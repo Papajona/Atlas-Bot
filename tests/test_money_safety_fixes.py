@@ -1,0 +1,213 @@
+"""Regression tests for the nine money-safety fixes layered on 3.10.45."""
+import asyncio
+import hashlib
+import hmac
+import json
+import time
+import uuid
+from decimal import Decimal
+
+import pytest
+from pydantic import ValidationError
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.config import settings
+from app.customer_funds import post_deposit, reserve_trading, settle_withdrawal
+from app.db import Base, CustomerLedgerAccount, Incident, LedgerEntry
+
+
+@pytest.fixture(autouse=True)
+def encryption_key(monkeypatch):
+    from cryptography.fernet import Fernet
+    monkeypatch.setattr(settings, "app_encryption_key", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "app_encryption_keys_json", "")
+    monkeypatch.setattr(settings, "app_encryption_active_key_id", "v1")
+
+
+async def with_database(check):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        await check(async_sessionmaker(engine, expire_on_commit=False))
+    finally:
+        await engine.dispose()
+
+
+def test_reserve_rounds_up_and_amounts_are_ledger_precision():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(CustomerLedgerAccount(customer_id=1, available=Decimal("10")))
+            await db.commit()
+            await reserve_trading(db, 1, 0.0000001, reference_id="r:tiny")   # 1e-7 must not become 0 or round down
+            await reserve_trading(db, 1, 1.2345671, reference_id="r:frac")
+            await db.commit()
+            ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
+            assert ledger.trading_reserved == Decimal("0.000001") + Decimal("1.234568")
+            assert ledger.available == Decimal("10") - ledger.trading_reserved
+    asyncio.run(with_database(check))
+
+
+def test_withdrawal_settlement_shortfall_opens_critical_incident():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(CustomerLedgerAccount(customer_id=1, available=Decimal("0"), withdrawal_reserved=Decimal("4")))
+            await db.commit()
+            await settle_withdrawal(db, 1, 10, reference_id="w:1")
+            await db.commit()
+        async with sessions() as db:
+            ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
+            assert ledger.withdrawal_reserved == Decimal("0")
+            inc = (await db.execute(select(Incident))).scalar_one()
+            assert inc.severity == "CRITICAL" and inc.incident_key == "WITHDRAWAL_RESERVE_SHORTFALL:w:1"
+            assert "6" in inc.detail_json  # shortfall recorded
+    asyncio.run(with_database(check))
+
+
+def test_deposit_idempotency_is_provider_namespaced_but_legacy_safe():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(CustomerLedgerAccount(customer_id=1))
+            await db.commit()
+            await post_deposit(db, customer_id=1, wallet_id=1, amount=5, provider_reference="ref-1", metadata={}, provider="stripe")
+            await post_deposit(db, customer_id=1, wallet_id=1, amount=5, provider_reference="ref-1", metadata={}, provider="stripe")   # replay
+            await post_deposit(db, customer_id=1, wallet_id=1, amount=7, provider_reference="ref-1", metadata={}, provider="wise")     # other provider, same ref
+            await db.commit()
+            ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
+            assert ledger.available == Decimal("12")
+            # a deposit posted under the legacy key is still recognised
+            db.add(LedgerEntry(customer_id=1, currency="USDT", entry_type="DEPOSIT_CREDIT", debit=0, credit=3, amount=3,
+                               reference_type="TRON_TX", reference_id="old-ref", idempotency_key="deposit:old-ref"))
+            await db.commit()
+            await post_deposit(db, customer_id=1, wallet_id=1, amount=3, provider_reference="old-ref", metadata={}, provider="tron-usdt")
+            await db.commit()
+            assert (await db.execute(select(CustomerLedgerAccount))).scalar_one().available == Decimal("12")
+    asyncio.run(with_database(check))
+
+
+@pytest.mark.parametrize("model", ["CustomerWithdrawalCreate"])
+def test_withdrawal_amount_rejects_more_than_six_decimals(model):
+    import app.main as main
+    cls = getattr(main, model)
+    kwargs = {"destination": "T" + "A" * 33}
+    assert cls(amount=1.234567, **kwargs).amount == 1.234567
+    for bad in (0.0000001, 1.2345678):
+        with pytest.raises(ValidationError):
+            cls(amount=bad, **kwargs)
+
+
+def test_admin_withdrawal_create_also_rejects_excess_precision():
+    import app.main as main
+    base = dict(request_id="req-123", account_ref="1", currency="USDT", destination_masked="TAAAAA...AAAAAA")
+    main.WithdrawalCreate(amount=2.5, **base)
+    with pytest.raises(ValidationError):
+        main.WithdrawalCreate(amount=2.1234567, **base)
+
+
+def test_stuck_withdrawal_alerts_are_throttled():
+    import app.main as main
+    main._recovery_last_alert.clear()
+    assert main._should_alert_recovery(7, now=1000.0, interval=900.0) is True
+    assert main._should_alert_recovery(7, now=1500.0, interval=900.0) is False
+    assert main._should_alert_recovery(8, now=1500.0, interval=900.0) is True   # independent per withdrawal
+    assert main._should_alert_recovery(7, now=1901.0, interval=900.0) is True
+
+
+def test_tron_cursor_never_skips_a_deferred_deposit():
+    import app.main as main
+    assert main._next_tron_cursor(50, 200, None) == 200
+    assert main._next_tron_cursor(50, 200, 120) == 119          # deferred deposit at ts 120 stays inside next window
+    assert main._next_tron_cursor(500, 200, 120) == 500         # never moves backwards
+    assert main._next_tron_cursor(0, 0, None) == 0
+
+
+def test_tron_identical_transfers_in_one_tx_get_distinct_references():
+    import app.main as main
+    seen = {}
+    kw = dict(txid="a" * 64, sender="S" * 34, address="D" * 34, raw_value=5_000_000, block_ts=1_700_000_000_000)
+    first = main._tron_deposit_reference(seen, **kw)
+    second = main._tron_deposit_reference(seen, **kw)
+    assert first == f"tron-usdt:{kw['txid']}:{kw['sender']}:{kw['address']}:5000000:1700000000000"   # historical format preserved
+    assert second == first + "#1" and second != first
+    assert len(second) <= 180                                    # fits provider_reference column
+
+
+def test_tron_scanner_marks_deferrals_before_advancing_cursor():
+    src = open("app/main.py").read()
+    scan = src[src.index("async def _usdt_tron_monitor_loop"):]
+    scan = scan[:scan.index("\nasync def ", 10)] if "\nasync def " in scan[10:] else scan
+    assert scan.count("_defer(block_ts)") == 3                   # receipt, block number, confirmations
+    assert scan.index("_defer(block_ts)") < scan.index("highest_ts = max(highest_ts, block_ts)")
+    assert "_next_tron_cursor(" in scan
+
+
+def test_confirming_a_pending_funding_credits_the_stored_amount_not_the_payload():
+    from fastapi.testclient import TestClient
+    import app.main as main
+    from app.db import init_db, SessionLocal, CustomerProfile, Wallet, FundingTransaction
+
+    secret = "test-funding-secret"
+    settings.funding_webhook_secret = secret
+    uid = "auth-" + uuid.uuid4().hex
+    ref = "ref-" + uuid.uuid4().hex
+
+    async def seed():
+        await init_db()
+        async with SessionLocal() as db:
+            c = CustomerProfile(auth_user_id=uid)
+            db.add(c); await db.flush()
+            w = Wallet(customer_id=c.id, currency="USDT", wallet_type="INTERNAL_TRADING", status="PENDING")
+            db.add(w); await db.flush()
+            db.add(FundingTransaction(customer_id=c.id, wallet_id=w.id, provider="wire", provider_reference=ref,
+                                      amount=10.0, currency="USDT", status="PENDING"))
+            await db.commit()
+            return c.id
+
+    cid = asyncio.run(seed())
+    body = json.dumps({"customer_auth_user_id": uid, "provider": "wire", "provider_reference": ref,
+                       "amount": 1000.0, "currency": "USDT", "status": "CONFIRMED"}).encode()
+    sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    with TestClient(main.app) as client:
+        r = client.post("/api/internal/funding/webhook", content=body, headers={"x-funding-signature": sig})
+    assert r.status_code == 200, r.text
+
+    async def balance():
+        async with SessionLocal() as db:
+            return (await db.execute(select(CustomerLedgerAccount).where(CustomerLedgerAccount.customer_id == cid))).scalar_one().available
+    assert asyncio.run(balance()) == Decimal("10")
+
+
+def test_position_flip_reserve_failure_does_not_abort_the_fill(monkeypatch):
+    import app.execution as ex
+    from app.db import Trade, Position
+
+    opened = []
+
+    async def fake_open_incident(**kw):
+        opened.append(kw)
+
+    monkeypatch.setattr(ex, "open_incident", fake_open_incident)
+
+    async def check(sessions):
+        async with sessions() as db:
+            # long 1 @100 with 100 reserved; customer has nothing else available
+            db.add(CustomerLedgerAccount(customer_id=1, available=Decimal("0"), trading_reserved=Decimal("100")))
+            db.add(Position(customer_id=1, exchange="binance", symbol="BTC/USDT", quantity=1.0,
+                            average_entry_price=100.0, mark_price=100.0, reserved_capital=100.0))
+            trade = Trade(customer_id=1, exchange="binance", symbol="BTC/USDT", side="sell", timeframe="1h",
+                          mode="paper", quantity=3.0, requested_quantity=3.0, filled_quantity=0.0, remaining_quantity=3.0,
+                          requested_price=100.0, client_order_id="c-flip", signal_id="s-flip", status="FILLED")
+            db.add(trade)
+            await db.flush()
+            # Sell 3: closes the long (frees 100) then flips short 2 @100 which needs 200 -> deficit of 100.
+            await ex._apply_fill_to_position(db, trade, 3.0, 100.0)   # must not raise
+            await db.commit()
+            pos = (await db.execute(select(Position))).scalar_one()
+            assert pos.quantity == -2.0                                 # the broker fill is still recorded
+            assert "FLIP_RESERVE_DEFICIT" in (trade.error or "")
+            assert pos.reserved_capital == 0.0                          # capital not booked without a reserve
+            ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
+            assert ledger.trading_reserved == Decimal("0") and ledger.available == Decimal("100")
+        assert opened and opened[0]["key"].startswith("POSITION_FLIP_RESERVE_DEFICIT:")
+    asyncio.run(with_database(check))
