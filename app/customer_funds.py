@@ -64,7 +64,9 @@ async def get_or_create_ledger(db, customer_id: int, currency: str = USDT) -> Cu
 
 async def post_journal(db, *, currency: str, entry_type: str, reference_type: str, reference_id: str, idempotency_key: str, lines: list[dict], description: str = "") -> LedgerJournal:
     """Create an immutable balanced double-entry journal. All amounts are Decimal-safe."""
-    existing = (await db.execute(select(LedgerJournal).where(LedgerJournal.idempotency_key == idempotency_key))).scalar_one_or_none()
+    existing = (await db.execute(select(LedgerJournal).where(
+        LedgerJournal.idempotency_key == idempotency_key
+    ).with_for_update())).scalar_one_or_none()
     if existing:
         return existing
     total_debit = sum((D(str(line.get("debit", 0))) for line in lines), D("0"))
@@ -97,8 +99,6 @@ async def post_deposit(db, *, customer_id: int, wallet_id: int, amount: float, p
     if amount_d <= 0:
         raise ValueError("deposit amount must be positive")
     ledger = await get_or_create_ledger(db, customer_id, USDT)
-    # Namespaced by provider so two providers reusing a reference cannot suppress each other's credit.
-    # The legacy un-namespaced key is still honoured so deposits posted before this change stay idempotent.
     legacy_idem = f"deposit:{provider_reference}"
     idem = f"deposit:{provider}:{provider_reference}" if provider else legacy_idem
     keys = {idem, legacy_idem}
@@ -143,12 +143,20 @@ async def reserve_trading(db, customer_id: int, amount: float, *, reference_id: 
         raise ValueError("reserve_trading requires a stable reference_id")
     ledger = await get_or_create_ledger(db, customer_id, USDT)
     idem = f"reserve:{reference_id}"
-    if (await db.execute(select(LedgerJournal).where(LedgerJournal.idempotency_key == idem))).scalar_one_or_none():
+    if (await db.execute(select(LedgerJournal).where(
+        LedgerJournal.idempotency_key == idem
+    ).with_for_update())).scalar_one_or_none():
         return ledger
-    if D(str(ledger.available)) < amount_d:
+
+    fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
+        CustomerLedgerAccount.customer_id == customer_id,
+        CustomerLedgerAccount.currency == USDT,
+    ).with_for_update())).scalar_one()
+
+    if D(str(fresh_ledger.available)) < amount_d:
         raise ValueError("insufficient available customer balance")
-    ledger.available = D(str(ledger.available)) - amount_d
-    ledger.trading_reserved = D(str(ledger.trading_reserved)) + amount_d
+    fresh_ledger.available = D(str(fresh_ledger.available)) - amount_d
+    fresh_ledger.trading_reserved = D(str(fresh_ledger.trading_reserved)) + amount_d
     await post_journal(db, currency=USDT, entry_type="TRADING_RESERVE", reference_type="TRADING",
                        reference_id=reference_id, idempotency_key=idem,
                        lines=[
@@ -158,7 +166,7 @@ async def reserve_trading(db, customer_id: int, amount: float, *, reference_id: 
     db.add(LedgerEntry(customer_id=customer_id, currency=USDT, entry_type="TRADING_RESERVE",
                        debit=amount_d, credit=0, amount=amount_d, reference_type="TRADING",
                        reference_id=reference_id, idempotency_key=idem))
-    return ledger
+    return fresh_ledger
 
 async def release_trading(db, customer_id: int, amount: float, *, reference_id: str) -> CustomerLedgerAccount:
     amount_d = _q(amount)
@@ -188,12 +196,20 @@ async def reserve_withdrawal(db, customer_id: int, amount: float, *, reference_i
         raise ValueError("withdrawal reserve amount must be positive")
     ledger = await get_or_create_ledger(db, customer_id, USDT)
     idem = f"withdrawal-reserve:{reference_id}"
-    if (await db.execute(select(LedgerJournal).where(LedgerJournal.idempotency_key == idem))).scalar_one_or_none():
+    if (await db.execute(select(LedgerJournal).where(
+        LedgerJournal.idempotency_key == idem
+    ).with_for_update())).scalar_one_or_none():
         return ledger
-    if D(str(ledger.available)) < amount_d:
+
+    fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
+        CustomerLedgerAccount.customer_id == customer_id,
+        CustomerLedgerAccount.currency == USDT,
+    ).with_for_update())).scalar_one()
+
+    if D(str(fresh_ledger.available)) < amount_d:
         raise ValueError("insufficient available customer balance")
-    ledger.available = D(str(ledger.available)) - amount_d
-    ledger.withdrawal_reserved = D(str(ledger.withdrawal_reserved)) + amount_d
+    fresh_ledger.available = D(str(fresh_ledger.available)) - amount_d
+    fresh_ledger.withdrawal_reserved = D(str(fresh_ledger.withdrawal_reserved)) + amount_d
     await post_journal(db, currency=USDT, entry_type="WITHDRAWAL_RESERVE", reference_type="WITHDRAWAL",
                        reference_id=reference_id, idempotency_key=idem,
                        lines=[
@@ -203,7 +219,7 @@ async def reserve_withdrawal(db, customer_id: int, amount: float, *, reference_i
     db.add(LedgerEntry(customer_id=customer_id, currency=USDT, entry_type="WITHDRAWAL_RESERVE",
                        debit=amount_d, credit=0, amount=amount_d, reference_type="WITHDRAWAL",
                        reference_id=reference_id, idempotency_key=idem))
-    return ledger
+    return fresh_ledger
 
 async def release_withdrawal(db, customer_id: int, amount: float, *, reference_id: str) -> CustomerLedgerAccount:
     amount_d = _q(amount)
@@ -286,9 +302,17 @@ async def settle_realized_pnl(db, *, customer_id: int, amount: float, reference_
         return
     ledger = await get_or_create_ledger(db, customer_id, USDT)
     idem = f"settlement:{reference_id}"
-    if (await db.execute(select(LedgerJournal).where(LedgerJournal.idempotency_key == idem))).scalar_one_or_none():
+    if (await db.execute(select(LedgerJournal).where(
+        LedgerJournal.idempotency_key == idem
+    ).with_for_update())).scalar_one_or_none():
         return
-    available = D(str(ledger.available))
+
+    fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
+        CustomerLedgerAccount.customer_id == customer_id,
+        CustomerLedgerAccount.currency == USDT,
+    ).with_for_update())).scalar_one()
+
+    available = D(str(fresh_ledger.available))
     shortfall = D("0")
     if pnl > 0:
         lines = [
@@ -312,7 +336,7 @@ async def settle_realized_pnl(db, *, customer_id: int, amount: float, reference_
     await post_journal(db, currency=USDT, entry_type="TRADE_SETTLEMENT", reference_type="TRADE",
                        reference_id=reference_id, idempotency_key=idem, lines=lines,
                        description="Realized trading P&L settlement")
-    ledger.available = available + delta
+    fresh_ledger.available = available + delta
     if shortfall > 0:
         logger.critical("realized_loss_exceeds_available customer=%s reference=%s loss=%s shortfall=%s",
                         customer_id, reference_id, abs(pnl), shortfall)
@@ -334,19 +358,26 @@ async def settle_trading_fee(db, *, customer_id: int, fee: float, reference_id: 
         return
     ledger = await get_or_create_ledger(db, customer_id, USDT)
     idem = f"fee:{reference_id}"
-    if (await db.execute(select(LedgerJournal).where(LedgerJournal.idempotency_key == idem))).scalar_one_or_none():
+    if (await db.execute(select(LedgerJournal).where(
+        LedgerJournal.idempotency_key == idem
+    ).with_for_update())).scalar_one_or_none():
         return
-    available = D(str(ledger.available))
-    reserved = D(str(ledger.trading_reserved))
+
+    fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
+        CustomerLedgerAccount.customer_id == customer_id,
+        CustomerLedgerAccount.currency == USDT,
+    ).with_for_update())).scalar_one()
+
+    available = D(str(fresh_ledger.available))
+    reserved = D(str(fresh_ledger.trading_reserved))
     if available + reserved < fee_d and strict:
         raise ValueError("customer ledger cannot absorb trading fee")
     absorbable = min(available + reserved, fee_d)
     shortfall = fee_d - absorbable
     from_available = min(available, absorbable)
     from_reserved = absorbable - from_available
-    ledger.available = available - from_available
-    ledger.trading_reserved = reserved - from_reserved
-    # A fee reduces customer liability (debit) and is recognised on the fee account (credit).
+    fresh_ledger.available = available - from_available
+    fresh_ledger.trading_reserved = reserved - from_reserved
     lines = []
     if from_available > 0:
         lines.append({"account_code": _customer_account(customer_id, "AVAILABLE"), "customer_id": customer_id, "debit": from_available, "credit": 0})
@@ -421,3 +452,4 @@ async def ledger_invariant_report(db, *, tolerance: str = "0.000001", limit: int
 
 
 _record_ledger_incident = record_ledger_incident  # backward-compatible alias
+
