@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
-from app.customer_funds import post_deposit, reserve_trading, settle_withdrawal
+from app.customer_funds import post_deposit, reserve_trading, release_trading, settle_withdrawal
 from app.db import Base, CustomerLedgerAccount, Incident, LedgerEntry
 
 
@@ -33,6 +33,41 @@ async def with_database(check):
         await check(async_sessionmaker(engine, expire_on_commit=False))
     finally:
         await engine.dispose()
+
+
+def test_customer_ledger_money_fields_are_decimal_typed():
+    from sqlalchemy.orm import Mapped
+
+    annotations = CustomerLedgerAccount.__annotations__
+    for field in ("available", "trading_reserved", "withdrawal_reserved"):
+        assert annotations[field] == Mapped[Decimal]
+
+
+def test_release_trading_preserves_decimal_ledger_precision():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(
+                CustomerLedgerAccount(
+                    customer_id=1,
+                    available=Decimal("1.000000"),
+                    trading_reserved=Decimal("50.123456"),
+                )
+            )
+            await db.commit()
+
+            await release_trading(
+                db,
+                customer_id=1,
+                amount=50.123456,
+                reference_id="release:decimal-precision",
+            )
+            await db.commit()
+
+            ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
+            assert ledger.available == Decimal("51.123456")
+            assert ledger.trading_reserved == Decimal("0.000000")
+
+    asyncio.run(with_database(check))
 
 
 def test_reserve_rounds_up_and_amounts_are_ledger_precision():

@@ -451,9 +451,9 @@ class CustomerLedgerAccount(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     currency: Mapped[str] = mapped_column(String(20), nullable=False, default="USDT")
-    available: Mapped[float] = mapped_column(Numeric(38, 6), nullable=False, default=0)
-    trading_reserved: Mapped[float] = mapped_column(Numeric(38, 6), nullable=False, default=0)
-    withdrawal_reserved: Mapped[float] = mapped_column(Numeric(38, 6), nullable=False, default=0)
+    available: Mapped[Decimal] = mapped_column(Numeric(38, 6), nullable=False, default=0)
+    trading_reserved: Mapped[Decimal] = mapped_column(Numeric(38, 6), nullable=False, default=0)
+    withdrawal_reserved: Mapped[Decimal] = mapped_column(Numeric(38, 6), nullable=False, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 

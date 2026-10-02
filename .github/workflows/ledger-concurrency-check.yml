@@ -1,0 +1,98 @@
+name: Ledger Concurrency Hardening (PostgreSQL Required)
+
+on:
+  pull_request:
+    paths:
+      - 'app/customer_funds.py'
+      - 'app/db.py'
+      - 'tests/test_postgres_ledger_concurrency_3_10_46.py'
+      - 'tests/test_ledger_invariants_3_10_46.py'
+      - 'tests/test_ledger_all_paths_concurrent_3_10_46.py'
+      - '.github/workflows/ledger-concurrency-check.yml'
+  push:
+    branches:
+      - main
+      - hardening/*
+
+jobs:
+  postgres-ledger-concurrency:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: atlas_test
+          POSTGRES_USER: atlas
+          POSTGRES_PASSWORD: test_password
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Wait for PostgreSQL
+        run: |
+          until pg_isready -h localhost -p 5432 -U atlas; do
+            echo "Waiting for PostgreSQL..."
+            sleep 1
+          done
+
+      - name: Run database migrations
+        env:
+          DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+        run: |
+          alembic upgrade head
+
+      - name: Run ledger invariants test (SQLite baseline)
+        run: |
+          pytest -q tests/test_ledger_invariants_3_10_46.py -v
+
+      - name: Run Postgres concurrency tests (MANDATORY)
+        env:
+          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+          DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+        run: |
+          pytest -q tests/test_postgres_ledger_concurrency_3_10_46.py -v
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "ERROR: Postgres concurrency tests failed. This is a BLOCKER for ledger safety."
+            exit $EXIT_CODE
+          fi
+
+      - name: Run comprehensive ledger path tests (MANDATORY)
+        env:
+          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+          DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+        run: |
+          pytest -q tests/test_ledger_all_paths_concurrent_3_10_46.py -v --tb=short
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "ERROR: Ledger path concurrency tests failed. Some mutation paths may not be properly locked."
+            exit $EXIT_CODE
+          fi
+
+      - name: Report success
+        if: success()
+        run: |
+          echo "✓ Ledger concurrency tests PASSED"
+          echo "✓ Invariants PASSED"
+          echo "✓ All mutation paths tested PASSED"
+          echo "✓ PostgreSQL ledger concurrency gate PASSED"
