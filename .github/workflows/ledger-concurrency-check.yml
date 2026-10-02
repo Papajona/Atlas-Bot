@@ -8,6 +8,7 @@ on:
       - 'tests/test_postgres_ledger_concurrency_3_10_46.py'
       - 'tests/test_ledger_invariants_3_10_46.py'
       - 'tests/test_ledger_all_paths_concurrent_3_10_46.py'
+      - 'requirements-dev.txt'
       - '.github/workflows/ledger-concurrency-check.yml'
   push:
     branches:
@@ -61,6 +62,59 @@ jobs:
         run: |
           alembic upgrade head
 
+      - name: Verify SQLAlchemy ledger money types
+        run: |
+          python - <<'PY'
+          from sqlalchemy import inspect
+          from app.db import CustomerLedgerAccount
+
+          mapper = inspect(CustomerLedgerAccount)
+          expected = {"available", "trading_reserved", "withdrawal_reserved"}
+          seen = set()
+          for col in mapper.columns:
+              if col.name in expected:
+                  seen.add(col.name)
+                  print(f"{col.name}: type={col.type}, python_type={col.type.python_type}")
+                  assert col.type.python_type.__name__ == "Decimal"
+          assert seen == expected
+          PY
+
+      - name: Verify PostgreSQL ledger constraints
+        env:
+          PGPASSWORD: test_password
+        run: |
+          psql "postgresql://atlas@localhost:5432/atlas_test" -v ON_ERROR_STOP=1 <<'SQL'
+          SELECT constraint_name, constraint_type
+          FROM information_schema.table_constraints
+          WHERE table_name='customer_ledger_accounts'
+          ORDER BY constraint_name;
+
+          SELECT constraint_name
+          FROM information_schema.check_constraints
+          WHERE constraint_name IN (
+            'ck_customer_ledger_available_nonnegative',
+            'ck_customer_ledger_trading_reserved_nonnegative',
+            'ck_customer_ledger_withdrawal_reserved_nonnegative'
+          )
+          ORDER BY constraint_name;
+
+          DO $
+          DECLARE
+            required_count integer;
+          BEGIN
+            SELECT count(*) INTO required_count
+            FROM information_schema.check_constraints
+            WHERE constraint_name IN (
+              'ck_customer_ledger_available_nonnegative',
+              'ck_customer_ledger_trading_reserved_nonnegative',
+              'ck_customer_ledger_withdrawal_reserved_nonnegative'
+            );
+            IF required_count <> 3 THEN
+              RAISE EXCEPTION 'Expected 3 customer ledger nonnegative checks, found %', required_count;
+            END IF;
+          END $;
+          SQL
+
       - name: Run ledger invariants test (SQLite baseline)
         run: |
           pytest -q tests/test_ledger_invariants_3_10_46.py -v
@@ -70,6 +124,8 @@ jobs:
           ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
           DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
         run: |
+          pytest -q tests/test_postgres_ledger_concurrency_3_10_46.py::test_concurrent_withdrawal_reserves_never_overdraw -vv --tb=short
+          pytest -q tests/test_postgres_ledger_concurrency_3_10_46.py::test_withdrawal_reserve_acquires_row_lock_before_mutation -vv --tb=short -s
           pytest -q tests/test_postgres_ledger_concurrency_3_10_46.py -v
           EXIT_CODE=$?
           if [ $EXIT_CODE -ne 0 ]; then
