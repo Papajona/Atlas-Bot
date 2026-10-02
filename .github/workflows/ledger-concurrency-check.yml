@@ -133,6 +133,13 @@ jobs:
             exit $EXIT_CODE
           fi
 
+      - name: Run duplicate idempotency verification
+        env:
+          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+          DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+        run: |
+          pytest -q tests/test_ledger_all_paths_concurrent_3_10_46.py::test_duplicate_idempotency_across_all_functions -vv --tb=short
+
       - name: Run comprehensive ledger path tests (MANDATORY)
         env:
           ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
