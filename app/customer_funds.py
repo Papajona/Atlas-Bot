@@ -174,11 +174,11 @@ async def release_trading(db, customer_id: int, amount: float, *, reference_id: 
     idem = f"release:{reference_id}:{customer_id}"
     if (await db.execute(select(LedgerJournal).where(LedgerJournal.idempotency_key == idem))).scalar_one_or_none():
         return ledger
-    release = min(amount_d, D(str(ledger.trading_reserved)))
+    release = min(amount_d, ledger.trading_reserved)
     if release <= 0:
         return ledger
-    ledger.trading_reserved = D(str(ledger.trading_reserved)) - release
-    ledger.available = D(str(ledger.available)) + release
+    ledger.trading_reserved -= release
+    ledger.available += release
     await post_journal(db, currency=USDT, entry_type="TRADING_RELEASE", reference_type="TRADE",
                        reference_id=reference_id, idempotency_key=idem,
                        lines=[
