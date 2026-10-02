@@ -182,11 +182,11 @@ async def release_trading(db, customer_id: int, amount: float, *, reference_id: 
         CustomerLedgerAccount.customer_id == customer_id,
         CustomerLedgerAccount.currency == USDT,
     ).with_for_update())).scalar_one()
-    release = min(amount_d, D(str(fresh_ledger.trading_reserved)))
+    release = min(amount_d, fresh_ledger.trading_reserved)
     if release <= 0:
         return fresh_ledger
-    fresh_ledger.trading_reserved = D(str(fresh_ledger.trading_reserved)) - release
-    fresh_ledger.available = D(str(fresh_ledger.available)) + release
+    fresh_ledger.trading_reserved -= release
+    fresh_ledger.available += release
     await post_journal(db, currency=USDT, entry_type="TRADING_RELEASE", reference_type="TRADE",
                        reference_id=reference_id, idempotency_key=idem,
                        lines=[
