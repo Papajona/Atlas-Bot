@@ -39,5 +39,5 @@ def test_plan_feature_tiers():
     assert '"dca_bot"' in s
     assert '"market_scanner"' in s
     assert '"strategy_builder"' in s
-    assert 'app_version: str = "3.10.46"' in (ROOT/"app/config.py").read_text()
+    assert 'app_version: str = "3.10.47"' in (ROOT/"app/config.py").read_text()
     assert 'down_revision = "0013_billing_referrals_margin"' in (ROOT/"alembic/versions/0014_trading_product_features.py").read_text()

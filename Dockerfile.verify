@@ -8,5 +8,5 @@ COPY alembic ./alembic
 COPY alembic.ini pytest.ini ./
 COPY tests ./tests
 COPY scripts ./scripts
-RUN chmod +x scripts/verify_release.sh
+RUN chmod +x scripts/verify_release.sh && python scripts/check_no_secrets.py && python -m compileall -q app alembic
 CMD ["bash", "scripts/verify_release.sh"]

@@ -1,4 +1,4 @@
-# Atlas deployment guide (release 3.10.46): Google Cloud Run + Supabase PostgreSQL + Redis
+# Atlas deployment guide (release 3.10.47): Google Cloud Run + Supabase PostgreSQL + Redis
 
 **Read this first.** This guide describes what the scripts in `deploy/` do today, in the order they must run, with the checks that should pass at each step and
 the gaps that remain. Nothing here was executed against a real project by its author (no `gcloud`, network, Postgres or exchange access in the authoring
@@ -21,7 +21,7 @@ environment); every command is derived from the scripts and the vendor documenta
 | Edge | external HTTPS load balancer + Cloud Armor | manual | public entry point | the API is not reachable directly by design |
 
 **What runs where** (from `startup()` in `app/main.py`): the **API runs no background loops**. The **worker** runs the reconciliation loop, the TRON deposit
-monitor (if enabled and a TronGrid key is present), the heartbeat, withdrawal recovery, the **customer exchange-key audit** (new in 3.10.46), the daily research
+monitor (if enabled and a TronGrid key is present), the heartbeat, withdrawal recovery, the **customer exchange-key audit** (new in 3.10.47), the daily research
 loop, and the adaptive bot and executor controllers. A `job` role runs only the heartbeat. Consequence: Cloud Run's request-based CPU throttling cannot starve
 anything on the API, while the worker pool is always-on by design.
 
@@ -118,7 +118,7 @@ Creates the log sink/bucket retention. Lock the retention policy only after revi
 `DATABASE_URL=postgresql://... bash deploy/verify-live-money-runtime.sh` runs: `alembic upgrade head`, `alembic check`, `validate-postgres-constraints.py`,
 the Postgres concurrency tests (the original probe test **and** `tests/test_postgres_ledger_concurrency_3_10_46.py`, which exercises the real ledger under
 contention), the live-money static suites, `bandit -lll`, and `pip-audit --strict`. It never enables live trading.
-**Pass criteria:** zero failures. Expect fixes on the first run: the 3.10.46 tests were written without a database available.
+**Pass criteria:** zero failures. Expect fixes on the first run: the 3.10.47 tests were written without a database available.
 Also run the whole suite once: `pytest -q`.
 
 ### Step 4: Build the image (immutable, tagged by commit)
@@ -216,13 +216,13 @@ Redis availability; Cloud Armor blocks. `/metrics` (Prometheus format, admin onl
 
 Per-secret IAM with a dedicated identity per workload; migrator limited to the database URL; ingress limited to the load balancer; TOTP-protected admin;
 withdrawal step-up and address cooling-off; customer exchange keys must be trade-only (provisioning and broker construction reject withdrawal/universal-transfer
-rights, and since 3.10.46 the worker re-reads Binance `apiRestrictions` every 15 minutes and **suspends** accounts whose live permissions exceed policy);
+rights, and since 3.10.47 the worker re-reads Binance `apiRestrictions` every 15 minutes and **suspends** accounts whose live permissions exceed policy);
 AI layer has no execution authority and external text is wrapped as untrusted data; non-root container; audit log retention. Run `bandit` and `pip-audit` in CI
 and before each release (the verify script does).
 
 ---------------------------------------------------------------------------------------------------------------------------------
 
-## 8. Defects found and fixed while preparing this guide (3.10.46)
+## 8. Defects found and fixed while preparing this guide (3.10.47)
 
 | Defect | Effect before | Fix |
 |---|---|---|
