@@ -4041,14 +4041,14 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
         while True:
             async with SessionLocal() as db:
                 s = await db.get(AppState, 1)
-                equity = float(s.equity) if s and s.equity is not None else 10000.0
-                peak = float(s.peak_equity) if s and s.peak_equity else max(equity, 10000.0)
+                equity = float(s.equity) if s and s.equity is not None else 0.0
+                peak = float(s.peak_equity) if s and s.peak_equity else equity
                 daily_start = float(s.daily_start_equity) if s and s.daily_start_equity else equity
                 current_dd = (1.0 - equity / peak) * 100.0 if peak > 0 else 0.0
                 daily_loss = (1.0 - equity / daily_start) * 100.0 if daily_start > 0 else 0.0
-                realized = float(s.realized_pnl) if s and s.realized_pnl is not None else 450.0
-                unrealized = float(s.unrealized_pnl) if s and s.unrealized_pnl is not None else 82.50
-                kill = bool(s.kill_switch) if s else False
+                realized = float(s.realized_pnl) if s and s.realized_pnl is not None else 0.0
+                unrealized = float(s.unrealized_pnl) if s and s.unrealized_pnl is not None else 0.0
+                kill = bool(s.kill_switch) if s else True
 
                 rows = (await db.execute(select(StrategyOutcome.net_return_bps).order_by(StrategyOutcome.created_at.desc()).limit(100))).scalars().all()
                 if len(rows) >= 10:
@@ -4080,15 +4080,15 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 "sharpe_ratio": round(sharpe, 2),
                 "calmar_ratio": round(calmar, 2),
                 "sortino_ratio": round(sortino, 2),
-                "deflated_sharpe_ratio": 0.98,
+                "deflated_sharpe_ratio": 0.0,
                 "edge_decay_z_score": round(edge_decay_z, 2),
-                "regime": "TRENDING LOW-VOL",
-                "regime_description": "Strong momentum drift; trend-following weighted at 45%",
-                "momentum_weight": 45,
-                "mean_rev_weight": 15,
-                "session_weight": 25,
-                "carry_weight": 15,
-                "cost_stress_headroom": 2.41,
+                "regime": "UNKNOWN",
+                "regime_description": "Insufficient empirical data for live classification",
+                "momentum_weight": 0,
+                "mean_rev_weight": 0,
+                "session_weight": 0,
+                "carry_weight": 0,
+                "cost_stress_headroom": 0.0,
                 "ai_safety_timeout_seconds": float(settings.ai_strategy_provider_timeout_seconds),
                 "is_halted": kill,
                 "stream_type": "WEBSOCKET_PUSH",
