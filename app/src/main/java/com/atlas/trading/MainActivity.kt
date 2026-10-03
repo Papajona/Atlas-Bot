@@ -93,7 +93,7 @@ class MainActivity : AppCompatActivity() {
                             if (!state.confirmed) throw IllegalStateException("Server did not confirm requested risk state")
                             Toast.makeText(
                                 this@MainActivity,
-                                if (isHalted) "SERVER CONFIRMED: ENGINE HALTED" else "SERVER CONFIRMED: ENGINE RESUMED",
+                                if (isHalted) "SERVER CONFIRMED: ENGINE HALTED" else "SERVER CONFIRMED: HALT RELEASED; LIVE TRADING REMAINS DISABLED",
                                 Toast.LENGTH_LONG
                             ).show()
                         } catch (e: Exception) {
