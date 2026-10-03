@@ -17,6 +17,8 @@ import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
+    private val securityAuditLog by lazy { SecurityAuditLog(applicationContext) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         window.clearFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
         enableEdgeToEdge()
@@ -71,11 +73,13 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     super.onAuthenticationError(errorCode, errString)
+                    runCatching { securityAuditLog.append("BIOMETRIC_AUTH_ERROR", mapOf("purpose" to "RISK_RESET", "error_code" to errorCode)) }
                     Toast.makeText(this@MainActivity, "Auth canceled: $errString", Toast.LENGTH_SHORT).show()
                 }
 
                 override fun onAuthenticationFailed() {
                     super.onAuthenticationFailed()
+                    runCatching { securityAuditLog.append("BIOMETRIC_AUTH_FAILED", mapOf("purpose" to "RISK_RESET")) }
                     Toast.makeText(this@MainActivity, "Biometric unrecognized", Toast.LENGTH_SHORT).show()
                 }
             })
