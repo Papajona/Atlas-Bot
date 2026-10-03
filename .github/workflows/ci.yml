@@ -59,6 +59,14 @@ jobs:
         run: python -m bandit -r app -lll
       - name: Dependency audit
         run: python -m pip_audit -r requirements.txt --strict
+      - name: Full PostgreSQL ledger concurrency suite
+        env:
+          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+          DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+        run: |
+          python -m pytest -q tests/test_postgres_ledger_concurrency_3_10_46.py
+          python -m pytest -q tests/test_ledger_all_paths_concurrent_3_10_46.py
+
       - name: Full pytest suite
         run: python -m pytest -q
 
