@@ -44,11 +44,11 @@ def test_adaptive_wfo_emits_promotion_evidence():
 
 
 def test_release_identity_files_are_consistent():
-    assert 'app_version: str = "3.10.46"' in (ROOT / "app/config.py").read_text()
-    assert '__version__ = "3.10.46"' in (ROOT / "app/__init__.py").read_text()
+    assert 'app_version: str = "3.10.47"' in (ROOT / "app/config.py").read_text()
+    assert '__version__ = "3.10.47"' in (ROOT / "app/__init__.py").read_text()
     android = (ROOT / "android/app/build.gradle.kts").read_text()
-    assert "versionCode = 1046" in android
-    assert 'versionName = "3.10.46"' in android
+    assert "versionCode = 1047" in android
+    assert 'versionName = "3.10.47"' in android
 
 
 def test_deploy_scripts_require_immutable_identity():
