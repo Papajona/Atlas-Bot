@@ -46,8 +46,8 @@ class LiveEquityWebSocketClient(
     private var currentUrl: String = ""
     private var isIntentionalClose = false
 
-    fun connect(baseUrl: String) {
-        if (baseUrl.isBlank()) return
+    fun connect(baseUrl: String, accessToken: String?) {
+        if (baseUrl.isBlank() || accessToken.isNullOrBlank()) return
         val targetWsUrl = buildWebSocketUrl(baseUrl)
         if (currentUrl == targetWsUrl && _connectionState.value is WebSocketConnectionState.Connected) {
             return
@@ -56,16 +56,17 @@ class LiveEquityWebSocketClient(
         currentUrl = targetWsUrl
         isIntentionalClose = false
         reconnectAttempts = 0
-        initiateConnection(targetWsUrl)
+        initiateConnection(targetWsUrl, accessToken)
     }
 
-    private fun initiateConnection(wsUrl: String) {
+    private fun initiateConnection(wsUrl: String, accessToken: String?) {
         reconnectJob?.cancel()
         _connectionState.value = WebSocketConnectionState.Connecting
 
         val request = Request.Builder()
             .url(wsUrl)
             .header("Sec-WebSocket-Protocol", "atlas-telemetry-v1")
+            .header("Authorization", "Bearer $accessToken")
             .build()
 
         activeWebSocket?.cancel()
@@ -126,7 +127,7 @@ class LiveEquityWebSocketClient(
         reconnectJob = coroutineScope.launch {
             delay(delayMs)
             if (!isIntentionalClose && currentUrl.isNotBlank()) {
-                initiateConnection(currentUrl)
+                // Reconnect is triggered by the authenticated screen with its current token.
             }
         }
     }
