@@ -45,7 +45,6 @@ def scan() -> list[str]:
 if __name__ == "__main__":
     findings=scan()
     if findings:
-        print("
-".join(findings))
+        print("\n".join(findings))
         sys.exit(1)
     print("No high-signal repository secrets detected.")
