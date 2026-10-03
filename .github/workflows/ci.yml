@@ -74,3 +74,5 @@ jobs:
           bash -n deploy/cloud-run-worker-deploy.sh
           bash -n deploy/cloud-run-migration-job.sh
           bash -n deploy/verify-live-money-runtime.sh
+          bash -n deploy/verify-cloud-audit.sh
+          bash -n deploy/gcp-security-audit-retention.sh
