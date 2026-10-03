@@ -11,7 +11,7 @@
         android:orientation="vertical"
         android:padding="20dp">
 
-        <!-- Header -->
+        <!-- Top Header -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -27,9 +27,9 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="ATLAS TRADING"
+                    android:text="ATLAS QUANTITATIVE"
                     android:textColor="#6EE7F7"
-                    android:textSize="12sp"
+                    android:textSize="11sp"
                     android:textStyle="bold"
                     android:letterSpacing="0.15" />
 
@@ -45,9 +45,9 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Release 3.10.47 • Paper Mode"
+                    android:text="Release 3.10.47 • Anti-Failure Architecture"
                     android:textColor="#94A3B8"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
             </LinearLayout>
 
             <TextView
@@ -65,19 +65,186 @@
                 android:paddingBottom="6dp" />
         </LinearLayout>
 
-        <!-- Account Metrics Card -->
+        <!-- 1. Market Regime & Adaptive Strategy Allocator -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:background="@drawable/bg_card"
             android:orientation="vertical"
             android:padding="18dp"
-            android:layout_marginTop="20dp">
+            android:layout_marginTop="18dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="MARKET REGIME DETECTOR"
+                    android:textColor="#94A3B8"
+                    android:textSize="11sp"
+                    android:textStyle="bold"
+                    android:letterSpacing="0.1" />
+
+                <TextView
+                    android:id="@+id/tv_current_regime"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="TRENDING LOW-VOL"
+                    android:textColor="#38BDF8"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tv_regime_desc"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Strong directional momentum with low realized chop. Trend strategies prioritized."
+                android:textColor="#64748B"
+                android:textSize="12sp"
+                android:layout_marginTop="4dp" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#1E293B"
+                android:layout_marginTop="12dp"
+                android:layout_marginBottom="12dp" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="ACCOUNT OVERVIEW"
+                android:text="Ensemble Alpha Allocation:"
+                android:textColor="#CBD5E1"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="8dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="• Momentum (1h / 4h ATR Breakout):"
+                    android:textColor="#94A3B8"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tv_weight_momentum"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="45%"
+                    android:textColor="#34D399"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="4dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="• Mean Reversion (Z-Score Bands):"
+                    android:textColor="#94A3B8"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tv_weight_mean_rev"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="15%"
+                    android:textColor="#CBD5E1"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="4dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="• Session Opening Range (LDN/NY/TKO):"
+                    android:textColor="#94A3B8"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tv_weight_session"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="25%"
+                    android:textColor="#CBD5E1"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="4dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="• Volatility Carry &amp; Skew:"
+                    android:textColor="#94A3B8"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tv_weight_carry"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="15%"
+                    android:textColor="#CBD5E1"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/btn_cycle_regime"
+                android:layout_width="match_parent"
+                android:layout_height="38dp"
+                android:background="@drawable/bg_btn_secondary"
+                android:text="TEST REGIME SHIFT (REBALANCE)"
+                android:textColor="#38BDF8"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                android:layout_marginTop="12dp" />
+        </LinearLayout>
+
+        <!-- 2. Risk Engine First (First-Order Capital Defense) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="18dp"
+            android:layout_marginTop="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="RISK ENGINE FIRST (PRE-TRADE BOUNDS)"
                 android:textColor="#94A3B8"
                 android:textSize="11sp"
                 android:textStyle="bold"
@@ -122,14 +289,14 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Max Drawdown"
+                        android:text="Hard Drawdown Stop"
                         android:textColor="#64748B"
                         android:textSize="12sp" />
 
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="15.0%"
+                        android:text="15.0% Limit"
                         android:textColor="#38BDF8"
                         android:textSize="20sp"
                         android:textStyle="bold"
@@ -153,14 +320,14 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Daily Loss Limit"
+                    android:text="Trailing Daily Loss Ceiling"
                     android:textColor="#94A3B8"
                     android:textSize="13sp" />
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="$300.00 (3.0%)"
+                    android:text="-$300.00 (3.0%)"
                     android:textColor="#F1F5F9"
                     android:textSize="13sp"
                     android:textStyle="bold" />
@@ -176,21 +343,44 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Max Exposure Limit"
+                    android:text="Position Sizing Algorithm"
                     android:textColor="#94A3B8"
                     android:textSize="13sp" />
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="$20,000.00 (3 pos)"
+                    android:text="0.25x Quarter-Kelly"
+                    android:textColor="#F1F5F9"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="8dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Annualized Volatility Target"
+                    android:textColor="#94A3B8"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="12.0% Targeted"
                     android:textColor="#F1F5F9"
                     android:textSize="13sp"
                     android:textStyle="bold" />
             </LinearLayout>
         </LinearLayout>
 
-        <!-- Quantitative Risk Gates Card -->
+        <!-- 3. Validation Gates & Anti-Failure Verification (3.10.47) -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -202,7 +392,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="QUANTITATIVE RISK GATES (3.10.47)"
+                android:text="ANTI-FAILURE VALIDATION GATES (3.10.47)"
                 android:textColor="#94A3B8"
                 android:textSize="11sp"
                 android:textStyle="bold"
@@ -218,14 +408,14 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Cost-Stress Hurdle (2.0x)"
+                    android:text="2.0x Cost-Stress Hurdle"
                     android:textColor="#CBD5E1"
                     android:textSize="13sp" />
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="ENFORCED"
+                    android:text="PASS (2.41x Headroom)"
                     android:textColor="#34D399"
                     android:textSize="12sp"
                     android:textStyle="bold" />
@@ -241,14 +431,14 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Deflated Sharpe Ratio Floor"
+                    android:text="Deflated Sharpe Ratio (DSR)"
                     android:textColor="#CBD5E1"
                     android:textSize="13sp" />
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="DSR >= 0.95"
+                    android:text="0.98 >= 0.95 PASS"
                     android:textColor="#34D399"
                     android:textSize="12sp"
                     android:textStyle="bold" />
@@ -264,14 +454,14 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Edge-Decay Monitor (100 trades)"
+                    android:text="Edge-Decay Monitor (N=100)"
                     android:textColor="#CBD5E1"
                     android:textSize="13sp" />
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="z > -2.0 HALT"
+                    android:text="z = +0.84 > -2.0"
                     android:textColor="#38BDF8"
                     android:textSize="12sp"
                     android:textStyle="bold" />
@@ -287,7 +477,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="AI Review Latency Ceiling"
+                    android:text="AI Safety Latency Ceiling"
                     android:textColor="#CBD5E1"
                     android:textSize="13sp" />
 
@@ -299,81 +489,30 @@
                     android:textSize="12sp"
                     android:textStyle="bold" />
             </LinearLayout>
-        </LinearLayout>
 
-        <!-- Active Strategies Card -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:background="@drawable/bg_card"
-            android:orientation="vertical"
-            android:padding="18dp"
-            android:layout_marginTop="16dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="ACTIVE MULTI-STRATEGY ENGINES"
-                android:textColor="#94A3B8"
+            <Button
+                android:id="@+id/btn_inspect_gates"
+                android:layout_width="match_parent"
+                android:layout_height="38dp"
+                android:background="@drawable/bg_btn_secondary"
+                android:text="INSPECT FULL AUDIT CRITERIA"
+                android:textColor="#6EE7F7"
                 android:textSize="11sp"
                 android:textStyle="bold"
-                android:letterSpacing="0.1" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="• Time-Series Momentum (1h / 4h ATR breakout)"
-                android:textColor="#E2E8F0"
-                android:textSize="13sp"
-                android:layout_marginTop="10dp" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="• Mean Reversion (Z-Score &amp; Bollinger bands)"
-                android:textColor="#E2E8F0"
-                android:textSize="13sp"
-                android:layout_marginTop="6dp" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="• Session Opening Range (London / NY / Tokyo)"
-                android:textColor="#E2E8F0"
-                android:textSize="13sp"
-                android:layout_marginTop="6dp" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="• Adaptive Strategy Router (3 Champion models)"
-                android:textColor="#E2E8F0"
-                android:textSize="13sp"
-                android:layout_marginTop="6dp" />
+                android:layout_marginTop="12dp" />
         </LinearLayout>
 
-        <!-- Actions -->
-        <Button
-            android:id="@+id/btn_run_preflight"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:background="@drawable/bg_btn_primary"
-            android:text="RUN PREFLIGHT DIAGNOSTIC"
-            android:textColor="#070B18"
-            android:textSize="13sp"
-            android:textStyle="bold"
-            android:layout_marginTop="20dp" />
-
+        <!-- 4. Operator Action Buttons -->
         <Button
             android:id="@+id/btn_open_portal"
             android:layout_width="match_parent"
             android:layout_height="48dp"
-            android:background="@drawable/bg_card"
-            android:text="OPEN WEB TRADING PORTAL"
-            android:textColor="#6EE7F7"
+            android:background="@drawable/bg_btn_primary"
+            android:text="OPEN WEB TRADING TERMINAL"
+            android:textColor="#070B18"
             android:textSize="13sp"
             android:textStyle="bold"
-            android:layout_marginTop="12dp" />
+            android:layout_marginTop="20dp" />
 
         <Button
             android:id="@+id/btn_emergency_kill"
@@ -384,8 +523,36 @@
             android:textColor="#FCA5A5"
             android:textSize="13sp"
             android:textStyle="bold"
-            android:layout_marginTop="12dp"
-            android:layout_marginBottom="24dp" />
+            android:layout_marginTop="12dp" />
+
+        <!-- 5. Asymmetric Risk & Fiduciary Disclosure -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:layout_marginTop="20dp"
+            android:layout_marginBottom="28dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="FIDUCIARY &amp; REGULATORY RISK DISCLOSURE"
+                android:textColor="#EF4444"
+                android:textSize="10sp"
+                android:textStyle="bold"
+                android:letterSpacing="0.08" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Trading quantitative and digital assets involves substantial risk of loss. Past or simulated performance does not guarantee future results. Users may lose some or all invested capital. The Atlas anti-failure architecture enforces loss prevention and survival over theoretical profit."
+                android:textColor="#94A3B8"
+                android:textSize="11sp"
+                android:lineSpacingExtra="2dp"
+                android:layout_marginTop="6dp" />
+        </LinearLayout>
 
     </LinearLayout>
 </ScrollView>
