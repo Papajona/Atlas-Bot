@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.view.WindowManager
 import android.widget.Toast
+import android.content.SharedPreferences
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -35,10 +36,20 @@ class MainActivity : AppCompatActivity() {
                     authenticateBiometricForResume(onSuccess)
                 },
                 onEmergencyHaltToggle = { isHalted ->
+                    // The UI callback must not claim a state transition. The backend
+                    // is the source of truth and must confirm the authenticated action.
                     if (isHalted) {
-                        Toast.makeText(this, "EMERGENCY HALT ACTIVATED: All order creation blocked.", Toast.LENGTH_LONG).show()
+                        Toast.makeText(
+                            this,
+                            "Emergency halt requested. Verify HALTED state on the server.",
+                            Toast.LENGTH_LONG
+                        ).show()
                     } else {
-                        Toast.makeText(this, "Trading engine resumed with 3.10.47 risk gates.", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(
+                            this,
+                            "Resume is authorization-gated; server state must confirm LIVE.",
+                            Toast.LENGTH_LONG
+                        ).show()
                     }
                 }
             )
@@ -81,9 +92,13 @@ class MainActivity : AppCompatActivity() {
             })
             prompt.authenticate(promptInfo)
         } else {
-            // Emulators or devices without hardware biometrics enrolled fallback safely
-            Toast.makeText(this, "Security Bypass: Developer/Emulator Environment", Toast.LENGTH_SHORT).show()
-            onSuccess()
+            // Never bypass the operator gate. A device without a supported/enrolled
+            // authenticator cannot authorize resuming live trading.
+            Toast.makeText(
+                this,
+                "Resume blocked: strong biometric/device credential is required.",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
