@@ -35,6 +35,9 @@ class AdaptiveModelPolicy:
     # keeping daily retraining -- that trade-off (promotion latency vs. adaptation speed)
     # is a product decision, not something to hardcode here.
     consecutive_passes_required: int = 2
+    research_min_deflated_sharpe: float = 0.0
+    research_require_cost_stress: bool = True
+    research_cost_stress_multiplier: float = 2.0
 
 
 def _meta_path(model_path: str | Path) -> Path:
@@ -266,11 +269,18 @@ def ensure_adaptive_model(
     # Run the exact same walk-forward evaluator used for research before training
     # a deployable candidate. This keeps model promotion tied to OOS evidence.
     wfo = ai_walk_forward_backtest(
-        df, asset=asset, folds=folds, min_train=min_train, threshold=threshold
+        df, asset=asset, folds=folds, min_train=min_train, threshold=threshold,
+        cost_stress_multiplier=policy.research_cost_stress_multiplier
     )
     oos_gate = oos_promotion_gate(
-        wfo, min_folds=5, min_total_return=policy.min_total_return,
-        min_positive_fold_ratio=0.50, max_negative_fold_return=-0.20, require_last_fold_positive=True
+        wfo,
+        min_dsr=(policy.research_min_deflated_sharpe or None),
+        require_cost_stress=policy.research_require_cost_stress,
+        min_folds=5,
+        min_total_return=policy.min_total_return,
+        min_positive_fold_ratio=0.50,
+        max_negative_fold_return=-0.20,
+        require_last_fold_positive=True
     )
     absolute_pass = (
         wfo.get("sharpe", 0.0) >= policy.min_sharpe
