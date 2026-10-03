@@ -12,7 +12,7 @@ Do not enable customer live trading or real-money withdrawals until every Critic
 
 - Android release builds no longer use the debug keystore. Release signing now requires CI-provided signing variables.
 - Added a gated Android workflow: every PR can build a debug APK; production-tagged builds require a protected production environment and a base64-encoded release keystore secret.
-- Removed the Android biometric security bypass that previously allowed resume on devices without supported/enrolled authentication.
+- Removed the Android biometric security bypass that previously allowed risk-control authorization on devices without supported/enrolled authentication.
 - Risk dashboard HTTP telemetry is now protected by the server-side RISK_OFFICER authorization boundary.
 - Risk dashboard WebSocket telemetry authenticates before accepting the socket.
 - Mobile risk telemetry no longer invents healthy-looking defaults when the backend is unavailable or omits required fields; it fails closed.
@@ -39,7 +39,7 @@ Do not enable customer live trading or real-money withdrawals until every Critic
 - [ ] Public /healthz and /readyz checks pass through the real load-balancer path.
 - [ ] Cloud Armor blocking/rate-limit rules have been exercised and observed in Cloud Logging.
 - [ ] Exchange sandbox drills cover timeout, UNKNOWN order, duplicate submission, partial fill, stop rejection, cancel race, and worker restart.
-- [ ] Physical Android device test completed for login/MFA, risk telemetry, kill switch, resume authorization, certificate/host restrictions, and release build.
+- [ ] Physical Android device test completed for login/MFA, risk telemetry, emergency halt, biometric reset authorization, certificate/host restrictions, and release build.
 
 ## Broker and asset routing
 
@@ -81,6 +81,6 @@ The correct status remains **NO-GO for live money** until the Critical evidence 
 
 The Android control client was corrected to use the existing backend administrator authentication contract instead of inventing a separate client-side Supabase SDK integration. Native login calls the administrator login endpoint, discovers the verified TOTP factor, creates a challenge, and exchanges the 6-digit authenticator code through the MFA verification endpoint. The returned bearer token is attached to risk telemetry and risk-control requests. WebSocket telemetry is also bearer-authenticated. Risk metrics no longer use the previous healthy-looking hard-coded equity/drawdown/Sharpe defaults; unavailable telemetry fails closed. CI now includes Android debug compilation plus the native mobile security regression tests.
 
-The native emergency control is a **server-authoritative halt/reset control**, not a local resume-trading switch. The kill operation requests the authoritative emergency halt. The reset operation releases the application halt state but intentionally leaves live trading disabled and returns Atlas to PAPER mode; any later re-enable of live trading remains a separate privileged operation.
+The native emergency control is a **server-authoritative halt/reset control**, not a local resume-trading switch. The Android client must not claim that biometric success alone resumes live trading. The kill operation requests the authoritative emergency halt. The reset operation releases the application halt state but intentionally leaves live trading disabled and returns Atlas to PAPER mode; any later re-enable of live trading remains a separate privileged operation.
 
 **Operational caveat:** source-level integration is corrected, but live-money readiness still requires an actual authenticated Android-device test against the deployed service, including AAL2 login, kill confirmation, biometric reset authorization, token expiry/re-login, and broker-side halt verification. No claim of live-money readiness is made until those tests pass.
