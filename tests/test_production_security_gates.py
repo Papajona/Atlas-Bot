@@ -30,3 +30,28 @@ def test_risk_websocket_authenticates_before_accept():
     assert "await auth(None, authorization)" in block
     assert 'await websocket.close(code=1008' in block
     assert "await websocket.accept()" in block
+
+
+def test_android_risk_controls_require_authenticated_server_session():
+    auth = (ROOT / "app" / "src" / "main" / "java" / "com" / "atlas" / "trading" / "auth" / "AdminAuthClient.kt").read_text()
+    main = (ROOT / "app" / "src" / "main" / "java" / "com" / "atlas" / "trading" / "MainActivity.kt").read_text()
+    risk = (ROOT / "app" / "src" / "main" / "java" / "com" / "atlas" / "trading" / "ui" / "RiskDashboard.kt").read_text()
+    assert "/api/admin/auth/login" in auth
+    assert "/api/admin/auth/mfa/challenge" in auth
+    assert "/api/admin/auth/mfa/verify" in auth
+    assert "/api/risk/kill" in auth
+    assert "/api/risk/reset" in auth
+    assert 'Authorization", "Bearer $bearer"' in auth
+    assert "setKillSwitch(isHalted, token)" in main
+    assert "accessToken: String? = null" in risk
+    assert 'conn.setRequestProperty("Authorization", "Bearer $accessToken")' in risk
+
+
+def test_android_risk_dashboard_has_no_fabricated_healthy_defaults():
+    risk = (ROOT / "app" / "src" / "main" / "java" / "com" / "atlas" / "trading" / "ui" / "RiskDashboard.kt").read_text()
+    assert "val equity: Double = 10000.0" not in risk
+    assert "val currentDrawdownPct: Double = 4.30" not in risk
+    assert "val sharpeRatio: Double = 1.84" not in risk
+    assert "TRENDING LOW-VOL" not in risk
+    assert 'streamType: String = "OFFLINE"' in risk
+    assert "telemetryAvailable: Boolean = false" in risk
