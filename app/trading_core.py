@@ -121,8 +121,6 @@ def _model_paths(model_path: str):
 
 
 def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: int = 5, asset: str = "crypto") -> dict:
-    if not np.isfinite(float(cost_stress_multiplier)) or float(cost_stress_multiplier) <= 0:
-        raise ValueError("cost_stress_multiplier must be a finite positive number")
     X = build_features(df)
     aligned = df.reindex(X.index)
     profile = PROFILES.get(asset, PROFILES["crypto"])
@@ -252,6 +250,8 @@ def predict_latest(df: pd.DataFrame, model_path: str, threshold: float = 0.05) -
 def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int = 5,
                              min_train: int = 800, threshold: float = 0.05,
                              cost_stress_multiplier: float = 2.0) -> dict:
+    if not np.isfinite(float(cost_stress_multiplier)) or float(cost_stress_multiplier) <= 0:
+        raise ValueError("cost_stress_multiplier must be a finite positive number")
     X = build_features(df)
     aligned = df.reindex(X.index)
     profile = PROFILES[asset]
