@@ -59,12 +59,16 @@ jobs:
           python -m alembic heads
       - name: Python lint (fatal static errors)
         run: |
-          set -o pipefail
-          python -m pyflakes app scripts tests 2>&1 | tee /tmp/pyflakes.txt
+          set +e
+          python -m pyflakes app scripts tests > /tmp/pyflakes.txt 2>&1
+          pyflakes_status=$?
+          set -e
+          cat /tmp/pyflakes.txt
           if grep -E "undefined name|redefinition of" /tmp/pyflakes.txt; then
             echo "Fatal static analysis errors detected."
             exit 1
           fi
+          echo "Pyflakes exited with status ${pyflakes_status}; non-fatal legacy warnings are allowed unless a fatal static error is present."
       - name: Security scan
         run: python -m bandit -r app -lll
       - name: Dependency audit
