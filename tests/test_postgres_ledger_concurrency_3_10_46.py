@@ -55,7 +55,19 @@ async def _balances(sessions, cid):
     from app.db import CustomerLedgerAccount, LedgerJournal, LedgerJournalLine
     async with sessions() as db:
         l = (await db.execute(select(CustomerLedgerAccount).where(CustomerLedgerAccount.customer_id == cid))).scalar_one()
-        lines = (await db.execute(select(LedgerJournalLine).where(LedgerJournalLine.customer_id == cid))).scalars().all()
+        journal_ids = (
+            select(LedgerJournalLine.journal_id)
+            .where(LedgerJournalLine.customer_id == cid)
+            .distinct()
+            .subquery()
+        )
+        lines = (
+            await db.execute(
+                select(LedgerJournalLine).where(
+                    LedgerJournalLine.journal_id.in_(select(journal_ids.c.journal_id))
+                )
+            )
+        ).scalars().all()
         return l, lines
 
 
