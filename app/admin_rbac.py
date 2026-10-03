@@ -5,13 +5,14 @@ from fastapi import HTTPException
 from .config import settings
 from .db import AdminRole, SessionLocal
 
-ROLES = {"READ_ONLY", "OPERATIONS", "RISK_OFFICER", "TREASURY", "COMPLIANCE", "ADMINISTRATOR"}
+ROLES = {"READ_ONLY", "OPERATIONS", "RISK_OFFICER", "TREASURY", "COMPLIANCE", "FINANCE", "ADMINISTRATOR"}
 ROLE_RANK = {
     "READ_ONLY": 10,
     "OPERATIONS": 20,
     "RISK_OFFICER": 30,
     "TREASURY": 30,
     "COMPLIANCE": 30,
+    "FINANCE": 40,
     "ADMINISTRATOR": 100,
 }
 
