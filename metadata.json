@@ -1,0 +1,6 @@
+{
+  "name": "Atlas Trading",
+  "description": "Atlas Trading mobile control center for automated trading and portfolio management",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
