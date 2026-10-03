@@ -82,3 +82,12 @@
 # Suppress warnings on optional dependencies
 -dontwarn java.lang.invoke.**
 -dontwarn javax.annotation.**
+
+# OkHttp & Okio rules
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-keepnames class okhttp3.internal.publicsuffix.PublicSuffixDatabase
+
+# Biometric rules
+-dontwarn androidx.biometric.**
+-keep class androidx.biometric.** { *; }

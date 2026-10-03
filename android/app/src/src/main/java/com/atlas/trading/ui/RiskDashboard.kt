@@ -36,9 +36,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.TimeUnit
 
 /**
  * Real-time Portfolio Risk Metrics state model.
@@ -67,6 +73,7 @@ data class PortfolioRiskMetrics(
     val costStressHeadroom: Double = 2.41,   // 2.0x hurdle passed
     val aiSafetyTimeoutSeconds: Double = 1.5,
     val isHalted: Boolean = false,
+    val streamType: String = "HTTP_POLL",
     val lastUpdatedEpochMs: Long = System.currentTimeMillis()
 )
 
@@ -120,21 +127,109 @@ fun RiskDashboardScreen(
     backendUrl: String = "",
     initialMetrics: PortfolioRiskMetrics = PortfolioRiskMetrics(),
     onOpenPortal: () -> Unit = {},
+    onRequestBiometricResume: ((onSuccess: () -> Unit) -> Unit) = { it() },
     onEmergencyHaltToggle: (Boolean) -> Unit = {}
 ) {
     var metrics by remember { mutableStateOf(initialMetrics) }
     var isSimulatingStress by remember { mutableStateOf(false) }
     var isRefreshing by remember { mutableStateOf(false) }
+    var isWebSocketConnected by remember { mutableStateOf(false) }
     var showAuditDialog by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
-    // Query live backend metrics infrastructure on launch
+    // Query live backend metrics infrastructure on launch via HTTP
     LaunchedEffect(backendUrl) {
         if (backendUrl.isNotBlank()) {
             val live = fetchLiveRiskMetrics(backendUrl)
             if (live != null) {
                 metrics = live
             }
+        }
+    }
+
+    // Active Telemetry Fallback Loop: When WebSocket disconnects, seamlessly poll HTTP every 3.5s
+    LaunchedEffect(backendUrl, isWebSocketConnected) {
+        if (backendUrl.isNotBlank() && !isWebSocketConnected) {
+            while (!isWebSocketConnected) {
+                val live = fetchLiveRiskMetrics(backendUrl)
+                if (live != null) {
+                    metrics = live.copy(streamType = "HTTP_FALLBACK")
+                }
+                delay(3500)
+            }
+        }
+    }
+
+    // Connect to persistent WebSocket telemetry stream
+    DisposableEffect(backendUrl) {
+        if (backendUrl.isBlank()) return@DisposableEffect onDispose {}
+
+        val wsUrl = backendUrl
+            .replaceFirst("https://", "wss://")
+            .replaceFirst("http://", "ws://")
+            .trimEnd('/') + "/ws/risk-telemetry"
+
+        val client = OkHttpClient.Builder()
+            .readTimeout(10, TimeUnit.SECONDS)
+            .build()
+
+        val request = Request.Builder().url(wsUrl).build()
+        val wsListener = object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                isWebSocketConnected = true
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                try {
+                    val json = JSONObject(text)
+                    if (json.has("equity")) {
+                        val updated = PortfolioRiskMetrics(
+                            equity = json.optDouble("equity", metrics.equity),
+                            peakEquity = json.optDouble("peak_equity", metrics.peakEquity),
+                            realizedPnl = json.optDouble("realized_pnl", metrics.realizedPnl),
+                            unrealizedPnl = json.optDouble("unrealized_pnl", metrics.unrealizedPnl),
+                            currentDrawdownPct = json.optDouble("current_drawdown_pct", metrics.currentDrawdownPct),
+                            maxDrawdownLimitPct = json.optDouble("max_drawdown_limit_pct", metrics.maxDrawdownLimitPct),
+                            dailyLossPct = json.optDouble("daily_loss_pct", metrics.dailyLossPct),
+                            dailyLossLimitPct = json.optDouble("daily_loss_limit_pct", metrics.dailyLossLimitPct),
+                            sharpeRatio = json.optDouble("sharpe_ratio", metrics.sharpeRatio),
+                            calmarRatio = json.optDouble("calmar_ratio", metrics.calmarRatio),
+                            sortinoRatio = json.optDouble("sortino_ratio", metrics.sortinoRatio),
+                            deflatedSharpeRatio = json.optDouble("deflated_sharpe_ratio", metrics.deflatedSharpeRatio),
+                            edgeDecayZScore = json.optDouble("edge_decay_z_score", metrics.edgeDecayZScore),
+                            regime = json.optString("regime", metrics.regime),
+                            regimeDescription = json.optString("regime_description", metrics.regimeDescription),
+                            momentumWeight = json.optInt("momentum_weight", metrics.momentumWeight),
+                            meanRevWeight = json.optInt("mean_rev_weight", metrics.meanRevWeight),
+                            sessionWeight = json.optInt("session_weight", metrics.sessionWeight),
+                            carryWeight = json.optInt("carry_weight", metrics.carryWeight),
+                            costStressHeadroom = json.optDouble("cost_stress_headroom", metrics.costStressHeadroom),
+                            aiSafetyTimeoutSeconds = json.optDouble("ai_safety_timeout_seconds", metrics.aiSafetyTimeoutSeconds),
+                            isHalted = json.optBoolean("is_halted", metrics.isHalted),
+                            streamType = json.optString("stream_type", "WEBSOCKET_PUSH"),
+                            lastUpdatedEpochMs = json.optLong("last_updated_epoch_ms", System.currentTimeMillis())
+                        )
+                        coroutineScope.launch(Dispatchers.Main) {
+                            metrics = updated
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                isWebSocketConnected = false
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                isWebSocketConnected = false
+            }
+        }
+
+        val webSocket = client.newWebSocket(request, wsListener)
+
+        onDispose {
+            webSocket.close(1000, "Screen disposed")
+            client.dispatcher.executorService.shutdown()
         }
     }
 
@@ -158,13 +253,40 @@ fun RiskDashboardScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text(
-                            text = "ATLAS RISK GOVERNOR",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = accentCyan,
-                            letterSpacing = 1.5.sp
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "ATLAS RISK GOVERNOR",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = accentCyan,
+                                letterSpacing = 1.5.sp
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            val currentStatusColor = when {
+                                isWebSocketConnected -> emeraldPass
+                                metrics.streamType == "HTTP_FALLBACK" || metrics.streamType == "HTTP_POLL" -> amberWarning
+                                else -> textMuted
+                            }
+                            val currentStatusText = when {
+                                isWebSocketConnected -> "WS LIVE"
+                                metrics.streamType == "HTTP_FALLBACK" -> "HTTP FALLBACK"
+                                metrics.streamType == "HTTP_POLL" -> "HTTP CONNECTED"
+                                else -> "OFFLINE CACHE"
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(currentStatusColor)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = currentStatusText,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = currentStatusColor
+                            )
+                        }
                         Text(
                             text = "Real-Time Risk Dashboard",
                             fontSize = 18.sp,
@@ -326,14 +448,29 @@ fun RiskDashboardScreen(
                 )
             }
 
-            // 5. Anti-Failure Controls & Actions
+            // 5. On-Device Quantitative Strategy Replay & Backtesting
+            item {
+                StrategyReplaySection()
+            }
+
+            // 6. Anti-Failure Controls & Actions
             item {
                 ActionControls(
                     isHalted = metrics.isHalted,
                     onHaltToggle = {
-                        val newHalt = !metrics.isHalted
-                        metrics = metrics.copy(isHalted = newHalt)
-                        onEmergencyHaltToggle(newHalt)
+                        if (!metrics.isHalted) {
+                            // Emergency halt: Zero friction, halts immediately
+                            val newHalt = true
+                            metrics = metrics.copy(isHalted = newHalt)
+                            onEmergencyHaltToggle(newHalt)
+                        } else {
+                            // High-risk action: Require biometric authorization to resume
+                            onRequestBiometricResume {
+                                val newHalt = false
+                                metrics = metrics.copy(isHalted = newHalt)
+                                onEmergencyHaltToggle(newHalt)
+                            }
+                        }
                     },
                     onOpenPortal = onOpenPortal,
                     accentCyan = accentCyan,
@@ -342,7 +479,7 @@ fun RiskDashboardScreen(
                 )
             }
 
-            // 6. Fiduciary Risk Disclosure
+            // 7. Fiduciary Risk Disclosure
             item {
                 FiduciaryDisclosureCard(cardSurface = cardSurface, cardBorder = cardBorder)
                 Spacer(modifier = Modifier.height(24.dp))
