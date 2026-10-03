@@ -1,5 +1,5 @@
 name: Atlas CI
-# re-run after CI lint-gate refinement
+# re-run after duplicate import fix
 # Push-triggered verification workflow for pull requests and protected branches.
 
 on:
