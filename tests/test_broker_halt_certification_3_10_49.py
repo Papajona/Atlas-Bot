@@ -1,7 +1,6 @@
 from pathlib import Path
 import ast
 import re
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 EXEC = (ROOT / "app/execution.py").read_text()
@@ -112,12 +111,8 @@ def test_cancellation_failure_must_never_be_reported_as_clean_halt():
 
     # This is deliberately strict: returning ok=True while a broker cancellation
     # failed would create a false-green emergency stop.
-    return_match = re.search(r'return \{"ok":\s*True,\s*"canceled_count"', emergency)
-    if return_match:
-        pytest.xfail(
-            "Known production gap: emergency_stop currently returns ok=True even when "
-            "broker cancellation failures exist. It must return unconfirmed/critical."
-        )
+    assert '"ok": broker_halt_confirmed' in emergency
+    assert '"broker_halt_confirmed": broker_halt_confirmed' in emergency
 
 
 def test_emergency_stop_records_critical_customer_cancel_incident():
@@ -134,23 +129,17 @@ def test_order_command_records_submission_fencing_token():
     assert "row.fencing_token = int(token)" in command
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Emergency stop currently invalidates kill state but does not yet wait for in-flight SUBMITTING commands before declaring broker halt confirmed.",
-)
 def test_emergency_stop_waits_for_inflight_submissions_before_confirmation():
     emergency = _function_source(EXEC, "emergency_stop")
-    assert "SUBMITTING" in emergency
-    assert "await" in emergency
+    assert "LIVE_SUBMISSION_LOCK_KEY" in emergency
+    assert "_wait_for_live_submission_barrier" in emergency
+    assert "barrier_confirmed" in emergency
     assert "fetch_open_orders" in emergency
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="A true network-delay race requires an execution-state barrier around the external broker side effect; current code has UNKNOWN reconciliation but no halt confirmation barrier.",
-)
 def test_network_delay_race_cannot_return_confirmed_halt_before_reconciliation():
     emergency = _function_source(EXEC, "emergency_stop")
     assert "UNKNOWN" in emergency
-    assert "fetch_open_orders" in emergency
+    assert "LIVE_SUBMISSION_LOCK_KEY" in EXEC
     assert "broker_halt_confirmed" in emergency
+    assert '"ok": broker_halt_confirmed' in emergency
