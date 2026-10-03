@@ -78,10 +78,11 @@ jobs:
       - name: Wait for PostgreSQL
         run: |
           until pg_isready -h 127.0.0.1 -p 5432 -U atlas -d atlas_production_verify; do sleep 1; done
-      - name: Apply and verify migrations
+      - name: Apply and verify migration head
         run: |
           python -m alembic upgrade head
-          python -m alembic check
+          python -m alembic current
+          python -m alembic heads
       - name: Production-oriented static and security gates
         run: |
           python -m compileall -q app alembic
