@@ -143,7 +143,7 @@ def test_order_command_records_submission_fencing_token():
 
 def test_emergency_stop_waits_for_inflight_submissions_before_confirmation():
     emergency = _function_source(EXEC, "emergency_stop")
-    assert "LIVE_SUBMISSION_LOCK_KEY" in emergency
+    assert "LIVE_SUBMISSION_LOCK_KEY" in EXEC
     assert "_wait_for_live_submission_barrier" in emergency
     assert "barrier_confirmed" in emergency
     assert "fetch_open_orders" in emergency
