@@ -106,7 +106,9 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
 
     model_path = tmp_path / "btc.joblib"
     candidate_result = {"model_sha256": "abc123", "features": 20, "folds": 3}
-    wfo = {"sharpe": 1.0, "max_drawdown": -0.10, "trades": 40, "total_return": 0.20, "folds": [{"total_return": 0.03}, {"total_return": 0.02}, {"total_return": 0.04}, {"total_return": 0.05}, {"total_return": 0.06}]}
+    wfo = {"sharpe": 1.0, "max_drawdown": -0.10, "trades": 40, "total_return": 0.20,
+           "folds": [{"total_return": 0.03}, {"total_return": 0.02}, {"total_return": 0.04}, {"total_return": 0.05}, {"total_return": 0.06}],
+           "cost_stress_ok": True}
 
     monkeypatch.setattr(adaptive_bot, "ai_walk_forward_backtest", lambda *a, **k: wfo)
     def fake_train(df, path, **kwargs):
