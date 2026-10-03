@@ -4,7 +4,7 @@ def test_version_and_distributed_security_controls():
     cfg = Path("app/config.py").read_text()
     main = Path("app/main.py").read_text()
     req = Path("requirements.txt").read_text()
-    assert 'app_version: str = "3.10.46"' in cfg
+    assert 'app_version: str = "3.10.47"' in cfg
     assert 'allow_rate_limit' in main
     assert 'check_redis' in main
     assert 'ServiceHeartbeat' in main
