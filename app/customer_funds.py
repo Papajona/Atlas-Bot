@@ -176,12 +176,16 @@ async def release_trading(db, customer_id: int, amount: float, *, reference_id: 
     amount_d = _q(amount)
     ledger = await get_or_create_ledger(db, customer_id, USDT)
     idem = f"release:{reference_id}:{customer_id}"
-    if (await db.execute(select(LedgerJournal).where(LedgerJournal.idempotency_key == idem))).scalar_one_or_none():
-        return ledger
     fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
         CustomerLedgerAccount.customer_id == customer_id,
         CustomerLedgerAccount.currency == USDT,
     ).with_for_update())).scalar_one()
+    # Re-check idempotency after acquiring the authoritative ledger row lock.
+    # A concurrent caller may have committed the journal while this transaction waited.
+    if (await db.execute(select(LedgerJournal).where(
+        LedgerJournal.idempotency_key == idem
+    ).with_for_update())).scalar_one_or_none():
+        return fresh_ledger
     release = min(amount_d, fresh_ledger.trading_reserved)
     if release <= 0:
         return fresh_ledger
