@@ -149,7 +149,7 @@ fun RiskDashboardScreen(
     }
 
     // Connect persistent WebSocket stream on appearance, disconnect on leave
-    DisposableEffect(backendUrl) {
+    DisposableEffect(backendUrl, accessToken) {
         if (backendUrl.isNotBlank()) {
             webSocketClient.connect(backendUrl, accessToken)
         }
@@ -236,8 +236,8 @@ fun RiskDashboardScreen(
                         onClick = {
                             coroutineScope.launch {
                                 isRefreshing = true
-                                if (wsConnectionState !is WebSocketConnectionState.Connected && backendUrl.isNotBlank()) {
-                                    webSocketClient.connect(backendUrl)
+                                if (wsConnectionState !is WebSocketConnectionState.Connected && backendUrl.isNotBlank() && !accessToken.isNullOrBlank()) {
+                                    webSocketClient.connect(backendUrl, accessToken)
                                 }
                                 val live = if (backendUrl.isNotBlank()) fetchLiveRiskMetrics(backendUrl) else null
                                 if (live != null) {
