@@ -36,13 +36,16 @@ def scan() -> list[str]:
                 continue
             m=ASSIGNMENT.search(line)
             if m and m.group(1).lower() not in PLACEHOLDERS and not m.group(1).startswith("<"):
-                if any(safe in m.group(1).lower() for safe in ("verification", "test-", "fake-", "example", "placeholder", "changeme")):\n                    continue\n                if "your-" not in m.group(1).lower():
+                if any(safe in m.group(1).lower() for safe in ("verification", "test-", "fake-", "example", "placeholder", "changeme")):
+                    continue
+                if "your-" not in m.group(1).lower():
                     findings.append(f"{path.relative_to(ROOT)}:{lineno}: credential-like assignment")
     return findings
 
 if __name__ == "__main__":
     findings=scan()
     if findings:
-        print("\n".join(findings))
+        print("
+".join(findings))
         sys.exit(1)
     print("No high-signal repository secrets detected.")
