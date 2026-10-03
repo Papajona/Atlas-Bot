@@ -4051,22 +4051,22 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 kill = bool(s.kill_switch) if s else True
 
                 rows = (await db.execute(select(StrategyOutcome.net_return_bps).order_by(StrategyOutcome.created_at.desc()).limit(100))).scalars().all()
-                if len(rows) >= 10:
-                    returns = [r / 10000.0 for r in rows if r is not None]
+                returns = [r / 10000.0 for r in rows if r is not None]
+                if len(returns) >= 10:
                     mean_ret = sum(returns) / len(returns)
-                    variance = sum((r - mean_ret) ** 2 for r in returns) / len(returns) if len(returns) > 1 else 0.0001
+                    variance = sum((r - mean_ret) ** 2 for r in returns) / (len(returns) or 1)
                     vol = math.sqrt(variance)
-                    sharpe = (mean_ret / vol * math.sqrt(8760)) if vol > 0 else 1.84
-                    calmar = (mean_ret * 8760 / max(0.01, current_dd / 100.0)) if current_dd > 0 else 2.12
+                    sharpe = (mean_ret / vol * math.sqrt(8760)) if vol > 0 else 0.0
+                    calmar = (mean_ret * 8760 / max(0.01, current_dd / 100.0)) if current_dd > 0 else 0.0
                     downside = [r for r in returns if r < 0]
                     downside_vol = math.sqrt(sum(r**2 for r in downside) / max(1, len(downside)))
-                    sortino = (mean_ret / downside_vol * math.sqrt(8760)) if downside_vol > 0 else 2.45
-                    edge_decay_z = (mean_ret / (vol / math.sqrt(len(returns)))) if vol > 0 else 0.84
+                    sortino = (mean_ret / downside_vol * math.sqrt(8760)) if downside_vol > 0 else 0.0
+                    edge_decay_z = (mean_ret / (vol / math.sqrt(len(returns)))) if vol > 0 else 0.0
                 else:
-                    sharpe = 1.84
-                    calmar = 2.12
-                    sortino = 2.45
-                    edge_decay_z = 0.84
+                    sharpe = 0.0
+                    calmar = 0.0
+                    sortino = 0.0
+                    edge_decay_z = 0.0
 
             payload = {
                 "equity": round(equity, 2),
