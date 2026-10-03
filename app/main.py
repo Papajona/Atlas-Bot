@@ -4982,10 +4982,29 @@ async def disable_live(x_admin_token: str | None = Header(default=None), authori
 async def kill(x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "RISK_OFFICER")
+    actor_id = str(claims.get("sub") or _audit_actor.get() or "risk-officer")
     try:
-        return await emergency_stop(settings.default_exchange if settings.exchange_api_key and settings.exchange_api_secret else None)
+        result = await emergency_stop(
+            settings.default_exchange if settings.exchange_api_key and settings.exchange_api_secret else None
+        )
     except Exception as e:
         raise _safe_http_error(502, e, "Emergency stop state set but broker cancellation failed") from e
+    # Never let the mobile client infer success from its local UI state. Return
+    # the persisted platform state so the client can reconcile against the server.
+    async with SessionLocal() as db:
+        state = await db.get(AppState, 1)
+        if not state or not state.kill_switch:
+            raise HTTPException(503, "Emergency halt was not persisted")
+        response = {
+            "ok": True,
+            "kill_switch": bool(state.kill_switch),
+            "live_enabled": bool(state.live_enabled),
+            "mode": str(state.mode or "PAPER"),
+            "confirmed_at": datetime.now(timezone.utc).isoformat(),
+            "actor_id": actor_id,
+            "broker_result": result,
+        }
+    return response
 
 
 @app.post("/api/risk/reset")
@@ -4994,12 +5013,17 @@ async def reset(x_admin_token: str | None = Header(default=None), authorization:
     await require_role(claims, "RISK_OFFICER")
     async with SessionLocal() as db:
         s = await db.get(AppState, 1)
+        if not s:
+            raise HTTPException(503, "Risk state is unavailable")
         s.kill_switch = False
         s.live_enabled = False
         s.mode = "PAPER"
         await db.commit()
+        await db.refresh(s)
+        if s.kill_switch or s.live_enabled or str(s.mode).upper() != "PAPER":
+            raise HTTPException(503, "Risk reset was not persisted")
     await _audit("KILL_SWITCH_RESET", {})
-    return {"ok": True, "mode": "PAPER", "live_enabled": False}
+    return {"ok": True, "kill_switch": False, "mode": "PAPER", "live_enabled": False}
 
 
 async def _audit(event: str, detail: dict, actor_id: str | None = None):
