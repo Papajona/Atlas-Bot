@@ -116,8 +116,8 @@ class MainActivity : AppCompatActivity() {
         if (canAuthenticate == BiometricManager.BIOMETRIC_SUCCESS) {
             val promptInfo = BiometricPrompt.PromptInfo.Builder()
                 .setTitle("Atlas Security: Disarm Kill Switch")
-                .setSubtitle("Biometric authentication required to resume trading")
-                .setDescription("Scan fingerprint or use device credentials to authorize capital allocation.")
+                .setSubtitle("Biometric authentication required to authorize risk reset")
+                .setDescription("Scan fingerprint or use device credentials to authorize release of the application halt. Live trading remains disabled until separately enabled.")
                 .setAllowedAuthenticators(
                     BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL
                 )
@@ -126,7 +126,7 @@ class MainActivity : AppCompatActivity() {
             val prompt = BiometricPrompt(this, executor, object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     super.onAuthenticationSucceeded(result)
-                    Toast.makeText(this@MainActivity, "Biometrics Verified. Trading Resumed.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "Biometrics verified. Requesting server risk reset…", Toast.LENGTH_SHORT).show()
                     onSuccess()
                 }
 
