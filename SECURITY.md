@@ -18,7 +18,7 @@ The encryption key is separate from the Supabase credentials, exchange keys, TRO
 
 ## Customer OTP step-up
 
-Customer withdrawals now require a fresh Supabase email/SMS OTP verification and a short-lived, signed backend step-up token. The token is bound to the authenticated Supabase user and expires according to `WITHDRAWAL_STEP_UP_MINUTES` (10 minutes by default). OTP values are never stored or logged by the application. OTP endpoints are rate-limited more aggressively than normal API routes.
+Customer withdrawals now require a fresh Supabase email/SMS OTP verification and a short-lived, signed backend step-up token. The token is bound to the authenticated Supabase user and expires according to `WITHDRAWAL_STEP_UP_MINUTES` (3 minutes by default, with application validation capping it at 3 minutes). OTP values are never stored or logged by the application. OTP endpoints are rate-limited more aggressively than normal API routes.
 
 ## Accepted dependency risk: ecdsa / PYSEC-2026-1325 (reviewed 2026)
 
