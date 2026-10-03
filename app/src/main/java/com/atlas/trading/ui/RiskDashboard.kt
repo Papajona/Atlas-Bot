@@ -51,29 +51,29 @@ import java.util.concurrent.TimeUnit
  * Connects to the Atlas Trading metrics & state gathering infrastructure.
  */
 data class PortfolioRiskMetrics(
-    val equity: Double = 10000.0,
-    val peakEquity: Double = 10450.0,
-    val realizedPnl: Double = 450.0,
-    val unrealizedPnl: Double = 82.50,
-    val currentDrawdownPct: Double = 4.30,   // e.g. 4.3%
+    val equity: Double = 0.0,
+    val peakEquity: Double = 0.0,
+    val realizedPnl: Double = 0.0,
+    val unrealizedPnl: Double = 0.0,
+    val currentDrawdownPct: Double = 0.0,   // e.g. 4.3%
     val maxDrawdownLimitPct: Double = 15.0,  // e.g. 15.0%
-    val dailyLossPct: Double = 0.85,         // e.g. 0.85%
+    val dailyLossPct: Double = 0.0,         // e.g. 0.85%
     val dailyLossLimitPct: Double = 3.0,     // e.g. 3.0%
-    val sharpeRatio: Double = 1.84,
-    val calmarRatio: Double = 2.12,
-    val sortinoRatio: Double = 2.45,
-    val deflatedSharpeRatio: Double = 0.98,  // DSR >= 0.95
-    val edgeDecayZScore: Double = 0.84,     // z-score vs -2.0 halt
-    val regime: String = "TRENDING LOW-VOL",
-    val regimeDescription: String = "Strong momentum drift; trend-following weighted at 45%",
-    val momentumWeight: Int = 45,
-    val meanRevWeight: Int = 15,
-    val sessionWeight: Int = 25,
-    val carryWeight: Int = 15,
-    val costStressHeadroom: Double = 2.41,   // 2.0x hurdle passed
+    val sharpeRatio: Double = 0.0,
+    val calmarRatio: Double = 0.0,
+    val sortinoRatio: Double = 0.0,
+    val deflatedSharpeRatio: Double = 0.0,  // DSR >= 0.95
+    val edgeDecayZScore: Double = 0.0,     // z-score vs -2.0 halt
+    val regime: String = "UNKNOWN / NOT VERIFIED",
+    val regimeDescription: String = "Live telemetry unavailable; no trading decision should rely on cached values.",
+    val momentumWeight: Int = 0,
+    val meanRevWeight: Int = 0,
+    val sessionWeight: Int = 0,
+    val carryWeight: Int = 0,
+    val costStressHeadroom: Double = 0.0,   // 2.0x hurdle passed
     val aiSafetyTimeoutSeconds: Double = 1.5,
-    val isHalted: Boolean = false,
-    val streamType: String = "HTTP_POLL",
+    val isHalted: Boolean = true,
+    val streamType: String = "OFFLINE_FAIL_CLOSED",
     val lastUpdatedEpochMs: Long = System.currentTimeMillis()
 )
 
@@ -90,29 +90,33 @@ suspend fun fetchLiveRiskMetrics(baseUrl: String): PortfolioRiskMetrics? = withC
         if (conn.responseCode == 200) {
             val responseText = conn.inputStream.bufferedReader().use { it.readText() }
             val json = JSONObject(responseText)
+            // Never manufacture risk numbers when the server omits telemetry.
+            // Required fields must be present before the mobile UI accepts the snapshot.
+            val required = listOf("equity", "peak_equity", "is_halted", "last_updated_epoch_ms")
+            if (required.any { !json.has(it) }) return@withContext null
             PortfolioRiskMetrics(
-                equity = json.optDouble("equity", 10000.0),
-                peakEquity = json.optDouble("peak_equity", 10450.0),
-                realizedPnl = json.optDouble("realized_pnl", 450.0),
-                unrealizedPnl = json.optDouble("unrealized_pnl", 82.50),
-                currentDrawdownPct = json.optDouble("current_drawdown_pct", 4.30),
+                equity = json.getDouble("equity"),
+                peakEquity = json.getDouble("peak_equity"),
+                realizedPnl = json.optDouble("realized_pnl", 0.0),
+                unrealizedPnl = json.optDouble("unrealized_pnl", 0.0),
+                currentDrawdownPct = json.optDouble("current_drawdown_pct", 0.0),
                 maxDrawdownLimitPct = json.optDouble("max_drawdown_limit_pct", 15.0),
-                dailyLossPct = json.optDouble("daily_loss_pct", 0.85),
+                dailyLossPct = json.optDouble("daily_loss_pct", 0.0),
                 dailyLossLimitPct = json.optDouble("daily_loss_limit_pct", 3.0),
-                sharpeRatio = json.optDouble("sharpe_ratio", 1.84),
-                calmarRatio = json.optDouble("calmar_ratio", 2.12),
-                sortinoRatio = json.optDouble("sortino_ratio", 2.45),
-                deflatedSharpeRatio = json.optDouble("deflated_sharpe_ratio", 0.98),
-                edgeDecayZScore = json.optDouble("edge_decay_z_score", 0.84),
-                regime = json.optString("regime", "TRENDING LOW-VOL"),
-                regimeDescription = json.optString("regime_description", "Strong momentum drift; trend-following weighted at 45%"),
+                sharpeRatio = json.optDouble("sharpe_ratio", 0.0),
+                calmarRatio = json.optDouble("calmar_ratio", 0.0),
+                sortinoRatio = json.optDouble("sortino_ratio", 0.0),
+                deflatedSharpeRatio = json.optDouble("deflated_sharpe_ratio", 0.0),
+                edgeDecayZScore = json.optDouble("edge_decay_z_score", 0.0),
+                regime = json.optString("regime", "UNKNOWN / NOT VERIFIED"),
+                regimeDescription = json.optString("regime_description", "Live telemetry unavailable; no trading decision should rely on cached values."),
                 momentumWeight = json.optInt("momentum_weight", 45),
                 meanRevWeight = json.optInt("mean_rev_weight", 15),
                 sessionWeight = json.optInt("session_weight", 25),
                 carryWeight = json.optInt("carry_weight", 15),
-                costStressHeadroom = json.optDouble("cost_stress_headroom", 2.41),
+                costStressHeadroom = json.optDouble("cost_stress_headroom", 0.0),
                 aiSafetyTimeoutSeconds = json.optDouble("ai_safety_timeout_seconds", 1.5),
-                isHalted = json.optBoolean("is_halted", false),
+                isHalted = json.getBoolean("is_halted"),
                 lastUpdatedEpochMs = json.optLong("last_updated_epoch_ms", System.currentTimeMillis())
             )
         } else null
