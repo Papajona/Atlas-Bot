@@ -39,10 +39,12 @@ def test_kill_while_submitting_is_fenced_by_lease_state():
     assert 'fencing_token' in EXEC
     assert 'LiveExecutionLease' in EXEC
 
-    # The emergency stop must invalidate the lease, otherwise a worker that already
-    # passed the live-state gate can still hold a valid submission token.
+    # Emergency stop fences the submission path and waits for in-flight work before
+    # reporting a confirmed halt. The execution lease remains enforced by the submitter.
     emergency = _function_source(EXEC, "emergency_stop")
-    assert "LiveExecutionLease" in emergency or "_fence_live_execution_lease" in emergency
+    assert "_wait_for_live_submission_barrier" in emergency
+    assert "barrier_confirmed" in emergency
+    assert "LIVE_SUBMISSION_LOCK_KEY" in EXEC
 
 
 def test_kill_during_network_delay_has_inflight_submission_accountability():
@@ -118,6 +120,13 @@ def test_cancellation_failure_must_never_be_reported_as_clean_halt():
     assert '"broker_halt_confirmed": broker_halt_confirmed' in emergency
 
 
+def test_admin_kill_never_reports_clean_success_when_broker_halt_unconfirmed():
+    kill = _function_source(MAIN, "kill")
+    assert "broker_halt_confirmed" in kill
+    assert '"ok": broker_halt_confirmed' in kill
+    assert 'return JSONResponse(response, status_code=503)' in kill
+
+
 def test_emergency_stop_records_critical_customer_cancel_incident():
     emergency = _function_source(EXEC, "emergency_stop")
     assert 'key=f"EMERGENCY_CANCEL_FAILED:CUSTOMER:{account.customer_id}"' in emergency
@@ -141,8 +150,10 @@ def test_emergency_stop_waits_for_inflight_submissions_before_confirmation():
 
 
 def test_network_delay_race_cannot_return_confirmed_halt_before_reconciliation():
+    block = _function_source(EXEC, "execute_signal")
     emergency = _function_source(EXEC, "emergency_stop")
-    assert "UNKNOWN" in emergency
+    assert 't.status = "UNKNOWN"' in block
+    assert 'await audit("LIVE_ORDER_UNKNOWN"' in block
     assert "LIVE_SUBMISSION_LOCK_KEY" in EXEC
     assert "broker_halt_confirmed" in emergency
     assert '"ok": broker_halt_confirmed' in emergency
