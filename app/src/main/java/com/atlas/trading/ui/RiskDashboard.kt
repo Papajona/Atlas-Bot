@@ -32,15 +32,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.atlas.trading.network.LiveEquityWebSocketClient
+import com.atlas.trading.network.WebSocketManager
 import com.atlas.trading.network.WebSocketConnectionState
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 
 /**
  * Real-time Portfolio Risk Metrics state model.
@@ -71,54 +66,13 @@ data class PortfolioRiskMetrics(
     val isHalted: Boolean = true,
     val streamType: String = "OFFLINE",
     val telemetryAvailable: Boolean = false,
+    val workerHealthStatus: String = "UNKNOWN",
+    val workerHealthy: Boolean = false,
+    val workerInstances: Int = 0,
+    val healthyWorkerInstances: Int = 0,
+    val workerHeartbeatAgeSeconds: Double = Double.NaN,
     val lastUpdatedEpochMs: Long = 0L
 )
-
-suspend fun fetchLiveRiskMetrics(baseUrl: String, accessToken: String?): PortfolioRiskMetrics? = withContext(Dispatchers.IO) {
-    if (baseUrl.isBlank() || accessToken.isNullOrBlank()) return@withContext null
-    try {
-        val endpoint = "${baseUrl.trimEnd('/')}/api/risk-dashboard/metrics"
-        val url = URL(endpoint)
-        val conn = url.openConnection() as HttpURLConnection
-        conn.requestMethod = "GET"
-        conn.connectTimeout = 4000
-        conn.readTimeout = 4000
-        conn.setRequestProperty("Accept", "application/json")
-        conn.setRequestProperty("Authorization", "Bearer $accessToken")
-        if (conn.responseCode == 200) {
-            val responseText = conn.inputStream.bufferedReader().use { it.readText() }
-            val json = JSONObject(responseText)
-            PortfolioRiskMetrics(
-                equity = json.optDouble("equity", Double.NaN),
-                peakEquity = json.optDouble("peak_equity", Double.NaN),
-                realizedPnl = json.optDouble("realized_pnl", Double.NaN),
-                unrealizedPnl = json.optDouble("unrealized_pnl", Double.NaN),
-                currentDrawdownPct = json.optDouble("current_drawdown_pct", Double.NaN),
-                maxDrawdownLimitPct = json.optDouble("max_drawdown_limit_pct", Double.NaN),
-                dailyLossPct = json.optDouble("daily_loss_pct", Double.NaN),
-                dailyLossLimitPct = json.optDouble("daily_loss_limit_pct", Double.NaN),
-                sharpeRatio = json.optDouble("sharpe_ratio", Double.NaN),
-                calmarRatio = json.optDouble("calmar_ratio", Double.NaN),
-                sortinoRatio = json.optDouble("sortino_ratio", Double.NaN),
-                deflatedSharpeRatio = json.optDouble("deflated_sharpe_ratio", Double.NaN),
-                edgeDecayZScore = json.optDouble("edge_decay_z_score", Double.NaN),
-                regime = json.optString("regime", "UNKNOWN"),
-                regimeDescription = json.optString("regime_description", "Live telemetry incomplete"),
-                momentumWeight = json.optInt("momentum_weight", 45),
-                meanRevWeight = json.optInt("mean_rev_weight", 15),
-                sessionWeight = json.optInt("session_weight", 25),
-                carryWeight = json.optInt("carry_weight", 15),
-                costStressHeadroom = json.optDouble("cost_stress_headroom", Double.NaN),
-                aiSafetyTimeoutSeconds = json.optDouble("ai_safety_timeout_seconds", Double.NaN),
-                isHalted = json.optBoolean("is_halted", false),
-                telemetryAvailable = json.has("equity") && json.has("is_halted"),
-                lastUpdatedEpochMs = json.optLong("last_updated_epoch_ms", 0L)
-            )
-        } else null
-    } catch (_: Exception) {
-        null
-    }
-}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -130,7 +84,7 @@ fun RiskDashboardScreen(
     onRequestBiometricResume: ((onSuccess: () -> Unit) -> Unit) = { it() },
     onEmergencyHaltToggle: (Boolean) -> Unit = {}
 ) {
-    val webSocketClient = remember { LiveEquityWebSocketClient() }
+    val webSocketClient = remember { WebSocketManager() }
     val wsConnectionState by webSocketClient.connectionState.collectAsState()
     val streamedMetrics by webSocketClient.liveMetrics.collectAsState()
     val latencyMs by webSocketClient.lastMessageLatencyMs.collectAsState()
@@ -154,17 +108,7 @@ fun RiskDashboardScreen(
             webSocketClient.connect(backendUrl, accessToken)
         }
         onDispose {
-            webSocketClient.disconnect()
-        }
-    }
-
-    // One-time baseline cold-start fetch while socket initializes
-    LaunchedEffect(backendUrl, accessToken) {
-        if (backendUrl.isNotBlank() && !accessToken.isNullOrBlank() && wsConnectionState !is WebSocketConnectionState.Connected) {
-            val live = fetchLiveRiskMetrics(backendUrl, accessToken)
-            if (live != null) {
-                metrics = live
-            }
+            webSocketClient.close()
         }
     }
 
@@ -239,12 +183,10 @@ fun RiskDashboardScreen(
                                 if (wsConnectionState !is WebSocketConnectionState.Connected && backendUrl.isNotBlank() && !accessToken.isNullOrBlank()) {
                                     webSocketClient.connect(backendUrl, accessToken)
                                 }
-                                val live = if (backendUrl.isNotBlank()) fetchLiveRiskMetrics(backendUrl, accessToken) else null
-                                if (live != null) {
-                                    metrics = live
-                                } else {
-                                    metrics = PortfolioRiskMetrics()
+                                if (backendUrl.isNotBlank() && !accessToken.isNullOrBlank()) {
+                                    webSocketClient.connect(backendUrl, accessToken)
                                 }
+                                if (streamedMetrics.lastUpdatedEpochMs > 0) metrics = streamedMetrics
                                 isRefreshing = false
                             }
                         },
@@ -280,6 +222,7 @@ fun RiskDashboardScreen(
                     cardBorder = cardBorder,
                     emeraldColor = emeraldPass,
                     redColor = redDanger,
+                    warningColor = amberWarning,
                     onInspectAudit = { showAuditDialog = true }
                 )
             }
@@ -428,6 +371,7 @@ private fun SystemStateRibbon(
     cardBorder: Color,
     emeraldColor: Color,
     redColor: Color,
+    warningColor: Color,
     onInspectAudit: () -> Unit
 ) {
     Card(
@@ -464,7 +408,20 @@ private fun SystemStateRibbon(
                         fontSize = 11.sp,
                         color = Color(0xFF64748B)
                     )
-                }
+
+                    val healthColor = when (metrics.workerHealthStatus) {
+                        "HEALTHY" -> emeraldColor
+                        "STALE" -> warningColor
+                        "MISSING" -> redColor
+                        else -> Color(0xFF94A3B8)
+                    }
+                    Text(
+                        text = "WORKER ENGINE: " + metrics.workerHealthStatus + " • " + metrics.healthyWorkerInstances + "/" + metrics.workerInstances + " healthy",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = healthColor,
+                        modifier = Modifier.testTag("worker_health_status")
+                    )                }
             }
 
             TextButton(
