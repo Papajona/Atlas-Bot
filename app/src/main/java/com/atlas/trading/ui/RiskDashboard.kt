@@ -77,8 +77,8 @@ data class PortfolioRiskMetrics(
     val lastUpdatedEpochMs: Long = System.currentTimeMillis()
 )
 
-suspend fun fetchLiveRiskMetrics(baseUrl: String): PortfolioRiskMetrics? = withContext(Dispatchers.IO) {
-    if (baseUrl.isBlank()) return@withContext null
+suspend fun fetchLiveRiskMetrics(baseUrl: String, accessToken: String?): PortfolioRiskMetrics? = withContext(Dispatchers.IO) {
+    if (baseUrl.isBlank() || accessToken.isNullOrBlank()) return@withContext null
     try {
         val endpoint = "${baseUrl.trimEnd('/')}/api/risk-dashboard/metrics"
         val url = URL(endpoint)
@@ -87,6 +87,7 @@ suspend fun fetchLiveRiskMetrics(baseUrl: String): PortfolioRiskMetrics? = withC
         conn.connectTimeout = 4000
         conn.readTimeout = 4000
         conn.setRequestProperty("Accept", "application/json")
+        conn.setRequestProperty("Authorization", "Bearer $accessToken")
         if (conn.responseCode == 200) {
             val responseText = conn.inputStream.bufferedReader().use { it.readText() }
             val json = JSONObject(responseText)
@@ -129,6 +130,7 @@ suspend fun fetchLiveRiskMetrics(baseUrl: String): PortfolioRiskMetrics? = withC
 @Composable
 fun RiskDashboardScreen(
     backendUrl: String = "",
+    accessToken: String? = null,
     initialMetrics: PortfolioRiskMetrics = PortfolioRiskMetrics(),
     onOpenPortal: () -> Unit = {},
     onRequestBiometricResume: ((onSuccess: () -> Unit) -> Unit) = { it() },
@@ -142,9 +144,9 @@ fun RiskDashboardScreen(
     val coroutineScope = rememberCoroutineScope()
 
     // Query live backend metrics infrastructure on launch via HTTP
-    LaunchedEffect(backendUrl) {
+    LaunchedEffect(backendUrl, accessToken) {
         if (backendUrl.isNotBlank()) {
-            val live = fetchLiveRiskMetrics(backendUrl)
+            val live = fetchLiveRiskMetrics(backendUrl, accessToken)
             if (live != null) {
                 metrics = live
             }
@@ -152,8 +154,8 @@ fun RiskDashboardScreen(
     }
 
     // Active Telemetry Fallback Loop: When WebSocket disconnects, seamlessly poll HTTP every 3.5s
-    LaunchedEffect(backendUrl, isWebSocketConnected) {
-        if (backendUrl.isNotBlank() && !isWebSocketConnected) {
+    LaunchedEffect(backendUrl, accessToken, isWebSocketConnected) {
+        if (backendUrl.isNotBlank() && !accessToken.isNullOrBlank() && !isWebSocketConnected) {
             while (!isWebSocketConnected) {
                 val live = fetchLiveRiskMetrics(backendUrl)
                 if (live != null) {
@@ -165,7 +167,7 @@ fun RiskDashboardScreen(
     }
 
     // Connect to persistent WebSocket telemetry stream
-    DisposableEffect(backendUrl) {
+    DisposableEffect(backendUrl, accessToken) {
         if (backendUrl.isBlank()) return@DisposableEffect onDispose {}
 
         val wsUrl = backendUrl
@@ -177,7 +179,11 @@ fun RiskDashboardScreen(
             .readTimeout(10, TimeUnit.SECONDS)
             .build()
 
-        val request = Request.Builder().url(wsUrl).build()
+        if (accessToken.isNullOrBlank()) return@DisposableEffect onDispose {}
+        val request = Request.Builder()
+            .url(wsUrl)
+            .header("Authorization", "Bearer $accessToken")
+            .build()
         val wsListener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 isWebSocketConnected = true
