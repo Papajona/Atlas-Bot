@@ -580,7 +580,7 @@ async def _run_persisted_adaptive_bot_cycle(bot_id: int, req: CustomerBotStartRe
             await open_incident(key=f"DERIVATIVES_STRESS:{profile.id}:{req.symbol}",severity="HIGH",category="MARKET_STRESS",summary="Live entry blocked by severe derivatives stress",detail=derivatives_context,customer_id=profile.id)
             return {"decision":"NO_TRADE","stage":"derivatives_stress_gate","derivatives_context":derivatives_context}
 
-    policy = AdaptiveModelPolicy(max_age_hours=settings.adaptive_retrain_hours, min_sharpe=settings.adaptive_min_sharpe, max_drawdown=settings.adaptive_max_drawdown, min_trades=settings.adaptive_min_trades, min_total_return=settings.adaptive_min_total_return)
+    policy = AdaptiveModelPolicy(max_age_hours=settings.adaptive_retrain_hours, min_sharpe=settings.adaptive_min_sharpe, max_drawdown=settings.adaptive_max_drawdown, min_trades=settings.adaptive_min_trades, min_total_return=settings.adaptive_min_total_return, research_min_deflated_sharpe=settings.research_min_deflated_sharpe, research_require_cost_stress=settings.research_require_cost_stress, research_cost_stress_multiplier=settings.research_cost_stress_multiplier)
     # Learning is independent of trade opportunity: the controller retrains/backtests
     # on schedule even when the current candle produces no deterministic setup.
     adaptive = await _ensure_adaptive_model_locked(req, df, policy)
