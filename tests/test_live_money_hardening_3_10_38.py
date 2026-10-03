@@ -55,8 +55,8 @@ def test_parameter_plateau_rejects_single_peak():
 
 def test_release_version_is_3_10_43():
     root=Path(__file__).resolve().parents[1]
-    assert 'app_version: str = "3.10.46"' in (root/'app/config.py').read_text()
-    assert '__version__ = "3.10.46"' in (root/'app/__init__.py').read_text()
+    assert 'app_version: str = "3.10.47"' in (root/'app/config.py').read_text()
+    assert '__version__ = "3.10.47"' in (root/'app/__init__.py').read_text()
 
 
 def test_meta_label_predicts_current_unlabeled_bar():
