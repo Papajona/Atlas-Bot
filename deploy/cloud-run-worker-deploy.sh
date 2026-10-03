@@ -30,6 +30,13 @@ if [[ ! "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
   echo "ERROR: RELEASE_SHA must be a full 40-character git SHA." >&2
   exit 2
 fi
+
+IMAGE_TAG_SHA="${IMAGE%@*}"
+IMAGE_TAG_SHA="${IMAGE_TAG_SHA##*:}"
+if [[ "$IMAGE_TAG_SHA" != "$RELEASE_SHA" ]]; then
+  echo "ERROR: worker image tag commit ($IMAGE_TAG_SHA) does not match RELEASE_SHA ($RELEASE_SHA)." >&2
+  exit 2
+fi
 SA="${WORKER_SERVICE_ACCOUNT}@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 
 # The persisted bot cycles run HERE (worker), and each one needs BOTH Gemini and Groq to approve (fail-closed). Without a Groq key every
