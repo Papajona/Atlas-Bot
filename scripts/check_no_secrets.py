@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKIP_DIRS = {".git", ".venv", "__pycache__", "node_modules", "dist", "build", ".pytest_cache"}
 TEXT_SUFFIXES = {".py",".sh",".bash",".env",".example",".yml",".yaml",".json",".toml",".ini",".gradle",".kts"}
 ASSIGNMENT = re.compile(r"(?i)\b(?:api[_-]?key|api[_-]?secret|secret[_-]?key|password|token|mnemonic|seed[_-]?phrase)\s*[:=]\s*['\"]?([A-Za-z0-9_+/=.-]{20,})")
-PRIVATE_KEY = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----")
+PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----\s*$")
 TRON_SEED = re.compile(r"(?i)\b(?:mnemonic|seed[_-]?phrase|private[_-]?key)\s*[:=]")
 
 PLACEHOLDERS = {"changeme","change-me","example","placeholder","your-secret","your-key","test-password","verification-password","verification","atlas-ci","fake-key","generate_a_fernet_key_and_store_in_secret_manager"}
