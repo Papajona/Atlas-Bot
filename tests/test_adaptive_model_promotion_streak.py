@@ -28,7 +28,8 @@ def _synthetic_ohlcv(n=900, seed=11):
 def _passing_wfo():
     folds = [{"total_return": 0.05}, {"total_return": 0.04}, {"total_return": 0.03},
               {"total_return": 0.02}, {"total_return": 0.06}]
-    return {"sharpe": 1.2, "max_drawdown": -0.05, "trades": 50, "total_return": 0.10, "folds": folds}
+    return {"sharpe": 1.2, "max_drawdown": -0.05, "trades": 50, "total_return": 0.10,
+            "folds": folds, "cost_stress_ok": True}
 
 
 def _failing_wfo():

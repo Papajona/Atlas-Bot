@@ -11,6 +11,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import balanced_accuracy_score, f1_score, log_loss
 from lightgbm import LGBMClassifier
 from .config import settings
+from .research_validation import deflated_sharpe_report, cost_breakeven_report
 from .model_registry import sha256_file, artifact_signature, verify_artifact_signature
 
 
@@ -247,7 +248,10 @@ def predict_latest(df: pd.DataFrame, model_path: str, threshold: float = 0.05) -
 
 
 def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int = 5,
-                             min_train: int = 800, threshold: float = 0.05) -> dict:
+                             min_train: int = 800, threshold: float = 0.05,
+                             cost_stress_multiplier: float = 2.0) -> dict:
+    if not np.isfinite(float(cost_stress_multiplier)) or float(cost_stress_multiplier) <= 0:
+        raise ValueError("cost_stress_multiplier must be a finite positive number")
     X = build_features(df)
     aligned = df.reindex(X.index)
     profile = PROFILES[asset]
@@ -283,7 +287,8 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
         fold_equity = np.cumprod(1.0 + fold_net) if len(fold_net) else np.array([1.0])
         fold_peak = np.maximum.accumulate(fold_equity)
         fold_dd = fold_equity / fold_peak - 1.0
-        fold_metrics.append({"train_bars":int(len(tr)),"test_bars":int(len(te)),"total_return":float(fold_equity[-1]-1.0),"max_drawdown":float(fold_dd.min()),"trades":int(np.count_nonzero(np.diff(np.r_[0,sig])) )})
+        fold_sharpe = float(fold_net.mean() / fold_net.std() * np.sqrt(profile.bars_per_year)) if float(fold_net.std()) > 0 else 0.0
+        fold_metrics.append({"train_bars":int(len(tr)),"test_bars":int(len(te)),"total_return":float(fold_equity[-1]-1.0),"max_drawdown":float(fold_dd.min()),"trades":int(np.count_nonzero(np.diff(np.r_[0,sig])) ),"sharpe":fold_sharpe})
     ret = aligned.close.pct_change().fillna(0)
     position = pred_signal.fillna(0).shift(1).fillna(0)
     turnover = position.diff().abs().fillna(position.abs())
@@ -293,6 +298,8 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
     equity = (1 + net).cumprod()
     peak = equity.cummax()
     dd = equity / peak - 1
+    cost_report = cost_breakeven_report((position * ret).to_numpy(), turnover.to_numpy(), taker_bps=profile.taker_bps, slippage_bps=profile.slippage_bps, bars_per_year=profile.bars_per_year, stress_multiplier=cost_stress_multiplier)
+    dsr_report = deflated_sharpe_report(net.to_numpy(), [float(f.get("sharpe", 0.0)) for f in fold_metrics], max(1, len(fold_metrics)), profile.bars_per_year)
     vol = float(net.std())
     annual = profile.bars_per_year
     downside = net[net < 0].std()
@@ -316,4 +323,9 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
         "validation_signal_count": len(scores),
         "prediction_gap_policy": "NO_FORWARD_FILL_ACROSS_NON_TEST_WINDOWS",
         "folds": fold_metrics,
+        "cost_stress_ok": bool(cost_report.get("stress_ok")) if cost_report.get("status") == "OK" else False,
+        "cost_stress_multiplier": float(cost_stress_multiplier),
+        "cost_analysis": cost_report,
+        "deflated_sharpe": dsr_report.get("deflated_sharpe_ratio") if dsr_report.get("status") == "OK" else None,
+        "deflated_sharpe_status": dsr_report.get("status"),
     }

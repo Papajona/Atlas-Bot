@@ -6,7 +6,7 @@ _VALID_ENVIRONMENTS = {"development", "staging", "production", "test"}
 
 class Settings(BaseSettings):
     app_name: str = "AI Trading Console"
-    app_version: str = "3.10.45"
+    app_version: str = "3.10.46"
     # No default: the previous default of "development" silently matched the also-default
     # SQLite/plaintext-fallback posture, so a deployment that simply forgot to set ENVIRONMENT
     # got the insecure combination with no warning. Requiring an explicit value means a missing
@@ -239,6 +239,10 @@ class Settings(BaseSettings):
     metrics_enabled: bool = True
     background_reconciliation_enabled: bool = True
     reconciliation_interval_seconds: int = 60
+    # Continuous solvency reconciliation across customer ledger liabilities and configured TRON custody.
+    custody_reconciliation_enabled: bool = True
+    custody_reconciliation_interval_seconds: int = 300
+    custody_solvency_min_ratio: float = 1.0
     # API abuse/resource controls. Per-process limiter; put a gateway limiter in front for multi-worker deployments.
     api_rate_limit_per_minute: int = 120
     auth_rate_limit_per_minute: int = 10
@@ -256,6 +260,10 @@ class Settings(BaseSettings):
     withdrawal_new_address_requires_verification: bool = True
     expensive_api_rate_limit_per_minute: int = 12
     metrics_require_admin: bool = True
+    # Immutable build identity injected by CI/deployment; required in production.
+    release_sha: str = ""
+    release_version: str = ""
+    image_digest: str = ""
 
     # Commercial plans / subscriptions / referrals. Payment provider secrets belong in Secret Manager.
     billing_enabled: bool = True

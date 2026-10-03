@@ -55,7 +55,19 @@ async def _balances(sessions, cid):
     from app.db import CustomerLedgerAccount, LedgerJournal, LedgerJournalLine
     async with sessions() as db:
         l = (await db.execute(select(CustomerLedgerAccount).where(CustomerLedgerAccount.customer_id == cid))).scalar_one()
-        lines = (await db.execute(select(LedgerJournalLine).where(LedgerJournalLine.customer_id == cid))).scalars().all()
+        journal_ids = (
+            select(LedgerJournalLine.journal_id)
+            .where(LedgerJournalLine.customer_id == cid)
+            .distinct()
+            .subquery()
+        )
+        lines = (
+            await db.execute(
+                select(LedgerJournalLine).where(
+                    LedgerJournalLine.journal_id.in_(select(journal_ids.c.journal_id))
+                )
+            )
+        ).scalars().all()
         return l, lines
 
 
@@ -83,6 +95,59 @@ async def test_concurrent_withdrawal_reserves_never_overdraw():
         assert ledger.available + ledger.withdrawal_reserved == Decimal("100")  # money conserved
         assert sum(l.debit for l in lines) == sum(l.credit for l in lines)
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_reserve_acquires_row_lock_before_mutation():
+    """Prove reserve_withdrawal emits SELECT ... FOR UPDATE and holds that row lock."""
+    from sqlalchemy import event, select, text
+    from sqlalchemy.exc import DBAPIError
+    from app.db import CustomerLedgerAccount
+    from app.customer_funds import reserve_withdrawal
+
+    engine, sessions = await _sessions()
+    statements = []
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def capture_customer_ledger_sql(conn, cursor, statement, parameters, context, executemany):
+        normalized = statement.replace("\\n", " ").strip()
+        if "customer_ledger_accounts" in normalized.lower():
+            statements.append(normalized)
+
+    try:
+        cid = await _customer(sessions, "100")
+
+        async with sessions() as holder:
+            await reserve_withdrawal(
+                holder,
+                cid,
+                30,
+                reference_id=f"lock-proof-{cid}",
+            )
+
+            assert any(
+                "for update" in statement.lower()
+                for statement in statements
+            ), "reserve_withdrawal did not emit SELECT ... FOR UPDATE"
+
+            async with sessions() as waiter:
+                await waiter.execute(text("SET LOCAL lock_timeout = '200ms'"))
+                with pytest.raises(DBAPIError) as exc_info:
+                    await waiter.execute(
+                        select(CustomerLedgerAccount)
+                        .where(CustomerLedgerAccount.customer_id == cid)
+                        .with_for_update()
+                    )
+                assert getattr(exc_info.value.orig, "sqlstate", None) == "55P03"
+
+            await holder.rollback()
+    finally:
+        event.remove(
+            engine.sync_engine,
+            "before_cursor_execute",
+            capture_customer_ledger_sql,
+        )
         await engine.dispose()
 
 

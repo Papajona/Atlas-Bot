@@ -174,4 +174,4 @@ def test_paper_only_product_endpoints_do_not_claim_live_authority():
 def test_current_readme_does_not_retain_stale_release_heading():
     readme = (ROOT / "README.md").read_text()
     assert '# Atlas Trading 3.10.35' not in readme
-    assert '## Current release: 3.10.45' in readme
+    assert '## Current release: 3.10.46' in readme

@@ -1,0 +1,103 @@
+name: Atlas CI
+# re-run after duplicate import fix
+# Push-triggered verification workflow for pull requests and protected branches.
+
+on:
+  pull_request:
+  push:
+    branches: [main, "hardening/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  python-quality-and-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: atlas_test
+          POSTGRES_USER: atlas
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U atlas -d atlas_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+      ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      CUSTOMER_LIVE_TRADING_ENABLED: "false"
+      BROKER_SANDBOX: "true"
+      BACKGROUND_RECONCILIATION_ENABLED: "false"
+      ADMIN_TOKEN: test-admin-token-for-ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Wait for PostgreSQL
+        run: |
+          until pg_isready -h 127.0.0.1 -p 5432 -U atlas -d atlas_test; do sleep 1; done
+      - name: Compile source
+        run: python -m compileall -q app alembic
+      - name: Apply migrations
+        run: python -m alembic upgrade head
+      - name: Verify migration head
+        run: |
+          python -m alembic current
+          python -m alembic heads
+      - name: Python lint (fatal static errors)
+        run: |
+          set +e
+          python -m pyflakes app scripts tests > /tmp/pyflakes.txt 2>&1
+          pyflakes_status=$?
+          set -e
+          cat /tmp/pyflakes.txt
+          if grep -E "undefined name|redefinition of" /tmp/pyflakes.txt; then
+            echo "Fatal static analysis errors detected."
+            exit 1
+          fi
+          echo "Pyflakes exited with status ${pyflakes_status}; non-fatal legacy warnings are allowed unless a fatal static error is present."
+      - name: Security scan
+        run: python -m bandit -r app -lll
+      - name: Dependency audit
+        run: |
+          # PYSEC-2026-1325 is reviewed in SECURITY.md. It is a transitive ecdsa
+          # dependency of bip-utils and Atlas only uses bip-utils for public-key
+          # TRON address derivation/validation, never private-key signing.
+          # Keep strict auditing enabled for all other findings.
+          python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325
+      - name: Full PostgreSQL ledger concurrency suite
+        env:
+          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+          DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+        run: |
+          python -m pytest -q tests/test_postgres_ledger_concurrency_3_10_46.py
+          python -m pytest -q tests/test_ledger_all_paths_concurrent_3_10_46.py
+
+      - name: Full pytest suite
+        env:
+          # The dedicated PostgreSQL concurrency suites above validate row-locking
+          # against real PostgreSQL. Keep the broad unit suite on isolated SQLite so
+          # asyncio/TestClient tests cannot inherit a PostgreSQL async engine across
+          # independently managed pytest event loops.
+          DATABASE_URL: sqlite+aiosqlite:///./test_trading.db
+          ATLAS_POSTGRES_URL: ""
+        run: python -m pytest -q
+
+      - name: Shell syntax
+        run: |
+          bash -n deploy/cloud-run-deploy.sh
+          bash -n deploy/cloud-run-worker-deploy.sh
+          bash -n deploy/cloud-run-migration-job.sh

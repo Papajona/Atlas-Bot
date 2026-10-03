@@ -1,0 +1,105 @@
+name: Production Verification Gate
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  production-safety:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: atlas_production_verify
+          POSTGRES_USER: atlas
+          POSTGRES_PASSWORD: verification_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U atlas -d atlas_production_verify"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    env:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
+      ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
+      SECRET_KEY: atlas-ci-production-verification-secret-32-bytes
+      APP_ENCRYPTION_KEY: ZmFrZS1rZXktZm9yLWNpLXZlcmlmaWNhdGlvbg==
+      SUPABASE_URL: https://verification.supabase.co
+      SUPABASE_ANON_KEY: verification-anon-key
+      FUNDING_WEBHOOK_SECRET: verification-funding-secret
+      ADMIN_SUPABASE_USER_IDS: verification-admin
+      FORWARDED_ALLOW_IPS: 127.0.0.1/32
+      BACKUP_RECOVERY_URL: https://recovery.invalid/atlas-verification
+      REDIS_URL: redis://127.0.0.1:6379/0
+      MODEL_SIGNING_PUBLIC_KEY: verification-model-key
+      MODEL_SIGNING_PRIVATE_KEY: verification-model-private-key
+      RELEASE_VERSION: "3.10.46"
+      IMAGE_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      RELEASE_SHA: ${{ github.sha }}
+      USDT_TRON_ENABLED: "false"
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      BROKER_SANDBOX: "true"
+      BACKGROUND_RECONCILIATION_ENABLED: "false"
+      ADMIN_TOKEN: production-verification-only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Validate production settings and release identity
+        run: |
+          python - <<'PY'
+          import re
+          from app.config import settings
+          assert settings.environment == "production"
+          assert not settings.database_url.lower().startswith("sqlite")
+          assert re.fullmatch(r"[0-9a-f]{40}", settings.release_sha)
+          assert settings.release_version == settings.app_version == "3.10.46"
+          assert re.fullmatch(r"sha256:[0-9a-f]{64}", settings.image_digest)
+          assert settings.process_role == "api"
+          print("production configuration and release identity validated")
+          PY
+      - name: Wait for PostgreSQL
+        run: |
+          until pg_isready -h 127.0.0.1 -p 5432 -U atlas -d atlas_production_verify; do sleep 1; done
+      - name: Apply and verify migration head
+        run: |
+          python -m alembic upgrade head
+          python -m alembic current
+          python -m alembic heads
+      - name: Production-oriented static and security gates
+        run: |
+          python -m compileall -q app alembic
+          python -m pyflakes app
+          python -m bandit -r app -lll
+          python -m pip_audit -r requirements.txt --strict
+      - name: Production startup smoke test
+        run: |
+          python - <<'PY'
+          import asyncio
+          from app.main import startup, shutdown
+          async def main():
+              await startup()
+              await shutdown()
+          asyncio.run(main())
+          print("production startup/shutdown validation passed")
+          PY
+
+      - name: Full regression suite in safe mode
+        run: python -m pytest -q

@@ -9,7 +9,6 @@ import re
 import hashlib
 import time
 import json
-import base64
 import uuid
 from decimal import Decimal
 from contextvars import ContextVar
@@ -51,6 +50,7 @@ from .incidents import open_incident
 from .model_registry import verify_model_file, backup_champion, rollback_champion
 from .correlation_risk import adjusted_group_exposure
 from .custody_signer import custody_signing_required, validate_signer_config
+from .custody_reconciliation import reconcile_usdt_custody
 from .meta_labeling import meta_label_gate
 from .derivatives_context import fetch_public_derivatives_context
 from .multi_timeframe import multi_timeframe_signal
@@ -307,6 +307,12 @@ async def startup():
             raise RuntimeError("BACKUP_RECOVERY_URL is required in production")
         if settings.external_security_audit_required and not settings.external_security_audit_enabled:
             raise RuntimeError("EXTERNAL_SECURITY_AUDIT_ENABLED must remain true in production")
+        if not re.fullmatch(r"[0-9a-f]{40}", str(settings.release_sha or "").lower()):
+            raise RuntimeError("RELEASE_SHA is required in production and must be a full 40-character git SHA")
+        if str(settings.release_version or "") != str(settings.app_version or ""):
+            raise RuntimeError("RELEASE_VERSION must exactly match the application release version")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(settings.image_digest or "").lower()):
+            raise RuntimeError("IMAGE_DIGEST is required in production and must be a sha256 digest")
         if settings.payout_live_enabled:
             if not settings.withdrawals_enabled:
                 raise RuntimeError("PAYOUT_LIVE_ENABLED requires WITHDRAWALS_ENABLED=true")
@@ -334,6 +340,8 @@ async def startup():
     if process_role == "worker":
         if settings.background_reconciliation_enabled:
             _background_task = _track_worker_task(_reconciliation_loop())
+        if settings.custody_reconciliation_enabled:
+            _track_worker_task(_custody_reconciliation_loop())
         if settings.usdt_tron_enabled and settings.usdt_trongrid_api_key:
             _usdt_task = _track_worker_task(_usdt_tron_monitor_loop())
         _track_worker_task(_heartbeat_loop())
@@ -571,7 +579,7 @@ async def _run_persisted_adaptive_bot_cycle(bot_id: int, req: CustomerBotStartRe
             await open_incident(key=f"DERIVATIVES_STRESS:{profile.id}:{req.symbol}",severity="HIGH",category="MARKET_STRESS",summary="Live entry blocked by severe derivatives stress",detail=derivatives_context,customer_id=profile.id)
             return {"decision":"NO_TRADE","stage":"derivatives_stress_gate","derivatives_context":derivatives_context}
 
-    policy = AdaptiveModelPolicy(max_age_hours=settings.adaptive_retrain_hours, min_sharpe=settings.adaptive_min_sharpe, max_drawdown=settings.adaptive_max_drawdown, min_trades=settings.adaptive_min_trades, min_total_return=settings.adaptive_min_total_return)
+    policy = AdaptiveModelPolicy(max_age_hours=settings.adaptive_retrain_hours, min_sharpe=settings.adaptive_min_sharpe, max_drawdown=settings.adaptive_max_drawdown, min_trades=settings.adaptive_min_trades, min_total_return=settings.adaptive_min_total_return, research_min_deflated_sharpe=settings.research_min_deflated_sharpe, research_require_cost_stress=settings.research_require_cost_stress, research_cost_stress_multiplier=settings.research_cost_stress_multiplier)
     # Learning is independent of trade opportunity: the controller retrains/backtests
     # on schedule even when the current candle produces no deterministic setup.
     adaptive = await _ensure_adaptive_model_locked(req, df, policy)
@@ -1041,6 +1049,26 @@ async def _reconciliation_loop():
         except Exception:
             logger.exception("reconciliation_loop: customer live reconciliation failed")
 
+
+
+async def _custody_reconciliation_loop():
+    """Continuously reconcile USDT customer liabilities against configured TRON custody."""
+    interval = max(60, int(settings.custody_reconciliation_interval_seconds or 300))
+    while True:
+        await asyncio.sleep(interval)
+        if not settings.custody_reconciliation_enabled:
+            continue
+        try:
+            async with SessionLocal() as db:
+                report = await reconcile_usdt_custody(db)
+                await db.commit()
+            if report.get("status") != "OK":
+                logger.critical("custody_solvency_reconciliation status=%s ratio=%s gap=%s",
+                                report.get("status"), report.get("solvency_ratio"), report.get("coverage_gap"))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("custody_reconciliation_loop: pass failed")
 
 
 async def _heartbeat_loop():
@@ -2327,7 +2355,8 @@ async def customer_referrals(authorization: str | None = Header(default=None)):
 
 @app.post("/api/admin/billing/cost")
 async def admin_billing_cost(req: CostEventRequest, authorization: str | None = Header(default=None), x_admin_token: str | None = Header(default=None)):
-    await auth(x_admin_token, authorization)
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "FINANCE")
     async with SessionLocal() as db:
         row=CostLedger(customer_id=req.customer_id,category=req.category,provider=req.provider,amount=req.amount,currency=req.currency.upper(),reference=req.reference)
         db.add(row); await db.commit()
@@ -2336,7 +2365,8 @@ async def admin_billing_cost(req: CostEventRequest, authorization: str | None = 
 
 @app.post("/api/admin/billing/revenue")
 async def admin_billing_revenue(req: RevenueEventRequest, authorization: str | None = Header(default=None), x_admin_token: str | None = Header(default=None)):
-    await auth(x_admin_token, authorization)
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "FINANCE")
     async with SessionLocal() as db:
         existing=(await db.execute(select(RevenueLedger).where(RevenueLedger.provider==req.provider,RevenueLedger.provider_reference==req.provider_reference))).scalar_one_or_none()
         if existing: return {"ok":True,"id":existing.id,"duplicate":True}
@@ -2347,7 +2377,8 @@ async def admin_billing_revenue(req: RevenueEventRequest, authorization: str | N
 
 @app.get("/api/admin/billing/margin")
 async def admin_billing_margin(months: int = 1, authorization: str | None = Header(default=None), x_admin_token: str | None = Header(default=None)):
-    await auth(x_admin_token, authorization)
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "FINANCE")
     months=max(1,min(months,24)); cutoff=datetime.now(timezone.utc)-__import__('datetime').timedelta(days=31*months)
     async with SessionLocal() as db:
         revenue=float((await db.execute(select(func.coalesce(func.sum(RevenueLedger.net_amount),0.0)).where(RevenueLedger.created_at>=cutoff))).scalar_one() or 0)
@@ -3812,7 +3843,7 @@ async def customer_withdrawals(authorization: str | None = Header(default=None))
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "ok"}
+    return {"status": "ok", "release": {"version": settings.release_version or settings.app_version, "sha": settings.release_sha or None, "image_digest": settings.image_digest or None}}
 
 
 @app.get("/readyz")
@@ -3883,6 +3914,7 @@ async def readyz():
     # Meta-labeling is safe for live use only because the gate now predicts the
     # current, unlabeled bar from models trained strictly on completed labels.
     checks["meta_label_live_safe"] = True
+    checks["release_identity"] = bool(settings.release_sha and settings.release_version == settings.app_version and re.fullmatch(r"sha256:[0-9a-f]{64}", str(settings.image_digest or "").lower())) if settings.environment != "development" else True
 
     return {"ready": all(checks.values()), "checks": checks}
 
