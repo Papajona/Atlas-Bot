@@ -19,7 +19,7 @@ def test_reserve_trading_uses_stable_reference_not_timestamp():
 
 def test_release_trading_checks_idempotency_before_mutating_balances():
     block = _src("customer_funds.py").split("async def release_trading", 1)[1].split("async def ", 1)[0]
-    assert block.index("idempotency_key == idem") < block.index("ledger.trading_reserved =")
+    assert block.index("LedgerJournal.idempotency_key == idem") < block.index("ledger.trading_reserved =")
 
 
 def test_execution_callers_pass_stable_reserve_references():

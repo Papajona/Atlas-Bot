@@ -26,6 +26,6 @@ def test_market_controls_are_functional():
     assert "globalSearch')?.addEventListener('input',applyMarketFilters)" in s
 
 def test_current_release_identity_is_3_10_43():
-    assert 'app_version: str = "3.10.45"' in (ROOT/"app/config.py").read_text()
-    assert '__version__ = "3.10.45"' in (ROOT/"app/__init__.py").read_text()
-    assert 'versionName = "3.10.45"' in (ROOT/"android/app/build.gradle.kts").read_text()
+    assert 'app_version: str = "3.10.46"' in (ROOT/"app/config.py").read_text()
+    assert '__version__ = "3.10.46"' in (ROOT/"app/__init__.py").read_text()
+    assert 'versionName = "3.10.46"' in (ROOT/"android/app/build.gradle.kts").read_text()

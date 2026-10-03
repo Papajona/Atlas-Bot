@@ -180,7 +180,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # Persistent trial accounting: count DISTINCT configurations ever evaluated (label = strategy/variant + config fingerprint), not runs.
     # Re-running the same configs on one more day of data is not a new trial; changing any parameter or adding a strategy is.
     import hashlib
-    fp = hashlib.sha1(json.dumps(getattr(cfg, "__dict__", {}), default=str, sort_keys=True).encode()).hexdigest()[:8]
+    fp = hashlib.sha1(json.dumps(getattr(cfg, "__dict__", {}), default=str, sort_keys=True).encode(), usedforsecurity=False).hexdigest()[:8]
     this_labels = {f"{r.get('strategy')}@{fp}" for r in results} | {f"variant:{v['multiplier']}@{fp}" for v in variants}
     if include_ai:
         this_labels.add(f"ai@{fp}")

@@ -31,13 +31,29 @@ if [[ -z "$SECRET_GROQ_API_KEY_VERSION" ]]; then
 fi
 if [[ -n "$SECRET_GROQ_API_KEY_VERSION" ]]; then AI_SECRET_ARGS="${AI_SECRET_ARGS},GROQ_API_KEY=atlas-groq-api-key:${SECRET_GROQ_API_KEY_VERSION}"; fi
 
-IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AR_REPOSITORY}/${CLOUD_RUN_SERVICE}:$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)"
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "ERROR: deployment requires a clean git worktree; commit or discard local changes before building." >&2
+  exit 2
+fi
+GIT_SHA="$(git rev-parse HEAD)"
+RELEASE_VERSION="$(sed -n 's/^[[:space:]]*app_version: str = "\([^"]*\)".*/\1/p' app/config.py | head -n1)"
+if [[ ! "$GIT_SHA" =~ ^[0-9a-f]{40}$ || -z "$RELEASE_VERSION" ]]; then
+  echo "ERROR: unable to derive immutable release identity from git/app/config.py" >&2
+  exit 2
+fi
+IMAGE_TAG="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AR_REPOSITORY}/${CLOUD_RUN_SERVICE}:${GIT_SHA}"
 SA="${SERVICE_ACCOUNT}@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 
 gcloud config set project "$GCP_PROJECT_ID"
-gcloud builds submit --tag "$IMAGE" .
+gcloud builds submit --tag "$IMAGE_TAG" .
+IMAGE_DIGEST="$(gcloud artifacts docker images describe "$IMAGE_TAG" --format='value(image_summary.digest)')"
+if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "ERROR: Artifact Registry did not return a valid immutable image digest." >&2
+  exit 2
+fi
+IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AR_REPOSITORY}/${CLOUD_RUN_SERVICE}@${IMAGE_DIGEST}"
 
-ENV_VARS="^@^ENVIRONMENT=production@PAPER_TRADING=true@LIVE_TRADING_ENABLED=false@BROKER_SANDBOX=true@DOCS_ENABLED=false@METRICS_REQUIRE_ADMIN=true@BACKGROUND_RECONCILIATION_ENABLED=false@PROCESS_ROLE=api@MODEL_DIR=/app/models@USDT_TRON_ENABLED=true@USDT_TRON_NETWORK=mainnet@USDT_TRONGRID_BASE_URL=https://api.trongrid.io@USDT_TRON_USDT_CONTRACT=TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t@USDT_TRON_POLL_SECONDS=60@USDT_TRON_MIN_CONFIRMATIONS=19@FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS}@SUPABASE_URL=${SUPABASE_URL}@ADMIN_SUPABASE_USER_IDS=${ADMIN_SUPABASE_USER_IDS}@BACKUP_RECOVERY_URL=${BACKUP_RECOVERY_URL}@ADMIN_TOTP_REQUIRED=true@DISTRIBUTED_RATE_LIMIT_REQUIRED=true@REQUIRE_BACKUP_RECOVERY_CONFIG=true@GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}@GEMINI_STRATEGY_MODEL=${GEMINI_STRATEGY_MODEL:-gemini-3.5-flash}@GROQ_MODEL=openai/gpt-oss-20b@GROQ_STRATEGY_MODEL=openai/gpt-oss-20b@GROQ_MAX_COMPLETION_TOKENS=4096"
+ENV_VARS="^@^ENVIRONMENT=production@RELEASE_SHA=${GIT_SHA}@RELEASE_VERSION=${RELEASE_VERSION}@IMAGE_DIGEST=${IMAGE_DIGEST}@PAPER_TRADING=true@LIVE_TRADING_ENABLED=false@BROKER_SANDBOX=true@DOCS_ENABLED=false@METRICS_REQUIRE_ADMIN=true@BACKGROUND_RECONCILIATION_ENABLED=false@PROCESS_ROLE=api@MODEL_DIR=/app/models@USDT_TRON_ENABLED=true@USDT_TRON_NETWORK=mainnet@USDT_TRONGRID_BASE_URL=https://api.trongrid.io@USDT_TRON_USDT_CONTRACT=TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t@USDT_TRON_POLL_SECONDS=60@USDT_TRON_MIN_CONFIRMATIONS=19@FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS}@SUPABASE_URL=${SUPABASE_URL}@ADMIN_SUPABASE_USER_IDS=${ADMIN_SUPABASE_USER_IDS}@BACKUP_RECOVERY_URL=${BACKUP_RECOVERY_URL}@ADMIN_TOTP_REQUIRED=true@DISTRIBUTED_RATE_LIMIT_REQUIRED=true@REQUIRE_BACKUP_RECOVERY_CONFIG=true@GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}@GEMINI_STRATEGY_MODEL=${GEMINI_STRATEGY_MODEL:-gemini-3.5-flash}@GROQ_MODEL=openai/gpt-oss-20b@GROQ_STRATEGY_MODEL=openai/gpt-oss-20b@GROQ_MAX_COMPLETION_TOKENS=4096"
 
 gcloud run deploy "$CLOUD_RUN_SERVICE" \
   --image "$IMAGE" \

@@ -105,7 +105,11 @@ async def post_deposit(db, *, customer_id: int, wallet_id: int, amount: float, p
     existing = (await db.execute(select(LedgerEntry).where(LedgerEntry.idempotency_key.in_(keys)))).scalars().first()
     if existing:
         return ledger
-    ledger.available = D(str(ledger.available)) + amount_d
+    fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
+        CustomerLedgerAccount.customer_id == customer_id,
+        CustomerLedgerAccount.currency == USDT,
+    ).with_for_update())).scalar_one()
+    fresh_ledger.available = D(str(fresh_ledger.available)) + amount_d
     await post_journal(db, currency=USDT, entry_type="DEPOSIT_CREDIT", reference_type="TRON_TX",
                        reference_id=provider_reference, idempotency_key=idem,
                        lines=[
@@ -116,7 +120,7 @@ async def post_deposit(db, *, customer_id: int, wallet_id: int, amount: float, p
                        debit=0, credit=amount_d, amount=amount_d, reference_type="TRON_TX",
                        reference_id=provider_reference, idempotency_key=idem,
                        metadata_json=json.dumps({"wallet_id": wallet_id, **metadata}, separators=(",", ":"))))
-    return ledger
+    return fresh_ledger
 
 async def sync_wallet_from_ledger(db, customer_id: int, currency: str = USDT) -> None:
     ledger = await get_or_create_ledger(db, customer_id, currency)
@@ -172,13 +176,21 @@ async def release_trading(db, customer_id: int, amount: float, *, reference_id: 
     amount_d = _q(amount)
     ledger = await get_or_create_ledger(db, customer_id, USDT)
     idem = f"release:{reference_id}:{customer_id}"
-    if (await db.execute(select(LedgerJournal).where(LedgerJournal.idempotency_key == idem))).scalar_one_or_none():
-        return ledger
-    release = min(amount_d, ledger.trading_reserved)
+    fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
+        CustomerLedgerAccount.customer_id == customer_id,
+        CustomerLedgerAccount.currency == USDT,
+    ).with_for_update())).scalar_one()
+    # Re-check idempotency after acquiring the authoritative ledger row lock.
+    # A concurrent caller may have committed the journal while this transaction waited.
+    if (await db.execute(select(LedgerJournal).where(
+        LedgerJournal.idempotency_key == idem
+    ).with_for_update())).scalar_one_or_none():
+        return fresh_ledger
+    release = min(amount_d, fresh_ledger.trading_reserved)
     if release <= 0:
-        return ledger
-    ledger.trading_reserved -= release
-    ledger.available += release
+        return fresh_ledger
+    fresh_ledger.trading_reserved -= release
+    fresh_ledger.available += release
     await post_journal(db, currency=USDT, entry_type="TRADING_RELEASE", reference_type="TRADE",
                        reference_id=reference_id, idempotency_key=idem,
                        lines=[
@@ -188,7 +200,7 @@ async def release_trading(db, customer_id: int, amount: float, *, reference_id: 
     db.add(LedgerEntry(customer_id=customer_id, currency=USDT, entry_type="TRADING_RELEASE",
                        debit=0, credit=release, amount=release, reference_type="TRADE",
                        reference_id=reference_id, idempotency_key=idem))
-    return ledger
+    return fresh_ledger
 
 async def reserve_withdrawal(db, customer_id: int, amount: float, *, reference_id: str) -> CustomerLedgerAccount:
     amount_d = _q(amount)
@@ -229,11 +241,15 @@ async def release_withdrawal(db, customer_id: int, amount: float, *, reference_i
     idem = f"withdrawal-release:{reference_id}"
     if (await db.execute(select(LedgerJournal).where(LedgerJournal.idempotency_key == idem))).scalar_one_or_none():
         return ledger
-    release = min(amount_d, D(str(ledger.withdrawal_reserved)))
+    fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
+        CustomerLedgerAccount.customer_id == customer_id,
+        CustomerLedgerAccount.currency == USDT,
+    ).with_for_update())).scalar_one()
+    release = min(amount_d, D(str(fresh_ledger.withdrawal_reserved)))
     if release <= 0:
-        return ledger
-    ledger.withdrawal_reserved = D(str(ledger.withdrawal_reserved)) - release
-    ledger.available = D(str(ledger.available)) + release
+        return fresh_ledger
+    fresh_ledger.withdrawal_reserved = D(str(fresh_ledger.withdrawal_reserved)) - release
+    fresh_ledger.available = D(str(fresh_ledger.available)) + release
     await post_journal(db, currency=USDT, entry_type="WITHDRAWAL_RELEASE", reference_type="WITHDRAWAL",
                        reference_id=reference_id, idempotency_key=idem,
                        lines=[
@@ -243,7 +259,7 @@ async def release_withdrawal(db, customer_id: int, amount: float, *, reference_i
     db.add(LedgerEntry(customer_id=customer_id, currency=USDT, entry_type="WITHDRAWAL_RELEASE",
                        debit=0, credit=release, amount=release, reference_type="WITHDRAWAL",
                        reference_id=reference_id, idempotency_key=idem))
-    return ledger
+    return fresh_ledger
 
 async def settle_withdrawal(db, customer_id: int, amount: float, *, reference_id: str) -> CustomerLedgerAccount:
     amount_d = _q(amount)
@@ -253,7 +269,11 @@ async def settle_withdrawal(db, customer_id: int, amount: float, *, reference_id
     idem = f"withdrawal-settlement:{reference_id}"
     if (await db.execute(select(LedgerJournal).where(LedgerJournal.idempotency_key == idem))).scalar_one_or_none():
         return ledger
-    reserved_now = D(str(ledger.withdrawal_reserved))
+    fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
+        CustomerLedgerAccount.customer_id == customer_id,
+        CustomerLedgerAccount.currency == USDT,
+    ).with_for_update())).scalar_one()
+    reserved_now = D(str(fresh_ledger.withdrawal_reserved))
     settle = min(amount_d, reserved_now)
     if reserved_now < amount_d:
         shortfall = amount_d - reserved_now
@@ -265,8 +285,8 @@ async def settle_withdrawal(db, customer_id: int, amount: float, *, reference_id
             detail={"customer_id": customer_id, "reference_id": reference_id, "payout": str(amount_d),
                     "reserved": str(reserved_now), "shortfall": str(shortfall)}, customer_id=customer_id)
     if settle <= 0:
-        return ledger
-    ledger.withdrawal_reserved = D(str(ledger.withdrawal_reserved)) - settle
+        return fresh_ledger
+    fresh_ledger.withdrawal_reserved = D(str(fresh_ledger.withdrawal_reserved)) - settle
     await post_journal(db, currency=USDT, entry_type="WITHDRAWAL_SETTLEMENT", reference_type="WITHDRAWAL",
                        reference_id=reference_id, idempotency_key=idem,
                        lines=[
@@ -276,7 +296,7 @@ async def settle_withdrawal(db, customer_id: int, amount: float, *, reference_id
     db.add(LedgerEntry(customer_id=customer_id, currency=USDT, entry_type="WITHDRAWAL_SETTLEMENT",
                        debit=settle, credit=0, amount=settle, reference_type="WITHDRAWAL",
                        reference_id=reference_id, idempotency_key=idem))
-    return ledger
+    return fresh_ledger
 
 async def customer_balance(db, customer_id: int, currency: str = USDT) -> dict:
     ledger = await get_or_create_ledger(db, customer_id, currency)
@@ -452,4 +472,3 @@ async def ledger_invariant_report(db, *, tolerance: str = "0.000001", limit: int
 
 
 _record_ledger_incident = record_ledger_incident  # backward-compatible alias
-
