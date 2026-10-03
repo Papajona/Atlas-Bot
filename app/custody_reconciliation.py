@@ -13,20 +13,11 @@ TRON = "TRON"
 D = Decimal
 
 
-def _upsert_incident(db, *, key: str, severity: str, category: str, summary: str, detail: dict) -> None:
+async def _upsert_incident(db, *, key: str, severity: str, category: str, summary: str, detail: dict) -> None:
     """Create or refresh an incident in the caller transaction."""
     import json
     now = datetime.now(timezone.utc)
-    row = None
-    # Caller transaction serializes the reconciliation pass; lock an existing incident
-    # before replacing its detail so concurrent worker instances cannot lose updates.
-    # A unique incident key is the durable dedupe boundary.
-    row = None
-    try:
-        row = db.sync_session.execute(select(Incident).where(Incident.incident_key == key).with_for_update()).scalar_one_or_none()
-    except AttributeError:
-        # AsyncSession exposes execute() asynchronously; this path is never expected.
-        raise
+    row = (await db.execute(select(Incident).where(Incident.incident_key == key).with_for_update())).scalar_one_or_none()
     if row is None:
         db.add(Incident(
             incident_key=key,
@@ -145,7 +136,7 @@ async def reconcile_usdt_custody(db) -> dict:
             "addresses_checked": len(addresses),
             "error": "TRON custody credentials or treasury address are not configured",
         }
-        _upsert_incident(
+        await _upsert_incident(
             db,
             key="CUSTODY_RECONCILIATION:USDT:TRON:CONFIG",
             severity="HIGH",
