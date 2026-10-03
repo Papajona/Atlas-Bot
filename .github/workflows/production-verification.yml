@@ -46,7 +46,7 @@ jobs:
       MODEL_SIGNING_PRIVATE_KEY: verification-model-private-key
       RELEASE_VERSION: "3.10.46"
       IMAGE_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
-      RELEASE_SHA: \${{ github.sha }}
+      RELEASE_SHA: ${{ github.sha }}
       USDT_TRON_ENABLED: "false"
       PAPER_TRADING: "true"
       LIVE_TRADING_ENABLED: "false"
