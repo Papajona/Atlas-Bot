@@ -633,7 +633,11 @@ async def _run_persisted_adaptive_bot_cycle(bot_id: int, req: CustomerBotStartRe
     # only -- it does not gate on its own and never blocks a trade by itself.
     macro_context = await latest_macro_context()
     packet = {"symbol": req.symbol, "asset": req.asset, "exchange": req.exchange, "timeframe": req.timeframe, "market_timestamp": deterministic["timestamp"], "trade_plan": plan, "deterministic_rules": deterministic["rules"], "price_context": {"latest_close": float(df.close.iloc[-1]), "bars": int(len(df)), "spread_bps": spread_bps}, "data_quality": deterministic["data_quality"], "adaptive_model": adaptive, "ml_signal": ml_signal, "macro_context": macro_context}
-    ai_review = await dual_ai_trade_safety_review(packet)
+    try:
+        ai_review = await asyncio.wait_for(dual_ai_trade_safety_review(packet), timeout=settings.ai_strategy_provider_timeout_seconds)
+    except asyncio.TimeoutError:
+        await _audit("ADAPTIVE_BOT_AI_TIMEOUT", {"bot_id": bot_id, "customer_id": profile.id, "symbol": req.symbol, "timeout_seconds": settings.ai_strategy_provider_timeout_seconds})
+        return {"decision": "NO_TRADE", "stage": "ai_safety_timeout", "analysis": deterministic, "adaptive_model": adaptive, "ml_signal": ml_signal}
     if not ai_review["safe"]:
         stage = "ai_safety_not_configured" if not ai_review.get("configured", True) else "ai_safety_gate"
         await _audit("ADAPTIVE_BOT_AI_VETO" if stage == "ai_safety_gate" else "ADAPTIVE_BOT_AI_NOT_CONFIGURED",
