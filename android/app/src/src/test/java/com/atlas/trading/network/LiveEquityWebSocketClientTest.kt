@@ -8,19 +8,19 @@ class LiveEquityWebSocketClientTest {
 
     @Test
     fun testBuildWebSocketUrlHttps() {
-        val result = LiveEquityWebSocketClient.buildWebSocketUrl("https://ais-dev.run.app")
+        val result = WebSocketManager.buildWebSocketUrl("https://ais-dev.run.app")
         assertEquals("wss://ais-dev.run.app/ws/risk-telemetry", result)
     }
 
     @Test
     fun testBuildWebSocketUrlHttp() {
-        val result = LiveEquityWebSocketClient.buildWebSocketUrl("http://localhost:8000")
+        val result = WebSocketManager.buildWebSocketUrl("http://localhost:8000")
         assertEquals("ws://localhost:8000/ws/risk-telemetry", result)
     }
 
     @Test
     fun testBuildWebSocketUrlPreservesExistingWsPath() {
-        val result = LiveEquityWebSocketClient.buildWebSocketUrl("wss://ais-dev.run.app/ws/equity")
+        val result = WebSocketManager.buildWebSocketUrl("wss://ais-dev.run.app/ws/equity")
         assertEquals("wss://ais-dev.run.app/ws/equity", result)
     }
 
@@ -55,7 +55,7 @@ class LiveEquityWebSocketClientTest {
             }
         """.trimIndent()
 
-        val parsed = LiveEquityWebSocketClient.parseEquityMessage(jsonPayload, PortfolioRiskMetrics())
+        val parsed = WebSocketManager.parseEquityMessage(jsonPayload, PortfolioRiskMetrics())
         assertNotNull(parsed)
         parsed?.let {
             assertEquals(10450.75, it.equity, 0.001)
@@ -71,13 +71,22 @@ class LiveEquityWebSocketClientTest {
     }
 
     @Test
+    fun testReconnectBackoffIsBounded() {
+        assertEquals(1_000L, WebSocketManager.reconnectDelayMs(1))
+        assertEquals(2_000L, WebSocketManager.reconnectDelayMs(2))
+        assertEquals(8_000L, WebSocketManager.reconnectDelayMs(4))
+        assertEquals(15_000L, WebSocketManager.reconnectDelayMs(5))
+        assertEquals(15_000L, WebSocketManager.reconnectDelayMs(99))
+    }
+
+    @Test
     fun testParseEquityMessageInvalidPayloadReturnsNull() {
         val nonEquityPayload = """{"status": "ok", "message": "heartbeat"}"""
-        val parsed = LiveEquityWebSocketClient.parseEquityMessage(nonEquityPayload, PortfolioRiskMetrics())
+        val parsed = WebSocketManager.parseEquityMessage(nonEquityPayload, PortfolioRiskMetrics())
         assertNull(parsed)
 
         val malformedJson = "{ corrupted json string }"
-        val malformedParsed = LiveEquityWebSocketClient.parseEquityMessage(malformedJson, PortfolioRiskMetrics())
+        val malformedParsed = WebSocketManager.parseEquityMessage(malformedJson, PortfolioRiskMetrics())
         assertNull(malformedParsed)
     }
 }
