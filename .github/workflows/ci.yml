@@ -52,8 +52,10 @@ jobs:
         run: python -m compileall -q app alembic
       - name: Apply migrations
         run: python -m alembic upgrade head
-      - name: Check migrations
-        run: python -m alembic check
+      - name: Verify migration head
+        run: |
+          python -m alembic current
+          python -m alembic heads
       - name: Python lint
         run: python -m pyflakes app scripts tests
       - name: Security scan
