@@ -5,6 +5,15 @@ import android.net.Uri
 import android.os.Bundle
 import android.view.WindowManager
 import android.widget.Toast
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
+import com.atlas.trading.auth.AdminAuthClient
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -27,31 +36,73 @@ class MainActivity : AppCompatActivity() {
         val backendUrl = getString(R.string.backend_url).trimEnd('/')
 
         setContent {
+            var accessToken by remember { mutableStateOf<String?>(null) }
+            var loginError by remember { mutableStateOf<String?>(null) }
+            var mfaChallenge by remember { mutableStateOf<AdminAuthClient.MfaChallenge?>(null) }
+            val scope = rememberCoroutineScope()
+            val authClient = remember { AdminAuthClient(backendUrl) }
+
+            if (accessToken == null) {
+                AdminLoginScreen(
+                    error = loginError,
+                    mfaChallenge = mfaChallenge,
+                    onLogin = { email, password ->
+                        scope.launch {
+                            loginError = null
+                            try {
+                                val result = authClient.login(email, password)
+                                if (result.accessToken != null) {
+                                    accessToken = result.accessToken
+                                    mfaChallenge = null
+                                } else if (result.challenge != null) {
+                                    mfaChallenge = result.challenge
+                                } else {
+                                    loginError = result.message
+                                }
+                            } catch (e: Exception) {
+                                loginError = e.message ?: "Administrator authentication failed"
+                            }
+                        }
+                    },
+                    onVerifyMfa = { code ->
+                        scope.launch {
+                            loginError = null
+                            try {
+                                accessToken = authClient.verifyMfa(code)
+                                mfaChallenge = null
+                            } catch (e: Exception) {
+                                loginError = e.message ?: "Authenticator verification failed"
+                            }
+                        }
+                    }
+                )
+            } else {
             RiskDashboardScreen(
                 backendUrl = backendUrl,
+                accessToken = accessToken,
                 initialMetrics = PortfolioRiskMetrics(),
                 onOpenPortal = { openPortal() },
                 onRequestBiometricResume = { onSuccess ->
                     authenticateBiometricForResume(onSuccess)
                 },
                 onEmergencyHaltToggle = { isHalted ->
-                    // The UI callback must not claim a state transition. The backend
-                    // is the source of truth and must confirm the authenticated action.
-                    if (isHalted) {
-                        Toast.makeText(
-                            this,
-                            "Emergency halt requested. Verify HALTED state on the server.",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    } else {
-                        Toast.makeText(
-                            this,
-                            "Resume is authorization-gated; server state must confirm LIVE.",
-                            Toast.LENGTH_LONG
-                        ).show()
+                    val token = accessToken
+                    scope.launch {
+                        try {
+                            val state = authClient.setKillSwitch(isHalted, token)
+                            if (!state.confirmed) throw IllegalStateException("Server did not confirm requested risk state")
+                            Toast.makeText(
+                                this@MainActivity,
+                                if (isHalted) "SERVER CONFIRMED: ENGINE HALTED" else "SERVER CONFIRMED: ENGINE RESUMED",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        } catch (e: Exception) {
+                            Toast.makeText(this@MainActivity, "Risk state change failed: ${e.message}", Toast.LENGTH_LONG).show()
+                        }
                     }
                 }
             )
+            }
         }
     }
 
