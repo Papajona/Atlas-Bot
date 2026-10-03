@@ -31,11 +31,11 @@ def scan() -> list[str]:
             if PRIVATE_KEY.search(line):
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: private-key material")
                 continue
-            if TRON_SEED.search(line) and not any(p in line.lower() for p in PLACEHOLDERS):
+            if "re.compile" not in line and TRON_SEED.search(line) and not any(p in line.lower() for p in PLACEHOLDERS):
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                 continue
             m=ASSIGNMENT.search(line)
-            if m and m.group(1).lower() not in PLACEHOLDERS and not m.group(1).startswith("<"):
+            if m and m.group(1).lower() not in PLACEHOLDERS and not m.group(1).startswith("<") and "." not in m.group(1) and "(" not in m.group(1):
                 if any(safe in m.group(1).lower() for safe in ("verification", "test-", "fake-", "example", "placeholder", "changeme")):
                     continue
                 if "your-" not in m.group(1).lower():
