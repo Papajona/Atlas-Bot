@@ -70,6 +70,8 @@ jobs:
           ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
         run: |
           alembic upgrade head
+          alembic current
+          alembic heads
 
       - name: Run ledger invariants test (SQLite baseline)
         run: |
