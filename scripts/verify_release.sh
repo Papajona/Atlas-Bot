@@ -9,7 +9,8 @@ export LIVE_TRADING_ENABLED=false
 export BROKER_SANDBOX=true
 export BACKGROUND_RECONCILIATION_ENABLED=false
 
-python scripts/check_no_secrets.py\npython -m pytest -q tests/test_execution_control_plane_3_10_43.py tests/test_live_money_static_3_10_38.py tests/test_adaptive_strategy_router_3_10_41.py tests/test_trade_learning_3_10_42.py tests/test_research_validation.py
+python scripts/check_no_secrets.py
+python -m pytest -q tests/test_execution_control_plane_3_10_43.py tests/test_live_money_static_3_10_38.py tests/test_adaptive_strategy_router_3_10_41.py tests/test_trade_learning_3_10_42.py tests/test_research_validation.py
 python -m alembic upgrade head
 python -m alembic check
 
@@ -18,4 +19,5 @@ if [[ "${DATABASE_URL}" == postgresql* ]]; then
   python -m pytest -q tests/test_postgres_concurrency_3_10_39.py
 fi
 python -m bandit -r app -lll -f json -o bandit-report.json
-python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325 -f json -o pip-audit-report.json\npython scripts/check_ai_models.py || test $? -eq 2
+python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325 -f json -o pip-audit-report.json
+python scripts/check_ai_models.py || test $? -eq 2
