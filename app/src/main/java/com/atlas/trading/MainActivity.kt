@@ -14,6 +14,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import com.atlas.trading.auth.AdminAuthClient
+import com.atlas.trading.security.SecurityAuditLog
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -25,6 +26,8 @@ import com.atlas.trading.ui.RiskDashboardScreen
 import java.io.File
 
 class MainActivity : AppCompatActivity() {
+
+    private val securityAuditLog by lazy { SecurityAuditLog(applicationContext) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         window.clearFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
@@ -89,8 +92,10 @@ class MainActivity : AppCompatActivity() {
                     val token = accessToken
                     scope.launch {
                         try {
+                            runCatching { securityAuditLog.append("RISK_KILL_SWITCH_REQUESTED", mapOf("halted" to isHalted)) }
                             val state = authClient.setKillSwitch(isHalted, token)
                             if (!state.confirmed) throw IllegalStateException("Server did not confirm requested risk state")
+                            runCatching { securityAuditLog.append("RISK_KILL_SWITCH_CONFIRMED", mapOf("halted" to isHalted)) }
                             Toast.makeText(
                                 this@MainActivity,
                                 if (isHalted) "SERVER CONFIRMED: ENGINE HALTED" else "SERVER CONFIRMED: HALT RELEASED; LIVE TRADING REMAINS DISABLED",
@@ -126,17 +131,20 @@ class MainActivity : AppCompatActivity() {
             val prompt = BiometricPrompt(this, executor, object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     super.onAuthenticationSucceeded(result)
+                    runCatching { securityAuditLog.append("BIOMETRIC_AUTH_SUCCEEDED", mapOf("purpose" to "RISK_RESET")) }
                     Toast.makeText(this@MainActivity, "Biometrics verified. Requesting server risk reset…", Toast.LENGTH_SHORT).show()
                     onSuccess()
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     super.onAuthenticationError(errorCode, errString)
+                    runCatching { securityAuditLog.append("BIOMETRIC_AUTH_ERROR", mapOf("purpose" to "RISK_RESET", "error_code" to errorCode)) }
                     Toast.makeText(this@MainActivity, "Auth canceled: $errString", Toast.LENGTH_SHORT).show()
                 }
 
                 override fun onAuthenticationFailed() {
                     super.onAuthenticationFailed()
+                    runCatching { securityAuditLog.append("BIOMETRIC_AUTH_FAILED", mapOf("purpose" to "RISK_RESET")) }
                     Toast.makeText(this@MainActivity, "Biometric unrecognized", Toast.LENGTH_SHORT).show()
                 }
             })
