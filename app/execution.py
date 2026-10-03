@@ -992,6 +992,21 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             if not submission_lock_acquired:
                 raise RiskBlocked("Live broker submission barrier is unavailable; order submission aborted")
             try:
+                # Re-read the authoritative risk state after acquiring the external
+                # submission barrier. A worker may have passed the earlier gate while
+                # an emergency halt was being requested; it must not submit after the
+                # halt has fenced the broker submission section.
+                async with SessionLocal() as final_gate_db:
+                    await assert_live_system_enabled(
+                        final_gate_db,
+                        asset=asset,
+                        customer_id=customer_id,
+                        exchange=exchange,
+                        side=side,
+                        quantity=amount,
+                        reduce_only=reduce_only,
+                    )
+                await _verify_live_lease(lease_token)
                 await _mark_order_command(command.id, status="SUBMITTING", token=lease_token, attempts_increment=True)
                 if asset in {"forex", "commodity"}:
                     order = await asyncio.to_thread(
