@@ -88,10 +88,17 @@ jobs:
           python -m pyflakes app
           python -m bandit -r app -lll
           python -m pip_audit -r requirements.txt --strict
+      - name: Production startup smoke test
+        run: |
+          python - <<'PY'
+          import asyncio
+          from app.main import startup, shutdown
+          async def main():
+              await startup()
+              await shutdown()
+          asyncio.run(main())
+          print("production startup/shutdown validation passed")
+          PY
+
       - name: Full regression suite in safe mode
-        env:
-          ENVIRONMENT: development
-          DATABASE_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
-          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
-          BACKGROUND_RECONCILIATION_ENABLED: "false"
         run: python -m pytest -q
