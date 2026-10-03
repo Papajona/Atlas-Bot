@@ -28,6 +28,9 @@ def test_kill_during_pre_submit_has_two_independent_live_guards():
     assert 'assert_live_system_enabled(' in block
     assert 'await _verify_live_lease(lease_token)' in block
     assert block.index("await _verify_live_lease(lease_token)") < block.index("broker.market_order")
+    assert "LIVE_SUBMISSION_LOCK_KEY" in block
+    assert "final_gate_db" in block
+    assert "await assert_live_system_enabled(" in block
 
 
 def test_kill_while_submitting_is_fenced_by_lease_state():
