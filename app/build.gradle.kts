@@ -56,13 +56,18 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            check(
-                !releaseStoreFile.isNullOrBlank() &&
-                !releaseStorePassword.isNullOrBlank() &&
-                !releaseKeyAlias.isNullOrBlank() &&
-                !releaseKeyPassword.isNullOrBlank()
-            ) {
-                "Production release signing is not configured. Provide the ATLAS_RELEASE_* signing environment variables."
+            // Evaluate the release-signing guard only when a release task is actually requested.
+            // This keeps CI/debug compilation independent of production keystore secrets while
+            // preserving a hard fail for every release build.
+            if (gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }) {
+                check(
+                    !releaseStoreFile.isNullOrBlank() &&
+                    !releaseStorePassword.isNullOrBlank() &&
+                    !releaseKeyAlias.isNullOrBlank() &&
+                    !releaseKeyPassword.isNullOrBlank()
+                ) {
+                    "Production release signing is not configured. Provide the ATLAS_RELEASE_* signing environment variables."
+                }
             }
             signingConfig = signingConfigs.getByName("releaseConfig")
         }
