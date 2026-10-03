@@ -4,7 +4,7 @@ plugins {
 }
 
 android { namespace = "com.atlas.trading"; compileSdk = 35
-    defaultConfig { applicationId = "com.atlas.trading"; minSdk = 26; targetSdk = 35; versionCode = 1046; versionName = "3.10.46" }
+    defaultConfig { applicationId = "com.atlas.trading"; minSdk = 26; targetSdk = 35; versionCode = 1047; versionName = "3.10.47" }
 }
 
 dependencies {
