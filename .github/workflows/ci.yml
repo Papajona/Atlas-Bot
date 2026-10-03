@@ -54,10 +54,16 @@ jobs:
       - name: Check migrations
         run: python -m alembic check
       - name: Python lint
-        run: python -m pyflakes app
+        run: python -m pyflakes app scripts tests
       - name: Security scan
         run: python -m bandit -r app -lll
       - name: Dependency audit
         run: python -m pip_audit -r requirements.txt --strict
       - name: Full pytest suite
         run: python -m pytest -q
+
+      - name: Shell syntax
+        run: |
+          bash -n deploy/cloud-run-deploy.sh
+          bash -n deploy/cloud-run-worker-deploy.sh
+          bash -n deploy/cloud-run-migration-job.sh
