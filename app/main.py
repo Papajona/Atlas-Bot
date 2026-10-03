@@ -4022,6 +4022,7 @@ async def risk_dashboard_metrics(
 
 
 @app.websocket("/ws/risk-telemetry")
+@app.websocket("/ws/equity")
 async def websocket_risk_telemetry(websocket: WebSocket):
     """Persistent WebSocket stream for privileged risk telemetry.
 
