@@ -1,4 +1,5 @@
 name: Atlas CI
+# Push-triggered verification workflow for pull requests and protected branches.
 
 on:
   pull_request:
