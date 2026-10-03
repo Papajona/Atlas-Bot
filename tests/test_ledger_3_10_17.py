@@ -26,6 +26,6 @@ def test_customer_ledger_statement_route():
 
 def test_current_release_identity_without_changing_live_flags():
     config=(ROOT/"app/config.py").read_text()
-    assert 'app_version: str = "3.10.45"' in config
+    assert 'app_version: str = "3.10.46"' in config
     assert 'live_trading_enabled: bool = False' in config
     assert 'customer_live_trading_enabled: bool = False' in config
