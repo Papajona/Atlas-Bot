@@ -47,34 +47,35 @@ import java.net.URL
  * Connects to the Atlas Trading metrics & state gathering infrastructure.
  */
 data class PortfolioRiskMetrics(
-    val equity: Double = 10000.0,
-    val peakEquity: Double = 10450.0,
-    val realizedPnl: Double = 450.0,
-    val unrealizedPnl: Double = 82.50,
-    val currentDrawdownPct: Double = 4.30,   // e.g. 4.3%
-    val maxDrawdownLimitPct: Double = 15.0,  // e.g. 15.0%
-    val dailyLossPct: Double = 0.85,         // e.g. 0.85%
-    val dailyLossLimitPct: Double = 3.0,     // e.g. 3.0%
-    val sharpeRatio: Double = 1.84,
-    val calmarRatio: Double = 2.12,
-    val sortinoRatio: Double = 2.45,
-    val deflatedSharpeRatio: Double = 0.98,  // DSR >= 0.95
-    val edgeDecayZScore: Double = 0.84,     // z-score vs -2.0 halt
-    val regime: String = "TRENDING LOW-VOL",
-    val regimeDescription: String = "Strong momentum drift; trend-following weighted at 45%",
-    val momentumWeight: Int = 45,
-    val meanRevWeight: Int = 15,
-    val sessionWeight: Int = 25,
-    val carryWeight: Int = 15,
-    val costStressHeadroom: Double = 2.41,   // 2.0x hurdle passed
-    val aiSafetyTimeoutSeconds: Double = 1.5,
-    val isHalted: Boolean = false,
-    val streamType: String = "HTTP_POLL",
-    val lastUpdatedEpochMs: Long = System.currentTimeMillis()
+    val equity: Double = 0.0,
+    val peakEquity: Double = 0.0,
+    val realizedPnl: Double = 0.0,
+    val unrealizedPnl: Double = 0.0,
+    val currentDrawdownPct: Double = 0.0,
+    val maxDrawdownLimitPct: Double = 0.0,
+    val dailyLossPct: Double = 0.0,
+    val dailyLossLimitPct: Double = 0.0,
+    val sharpeRatio: Double = 0.0,
+    val calmarRatio: Double = 0.0,
+    val sortinoRatio: Double = 0.0,
+    val deflatedSharpeRatio: Double = 0.0,
+    val edgeDecayZScore: Double = 0.0,
+    val regime: String = "UNKNOWN",
+    val regimeDescription: String = "Live telemetry unavailable",
+    val momentumWeight: Int = 0,
+    val meanRevWeight: Int = 0,
+    val sessionWeight: Int = 0,
+    val carryWeight: Int = 0,
+    val costStressHeadroom: Double = 0.0,
+    val aiSafetyTimeoutSeconds: Double = 0.0,
+    val isHalted: Boolean = true,
+    val streamType: String = "OFFLINE",
+    val telemetryAvailable: Boolean = false,
+    val lastUpdatedEpochMs: Long = 0L
 )
 
-suspend fun fetchLiveRiskMetrics(baseUrl: String): PortfolioRiskMetrics? = withContext(Dispatchers.IO) {
-    if (baseUrl.isBlank()) return@withContext null
+suspend fun fetchLiveRiskMetrics(baseUrl: String, accessToken: String?): PortfolioRiskMetrics? = withContext(Dispatchers.IO) {
+    if (baseUrl.isBlank() || accessToken.isNullOrBlank()) return@withContext null
     try {
         val endpoint = "${baseUrl.trimEnd('/')}/api/risk-dashboard/metrics"
         val url = URL(endpoint)
@@ -83,33 +84,35 @@ suspend fun fetchLiveRiskMetrics(baseUrl: String): PortfolioRiskMetrics? = withC
         conn.connectTimeout = 4000
         conn.readTimeout = 4000
         conn.setRequestProperty("Accept", "application/json")
+        conn.setRequestProperty("Authorization", "Bearer $accessToken")
         if (conn.responseCode == 200) {
             val responseText = conn.inputStream.bufferedReader().use { it.readText() }
             val json = JSONObject(responseText)
             PortfolioRiskMetrics(
-                equity = json.optDouble("equity", 10000.0),
-                peakEquity = json.optDouble("peak_equity", 10450.0),
-                realizedPnl = json.optDouble("realized_pnl", 450.0),
-                unrealizedPnl = json.optDouble("unrealized_pnl", 82.50),
-                currentDrawdownPct = json.optDouble("current_drawdown_pct", 4.30),
-                maxDrawdownLimitPct = json.optDouble("max_drawdown_limit_pct", 15.0),
-                dailyLossPct = json.optDouble("daily_loss_pct", 0.85),
-                dailyLossLimitPct = json.optDouble("daily_loss_limit_pct", 3.0),
-                sharpeRatio = json.optDouble("sharpe_ratio", 1.84),
-                calmarRatio = json.optDouble("calmar_ratio", 2.12),
-                sortinoRatio = json.optDouble("sortino_ratio", 2.45),
-                deflatedSharpeRatio = json.optDouble("deflated_sharpe_ratio", 0.98),
-                edgeDecayZScore = json.optDouble("edge_decay_z_score", 0.84),
-                regime = json.optString("regime", "TRENDING LOW-VOL"),
-                regimeDescription = json.optString("regime_description", "Strong momentum drift; trend-following weighted at 45%"),
+                equity = json.optDouble("equity", Double.NaN),
+                peakEquity = json.optDouble("peak_equity", Double.NaN),
+                realizedPnl = json.optDouble("realized_pnl", Double.NaN),
+                unrealizedPnl = json.optDouble("unrealized_pnl", Double.NaN),
+                currentDrawdownPct = json.optDouble("current_drawdown_pct", Double.NaN),
+                maxDrawdownLimitPct = json.optDouble("max_drawdown_limit_pct", Double.NaN),
+                dailyLossPct = json.optDouble("daily_loss_pct", Double.NaN),
+                dailyLossLimitPct = json.optDouble("daily_loss_limit_pct", Double.NaN),
+                sharpeRatio = json.optDouble("sharpe_ratio", Double.NaN),
+                calmarRatio = json.optDouble("calmar_ratio", Double.NaN),
+                sortinoRatio = json.optDouble("sortino_ratio", Double.NaN),
+                deflatedSharpeRatio = json.optDouble("deflated_sharpe_ratio", Double.NaN),
+                edgeDecayZScore = json.optDouble("edge_decay_z_score", Double.NaN),
+                regime = json.optString("regime", "UNKNOWN"),
+                regimeDescription = json.optString("regime_description", "Live telemetry incomplete"),
                 momentumWeight = json.optInt("momentum_weight", 45),
                 meanRevWeight = json.optInt("mean_rev_weight", 15),
                 sessionWeight = json.optInt("session_weight", 25),
                 carryWeight = json.optInt("carry_weight", 15),
-                costStressHeadroom = json.optDouble("cost_stress_headroom", 2.41),
-                aiSafetyTimeoutSeconds = json.optDouble("ai_safety_timeout_seconds", 1.5),
+                costStressHeadroom = json.optDouble("cost_stress_headroom", Double.NaN),
+                aiSafetyTimeoutSeconds = json.optDouble("ai_safety_timeout_seconds", Double.NaN),
                 isHalted = json.optBoolean("is_halted", false),
-                lastUpdatedEpochMs = json.optLong("last_updated_epoch_ms", System.currentTimeMillis())
+                telemetryAvailable = json.has("equity") && json.has("is_halted"),
+                lastUpdatedEpochMs = json.optLong("last_updated_epoch_ms", 0L)
             )
         } else null
     } catch (_: Exception) {
@@ -122,6 +125,7 @@ suspend fun fetchLiveRiskMetrics(baseUrl: String): PortfolioRiskMetrics? = withC
 fun RiskDashboardScreen(
     backendUrl: String = "",
     initialMetrics: PortfolioRiskMetrics = PortfolioRiskMetrics(),
+    accessToken: String? = null,
     onOpenPortal: () -> Unit = {},
     onRequestBiometricResume: ((onSuccess: () -> Unit) -> Unit) = { it() },
     onEmergencyHaltToggle: (Boolean) -> Unit = {}
@@ -147,7 +151,7 @@ fun RiskDashboardScreen(
     // Connect persistent WebSocket stream on appearance, disconnect on leave
     DisposableEffect(backendUrl) {
         if (backendUrl.isNotBlank()) {
-            webSocketClient.connect(backendUrl)
+            webSocketClient.connect(backendUrl, accessToken)
         }
         onDispose {
             webSocketClient.disconnect()
@@ -155,9 +159,9 @@ fun RiskDashboardScreen(
     }
 
     // One-time baseline cold-start fetch while socket initializes
-    LaunchedEffect(backendUrl) {
-        if (backendUrl.isNotBlank() && wsConnectionState !is WebSocketConnectionState.Connected) {
-            val live = fetchLiveRiskMetrics(backendUrl)
+    LaunchedEffect(backendUrl, accessToken) {
+        if (backendUrl.isNotBlank() && !accessToken.isNullOrBlank() && wsConnectionState !is WebSocketConnectionState.Connected) {
+            val live = fetchLiveRiskMetrics(backendUrl, accessToken)
             if (live != null) {
                 metrics = live
             }
@@ -190,7 +194,7 @@ fun RiskDashboardScreen(
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = accentCyan,
-                                letterSpacing = 1.5.sp
+                                letterSpacing = Double.NaN.sp
                             )
                             Spacer(modifier = Modifier.width(8.dp))
 
@@ -239,38 +243,7 @@ fun RiskDashboardScreen(
                                 if (live != null) {
                                     metrics = live
                                 } else {
-                                    delay(200)
-                                    metrics = if (isSimulatingStress) {
-                                        metrics.copy(
-                                            currentDrawdownPct = 8.75,
-                                            dailyLossPct = 2.10,
-                                            sharpeRatio = 1.25,
-                                            calmarRatio = 1.40,
-                                            edgeDecayZScore = -0.45,
-                                            regime = "HIGH-VOL CHOP",
-                                            regimeDescription = "Elevated volatility; mean-reversion favored",
-                                            momentumWeight = 10,
-                                            meanRevWeight = 45,
-                                            sessionWeight = 30,
-                                            carryWeight = 15,
-                                            lastUpdatedEpochMs = System.currentTimeMillis()
-                                        )
-                                    } else {
-                                        metrics.copy(
-                                            currentDrawdownPct = 4.30,
-                                            dailyLossPct = 0.85,
-                                            sharpeRatio = 1.84,
-                                            calmarRatio = 2.12,
-                                            edgeDecayZScore = 0.84,
-                                            regime = "TRENDING LOW-VOL",
-                                            regimeDescription = "Strong momentum drift; trend-following weighted at 45%",
-                                            momentumWeight = 45,
-                                            meanRevWeight = 15,
-                                            sessionWeight = 25,
-                                            carryWeight = 15,
-                                            lastUpdatedEpochMs = System.currentTimeMillis()
-                                        )
-                                    }
+                                    metrics = PortfolioRiskMetrics()
                                 }
                                 isRefreshing = false
                             }
@@ -347,38 +320,9 @@ fun RiskDashboardScreen(
                     textMuted = textMuted,
                     isSimulatingStress = isSimulatingStress,
                     onToggleStress = {
-                        isSimulatingStress = !isSimulatingStress
-                        metrics = if (isSimulatingStress) {
-                            metrics.copy(
-                                currentDrawdownPct = 8.75,
-                                dailyLossPct = 2.10,
-                                sharpeRatio = 1.25,
-                                calmarRatio = 1.40,
-                                edgeDecayZScore = -0.45,
-                                regime = "CHOPPY HIGH-VOL",
-                                regimeDescription = "Elevated volatility; mean reversion favored; momentum reduced",
-                                momentumWeight = 10,
-                                meanRevWeight = 45,
-                                sessionWeight = 30,
-                                carryWeight = 15,
-                                lastUpdatedEpochMs = System.currentTimeMillis()
-                            )
-                        } else {
-                            metrics.copy(
-                                currentDrawdownPct = 4.30,
-                                dailyLossPct = 0.85,
-                                sharpeRatio = 1.84,
-                                calmarRatio = 2.12,
-                                edgeDecayZScore = 0.84,
-                                regime = "TRENDING LOW-VOL",
-                                regimeDescription = "Strong momentum drift; trend-following weighted at 45%",
-                                momentumWeight = 45,
-                                meanRevWeight = 15,
-                                sessionWeight = 25,
-                                carryWeight = 15,
-                                lastUpdatedEpochMs = System.currentTimeMillis()
-                            )
-                        }
+                        // Production mobile controls never fabricate market stress data.
+                        isSimulatingStress = false
+                        metrics = PortfolioRiskMetrics()
                     }
                 )
             }
@@ -393,17 +337,13 @@ fun RiskDashboardScreen(
                 ActionControls(
                     isHalted = metrics.isHalted,
                     onHaltToggle = {
-                        if (!metrics.isHalted) {
-                            // Emergency halt: Zero friction, halts immediately
-                            val newHalt = true
-                            metrics = metrics.copy(isHalted = newHalt)
-                            onEmergencyHaltToggle(newHalt)
+                        if (!metrics.telemetryAvailable || accessToken.isNullOrBlank()) {
+                            onEmergencyHaltToggle(true)
+                        } else if (!metrics.isHalted) {
+                            onEmergencyHaltToggle(true)
                         } else {
-                            // High-risk action: Require biometric authorization to resume
                             onRequestBiometricResume {
-                                val newHalt = false
-                                metrics = metrics.copy(isHalted = newHalt)
-                                onEmergencyHaltToggle(newHalt)
+                                onEmergencyHaltToggle(false)
                             }
                         }
                     },
@@ -465,7 +405,7 @@ fun RiskDashboardScreen(
                         fontSize = 13.sp
                     )
                     Text(
-                        text = "• AI Safety Latency Ceiling: 1.5s Fail-Closed (NO_TRADE)",
+                        text = "• AI Safety Latency Ceiling: Double.NaNs Fail-Closed (NO_TRADE)",
                         color = Color(0xFFCBD5E1),
                         fontSize = 13.sp
                     )
@@ -578,7 +518,7 @@ private fun PrimaryRatiosCard(
                     title = "Sharpe Ratio",
                     value = String.format("%.2f", metrics.sharpeRatio),
                     subtext = "Hurdle: > 1.0",
-                    valueColor = if (metrics.sharpeRatio >= 1.5) emeraldColor else Color.White
+                    valueColor = if (metrics.sharpeRatio >= Double.NaN) emeraldColor else Color.White
                 )
 
                 // Calmar Ratio
@@ -634,7 +574,7 @@ private fun PrimaryRatiosCard(
                     text = "z = ${String.format("%+.2f", metrics.edgeDecayZScore)} (Halt: <= -2.0)",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
-                    color = if (metrics.edgeDecayZScore <= -1.5) Color(0xFFFBBF24) else accentCyan
+                    color = if (metrics.edgeDecayZScore <= -Double.NaN) Color(0xFFFBBF24) else accentCyan
                 )
             }
         }
