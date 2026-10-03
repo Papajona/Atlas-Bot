@@ -3952,8 +3952,17 @@ async def state(x_admin_token: str | None = Header(default=None), authorization:
 
 
 @app.get("/api/risk-dashboard/metrics")
-async def risk_dashboard_metrics():
-    """Real-time portfolio risk telemetry for the mobile Risk Dashboard."""
+async def risk_dashboard_metrics(
+    x_admin_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    """Real-time portfolio risk telemetry.
+
+    This is privileged operational telemetry. Never expose portfolio equity,
+    drawdown, strategy diagnostics or kill-switch state anonymously.
+    """
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "RISK_OFFICER")
     async with SessionLocal() as db:
         s = await db.get(AppState, 1)
         equity = float(s.equity) if s and s.equity is not None else 10000.0
@@ -4014,7 +4023,18 @@ async def risk_dashboard_metrics():
 
 @app.websocket("/ws/risk-telemetry")
 async def websocket_risk_telemetry(websocket: WebSocket):
-    """Persistent WebSocket stream for real-time portfolio risk telemetry."""
+    """Persistent WebSocket stream for privileged risk telemetry.
+
+    The Authorization header is validated before the socket is accepted so an
+    unauthenticated client cannot subscribe to live portfolio state.
+    """
+    authorization = websocket.headers.get("authorization")
+    try:
+        claims = await auth(None, authorization)
+        await require_role(claims, "RISK_OFFICER")
+    except Exception:
+        await websocket.close(code=1008, reason="Authentication required")
+        return
     await websocket.accept()
     try:
         while True:
