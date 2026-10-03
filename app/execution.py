@@ -29,6 +29,7 @@ from .ids import make_signal_id, client_order_id
 from .audit_chain import record_audit
 from .live_fees import extract_order_fee_quote, ESTIMATED
 from .customer_funds import record_ledger_incident
+from .distributed import acquire_lock, release_lock
 
 
 TERMINAL_STATUSES = {"FILLED", "CANCELED", "REJECTED", "FAILED", "SIMULATED"}
@@ -51,6 +52,22 @@ class RiskBlocked(RuntimeError):
 _EXECUTION_LOCK = asyncio.Lock()
 
 _EXECUTION_OWNER = os.getenv("K_REVISION", "local") + ":" + uuid.uuid4().hex[:16]
+LIVE_SUBMISSION_LOCK_KEY = "live-broker-submission"
+
+
+def _live_submission_lock_ttl_seconds() -> int:
+    return max(60, int(settings.exchange_timeout_ms / 1000) + 30)
+
+
+async def _wait_for_live_submission_barrier(timeout_seconds: float) -> bool:
+    """Wait until no worker can be inside the external live-order submission section."""
+    deadline = asyncio.get_running_loop().time() + max(1.0, float(timeout_seconds))
+    while asyncio.get_running_loop().time() < deadline:
+        if await acquire_lock(LIVE_SUBMISSION_LOCK_KEY, ttl_seconds=_live_submission_lock_ttl_seconds()):
+            await release_lock(LIVE_SUBMISSION_LOCK_KEY)
+            return True
+        await asyncio.sleep(0.25)
+    return False
 
 
 async def _acquire_live_execution_lease(ttl_seconds: int = 30) -> tuple[str, int]:
@@ -968,18 +985,27 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     await assert_live_system_enabled(gate_db, asset=asset, customer_id=None, exchange=exchange, side=side, quantity=amount)
             _, lease_token = await _acquire_live_execution_lease(ttl_seconds=max(15, int(settings.exchange_timeout_ms / 1000) + 10))
             await _verify_live_lease(lease_token)
-            await _mark_order_command(command.id, status="SUBMITTING", token=lease_token, attempts_increment=True)
-            if asset in {"forex", "commodity"}:
-                order = await asyncio.to_thread(
-                    broker.market_order, symbol, side, amount, cid,
-                    stop_loss_price, take_profit_price,
-                )
-            else:
-                order = await asyncio.to_thread(
-                    broker.market_order, symbol, side, amount, cid,
-                    stop_loss_price, take_profit_price,
-                    bool(exchange_reduce_only and _is_derivatives_market(broker)),
-                )
+            submission_lock_acquired = await acquire_lock(
+                LIVE_SUBMISSION_LOCK_KEY,
+                ttl_seconds=_live_submission_lock_ttl_seconds(),
+            )
+            if not submission_lock_acquired:
+                raise RiskBlocked("Live broker submission barrier is unavailable; order submission aborted")
+            try:
+                await _mark_order_command(command.id, status="SUBMITTING", token=lease_token, attempts_increment=True)
+                if asset in {"forex", "commodity"}:
+                    order = await asyncio.to_thread(
+                        broker.market_order, symbol, side, amount, cid,
+                        stop_loss_price, take_profit_price,
+                    )
+                else:
+                    order = await asyncio.to_thread(
+                        broker.market_order, symbol, side, amount, cid,
+                        stop_loss_price, take_profit_price,
+                        bool(exchange_reduce_only and _is_derivatives_market(broker)),
+                    )
+            finally:
+                await release_lock(LIVE_SUBMISSION_LOCK_KEY)
         except (LiveExecutionBlocked, RiskBlocked) as exc:
             await _mark_order_command(command.id, status="BLOCKED", token=lease_token, error=str(exc))
             if customer_id is not None and reserved_cash > 0:
@@ -1383,7 +1409,7 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
 
 
 async def emergency_stop(exchange: str | None = None):
-    """Halt new live execution first, then cancel platform and customer open orders."""
+    """Fence new live submissions, wait for any in-flight broker call, then cancel and verify open orders."""
     async with SessionLocal() as db:
         s = await _get_state_locked(db)
         s.kill_switch = True
@@ -1391,6 +1417,21 @@ async def emergency_stop(exchange: str | None = None):
         s.mode = "HALTED"
         await db.commit()
 
+    canceled: list[dict[str, str]] = []
+    failures: list[dict[str, str]] = []
+    cancel_error = None
+    barrier_timeout = max(15.0, float(settings.exchange_timeout_ms) / 1000.0 + 15.0)
+    barrier_confirmed = await _wait_for_live_submission_barrier(barrier_timeout)
+    if not barrier_confirmed:
+        failure = {"scope": "live_submission_barrier", "error": "A live broker submission is still in flight or the distributed barrier is unavailable"}
+        failures.append(failure)
+        try:
+            await open_incident(key="EMERGENCY_STOP_SUBMISSION_BARRIER", severity="CRITICAL", category="EMERGENCY_STOP", summary="Emergency stop cannot confirm the live submission barrier", detail=failure)
+        except Exception:
+            logging.getLogger(__name__).warning("emergency_stop_barrier_incident_write_failed", exc_info=True)
+        await audit("EMERGENCY_CANCEL_FAILED", failure)
+        return {"ok": False, "broker_halt_confirmed": False, "canceled_count": 0, "failure_count": len(failures),
+                "cancel_error": "Live submission barrier not confirmed", "failures": failures, "mode": "HALTED"}
     canceled: list[dict[str, str]] = []
     failures: list[dict[str, str]] = []
     cancel_error = None
@@ -1406,6 +1447,10 @@ async def emergency_stop(exchange: str | None = None):
                     if order_id and state in {"PENDING", "OPEN"}:
                         await asyncio.to_thread(broker.cancel_order, order_id)
                         canceled.append({"scope": "platform_oanda", "order_id": order_id})
+                remaining = await asyncio.to_thread(broker.orders)
+                still_open = [str(o.get("id") or "") for o in remaining if str(o.get("state") or "").upper() in {"PENDING", "OPEN"}]
+                if still_open:
+                    failures.append({"scope": "platform_oanda", "error": f"Open orders remain after cancellation: {still_open[:20]}"})
             except Exception as exc:
                 cancel_error = str(exc)
                 failures.append({"scope": "platform_oanda", "error": cancel_error})
@@ -1424,6 +1469,9 @@ async def emergency_stop(exchange: str | None = None):
             rows = await asyncio.to_thread(broker.cancel_all_orders)
             for item in rows or []:
                 canceled.append({"scope": "platform_exchange", "order_id": str(item.get("id") or "")})
+            remaining = await asyncio.to_thread(broker.fetch_open_orders)
+            if remaining:
+                failures.append({"scope": "platform_exchange", "error": f"Open orders remain after cancellation: {len(remaining)}"})
         except Exception as exc:
             cancel_error = str(exc)
             failures.append({"scope": "platform_exchange", "error": cancel_error})
@@ -1446,6 +1494,9 @@ async def emergency_stop(exchange: str | None = None):
                 rows = await asyncio.to_thread(broker.cancel_all_orders)
                 for item in rows or []:
                     canceled.append({"scope": f"customer:{account.customer_id}", "order_id": str(item.get("id") or "")})
+                remaining = await asyncio.to_thread(broker.fetch_open_orders)
+                if remaining:
+                    failures.append({"scope": f"customer:{account.customer_id}", "error": f"Open orders remain after cancellation: {len(remaining)}"})
             except Exception as exc:
                 failure = {"scope": f"customer:{account.customer_id}", "error": str(exc)[:1000]}
                 failures.append(failure)
@@ -1459,10 +1510,13 @@ async def emergency_stop(exchange: str | None = None):
                 except Exception:
                     logging.getLogger(__name__).warning("emergency_stop_incident_write_failed", exc_info=True)
 
+    broker_halt_confirmed = not failures
     await audit("EMERGENCY_STOP", {
         "exchange": exchange, "canceled_count": len(canceled),
         "failure_count": len(failures), "cancel_error": cancel_error,
+        "broker_halt_confirmed": broker_halt_confirmed,
     })
-    return {"ok": True, "canceled_count": len(canceled), "failure_count": len(failures),
+    return {"ok": broker_halt_confirmed, "broker_halt_confirmed": broker_halt_confirmed,
+            "canceled_count": len(canceled), "failure_count": len(failures),
             "cancel_error": cancel_error, "failures": failures, "mode": "HALTED"}
 
