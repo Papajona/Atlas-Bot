@@ -32,15 +32,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.atlas.trading.network.LiveEquityWebSocketClient
+import com.atlas.trading.network.WebSocketManager
 import com.atlas.trading.network.WebSocketConnectionState
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 
 /**
  * Real-time Portfolio Risk Metrics state model.
@@ -73,50 +68,6 @@ data class PortfolioRiskMetrics(
     val lastUpdatedEpochMs: Long = System.currentTimeMillis()
 )
 
-suspend fun fetchLiveRiskMetrics(baseUrl: String): PortfolioRiskMetrics? = withContext(Dispatchers.IO) {
-    if (baseUrl.isBlank()) return@withContext null
-    try {
-        val endpoint = "${baseUrl.trimEnd('/')}/api/risk-dashboard/metrics"
-        val url = URL(endpoint)
-        val conn = url.openConnection() as HttpURLConnection
-        conn.requestMethod = "GET"
-        conn.connectTimeout = 4000
-        conn.readTimeout = 4000
-        conn.setRequestProperty("Accept", "application/json")
-        if (conn.responseCode == 200) {
-            val responseText = conn.inputStream.bufferedReader().use { it.readText() }
-            val json = JSONObject(responseText)
-            PortfolioRiskMetrics(
-                equity = json.optDouble("equity", 10000.0),
-                peakEquity = json.optDouble("peak_equity", 10450.0),
-                realizedPnl = json.optDouble("realized_pnl", 450.0),
-                unrealizedPnl = json.optDouble("unrealized_pnl", 82.50),
-                currentDrawdownPct = json.optDouble("current_drawdown_pct", 4.30),
-                maxDrawdownLimitPct = json.optDouble("max_drawdown_limit_pct", 15.0),
-                dailyLossPct = json.optDouble("daily_loss_pct", 0.85),
-                dailyLossLimitPct = json.optDouble("daily_loss_limit_pct", 3.0),
-                sharpeRatio = json.optDouble("sharpe_ratio", 1.84),
-                calmarRatio = json.optDouble("calmar_ratio", 2.12),
-                sortinoRatio = json.optDouble("sortino_ratio", 2.45),
-                deflatedSharpeRatio = json.optDouble("deflated_sharpe_ratio", 0.98),
-                edgeDecayZScore = json.optDouble("edge_decay_z_score", 0.84),
-                regime = json.optString("regime", "TRENDING LOW-VOL"),
-                regimeDescription = json.optString("regime_description", "Strong momentum drift; trend-following weighted at 45%"),
-                momentumWeight = json.optInt("momentum_weight", 45),
-                meanRevWeight = json.optInt("mean_rev_weight", 15),
-                sessionWeight = json.optInt("session_weight", 25),
-                carryWeight = json.optInt("carry_weight", 15),
-                costStressHeadroom = json.optDouble("cost_stress_headroom", 2.41),
-                aiSafetyTimeoutSeconds = json.optDouble("ai_safety_timeout_seconds", 1.5),
-                isHalted = json.optBoolean("is_halted", false),
-                lastUpdatedEpochMs = json.optLong("last_updated_epoch_ms", System.currentTimeMillis())
-            )
-        } else null
-    } catch (_: Exception) {
-        null
-    }
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RiskDashboardScreen(
@@ -126,7 +77,7 @@ fun RiskDashboardScreen(
     onRequestBiometricResume: ((onSuccess: () -> Unit) -> Unit) = { it() },
     onEmergencyHaltToggle: (Boolean) -> Unit = {}
 ) {
-    val webSocketClient = remember { LiveEquityWebSocketClient() }
+    val webSocketClient = remember { WebSocketManager() }
     val wsConnectionState by webSocketClient.connectionState.collectAsState()
     val streamedMetrics by webSocketClient.liveMetrics.collectAsState()
     val latencyMs by webSocketClient.lastMessageLatencyMs.collectAsState()
@@ -150,17 +101,7 @@ fun RiskDashboardScreen(
             webSocketClient.connect(backendUrl)
         }
         onDispose {
-            webSocketClient.disconnect()
-        }
-    }
-
-    // One-time baseline cold-start fetch while socket initializes
-    LaunchedEffect(backendUrl) {
-        if (backendUrl.isNotBlank() && wsConnectionState !is WebSocketConnectionState.Connected) {
-            val live = fetchLiveRiskMetrics(backendUrl)
-            if (live != null) {
-                metrics = live
-            }
+            webSocketClient.close()
         }
     }
 
@@ -235,43 +176,10 @@ fun RiskDashboardScreen(
                                 if (wsConnectionState !is WebSocketConnectionState.Connected && backendUrl.isNotBlank()) {
                                     webSocketClient.connect(backendUrl)
                                 }
-                                val live = if (backendUrl.isNotBlank()) fetchLiveRiskMetrics(backendUrl) else null
-                                if (live != null) {
-                                    metrics = live
-                                } else {
-                                    delay(200)
-                                    metrics = if (isSimulatingStress) {
-                                        metrics.copy(
-                                            currentDrawdownPct = 8.75,
-                                            dailyLossPct = 2.10,
-                                            sharpeRatio = 1.25,
-                                            calmarRatio = 1.40,
-                                            edgeDecayZScore = -0.45,
-                                            regime = "HIGH-VOL CHOP",
-                                            regimeDescription = "Elevated volatility; mean-reversion favored",
-                                            momentumWeight = 10,
-                                            meanRevWeight = 45,
-                                            sessionWeight = 30,
-                                            carryWeight = 15,
-                                            lastUpdatedEpochMs = System.currentTimeMillis()
-                                        )
-                                    } else {
-                                        metrics.copy(
-                                            currentDrawdownPct = 4.30,
-                                            dailyLossPct = 0.85,
-                                            sharpeRatio = 1.84,
-                                            calmarRatio = 2.12,
-                                            edgeDecayZScore = 0.84,
-                                            regime = "TRENDING LOW-VOL",
-                                            regimeDescription = "Strong momentum drift; trend-following weighted at 45%",
-                                            momentumWeight = 45,
-                                            meanRevWeight = 15,
-                                            sessionWeight = 25,
-                                            carryWeight = 15,
-                                            lastUpdatedEpochMs = System.currentTimeMillis()
-                                        )
-                                    }
+                                if (backendUrl.isNotBlank() && !accessToken.isNullOrBlank()) {
+                                    webSocketClient.connect(backendUrl, accessToken)
                                 }
+                                if (streamedMetrics.lastUpdatedEpochMs > 0) metrics = streamedMetrics
                                 isRefreshing = false
                             }
                         },
@@ -307,6 +215,7 @@ fun RiskDashboardScreen(
                     cardBorder = cardBorder,
                     emeraldColor = emeraldPass,
                     redColor = redDanger,
+                    warningColor = amberWarning,
                     onInspectAudit = { showAuditDialog = true }
                 )
             }
@@ -488,6 +397,7 @@ private fun SystemStateRibbon(
     cardBorder: Color,
     emeraldColor: Color,
     redColor: Color,
+    warningColor: Color,
     onInspectAudit: () -> Unit
 ) {
     Card(
@@ -524,7 +434,20 @@ private fun SystemStateRibbon(
                         fontSize = 11.sp,
                         color = Color(0xFF64748B)
                     )
-                }
+
+                    val healthColor = when (metrics.workerHealthStatus) {
+                        "HEALTHY" -> emeraldColor
+                        "STALE" -> warningColor
+                        "MISSING" -> redColor
+                        else -> Color(0xFF94A3B8)
+                    }
+                    Text(
+                        text = "WORKER ENGINE: " + metrics.workerHealthStatus + " • " + metrics.healthyWorkerInstances + "/" + metrics.workerInstances + " healthy",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = healthColor,
+                        modifier = Modifier.testTag("worker_health_status")
+                    )                }
             }
 
             TextButton(
