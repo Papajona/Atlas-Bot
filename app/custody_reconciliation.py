@@ -38,6 +38,15 @@ async def _upsert_incident(db, *, key: str, severity: str, category: str, summar
     row.updated_at = now
 
 
+async def _resolve_incident(db, *, key: str) -> None:
+    row = (await db.execute(select(Incident).where(Incident.incident_key == key).with_for_update())).scalar_one_or_none()
+    if row is not None and row.status == "OPEN":
+        row.status = "RESOLVED"
+        row.resolved_at = datetime.now(timezone.utc)
+        row.resolved_by = "custody-reconciliation"
+        row.updated_at = datetime.now(timezone.utc)
+
+
 def solvency_decision(*, assets: Decimal, liabilities: Decimal, minimum_ratio: Decimal = D("1.0")) -> dict:
     """Pure solvency decision used by both the worker and regression tests."""
     assets = D(str(assets))
@@ -163,7 +172,7 @@ async def reconcile_usdt_custody(db) -> dict:
             "addresses_checked": len(balances),
             "error": str(exc),
         }
-        _upsert_incident(
+        await _upsert_incident(
             db,
             key="CUSTODY_RECONCILIATION:USDT:TRON:ERROR",
             severity="HIGH",
@@ -190,12 +199,20 @@ async def reconcile_usdt_custody(db) -> dict:
         "virtual_wallet_balance": assets - balances.get(settings.usdt_tron_treasury_address, D("0")),
     }
 
+    if decision["status"] == "OK":
+        for incident_key in (
+            "CUSTODY_RECONCILIATION:USDT:TRON:CONFIG",
+            "CUSTODY_RECONCILIATION:USDT:TRON:ERROR",
+            "CUSTODY_SOLVENCY:USDT:TRON",
+        ):
+            await _resolve_incident(db, key=incident_key)
+
     if decision["status"] == "SHORTFALL":
         state = await db.get(AppState, 1)
         if state:
             state.kill_switch = True
             state.live_enabled = False
-        _upsert_incident(
+        await _upsert_incident(
             db,
             key="CUSTODY_SOLVENCY:USDT:TRON",
             severity="CRITICAL",
