@@ -50,8 +50,9 @@ The authoritative execution design is:
 | Crypto | Binance | Platform Binance credentials for platform trades; verified isolated Customer Binance accounts for customer trades | **Live-capable, subject to the production gates below** |
 | Forex | OANDA | OANDA practice/demo path for research, backtesting and demo execution | **Live execution disabled** |
 | Commodities | OANDA | OANDA practice/demo path for research, backtesting and demo execution | **Live execution disabled** |
+| Deriv | Deriv | Separate Deriv adapter/preflight exists, but real-account execution is intentionally disabled and not part of the unified live execution/outbox/ledger path | **Live execution disabled** |
 
-Atlas must not route live Forex or commodity orders through Binance. The execution code explicitly blocks OANDA live Forex/commodity execution and treats those markets as demo/paper-only.
+Atlas must not route live Forex or commodity orders through Binance. The execution code explicitly blocks OANDA live Forex/commodity execution and treats those markets as demo/paper-only. Deriv is also not currently an approved live execution venue for Atlas; its real-account buy/sell capability is explicitly disabled until it is integrated into the unified live execution controls.
 
 ### Binance fact-check
 
