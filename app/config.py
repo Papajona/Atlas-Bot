@@ -6,7 +6,7 @@ _VALID_ENVIRONMENTS = {"development", "staging", "production", "test"}
 
 class Settings(BaseSettings):
     app_name: str = "AI Trading Console"
-    app_version: str = "3.10.46"
+    app_version: str = "3.10.47"
     # No default: the previous default of "development" silently matched the also-default
     # SQLite/plaintext-fallback posture, so a deployment that simply forgot to set ENVIRONMENT
     # got the insecure combination with no warning. Requiring an explicit value means a missing
@@ -247,7 +247,7 @@ class Settings(BaseSettings):
     api_rate_limit_per_minute: int = 120
     auth_rate_limit_per_minute: int = 10
     otp_rate_limit_per_minute: int = 5
-    withdrawal_step_up_minutes: int = 10
+    withdrawal_step_up_minutes: int = 3\n    ai_strategy_provider_timeout_seconds: float = 1.5
     # Customer TOTP MFA. Uses Supabase Auth native TOTP (Google Authenticator compatible).
     customer_totp_required: bool = True
     # Admin authentication uses Supabase Auth with mandatory TOTP (Google Authenticator compatible).
@@ -380,7 +380,7 @@ class Settings(BaseSettings):
     def _normalize_tron_account_xpub(cls, value: str) -> str:
         return str(value or "").strip()
 
-    @field_validator("environment")
+    @field_validator("withdrawal_step_up_minutes")\n    @classmethod\n    def _validate_withdrawal_step_up_minutes(cls, value: int) -> int:\n        value = int(value)\n        if not 1 <= value <= 3:\n            raise ValueError("WITHDRAWAL_STEP_UP_MINUTES must be between 1 and 3 minutes")\n        return value\n\n    @field_validator("environment")
     @classmethod
     def _validate_environment(cls, value: str) -> str:
         normalized = value.strip().lower()
