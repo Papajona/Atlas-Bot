@@ -21,7 +21,11 @@
 - [ ] Kill switch tested.
 - [ ] Backup and restore procedure tested.
 - [ ] Logs/alerts configured.
-- [ ] Only after all checks pass: evaluate a restricted live pilot.
+- [ ] At least 90 days of out-of-sample paper performance recorded for the exact configuration, demonstrating positive net returns under 2x cost-stress and DSR >= 0.95.
+- [ ] Edge-decay halt monitor active and verified on historical closed trades ($z \le -2$).
+- [ ] Worker mid-fill failure drill (`kill -9` during execution) verified clean idempotent state recovery.
+- [ ] Legal and regulatory review of product disclosures, jurisdiction marketing rules, and risk disclaimers.
+- [ ] Only after all checks pass: evaluate a restricted, unlevered live pilot.
 
 ## 3.10.24 security deployment requirements
 - Cloud Run must be reachable through an external HTTPS Load Balancer with Cloud Armor; deployment uses `internal-and-cloud-load-balancing` ingress and does not rely on direct public `run.app` ingress.
