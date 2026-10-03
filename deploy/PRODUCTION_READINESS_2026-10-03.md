@@ -22,10 +22,10 @@ Do not enable customer live trading or real-money withdrawals until every Critic
 
 ### Critical
 
-- [ ] Native mobile operator login establishes a real Supabase AAL2/RISK_OFFICER session before native risk controls are enabled.
-- [ ] Native mobile emergency halt performs POST /api/risk/kill using that authenticated session and waits for server confirmation. A local UI toggle is never authoritative.
-- [ ] Resume requires biometric/device credential and a fresh server-side authorization decision.
-- [ ] Android release APK is built by CI from the protected production environment and verified with apksigner verify.
+- [x] Native mobile operator login now uses the existing Supabase-backed admin login + MFA challenge/verification flow and only enables native risk controls after an AAL2 access token is returned.
+- [x] Native mobile emergency halt/resume now POSTs `/api/risk/kill` or `/api/risk/reset` with the authenticated bearer token and requires authoritative server confirmation; local UI state is not the source of truth.
+- [x] Resume remains gated by strong biometric/device credential and the authenticated server risk-reset response.
+- [ ] Android release APK is built by CI from the protected production environment and verified with apksigner verify. (Debug compilation is now part of normal CI.)
 - [ ] Release signing key is stored outside GitHub source and outside the APK; rotation/recovery procedure is documented.
 - [ ] External HTTPS load balancer and Cloud Armor are deployed and verified from the public hostname. Direct Cloud Run run.app ingress must not be the public production path.
 - [ ] Backup restore drill has been executed against a disposable PostgreSQL/Supabase target, including integrity checks and recovery-time evidence.
@@ -62,3 +62,10 @@ A production Android artifact must never be signed by the Android debug keystore
 **No green source-level CI result can override missing operational evidence.**
 
 The correct status remains **NO-GO for live money** until the Critical evidence is completed.
+
+
+## 2026-10-03 mobile-control correction
+
+The Android control client was corrected to use the existing backend administrator authentication contract instead of inventing a separate client-side Supabase SDK integration. Native login calls `/api/admin/auth/login`, discovers the verified TOTP factor through `/api/admin/auth/mfa/status`, creates a challenge, and exchanges the 6-digit authenticator code through `/api/admin/auth/mfa/verify`. The returned bearer token is attached to risk telemetry and risk-control requests. WebSocket telemetry is also bearer-authenticated. Risk metrics no longer use the previous healthy-looking hard-coded equity/drawdown/Sharpe defaults; unavailable telemetry fails closed. CI now includes Android debug compilation plus the native mobile security regression tests.
+
+**Operational caveat:** source-level integration is corrected, but live-money readiness still requires an actual authenticated Android-device test against the deployed service, including AAL2 login, kill confirmation, biometric resume, token expiry/re-login, and broker-side halt verification. No claim of live-money readiness is made until those tests pass.
