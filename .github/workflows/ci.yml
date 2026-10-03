@@ -87,6 +87,13 @@ jobs:
           python -m pytest -q tests/test_ledger_all_paths_concurrent_3_10_46.py
 
       - name: Full pytest suite
+        env:
+          # The dedicated PostgreSQL concurrency suites above validate row-locking
+          # against real PostgreSQL. Keep the broad unit suite on isolated SQLite so
+          # asyncio/TestClient tests cannot inherit a PostgreSQL async engine across
+          # independently managed pytest event loops.
+          DATABASE_URL: sqlite+aiosqlite:///./test_trading.db
+          ATLAS_POSTGRES_URL: ""
         run: python -m pytest -q
 
       - name: Shell syntax
