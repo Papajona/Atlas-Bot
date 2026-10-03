@@ -100,3 +100,57 @@ def build_signed_subscription(api_key: str, timestamp_ms: int, signature: str, r
             "signature": signature,
         },
     }
+
+
+@dataclass
+class BinanceUserStreamSession:
+    """Reconnect-safe Binance user-stream transport.
+
+    The caller supplies a signed subscription payload and receives normalized messages.
+    A reconnect always invokes the reconciliation callback before normal message delivery
+    resumes, preventing silent stream gaps from becoming an unobserved account-state gap.
+    """
+    uri: str
+    subscription_factory: Any
+    on_message: Any
+    reconcile: Any
+    heartbeat_seconds: float = 15.0
+    max_backoff_seconds: float = 30.0
+
+    async def run(self, stop_event: Any) -> None:
+        import asyncio
+        import websockets
+
+        backoff = 1.0
+        first_connection = True
+        while not stop_event.is_set():
+            try:
+                async with websockets.connect(
+                    self.uri,
+                    ping_interval=None,
+                    ping_timeout=self.heartbeat_seconds,
+                    close_timeout=5,
+                    max_size=2_000_000,
+                ) as ws:
+                    await ws.send(json.dumps(self.subscription_factory()))
+                    await ws.ping()
+                    if not first_connection:
+                        await self.reconcile()
+                    first_connection = False
+                    backoff = 1.0
+                    while not stop_event.is_set():
+                        try:
+                            message = await asyncio.wait_for(ws.recv(), timeout=self.heartbeat_seconds)
+                            update = parse_order_update(message)
+                            if update is not None:
+                                await self.on_message(update)
+                        except asyncio.TimeoutError:
+                            pong = await ws.ping()
+                            await asyncio.wait_for(pong, timeout=self.heartbeat_seconds)
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                raise
+            except Exception:
+                if stop_event.is_set():
+                    break
+                await asyncio.sleep(min(backoff, self.max_backoff_seconds))
+                backoff = min(backoff * 2.0, self.max_backoff_seconds)
