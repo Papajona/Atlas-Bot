@@ -157,7 +157,7 @@ fun RiskDashboardScreen(
     LaunchedEffect(backendUrl, accessToken, isWebSocketConnected) {
         if (backendUrl.isNotBlank() && !accessToken.isNullOrBlank() && !isWebSocketConnected) {
             while (!isWebSocketConnected) {
-                val live = fetchLiveRiskMetrics(backendUrl)
+                val live = fetchLiveRiskMetrics(backendUrl, accessToken)
                 if (live != null) {
                     metrics = live.copy(streamType = "HTTP_FALLBACK")
                 }
@@ -327,21 +327,6 @@ fun RiskDashboardScreen(
                                             momentumWeight = 10,
                                             meanRevWeight = 45,
                                             sessionWeight = 30,
-                                            carryWeight = 15,
-                                            lastUpdatedEpochMs = System.currentTimeMillis()
-                                        )
-                                    } else {
-                                        metrics.copy(
-                                            currentDrawdownPct = 4.30,
-                                            dailyLossPct = 0.85,
-                                            sharpeRatio = 1.84,
-                                            calmarRatio = 2.12,
-                                            edgeDecayZScore = 0.84,
-                                            regime = "TRENDING LOW-VOL",
-                                            regimeDescription = "Strong momentum drift; trend-following weighted at 45%",
-                                            momentumWeight = 45,
-                                            meanRevWeight = 15,
-                                            sessionWeight = 25,
                                             carryWeight = 15,
                                             lastUpdatedEpochMs = System.currentTimeMillis()
                                         )
