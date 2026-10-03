@@ -8,6 +8,7 @@ on:
       - 'tests/test_postgres_ledger_concurrency_3_10_46.py'
       - 'tests/test_ledger_invariants_3_10_46.py'
       - 'tests/test_ledger_all_paths_concurrent_3_10_46.py'
+      - 'requirements-dev.txt'
       - '.github/workflows/ledger-concurrency-check.yml'
   push:
     branches:
@@ -17,6 +18,14 @@ on:
 jobs:
   postgres-ledger-concurrency:
     runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: development
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      CUSTOMER_LIVE_TRADING_ENABLED: "false"
+      BROKER_SANDBOX: "true"
+      BACKGROUND_RECONCILIATION_ENABLED: "false"
+      ADMIN_TOKEN: test-admin-token-for-ci
 
     services:
       postgres:
@@ -56,6 +65,7 @@ jobs:
 
       - name: Run database migrations
         env:
+          ENVIRONMENT: development
           DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
           ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
         run: |
