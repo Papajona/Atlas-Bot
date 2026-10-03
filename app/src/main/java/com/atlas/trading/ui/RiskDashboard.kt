@@ -239,7 +239,7 @@ fun RiskDashboardScreen(
                                 if (wsConnectionState !is WebSocketConnectionState.Connected && backendUrl.isNotBlank() && !accessToken.isNullOrBlank()) {
                                     webSocketClient.connect(backendUrl, accessToken)
                                 }
-                                val live = if (backendUrl.isNotBlank()) fetchLiveRiskMetrics(backendUrl) else null
+                                val live = if (backendUrl.isNotBlank()) fetchLiveRiskMetrics(backendUrl, accessToken) else null
                                 if (live != null) {
                                     metrics = live
                                 } else {
