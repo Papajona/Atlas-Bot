@@ -23,8 +23,8 @@ Do not enable customer live trading or real-money withdrawals until every Critic
 ### Critical
 
 - [x] Native mobile operator login now uses the existing Supabase-backed admin login + MFA challenge/verification flow and only enables native risk controls after an AAL2 access token is returned.
-- [x] Native mobile emergency halt/resume now POSTs `/api/risk/kill` or `/api/risk/reset` with the authenticated bearer token and requires authoritative server confirmation; local UI state is not the source of truth.
-- [x] Resume remains gated by strong biometric/device credential and the authenticated server risk-reset response.
+- [x] Native mobile emergency halt now POSTs the risk kill endpoint with the authenticated bearer token and requires authoritative server confirmation; local UI state is not the source of truth.
+- [x] A native reset/recovery action is gated by strong biometric/device-credential authorization and the authenticated server response. Reset is **not** a live-trading resume operation: the backend clears the application halt but deliberately leaves live trading disabled and Atlas in PAPER mode.
 - [ ] Android release APK is built by CI from the protected production environment and verified with apksigner verify. (Debug compilation is now part of normal CI.)
 - [ ] Release signing key is stored outside GitHub source and outside the APK; rotation/recovery procedure is documented.
 - [ ] External HTTPS load balancer and Cloud Armor are deployed and verified from the public hostname. Direct Cloud Run run.app ingress must not be the public production path.
@@ -41,7 +41,19 @@ Do not enable customer live trading or real-money withdrawals until every Critic
 - [ ] Exchange sandbox drills cover timeout, UNKNOWN order, duplicate submission, partial fill, stop rejection, cancel race, and worker restart.
 - [ ] Physical Android device test completed for login/MFA, risk telemetry, kill switch, resume authorization, certificate/host restrictions, and release build.
 
-## Binance fact-check
+## Broker and asset routing
+
+The authoritative execution design is:
+
+| Asset class | Venue | Current authority | Status |
+|---|---|---|---|
+| Crypto | Binance | Platform Binance credentials for platform trades; verified isolated Customer Binance accounts for customer trades | **Live-capable, subject to the production gates below** |
+| Forex | OANDA | OANDA practice/demo path for research, backtesting and demo execution | **Live execution disabled** |
+| Commodities | OANDA | OANDA practice/demo path for research, backtesting and demo execution | **Live execution disabled** |
+
+Atlas must not route live Forex or commodity orders through Binance. The execution code explicitly blocks OANDA live Forex/commodity execution and treats those markets as demo/paper-only.
+
+### Binance fact-check
 
 The repository contains a Binance user-stream implementation and unit tests for signed subscription message shape. That is not equivalent to demonstrating a production customer user stream. The remaining gate is an end-to-end authenticated exchange test with observed account/order events and recovery/reconciliation evidence.
 
@@ -64,8 +76,10 @@ A production Android artifact must never be signed by the Android debug keystore
 The correct status remains **NO-GO for live money** until the Critical evidence is completed.
 
 
-## 2026-10-03 mobile-control correction
+## 2026-10-03 mobile risk-control correction
 
-The Android control client was corrected to use the existing backend administrator authentication contract instead of inventing a separate client-side Supabase SDK integration. Native login calls `/api/admin/auth/login`, discovers the verified TOTP factor through `/api/admin/auth/mfa/status`, creates a challenge, and exchanges the 6-digit authenticator code through `/api/admin/auth/mfa/verify`. The returned bearer token is attached to risk telemetry and risk-control requests. WebSocket telemetry is also bearer-authenticated. Risk metrics no longer use the previous healthy-looking hard-coded equity/drawdown/Sharpe defaults; unavailable telemetry fails closed. CI now includes Android debug compilation plus the native mobile security regression tests.
+The Android control client was corrected to use the existing backend administrator authentication contract instead of inventing a separate client-side Supabase SDK integration. Native login calls the administrator login endpoint, discovers the verified TOTP factor, creates a challenge, and exchanges the 6-digit authenticator code through the MFA verification endpoint. The returned bearer token is attached to risk telemetry and risk-control requests. WebSocket telemetry is also bearer-authenticated. Risk metrics no longer use the previous healthy-looking hard-coded equity/drawdown/Sharpe defaults; unavailable telemetry fails closed. CI now includes Android debug compilation plus the native mobile security regression tests.
 
-**Operational caveat:** source-level integration is corrected, but live-money readiness still requires an actual authenticated Android-device test against the deployed service, including AAL2 login, kill confirmation, biometric resume, token expiry/re-login, and broker-side halt verification. No claim of live-money readiness is made until those tests pass.
+The native emergency control is a **server-authoritative halt/reset control**, not a local resume-trading switch. The kill operation requests the authoritative emergency halt. The reset operation releases the application halt state but intentionally leaves live trading disabled and returns Atlas to PAPER mode; any later re-enable of live trading remains a separate privileged operation.
+
+**Operational caveat:** source-level integration is corrected, but live-money readiness still requires an actual authenticated Android-device test against the deployed service, including AAL2 login, kill confirmation, biometric reset authorization, token expiry/re-login, and broker-side halt verification. No claim of live-money readiness is made until those tests pass.
