@@ -9,7 +9,6 @@ import re
 import hashlib
 import time
 import json
-import base64
 import uuid
 from decimal import Decimal
 from contextvars import ContextVar
