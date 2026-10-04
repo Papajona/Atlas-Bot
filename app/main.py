@@ -1076,6 +1076,40 @@ async def _custody_reconciliation_loop():
             logger.exception("custody_reconciliation_loop: pass failed")
 
 
+def _classify_worker_health(rows, *, stale_after_seconds: int, now: datetime | None = None) -> dict:
+    now = now or datetime.now(timezone.utc)
+    threshold = max(15, int(stale_after_seconds or 60))
+    healthy = 0
+    stale = 0
+    latest_at = None
+    for row in rows:
+        updated = row.updated_at
+        if updated is None:
+            age = float("inf")
+        else:
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            age = max(0.0, (now - updated).total_seconds())
+            if latest_at is None or updated > latest_at:
+                latest_at = updated
+        if str(row.status or "").upper() == "READY" and age <= threshold:
+            healthy += 1
+        else:
+            stale += 1
+    status = "HEALTHY" if healthy > 0 else ("STALE" if rows else "MISSING")
+    age = max(0.0, (now-latest_at).total_seconds()) if latest_at else None
+    return {"status":status,"healthy":healthy>0,"instances":len(rows),
+            "healthy_instances":healthy,"stale_instances":stale,
+            "latest_heartbeat_at":latest_at.isoformat() if latest_at else None,
+            "age_seconds":round(age,1) if age is not None else None,
+            "stale_after_seconds":threshold}
+
+async def _worker_health_snapshot(db) -> dict:
+    rows=(await db.execute(select(ServiceHeartbeat).where(ServiceHeartbeat.role=="worker")
+                           .order_by(ServiceHeartbeat.updated_at.desc()).limit(1000))).scalars().all()
+    return _classify_worker_health(rows, stale_after_seconds=settings.stale_instance_seconds)
+
+
 async def _heartbeat_loop():
     while True:
         try:
@@ -3973,6 +4007,7 @@ async def risk_dashboard_metrics(
         realized = float(s.realized_pnl) if s and s.realized_pnl is not None else 0.0
         unrealized = float(s.unrealized_pnl) if s and s.unrealized_pnl is not None else 0.0
         kill = bool(s.kill_switch) if s else True
+        worker_health = await _worker_health_snapshot(db)
 
         # Compute empirical performance from trailing closed strategy outcomes
         rows = (await db.execute(select(StrategyOutcome.net_return_bps).order_by(StrategyOutcome.created_at.desc()).limit(100))).scalars().all()
@@ -4017,8 +4052,20 @@ async def risk_dashboard_metrics(
             "ai_safety_timeout_seconds": float(settings.ai_strategy_provider_timeout_seconds),
             "is_halted": kill,
             "stream_type": "HTTP_POLL",
+            "worker_health": worker_health,
             "last_updated_epoch_ms": int(time.time() * 1000),
         }
+
+
+@app.get("/api/risk-dashboard/worker-health")
+async def risk_dashboard_worker_health(
+    x_admin_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "RISK_OFFICER")
+    async with SessionLocal() as db:
+        return await _worker_health_snapshot(db)
 
 
 @app.websocket("/ws/risk-telemetry")
@@ -4049,6 +4096,7 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 realized = float(s.realized_pnl) if s and s.realized_pnl is not None else 0.0
                 unrealized = float(s.unrealized_pnl) if s and s.unrealized_pnl is not None else 0.0
                 kill = bool(s.kill_switch) if s else True
+                worker_health = await _worker_health_snapshot(db)
 
                 rows = (await db.execute(select(StrategyOutcome.net_return_bps).order_by(StrategyOutcome.created_at.desc()).limit(100))).scalars().all()
                 returns = [r / 10000.0 for r in rows if r is not None]
@@ -4092,6 +4140,7 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 "ai_safety_timeout_seconds": float(settings.ai_strategy_provider_timeout_seconds),
                 "is_halted": kill,
                 "stream_type": "WEBSOCKET_PUSH",
+                "worker_health": worker_health,
                 "last_updated_epoch_ms": int(time.time() * 1000),
             }
             await websocket.send_json(payload)
