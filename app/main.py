@@ -4466,6 +4466,8 @@ async def mark_withdrawal_not_sent(
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
     approver_auth(req.admin_id, x_approver_token, x_admin_token)
+    if req.admin_id.strip() == req.operator_id.strip():
+        raise HTTPException(403, "Approver and release operator must be different people")
     if not verify_release_operator(req.operator_id, x_release_token):
         raise HTTPException(401, "Separate release-operator authentication required")
     async with SessionLocal() as db:
@@ -4488,6 +4490,8 @@ async def mark_withdrawal_not_sent(
             pass
         except PayoutUnknown as e:
             raise _safe_http_error(409, e, "Provider outcome remains unresolved; use reconcile instead") from e
+        except PayoutError as e:
+            raise _safe_http_error(409, e, "Provider recovery failed; use reconcile instead") from e
         w.status = "FAILED"
         w.provider_status = "NOT_SENT"
         w.provider_error = req.evidence.strip()[:1000]
