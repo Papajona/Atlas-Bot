@@ -32,7 +32,6 @@ jobs:
         run: |
           test "${GITHUB_REF}" = "refs/heads/main"
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
-          test "${GITHUB_SHA}" = "f8d802f70287380ad618e22589882da03768d567" || true
 
       - name: Authenticate to Google Cloud with GitHub OIDC
         uses: google-github-actions/auth@v2
@@ -80,7 +79,6 @@ jobs:
           AR_REPOSITORY: ${{ secrets.AR_REPOSITORY }}
           CLOUD_RUN_SERVICE: ${{ secrets.CLOUD_RUN_SERVICE }}
         run: |
-          RELEASE_VERSION="$(sed -n 's/^[[:space:]]*app_version: str = "\([^"]*\)".*/\1/p' app/config.py | head -n1)"
           IMAGE_TAG="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AR_REPOSITORY}/${CLOUD_RUN_SERVICE}:${EXPECTED_RELEASE_SHA}"
           EXPECTED_IMAGE_DIGEST="$(gcloud artifacts docker images describe "${IMAGE_TAG}" --format='value(image_summary.digest)')"
           test -n "${EXPECTED_IMAGE_DIGEST}"
