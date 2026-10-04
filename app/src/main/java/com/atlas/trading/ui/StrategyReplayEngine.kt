@@ -237,12 +237,15 @@ fun StrategyReplaySection(
     var simulationResult by remember { mutableStateOf<ReplaySummary?>(null) }
     var tradeFilter by remember { mutableStateOf("ALL") } // ALL, WINS, LOSSES
 
-    val cardSurface = Color(0xFF0E1729)
-    val cardBorder = Color(0xFF22304B)
-    val accentCyan = Color(0xFF6EE7F7)
-    val emeraldPass = Color(0xFF34D399)
-    val redDanger = Color(0xFFEF4444)
-    val textMuted = Color(0xFF94A3B8)
+    // Unified ambient palette supporting Light and Dark modes
+    val theme = com.atlas.trading.ui.theme.LocalAtlasColors.current
+    val cardSurface = theme.cardSurface
+    val cardBorder = theme.cardBorder
+    val accentCyan = theme.brandTeal
+    val emeraldPass = theme.emeraldAccent
+    val redDanger = theme.redDanger
+    val textPrimary = theme.textPrimary
+    val textMuted = theme.textMuted
 
     // Run initial deterministic baseline simulation on component appearance with $100 stake
     LaunchedEffect(selectedCapital, selectedStrategy, selectedScenario) {
@@ -279,7 +282,7 @@ fun StrategyReplaySection(
                         text = "Simulation: $${String.format(java.util.Locale.US, "%.0f", selectedCapital)} Stake (2x Fee Stress)",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = Color.White
+                        color = textPrimary
                     )
                 }
 
@@ -295,21 +298,21 @@ fun StrategyReplaySection(
                     modifier = Modifier
                         .height(38.dp)
                         .testTag("btn_run_simulation"),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
+                    colors = ButtonDefaults.buttonColors(containerColor = accentCyan),
                     shape = RoundedCornerShape(8.dp),
                     contentPadding = PaddingValues(horizontal = 12.dp)
                 ) {
                     if (isSimulating) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),
-                            color = accentCyan,
+                            color = Color.White,
                             strokeWidth = 2.dp
                         )
                     } else {
                         Icon(
                             imageVector = Icons.Default.PlayArrow,
                             contentDescription = "Run",
-                            tint = accentCyan,
+                            tint = Color.White,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
@@ -338,10 +341,10 @@ fun StrategyReplaySection(
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(6.dp))
-                            .background(if (isSelected) accentCyan.copy(alpha = 0.2f) else Color(0xFF111827))
+                            .background(if (isSelected) accentCyan else theme.cardInnerSurface)
                             .border(
                                 width = 1.dp,
-                                color = if (isSelected) accentCyan else cardBorder,
+                                color = if (isSelected) accentCyan else theme.cardBorder,
                                 shape = RoundedCornerShape(6.dp)
                             )
                             .clickable { selectedCapital = cap }
@@ -352,7 +355,7 @@ fun StrategyReplaySection(
                             text = "$${cap.toInt()}",
                             fontSize = 11.sp,
                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                            color = if (isSelected) accentCyan else Color.White
+                            color = if (isSelected) Color.White else textPrimary
                         )
                     }
                 }
@@ -373,10 +376,10 @@ fun StrategyReplaySection(
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(6.dp))
-                            .background(if (isSelected) Color(0xFF1E3A5F) else Color(0xFF111827))
+                            .background(if (isSelected) accentCyan else theme.cardInnerSurface)
                             .border(
                                 width = 1.dp,
-                                color = if (isSelected) accentCyan else cardBorder,
+                                color = if (isSelected) accentCyan else theme.cardBorder,
                                 shape = RoundedCornerShape(6.dp)
                             )
                             .clickable { selectedStrategy = strat }
@@ -404,10 +407,10 @@ fun StrategyReplaySection(
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(6.dp))
-                            .background(if (isSelected) Color(0xFF1E3A5F) else Color(0xFF111827))
+                            .background(if (isSelected) accentCyan else theme.cardInnerSurface)
                             .border(
                                 width = 1.dp,
-                                color = if (isSelected) accentCyan else cardBorder,
+                                color = if (isSelected) accentCyan else theme.cardBorder,
                                 shape = RoundedCornerShape(6.dp)
                             )
                             .clickable { selectedStrategy = strat }
@@ -440,10 +443,10 @@ fun StrategyReplaySection(
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(6.dp))
-                            .background(if (isSelected) Color(0xFF1E3A5F) else Color(0xFF111827))
+                            .background(if (isSelected) accentCyan else theme.cardInnerSurface)
                             .border(
                                 width = 1.dp,
-                                color = if (isSelected) accentCyan else cardBorder,
+                                color = if (isSelected) accentCyan else theme.cardBorder,
                                 shape = RoundedCornerShape(6.dp)
                             )
                             .clickable { selectedScenario = scenario }
@@ -487,7 +490,7 @@ fun StrategyReplaySection(
                         label = "PROFIT FACTOR",
                         value = "${res.profitFactor}",
                         subValue = "Max DD: ${res.maxDrawdownPct}%",
-                        color = if (res.profitFactor >= 1.5) accentCyan else Color.White,
+                        color = if (res.profitFactor >= 1.5) accentCyan else textPrimary,
                         modifier = Modifier.weight(1f)
                     )
                 }
@@ -514,13 +517,14 @@ fun StrategyReplaySection(
                         text = "Trade Execution Log (${res.trades.size})",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color.White
+                        color = textPrimary
                     )
 
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         TradeFilterChip(
                             label = "All (${res.trades.size})",
                             isSelected = tradeFilter == "ALL",
+                            activeColor = accentCyan,
                             onClick = { tradeFilter = "ALL" }
                         )
                         TradeFilterChip(
@@ -572,17 +576,19 @@ private fun PerformanceStatBadge(
     color: Color,
     modifier: Modifier = Modifier
 ) {
+    val theme = com.atlas.trading.ui.theme.LocalAtlasColors.current
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(8.dp))
-            .background(Color(0xFF111C30))
+            .background(theme.cardInnerSurface)
+            .border(1.dp, theme.cardBorder, RoundedCornerShape(8.dp))
             .padding(8.dp)
     ) {
         Column {
-            Text(text = label, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8))
+            Text(text = label, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = theme.textMuted)
             Spacer(modifier = Modifier.height(2.dp))
             Text(text = value, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = color)
-            Text(text = subValue, fontSize = 10.sp, color = Color(0xFF64748B))
+            Text(text = subValue, fontSize = 10.sp, color = theme.textMuted)
         }
     }
 }
@@ -594,6 +600,7 @@ private fun WinsLossesBar(
     grossProfit: Double,
     grossLoss: Double
 ) {
+    val theme = com.atlas.trading.ui.theme.LocalAtlasColors.current
     val total = max(1, wins + losses)
     val winFraction = wins.toFloat() / total.toFloat()
 
@@ -606,13 +613,13 @@ private fun WinsLossesBar(
                 text = "Wins: $wins (+$${String.format(java.util.Locale.US, "%.2f", grossProfit)})",
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color(0xFF34D399)
+                color = theme.emeraldAccent
             )
             Text(
                 text = "Losses: $losses (-$${String.format(java.util.Locale.US, "%.2f", abs(grossLoss))})",
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color(0xFFEF4444)
+                color = theme.redDanger
             )
         }
         Spacer(modifier = Modifier.height(4.dp))
@@ -621,19 +628,19 @@ private fun WinsLossesBar(
                 .fillMaxWidth()
                 .height(8.dp)
                 .clip(CircleShape)
-                .background(Color(0xFF1E293B))
+                .background(theme.cardInnerSurface)
         ) {
             Box(
                 modifier = Modifier
                     .weight(winFraction.coerceAtLeast(0.01f))
                     .fillMaxHeight()
-                    .background(Color(0xFF34D399))
+                    .background(theme.emeraldAccent)
             )
             Box(
                 modifier = Modifier
                     .weight((1f - winFraction).coerceAtLeast(0.01f))
                     .fillMaxHeight()
-                    .background(Color(0xFFEF4444))
+                    .background(theme.redDanger)
             )
         }
     }
@@ -643,16 +650,17 @@ private fun WinsLossesBar(
 private fun TradeFilterChip(
     label: String,
     isSelected: Boolean,
-    activeColor: Color = Color(0xFF6EE7F7),
+    activeColor: Color = Color(0xFF0D9488),
     onClick: () -> Unit
 ) {
+    val theme = com.atlas.trading.ui.theme.LocalAtlasColors.current
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(6.dp))
-            .background(if (isSelected) activeColor.copy(alpha = 0.2f) else Color.Transparent)
+            .background(if (isSelected) activeColor.copy(alpha = 0.15f) else Color.Transparent)
             .border(
                 width = 1.dp,
-                color = if (isSelected) activeColor else Color(0xFF22304B),
+                color = if (isSelected) activeColor else theme.cardBorder,
                 shape = RoundedCornerShape(6.dp)
             )
             .clickable(onClick = onClick)
@@ -662,22 +670,26 @@ private fun TradeFilterChip(
             text = label,
             fontSize = 9.sp,
             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-            color = if (isSelected) activeColor else Color(0xFF94A3B8)
+            color = if (isSelected) activeColor else theme.textMuted
         )
     }
 }
 
 @Composable
 private fun TradeItemRow(trade: ReplayTrade) {
-    val emeraldPass = Color(0xFF34D399)
-    val redDanger = Color(0xFFEF4444)
-    val cardSurfaceLight = Color(0xFF131F38)
+    val theme = com.atlas.trading.ui.theme.LocalAtlasColors.current
+    val emeraldPass = theme.emeraldAccent
+    val redDanger = theme.redDanger
+    val cardSurfaceLight = theme.cardInnerSurface
+    val textPrimary = theme.textPrimary
+    val textMuted = theme.textMuted
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
             .background(cardSurfaceLight)
+            .border(1.dp, theme.cardBorder, RoundedCornerShape(8.dp))
             .padding(horizontal = 10.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
@@ -696,20 +708,20 @@ private fun TradeItemRow(trade: ReplayTrade) {
                         text = "#${trade.id} ${trade.symbol}",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color.White
+                        color = textPrimary
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
                         text = trade.side,
                         fontSize = 9.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = if (trade.side == "BUY") emeraldPass else Color(0xFF60A5FA)
+                        color = if (trade.side == "BUY") emeraldPass else theme.brandAccent
                     )
                 }
                 Text(
                     text = "${trade.exitReason} • ${trade.timestamp}",
                     fontSize = 9.sp,
-                    color = Color(0xFF64748B)
+                    color = textMuted
                 )
             }
         }

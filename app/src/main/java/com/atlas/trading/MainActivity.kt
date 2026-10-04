@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import com.atlas.trading.auth.AdminAuthClient
 import com.atlas.trading.security.SecurityAuditLog
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -23,6 +24,12 @@ import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import com.atlas.trading.ui.PortfolioRiskMetrics
 import com.atlas.trading.ui.RiskDashboardScreen
+import com.atlas.trading.ui.UserDashboardScreen
+import com.atlas.trading.ui.theme.AppThemeMode
+import com.atlas.trading.ui.theme.AtlasTheme
+import com.atlas.trading.ui.theme.ThemePreferences
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.core.view.WindowCompat
 import java.io.File
 
 class MainActivity : AppCompatActivity() {
@@ -39,74 +46,111 @@ class MainActivity : AppCompatActivity() {
         val backendUrl = getString(R.string.backend_url).trimEnd('/')
 
         setContent {
-            var accessToken by remember { mutableStateOf<String?>(null) }
-            var loginError by remember { mutableStateOf<String?>(null) }
-            var mfaChallenge by remember { mutableStateOf<AdminAuthClient.MfaChallenge?>(null) }
-            val scope = rememberCoroutineScope()
-            val authClient = remember { AdminAuthClient(backendUrl) }
+            var themeMode by remember { mutableStateOf(ThemePreferences.getThemeMode(this@MainActivity)) }
+            val isSystemDark = isSystemInDarkTheme()
+            val isDark = when (themeMode) {
+                AppThemeMode.LIGHT -> false
+                AppThemeMode.DARK -> true
+                AppThemeMode.SYSTEM -> isSystemDark
+            }
 
-            if (accessToken == null) {
-                AdminLoginScreen(
-                    error = loginError,
-                    mfaChallenge = mfaChallenge,
-                    onLogin = { email, password ->
-                        scope.launch {
-                            loginError = null
-                            try {
-                                val result = authClient.login(email, password)
-                                if (result.accessToken != null) {
-                                    accessToken = result.accessToken
-                                    mfaChallenge = null
-                                } else if (result.challenge != null) {
-                                    mfaChallenge = result.challenge
-                                } else {
-                                    loginError = result.message
-                                }
-                            } catch (e: Exception) {
-                                loginError = e.message ?: "Administrator authentication failed"
-                            }
-                        }
-                    },
-                    onVerifyMfa = { code ->
-                        scope.launch {
-                            loginError = null
-                            try {
-                                accessToken = authClient.verifyMfa(code)
-                                mfaChallenge = null
-                            } catch (e: Exception) {
-                                loginError = e.message ?: "Authenticator verification failed"
-                            }
-                        }
-                    }
-                )
-            } else {
-            RiskDashboardScreen(
-                backendUrl = backendUrl,
-                accessToken = accessToken,
-                initialMetrics = PortfolioRiskMetrics(),
-                onOpenPortal = { openPortal() },
-                onRequestBiometricResume = { onSuccess ->
-                    authenticateBiometricForResume(onSuccess)
-                },
-                onEmergencyHaltToggle = { isHalted ->
-                    val token = accessToken
-                    scope.launch {
-                        try {
-                            runCatching { securityAuditLog.append("RISK_KILL_SWITCH_REQUESTED", mapOf("halted" to isHalted)) }
-                            val state = authClient.setKillSwitch(isHalted, token)
-                            if (!state.confirmed) throw IllegalStateException("Server did not confirm requested risk state")
-                            runCatching { securityAuditLog.append("RISK_KILL_SWITCH_CONFIRMED", mapOf("halted" to isHalted)) }
-                            Toast.makeText(
-                                this@MainActivity,
-                                if (isHalted) "SERVER CONFIRMED: ENGINE HALTED" else "SERVER CONFIRMED: HALT RELEASED; LIVE TRADING REMAINS DISABLED",
-                                Toast.LENGTH_LONG
-                            ).show()
-                        } catch (e: Exception) {
-                            Toast.makeText(this@MainActivity, "Risk state change failed: ${e.message}", Toast.LENGTH_LONG).show()
-                        }
-                    }
+            LaunchedEffect(isDark) {
+                WindowCompat.getInsetsController(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !isDark
+                    isAppearanceLightNavigationBars = !isDark
                 }
-            )
+            }
+
+            AtlasTheme(
+                themeMode = themeMode,
+                onThemeChange = { newMode ->
+                    themeMode = newMode
+                    ThemePreferences.setThemeMode(this@MainActivity, newMode)
+                }
+            ) {
+                var showOperatorConsole by remember { mutableStateOf(false) }
+                var accessToken by remember { mutableStateOf<String?>(null) }
+                var loginError by remember { mutableStateOf<String?>(null) }
+                var mfaChallenge by remember { mutableStateOf<AdminAuthClient.MfaChallenge?>(null) }
+                val scope = rememberCoroutineScope()
+                val authClient = remember { AdminAuthClient(backendUrl) }
+
+                BackHandler(enabled = showOperatorConsole) {
+                    showOperatorConsole = false
+                }
+
+                if (!showOperatorConsole) {
+                    UserDashboardScreen(
+                        userName = "Alice",
+                        backendUrl = backendUrl,
+                        onOpenOperatorConsole = { showOperatorConsole = true },
+                        onOpenPortal = { openPortal() }
+                    )
+                } else if (accessToken == null) {
+                    AdminLoginScreen(
+                        error = loginError,
+                        mfaChallenge = mfaChallenge,
+                        onLogin = { email, password ->
+                            scope.launch {
+                                loginError = null
+                                try {
+                                    val result = authClient.login(email, password)
+                                    if (result.accessToken != null) {
+                                        accessToken = result.accessToken
+                                        mfaChallenge = null
+                                    } else if (result.challenge != null) {
+                                        mfaChallenge = result.challenge
+                                    } else {
+                                        loginError = result.message
+                                    }
+                                } catch (e: Exception) {
+                                    loginError = e.message ?: "Administrator authentication failed"
+                                }
+                            }
+                        },
+                        onVerifyMfa = { code ->
+                            scope.launch {
+                                loginError = null
+                                try {
+                                    accessToken = authClient.verifyMfa(code)
+                                    mfaChallenge = null
+                                } catch (e: Exception) {
+                                    loginError = e.message ?: "Authenticator verification failed"
+                                }
+                            }
+                        },
+                        onBack = { showOperatorConsole = false }
+                    )
+                } else {
+                    RiskDashboardScreen(
+                        backendUrl = backendUrl,
+                        accessToken = accessToken,
+                        initialMetrics = PortfolioRiskMetrics(),
+                        onOpenPortal = { openPortal() },
+                        onRequestBiometricResume = { onSuccess ->
+                            authenticateBiometricForResume(onSuccess)
+                        },
+                        onEmergencyHaltToggle = { isHalted ->
+                            val token = accessToken
+                            scope.launch {
+                                try {
+                                    runCatching { securityAuditLog.append("RISK_KILL_SWITCH_REQUESTED", mapOf("halted" to isHalted)) }
+                                    val state = authClient.setKillSwitch(isHalted, token)
+                                    if (!state.confirmed) throw IllegalStateException("Server did not confirm requested risk state")
+                                    runCatching { securityAuditLog.append("RISK_KILL_SWITCH_CONFIRMED", mapOf("halted" to isHalted)) }
+                                    Toast.makeText(
+                                        this@MainActivity,
+                                        if (isHalted) "SERVER CONFIRMED: ENGINE HALTED" else "SERVER CONFIRMED: HALT RELEASED; LIVE TRADING REMAINS DISABLED",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                } catch (e: Exception) {
+                                    Toast.makeText(this@MainActivity, "Risk state change failed: ${e.message}", Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        },
+                        onBack = { showOperatorConsole = false }
+                    )
+                }
             }
         }
     }
