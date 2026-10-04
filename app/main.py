@@ -3850,7 +3850,14 @@ async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorizatio
         )
         w.proposal_digest = proposal_digest(request_id=request_id, amount=req.amount, currency="USDT",
             destination=w.destination, tag=w.destination_tag, network="TRON", provider=w.provider)
-        await reserve_withdrawal(db, profile.id, req.amount, reference_id=w.request_id)
+        try:
+            await reserve_withdrawal(db, profile.id, req.amount, reference_id=w.request_id)
+        except ValueError as exc:
+            # The authoritative ledger is locked/rechecked inside reserve_withdrawal. A concurrent
+            # withdrawal can therefore lose after the float pre-check; expose that deterministic
+            # business conflict as 409 instead of leaking a 500.
+            await db.rollback()
+            raise HTTPException(409, "Insufficient available USDT balance") from exc
         await sync_wallet_from_ledger(db, profile.id, "USDT")
         ledger_balance = await customer_balance(db, profile.id, "USDT")
         if trading_account:
