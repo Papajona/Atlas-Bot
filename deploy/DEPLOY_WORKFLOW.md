@@ -123,8 +123,9 @@ Also run the whole suite once: `pytest -q`.
 
 ### Step 4: Build the image (immutable, tagged by commit)
 `bash deploy/cloud-run-deploy.sh` builds with `gcloud builds submit --tag <region>-docker.pkg.dev/<project>/<repo>/<service>:<git-sha>`.
-**Known gap:** it builds the *working tree*, so uncommitted changes ship under a clean-looking sha. Build from a clean checkout or CI. Record the digest
-(`gcloud artifacts docker images describe ... --format='value(image_summary.digest)'`) and deploy by digest where possible.
+The script now **refuses a dirty Git worktree** before building, so the SHA embedded in the release identity cannot silently describe a different working tree.
+The recommended CI path is `.github/workflows/production-deploy.yml`, which checks out the exact requested commit, authenticates to GCP with GitHub OIDC,
+runs the same immutable deployment script, and then verifies the live endpoint against the Artifact Registry digest.
 
 ### Step 5: Migrate -- `deploy/cloud-run-migration-job.sh`
 ```
@@ -235,7 +236,7 @@ and before each release (the verify script does).
 | New real-ledger Postgres test not in the pre-flight script | concurrency of the actual ledger never exercised | added to `verify-live-money-runtime.sh` |
 
 ## 9. Known gaps (not fixed by scripts)
-No canary/rollback or explicit probes in the scripts (section 5); base image `python:3.13-slim` is not pinned by digest and there is no image-vulnerability gate
+Canary/rollback and explicit Cloud Run probes are still operational controls rather than automatic deployment steps; base image `python:3.13-slim` is not pinned by digest and there is no image-vulnerability gate
 between build and deploy; builds use the working tree; the worker holds the model-signing **private** key (acceptable for paper; for live, sign in CI/KMS and give the
 worker only the public key); invariant/custody checks are not scheduled; no automated exchange-venue-balance versus reserved-funds reconciliation; `main.py` and `execute_signal`
 remain very large; docker-compose is for local use only (`redis:8-alpine`, `postgres:17-alpine`, single `trading-app`), not a production topology.
