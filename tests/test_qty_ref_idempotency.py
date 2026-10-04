@@ -45,9 +45,10 @@ def test_distinct_ledger_precision_quantities_never_share_a_key():
 def test_old_collision_is_gone():
     # Legacy truncation mapped both quantities to the same millionth.
     assert int(0.0000011 * 1_000_000) == int(0.0000019 * 1_000_000)
-    # Both values round to the same persisted Numeric(38,6) amount, so sharing
-    # the canonical key is intentional and prevents duplicate ledger posting.
-    assert qty_ref(0.0000011) == qty_ref(0.0000019) == "0.000001"
+    # The current Decimal(str(...)) + ROUND_HALF_EVEN canonicalisation follows
+    # Numeric(38,6): 1.1 micro-units rounds down while 1.9 micro-units rounds up.
+    assert qty_ref(0.0000011) == "0.000001"
+    assert qty_ref(0.0000019) == "0.000002"
 
 
 def test_none_and_zero():
