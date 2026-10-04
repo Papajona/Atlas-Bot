@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 import app.main as main
 from app.config import settings
 from app.db import Base, CustomerLedgerAccount, Withdrawal
-from app.payout import PayoutNotFound, PayoutResult, PayoutError
+from app.payout import PayoutNotFound, PayoutResult, PayoutError, ExternalSignerPayoutProvider
 
 
 def _db():
@@ -200,7 +200,7 @@ def test_mark_not_sent_rejects_same_person_as_approver_and_operator(monkeypatch)
 
 def test_external_signer_recovery_lookup_error_is_not_treated_as_not_found():
     async def run():
-        provider = object.__new__(main.ExternalSignerPayoutProvider)
+        provider = object.__new__(ExternalSignerPayoutProvider)
         async def failed_request(*args, **kwargs):
             raise PayoutError("signer recovery lookup failed")
         provider._request = failed_request
