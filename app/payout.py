@@ -16,6 +16,9 @@ class PayoutError(Exception):
 class PayoutUnknown(PayoutError):
     """The provider may have accepted the payout but its response was lost."""
 
+class PayoutNotFound(PayoutUnknown):
+    """Provider-side recovery definitively found no matching payout."""
+
 _DEFINITE_HTTP_REJECTIONS = frozenset({400, 401, 403, 404, 422})
 _DEFINITE_CCXT_REJECTIONS = frozenset({
     "InsufficientFunds", "InvalidAddress", "AuthenticationError", "PermissionDenied",
@@ -123,7 +126,7 @@ class CCXTPayoutProvider:
                     raw_status = str(raw.get("status") or "PENDING").upper()
                     mapped = {"OK":"COMPLETED","SUCCESS":"COMPLETED","DONE":"COMPLETED","FAILED":"FAILED","CANCELED":"FAILED","CANCELLED":"FAILED"}.get(raw_status, "PENDING")
                     return PayoutResult(self.name, provider_id, mapped, raw_status, raw)
-        raise PayoutUnknown("No matching withdrawal was found in provider history")
+        raise PayoutNotFound("No matching withdrawal was found in provider history")
 
 
 class GenericBankProvider:
@@ -239,9 +242,14 @@ class ExternalSignerPayoutProvider:
 
     async def recover(self, idempotency_key, *, currency=None):
         data = await self._request("/recover", {"idempotency_key":idempotency_key,"currency":currency})
+        raw=str(data.get("status") or "PENDING").upper()
+        # Only an explicit provider-level NOT_FOUND is evidence that the signer never saw
+        # this idempotency key. Missing/unknown fields remain UNKNOWN and must not release funds.
+        if raw == "NOT_FOUND" or data.get("found") is False:
+            raise PayoutNotFound("External signer explicitly reported no matching payout")
         provider_id=str(data.get("provider_id") or data.get("transaction_id") or data.get("txid") or "")
         if not provider_id: raise PayoutUnknown("External signer recovery returned no transaction id")
-        raw=str(data.get("status") or "PENDING").upper(); mapped={"COMPLETED":"COMPLETED","SUCCESS":"COMPLETED","FAILED":"FAILED","REJECTED":"FAILED"}.get(raw,"PENDING")
+        mapped={"COMPLETED":"COMPLETED","SUCCESS":"COMPLETED","FAILED":"FAILED","REJECTED":"FAILED"}.get(raw,"PENDING")
         return PayoutResult(self.name,provider_id,mapped,raw,data)
 
 

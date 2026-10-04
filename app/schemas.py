@@ -257,6 +257,11 @@ class WithdrawalExecuteRequest(BaseModel):
 class WithdrawalReconcileRequest(BaseModel):
     operator_id: str = Field(min_length=2, max_length=120)
 
+class WithdrawalNotSentRequest(BaseModel):
+    operator_id: str = Field(min_length=2, max_length=120)
+    admin_id: str = Field(min_length=2, max_length=120)
+    evidence: str = Field(min_length=20, max_length=2000)
+
 
 class ModelRollbackRequest(BaseModel):
     asset: str = Field(default="crypto", pattern="^(crypto|forex|commodity)$")

@@ -39,7 +39,7 @@ from .research_validation import oos_promotion_gate, monte_carlo_bootstrap, para
 from .daily_research import run_daily_research, latest_macro_context
 from .execution import execute_signal, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
-from .payout import get_payout_provider, PayoutError, PayoutUnknown
+from .payout import get_payout_provider, PayoutError, PayoutUnknown, PayoutNotFound
 from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, verify_release_operator
 from .usdt_tron import derive_usdt_tron_address_from_xpub, validate_tron_account_xpub
 from .tron_sweep import build_sweep_intent, serialize_sweep_intent, SweepError, classify_solidified_sweep
@@ -143,6 +143,7 @@ from .schemas import (
     WithdrawalDecision,
     WithdrawalExecuteRequest,
     WithdrawalReconcileRequest,
+    WithdrawalNotSentRequest,
     ModelRollbackRequest,
     PlanChangeRequest,
     ReferralCodeRequest,
@@ -4336,7 +4337,7 @@ async def release_withdrawal(withdrawal_id: int, req: WithdrawalExecuteRequest, 
                                          tag=w.destination_tag, network=w.network,
                                          idempotency_key=idempotency_key,
                                          metadata={"withdrawal_id": w.id, "account_ref": w.account_ref})
-        except PayoutError as e:
+        except PayoutUnknown as e:
             async with SessionLocal() as db2:
                 w2 = await db2.get(Withdrawal, withdrawal_id)
                 w2.status = "UNKNOWN"
@@ -4436,6 +4437,8 @@ async def reconcile_withdrawal(withdrawal_id: int, req: WithdrawalReconcileReque
                 w.provider_id = result.provider_id
         except PayoutUnknown as e:
             raise _safe_http_error(502, e, "Provider reconciliation is currently unresolved") from e
+        except PayoutError as e:
+            raise _safe_http_error(502, e, "Provider reconciliation failed; retry reconciliation") from e
         w.provider_status = result.raw_status or result.status
         w.status = "RELEASED" if result.status == "COMPLETED" else ("FAILED" if result.status == "FAILED" else "SUBMITTED")
         if result.status == "COMPLETED":
@@ -4448,6 +4451,57 @@ async def reconcile_withdrawal(withdrawal_id: int, req: WithdrawalReconcileReque
         await db.commit()
     await _audit("WITHDRAWAL_RECONCILED", {"id": withdrawal_id, "provider_id": w.provider_id, "status": w.status, "operator_id": req.operator_id})
     return {"ok": True, "id": withdrawal_id, "status": w.status, "provider_status": w.provider_status, "provider_id": w.provider_id}
+
+
+@app.post("/api/admin/withdrawals/{withdrawal_id}/mark-not-sent")
+async def mark_withdrawal_not_sent(
+    withdrawal_id: int,
+    req: WithdrawalNotSentRequest,
+    x_admin_token: str | None = Header(default=None),
+    x_approver_token: str | None = Header(default=None),
+    x_release_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    """Release a reserved withdrawal only after dual control and provider recovery prove no payout exists."""
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "TREASURY")
+    approver_auth(req.admin_id, x_approver_token, x_admin_token)
+    if req.admin_id.strip().casefold() == req.operator_id.strip().casefold():
+        raise HTTPException(403, "Approver and release operator must be different people")
+    if not verify_release_operator(req.operator_id, x_release_token):
+        raise HTTPException(401, "Separate release-operator authentication required")
+    async with SessionLocal() as db:
+        w = (await db.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id).with_for_update())).scalar_one_or_none()
+        if not w:
+            raise HTTPException(404, "Withdrawal not found")
+        if w.status != "UNKNOWN":
+            raise HTTPException(409, f"Withdrawal is {w.status}; only UNKNOWN withdrawals can be marked not sent")
+        if w.provider_id:
+            raise HTTPException(409, "Provider transaction ID exists; use reconcile instead")
+        provider = get_payout_provider(w.provider or settings.payout_provider)
+        try:
+            recover = getattr(provider, "recover", None)
+            if recover is None:
+                raise HTTPException(409, "Provider does not support recovery; use reconcile instead")
+            result = await recover(f"withdrawal:{w.request_id}", currency=w.currency)
+            if result.provider_id:
+                raise HTTPException(409, "Provider payout found; use reconcile instead")
+        except PayoutNotFound:
+            pass
+        except PayoutUnknown as e:
+            raise _safe_http_error(409, e, "Provider outcome remains unresolved; use reconcile instead") from e
+        except PayoutError as e:
+            raise _safe_http_error(409, e, "Provider recovery failed; use reconcile instead") from e
+        w.status = "FAILED"
+        w.provider_status = "NOT_SENT"
+        w.provider_error = req.evidence.strip()[:1000]
+        w.reconciled_at = datetime.now(timezone.utc)
+        await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=w.request_id + ":not-sent")
+        await sync_wallet_from_ledger(db, w.customer_id, "USDT")
+        await db.commit()
+        result = {"id": w.id, "request_id": w.request_id, "status": w.status, "provider_status": w.provider_status}
+    await _audit("WITHDRAWAL_MARKED_NOT_SENT", {**result, "admin_id": req.admin_id, "operator_id": req.operator_id, "evidence": req.evidence.strip()})
+    return {"ok": True, **result}
 
 
 @app.post("/api/admin/withdrawals/{withdrawal_id}/reject")

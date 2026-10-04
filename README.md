@@ -11,7 +11,7 @@ This release turns the supplied `trader.py` prototype into a deployable trading 
 
 The console now includes an explainable ensemble rather than relying on one AI model. It combines **trend following, time-series momentum, breakout confirmation, and regime-filtered mean reversion**, then applies volatility-targeted position sizing and ATR-based protective levels. The engine is available through `POST /api/strategy/signal` and `POST /api/strategy/backtest`.
 
-The design is deliberately evidence-driven rather than marketed as a guaranteed “best strategy.” Long-run research has documented time-series momentum/trend-following across multiple asset classes and periods, while risk-parity/volatility-scaling research emphasizes controlling risk contributions and reducing exposure as volatility rises. citeturn0search0turn0search1turn0search13
+The design is deliberately evidence-driven rather than marketed as a guaranteed “best strategy.” Long-run research has documented time-series momentum/trend-following across multiple asset classes and periods, while risk-parity/volatility-scaling research emphasizes controlling risk contributions and reducing exposure as volatility rises.
 
 The backtest shifts signals one bar before applying returns and charges transaction costs, reducing common look-ahead and friction omissions. Results remain research diagnostics and must be validated out of sample, with realistic venue-specific fees/slippage, before any live deployment.
 
@@ -81,7 +81,7 @@ A transport timeout on order placement becomes `UNKNOWN`. Operators must reconci
 
 ## CCXT version
 
-The bundled requirements pin CCXT to `4.5.84`, verified against the CCXT GitHub releases page on September 24, 2026. https://github.com/ccxt/ccxt/releases
+The bundled requirements pin CCXT to `4.5.85` (see `requirements.txt`). Check https://github.com/ccxt/ccxt/releases and run the exchange drill tests before changing the pin.
 
 ## Production database
 
@@ -126,7 +126,7 @@ API: `GET /api/admin/withdrawals`, `POST /api/admin/withdrawals`, `POST /api/adm
 
 ## Forex / OANDA practice integration
 
-The platform now has a first-class OANDA v20 Forex adapter. OANDA documents a stable **fxTrade Practice** REST environment at `https://api-fxpractice.oanda.com` and a separate production environment at `https://api-fxtrade.oanda.com`. The practice environment is the default and is intended for testing. citeturn0search1
+The platform now has a first-class OANDA v20 Forex adapter. OANDA documents a stable **fxTrade Practice** REST environment at `https://api-fxpractice.oanda.com` and a separate production environment at `https://api-fxtrade.oanda.com`. The practice environment is the default and is intended for testing.
 
 Configure the demo account in `.env`:
 
@@ -151,7 +151,7 @@ The adapter supports:
 - OANDA transaction/order IDs
 - timeout → `UNKNOWN` behavior
 
-OANDA's v20 API supports real-time prices, historical pricing, order placement and account/trade state. citeturn0search0turn0search3
+OANDA's v20 API supports real-time prices, historical pricing, order placement and account/trade state.
 
 The platform's Forex demo endpoint is:
 
@@ -169,7 +169,7 @@ python scripts/oanda_demo_check.py
 
 It does **not** place an order. It verifies the practice account, retrieves account state, a live quote and instrument metadata.
 
-OANDA recommends maintaining a complete account snapshot and updating it from account updates for a consistent view of pending orders, trades and positions; the production reconciliation layer should follow that pattern rather than treating a single order response as authoritative. citeturn0search7
+OANDA recommends maintaining a complete account snapshot and updating it from account updates for a consistent view of pending orders, trades and positions; the production reconciliation layer should follow that pattern rather than treating a single order response as authoritative.
 
 ### Forex symbol format
 
