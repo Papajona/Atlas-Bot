@@ -34,15 +34,36 @@ jobs:
           test "${GITHUB_REF}" = "refs/heads/main"
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
 
-      - name: Require green CI on this exact commit
+      - name: Require all release CI gates on this exact commit
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          n="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" --json conclusion --jq '[.[] | select(.conclusion=="success")] | length')"
-          test "${n:-0}" -ge 1 || {
-            echo "CI has not passed for ${GITHUB_SHA}"
-            exit 1
+          set -euo pipefail
+
+          require_success() {
+            local workflow="$1"
+            local label="$2"
+            local ok
+            ok="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "$workflow" \
+              --commit "$GITHUB_SHA" \
+              --json status,conclusion \
+              --jq '[.[] | select(.status=="completed" and .conclusion=="success")] | length')"
+            if [ "${ok:-0}" -lt 1 ]; then
+              echo "BLOCKED: $label has not passed on exact commit $GITHUB_SHA"
+              gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow "$workflow" \
+                --commit "$GITHUB_SHA" \
+                --limit 10
+              exit 1
+            fi
+            echo "PASS: $label passed on exact commit $GITHUB_SHA"
           }
+
+          require_success "ci.yml" "Atlas CI"
+          require_success "ledger-concurrency-check.yml" "PostgreSQL ledger concurrency"
 
       - name: Authenticate to Google Cloud with GitHub OIDC
         uses: google-github-actions/auth@v2
