@@ -59,3 +59,12 @@ def test_deploy_scripts_require_immutable_identity():
     assert "image_summary.digest" in api
     assert "@$IMAGE_DIGEST" in worker
     assert "RELEASE_SHA" in worker
+
+
+def test_deployed_release_verifier_requires_exact_sha_and_digest():
+    script = (ROOT / "deploy/verify-deployed-release.sh").read_text()
+    assert 'EXPECTED_RELEASE_SHA' in script
+    assert 'EXPECTED_IMAGE_DIGEST' in script
+    assert 'curl --fail --silent --show-error' in script
+    assert 'actual_sha != os.environ["EXPECTED_RELEASE_SHA"]' in script
+    assert 'actual_digest != os.environ["EXPECTED_IMAGE_DIGEST"]' in script
