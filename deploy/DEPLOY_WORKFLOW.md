@@ -124,7 +124,7 @@ Also run the whole suite once: `pytest -q`.
 ### Step 4: Build the image (immutable, tagged by commit)
 `bash deploy/cloud-run-deploy.sh` builds with `gcloud builds submit --tag <region>-docker.pkg.dev/<project>/<repo>/<service>:<git-sha>`.
 The script now **refuses a dirty Git worktree** before building, so the SHA embedded in the release identity cannot silently describe a different working tree.
-The recommended CI path for the **API release** is `.github/workflows/production-deploy.yml`, which checks out the exact requested commit, authenticates to GCP with GitHub OIDC,
+The recommended CI path for the **API release** is `.github/workflows/production-deploy.yml`, which checks out the exact requested commit, requires a successful Atlas CI run for that exact SHA before any GCP authentication or deployment step, authenticates to GCP with GitHub OIDC,
 runs the same immutable API deployment script, and then verifies the live endpoint against the Artifact Registry digest. Database migration and worker-pool rollout remain separate
 gates and must follow the ordering in Steps 5–7; this workflow deliberately does not pretend to complete those infrastructure operations.
 
