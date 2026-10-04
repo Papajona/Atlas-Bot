@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
-from app.customer_funds import post_deposit, reserve_trading, release_trading, settle_withdrawal
+from app.customer_funds import post_deposit, reserve_trading, reserve_withdrawal, release_trading, settle_withdrawal, customer_balance
 from app.db import Base, CustomerLedgerAccount, Incident, LedgerEntry
 
 
@@ -245,4 +245,36 @@ def test_position_flip_reserve_failure_does_not_abort_the_fill(monkeypatch):
             ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
             assert ledger.trading_reserved == Decimal("0") and ledger.available == Decimal("100")
         assert opened and opened[0]["key"].startswith("POSITION_FLIP_RESERVE_DEFICIT:")
+    asyncio.run(with_database(check))
+
+
+def test_reserve_idempotency_rejects_different_amount():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(CustomerLedgerAccount(customer_id=77, available=Decimal("100")))
+            await db.commit()
+            await reserve_withdrawal(db, 77, 25, reference_id="same-ref")
+            await db.commit()
+            with pytest.raises(ValueError, match="different reserve amount"):
+                await reserve_withdrawal(db, 77, 30, reference_id="same-ref")
+            await db.rollback()
+            ledger = (await db.execute(select(CustomerLedgerAccount).where(
+                CustomerLedgerAccount.customer_id == 77
+            ))).scalar_one()
+            assert ledger.available == Decimal("75")
+            assert ledger.withdrawal_reserved == Decimal("25")
+    asyncio.run(with_database(check))
+
+
+def test_customer_balance_does_not_refresh_away_session_local_changes():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(CustomerLedgerAccount(customer_id=78, available=Decimal("100")))
+            await db.commit()
+            ledger = (await db.execute(select(CustomerLedgerAccount).where(
+                CustomerLedgerAccount.customer_id == 78
+            ))).scalar_one()
+            ledger.available = Decimal("90")
+            balance = await customer_balance(db, 78, "USDT")
+            assert balance["available"] == 90.0
     asyncio.run(with_database(check))
