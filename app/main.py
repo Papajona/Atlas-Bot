@@ -5111,6 +5111,10 @@ async def disable_live(x_admin_token: str | None = Header(default=None), authori
         s = await db.get(AppState, 1)
         s.live_enabled = False
         s.mode = "PAPER"
+        s.live_enable_requested_by = ""
+        s.live_enable_requested_at = None
+        s.live_enable_approved_by = ""
+        s.live_enable_approved_at = None
         await db.commit()
     await _audit("LIVE_DISABLED", {})
     return {"ok": True, "mode": "PAPER"}
@@ -5160,6 +5164,10 @@ async def reset(x_admin_token: str | None = Header(default=None), authorization:
         s.kill_switch = False
         s.live_enabled = False
         s.mode = "PAPER"
+        s.live_enable_requested_by = ""
+        s.live_enable_requested_at = None
+        s.live_enable_approved_by = ""
+        s.live_enable_approved_at = None
         await db.commit()
         await db.refresh(s)
         if s.kill_switch or s.live_enabled or str(s.mode).upper() != "PAPER":
