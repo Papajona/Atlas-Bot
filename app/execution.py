@@ -56,21 +56,22 @@ _EXECUTION_OWNER = os.getenv("K_REVISION", "local") + ":" + uuid.uuid4().hex[:16
 LIVE_SUBMISSION_LOCK_KEY = "live-broker-submission"
 
 
-_QTY_QUANTUM = Decimal("0.000000001")
+_QTY_QUANTUM = Decimal("0.000001")
 
 
 def _qty_ref(quantity: float | Decimal | int | None) -> str:
-    """Canonical fixed-point quantity for fill-derived idempotency references.
+    """Canonical fixed-point quantity matching the ledger's Numeric(38,6) precision.
 
-    Decimal(str(...)) avoids binary floating-point artifacts, while 9 decimal
-    places preserve distinct 8-decimal venue quantities and eliminate the old
-    6-decimal integer truncation collisions.
+    Decimal(str(...)) avoids binary floating-point artifacts. Canonicalising at the
+    same precision used by the ledger is important: otherwise two fill quantities
+    that become the same stored ledger amount could still receive different
+    idempotency keys and be posted twice.
     """
     value = Decimal("0") if quantity is None else Decimal(str(quantity))
     canonical = value.quantize(_QTY_QUANTUM, rounding=ROUND_HALF_EVEN)
     if canonical == 0:
         canonical = Decimal("0")
-    return format(canonical, ".9f")
+    return format(canonical, ".6f")
 
 
 def _live_submission_lock_ttl_seconds() -> int:
