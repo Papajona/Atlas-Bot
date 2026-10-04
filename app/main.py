@@ -5037,12 +5037,42 @@ async def reconcile_api(req: MarketRequest, x_admin_token: str | None = Header(d
 async def enable_live(body: LiveEnableRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "RISK_OFFICER")
+    actor_id = str(claims.get("sub") or _audit_actor.get() or "")
+    action = str(body.action or "REQUEST").upper()
+
     if settings.paper_trading or not settings.live_trading_enabled:
         raise HTTPException(403, "Live trading is feature-locked")
     if settings.broker_sandbox:
         raise HTTPException(403, "Broker sandbox mode is enabled; disable sandbox explicitly before live trading")
     if body.confirmation != settings.live_confirmation_text:
         raise HTTPException(403, "Live confirmation text did not match")
+    if action not in {"REQUEST", "APPROVE"}:
+        raise HTTPException(400, "Live enable action must be REQUEST or APPROVE")
+
+    now = datetime.now(timezone.utc)
+    async with SessionLocal() as db:
+        s = await db.get(AppState, 1)
+        if not s:
+            raise HTTPException(503, "Risk state is unavailable")
+        if s.kill_switch:
+            raise HTTPException(409, "Kill switch is active; reset it before enabling live mode")
+
+        if action == "REQUEST":
+            s.live_enabled = False
+            s.mode = "PAPER"
+            s.live_enable_requested_by = actor_id
+            s.live_enable_requested_at = now
+            s.live_enable_approved_by = ""
+            s.live_enable_approved_at = None
+            await db.commit()
+            await _audit("LIVE_ENABLE_REQUESTED", {"at": now.isoformat(), "actor_id": actor_id})
+            return {"ok": True, "mode": "PAPER", "status": "PENDING_SECOND_APPROVAL"}
+
+        if not s.live_enable_requested_by or not s.live_enable_requested_at:
+            raise HTTPException(409, "No pending live-trading enablement request exists")
+        if s.live_enable_requested_by == actor_id:
+            raise HTTPException(409, "A different RISK_OFFICER must approve the live-trading request")
+
     if settings.require_single_worker_for_live and int(os.getenv("WEB_CONCURRENCY", "1")) != 1:
         raise HTTPException(409, "Live trading requires exactly one active execution worker")
     if not settings.exchange_api_key or not settings.exchange_api_secret:
@@ -5058,16 +5088,20 @@ async def enable_live(body: LiveEnableRequest, x_admin_token: str | None = Heade
                 raise RuntimeError("Exchange does not advertise unified attached stopLoss support for the default symbol")
     except Exception as e:
         raise _safe_http_error(502, e, "Broker preflight failed") from e
+
     async with SessionLocal() as db:
         s = await db.get(AppState, 1)
-        if s.kill_switch:
-            raise HTTPException(409, "Kill switch is active; reset it before enabling live mode")
+        if not s or s.kill_switch:
+            raise HTTPException(409, "Risk state changed; live trading was not enabled")
+        if s.live_enable_requested_by == actor_id or not s.live_enable_requested_by:
+            raise HTTPException(409, "A distinct RISK_OFFICER approval is required")
+        s.live_enable_approved_by = actor_id
+        s.live_enable_approved_at = now
         s.live_enabled = True
         s.mode = "LIVE"
         await db.commit()
-    await _audit("LIVE_ENABLED", {"at": datetime.now(timezone.utc).isoformat()})
-    return {"ok": True, "mode": "LIVE"}
-
+    await _audit("LIVE_ENABLED", {"at": now.isoformat(), "requested_by": s.live_enable_requested_by, "approved_by": actor_id})
+    return {"ok": True, "mode": "LIVE", "status": "ENABLED"}
 
 @app.post("/api/live/disable")
 async def disable_live(x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
