@@ -1601,9 +1601,12 @@ async def _get_or_create_customer_trading_account(db, profile: CustomerProfile) 
     if not wallet or wallet.status != "ACTIVE":
         raise HTTPException(409, "Fund the USDT trading wallet before starting the bot")
     account = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == profile.id).with_for_update())).scalar_one_or_none()
-    # get_or_create_ledger() performs the one-time, journaled legacy-wallet migration.
+    # get_or_create_ledger() above performs the one-time, journaled legacy-wallet migration.
     # Never re-credit the authoritative ledger from the mutable wallet mirror.
-    ledger = await get_or_create_ledger(db, profile.id, "USDT")
+    ledger = (await db.execute(select(CustomerLedgerAccount).where(
+        CustomerLedgerAccount.customer_id == profile.id,
+        CustomerLedgerAccount.currency == "USDT",
+    ))).scalar_one()
     if float(ledger.available) + float(ledger.trading_reserved) <= 0:
         raise HTTPException(409, "Fund the USDT trading wallet before starting the bot")
     await sync_wallet_from_ledger(db, profile.id, "USDT")
@@ -3804,7 +3807,9 @@ async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorizatio
         ).with_for_update())).scalar_one_or_none()
         if not stepup or not hmac.compare_digest(stepup.token_hash, hashlib.sha256(x_withdrawal_step_up.encode()).hexdigest()):
             raise HTTPException(403, "Fresh OTP step-up verification is required before withdrawal")
-        stepup.used_at = datetime.now(timezone.utc)
+        # Canonical customer-cash lock order: ledger -> wallet -> trading account.
+        # This matches funding, fills, and trading-account bootstrap.
+        await get_or_create_ledger(db, profile.id, "USDT")
         wallet = (await db.execute(select(Wallet).where(
             Wallet.customer_id == profile.id, Wallet.currency == "USDT", Wallet.network == "TRON",
             Wallet.status == "ACTIVE"
@@ -3819,6 +3824,9 @@ async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorizatio
         if not destination_policy["allowed"]:
             await db.commit()
             raise HTTPException(409, f"Withdrawal destination is not yet trusted: {destination_policy['reason']}; ready_at={destination_policy.get('ready_at')}")
+        # Consume the single-use step-up only after the destination gate succeeds.
+        # A cooldown response commits the destination registration but must not burn the OTP.
+        stepup.used_at = datetime.now(timezone.utc)
         balance = await customer_balance(db, profile.id, "USDT")
         if balance["available"] < req.amount:
             raise HTTPException(409, "Insufficient available USDT balance")
