@@ -277,3 +277,17 @@ gcloud run services describe "$CLOUD_RUN_SERVICE" --region "$GCP_REGION" --forma
 Google Cloud Run docs: health checks (startup/liveness probes and the `--startup-probe` syntax), `gcloud run deploy` and `services update` references
 (`--no-traffic`, `--tag`, `update-traffic`), worker pools (always-on, no URL, no autoscaling). Binance docs for `GET /sapi/v1/account/apiRestrictions`. Google's model
 deprecation notices for `gemini-2.5-*`. The repository's own scripts, `app/config.py` and `app/main.py` for every default and role-gating statement above.
+
+
+## Post-deploy immutable release verification
+
+After deploying the API image by digest, verify the public or load-balanced HTTPS endpoint exposes the exact release identity that was built and deployed:
+
+```bash
+ATLAS_BASE_URL="https://your-atlas-host" \
+EXPECTED_RELEASE_SHA="$(git rev-parse HEAD)" \
+EXPECTED_IMAGE_DIGEST="sha256:..." \
+bash deploy/verify-deployed-release.sh
+```
+
+The verifier calls `/healthz` and fails unless both the Git SHA and Artifact Registry image digest match exactly. A green CI run alone does not prove that the live Cloud Run revision is serving the intended immutable artifact.
