@@ -1189,16 +1189,25 @@ async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
             f"Broker filled quantity exceeds requested quantity for trade {trade.id}: "
             f"filled={filled} requested={requested}"
         )
+    # Some venues report a terminal order as "closed" with both filled=0 and
+    # remaining=0 when the order never executed. That response is ambiguous:
+    # keep the trade UNKNOWN and preserve the full requested remainder.
+    if status in {"closed", "filled"} and requested > 0 and filled <= 0:
+        if remaining > 1e-9:
+            raise ValueError(
+                f"Broker closed-without-fill has inconsistent remaining quantity for trade {trade.id}: "
+                f"filled={filled} remaining={remaining} requested={requested}"
+            )
+        trade.status = "UNKNOWN"
+        trade.remaining_quantity = requested
+        trade.updated_at = utcnow()
+        return 0.0
+
     if requested > 0 and abs((filled + remaining) - requested) > 1e-9:
         raise ValueError(
             f"Broker quantity conservation failed for trade {trade.id}: "
             f"filled={filled} remaining={remaining} requested={requested}"
         )
-
-    if status in {"closed", "filled"} and requested > 0 and filled <= 0:
-        trade.status = "UNKNOWN"
-        trade.updated_at = utcnow()
-        return 0.0
 
     fee_delta, fee_cum, fee_quality, fee_note = _prepare_live_fee(trade, order, filled, avg)
     realized_delta = await _apply_fill_to_position(db, trade, filled, avg)
@@ -1599,4 +1608,3 @@ async def emergency_stop(exchange: str | None = None):
     return {"ok": broker_halt_confirmed, "broker_halt_confirmed": broker_halt_confirmed,
             "canceled_count": len(canceled), "failure_count": len(failures),
             "cancel_error": cancel_error, "failures": failures, "mode": "HALTED"}
-
