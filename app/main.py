@@ -1597,11 +1597,9 @@ async def _get_or_create_customer_trading_account(db, profile: CustomerProfile) 
     wallet = (await db.execute(select(Wallet).where(Wallet.customer_id == profile.id, Wallet.currency == "USDT").with_for_update())).scalar_one_or_none()
     if not wallet or wallet.status != "ACTIVE":
         raise HTTPException(409, "Fund the USDT trading wallet before starting the bot")
+    # get_or_create_ledger() performs the one-time, journaled legacy-wallet migration.
+    # Never re-credit the authoritative ledger from the mutable wallet mirror.
     ledger = await get_or_create_ledger(db, profile.id, "USDT")
-    # Legacy wallets are migrated once into the authoritative ledger balance. New credits only enter through ledger postings.
-    if float(ledger.available) == 0 and float(ledger.trading_reserved) == 0 and float(wallet.available_balance) > 0:
-        ledger.available = float(wallet.available_balance)
-        wallet.available_balance = float(ledger.available)
     if float(ledger.available) + float(ledger.trading_reserved) <= 0:
         raise HTTPException(409, "Fund the USDT trading wallet before starting the bot")
     await sync_wallet_from_ledger(db, profile.id, "USDT")
