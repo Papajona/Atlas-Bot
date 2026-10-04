@@ -11,6 +11,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  actions: read
 
 concurrency:
   group: atlas-production-deploy
@@ -32,6 +33,16 @@ jobs:
         run: |
           test "${GITHUB_REF}" = "refs/heads/main"
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+
+      - name: Require green CI on this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" --json conclusion --jq '[.[] | select(.conclusion=="success")] | length')"
+          test "${n:-0}" -ge 1 || {
+            echo "CI has not passed for ${GITHUB_SHA}"
+            exit 1
+          }
 
       - name: Authenticate to Google Cloud with GitHub OIDC
         uses: google-github-actions/auth@v2
