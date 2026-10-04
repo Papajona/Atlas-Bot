@@ -257,12 +257,34 @@ def test_reserve_idempotency_rejects_different_amount():
             await db.commit()
             with pytest.raises(ValueError, match="different reserve amount"):
                 await reserve_withdrawal(db, 77, 30, reference_id="same-ref")
+            # The endpoint/service layer must roll back an expected reserve conflict.
             await db.rollback()
             ledger = (await db.execute(select(CustomerLedgerAccount).where(
                 CustomerLedgerAccount.customer_id == 77
             ))).scalar_one()
             assert ledger.available == Decimal("75")
             assert ledger.withdrawal_reserved == Decimal("25")
+    asyncio.run(with_database(check))
+
+
+def test_reserve_idempotency_rejects_different_customer():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add_all([
+                CustomerLedgerAccount(customer_id=79, available=Decimal("100")),
+                CustomerLedgerAccount(customer_id=80, available=Decimal("100")),
+            ])
+            await db.commit()
+            await reserve_withdrawal(db, 79, 25, reference_id="shared-withdrawal-ref")
+            await db.commit()
+            with pytest.raises(ValueError, match="different customer"):
+                await reserve_withdrawal(db, 80, 25, reference_id="shared-withdrawal-ref")
+            await db.rollback()
+            rows = (await db.execute(select(CustomerLedgerAccount).where(
+                CustomerLedgerAccount.customer_id.in_([79, 80])
+            ).order_by(CustomerLedgerAccount.customer_id))).scalars().all()
+            assert rows[0].withdrawal_reserved == Decimal("25")
+            assert rows[1].withdrawal_reserved == Decimal("0")
     asyncio.run(with_database(check))
 
 
@@ -284,6 +306,33 @@ def test_customer_cash_lock_order_is_ledger_then_account():
     from pathlib import Path
     src = Path("app/execution.py").read_text()
     block = src[src.index("async def risk_gate"):src.index("\nasync def ", src.index("async def risk_gate") + 20)]
+    assert block.index('ledger = await get_or_create_ledger(db, customer_id, "USDT")') < block.index(
+        "select(TradingAccount).where(TradingAccount.customer_id == customer_id).with_for_update()"
+    )
+
+
+def test_customer_balance_lock_free_path_does_not_force_refresh():
+    import inspect
+    from app import customer_funds
+    src = inspect.getsource(customer_funds.customer_balance)
+    assert "lock: bool = False" in src
+    assert "with_for_update" not in src.split("if ledger is None:", 1)[0]
+    assert "populate_existing=True" not in src
+
+
+def test_locked_ledger_path_may_refresh_after_lock():
+    import inspect
+    from app import customer_funds
+    src = inspect.getsource(customer_funds.get_or_create_ledger)
+    assert src.count("populate_existing=True") == 2
+
+
+def test_customer_cash_lock_order_is_ledger_then_account():
+    from pathlib import Path
+    src = Path("app/execution.py").read_text()
+    start = src.index("async def risk_gate")
+    end = src.find("\nasync def ", start + 20)
+    block = src[start:] if end < 0 else src[start:end]
     assert block.index('ledger = await get_or_create_ledger(db, customer_id, "USDT")') < block.index(
         "select(TradingAccount).where(TradingAccount.customer_id == customer_id).with_for_update()"
     )
