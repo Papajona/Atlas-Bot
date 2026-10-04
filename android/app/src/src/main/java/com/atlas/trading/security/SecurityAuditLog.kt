@@ -22,7 +22,7 @@ class SecurityAuditLog(context: Context) {
     private val file=File(context.applicationContext.noBackupFilesDir,"atlas_security_audit.enc")
     private val lock=Any(); private val random=SecureRandom()
 
-    fun append(event:String, detail:Map<String,Any?>=emptyMap()) {
+    fun append(event: String, detail: Map<String, Any?> = emptyMap()) {
         require(event.isNotBlank())
         synchronized(lock) {
             val current=read()
@@ -35,7 +35,6 @@ class SecurityAuditLog(context: Context) {
             val plain=JSONObject().put("version",1).put("sequence",seq).put("recorded_at_epoch_ms",ts)
                 .put("event",event.take(100)).put("detail",JSONObject(d)).put("previous_hash",prev).put("event_hash",hash).toString()
             FileOutputStream(file,true).bufferedWriter(StandardCharsets.UTF_8).use { it.append(encrypt(plain)); it.newLine() }
-            file.setReadable(false,false); file.setWritable(false,false)
         }
     }
     fun verify():VerificationResult=synchronized(lock){
