@@ -16,6 +16,26 @@ class PayoutError(Exception):
 class PayoutUnknown(PayoutError):
     """The provider may have accepted the payout but its response was lost."""
 
+_DEFINITE_HTTP_REJECTIONS = frozenset({400, 401, 403, 404, 422})
+_DEFINITE_CCXT_REJECTIONS = frozenset({
+    "InsufficientFunds", "InvalidAddress", "AuthenticationError", "PermissionDenied",
+    "AccountSuspended", "BadSymbol", "InvalidOrder",
+})
+
+
+def classify_payout_exception(exc: BaseException) -> "PayoutError":
+    """Fail toward UNKNOWN. Only classify provider errors as definite failures when the
+    provider contract proves the request was rejected before any payout could occur."""
+    if isinstance(exc, PayoutError):
+        return exc
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int) and status in _DEFINITE_HTTP_REJECTIONS:
+        return PayoutError(str(exc))
+    if status is None and any(c.__name__ in _DEFINITE_CCXT_REJECTIONS for c in type(exc).__mro__):
+        return PayoutError(str(exc))
+    return PayoutUnknown(str(exc))
+
+
 @dataclass
 class PayoutResult:
     provider: str
@@ -69,10 +89,7 @@ class CCXTPayoutProvider:
         try:
             tx = await self._call(self.exchange.withdraw, currency, amount, destination, tag, params)
         except Exception as e:
-            msg = str(e).lower()
-            if any(x in msg for x in ("timeout", "timed out", "network", "connection")):
-                raise PayoutUnknown(str(e)) from e
-            raise PayoutError(str(e)) from e
+            raise classify_payout_exception(e) from e
         provider_id = str(tx.get("id") or tx.get("txid") or "")
         if not provider_id:
             raise PayoutUnknown("Exchange accepted/returned an ambiguous withdrawal without an id")
@@ -136,7 +153,7 @@ class GenericBankProvider:
         except (httpx.TimeoutException, httpx.NetworkError) as e:
             raise PayoutUnknown(str(e)) from e
         except Exception as e:
-            raise PayoutError(str(e)) from e
+            raise classify_payout_exception(e) from e
         provider_id = str(data.get("id") or data.get("transaction_id") or "")
         if not provider_id:
             raise PayoutUnknown("Bank provider returned no transaction id")
@@ -156,7 +173,7 @@ class GenericBankProvider:
         except (httpx.TimeoutException, httpx.NetworkError) as e:
             raise PayoutUnknown(str(e)) from e
         except Exception as e:
-            raise PayoutError(str(e)) from e
+            raise classify_payout_exception(e) from e
         provider_id = str(data.get("id") or data.get("transaction_id") or "")
         if not provider_id:
             raise PayoutUnknown("Bank provider returned no transaction id for idempotency key")
@@ -177,7 +194,7 @@ class GenericBankProvider:
         except (httpx.TimeoutException, httpx.NetworkError) as e:
             raise PayoutUnknown(str(e)) from e
         except Exception as e:
-            raise PayoutError(str(e)) from e
+            raise classify_payout_exception(e) from e
         raw = str(data.get("status", "PENDING")).upper()
         mapped = {"COMPLETED":"COMPLETED", "SUCCESS":"COMPLETED", "FAILED":"FAILED", "REJECTED":"FAILED"}.get(raw, "PENDING")
         return PayoutResult(self.name, provider_id, mapped, raw, data)
@@ -207,7 +224,7 @@ class ExternalSignerPayoutProvider:
         except (httpx.TimeoutException, httpx.NetworkError) as e:
             raise PayoutUnknown(str(e)) from e
         except Exception as e:
-            raise PayoutError(str(e)) from e
+            raise classify_payout_exception(e) from e
 
     async def send(self, *, currency, amount, destination, tag, network, idempotency_key, metadata):
         data = await self._request("/sign-and-broadcast", {"currency":currency,"amount":amount,"destination":destination,"tag":tag,"network":network,"idempotency_key":idempotency_key,"metadata":metadata})
