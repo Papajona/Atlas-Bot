@@ -140,7 +140,7 @@ def test_mark_not_sent_rejects_withdrawal_that_is_not_unknown(monkeypatch):
 
             monkeypatch.setattr(settings, "withdrawal_approver_tokens", "approver-1:approver-secret")
             with pytest.raises(HTTPException) as exc:
-                await _call_endpoint(main, sessions, w)
+                await _call_endpoint(main, sessions, w, monkeypatch=monkeypatch)
             assert exc.value.status_code == 409
         finally:
             await engine.dispose()
