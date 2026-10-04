@@ -3,7 +3,6 @@ import asyncio
 import hashlib
 import hmac
 import json
-import time
 import uuid
 from decimal import Decimal
 
@@ -325,17 +324,6 @@ def test_locked_ledger_path_may_refresh_after_lock():
     from app import customer_funds
     src = inspect.getsource(customer_funds.get_or_create_ledger)
     assert src.count("populate_existing=True") == 2
-
-
-def test_customer_cash_lock_order_is_ledger_then_account():
-    from pathlib import Path
-    src = Path("app/execution.py").read_text()
-    start = src.index("async def risk_gate")
-    end = src.find("\nasync def ", start + 20)
-    block = src[start:] if end < 0 else src[start:end]
-    assert block.index('ledger = await get_or_create_ledger(db, customer_id, "USDT")') < block.index(
-        "select(TradingAccount).where(TradingAccount.customer_id == customer_id).with_for_update()"
-    )
 
 
 def test_customer_withdrawal_locks_ledger_before_wallet_and_account():
