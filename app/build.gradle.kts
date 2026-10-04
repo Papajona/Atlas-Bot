@@ -88,4 +88,5 @@ dependencies {
     implementation("androidx.biometric:biometric:1.2.0-alpha05")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

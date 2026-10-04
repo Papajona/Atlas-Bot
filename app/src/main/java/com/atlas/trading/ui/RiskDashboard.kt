@@ -138,7 +138,7 @@ fun RiskDashboardScreen(
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = accentCyan,
-                                letterSpacing = Double.NaN.sp
+                                letterSpacing = 1.5.sp
                             )
                             Spacer(modifier = Modifier.width(8.dp))
 
@@ -348,7 +348,7 @@ fun RiskDashboardScreen(
                         fontSize = 13.sp
                     )
                     Text(
-                        text = "• AI Safety Latency Ceiling: Double.NaNs Fail-Closed (NO_TRADE)",
+                        text = "• AI Safety Latency Ceiling: 1.5s Fail-Closed (NO_TRADE)",
                         color = Color(0xFFCBD5E1),
                         fontSize = 13.sp
                     )
@@ -475,7 +475,7 @@ private fun PrimaryRatiosCard(
                     title = "Sharpe Ratio",
                     value = String.format("%.2f", metrics.sharpeRatio),
                     subtext = "Hurdle: > 1.0",
-                    valueColor = if (metrics.sharpeRatio >= Double.NaN) emeraldColor else Color.White
+                    valueColor = if (metrics.sharpeRatio >= 1.5) emeraldColor else Color.White
                 )
 
                 // Calmar Ratio
@@ -531,7 +531,7 @@ private fun PrimaryRatiosCard(
                     text = "z = ${String.format("%+.2f", metrics.edgeDecayZScore)} (Halt: <= -2.0)",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
-                    color = if (metrics.edgeDecayZScore <= -Double.NaN) Color(0xFFFBBF24) else accentCyan
+                    color = if (metrics.edgeDecayZScore <= -1.5) Color(0xFFFBBF24) else accentCyan
                 )
             }
         }
