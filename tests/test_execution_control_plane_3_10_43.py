@@ -98,3 +98,24 @@ def test_production_live_payouts_require_external_signer():
     startup = MAIN[MAIN.index('@app.on_event("startup")'):MAIN.index('@app.get("/healthz")')]
     assert 'payout_live_enabled and not settings.external_custody_signer_required' in startup
     assert 'EXTERNAL_CUSTODY_SIGNER_REQUIRED=true is mandatory' in startup
+
+
+def test_live_enablement_requires_two_distinct_risk_officers():
+    block = MAIN[MAIN.index('@app.post("/api/live/enable")'):MAIN.index('@app.post("/api/live/disable")')]
+    assert 'action not in {"REQUEST", "APPROVE"}' in block
+    assert 's.live_enable_requested_by = actor_id' in block
+    assert 's.live_enable_approved_by = ""' in block
+    assert 's.live_enable_requested_by == actor_id' in block
+    assert 'A different RISK_OFFICER must approve the live-trading request' in block
+    assert 's.live_enabled = True' in block
+    db = (ROOT / "app/db.py").read_text()
+    assert 'live_enable_requested_by' in db
+    assert 'live_enable_approved_by' in db
+
+
+def test_live_enablement_dual_control_migration_exists():
+    mig = (ROOT / "alembic/versions/0043_live_trading_dual_control.py").read_text()
+    assert 'revision = "0043_live_trading_dual_control"' in mig
+    assert 'down_revision = "0042_research_run_macro_context"' in mig
+    assert 'live_enable_requested_by' in mig
+    assert 'live_enable_approved_by' in mig
