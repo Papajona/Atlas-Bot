@@ -1,4 +1,4 @@
-name: Production Deployment
+name: Production API Deployment
 
 on:
   workflow_dispatch:
@@ -82,5 +82,5 @@ jobs:
           IMAGE_TAG="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AR_REPOSITORY}/${CLOUD_RUN_SERVICE}:${EXPECTED_RELEASE_SHA}"
           EXPECTED_IMAGE_DIGEST="$(gcloud artifacts docker images describe "${IMAGE_TAG}" --format='value(image_summary.digest)')"
           test -n "${EXPECTED_IMAGE_DIGEST}"
-          echo "Verifying release ${RELEASE_VERSION} SHA ${EXPECTED_RELEASE_SHA} digest ${EXPECTED_IMAGE_DIGEST}"
+          echo "Verifying SHA ${EXPECTED_RELEASE_SHA} digest ${EXPECTED_IMAGE_DIGEST}"
           bash deploy/verify-deployed-release.sh
