@@ -81,7 +81,7 @@ def test_mark_not_sent_success_releases_reserved_balance_after_definitive_not_fo
                 w = Withdrawal(
                     customer_id=1, request_id="req-not-found", account_ref="acct",
                     amount=25, currency="USDT", destination_masked="T***", destination="T" + "A" * 33,
-                    network="TRON", provider="external_signer", provider_id="provider-id", status="UNKNOWN",
+                    network="TRON", provider="external_signer", provider_id=None, status="UNKNOWN",
                 )
                 db.add(w)
                 await db.commit()
@@ -164,6 +164,43 @@ def test_mark_not_sent_blocks_when_provider_finds_the_payout(monkeypatch):
             async with sessions() as db:
                 saved = await db.get(Withdrawal, w.id)
                 assert saved.status == "UNKNOWN"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_mark_not_sent_does_not_release_when_provider_recovery_is_unknown(monkeypatch):
+    async def run():
+        engine = _db()
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            sessions = async_sessionmaker(engine, expire_on_commit=False)
+            async with sessions() as db:
+                db.add(CustomerLedgerAccount(customer_id=1, available=Decimal("0"), withdrawal_reserved=Decimal("25")))
+                w = Withdrawal(
+                    customer_id=1, request_id="req-unknown-recovery", amount=25, currency="USDT",
+                    destination_masked="T***", destination="T" + "A" * 33,
+                    network="TRON", provider="external_signer", provider_id=None, status="UNKNOWN",
+                )
+                db.add(w)
+                await db.commit()
+                await db.refresh(w)
+
+            class Provider:
+                async def recover(self, *args, **kwargs):
+                    raise PayoutUnknown("signer lookup timed out")
+
+            monkeypatch.setattr(settings, "withdrawal_approver_tokens", "approver-1:approver-secret")
+            with pytest.raises(HTTPException) as exc:
+                await _call_endpoint(main, sessions, w, provider=Provider(), monkeypatch=monkeypatch)
+            assert exc.value.status_code == 409
+            async with sessions() as db:
+                saved = await db.get(Withdrawal, w.id)
+                ledger = (await db.execute(select(CustomerLedgerAccount).where(CustomerLedgerAccount.customer_id == 1))).scalar_one()
+                assert saved.status == "UNKNOWN"
+                assert ledger.withdrawal_reserved == Decimal("25.000000")
         finally:
             await engine.dispose()
 
