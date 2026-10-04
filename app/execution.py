@@ -1151,6 +1151,25 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 "broker_order_id": broker_id, "client_order_id": cid, "price": fill_price, "filled": filled}
 
 
+async def _report_snapshot_rejection(trade_id, customer_id, exc: Exception) -> None:
+    """Make a rejected broker snapshot visible without mutating the trade state."""
+    try:
+        await open_incident(
+            key=f"BROKER_SNAPSHOT_REJECTED:{trade_id}",
+            severity="HIGH",
+            category="EXECUTION_RECONCILIATION",
+            summary="Broker order snapshot rejected by validation; trade state was not updated",
+            detail={"trade_id": trade_id, "error": str(exc)[:500]},
+            customer_id=customer_id,
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "broker_snapshot_rejection_incident_write_failed trade=%s",
+            trade_id,
+            exc_info=True,
+        )
+
+
 async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
     """Apply one broker snapshot without guessing an execution outcome.
 
@@ -1358,6 +1377,8 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
                 await db.commit()
                 results.append({"trade_id": t.id, "customer_id": customer_id, "status": t.status, "resolved": True})
         except Exception as exc:
+            if isinstance(exc, ValueError):
+                await _report_snapshot_rejection(trade_id, customer_id, exc)
             results.append({"trade_id": trade_id, "customer_id": customer_id, "resolved": False, "error": str(exc)[:1000]})
     return {"results": results, "checked": len(snapshots)}
 
@@ -1468,6 +1489,8 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                 await db.commit()
                 results.append({"trade_id": t.id, "status": t.status, "resolved": True})
         except Exception as exc:
+            if isinstance(exc, ValueError):
+                await _report_snapshot_rejection(trade_id, None, exc)
             results.append({"trade_id": trade_id, "resolved": False, "error": str(exc)})
     if is_oanda:
         try:
