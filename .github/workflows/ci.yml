@@ -80,6 +80,7 @@ jobs:
           bash -n deploy/verify-live-money-runtime.sh
           bash -n deploy/verify-cloud-audit.sh
           bash -n deploy/gcp-security-audit-retention.sh
+          bash -n scripts/apply_final_fixes.sh
 
   android-security-and-build:
     runs-on: ubuntu-latest
