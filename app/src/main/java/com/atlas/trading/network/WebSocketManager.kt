@@ -116,7 +116,7 @@ class WebSocketManager(
                 val errMsg = t.message ?: "Connection failure"
                 _connectionState.value = WebSocketConnectionState.Failed(errMsg)
                 if (!isIntentionalClose) {
-                    scheduleReconnect()
+                    scheduleReconnect(targetUrl)
                 }
             }
         }
