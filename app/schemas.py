@@ -205,6 +205,7 @@ class ExecuteRequest(MarketRequest):
 
 class LiveEnableRequest(BaseModel):
     confirmation: str
+    action: str = "REQUEST"
 
 
 class WithdrawalCreate(BaseModel):
