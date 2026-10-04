@@ -4466,7 +4466,7 @@ async def mark_withdrawal_not_sent(
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
     approver_auth(req.admin_id, x_approver_token, x_admin_token)
-    if req.admin_id.strip() == req.operator_id.strip():
+    if req.admin_id.strip().casefold() == req.operator_id.strip().casefold():
         raise HTTPException(403, "Approver and release operator must be different people")
     if not verify_release_operator(req.operator_id, x_release_token):
         raise HTTPException(401, "Separate release-operator authentication required")
