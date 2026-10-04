@@ -3,6 +3,8 @@ import asyncio
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
+from cryptography.fernet import Fernet
+
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -14,6 +16,15 @@ from app.config import settings
 from app.db import Base, CustomerLedgerAccount, Withdrawal
 from app.payout import PayoutNotFound, PayoutResult, PayoutError, ExternalSignerPayoutProvider
 from app.payout import PayoutUnknown
+
+
+@pytest.fixture(autouse=True)
+def _test_encryption_key(monkeypatch):
+    # Withdrawal.destination is encrypted by the ORM; provide an isolated test key
+    # so these DB-backed tests exercise the endpoint rather than fail during INSERT.
+    monkeypatch.setattr(settings, "app_encryption_key", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "app_encryption_keys_json", "{}")
+    monkeypatch.setattr(settings, "app_encryption_active_key_id", "v1")
 
 
 def _db():
