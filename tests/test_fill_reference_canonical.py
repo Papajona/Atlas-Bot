@@ -11,9 +11,13 @@ def _load_qty_ref():
         return _qty_ref
     except Exception:
         src = pathlib.Path(__file__).resolve().parents[1].joinpath("app", "execution.py").read_text()
-        fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "_qty_ref")
+        tree = ast.parse(src)
+        keep = [n for n in tree.body
+                if (isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "_QTY_QUANTUM")
+                or (isinstance(n, ast.FunctionDef) and n.name == "_qty_ref")]
+        assert len(keep) == 2, "expected _QTY_QUANTUM and _qty_ref in app/execution.py"
         ns = {"Decimal": Decimal, "ROUND_HALF_EVEN": ROUND_HALF_EVEN}
-        exec(compile(ast.Module([fn], []), "execution.py", "exec"), ns)
+        exec(compile(ast.Module(keep, []), "execution.py", "exec"), ns)
         return ns["_qty_ref"]
 
 
@@ -36,10 +40,10 @@ def test_distinct_ledger_precision_quantities_never_share_a_key():
 
 
 def test_old_collision_is_gone():
-    # Legacy truncation mapped both quantities to the same millionth even though
-    # they are distinct at the ledger's Numeric(38,6) precision.
+    # Legacy truncation mapped both quantities to the same millionth.
     assert int(0.0000011 * 1_000_000) == int(0.0000019 * 1_000_000)
-    assert qty_ref(0.0000011) != qty_ref(0.0000019)
+    assert qty_ref(0.0000011) == "0.000001"
+    assert qty_ref(0.0000019) == "0.000002"
 
 
 def test_none_and_zero():
