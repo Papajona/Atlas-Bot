@@ -83,3 +83,13 @@ def test_tron_destination_validation_is_server_side():
     main = Path("app/main.py").read_text()
     assert 'TrxAddrDecoder.DecodeAddr' in main
     assert 'req.network.upper() != "TRON"' in main
+
+
+def test_customer_withdrawal_maps_concurrent_reserve_conflict_to_409():
+    main = Path("app/main.py").read_text()
+    block = main[main.index('@app.post("/api/customer/withdrawals")'):main.index('@app.get("/api/customer/withdrawals")')]
+    assert "try:" in block
+    assert "await reserve_withdrawal(db, profile.id, req.amount, reference_id=w.request_id)" in block
+    assert "except ValueError as exc:" in block
+    assert 'await db.rollback()' in block
+    assert 'raise HTTPException(409, "Insufficient available USDT balance") from exc' in block
