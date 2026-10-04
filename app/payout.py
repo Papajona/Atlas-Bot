@@ -16,6 +16,9 @@ class PayoutError(Exception):
 class PayoutUnknown(PayoutError):
     """The provider may have accepted the payout but its response was lost."""
 
+class PayoutNotFound(PayoutUnknown):
+    """Provider-side recovery definitively found no matching payout."""
+
 _DEFINITE_HTTP_REJECTIONS = frozenset({400, 401, 403, 404, 422})
 _DEFINITE_CCXT_REJECTIONS = frozenset({
     "InsufficientFunds", "InvalidAddress", "AuthenticationError", "PermissionDenied",
@@ -123,7 +126,7 @@ class CCXTPayoutProvider:
                     raw_status = str(raw.get("status") or "PENDING").upper()
                     mapped = {"OK":"COMPLETED","SUCCESS":"COMPLETED","DONE":"COMPLETED","FAILED":"FAILED","CANCELED":"FAILED","CANCELLED":"FAILED"}.get(raw_status, "PENDING")
                     return PayoutResult(self.name, provider_id, mapped, raw_status, raw)
-        raise PayoutUnknown("No matching withdrawal was found in provider history")
+        raise PayoutNotFound("No matching withdrawal was found in provider history")
 
 
 class GenericBankProvider:
