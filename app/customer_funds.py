@@ -181,6 +181,32 @@ async def sync_wallet_from_ledger(db, customer_id: int, currency: str = USDT) ->
         wallet.locked_balance = float(ledger.trading_reserved + ledger.withdrawal_reserved)
         wallet.updated_at = utcnow()
 
+async def _check_reserve_replay(db, journal: LedgerJournal, customer_id: int, amount_d: Decimal, bucket: str) -> None:
+    """Validate that an idempotent reserve replay matches its original customer and amount."""
+    lines = (await db.execute(select(LedgerJournalLine).where(
+        LedgerJournalLine.journal_id == journal.id,
+        LedgerJournalLine.account_code == _customer_account(customer_id, bucket),
+    ))).scalars().all()
+    if not lines:
+        raise ValueError("idempotency key already used by a different customer")
+    recorded = sum((D(str(line.credit)) for line in lines), D("0"))
+    if recorded != amount_d:
+        logger.critical(
+            "reserve_replay_amount_mismatch customer=%s key=%s recorded=%s requested=%s",
+            customer_id, journal.idempotency_key, recorded, amount_d,
+        )
+        await record_ledger_incident(
+            db,
+            key=f"RESERVE_REPLAY_MISMATCH:{journal.idempotency_key}",
+            summary="Idempotent reserve replayed with a different amount",
+            detail={"customer_id": customer_id, "idempotency_key": journal.idempotency_key,
+                    "recorded": str(recorded), "requested": str(amount_d)},
+            customer_id=customer_id,
+            severity="HIGH",
+        )
+        raise ValueError("idempotency key already used with a different reserve amount")
+
+
 async def reserve_trading(db, customer_id: int, amount: float, *, reference_id: str) -> CustomerLedgerAccount:
     """Reserve customer cash for trading.
 
@@ -198,9 +224,11 @@ async def reserve_trading(db, customer_id: int, amount: float, *, reference_id: 
         raise ValueError("reserve_trading requires a stable reference_id")
     ledger = await get_or_create_ledger(db, customer_id, USDT)
     idem = f"reserve:{reference_id}"
-    if (await db.execute(select(LedgerJournal).where(
+    existing_reserve = (await db.execute(select(LedgerJournal).where(
         LedgerJournal.idempotency_key == idem
-    ).with_for_update())).scalar_one_or_none():
+    ).with_for_update())).scalar_one_or_none()
+    if existing_reserve:
+        await _check_reserve_replay(db, existing_reserve, customer_id, amount_d, "TRADING_RESERVED")
         return ledger
 
     fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
@@ -259,9 +287,11 @@ async def reserve_withdrawal(db, customer_id: int, amount: float, *, reference_i
         raise ValueError("withdrawal reserve amount must be positive")
     ledger = await get_or_create_ledger(db, customer_id, USDT)
     idem = f"withdrawal-reserve:{reference_id}"
-    if (await db.execute(select(LedgerJournal).where(
+    existing_reserve = (await db.execute(select(LedgerJournal).where(
         LedgerJournal.idempotency_key == idem
-    ).with_for_update())).scalar_one_or_none():
+    ).with_for_update())).scalar_one_or_none()
+    if existing_reserve:
+        await _check_reserve_replay(db, existing_reserve, customer_id, amount_d, "WITHDRAWAL_RESERVED")
         return ledger
 
     fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
@@ -357,8 +387,16 @@ async def settle_withdrawal(db, customer_id: int, amount: float, *, reference_id
                        reference_id=reference_id, idempotency_key=idem))
     return fresh_ledger
 
-async def customer_balance(db, customer_id: int, currency: str = USDT) -> dict:
-    ledger = await get_or_create_ledger(db, customer_id, currency)
+async def customer_balance(db, customer_id: int, currency: str = USDT, *, lock: bool = False) -> dict:
+    """Read customer balances without locking on normal dashboard reads."""
+    ledger = None
+    if not lock:
+        ledger = (await db.execute(select(CustomerLedgerAccount).where(
+            CustomerLedgerAccount.customer_id == customer_id,
+            CustomerLedgerAccount.currency == currency,
+        ))).scalar_one_or_none()
+    if ledger is None:
+        ledger = await get_or_create_ledger(db, customer_id, currency)
     return {"available": float(ledger.available), "trading_reserved": float(ledger.trading_reserved),
             "withdrawal_reserved": float(ledger.withdrawal_reserved),
             "total": float(D(str(ledger.available)) + D(str(ledger.trading_reserved)) + D(str(ledger.withdrawal_reserved)))}
