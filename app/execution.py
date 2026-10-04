@@ -228,6 +228,7 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
 
         account = None
         account_reduce_only = False
+        ledger = None
         if customer_id is not None:
             if settings.customer_cash_only_trading:
                 # Canonical customer-cash lock order is ledger -> wallet -> trading account.
@@ -252,7 +253,6 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
             if account.status != "ACTIVE" and not (account.status == "HALTED" and account_reduce_only):
                 raise RiskBlocked("Customer trading account is not active")
             if settings.customer_cash_only_trading:
-                ledger = await get_or_create_ledger(db, customer_id, "USDT")
                 # Loose (direction-only, not magnitude-capped) reducing check: only used to
                 # decide whether new cash needs to be reserved for this order, matching the
                 # existing behavior. account_reduce_only above is the stricter, magnitude-capped
