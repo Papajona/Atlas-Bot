@@ -36,7 +36,7 @@ async def get_or_create_ledger(db, customer_id: int, currency: str = USDT) -> Cu
     row = (await db.execute(select(CustomerLedgerAccount).where(
         CustomerLedgerAccount.customer_id == customer_id,
         CustomerLedgerAccount.currency == currency,
-    ).with_for_update())).scalar_one_or_none()
+    ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
     if row:
         return row
     # Concurrent first-use requests can both observe no ledger row. Keep the
@@ -50,7 +50,7 @@ async def get_or_create_ledger(db, customer_id: int, currency: str = USDT) -> Cu
         row = (await db.execute(select(CustomerLedgerAccount).where(
             CustomerLedgerAccount.customer_id == customer_id,
             CustomerLedgerAccount.currency == currency,
-        ).with_for_update())).scalar_one_or_none()
+        ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
         if not row:
             raise
         return row
