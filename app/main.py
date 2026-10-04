@@ -4476,8 +4476,8 @@ async def mark_withdrawal_not_sent(
             raise HTTPException(404, "Withdrawal not found")
         if w.status != "UNKNOWN":
             raise HTTPException(409, f"Withdrawal is {w.status}; only UNKNOWN withdrawals can be marked not sent")
-        if not w.provider_id:
-            raise HTTPException(409, "Provider transaction ID is required before a withdrawal can be marked not sent")
+        if w.provider_id:
+            raise HTTPException(409, "Provider transaction ID exists; use reconcile instead")
         provider = get_payout_provider(w.provider or settings.payout_provider)
         try:
             recover = getattr(provider, "recover", None)
