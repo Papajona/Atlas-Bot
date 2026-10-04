@@ -5,6 +5,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.config import settings
 from app.customer_funds import get_or_create_ledger, ledger_invariant_report
 from app.db import Base, Wallet, LedgerJournal, LedgerEntry
+import pytest
+
+@pytest.fixture(autouse=True)
+def encryption_key(monkeypatch):
+    from cryptography.fernet import Fernet
+    monkeypatch.setattr(settings, "app_encryption_key", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "app_encryption_keys_json", "")
+    monkeypatch.setattr(settings, "app_encryption_active_key_id", "v1")
+
 
 def run(check):
     async def go():
