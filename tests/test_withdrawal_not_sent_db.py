@@ -207,3 +207,14 @@ def test_external_signer_recovery_lookup_error_is_not_treated_as_not_found():
         with pytest.raises(PayoutError):
             await provider.recover("withdrawal:never-seen", currency="USDT")
     asyncio.run(run())
+
+
+def test_external_signer_recovery_404_is_definite_error_not_not_found(monkeypatch):
+    import httpx
+    from app.payout import classify_payout_exception
+
+    response = httpx.Response(404, request=httpx.Request("POST", "https://signer.test/recover"))
+    error = httpx.HTTPStatusError("not found", request=response.request, response=response)
+    classified = classify_payout_exception(error)
+    assert isinstance(classified, PayoutError)
+    assert not isinstance(classified, PayoutNotFound)
