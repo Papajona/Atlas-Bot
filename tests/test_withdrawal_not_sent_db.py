@@ -23,7 +23,7 @@ def _db():
     )
 
 
-async def _call_endpoint(main_module, sessions, withdrawal, *, admin_id="approver-1", operator_id="operator-1", provider=None):
+async def _call_endpoint(main_module, sessions, withdrawal, *, admin_id="approver-1", operator_id="operator-1", provider=None, monkeypatch=None):
     async def fake_auth(*args, **kwargs):
         return {"sub": "treasury-test", "role": "TREASURY"}
 
@@ -33,6 +33,9 @@ async def _call_endpoint(main_module, sessions, withdrawal, *, admin_id="approve
     async def fake_audit(*args, **kwargs):
         return None
 
+    if monkeypatch is not None:
+        monkeypatch.setattr(settings, "withdrawal_approver_tokens", "approver-1:approver-secret,same-person:approver-secret")
+        monkeypatch.setattr(settings, "withdrawal_release_tokens", "operator-1:operator-secret,same-person:operator-secret")
     old = {
         "SessionLocal": main_module.SessionLocal,
         "auth": main_module.auth,
@@ -90,7 +93,7 @@ def test_mark_not_sent_success_releases_reserved_balance_after_definitive_not_fo
 
                 monkeypatch.setattr(settings, "withdrawal_approver_tokens", "approver-1:approver-secret")
                 monkeypatch.setattr(settings, "withdrawal_release_tokens", "operator-1:operator-secret")
-                result = await _call_endpoint(main, sessions, w, provider=Provider())
+                result = await _call_endpoint(main, sessions, w, provider=Provider(), monkeypatch=monkeypatch)
 
             async with sessions() as db:
                 saved = await db.get(Withdrawal, w.id)
@@ -156,7 +159,7 @@ def test_mark_not_sent_blocks_when_provider_finds_the_payout(monkeypatch):
 
             monkeypatch.setattr(settings, "withdrawal_approver_tokens", "approver-1:approver-secret")
             with pytest.raises(HTTPException) as exc:
-                await _call_endpoint(main, sessions, w, provider=Provider())
+                await _call_endpoint(main, sessions, w, provider=Provider(), monkeypatch=monkeypatch)
             assert exc.value.status_code == 409
             async with sessions() as db:
                 saved = await db.get(Withdrawal, w.id)
@@ -190,6 +193,7 @@ def test_mark_not_sent_rejects_same_person_as_approver_and_operator(monkeypatch)
                     main, sessions, w,
                     admin_id="same-person",
                     operator_id="same-person",
+                    monkeypatch=monkeypatch,
                 )
             assert exc.value.status_code == 403
         finally:
@@ -206,6 +210,21 @@ def test_external_signer_recovery_lookup_error_is_not_treated_as_not_found():
         provider._request = failed_request
         with pytest.raises(PayoutError):
             await provider.recover("withdrawal:never-seen", currency="USDT")
+    asyncio.run(run())
+
+
+def test_external_signer_recovery_without_provider_id_is_unknown_not_not_found():
+    async def run():
+        provider = object.__new__(ExternalSignerPayoutProvider)
+
+        async def empty_recovery(*args, **kwargs):
+            return {}
+
+        provider._request = empty_recovery
+        with pytest.raises(PayoutError) as exc:
+            await provider.recover("withdrawal:never-seen", currency="USDT")
+        assert not isinstance(exc.value, PayoutNotFound)
+
     asyncio.run(run())
 
 
