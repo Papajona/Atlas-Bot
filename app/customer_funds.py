@@ -54,12 +54,63 @@ async def get_or_create_ledger(db, customer_id: int, currency: str = USDT) -> Cu
         if not row:
             raise
         return row
-    # One-time migration of legacy wallet balance into the authoritative ledger.
-    wallet = (await db.execute(select(Wallet).where(Wallet.customer_id == customer_id, Wallet.currency == currency).with_for_update())).scalar_one_or_none()
-    if wallet and float(wallet.available_balance or 0) > 0:
-        row.available = D(str(wallet.available_balance))
-        row.trading_reserved = 0
-        row.withdrawal_reserved = 0
+    # One-time migration of a positive legacy wallet balance into the authoritative ledger.
+    # The opening balance is posted as a balanced journal in this same transaction so the
+    # ledger balance can never exist without a corresponding immutable accounting record.
+    wallet = (await db.execute(
+        select(Wallet)
+        .where(Wallet.customer_id == customer_id, Wallet.currency == currency)
+        .with_for_update()
+    )).scalar_one_or_none()
+    opening = _q(wallet.available_balance or 0) if wallet else D("0")
+    if wallet and opening > 0:
+        row.available = opening
+        row.trading_reserved = D("0")
+        row.withdrawal_reserved = D("0")
+        idem = f"opening:{customer_id}:{currency}"
+        await post_journal(
+            db,
+            currency=currency,
+            entry_type="OPENING_BALANCE",
+            reference_type="LEGACY_WALLET",
+            reference_id=f"wallet:{wallet.id}",
+            idempotency_key=idem,
+            lines=[
+                {"account_code": "ASSET:LEGACY:WALLET_MIGRATION", "debit": opening, "credit": 0},
+                {
+                    "account_code": _customer_account(customer_id, "AVAILABLE", currency),
+                    "customer_id": customer_id,
+                    "debit": 0,
+                    "credit": opening,
+                },
+            ],
+            description="One-time migration of legacy wallet balance into the authoritative ledger",
+        )
+        # Preserve the legacy LedgerEntry stream used by existing reporting/reconciliation.
+        # It has its own idempotency constraint, so the same stable key cannot double-post.
+        existing_entry = (
+            await db.execute(
+                select(LedgerEntry).where(LedgerEntry.idempotency_key == idem)
+            )
+        ).scalar_one_or_none()
+        if existing_entry is None:
+            db.add(
+                LedgerEntry(
+                    customer_id=customer_id,
+                    currency=currency,
+                    entry_type="OPENING_BALANCE",
+                    debit=0,
+                    credit=opening,
+                    amount=opening,
+                    reference_type="LEGACY_WALLET",
+                    reference_id=f"wallet:{wallet.id}",
+                    idempotency_key=idem,
+                    metadata_json=json.dumps(
+                        {"source": "legacy_wallet_available_balance"},
+                        separators=(",", ":"),
+                    ),
+                )
+            )
     return row
 
 async def post_journal(db, *, currency: str, entry_type: str, reference_type: str, reference_id: str, idempotency_key: str, lines: list[dict], description: str = "") -> LedgerJournal:
