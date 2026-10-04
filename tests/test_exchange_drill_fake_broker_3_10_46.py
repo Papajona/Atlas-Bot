@@ -108,7 +108,7 @@ def test_broker_quantity_conservation_is_fail_closed():
     asyncio.run(with_database(check))
 
 
-def test_expired_partial_order_is_terminal_and_releases_only_unfilled_reserve():
+def test_expired_partial_order_is_terminal_and_preserves_actual_fill_and_remaining():
     async def check(sessions):
         async with sessions() as db:
             t = Trade(customer_id=1, signal_id="s5", client_order_id="c5", exchange="binance", symbol="BTC/USDT",
