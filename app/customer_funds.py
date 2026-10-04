@@ -284,17 +284,25 @@ async def settle_withdrawal(db, customer_id: int, amount: float, *, reference_id
             summary="Withdrawal payout exceeded the customer's withdrawal reserve",
             detail={"customer_id": customer_id, "reference_id": reference_id, "payout": str(amount_d),
                     "reserved": str(reserved_now), "shortfall": str(shortfall)}, customer_id=customer_id)
-    if settle <= 0:
+    shortfall = amount_d - settle  # 0 unless the reserve was short
+    if settle <= 0 and shortfall <= 0:
         return fresh_ledger
-    fresh_ledger.withdrawal_reserved = D(str(fresh_ledger.withdrawal_reserved)) - settle
+    if settle > 0:
+        fresh_ledger.withdrawal_reserved = D(str(fresh_ledger.withdrawal_reserved)) - settle
+    # The full payout left custody, so the journal must credit the full amount. Any part the
+    # customer's reserve could not cover is booked to the customer-deficit receivable (same
+    # treatment as trading losses) instead of leaving the books short by shortfall.
+    lines = []
+    if settle > 0:
+        lines.append({"account_code": _customer_account(customer_id, "WITHDRAWAL_RESERVED"), "customer_id": customer_id, "debit": settle, "credit": 0})
+    if shortfall > 0:
+        lines.append({"account_code": DEFICIT_ACCOUNT, "customer_id": customer_id, "debit": shortfall, "credit": 0})
+    lines.append({"account_code": "ASSET:TRON:WITHDRAWAL", "debit": 0, "credit": amount_d})
     await post_journal(db, currency=USDT, entry_type="WITHDRAWAL_SETTLEMENT", reference_type="WITHDRAWAL",
-                       reference_id=reference_id, idempotency_key=idem,
-                       lines=[
-                           {"account_code": _customer_account(customer_id, "WITHDRAWAL_RESERVED"), "customer_id": customer_id, "debit": settle, "credit": 0},
-                           {"account_code": "ASSET:TRON:WITHDRAWAL", "debit": 0, "credit": settle},
-                       ], description="Settle completed customer withdrawal")
+                       reference_id=reference_id, idempotency_key=idem, lines=lines,
+                       description="Settle completed customer withdrawal")
     db.add(LedgerEntry(customer_id=customer_id, currency=USDT, entry_type="WITHDRAWAL_SETTLEMENT",
-                       debit=settle, credit=0, amount=settle, reference_type="WITHDRAWAL",
+                       debit=amount_d, credit=0, amount=amount_d, reference_type="WITHDRAWAL",
                        reference_id=reference_id, idempotency_key=idem))
     return fresh_ledger
 
