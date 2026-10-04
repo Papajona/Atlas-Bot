@@ -4337,7 +4337,7 @@ async def release_withdrawal(withdrawal_id: int, req: WithdrawalExecuteRequest, 
                                          tag=w.destination_tag, network=w.network,
                                          idempotency_key=idempotency_key,
                                          metadata={"withdrawal_id": w.id, "account_ref": w.account_ref})
-        except PayoutError as e:
+        except PayoutUnknown as e:
             async with SessionLocal() as db2:
                 w2 = await db2.get(Withdrawal, withdrawal_id)
                 w2.status = "UNKNOWN"
@@ -4437,6 +4437,8 @@ async def reconcile_withdrawal(withdrawal_id: int, req: WithdrawalReconcileReque
                 w.provider_id = result.provider_id
         except PayoutUnknown as e:
             raise _safe_http_error(502, e, "Provider reconciliation is currently unresolved") from e
+        except PayoutError as e:
+            raise _safe_http_error(502, e, "Provider reconciliation failed; retry reconciliation") from e
         w.provider_status = result.raw_status or result.status
         w.status = "RELEASED" if result.status == "COMPLETED" else ("FAILED" if result.status == "FAILED" else "SUBMITTED")
         if result.status == "COMPLETED":
