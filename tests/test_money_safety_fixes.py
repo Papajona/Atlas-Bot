@@ -3,7 +3,6 @@ import asyncio
 import hashlib
 import hmac
 import json
-import time
 import uuid
 from decimal import Decimal
 
@@ -13,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
-from app.customer_funds import post_deposit, reserve_trading, release_trading, settle_withdrawal
+from app.customer_funds import post_deposit, reserve_trading, reserve_withdrawal, release_trading, settle_withdrawal, customer_balance
 from app.db import Base, CustomerLedgerAccount, Incident, LedgerEntry
 
 
@@ -246,3 +245,104 @@ def test_position_flip_reserve_failure_does_not_abort_the_fill(monkeypatch):
             assert ledger.trading_reserved == Decimal("0") and ledger.available == Decimal("100")
         assert opened and opened[0]["key"].startswith("POSITION_FLIP_RESERVE_DEFICIT:")
     asyncio.run(with_database(check))
+
+
+def test_reserve_idempotency_rejects_different_amount():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(CustomerLedgerAccount(customer_id=77, available=Decimal("100")))
+            await db.commit()
+            await reserve_withdrawal(db, 77, 25, reference_id="same-ref")
+            await db.commit()
+            with pytest.raises(ValueError, match="different reserve amount"):
+                await reserve_withdrawal(db, 77, 30, reference_id="same-ref")
+            # The endpoint/service layer must roll back an expected reserve conflict.
+            await db.rollback()
+            ledger = (await db.execute(select(CustomerLedgerAccount).where(
+                CustomerLedgerAccount.customer_id == 77
+            ))).scalar_one()
+            assert ledger.available == Decimal("75")
+            assert ledger.withdrawal_reserved == Decimal("25")
+    asyncio.run(with_database(check))
+
+
+def test_reserve_idempotency_rejects_different_customer():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add_all([
+                CustomerLedgerAccount(customer_id=79, available=Decimal("100")),
+                CustomerLedgerAccount(customer_id=80, available=Decimal("100")),
+            ])
+            await db.commit()
+            await reserve_withdrawal(db, 79, 25, reference_id="shared-withdrawal-ref")
+            await db.commit()
+            with pytest.raises(ValueError, match="different customer"):
+                await reserve_withdrawal(db, 80, 25, reference_id="shared-withdrawal-ref")
+            await db.rollback()
+            rows = (await db.execute(select(CustomerLedgerAccount).where(
+                CustomerLedgerAccount.customer_id.in_([79, 80])
+            ).order_by(CustomerLedgerAccount.customer_id))).scalars().all()
+            assert rows[0].withdrawal_reserved == Decimal("25")
+            assert rows[1].withdrawal_reserved == Decimal("0")
+    asyncio.run(with_database(check))
+
+
+def test_customer_balance_does_not_refresh_away_session_local_changes():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(CustomerLedgerAccount(customer_id=78, available=Decimal("100")))
+            await db.commit()
+            ledger = (await db.execute(select(CustomerLedgerAccount).where(
+                CustomerLedgerAccount.customer_id == 78
+            ))).scalar_one()
+            ledger.available = Decimal("90")
+            balance = await customer_balance(db, 78, "USDT")
+            assert balance["available"] == 90.0
+    asyncio.run(with_database(check))
+
+
+def test_customer_cash_lock_order_is_ledger_then_account():
+    from pathlib import Path
+    src = Path("app/execution.py").read_text()
+    block = src[src.index("async def risk_gate"):src.index("\nasync def ", src.index("async def risk_gate") + 20)]
+    assert block.index('ledger = await get_or_create_ledger(db, customer_id, "USDT")') < block.index(
+        "select(TradingAccount).where(TradingAccount.customer_id == customer_id).with_for_update()"
+    )
+
+
+def test_customer_balance_lock_free_path_does_not_force_refresh():
+    import inspect
+    from app import customer_funds
+    src = inspect.getsource(customer_funds.customer_balance)
+    assert "lock: bool = False" in src
+    assert "with_for_update" not in src.split("if ledger is None:", 1)[0]
+    assert "populate_existing=True" not in src
+
+
+def test_locked_ledger_path_may_refresh_after_lock():
+    import inspect
+    from app import customer_funds
+    src = inspect.getsource(customer_funds.get_or_create_ledger)
+    assert src.count("populate_existing=True") == 2
+
+
+def test_customer_withdrawal_locks_ledger_before_wallet_and_account():
+    from app import main
+    import inspect
+    block = inspect.getsource(main.customer_create_withdrawal)
+    assert block.index('await get_or_create_ledger(db, profile.id, "USDT")') < block.index(
+        'select(Wallet).where('
+    )
+    assert block.index('await get_or_create_ledger(db, profile.id, "USDT")') < block.index(
+        'select(TradingAccount).where('
+    )
+
+
+def test_stepup_is_consumed_only_after_destination_gate():
+    from app import main
+    import inspect
+    block = inspect.getsource(main.customer_create_withdrawal)
+    assert block.index('raise HTTPException(409, f"Withdrawal destination is not yet trusted') < block.index(
+        'stepup.used_at = datetime.now(timezone.utc)'
+    )
+    assert block.count('stepup.used_at = datetime.now(timezone.utc)') == 1
