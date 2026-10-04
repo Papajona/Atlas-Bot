@@ -8,13 +8,16 @@ class StrategyReplayEngineTest {
 
     @Test
     fun testTrendingBullReplaySimulation() = runBlocking {
-        val result = ReplaySimulator.runSimulation("Crypto BTC/USDT", "Trending Bull", 10000.0)
+        val result = ReplaySimulator.runSimulation("Trend 4H (BTC/USDT)", "Trending Bull", 100.0)
 
-        println("=== REPLAY TEST: TRENDING BULL ===")
+        println("=== REPLAY TEST: TRENDING BULL ($100 STAKE) ===")
+        println("Initial: $${result.initialCapital}, Ending: $${result.endingCapital}")
         println("Trades: ${result.totalTrades}, Wins: ${result.winningTrades}, Losses: ${result.losingTrades}")
         println("Win Rate: ${result.winRatePct}%, Net Return: ${result.netReturnPct}%, Net PnL: $${result.netProfit}")
         println("Max DD: ${result.maxDrawdownPct}%, Sharpe: ${result.sharpeRatio}, Profit Factor: ${result.profitFactor}")
 
+        assertEquals(100.0, result.initialCapital, 0.001)
+        assertTrue("Ending capital should be recorded", result.endingCapital > 0.0)
         assertTrue("Should produce at least 30 trades", result.totalTrades >= 30)
         assertTrue("Should have winning trades", result.winningTrades > 0)
         assertTrue("Should have losing trades", result.losingTrades > 0)
@@ -40,12 +43,14 @@ class StrategyReplayEngineTest {
 
     @Test
     fun testHighVolShockReplaySimulation() = runBlocking {
-        val result = ReplaySimulator.runSimulation("Forex EUR/USD", "High-Vol Shock", 10000.0)
+        val result = ReplaySimulator.runSimulation("Trend 1D (EUR/USD)", "High-Vol Shock", 100.0)
 
-        println("=== REPLAY TEST: HIGH-VOL SHOCK ===")
+        println("=== REPLAY TEST: HIGH-VOL SHOCK ($100 STAKE) ===")
+        println("Initial: $${result.initialCapital}, Ending: $${result.endingCapital}")
         println("Trades: ${result.totalTrades}, Wins: ${result.winningTrades}, Losses: ${result.losingTrades}")
         println("Win Rate: ${result.winRatePct}%, Net PnL: $${result.netProfit}, Max DD: ${result.maxDrawdownPct}%")
 
+        assertEquals(100.0, result.initialCapital, 0.001)
         assertTrue(result.totalTrades > 20)
         assertTrue(result.winningTrades > 0)
         assertTrue(result.losingTrades > 0)

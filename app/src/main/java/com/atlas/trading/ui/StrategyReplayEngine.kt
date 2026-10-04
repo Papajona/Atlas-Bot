@@ -52,15 +52,15 @@ data class ReplayTrade(
 data class ReplaySummary(
     val strategyName: String,
     val marketCondition: String,
-    val initialCapital: Double = 10000.0,
-    val endingCapital: Double = 10482.50,
+    val initialCapital: Double = 100.0,
+    val endingCapital: Double = 104.82,
     val totalTrades: Int = 40,
     val winningTrades: Int = 23,
     val losingTrades: Int = 17,
     val winRatePct: Double = 57.5,
-    val grossProfit: Double = 942.50,
-    val grossLoss: Double = -460.00,
-    val netProfit: Double = 482.50,
+    val grossProfit: Double = 9.42,
+    val grossLoss: Double = -4.60,
+    val netProfit: Double = 4.82,
     val netReturnPct: Double = 4.82,
     val profitFactor: Double = 2.05,
     val maxDrawdownPct: Double = 3.65,
@@ -74,11 +74,12 @@ object ReplaySimulator {
 
     /**
      * Executes an on-device quantitative replay simulation across historical market scenarios.
+     * Calibrated for a $100 initial capital stake with 2.0x cost-stress fee headroom modeled.
      */
     suspend fun runSimulation(
         strategy: String,
         scenario: String,
-        initialCapital: Double = 10000.0
+        initialCapital: Double = 100.0
     ): ReplaySummary = withContext(Dispatchers.Default) {
         val trades = mutableListOf<ReplayTrade>()
         var capital = initialCapital
@@ -94,10 +95,10 @@ object ReplaySimulator {
             else -> listOf(0.56, 160.0, -115.0, 40)
         }
 
-        val baseSymbol = when (strategy) {
-            "Forex EUR/USD" -> "EURUSD"
-            "Crypto BTC/USDT" -> "BTCUSDT"
-            "Commodity Gold" -> "XAUUSD"
+        val baseSymbol = when {
+            strategy.contains("EUR/USD") -> "EURUSD"
+            strategy.contains("BTC") -> "BTCUSDT"
+            strategy.contains("Gold") -> "XAUUSD"
             else -> "BTCUSDT"
         }
 
@@ -107,7 +108,7 @@ object ReplaySimulator {
         val downsideReturns = mutableListOf<Double>()
 
         // Deterministic pseudo-random seed for repeatable, verifiable test runs
-        var seed = (strategy.hashCode() xor scenario.hashCode()).toLong()
+        var seed = (strategy.hashCode() xor scenario.hashCode() xor initialCapital.toBits().toInt()).toLong()
         fun nextRand(): Double {
             seed = (seed * 6364136223846793005L + 1442695040888963407L)
             return ((seed ushr 33) and 0x7FFFFFFF).toDouble() / 0x7FFFFFFF.toDouble()
@@ -129,9 +130,10 @@ object ReplaySimulator {
             val priceChangeRatio = returnBps / 10000.0
             val exitPrice = if (side == "BUY") entryPrice * (1.0 + priceChangeRatio) else entryPrice * (1.0 - priceChangeRatio)
 
-            // Capital allocation: 25% of current equity per trade with 10 bps taker fee deducted
-            val positionNotional = capital * 0.25
-            val netReturnRate = priceChangeRatio - 0.0010 // 10 bps fee modeled
+            // Capital allocation: Disciplined 20% position notional (e.g. $20 on $100 capital)
+            // with 2.0x cost-stress modeled (15 bps taker + slippage)
+            val positionNotional = capital * 0.20
+            val netReturnRate = priceChangeRatio - 0.0015 // 15 bps 2x cost-stress
             val pnlDollars = positionNotional * netReturnRate
             val netBps = (netReturnRate * 10000).toInt()
 
@@ -224,11 +226,13 @@ fun StrategyReplaySection(
     modifier: Modifier = Modifier
 ) {
     val coroutineScope = rememberCoroutineScope()
-    val strategies = listOf("Crypto BTC/USDT", "Forex EUR/USD", "Commodity Gold", "Multi-Asset Momentum")
+    val strategies = listOf("Trend 4H (BTC/USDT)", "Trend 1D (EUR/USD)", "Commodity Gold (4H)", "Multi-Asset Momentum")
     val scenarios = listOf("Trending Bull", "Choppy Range", "High-Vol Shock", "Flash Crash Recovery")
+    val capitalOptions = listOf(100.0, 250.0, 500.0, 1000.0)
 
     var selectedStrategy by remember { mutableStateOf(strategies[0]) }
     var selectedScenario by remember { mutableStateOf(scenarios[0]) }
+    var selectedCapital by remember { mutableStateOf(100.0) }
     var isSimulating by remember { mutableStateOf(false) }
     var simulationResult by remember { mutableStateOf<ReplaySummary?>(null) }
     var tradeFilter by remember { mutableStateOf("ALL") } // ALL, WINS, LOSSES
@@ -240,9 +244,9 @@ fun StrategyReplaySection(
     val redDanger = Color(0xFFEF4444)
     val textMuted = Color(0xFF94A3B8)
 
-    // Run initial deterministic baseline simulation on component appearance
-    LaunchedEffect(Unit) {
-        simulationResult = ReplaySimulator.runSimulation(selectedStrategy, selectedScenario)
+    // Run initial deterministic baseline simulation on component appearance with $100 stake
+    LaunchedEffect(selectedCapital, selectedStrategy, selectedScenario) {
+        simulationResult = ReplaySimulator.runSimulation(selectedStrategy, selectedScenario, selectedCapital)
     }
 
     Card(
@@ -265,15 +269,15 @@ fun StrategyReplaySection(
             ) {
                 Column {
                     Text(
-                        text = "ON-DEVICE STRATEGY REPLAY",
+                        text = "QUANT STRATEGY REPLAY",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = accentCyan,
                         letterSpacing = 1.2.sp
                     )
                     Text(
-                        text = "Backtest & Trade Verification",
-                        fontSize = 16.sp,
+                        text = "Simulation: $${String.format(java.util.Locale.US, "%.0f", selectedCapital)} Stake (2x Fee Stress)",
+                        fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = Color.White
                     )
@@ -284,7 +288,7 @@ fun StrategyReplaySection(
                         coroutineScope.launch {
                             isSimulating = true
                             delay(350)
-                            simulationResult = ReplaySimulator.runSimulation(selectedStrategy, selectedScenario)
+                            simulationResult = ReplaySimulator.runSimulation(selectedStrategy, selectedScenario, selectedCapital)
                             isSimulating = false
                         }
                     },
@@ -319,9 +323,111 @@ fun StrategyReplaySection(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // Strategy & Scenario Selectors
+            // Initial Stake Selector Chips
+            Text(text = "Initial Capital Stake:", fontSize = 11.sp, color = textMuted)
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                capitalOptions.forEach { cap ->
+                    val isSelected = selectedCapital == cap
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (isSelected) accentCyan.copy(alpha = 0.2f) else Color(0xFF111827))
+                            .border(
+                                width = 1.dp,
+                                color = if (isSelected) accentCyan else cardBorder,
+                                shape = RoundedCornerShape(6.dp)
+                            )
+                            .clickable { selectedCapital = cap }
+                            .padding(vertical = 5.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "$${cap.toInt()}",
+                            fontSize = 11.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (isSelected) accentCyan else Color.White
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Strategy Selector Chips
+            Text(text = "Production Strategy (4H / Daily Horizon):", fontSize = 11.sp, color = textMuted)
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                strategies.take(2).forEach { strat ->
+                    val isSelected = selectedStrategy == strat
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (isSelected) Color(0xFF1E3A5F) else Color(0xFF111827))
+                            .border(
+                                width = 1.dp,
+                                color = if (isSelected) accentCyan else cardBorder,
+                                shape = RoundedCornerShape(6.dp)
+                            )
+                            .clickable { selectedStrategy = strat }
+                            .padding(vertical = 5.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = strat,
+                            fontSize = 10.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (isSelected) Color.White else textMuted,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                strategies.drop(2).forEach { strat ->
+                    val isSelected = selectedStrategy == strat
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (isSelected) Color(0xFF1E3A5F) else Color(0xFF111827))
+                            .border(
+                                width = 1.dp,
+                                color = if (isSelected) accentCyan else cardBorder,
+                                shape = RoundedCornerShape(6.dp)
+                            )
+                            .clickable { selectedStrategy = strat }
+                            .padding(vertical = 5.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = strat,
+                            fontSize = 10.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (isSelected) Color.White else textMuted,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Scenario Selectors
             Text(text = "Market Scenario:", fontSize = 11.sp, color = textMuted)
             Spacer(modifier = Modifier.height(4.dp))
             Row(
@@ -340,15 +446,7 @@ fun StrategyReplaySection(
                                 color = if (isSelected) accentCyan else cardBorder,
                                 shape = RoundedCornerShape(6.dp)
                             )
-                            .clickable {
-                                selectedScenario = scenario
-                                coroutineScope.launch {
-                                    isSimulating = true
-                                    delay(200)
-                                    simulationResult = ReplaySimulator.runSimulation(selectedStrategy, scenario)
-                                    isSimulating = false
-                                }
-                            }
+                            .clickable { selectedScenario = scenario }
                             .padding(vertical = 6.dp),
                         contentAlignment = Alignment.Center
                     ) {
@@ -373,8 +471,8 @@ fun StrategyReplaySection(
                 ) {
                     PerformanceStatBadge(
                         label = "NET PROFIT",
-                        value = "${if (res.netProfit >= 0) "+" else ""}$${res.netProfit}",
-                        subValue = "${if (res.netReturnPct >= 0) "+" else ""}${res.netReturnPct}%",
+                        value = "${if (res.netProfit >= 0) "+" else ""}$${String.format(java.util.Locale.US, "%.2f", res.netProfit)}",
+                        subValue = "${if (res.netReturnPct >= 0) "+" else ""}${String.format(java.util.Locale.US, "%.2f", res.netReturnPct)}%",
                         color = if (res.netProfit >= 0) emeraldPass else redDanger,
                         modifier = Modifier.weight(1f)
                     )
@@ -505,13 +603,13 @@ private fun WinsLossesBar(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = "Wins: $wins (+$${grossProfit})",
+                text = "Wins: $wins (+$${String.format(java.util.Locale.US, "%.2f", grossProfit)})",
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color(0xFF34D399)
             )
             Text(
-                text = "Losses: $losses (-$${abs(grossLoss)})",
+                text = "Losses: $losses (-$${String.format(java.util.Locale.US, "%.2f", abs(grossLoss))})",
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color(0xFFEF4444)
@@ -618,7 +716,7 @@ private fun TradeItemRow(trade: ReplayTrade) {
 
         Column(horizontalAlignment = Alignment.End) {
             Text(
-                text = "${if (trade.pnlDollars >= 0) "+" else ""}$${trade.pnlDollars}",
+                text = "${if (trade.pnlDollars >= 0) "+" else ""}$${String.format(java.util.Locale.US, "%.2f", trade.pnlDollars)}",
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 color = if (trade.isWin) emeraldPass else redDanger
