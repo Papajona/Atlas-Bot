@@ -1152,27 +1152,73 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
 
 
 async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
-    status = str(order.get("status") or "open").lower()
-    filled = float(order.get("filled") or 0.0)
-    avg = float(order.get("average") or order.get("price") or trade.average_fill_price or trade.requested_price)
+    """Apply one broker snapshot without guessing an execution outcome.
+
+    Broker state is authoritative, but malformed/incomplete snapshots fail closed.
+    A closed/filled response with no completed fill is kept UNKNOWN so reserves
+    cannot be released from an ambiguous broker response.
+    """
+    status = str(order.get("status") or "open").strip().lower()
+    try:
+        filled = float(order.get("filled") or 0.0)
+        requested = float(trade.requested_quantity or trade.quantity or 0.0)
+        reported_remaining = order.get("remaining")
+        remaining = (
+            float(reported_remaining)
+            if reported_remaining is not None
+            else max(0.0, requested - filled)
+        )
+        avg = float(
+            order.get("average")
+            or order.get("price")
+            or trade.average_fill_price
+            or trade.requested_price
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"Malformed broker order snapshot for trade {trade.id}") from exc
+
+    if not all(
+        Decimal(str(value)).is_finite()
+        for value in (filled, requested, remaining, avg)
+    ):
+        raise ValueError(f"Non-finite broker order snapshot for trade {trade.id}")
+    if filled < 0 or remaining < 0 or requested < 0:
+        raise ValueError(f"Negative broker quantity in snapshot for trade {trade.id}")
+    if requested > 0 and filled > requested + 1e-9:
+        raise ValueError(
+            f"Broker filled quantity exceeds requested quantity for trade {trade.id}: "
+            f"filled={filled} requested={requested}"
+        )
+    if requested > 0 and abs((filled + remaining) - requested) > 1e-9:
+        raise ValueError(
+            f"Broker quantity conservation failed for trade {trade.id}: "
+            f"filled={filled} remaining={remaining} requested={requested}"
+        )
+
+    if status in {"closed", "filled"} and requested > 0 and filled <= 0:
+        trade.status = "UNKNOWN"
+        trade.updated_at = utcnow()
+        return 0.0
+
     fee_delta, fee_cum, fee_quality, fee_note = _prepare_live_fee(trade, order, filled, avg)
     realized_delta = await _apply_fill_to_position(db, trade, filled, avg)
     await _post_live_fee(db, trade, fee_delta, fee_cum, fee_quality, fee_note)
-    if status in {"closed", "filled"} and trade.remaining_quantity <= 0:
+
+    if status in {"closed", "filled"} and remaining <= 0:
         trade.status = "FILLED"
-    elif status in {"canceled", "cancelled"}:
+    elif status in {"canceled", "cancelled", "expired"}:
         trade.status = "CANCELED"
-    elif status in {"rejected"}:
+    elif status == "rejected":
         trade.status = "REJECTED"
     elif filled > 0:
         trade.status = "PARTIAL"
     else:
         trade.status = "OPEN"
+
     if trade.status in {"FILLED", "CANCELED", "REJECTED"}:
         await _release_unneeded_order_reserve(db, trade)
     trade.updated_at = utcnow()
     return realized_delta
-
 
 async def sync_live_account(exchange: str, symbols: list[str] | None = None) -> dict[str, Any]:
     cfg = BrokerConfig(exchange_id=exchange, api_key=settings.exchange_api_key, api_secret=settings.exchange_api_secret,
