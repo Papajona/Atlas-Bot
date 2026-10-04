@@ -103,6 +103,10 @@ class AppState(Base):
     unrealized_pnl: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
     kill_switch: Mapped[bool] = mapped_column(Boolean, default=False)
     live_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    live_enable_requested_by: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    live_enable_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    live_enable_approved_by: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    live_enable_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     forex_demo_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
