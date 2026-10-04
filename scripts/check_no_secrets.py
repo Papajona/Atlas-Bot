@@ -21,8 +21,8 @@ PLACEHOLDERS = {"changeme","change-me","example","placeholder","your-secret","yo
 def scan() -> list[str]:
     findings=[]
     for path in ROOT.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in TEXT_SUFFIXES:
-            continue
+        if not path.is_file() or (path.suffix.lower() not in TEXT_SUFFIXES and not path.name.lower().startswith(".env")):
+            continue  # ".env" has an empty suffix, so match dotenv files by name too
         if any(part in SKIP_DIRS for part in path.parts):
             continue
         try: text=path.read_text(errors="ignore")
