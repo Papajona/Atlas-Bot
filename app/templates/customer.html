@@ -49,9 +49,9 @@
           <h2 class="home-greeting" id="homeGreeting">Welcome back</h2>
           <span class="mode-chip">Paper trading · live trading is gated</span>
           <div class="kpi-row" role="list" aria-label="Account summary"><div class="kpi" role="listitem"><span>Account equity</span><strong id="homeBalance">—</strong></div><div class="kpi" role="listitem"><span>Open positions</span><strong id="homeActive">—</strong></div><div class="kpi" role="listitem"><span>Open P&amp;L</span><strong id="homeOpenPnl" class="flat">—</strong></div></div>
-          <section class="hcard" aria-labelledby="perfTitle"><h3 id="perfTitle">Performance (7 days)</h3><p class="sub" id="perfSub">Realised trading result after fees. Deposits and withdrawals are excluded.</p><div class="chart-box" id="homeChart"><div class="chart-empty">Loading…</div></div></section>
+          <section class="hcard" aria-labelledby="perfTitle"><h3 id="perfTitle">Realised P&amp;L · 7 days</h3><p class="sub" id="perfSub">Closed-trade result after fees. Deposits and withdrawals are excluded.</p><div class="chart-box" id="homeChart"><div class="chart-empty">Loading…</div></div></section>
           <section class="hcard" aria-labelledby="actTitle"><h3 id="actTitle">Recent activity</h3><ul class="act-list" id="homeActivity"><li class="empty-note">Loading…</li></ul></section>
-          <nav class="quick" aria-label="Quick actions"><a href="#trade"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h12l-3-3M17 17H5l3 3"/></svg>New trade</a><a href="#wallet"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>Deposit</a><a href="#wallet"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m0 0-4 4m4-4 4 4M5 20h14"/></svg>Withdraw</a><a href="#analytics"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h4v8H4zM10 7h4v13h-4zM16 4h4v16h-4z"/></svg>Analytics</a></nav>
+          <nav class="quick" aria-label="Quick actions"><a href="#trade"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h12l-3-3M17 17H5l3 3"/></svg>Create paper trade</a><a href="#wallet"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>Deposit</a><a href="#wallet"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m0 0-4 4m4-4 4 4M5 20h14"/></svg>Withdraw</a><a href="#analytics"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h4v8H4zM10 7h4v13h-4zM16 4h4v16h-4z"/></svg>Analytics</a></nav>
           <section class="hcard" aria-labelledby="watchTitle"><h3 id="watchTitle">Watchlist</h3><p class="sub">Atlas scanner signals. Not trading advice.</p><ul class="watch-list" id="homeWatch"><li class="empty-note">Loading…</li></ul></section>
           <nav class="home-links" aria-label="More"><a href="#trade">Trade desk</a><a href="#security">Security</a></nav>
           <div class="legacy-ids" hidden aria-hidden="true"><strong id="walletTotal">0.000000</strong><strong id="customerPlan">FREE</strong><small id="customerPlanStatus">—</small><strong id="customerStatus">—</strong><small id="customerEmail">—</small><div id="portfolioOut"></div><b id="snapshotEquity">—</b><b id="snapshotCash">—</b><b id="snapshotPositions">—</b><div id="funding"></div></div>
@@ -167,13 +167,67 @@ document.getElementById('menuBtn')?.addEventListener('click',()=>document.getEle
 window.addEventListener('hashchange',()=>setActiveSection(location.hash.replace('#','')||'overview'));
 if(location.hash)setActiveSection(location.hash.replace('#',''));
 document.querySelectorAll('[data-setting]').forEach(el=>{const saved=localStorage.getItem('atlas_ui_'+el.dataset.setting);if(saved!==null)el.checked=saved==='1';el.addEventListener('change',()=>{localStorage.setItem('atlas_ui_'+el.dataset.setting,el.checked?'1':'0');if(el.id==='reduceMotion')document.body.classList.toggle('reduce-motion',el.checked);if(el.id==='compactMarkets')document.body.classList.toggle('compact-markets',el.checked);});});
-/* showAccount was referenced before definition, causing a ReferenceError during login. */
-async function showAccount(){document.getElementById("auth").style.display="none";document.getElementById("mfaBox").style.display="none";document.getElementById("account").style.display="block";await loadAccount();await loadProductWorkspace();for(const fn of [loadBilling,loadCandidates,loadExecutors,refreshBotStatus]){try{await fn();}catch(e){}}}
-function syncUiAccount(){const email=document.getElementById('customerEmail')?.textContent||'—';const status=document.getElementById('customerStatus')?.textContent||'—';const se=document.getElementById('settingsEmail');const ss=document.getElementById('settingsStatus');if(se)se.textContent=email;if(ss)ss.textContent=status;const wb=document.getElementById('walletTotal')?.textContent||'—';const wh=document.getElementById('walletBalanceHero');if(wh)wh.textContent=wb;}
-const _showAccount=showAccount;showAccount=async function(){await _showAccount();syncUiAccount();};
-const _loadAccount=loadAccount;loadAccount=async function(){await _loadAccount();syncUiAccount();try{const p=await api('/api/customer/portfolio');document.getElementById('snapshotEquity').textContent='$'+Number(p.equity||0).toFixed(2);document.getElementById('snapshotCash').textContent='$'+Number(p.cash_equity||0).toFixed(2);document.getElementById('snapshotPositions').textContent=String((p.positions||[]).length);const po=document.getElementById('portfolioOut');if(po)po.textContent=`Equity: $${Number(p.equity||0).toFixed(2)} · Cash: $${Number(p.cash_equity||0).toFixed(2)} · Positions: ${(p.positions||[]).length}`;const wallets=await api('/api/customer/wallets');const usdt=wallets.find(w=>String(w.currency||'').toUpperCase()==='USDT');const wh=document.getElementById('walletBalanceHero');if(wh)wh.textContent=usdt?Number(usdt.available_balance||0).toFixed(6)+' USDT':'0.000000 USDT';}catch(e){}}
-const _loadProductWorkspace=loadProductWorkspace;loadProductWorkspace=async function(){await _loadProductWorkspace();const src=document.getElementById('scannerOut');const rows=document.getElementById('marketRows');if(src&&rows){const items=src.querySelectorAll('div');rows.replaceChildren();if(items.length){for(const x of items){const t=x.textContent.trim().split(' ');const tr=document.createElement('tr');for(const val of [t[0]||'—',t[1]||'—',t[4]||'—',t[7]||'—','READY']){const td=document.createElement('td');td.textContent=val;tr.appendChild(td);}rows.appendChild(tr);}applyMarketFilters();}else{const tr=document.createElement('tr');const td=document.createElement('td');td.colSpan=5;td.className='muted';td.textContent='No scanner results.';tr.appendChild(td);rows.appendChild(tr);}}}
-const _loadDeposit=loadDeposit;loadDeposit=async function(){await _loadDeposit();document.getElementById('depositBox')?.classList.add('loaded');};
+/* Keep one wrapper per lifecycle function: predictable, testable, and easy to maintain. */
+async function showAccount(){
+  document.getElementById('auth').style.display='none';
+  document.getElementById('mfaBox').style.display='none';
+  document.getElementById('account').style.display='block';
+  await loadAccount();
+  await loadProductWorkspace();
+  for(const fn of [loadBilling,loadCandidates,loadExecutors,refreshBotStatus]){try{await fn();}catch(e){}}
+  syncUiAccount();
+}
+function syncUiAccount(){
+  const email=document.getElementById('customerEmail')?.textContent||'—';
+  const status=document.getElementById('customerStatus')?.textContent||'—';
+  const se=document.getElementById('settingsEmail'), ss=document.getElementById('settingsStatus');
+  if(se)se.textContent=email;
+  if(ss)ss.textContent=status;
+  const wb=document.getElementById('walletTotal')?.textContent||'—';
+  const wh=document.getElementById('walletBalanceHero');
+  if(wh)wh.textContent=wb;
+}
+const _loadAccount=loadAccount;
+loadAccount=async function(){
+  await _loadAccount();
+  syncUiAccount();
+  try{
+    const p=await api('/api/customer/portfolio');
+    document.getElementById('snapshotEquity').textContent='$'+Number(p.equity||0).toFixed(2);
+    document.getElementById('snapshotCash').textContent='$'+Number(p.cash_equity||0).toFixed(2);
+    document.getElementById('snapshotPositions').textContent=String((p.positions||[]).length);
+    const po=document.getElementById('portfolioOut');
+    if(po)po.textContent='Equity: $'+Number(p.equity||0).toFixed(2)+' · Cash: $'+Number(p.cash_equity||0).toFixed(2)+' · Positions: '+((p.positions||[]).length);
+  }catch(e){}
+  await renderHome().catch(()=>{});
+};
+const _loadProductWorkspace=loadProductWorkspace;
+loadProductWorkspace=async function(){
+  await _loadProductWorkspace();
+  const src=document.getElementById('scannerOut'), rows=document.getElementById('marketRows');
+  if(src&&rows){
+    const items=src.querySelectorAll('div');
+    rows.replaceChildren();
+    if(items.length){
+      for(const x of items){
+        const t=x.textContent.trim().split(' ');
+        const tr=document.createElement('tr');
+        for(const val of [t[0]||'—',t[1]||'—',t[4]||'—',t[7]||'—','READY']){
+          const td=document.createElement('td');td.textContent=val;tr.appendChild(td);
+        }
+        rows.appendChild(tr);
+      }
+      applyMarketFilters();
+    }else{
+      const tr=document.createElement('tr'),td=document.createElement('td');
+      td.colSpan=5;td.className='muted';td.textContent='No scanner results.';
+      tr.appendChild(td);rows.appendChild(tr);
+    }
+  }
+  await renderWatch().catch(()=>{});
+};
+const _loadDeposit=loadDeposit;
+loadDeposit=async function(){await _loadDeposit();document.getElementById('depositBox')?.classList.add('loaded');};
 
 async function createLabCandidate(){try{const d=await api('/api/customer/strategy-lab/candidates',{method:'POST',body:JSON.stringify({name:document.getElementById('labName').value,prompt:document.getElementById('labPrompt').value,asset:document.getElementById('labAsset').value,symbol:document.getElementById('labSymbol').value,exchange:document.getElementById('labAsset').value==='crypto'?'binance':'oanda',timeframe:document.getElementById('labTf').value,days:365})});document.getElementById('labOut').textContent='Candidate #'+d.id+' created. Validating...';await validateCandidate(d.id);}catch(e){document.getElementById('labOut').textContent=e.message;}}
 async function validateCandidate(id){try{const d=await api(`/api/customer/strategy-lab/candidates/${id}/validate`,{method:'POST'});document.getElementById('labOut').textContent=summarizeValidation(d);await loadCandidates();}catch(e){document.getElementById('labOut').textContent=e.message;}}
@@ -191,14 +245,27 @@ function groupLedger(lines){const m=new Map();for(const l of lines){if(!String(l
 const HOME_ACT={DEPOSIT_CREDIT:['Deposit','dep','↓'],TRADE_SETTLEMENT:['Trade result','trd','↔'],TRADING_FEE:['Trading fee','fee','%'],WITHDRAWAL_SETTLEMENT:['Withdrawal sent','wd','↑']};
 function homeNote(el,text){el.replaceChildren();const li=document.createElement('li');li.className='empty-note';li.textContent=text;el.appendChild(li);}
 function renderActivity(journals){const ul=document.getElementById('homeActivity');const rows=journals.filter(j=>Math.abs(j.net)>1e-9).slice(0,4);if(!rows.length){homeNote(ul,'No activity yet. Deposits, trades and withdrawals will show up here.');return;}ul.replaceChildren();for(const j of rows){const meta=HOME_ACT[j.type]||[String(j.type||'Activity').replace(/_/g,' ').replace(/^./,c=>c.toUpperCase()),'fee','•'];const li=document.createElement('li');li.className='act-row';const b=document.createElement('span');b.className='badge '+meta[1];b.textContent=meta[2];const lbl=document.createElement('span');lbl.className='lbl';lbl.textContent=meta[0];const when=document.createElement('small');when.className='muted';when.textContent=' '+new Date(j.at).toLocaleDateString(undefined,{month:'short',day:'numeric'});lbl.appendChild(when);const amt=document.createElement('span');amt.className='amt '+pnlClass(j.net);amt.textContent=fmtUsd(j.net,true);li.append(b,lbl,amt);ul.appendChild(li);}}
-function renderPerformance(journals){const box=document.getElementById('homeChart');const sub=document.getElementById('perfSub');const cutoff=Date.now()-7*864e5;const rows=journals.filter(j=>(j.type==='TRADE_SETTLEMENT'||j.type==='TRADING_FEE')&&Date.parse(j.at)>=cutoff).sort((a,b)=>Date.parse(a.at)-Date.parse(b.at));box.replaceChildren();if(!rows.length){const d=document.createElement('div');d.className='chart-empty';d.textContent='No closed trades in the last 7 days. Results appear here after your first closed trade.';box.appendChild(d);return;}let run=0;for(const j of rows)run+=j.net;sub.textContent='Net '+fmtUsd(run,true)+' realised after fees. Deposits and withdrawals are excluded.';}
+function renderPerformance(journals){
+  const box=document.getElementById('homeChart'),sub=document.getElementById('perfSub'),cutoff=Date.now()-7*864e5;
+  const rows=journals.filter(j=>(j.type==='TRADE_SETTLEMENT'||j.type==='TRADING_FEE')&&Date.parse(j.at)>=cutoff).sort((a,b)=>Date.parse(a.at)-Date.parse(b.at));
+  box.replaceChildren();
+  if(!rows.length){const d=document.createElement('div');d.className='chart-empty';d.textContent='No closed trades in the last 7 days. Results appear here after your first closed trade.';box.appendChild(d);return;}
+  let run=0;
+  const points=rows.map(j=>{run+=j.net;return {at:j.at,v:run};});
+  const total=run,vals=points.map(x=>x.v),min=Math.min(0,...vals),max=Math.max(0,...vals),range=Math.max(max-min,1),w=720,h=210,pad=18;
+  sub.textContent='Net '+fmtUsd(total,true)+' realised after fees. Deposits and withdrawals are excluded.';
+  const xy=(x,i)=>{const xx=pad+(i/Math.max(points.length-1,1))*(w-pad*2);const yy=h-pad-((x.v-min)/range)*(h-pad*2);return [xx,yy];};
+  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 '+w+' '+h);svg.setAttribute('preserveAspectRatio','none');svg.setAttribute('role','img');svg.setAttribute('aria-label','Seven day realised profit and loss chart');
+  const zero=document.createElementNS('http://www.w3.org/2000/svg','line');const zeroY=h-pad-((0-min)/range)*(h-pad*2);
+  zero.setAttribute('x1',pad);zero.setAttribute('x2',w-pad);zero.setAttribute('y1',zeroY);zero.setAttribute('y2',zeroY);zero.setAttribute('stroke','rgba(27,37,64,.12)');zero.setAttribute('stroke-dasharray','4 5');
+  const poly=document.createElementNS('http://www.w3.org/2000/svg','polyline');poly.setAttribute('points',points.map((x,i)=>xy(x,i).map(v=>v.toFixed(1)).join(',')).join(' '));poly.setAttribute('fill','none');poly.setAttribute('stroke','currentColor');poly.setAttribute('stroke-width','3');poly.setAttribute('stroke-linecap','round');poly.setAttribute('stroke-linejoin','round');poly.classList.add(total>0?'pos':total<0?'neg':'flat');
+  svg.append(zero,poly);box.appendChild(svg);
+}
+
 async function renderHome(){const email=(document.getElementById('customerEmail')?.textContent||'').trim();document.getElementById('homeGreeting').textContent=homeName(email);const av=document.getElementById('homeAvatar');if(av)av.textContent=(email[0]||'A').toUpperCase();try{const p=await api('/api/customer/portfolio');const pnl=(p.positions||[]).reduce((sum,x)=>sum+Number(x.unrealized_pnl||0),0);document.getElementById('homeBalance').textContent=fmtUsdt(p.equity);document.getElementById('homeActive').textContent=String((p.positions||[]).length);const el=document.getElementById('homeOpenPnl');el.textContent=fmtUsdt(pnl,true);el.className=pnlClass(pnl);}catch(e){for(const id of ['homeBalance','homeActive','homeOpenPnl'])document.getElementById(id).textContent='—';}try{const l=await api('/api/customer/ledger');const entries=l.entries||[];const j=groupLedger(entries);renderActivity(j);renderPerformance(j);}catch(e){homeNote(document.getElementById('homeActivity'),'Activity is unavailable right now.');const box=document.getElementById('homeChart');box.replaceChildren();const d=document.createElement('div');d.className='chart-empty';d.textContent='Performance is unavailable right now.';box.appendChild(d);}}
 function coinClass(base){return base==='BTC'?'coin-b':base==='ETH'?'coin-e':base==='SOL'?'coin-s':'coin-x';}
 function fmtPrice(v){const n=Number(v);if(!isFinite(n))return '—';return n>=1000?n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):n.toLocaleString('en-US',{maximumFractionDigits:4});}
 async function renderWatch(){const ul=document.getElementById('homeWatch');try{const s=await api('/api/customer/market-scanner?exchange=bybit&symbols=BTC%2FUSDT%3AUSDT%2CETH%2FUSDT%3AUSDT%2CSOL%2FUSDT%3AUSDT');const rows=(s.results||[]).filter(x=>x.signal!=='ERROR');if(!rows.length){homeNote(ul,'No market data right now.');return;}ul.replaceChildren();for(const x of rows){const base=String(x.symbol||'').split('/')[0];const li=document.createElement('li');li.className='watch-row';const b=document.createElement('span');b.className='badge '+coinClass(base);b.textContent=base.slice(0,1);const lbl=document.createElement('span');lbl.className='lbl';lbl.textContent=base+' $'+fmtPrice(x.price);const sig=String(x.signal||'NEUTRAL').toUpperCase();const pill=document.createElement('span');pill.className='pill '+(sig==='LONG'?'long':sig==='SHORT'?'short':'neutral');pill.textContent=sig.charAt(0)+sig.slice(1).toLowerCase();li.append(b,lbl,pill);ul.appendChild(li);}}catch(e){homeNote(ul,'Market signals are unavailable right now.');}}
-const _loadAccountHome=loadAccount;loadAccount=async function(){await _loadAccountHome();renderHome().catch(()=>{});};
-const _loadWorkspaceHome=loadProductWorkspace;loadProductWorkspace=async function(){await _loadWorkspaceHome();renderWatch().catch(()=>{});};
-
 async function executorAction(id,action){try{const d=await api(`/api/customer/executors/${id}/action`,{method:'POST',body:JSON.stringify({action})});document.getElementById('executorOut').textContent=JSON.stringify(d,null,2);await loadExecutors();}catch(e){document.getElementById('executorOut').textContent=e.message;}}
 </script>
 </body></html>
