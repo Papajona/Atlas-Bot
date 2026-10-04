@@ -110,7 +110,9 @@ def test_customer_bot_uses_adaptive_model_confirmation():
 
 def test_customer_bot_ui_exposes_learning_and_oos_gate():
     source = open("app/templates/customer.html", encoding="utf-8").read()
-    assert "Start Autonomous" in source
+    assert "Start Automated Bot" in source
+    assert "Current mode: PAPER" in source
+    assert "Request Live Automation" in source
     assert "Cycle" in source
     assert "Controller:" in source
     assert "Adaptive learner" in source
