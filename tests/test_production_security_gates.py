@@ -45,7 +45,9 @@ def test_android_risk_controls_require_authenticated_server_session():
     assert 'Authorization", "Bearer $bearer"' in auth
     assert "setKillSwitch(isHalted, token)" in main
     assert "accessToken: String? = null" in risk
-    assert 'conn.setRequestProperty("Authorization", "Bearer $accessToken")' in risk
+    assert "WebSocketManager" in risk
+    assert "fetchLiveRiskMetrics" not in risk
+    assert "HttpURLConnection" not in risk
 
 
 def test_android_risk_dashboard_has_no_fabricated_healthy_defaults():
@@ -56,3 +58,22 @@ def test_android_risk_dashboard_has_no_fabricated_healthy_defaults():
     assert "TRENDING LOW-VOL" not in risk
     assert 'streamType: String = "OFFLINE"' in risk
     assert "telemetryAvailable: Boolean = false" in risk
+
+
+def test_worker_health_and_local_security_audit_are_wired():
+    main = (ROOT / "app" / "main.py").read_text()
+    audit = (ROOT / "app" / "src" / "main" / "java" / "com" / "atlas" / "trading" / "security" / "SecurityAuditLog.kt").read_text()
+    activity = (ROOT / "app" / "src" / "main" / "java" / "com" / "atlas" / "trading" / "MainActivity.kt").read_text()
+    risk = (ROOT / "app" / "src" / "main" / "java" / "com" / "atlas" / "trading" / "ui" / "RiskDashboard.kt").read_text()
+    manager = (ROOT / "app" / "src" / "main" / "java" / "com" / "atlas" / "trading" / "network" / "WebSocketManager.kt").read_text()
+    assert "_worker_health_snapshot" in main
+    assert "/api/risk-dashboard/worker-health" in main
+    assert '"worker_health": worker_health' in main
+    assert "AndroidKeyStore" in audit
+    assert "AES/GCM/NoPadding" in audit
+    assert "noBackupFilesDir" in audit
+    assert "BIOMETRIC_AUTH_FAILED" in activity
+    assert "RISK_KILL_SWITCH_CONFIRMED" in activity
+    assert "worker_health_status" in risk
+    assert "scheduleReconnect" in manager
+    assert "initiateConnection(wsUrl, token)" in manager
