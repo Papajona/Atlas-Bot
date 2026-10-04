@@ -75,3 +75,51 @@ def test_order_rejected_after_timeout_charges_nothing():
             ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
             assert ledger.available == Decimal("100")
     asyncio.run(with_database(check))
+
+def test_closed_without_fill_remains_unknown_and_does_not_create_fill():
+    async def check(sessions):
+        async with sessions() as db:
+            t = Trade(customer_id=1, signal_id="s3", client_order_id="c3", exchange="binance", symbol="BTC/USDT",
+                      side="buy", quantity=0.2, requested_quantity=0.2, remaining_quantity=0.2,
+                      mode="LIVE", status="UNKNOWN")
+            db.add(t)
+            await db.commit()
+            await execution._apply_broker_snapshot(
+                db, t, {"id": "B3", "status": "closed", "filled": 0, "remaining": 0, "average": 60000, "price": 60000}
+            )
+            assert t.status == "UNKNOWN"
+            assert t.filled_quantity == pytest.approx(0.0)
+            assert t.remaining_quantity == pytest.approx(0.2)
+    asyncio.run(with_database(check))
+
+
+def test_broker_quantity_conservation_is_fail_closed():
+    async def check(sessions):
+        async with sessions() as db:
+            t = Trade(customer_id=1, signal_id="s4", client_order_id="c4", exchange="binance", symbol="BTC/USDT",
+                      side="buy", quantity=0.2, requested_quantity=0.2, remaining_quantity=0.2,
+                      mode="LIVE", status="UNKNOWN")
+            db.add(t)
+            await db.commit()
+            with pytest.raises(ValueError, match="quantity conservation"):
+                await execution._apply_broker_snapshot(
+                    db, t, {"id": "B4", "status": "open", "filled": 0.1, "remaining": 0.2, "average": 60000}
+                )
+    asyncio.run(with_database(check))
+
+
+def test_expired_partial_order_is_terminal_and_releases_only_unfilled_reserve():
+    async def check(sessions):
+        async with sessions() as db:
+            t = Trade(customer_id=1, signal_id="s5", client_order_id="c5", exchange="binance", symbol="BTC/USDT",
+                      side="buy", quantity=0.2, requested_quantity=0.2, remaining_quantity=0.2,
+                      mode="LIVE", status="UNKNOWN")
+            db.add(t)
+            await db.commit()
+            await execution._apply_broker_snapshot(
+                db, t, {"id": "B5", "status": "expired", "filled": 0.1, "remaining": 0.1, "average": 60000}
+            )
+            assert t.status == "CANCELED"
+            assert t.filled_quantity == pytest.approx(0.1)
+            assert t.remaining_quantity == pytest.approx(0.1)
+    asyncio.run(with_database(check))
