@@ -36,10 +36,10 @@ def test_distinct_ledger_precision_quantities_never_share_a_key():
 
 
 def test_old_collision_is_gone():
-    # Legacy truncation mapped both quantities to the same millionth.
+    # Legacy truncation mapped both quantities to the same millionth even though
+    # they are distinct at the ledger's Numeric(38,6) precision.
     assert int(0.0000011 * 1_000_000) == int(0.0000019 * 1_000_000)
-    # The current canonical form is aligned to Numeric(38,6).
-    assert qty_ref(0.0000011) == qty_ref(0.0000019) == "0.000001"
+    assert qty_ref(0.0000011) != qty_ref(0.0000019)
 
 
 def test_none_and_zero():
