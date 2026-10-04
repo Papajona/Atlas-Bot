@@ -296,3 +296,18 @@ body{color:var(--text);background:linear-gradient(160deg,#e6edfb 0%,#e4f3ef 100%
     font-size: 1.4rem;
   }
 }
+
+/* Production interaction polish: visible focus, tactile controls, and safe status language. */
+:focus-visible{outline:3px solid rgba(31,111,235,.30);outline-offset:2px}
+.quick a,.mobile-nav a,button,.home-avatar{transition:transform .16s ease,box-shadow .16s ease,background-color .16s ease}
+button:not(:disabled):active,.quick a:active{transform:translateY(1px)}
+button:disabled{opacity:.55;cursor:not-allowed}
+.mode-chip{border:1px solid rgba(31,111,235,.10)}
+@media(max-width:820px){
+  .risk-note{position:relative;z-index:12}
+  .home-top + .home-greeting{scroll-margin-top:76px}
+  .quick a{touch-action:manipulation}
+}
+@media(prefers-reduced-motion:reduce){
+  .quick a,.mobile-nav a,button,.home-avatar{transition:none}
+}
