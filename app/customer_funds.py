@@ -4,7 +4,7 @@ import json
 import logging
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from .db import CustomerLedgerAccount, Incident, LedgerEntry, LedgerJournal, LedgerJournalLine, Wallet, TradingAccount, utcnow
+from .db import CustomerLedgerAccount, Incident, LedgerEntry, LedgerJournal, LedgerJournalLine, SessionLocal, Wallet, TradingAccount, utcnow
 
 USDT = "USDT"
 D = Decimal
@@ -527,44 +527,91 @@ async def ledger_statement(db, customer_id: int, currency: str = USDT, limit: in
              "created_at": j.created_at.isoformat() if j.created_at else None} for j, line in rows]
 
 
-async def ledger_invariant_report(db, *, tolerance: str = "0.000001", limit: int = 50) -> dict:
-    """Monitoring-only proof that the books agree with themselves. Never mutates balances.
-
-    1. Every journal balances (sum(debit) == sum(credit)).
-    2. Each customer's AVAILABLE / TRADING_RESERVED / WITHDRAWAL_RESERVED balance equals credits - debits posted to its
-       liability account. A drift means some code path changed a balance without a journal (or the reverse).
-    Opens a CRITICAL `LEDGER_INVARIANT_BREACH` incident when either fails.
-    """
-    tol = D(tolerance)
+async def _invariant_snapshot(db, tol: Decimal):
+    """Compute the invariant snapshot from one database transaction."""
     unbalanced = (await db.execute(
         select(LedgerJournalLine.journal_id, func.sum(LedgerJournalLine.debit), func.sum(LedgerJournalLine.credit))
         .group_by(LedgerJournalLine.journal_id)
-        .having(func.sum(LedgerJournalLine.debit) != func.sum(LedgerJournalLine.credit)).limit(limit))).all()
+        .having(func.sum(LedgerJournalLine.debit) != func.sum(LedgerJournalLine.credit))
+    )).all()
     net_rows = (await db.execute(
         select(LedgerJournalLine.customer_id, LedgerJournalLine.account_code,
                func.coalesce(func.sum(LedgerJournalLine.credit), 0) - func.coalesce(func.sum(LedgerJournalLine.debit), 0))
         .where(LedgerJournalLine.account_code.like("LIABILITY:CUSTOMER:%"))
-        .group_by(LedgerJournalLine.customer_id, LedgerJournalLine.account_code))).all()
+        .group_by(LedgerJournalLine.customer_id, LedgerJournalLine.account_code)
+    )).all()
     journal_net: dict[tuple[int, str], Decimal] = {}
     for customer_id, account_code, net in net_rows:
         if customer_id is not None:
             journal_net[(int(customer_id), str(account_code).rsplit(":", 1)[-1])] = D(str(net))
     drifts = []
-    ledgers = (await db.execute(select(CustomerLedgerAccount).where(CustomerLedgerAccount.currency == USDT))).scalars().all()
+    ledgers = (await db.execute(
+        select(CustomerLedgerAccount).where(CustomerLedgerAccount.currency == USDT)
+    )).scalars().all()
     for ledger in ledgers:
-        for bucket, balance in (("AVAILABLE", ledger.available), ("TRADING_RESERVED", ledger.trading_reserved),
-                                ("WITHDRAWAL_RESERVED", ledger.withdrawal_reserved)):
+        for bucket, balance in (
+            ("AVAILABLE", ledger.available),
+            ("TRADING_RESERVED", ledger.trading_reserved),
+            ("WITHDRAWAL_RESERVED", ledger.withdrawal_reserved),
+        ):
             diff = D(str(balance)) - journal_net.get((int(ledger.customer_id), bucket), D("0"))
             if abs(diff) > tol:
-                drifts.append({"customer_id": int(ledger.customer_id), "bucket": bucket, "balance": str(D(str(balance))),
-                               "journal_net": str(journal_net.get((int(ledger.customer_id), bucket), D("0"))), "drift": str(diff)})
+                drifts.append({
+                    "customer_id": int(ledger.customer_id),
+                    "bucket": bucket,
+                    "balance": str(D(str(balance))),
+                    "journal_net": str(journal_net.get((int(ledger.customer_id), bucket), D("0"))),
+                    "drift": str(diff),
+                })
+    return unbalanced, drifts, len(ledgers)
+
+
+def _dialect_name(db) -> str:
+    try:
+        return str(db.get_bind().dialect.name)
+    except Exception:
+        try:
+            return str(db.bind.dialect.name)
+        except Exception:
+            return ""
+
+
+async def ledger_invariant_report(db, *, tolerance: str = "0.000001", limit: int = 50) -> dict:
+    """Monitoring-only proof that the books agree with themselves.
+
+    On PostgreSQL, the invariant reads use a separate REPEATABLE READ transaction so a
+    concurrent commit cannot produce a false drift by mixing snapshots.
+    """
+    tol = D(tolerance)
+    if _dialect_name(db) == "postgresql":
+        async with SessionLocal() as snap:
+            await snap.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+            unbalanced, drifts, checked = await _invariant_snapshot(snap, tol)
+            await snap.rollback()
+    else:
+        unbalanced, drifts, checked = await _invariant_snapshot(db, tol)
+
+    unbalanced = unbalanced[:limit]
     ok = not unbalanced and not drifts
-    report = {"ok": ok, "unbalanced_journals": [{"journal_id": int(j), "debit": str(d), "credit": str(c)} for j, d, c in unbalanced],
-              "bucket_drifts": drifts[:limit], "drift_count": len(drifts), "customers_checked": len(ledgers)}
+    report = {
+        "ok": ok,
+        "unbalanced_journals": [
+            {"journal_id": int(j), "debit": str(d), "credit": str(cr)}
+            for j, d, cr in unbalanced
+        ],
+        "bucket_drifts": drifts[:limit],
+        "drift_count": len(drifts),
+        "customers_checked": checked,
+    }
     if not ok:
         logger.critical("ledger_invariant_breach unbalanced=%s drifts=%s", len(unbalanced), len(drifts))
-        await record_ledger_incident(db, key="LEDGER_INVARIANT_BREACH", summary="Ledger invariant check failed: journals unbalanced or balances drifted from journals",
-                                      detail={"unbalanced": len(unbalanced), "drifts": drifts[:10]}, customer_id=None)
+        await record_ledger_incident(
+            db,
+            key="LEDGER_INVARIANT_BREACH",
+            summary="Ledger invariant check failed: journals unbalanced or balances drifted from journals",
+            detail={"unbalanced": len(unbalanced), "drifts": drifts[:10]},
+            customer_id=None,
+        )
     return report
 
 
