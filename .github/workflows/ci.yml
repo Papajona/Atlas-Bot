@@ -65,6 +65,8 @@ jobs:
           python -m pytest -q tests/test_ledger_all_paths_concurrent_3_10_46.py
       - name: Customer page integrity
         run: python -m pytest -q tests/test_customer_page_integrity.py
+      - name: Withdrawal payout safety
+        run: python -m pytest -q tests/test_withdrawal_payout_error_guards.py tests/test_withdrawal_not_sent_db.py
       - name: Full pytest suite
         env:
           DATABASE_URL: sqlite+aiosqlite:///./test_trading.db
