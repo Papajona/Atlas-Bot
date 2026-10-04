@@ -4336,7 +4336,7 @@ async def release_withdrawal(withdrawal_id: int, req: WithdrawalExecuteRequest, 
                                          tag=w.destination_tag, network=w.network,
                                          idempotency_key=idempotency_key,
                                          metadata={"withdrawal_id": w.id, "account_ref": w.account_ref})
-        except PayoutUnknown as e:
+        except PayoutError as e:
             async with SessionLocal() as db2:
                 w2 = await db2.get(Withdrawal, withdrawal_id)
                 w2.status = "UNKNOWN"
