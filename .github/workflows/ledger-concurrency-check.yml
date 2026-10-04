@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'app/customer_funds.py'
+      - 'app/audit_chain.py'
       - 'app/db.py'
       - 'tests/test_postgres_ledger_concurrency_3_10_46.py'
       - 'tests/test_ledger_invariants_3_10_46.py'
