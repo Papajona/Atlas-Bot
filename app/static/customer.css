@@ -26,3 +26,4 @@ form,label{display:block}.formgrid{display:grid;grid-template-columns:repeat(2,m
 
 button:disabled,input:disabled,select:disabled,textarea:disabled{cursor:not-allowed;opacity:.55;transform:none;box-shadow:none}
 .settings-grid .settings-card{min-height:100%}.settings-grid .settings-card:first-child{grid-column:1/-1}
+.settings-grid-refined{align-items:stretch}.settings-grid-refined .settings-card{display:flex;flex-direction:column}.settings-grid-refined .settings-card-head{min-height:42px}.settings-grid-refined .setting-row{min-height:48px}.settings-grid-refined .setting-row small{max-width:42rem}.settings-grid-refined .plan-list{scrollbar-width:thin}.settings-grid-refined .referral-row input{min-width:0}@media(max-width:820px){.settings-grid-refined{gap:12px}.settings-grid-refined .settings-card-head{margin-bottom:12px}.settings-grid-refined .setting-row{padding:12px 0}}
