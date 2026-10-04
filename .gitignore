@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Local environments and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Databases and local runtime state
+*.db
+*.sqlite
+*.sqlite3
+data/
+logs/
+
+# ML/build artifacts
+models/
+model-staging/
+.gradle/
+build/
+dist/
+
+# IDE/OS
+.idea/
+.vscode/
+.DS_Store
