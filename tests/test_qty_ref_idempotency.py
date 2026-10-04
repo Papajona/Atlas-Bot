@@ -31,8 +31,10 @@ def test_one_ulp_drift_does_not_change_key():
         assert qty_ref(math.nextafter(a, 0.0)) == qty_ref(a) == qty_ref(math.nextafter(a, 1.0))
 
 
-def test_distinct_8dp_quantities_never_share_a_key():
-    keys = {qty_ref(k / 100_000_000) for k in range(1, 200_000)}
+def test_distinct_ledger_precision_quantities_never_share_a_key():
+    # The customer ledger stores quantities at 6 decimal places; every distinct
+    # ledger-representable positive quantity in this range must retain its key.
+    keys = {qty_ref(k / 1_000_000) for k in range(1, 200_000)}
     assert len(keys) == 199_999
 
 
@@ -46,6 +48,11 @@ def test_none_and_zero():
 
 
 def test_negative_zero_and_decimal_inputs_are_canonical():
-    assert qty_ref(-0.0) == "0.000000000"
-    assert qty_ref(Decimal("0.1234567894")) == "0.123456789"
-    assert qty_ref(Decimal("0.1234567896")) == "0.123456790"
+    assert qty_ref(-0.0) == "0.000000"
+    assert qty_ref(Decimal("0.1234564")) == "0.123456"
+    assert qty_ref(Decimal("0.1234566")) == "0.123457"
+
+
+def test_key_precision_matches_ledger_precision():
+    assert qty_ref(Decimal("0.1234561")) == qty_ref(Decimal("0.1234564"))
+    assert qty_ref(Decimal("0.1234564")) != qty_ref(Decimal("0.1234574"))
