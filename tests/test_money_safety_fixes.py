@@ -278,3 +278,12 @@ def test_customer_balance_does_not_refresh_away_session_local_changes():
             balance = await customer_balance(db, 78, "USDT")
             assert balance["available"] == 90.0
     asyncio.run(with_database(check))
+
+
+def test_customer_cash_lock_order_is_ledger_then_account():
+    from pathlib import Path
+    src = Path("app/execution.py").read_text()
+    block = src[src.index("async def risk_gate"):src.index("\nasync def ", src.index("async def risk_gate") + 20)]
+    assert block.index('ledger = await get_or_create_ledger(db, customer_id, "USDT")') < block.index(
+        "select(TradingAccount).where(TradingAccount.customer_id == customer_id).with_for_update()"
+    )
