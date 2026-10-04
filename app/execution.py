@@ -6,6 +6,7 @@ import json
 import os
 import uuid
 from datetime import date, datetime, timezone
+from decimal import Decimal, ROUND_HALF_EVEN
 from typing import Any
 
 from sqlalchemy import select, func, or_
@@ -53,6 +54,23 @@ _EXECUTION_LOCK = asyncio.Lock()
 
 _EXECUTION_OWNER = os.getenv("K_REVISION", "local") + ":" + uuid.uuid4().hex[:16]
 LIVE_SUBMISSION_LOCK_KEY = "live-broker-submission"
+
+
+_QTY_QUANTUM = Decimal("0.000000001")
+
+
+def _qty_ref(quantity: float | Decimal | int | None) -> str:
+    """Canonical fixed-point quantity for fill-derived idempotency references.
+
+    Decimal(str(...)) avoids binary floating-point artifacts, while 9 decimal
+    places preserve distinct 8-decimal venue quantities and eliminate the old
+    6-decimal integer truncation collisions.
+    """
+    value = Decimal("0") if quantity is None else Decimal(str(quantity))
+    canonical = value.quantize(_QTY_QUANTUM, rounding=ROUND_HALF_EVEN)
+    if canonical == 0:
+        canonical = Decimal("0")
+    return format(canonical, ".9f")
 
 
 def _live_submission_lock_ttl_seconds() -> int:
@@ -420,7 +438,7 @@ async def _post_live_fee(db, trade: Trade, delta: float, cumulative: float, qual
     if trade.customer_id is None or delta <= 0:
         return
     await settle_trading_fee(db, customer_id=trade.customer_id, fee=delta,
-                             reference_id=f"trade:{trade.id}:fee:{int(round(cumulative * 1_000_000))}", strict=False)
+                             reference_id=f"trade:{trade.id}:fee:{_qty_ref(cumulative)}", strict=False)
     if quality == ESTIMATED:
         await record_ledger_incident(
             db, key=f"LIVE_FEE_ESTIMATED:{trade.id}", severity="HIGH",
@@ -473,7 +491,7 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 released = position.reserved_capital * (closing / abs(old_qty))
                 position.reserved_capital = max(0.0, position.reserved_capital - released)
                 if released > 0:
-                    await release_trading(db, trade.customer_id, released, reference_id=f"trade:{trade.id}:close:{int(new_filled * 1000000)}")
+                    await release_trading(db, trade.customer_id, released, reference_id=f"trade:{trade.id}:close:{_qty_ref(new_filled)}")
                     account_locked = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == trade.customer_id).with_for_update())).scalar_one_or_none()
                     if account_locked:
                         account_locked.reserved_margin = max(0.0, account_locked.reserved_margin - released)
@@ -489,7 +507,7 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                         # A savepoint keeps a failed reserve from leaving partial ledger state behind.
                         async with db.begin_nested():
                             await reserve_trading(db, trade.customer_id, flip_cost,
-                                                  reference_id=f"trade:{trade.id}:flip:{int(new_filled * 1000000)}")
+                                                  reference_id=f"trade:{trade.id}:flip:{_qty_ref(new_filled)}")
                         position.reserved_capital += flip_cost
                         account_locked = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == trade.customer_id).with_for_update())).scalar_one_or_none()
                         if account_locked:
@@ -581,7 +599,7 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         # long-lived position with many partial fills.
         position.realized_pnl = quantize_money(position.realized_pnl + realized)
         if realized and trade.customer_id is not None:
-            await settle_realized_pnl(db, customer_id=trade.customer_id, amount=realized, reference_id=f"trade:{trade.id}:realized:{int(new_filled * 1000000)}", strict=False)
+            await settle_realized_pnl(db, customer_id=trade.customer_id, amount=realized, reference_id=f"trade:{trade.id}:realized:{_qty_ref(new_filled)}", strict=False)
         if realized != 0.0:
             # Store observed outcome against the strategy that opened the position.
             # This avoids attributing a close to the strategy of the closing order.
@@ -636,7 +654,7 @@ async def _release_unneeded_order_reserve(db, trade: Trade) -> float:
         deficit = filled_cost - reserved
         try:
             await reserve_trading(db, trade.customer_id, deficit,
-                                  reference_id=f"trade:{trade.id}:reserve-deficit:{int(round(float(trade.filled_quantity or 0.0) * 1000000))}")
+                                  reference_id=f"trade:{trade.id}:reserve-deficit:{_qty_ref(trade.filled_quantity)}")
             reserved += deficit
             trade.reserved_cash = reserved
             account_locked = (await db.execute(select(TradingAccount).where(
