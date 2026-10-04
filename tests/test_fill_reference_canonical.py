@@ -21,7 +21,11 @@ qty_ref = _load_qty_ref()
 
 
 def test_one_ulp_drift_does_not_change_key():
+    # Avoid exact half-micro-unit boundaries, where ROUND_HALF_EVEN intentionally changes
+    # the result when the value crosses the boundary by one ULP.
     for k in range(1, 200_000):
+        if k % 100 == 50:
+            continue
         a = k / 100_000_000
         assert qty_ref(math.nextafter(a, 0.0)) == qty_ref(a) == qty_ref(math.nextafter(a, 1.0))
 
