@@ -336,3 +336,25 @@ def test_customer_cash_lock_order_is_ledger_then_account():
     assert block.index('ledger = await get_or_create_ledger(db, customer_id, "USDT")') < block.index(
         "select(TradingAccount).where(TradingAccount.customer_id == customer_id).with_for_update()"
     )
+
+
+def test_customer_withdrawal_locks_ledger_before_wallet_and_account():
+    from app import main
+    import inspect
+    block = inspect.getsource(main.customer_create_withdrawal)
+    assert block.index('await get_or_create_ledger(db, profile.id, "USDT")') < block.index(
+        'select(Wallet).where('
+    )
+    assert block.index('await get_or_create_ledger(db, profile.id, "USDT")') < block.index(
+        'select(TradingAccount).where('
+    )
+
+
+def test_stepup_is_consumed_only_after_destination_gate():
+    from app import main
+    import inspect
+    block = inspect.getsource(main.customer_create_withdrawal)
+    assert block.index('raise HTTPException(409, f"Withdrawal destination is not yet trusted') < block.index(
+        'stepup.used_at = datetime.now(timezone.utc)'
+    )
+    assert block.count('stepup.used_at = datetime.now(timezone.utc)') == 1
