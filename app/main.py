@@ -1593,10 +1593,14 @@ def _current_spread_bps(req: MarketRequest, customer_id: int | None = None) -> f
 
 
 async def _get_or_create_customer_trading_account(db, profile: CustomerProfile) -> TradingAccount:
-    account = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == profile.id).with_for_update())).scalar_one_or_none()
+    # Canonical customer-cash lock order is ledger -> wallet -> trading account.
+    # Keep this order consistent with withdrawals/funding so concurrent cash operations
+    # cannot form a ledger/account or ledger/wallet deadlock cycle.
+    await get_or_create_ledger(db, profile.id, "USDT")
     wallet = (await db.execute(select(Wallet).where(Wallet.customer_id == profile.id, Wallet.currency == "USDT").with_for_update())).scalar_one_or_none()
     if not wallet or wallet.status != "ACTIVE":
         raise HTTPException(409, "Fund the USDT trading wallet before starting the bot")
+    account = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == profile.id).with_for_update())).scalar_one_or_none()
     # get_or_create_ledger() performs the one-time, journaled legacy-wallet migration.
     # Never re-credit the authoritative ledger from the mutable wallet mirror.
     ledger = await get_or_create_ledger(db, profile.id, "USDT")
