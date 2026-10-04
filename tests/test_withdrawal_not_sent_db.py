@@ -228,6 +228,20 @@ def test_external_signer_recovery_without_provider_id_is_unknown_not_not_found()
     asyncio.run(run())
 
 
+def test_external_signer_recovery_requires_explicit_not_found_evidence():
+    async def run():
+        provider = object.__new__(ExternalSignerPayoutProvider)
+
+        async def explicit_not_found(*args, **kwargs):
+            return {"status": "NOT_FOUND"}
+
+        provider._request = explicit_not_found
+        with pytest.raises(PayoutNotFound):
+            await provider.recover("withdrawal:never-seen", currency="USDT")
+
+    asyncio.run(run())
+
+
 def test_external_signer_recovery_404_is_definite_error_not_not_found(monkeypatch):
     import httpx
     from app.payout import classify_payout_exception
