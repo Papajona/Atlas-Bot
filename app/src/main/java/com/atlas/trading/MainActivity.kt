@@ -81,7 +81,7 @@ class MainActivity : AppCompatActivity() {
 
                 if (!showOperatorConsole) {
                     UserDashboardScreen(
-                        userName = "Alice",
+                        userName = "Sample data",
                         backendUrl = backendUrl,
                         onOpenOperatorConsole = { showOperatorConsole = true },
                         onOpenPortal = { openPortal() }
@@ -211,7 +211,7 @@ class MainActivity : AppCompatActivity() {
 
         val targetUri = Uri.parse(backendUrl)
         val host = targetUri.host.orEmpty().lowercase()
-        val isAllowed = host == trustedHost || host == checkoutHost || host.endsWith(".run.app")
+        val isAllowed = host == trustedHost || host == checkoutHost
 
         if (isAllowed && backendUrl.startsWith("https://")) {
             val browserIntent = Intent(Intent.ACTION_VIEW, targetUri)
