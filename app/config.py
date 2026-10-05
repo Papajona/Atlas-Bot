@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     usdt_tron_scan_pages: int = 10
     usdt_tron_cursor_overlap_seconds: int = 120
     usdt_tron_verify_receipt: bool = True
+    usdt_tron_scan_concurrency: int = 4
+    usdt_tron_max_qps: float = 10.0
     usdt_tron_sweep_enabled: bool = False
     usdt_tron_sweep_min_confirmations: int = 19
     usdt_tron_sweep_min_amount: float = 1.0
@@ -234,6 +236,7 @@ class Settings(BaseSettings):
     exchange_api_secret: str = ""
     exchange_password: str = ""
     exchange_timeout_ms: int = 10_000
+    emergency_stop_concurrency: int = 8
 
     log_level: str = "INFO"
     metrics_enabled: bool = True
