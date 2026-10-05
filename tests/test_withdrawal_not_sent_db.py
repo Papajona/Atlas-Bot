@@ -310,3 +310,28 @@ def test_release_withdrawal_route_contains_separation_gate():
     src = inspect.getsource(main.release_withdrawal)
     assert "release_separation_violation(" in src
     assert src.index("release_separation_violation(") < src.index("destination_allowed(")
+
+
+def test_release_route_binds_operator_identity_over_http(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    async def fake_auth(*args, **kwargs):
+        return {"sub": "authenticated-operator", "role": "TREASURY"}
+
+    async def fake_role(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(main, "auth", fake_auth)
+    monkeypatch.setattr(main, "require_role", fake_role)
+    monkeypatch.setattr(settings, "withdrawals_enabled", True)
+    monkeypatch.setattr(settings, "payout_live_enabled", True)
+    monkeypatch.setattr(settings, "withdrawal_release_tokens", "operator-1:operator-secret")
+
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/admin/withdrawals/1/release",
+        json={"operator_id": "operator-1", "signature": None},
+        headers={"X-Admin-Token": "admin", "X-Release-Token": "operator-secret"},
+    )
+    assert response.status_code == 403
+    assert "identity" in response.json()["detail"].lower()
