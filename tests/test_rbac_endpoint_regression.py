@@ -41,15 +41,10 @@ def _function_block(name: str) -> str:
 @pytest.mark.parametrize("name,required_role", ENDPOINT_ROLES.items())
 def test_reviewed_endpoint_has_exact_rbac_gate(name, required_role):
     block = _function_block(name)
-    assert "claims = await auth(x_admin_token, authorization)" in block
+    auth_call = "await auth(x_admin_token, authorization)"
+    assert f"claims = {auth_call}" in block
+    assert block.count(auth_call) == 1
     assert f'await require_role(claims, "{required_role}")' in block
-
-
-@pytest.mark.parametrize("name", ENDPOINT_ROLES)
-def test_reviewed_endpoint_does_not_leave_auth_result_unused(name):
-    block = _function_block(name)
-    assert "await auth(x_admin_token, authorization)" not in block
-    assert "claims = await auth(x_admin_token, authorization)" in block
 
 
 def _run(coro):
