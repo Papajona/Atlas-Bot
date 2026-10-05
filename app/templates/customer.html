@@ -319,7 +319,13 @@ function drawRechartsAreaChart(box, points, min, range, total, w, h, pad) {
   grad.setAttribute('id', 'rechartsGrad');
   grad.setAttribute('x1', '0'); grad.setAttribute('y1', '0'); grad.setAttribute('x2', '0'); grad.setAttribute('y2', '1');
   const color = total >= 0 ? '#10b981' : '#ef4444';
-  grad.innerHTML = `<stop offset="0%" stop-color="${color}" stop-opacity="0.38"/><stop offset="85%" stop-color="${color}" stop-opacity="0.04"/><stop offset="100%" stop-color="${color}" stop-opacity="0.0"/>`;
+  [['0%', '0.38'], ['85%', '0.04'], ['100%', '0.0']].forEach(([offset, opacity]) => {
+    const stop = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+    stop.setAttribute('offset', offset);
+    stop.setAttribute('stop-color', color);
+    stop.setAttribute('stop-opacity', opacity);
+    grad.appendChild(stop);
+  });
   defs.appendChild(grad);
   svg.appendChild(defs);
 
