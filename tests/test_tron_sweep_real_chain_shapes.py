@@ -58,9 +58,9 @@ def test_garbage_addresses_do_not_normalise():
         assert _address_to_hex20(bad) is None
 
 
-def test_transfer_topic_is_the_real_keccak_of_the_event_signature():
-    keccak = pytest.importorskip("Crypto.Hash.keccak")
-    h = keccak.new(digest_bits=256)
-    h.update(b"Transfer(address,address,uint256)")
-    assert TRANSFER_TOPIC == h.hexdigest()
+def test_transfer_topic_matches_the_canonical_erc20_transfer_topic():
+    # Canonical Keccak-256 topic for Transfer(address,address,uint256).
+    # Keep the protocol vector explicit so a third-party hash backend cannot
+    # silently redefine the chain-level event identifier.
+    assert TRANSFER_TOPIC == "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a9df523b3ef"
     assert extract_trc20_transfer(_receipt(), USDT_BASE58, FROM_B58, TO_B58) == RAW_AMOUNT
