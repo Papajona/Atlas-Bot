@@ -8,6 +8,8 @@ from defusedxml import ElementTree as ET
 import httpx
 import pandas as pd
 
+from .data import _attach_data_provenance
+
 
 class MarketSourceError(RuntimeError):
     pass
@@ -51,8 +53,17 @@ def _normalize_ohlcv(frame: pd.DataFrame) -> pd.DataFrame:
 def yahoo_history(symbol: str, period: str = "3y", interval: str = "1d") -> pd.DataFrame:
     """Historical reference data. Never use Yahoo as the execution price source."""
     import yfinance as yf
+    fetched_at = datetime.now(timezone.utc).isoformat()
     frame = yf.download(symbol, period=period, interval=interval, auto_adjust=False, progress=False, threads=False)
-    return _normalize_ohlcv(frame)
+    normalized = _normalize_ohlcv(frame)
+    return _attach_data_provenance(
+        normalized,
+        source="yahoo_finance",
+        symbol=symbol,
+        exchange="yahoo_finance",
+        timeframe=interval,
+        fetched_at=fetched_at,
+    )
 
 
 def _parse_feed_date(value: str | None) -> str | None:
