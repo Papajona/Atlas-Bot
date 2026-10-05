@@ -300,3 +300,13 @@ def test_external_signer_recovery_404_is_definite_error_not_not_found(monkeypatc
     classified = classify_payout_exception(error)
     assert isinstance(classified, PayoutError)
     assert not isinstance(classified, PayoutNotFound)
+
+
+# The release route itself is exercised through FastAPI's ASGI stack in CI when
+# the application integration fixtures are available. This structural assertion
+# prevents the separation check from being accidentally moved below payout I/O.
+def test_release_withdrawal_route_contains_separation_gate():
+    import inspect
+    src = inspect.getsource(main.release_withdrawal)
+    assert "release_separation_violation(" in src
+    assert src.index("release_separation_violation(") < src.index("destination_allowed(")
