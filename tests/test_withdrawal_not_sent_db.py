@@ -37,7 +37,7 @@ def _db():
 
 async def _call_endpoint(main_module, sessions, withdrawal, *, admin_id="approver-1", operator_id="operator-1", provider=None, monkeypatch=None):
     async def fake_auth(*args, **kwargs):
-        return {"sub": "treasury-test", "role": "TREASURY"}
+        return {"sub": operator_id, "role": "TREASURY"}
 
     async def fake_role(*args, **kwargs):
         return True
