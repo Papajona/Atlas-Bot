@@ -52,3 +52,11 @@ def test_android_settings_do_not_claim_live_or_real_identity_without_backend_dat
         "AUDIT_INITIALIZED",
     ):
         assert value not in source
+
+
+def test_admin_rbac_inactive_assignment_blocks_bootstrap_fallback():
+    source = (ROOT / "app/admin_rbac.py").read_text()
+    assert "select(AdminRole.role, AdminRole.active)" in source
+    assert "if rows:" in source
+    assert "deactivating the last role must not fall through" in source
+    assert "AdminRole.active.is_(True)" not in source
