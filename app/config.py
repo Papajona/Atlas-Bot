@@ -101,6 +101,10 @@ class Settings(BaseSettings):
     research_yahoo_period: str = "3y"
     research_taker_bps: float = 5.5
     research_slippage_bps: float = 2.0
+    # Production research must identify the evidence behind the fee assumption; the
+    # development default is intentionally not accepted as customer-execution evidence.
+    research_fee_source: str = ""
+    research_fee_evidence_id: str = ""
     research_folds: int = 5
     research_min_train: int = 800
     research_ai_threshold: float = 0.05
@@ -424,6 +428,13 @@ class Settings(BaseSettings):
             # Production adaptive-model promotion must not silently run with the
             # development/off DSR floor. The deployment example already recommends
             # 0.95; enforce that floor at the production configuration boundary.
+            if self.environment == "production" and self.adaptive_ai_enabled and self.research_taker_bps <= 0:
+                raise ValueError("RESEARCH_TAKER_BPS must be > 0 in production")
+            if self.environment == "production" and self.adaptive_ai_enabled and (not self.research_fee_source.strip() or not self.research_fee_evidence_id.strip()):
+                raise ValueError(
+                    "RESEARCH_FEE_SOURCE and RESEARCH_FEE_EVIDENCE_ID are required in production "
+                    "so research costs cannot silently rely on an unverified default"
+                )
             if self.environment == "production" and self.adaptive_ai_enabled and self.research_min_deflated_sharpe < 0.95:
                 raise ValueError(
                     "RESEARCH_MIN_DEFLATED_SHARPE must be >= 0.95 in production "
