@@ -58,7 +58,7 @@ def test_customer_home_copy_is_financially_precise():
 
 
 def test_home_chart_is_ledger_backed():
-    _, js = _split()
+    head, js = _split()
     assert "TRADE_SETTLEMENT" in js
     assert "TRADING_FEE" in js
-    assert "Seven day realised profit and loss chart" in js
+    assert 'aria-label="Seven day realised profit and loss chart"' in head
