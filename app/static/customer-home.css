@@ -311,3 +311,19 @@ button:disabled{opacity:.55;cursor:not-allowed}
 @media(prefers-reduced-motion:reduce){
   .quick a,.mobile-nav a,button,.home-avatar{transition:none}
 }
+
+
+/* Verified accessibility hardening: WCAG-oriented contrast, focus, reduced motion. */
+:root{--muted2:#5b6a82}
+label,.formgrid label{color:#4a5870}
+.eyebrow{color:#5a677d}
+.text-btn{color:#0b5cad;text-decoration:underline}
+.primary-cta,button.primary{background:linear-gradient(135deg,#1558c0,#0d7a68);color:#fff}
+.avatar,.profile-avatar{color:#0f2a55;background:#d6e6fb}
+input::placeholder,textarea::placeholder{color:#5f6c82;opacity:1}
+.chip.active,.chip.is-active,button.active[data-range]{background:#0b6b4a;color:#fff}
+.secure-status{color:#0b6b4a}
+small,.muted,.sub{color:#56637a}
+.nav-link.active{color:#0b4fb3}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #0b5cad;outline-offset:2px}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

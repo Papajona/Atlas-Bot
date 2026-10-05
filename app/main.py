@@ -4136,8 +4136,18 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
         await websocket.close(code=1008, reason="Authentication required")
         return
     await websocket.accept()
+    last_auth_check = time.monotonic()
     try:
         while True:
+            # Re-validate the bearer token/role periodically so a revoked or demoted operator is cut off.
+            if time.monotonic() - last_auth_check > 30:
+                try:
+                    claims = await auth(None, authorization)
+                    await require_role(claims, "RISK_OFFICER")
+                    last_auth_check = time.monotonic()
+                except Exception:
+                    await websocket.close(code=1008, reason="Session no longer authorised")
+                    return
             async with SessionLocal() as db:
                 s = await db.get(AppState, 1)
                 equity = float(s.equity) if s and s.equity is not None else 0.0

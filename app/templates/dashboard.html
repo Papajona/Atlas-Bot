@@ -185,7 +185,7 @@ async function loadWithdrawals(){
   }catch(e){$('output').textContent='Withdrawal queue: '+e.message}
 }
 async function approveWithdrawal(id){
-  const admin=$('adminId').value.trim(); sessionStorage.setItem('ait_approver_token',$('approverToken').value||''); if(!admin){$('output').textContent='Enter an Admin ID first.';return}
+  const admin=$('adminId').value.trim(); if(!admin){$('output').textContent='Enter an Admin ID first.';return}
   try{const reason=prompt('Approval note (optional):','');const j=await api('/api/admin/withdrawals/'+id+'/approve',{method:'POST',body:JSON.stringify({admin_id:admin,reason:reason||''})});$('output').textContent=JSON.stringify(j,null,2);loadWithdrawals()}catch(e){$('output').textContent='Approval failed: '+e.message}
 }
 async function executeWithdrawal(id){
@@ -199,7 +199,7 @@ async function reconcileWithdrawal(id){
   try{const j=await api('/api/admin/withdrawals/'+id+'/reconcile',{method:'POST',headers:{'X-Release-Token':release},body:JSON.stringify({operator_id:operator})});$('output').textContent=JSON.stringify(j,null,2);loadWithdrawals()}catch(e){$('output').textContent='Reconciliation failed: '+e.message}
 }
 async function rejectWithdrawal(id){
-  const admin=$('adminId').value.trim(); sessionStorage.setItem('ait_approver_token',$('approverToken').value||''); if(!admin){$('output').textContent='Enter an Admin ID first.';return}
+  const admin=$('adminId').value.trim(); if(!admin){$('output').textContent='Enter an Admin ID first.';return}
   const reason=prompt('Required rejection reason:',''); if(!reason?.trim())return;
   try{const j=await api('/api/admin/withdrawals/'+id+'/reject',{method:'POST',body:JSON.stringify({admin_id:admin,reason})});$('output').textContent=JSON.stringify(j,null,2);loadWithdrawals()}catch(e){$('output').textContent='Rejection failed: '+e.message}
 }
@@ -211,8 +211,8 @@ async function refresh(){try{const s=await api('/api/state');$('mode').textConte
 async function run(path,body=req()){ $('output').textContent='Working…';try{const j=await api(path,{method:'POST',body:JSON.stringify(body)});$('output').textContent=JSON.stringify(j,null,2);refresh()}catch(e){$('output').textContent='ERROR: '+e.message}}
 function train(){run('/api/train')} function backtest(){run('/api/backtest')} function strategyBacktest(){run('/api/strategy/backtest')} function backtestAll(){run('/api/research/backtest-all')} function aiReview(){run('/api/research/review')} function paperSignals(){run('/api/research/paper-signals')} function signal(){run('/api/signal')} function strategySignal(){run('/api/strategy/signal')} function paperStep(){run('/api/paper/step')}
 async function reconcile(){run('/api/reconcile',req())}
-async function halt(){try{$('output').textContent=JSON.stringify(await api('/api/risk/kill',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent=e.message}}
-async function resetRisk(){try{$('output').textContent=JSON.stringify(await api('/api/risk/reset',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent=e.message}}
+async function halt(){if(!confirm('HALT trading and cancel open orders? This is an emergency action.'))return;try{$('output').textContent=JSON.stringify(await api('/api/risk/kill',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent='HALT NOT CONFIRMED: '+e.message}}
+async function resetRisk(){if(!confirm('Release the halt? Live trading remains OFF.'))return;try{$('output').textContent=JSON.stringify(await api('/api/risk/reset',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent=e.message}}
 async function disableLive(){try{$('output').textContent=JSON.stringify(await api('/api/live/disable',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent=e.message}}
 if(token())$('authState').textContent='Admin session present; verify Authenticator if prompted.';refresh();loadWithdrawals();loadRoles();loadMargin();setInterval(refresh,5000);setInterval(loadWithdrawals,10000)
 </script>
