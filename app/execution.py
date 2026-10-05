@@ -1603,7 +1603,7 @@ async def emergency_stop(exchange: str | None = None):
                     CustomerBinanceAccount.can_trade.is_(True),
                 )
             )).scalars().all()
-        for account in customer_accounts:
+        async def _sweep_customer(account):
             try:
                 broker = await asyncio.to_thread(
                     build_customer_binance_broker, account, timeout_ms=settings.exchange_timeout_ms, sandbox=False
@@ -1626,6 +1626,12 @@ async def emergency_stop(exchange: str | None = None):
                     )
                 except Exception:
                     logging.getLogger(__name__).warning("emergency_stop_incident_write_failed", exc_info=True)
+
+        sweep_slots = asyncio.Semaphore(max(1, int(settings.emergency_stop_concurrency)))
+        async def _bounded_sweep(account):
+            async with sweep_slots:
+                await _sweep_customer(account)
+        await asyncio.gather(*(_bounded_sweep(account) for account in customer_accounts))
 
     broker_halt_confirmed = not failures
     await audit("EMERGENCY_STOP", {
