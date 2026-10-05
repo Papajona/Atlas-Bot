@@ -7,7 +7,7 @@ DEPLOY = (ROOT / "deploy" / "DEPLOY_WORKFLOW.md").read_text(encoding="utf-8")
 
 
 def test_production_adaptive_ai_requires_nonzero_dsr_floor():
-    assert 'if self.adaptive_ai_enabled and self.research_min_deflated_sharpe < 0.95:' in CONFIG
+    assert 'if self.environment == "production" and self.adaptive_ai_enabled and self.research_min_deflated_sharpe < 0.95:' in CONFIG
     assert 'RESEARCH_MIN_DEFLATED_SHARPE must be >= 0.95 in production' in CONFIG
 
 
