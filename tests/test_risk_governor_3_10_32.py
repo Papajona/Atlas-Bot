@@ -20,3 +20,10 @@ def test_risk_per_trade_limit_blocks_oversized_stop_risk():
 def test_risk_per_trade_limit_allows_sized_position():
     d=evaluate_trade(side="buy",price=100,quantity=0.5,live=True,stop_loss_price=90,take_profit_price=120,signal={},equity=1000,risk_per_trade=0.005,risk_tolerance=0.10)
     assert d.action=="ALLOW"
+
+
+def test_live_execution_spread_is_blocked_above_configured_ceiling():
+    d = evaluate_trade(side="buy", price=101, quantity=1, live=True, stop_loss_price=95,
+                       take_profit_price=110, signal={}, spread_bps=101, max_spread_bps=100)
+    assert d.action == "BLOCK"
+    assert "spread_guard" in d.reasons
