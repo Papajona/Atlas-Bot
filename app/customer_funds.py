@@ -9,6 +9,7 @@ from .db import CustomerLedgerAccount, Incident, LedgerEntry, LedgerJournal, Led
 USDT = "USDT"
 D = Decimal
 logger = logging.getLogger(__name__)
+LEGACY_MIGRATION_ACCOUNT = "ASSET:LEGACY:WALLET_MIGRATION"
 _SCALE = Decimal("0.000001")  # matches the Numeric(38,6) ledger columns
 
 
