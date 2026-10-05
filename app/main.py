@@ -867,7 +867,7 @@ class _RateGate:
             delay = self._next - now
             if delay > 0:
                 await asyncio.sleep(delay)
-                now = time.mononic()
+                now = _time.monotonic()
             self._next = max(now, self._next) + self._interval
 
 async def _usdt_tron_monitor_loop():
