@@ -823,10 +823,18 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     timeout_ms=settings.exchange_timeout_ms,
                 ))
             ticker = await asyncio.to_thread(broker.ticker, symbol)
-            quote = float(ticker.get("ask") if side == "buy" and ticker.get("ask") else
-                          ticker.get("bid") if side == "sell" and ticker.get("bid") else ticker.get("last") or 0)
+            bid = float(ticker.get("bid") or 0)
+            ask = float(ticker.get("ask") or 0)
+            quote = float(ask if side == "buy" and ask > 0 else
+                          bid if side == "sell" and bid > 0 else ticker.get("last") or 0)
             if quote <= 0:
                 raise RiskBlocked("Broker returned no usable market price")
+            spread_bps = None
+            if bid > 0 and ask > 0 and ask >= bid:
+                mid = (ask + bid) / 2.0
+                spread_bps = ((ask - bid) / mid) * 10_000 if mid > 0 else None
+            elif live:
+                raise RiskBlocked("Broker did not return a usable bid/ask spread for live execution")
             if price > 0:
                 slip = abs(quote / price - 1) * 10_000
                 if slip > settings.max_slippage_bps:
@@ -856,7 +864,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     raise RiskBlocked("OANDA instrument is not tradeable for this account")
             except Exception as exc:
                 raise RiskBlocked(str(exc)) from exc
-        governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {})
+        governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps)
         if governor.action != "ALLOW":
             raise RiskBlocked("Risk Governor blocked order: " + ",".join(governor.reasons))
         await risk_gate(symbol, quote, quantity, live=live, signal_timestamp=signal_timestamp, side=side, customer_id=customer_id, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {})
