@@ -22,6 +22,20 @@ def verify_release_operator(operator_id: str, token: str | None) -> bool:
     return bool(expected and token and hmac.compare_digest(token, expected))
 
 
+
+def release_separation_violation(operator_id: str, release_token: str | None, approvers: list[str | None]) -> str | None:
+    """Enforce separation of duties between withdrawal approvers and the release operator."""
+    op = str(operator_id or "").strip().lower()
+    named = {str(a).strip().lower() for a in approvers if a and str(a).strip()}
+    if op and op in named:
+        return "Release operator must be different from the withdrawal approvers"
+    token = str(release_token or "")
+    if token:
+        for secret in _pairs(settings.withdrawal_approver_tokens).values():
+            if hmac.compare_digest(token, secret):
+                return "Release credential must be distinct from every approver credential"
+    return None
+
 def destination_fingerprint(destination: str, currency: str, network: str = '') -> str:
     raw = f'{currency.upper()}|{network.upper()}|{destination.strip()}'.encode()
     return hashlib.sha256(raw).hexdigest()
