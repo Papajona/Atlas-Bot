@@ -421,6 +421,14 @@ class Settings(BaseSettings):
                     raise ValueError("MODEL_SIGNING_PRIVATE_KEY is required for adaptive worker model promotion")
             if self.process_role == "api" and not self.forwarded_allow_ips:
                 raise ValueError("FORWARDED_ALLOW_IPS must be explicitly configured for the API in staging/production")
+            # Production adaptive-model promotion must not silently run with the
+            # development/off DSR floor. The deployment example already recommends
+            # 0.95; enforce that floor at the production configuration boundary.
+            if self.adaptive_ai_enabled and self.research_min_deflated_sharpe < 0.95:
+                raise ValueError(
+                    "RESEARCH_MIN_DEFLATED_SHARPE must be >= 0.95 in production "
+                    "when adaptive AI promotion is enabled"
+                )
         return self
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
