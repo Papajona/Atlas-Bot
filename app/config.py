@@ -424,7 +424,7 @@ class Settings(BaseSettings):
             # Production adaptive-model promotion must not silently run with the
             # development/off DSR floor. The deployment example already recommends
             # 0.95; enforce that floor at the production configuration boundary.
-            if self.adaptive_ai_enabled and self.research_min_deflated_sharpe < 0.95:
+            if self.environment == "production" and self.adaptive_ai_enabled and self.research_min_deflated_sharpe < 0.95:
                 raise ValueError(
                     "RESEARCH_MIN_DEFLATED_SHARPE must be >= 0.95 in production "
                     "when adaptive AI promotion is enabled"
