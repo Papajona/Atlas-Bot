@@ -40,7 +40,7 @@ from .daily_research import run_daily_research, latest_macro_context
 from .execution import execute_signal, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
 from .payout import get_payout_provider, PayoutError, PayoutUnknown, PayoutNotFound
-from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, verify_release_operator
+from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, release_separation_violation, verify_release_operator
 from .usdt_tron import derive_usdt_tron_address_from_xpub, validate_tron_account_xpub
 from .tron_sweep import build_sweep_intent, serialize_sweep_intent, SweepError, classify_solidified_sweep
 from .customer_funds import get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, ledger_statement, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal
@@ -852,6 +852,23 @@ async def _daily_research_loop():
             await _audit("RESEARCH_DAILY_FAILED", {"error": str(exc)})
 
 
+
+class _RateGate:
+    """Pace concurrent TronGrid request starts to a configured process-wide QPS ceiling."""
+    def __init__(self, qps: float):
+        self._interval = 1.0 / max(0.1, float(qps))
+        self._next = 0.0
+        self._lock = asyncio.Lock()
+
+    async def wait(self) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            delay = self._next - now
+            if delay > 0:
+                await asyncio.sleep(delay)
+                now = time.mononic()
+            self._next = max(now, self._next) + self._interval
+
 async def _usdt_tron_monitor_loop():
     """Reconcile confirmed TRC-20 USDT deposits into customer ledgers.
 
@@ -869,11 +886,15 @@ async def _usdt_tron_monitor_loop():
                     Wallet.currency == "USDT", Wallet.network == "TRON", Wallet.status == "ACTIVE"))).scalars().all()
             wallets = [w for w in wallets if w.deposit_address]
             headers = {"accept": "application/json", "TRON-PRO-API-KEY": settings.usdt_trongrid_api_key}
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                for wallet in wallets:
+            gate = _RateGate(settings.usdt_tron_max_qps)
+            async def _pace(_request):
+                await gate.wait()
+            scan_slots = asyncio.Semaphore(max(1, int(settings.usdt_tron_scan_concurrency)))
+            async with httpx.AsyncClient(timeout=15.0, event_hooks={"request": [_pace]}) as client:
+                async def _scan_one(wallet):
                     lock_key = f"tron-deposit-scan:{wallet.id}"
                     if not await acquire_lock(lock_key, ttl_seconds=max(120, poll_seconds + 120)):
-                        continue
+                        return
                     try:
                         async with SessionLocal() as db:
                             cursor = (await db.execute(select(TronDepositCursor).where(
@@ -933,7 +954,13 @@ async def _usdt_tron_monitor_loop():
                                 if not txid or block_ts <= 0:
                                     continue
 
-                                if settings.usdt_tron_verify_receipt:
+                                provider_ref = _tron_deposit_reference(seen_refs, txid=txid, sender=sender,
+                                                                       address=wallet.deposit_address, raw_value=raw_value, block_ts=block_ts)
+                                async with SessionLocal() as db:
+                                    already_credited = (await db.execute(select(FundingTransaction.id).where(
+                                        FundingTransaction.provider == "tron-usdt",
+                                        FundingTransaction.provider_reference == provider_ref))).first() is not None
+                                if not already_credited and settings.usdt_tron_verify_receipt:
                                     receipt_url = f"{settings.usdt_trongrid_base_url.rstrip('/')}/walletsolidity/gettransactioninfobyid"
                                     receipt_response = await client.post(receipt_url, json={"value": txid}, headers=headers)
                                     receipt_response.raise_for_status()
@@ -958,9 +985,9 @@ async def _usdt_tron_monitor_loop():
                                             continue
 
                                 highest_ts = max(highest_ts, block_ts)
+                                if already_credited:
+                                    continue
                                 amount = raw_value / 1_000_000
-                                provider_ref = _tron_deposit_reference(seen_refs, txid=txid, sender=sender,
-                                                                       address=wallet.deposit_address, raw_value=raw_value, block_ts=block_ts)
                                 async with SessionLocal() as db:
                                     existing = (await db.execute(select(FundingTransaction).where(
                                         FundingTransaction.provider == "tron-usdt",
@@ -1015,6 +1042,11 @@ async def _usdt_tron_monitor_loop():
                         await _audit("TRON_WALLET_SCAN_FAILED", {"wallet_id": wallet.id, "error": str(exc)})
                     finally:
                         await release_lock(lock_key)
+
+                async def _bounded(wallet):
+                    async with scan_slots:
+                        await _scan_one(wallet)
+                await asyncio.gather(*(_bounded(w) for w in wallets))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -4326,6 +4358,9 @@ async def release_withdrawal(withdrawal_id: int, req: WithdrawalExecuteRequest, 
             raise HTTPException(409, f"Withdrawal is {w.status}; only APPROVED withdrawals can be released")
         if w.risk_score >= settings.withdrawal_review_score and not w.risk_reviewed_by:
             raise HTTPException(409, "High-risk withdrawal requires explicit risk review before release")
+        separation = release_separation_violation(req.operator_id, x_release_token, [w.first_approved_by, w.second_approved_by])
+        if separation:
+            raise HTTPException(409, separation)
         if not w.destination:
             raise HTTPException(409, "Withdrawal has no executable destination")
         if not destination_allowed(w.destination, w.currency, w.network):
