@@ -32,7 +32,13 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
         response.headers["Cache-Control"] = "no-store"
         if str(settings.environment).lower() == "production":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-            response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
+            # img-src data: is required: the MFA enrolment QR is a data: URI and was blocked by default-src self.
+            # unsafe-inline remains until inline handlers/scripts are moved to nonce-protected files.
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+                "script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; "
+                "form-action 'self'; frame-ancestors 'none'"
+            )
         logger.info(json.dumps({"request_id": request_id, "method": request.method, "path": path,
                                 "status": response.status_code, "duration_ms": round(elapsed * 1000, 2)}))
         return response
