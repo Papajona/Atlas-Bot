@@ -789,6 +789,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
         # In live mode, the exchange quote is authoritative. Never trust a client-supplied price for risk sizing.
         broker = None
         quote = price
+        spread_bps = None
         if live:
             # Customer live trading requires a verified isolated exchange/subaccount adapter.
             # Customer crypto execution must resolve only the customer's verified venue mapping.
