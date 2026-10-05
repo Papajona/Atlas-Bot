@@ -25,8 +25,8 @@ import androidx.compose.ui.unit.sp
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModernSettingsScreen(
-    userName: String = "Alice Henderson",
-    userEmail: String = "alice.henderson@atlas.trading",
+    userName: String = "Sample data",
+    userEmail: String = "not connected to your account",
     onOpenOperatorConsole: () -> Unit = {},
     onOpenPortal: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -160,7 +160,7 @@ fun ModernSettingsScreen(
                                         .padding(horizontal = 6.dp, vertical = 2.dp)
                                 ) {
                                     Text(
-                                        text = "VERIFIED PRO",
+                                        text = "Sample profile",
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = emeraldBadgeText
@@ -186,13 +186,13 @@ fun ModernSettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column {
-                            Text(text = "Account Tier", fontSize = 11.sp, color = textMuted)
-                            Text(text = "Tier 1 Multi-Asset Access", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = textPrimary)
+                            Text(text = "Account status", fontSize = 11.sp, color = textMuted)
+                            Text(text = "Not connected to an account", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = textPrimary)
                         }
 
                         Column(horizontalAlignment = Alignment.End) {
                             Text(text = "Trader ID", fontSize = 11.sp, color = textMuted)
-                            Text(text = "#AT-8824-LIVE", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = brandTeal)
+                            Text(text = "Unavailable", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = textMuted)
                         }
                     }
                 }
@@ -211,7 +211,7 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.PlayArrow,
                     iconTint = brandTeal,
                     title = "Paper Trading Simulation",
-                    subtitle = if (isPaperTrading) "Safe demo execution (Zero financial risk)" else "Live order routing active",
+                    subtitle = "Display only: does not change server trading mode (set on the web console)",
                     checked = isPaperTrading,
                     onCheckedChange = { isPaperTrading = it },
                     textPrimary = textPrimary,
@@ -412,7 +412,7 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Lock,
                     iconTint = brandTeal,
                     title = "Biometric App Lock",
-                    subtitle = "Require Fingerprint / Device Credential to unlock app",
+                    subtitle = "Display only: not yet enforced",
                     checked = biometricLock,
                     onCheckedChange = { biometricLock = it },
                     textPrimary = textPrimary,
@@ -458,13 +458,13 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.List,
                     iconTint = brandTeal,
                     title = "Encrypted Security Audit Trail",
-                    subtitle = "Inspect tamper-proof cryptographic audit entries",
-                    badge = "AES-GCM",
+                    subtitle = "Display only: audit events are not connected in this build",
+                    badge = "NOT CONNECTED",
                     badgeBg = Color(0xFFEFF6FF),
                     badgeText = Color(0xFF1D4ED8),
                     onClick = {
                         activeDialogTitle = "Encrypted Security Audit Trail"
-                        activeDialogContent = "Latest Security Events Recorded:\n• [2026-10-04 15:48 UTC] AUDIT_INITIALIZED (KeyStore AES-256-GCM)\n• [2026-10-04 15:49 UTC] BIOMETRIC_CREDENTIAL_VERIFIED (Pass)\n• [2026-10-04 15:52 UTC] BACKEND_PORTAL_ALLOWLIST_CHECK (Pass)\n• [2026-10-04 16:05 UTC] SYSTEM_INTEGRITY_PASSED (Zero-DEX)"
+                        activeDialogContent = "No live audit events are available in this build. Connect the authenticated account and backend audit API before displaying security events."
                     },
                     textPrimary = textPrimary,
                     textMuted = textMuted
@@ -506,7 +506,7 @@ fun ModernSettingsScreen(
                                 color = textPrimary
                             )
                             Text(
-                                text = "Connected • Cloud Run (14ms WebSocket)",
+                                text = "Not connected • live telemetry unavailable",
                                 fontSize = 11.sp,
                                 color = emeraldAccent,
                                 fontWeight = FontWeight.SemiBold
@@ -517,7 +517,7 @@ fun ModernSettingsScreen(
                     Spacer(modifier = Modifier.height(10.dp))
 
                     Text(
-                        text = "Access live portfolio risk matrices, Deflated Sharpe telemetry, and the emergency Kill Switch circuit breaker.",
+                        text = "Live risk telemetry and the emergency Kill Switch are available only through the authenticated operator console.",
                         fontSize = 12.sp,
                         color = textMuted,
                         lineHeight = 18.sp
@@ -574,7 +574,7 @@ fun ModernSettingsScreen(
                     badge = "v3.10.47",
                     badgeBg = Color(0xFFF1F5F9),
                     badgeText = Color(0xFF475569),
-                    subtitle = "Production release with zero mock data",
+                    subtitle = "Sample data only: not yet connected to your account",
                     onClick = {
                         activeDialogTitle = "Atlas Trading System"
                         activeDialogContent = "Version: 3.10.47 (Build 1047)\nArchitecture: Jetpack Compose + Cloud Run FastAPI + PostgreSQL\nCompliance: Google Play Developer Program Compliant"
