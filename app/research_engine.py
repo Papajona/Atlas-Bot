@@ -143,9 +143,14 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                             prior_trial_labels=None) -> dict:
     cfg = cfg or StrategyConfig()
     data_quality = validate_ohlcv_frame(df)
+    provenance = dict(df.attrs.get("data_provenance") or {})
+    if not provenance.get("sha256"):
+        data_quality.setdefault("issues", []).append("missing_data_provenance_hash")
+        data_quality["valid"] = False
     if not data_quality["valid"]:
-        return {"research_version": "3.10.3-validation-v1", "status": "DATA_INVALID",
-                "data_quality": data_quality, "strategies": [], "strategy_count": 0}
+        return {"research_version": "3.10.3-validation-v2", "status": "DATA_INVALID",
+                "data_quality": data_quality, "data_provenance": provenance,
+                "strategies": [], "strategy_count": 0}
     components = ["trend", "momentum", "breakout", "mean_reversion", "ensemble"]
     results = [_component_backtest(df, c, cfg, taker_bps, slippage_bps, asset) for c in components]
     for row in results:
@@ -216,8 +221,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             ai_result = {"strategy": "ai_walk_forward", "status": "INSUFFICIENT_DATA", "error": str(exc)}
     ranked = _rank_for_research(results.copy())
     return {
-        "research_version": "3.10.3-validation-v1",
+        "research_version": "3.10.3-validation-v2",
         "data_quality": data_quality,
+        "data_provenance": provenance,
         "validation": {"purged_walk_forward_folds": [fold.__dict__ for fold in validation_splits],
                         "cost_sensitivity": sensitivity,
                         "bootstrap_mean_return_ci": ci,
