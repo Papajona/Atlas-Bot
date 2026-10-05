@@ -13,4 +13,4 @@ def test_production_adaptive_ai_requires_nonzero_dsr_floor():
 
 def test_deployment_docs_do_not_describe_off_dsr_as_production_default():
     assert '| `RESEARCH_MIN_DEFLATED_SHARPE` | `0.95`' in DEPLOY
-    assert 'production promotion requires the DSR floor to be at least 0.95' in DEPLOY
+    assert 'production adaptive-model promotion fails closed below 0.95' in DEPLOY
