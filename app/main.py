@@ -4346,6 +4346,9 @@ async def release_withdrawal(withdrawal_id: int, req: WithdrawalExecuteRequest, 
     """Execute an approved withdrawal through a separately authenticated release operator."""
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
+    authenticated_operator = str(claims.get("sub") or claims.get("user_id") or "").strip()
+    if not authenticated_operator or not hmac.compare_digest(authenticated_operator, str(req.operator_id or "").strip()):
+        raise HTTPException(403, "Release operator identity must match the authenticated user")
     if not verify_release_operator(req.operator_id, x_release_token):
         raise HTTPException(401, "Separate release-operator authentication required")
     if not settings.withdrawals_enabled or not settings.payout_live_enabled:
