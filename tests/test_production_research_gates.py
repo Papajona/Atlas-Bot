@@ -27,3 +27,15 @@ def test_research_backtests_use_shared_next_open_execution_model():
     assert "def next_open_returns" in strategy
     assert 'df["close"].pct_change()' not in research
     assert 'df["close"].pct_change()' not in strategy
+
+
+def test_production_research_requires_fee_evidence():
+    assert "research_fee_source: str = \"\"" in CONFIG
+    assert "research_fee_evidence_id: str = \"\"" in CONFIG
+    assert "RESEARCH_FEE_SOURCE and RESEARCH_FEE_EVIDENCE_ID are required in production" in CONFIG
+
+
+def test_sandbox_drill_fails_closed_on_warning_or_skip():
+    drill = (ROOT / "scripts" / "exchange_sandbox_drill.py").read_text(encoding="utf-8")
+    assert 'counts["WARN"] == 0' in drill
+    assert 'counts["SKIP"] == 0' in drill
