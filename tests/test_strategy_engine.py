@@ -50,6 +50,15 @@ def test_strategy_annualization_uses_bar_frequency():
 def test_all_strategy_research_and_ai_review():
     from app.research_engine import backtest_all_strategies, ai_market_review
     df = sample_df(1800)
+    df.attrs["data_provenance"] = {
+        "source": "synthetic_test",
+        "symbol": "TEST",
+        "exchange": "synthetic",
+        "timeframe": "1h",
+        "fetched_at_utc": "2026-01-01T00:00:00+00:00",
+        "row_count": len(df),
+        "sha256": "0" * 64,
+    }
     out = backtest_all_strategies(df, include_ai=False)
     assert out["strategy_count"] == 5
     assert set(out["research_order"]) == {"trend", "momentum", "breakout", "mean_reversion", "ensemble"}
