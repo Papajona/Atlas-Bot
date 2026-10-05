@@ -52,7 +52,7 @@ def test_customer_home_copy_is_financially_precise():
     assert "Account equity" in head
     assert "Open positions" in head
     assert "Open P&amp;L" in head
-    assert "Realised P&amp;L · 7 days" in head
+    assert "Realised P&amp;L &middot; 7 days" in head
     assert "Create paper trade" in head
     assert "Performance (7 days)" not in head
 
