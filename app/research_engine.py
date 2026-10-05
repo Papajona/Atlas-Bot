@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pandas as pd
 
-from .strategy_engine import StrategyConfig, strategy_signals, risk_scaled_position
+from .strategy_engine import StrategyConfig, strategy_signals, risk_scaled_position, next_open_returns
 from .trading_core import ai_walk_forward_backtest
 from .strategy_evidence import evidence_for
 from .research_validation import monte_carlo_bootstrap, parameter_plateau_score, deflated_sharpe_report, cost_breakeven_report
@@ -34,7 +34,7 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
     vol = s["realized_vol"]
     lev = (cfg.target_vol_annual / vol.replace(0, np.nan)).clip(upper=cfg.max_leverage)
     pos = (raw * lev).clip(-cfg.max_leverage, cfg.max_leverage).shift(1).fillna(0.0)
-    ret = df["close"].pct_change().fillna(0.0)
+    ret = next_open_returns(df) - 1.0
     turnover = pos.diff().abs().fillna(pos.abs())
     costs = turnover * ((taker_bps + slippage_bps) / 10_000.0)
     net = pos * ret - costs
@@ -157,14 +157,15 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         row["evidence"] = evidence_for(row["strategy"])
     validation_splits = purged_walk_forward_splits(len(df), folds=folds, min_train=min_train, purge=1, embargo=1)
     ensemble_signal = strategy_signals(df, cfg, asset=asset)["ensemble"].fillna(0.0)
-    gross = ensemble_signal.shift(1).fillna(0.0) * df["close"].pct_change().fillna(0.0)
-    turnover = ensemble_signal.diff().abs().shift(1).fillna(0.0)
+    ensemble_pos = ensemble_signal.shift(1).fillna(0.0)
+    gross = ensemble_pos * (next_open_returns(df) - 1.0)
+    turnover = ensemble_pos.diff().abs().fillna(ensemble_pos.abs())
     sensitivity = cost_sensitivity(gross.to_numpy(), turnover.to_numpy())
     ci = bootstrap_mean_ci((gross - turnover * ((taker_bps + slippage_bps) / 10000.0)).to_numpy(), block_size=10)
     adjusted = multiple_testing_sharpe_adjustment([r.get("sharpe", 0.0) for r in results], trials=len(results))
     oos = fixed_signal_walk_forward_oos(df, ensemble_signal,
                                         costs_bps=taker_bps + slippage_bps, folds=folds, min_train=min_train)
-    gross_net = ensemble_signal.shift(1).fillna(0.0) * df["close"].pct_change().fillna(0.0)
+    gross_net = ensemble_pos * (next_open_returns(df) - 1.0)
     regime_performance = regime_conditioned_performance(df, gross_net - turnover * ((taker_bps + slippage_bps) / 10000.0), asset=asset)
     per_strategy_oos = {}
     for component in components:
@@ -201,12 +202,12 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     oos["cost_analysis"] = ens_cost
     # Each component is judged on its own net returns (main.py gates on per_strategy_oos[selected]), same trial count.
     ann_bars = PROFILES.get(asset, PROFILES["crypto"]).bars_per_year
-    pct = df["close"].pct_change().fillna(0.0)
     for component in components:
         sig = strategy_signals(df, cfg, asset=asset)[component].fillna(0.0)
-        net_c = (sig.shift(1).fillna(0.0) * pct - sig.diff().abs().shift(1).fillna(0.0) * ((taker_bps + slippage_bps) / 10000.0)).to_numpy()
+        component_pos = sig.shift(1).fillna(0.0)
+        net_c = (component_pos * (next_open_returns(df) - 1.0) - component_pos.diff().abs().fillna(component_pos.abs()) * ((taker_bps + slippage_bps) / 10000.0)).to_numpy()
         comp_dsr = deflated_sharpe_report(net_c, trial_sharpes, n_trials, ann_bars)
-        comp_cost = cost_breakeven_report((sig.shift(1).fillna(0.0) * pct).to_numpy(), sig.diff().abs().shift(1).fillna(0.0).to_numpy(),
+        comp_cost = cost_breakeven_report((component_pos * (next_open_returns(df) - 1.0)).to_numpy(), component_pos.diff().abs().fillna(component_pos.abs()).to_numpy(),
                                           taker_bps=taker_bps, slippage_bps=slippage_bps, bars_per_year=ann_bars, stress_multiplier=cost_mult)
         per_strategy_oos[component]["cost_stress_ok"] = bool(comp_cost.get("stress_ok"))
         per_strategy_oos[component]["cost_analysis"] = comp_cost
