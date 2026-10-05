@@ -2001,7 +2001,8 @@ async def admin_reconcile_tron_sweep(sweep_id: int, authorization: str | None = 
 
 @app.get("/api/admin/custody/tron/sweeps")
 async def admin_list_tron_sweeps(authorization: str | None = Header(default=None), x_admin_token: str | None = Header(default=None), status: str | None = None):
-    await auth(x_admin_token, authorization)
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "READ_ONLY")
     async with SessionLocal() as db:
         stmt = select(TronSweep).order_by(desc(TronSweep.created_at)).limit(200)
         if status:
@@ -4671,7 +4672,8 @@ async def forex_demo_price(instrument: str = "EUR_USD", x_admin_token: str | Non
 
 @app.post("/api/forex/demo/enable")
 async def enable_forex_demo(body: LiveEnableRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
-    await auth(x_admin_token, authorization)
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "OPERATIONS")
     if not settings.oanda_practice:
         raise HTTPException(403, "OANDA practice mode is required for demo enablement")
     if body.confirmation != "ENABLE_FOREX_DEMO":
@@ -4710,7 +4712,8 @@ async def enable_forex_demo(body: LiveEnableRequest, x_admin_token: str | None =
 
 @app.post("/api/forex/demo/execute")
 async def execute_forex_demo(req: ExecuteRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
-    await auth(x_admin_token, authorization)
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "OPERATIONS")
     if req.asset != "forex":
         raise HTTPException(400, "This endpoint only accepts Forex requests")
     if not settings.oanda_practice:
@@ -4747,7 +4750,8 @@ async def execute_forex_demo(req: ExecuteRequest, x_admin_token: str | None = He
 
 @app.post("/api/train")
 async def train(req: TrainRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
-    await auth(x_admin_token, authorization)
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "OPERATIONS")
     if str(settings.environment).lower() in {"staging", "production"} and str(settings.process_role).lower() != "worker":
         raise HTTPException(409, "Model training and promotion run only in the Atlas worker process")
     path = model_file(req)
@@ -4897,7 +4901,8 @@ async def research_fx_model(req: MarketRequest, x_admin_token: str | None = Head
 
 @app.post("/api/research/run-daily")
 async def research_run_daily(x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
-    await auth(x_admin_token, authorization)
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "OPERATIONS")
     if not settings.daily_research_enabled:
         raise HTTPException(403, "Daily research is disabled")
     result = await run_daily_research()
@@ -4923,7 +4928,8 @@ async def research_runs_history(symbol: str | None = None, limit: int = 30, x_ad
 @app.get("/api/admin/model-experiments")
 async def model_experiments_history(model_path: str | None = None, status: str | None = None, limit: int = 50, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     """Adaptive-model retrain history (promotions, rejections, drift alerts), newest first."""
-    await auth(x_admin_token, authorization)
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "READ_ONLY")
     limit = max(1, min(int(limit), 200))
     async with SessionLocal() as db:
         q = select(ModelExperiment)
@@ -5034,7 +5040,8 @@ async def strategy_backtest_api(req: MarketRequest, x_admin_token: str | None = 
 
 @app.post("/api/paper/step")
 async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
-    await auth(x_admin_token, authorization)
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "OPERATIONS")
     path = model_file(req)
     try:
         df = await asyncio.to_thread(market_data, req.model_copy(update={"days": 5}))
@@ -5064,7 +5071,8 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
 
 @app.post("/api/execute")
 async def execute(req: ExecuteRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
-    await auth(x_admin_token, authorization)
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "OPERATIONS")
     signal_timestamp = req.signal_timestamp or datetime.now(timezone.utc).isoformat()
     sig = {"score": req.score, "long_probability": req.long_probability,
            "short_probability": req.short_probability, "flat_probability": req.flat_probability}
@@ -5082,7 +5090,8 @@ async def execute(req: ExecuteRequest, x_admin_token: str | None = Header(defaul
 
 @app.post("/api/reconcile")
 async def reconcile_api(req: MarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
-    await auth(x_admin_token, authorization)
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "OPERATIONS")
     try:
         return await reconcile(req.exchange, req.symbol)
     except Exception as e:
