@@ -861,8 +861,9 @@ class _RateGate:
         self._lock = asyncio.Lock()
 
     async def wait(self) -> None:
+        import time as _time
         async with self._lock:
-            now = time.monotonic()
+            now = _time.monotonic()
             delay = self._next - now
             if delay > 0:
                 await asyncio.sleep(delay)
