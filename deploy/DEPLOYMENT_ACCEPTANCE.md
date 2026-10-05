@@ -21,7 +21,8 @@
 - [ ] Kill switch tested.
 - [ ] Backup and restore procedure tested.
 - [ ] Logs/alerts configured.
-- [ ] At least 90 days of out-of-sample paper performance recorded for the exact configuration, demonstrating positive net returns under 2x cost-stress and DSR >= 0.95.
+- [ ] Four-week interim forward paper/shadow gate: at least 28 consecutive calendar days of the exact configuration, with positive net results under 2x cost-stress, DSR >= 0.95, active risk controls, retained evidence and no unresolved critical incidents.
+- [ ] At least 90 days of out-of-sample paper performance recorded for the exact configuration, demonstrating positive net returns under 2x cost-stress and DSR >= 0.95. The 28-day interim gate does not replace this final evidence requirement.
 - [ ] Edge-decay halt monitor active and verified on historical closed trades ($z \le -2$).
 - [ ] Worker mid-fill failure drill (`kill -9` during execution) verified clean idempotent state recovery.
 - [ ] Legal and regulatory review of product disclosures, jurisdiction marketing rules, and risk disclaimers.
