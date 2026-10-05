@@ -135,3 +135,7 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
     assert model_path.exists()
     assert json.loads(pathlib.Path(str(model_path)+".meta.json").read_text())["model_sha256"] == hashlib.sha256(b"model-bytes").hexdigest()
     assert json.loads(pathlib.Path(str(model_path)+".adaptive.json").read_text())["status"] == "CHAMPION"
+
+def test_strategy_backtest_reports_next_open_execution_model():
+    result = strategy_backtest(sample_df(), taker_bps=0, slippage_bps=0)
+    assert result["backtest_model"].startswith("next-open execution")
