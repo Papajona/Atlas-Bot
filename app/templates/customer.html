@@ -51,14 +51,14 @@
           <div class="kpi-row" role="list" aria-label="Account summary"><div class="kpi" role="listitem"><span>Account equity</span><strong id="homeBalance">—</strong></div><div class="kpi" role="listitem"><span>Open positions</span><strong id="homeActive">—</strong></div><div class="kpi" role="listitem"><span>Open P&amp;L</span><strong id="homeOpenPnl" class="flat">—</strong></div></div>
           <section class="hcard" aria-labelledby="perfTitle">
             <div style="display:flex;justify-content:space-between;align-items:center;">
-              <h3 id="perfTitle">Portfolio Performance · 30 days</h3>
+              <h3 id="perfTitle">Realised P&amp;L &middot; 7 days</h3>
               <div class="time-toggles" style="display:flex;gap:4px;">
-                <button type="button" class="chip" onclick="setPerfTimeframe(7)" id="btnTf7" style="padding:2px 8px;font-size:11px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;cursor:pointer;">7D</button>
-                <button type="button" class="chip active" onclick="setPerfTimeframe(30)" id="btnTf30" style="padding:2px 8px;font-size:11px;border-radius:6px;border:1px solid #10b981;background:#10b981;color:#fff;cursor:pointer;">30D</button>
+                <button type="button" class="chip active" onclick="setPerfTimeframe(7)" id="btnTf7" style="padding:2px 8px;font-size:11px;border-radius:6px;border:1px solid #10b981;background:#10b981;color:#fff;cursor:pointer;">7D</button>
+                <button type="button" class="chip" onclick="setPerfTimeframe(30)" id="btnTf30" style="padding:2px 8px;font-size:11px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;cursor:pointer;">30D</button>
               </div>
             </div>
             <p class="sub" id="perfSub">Closed-trade result and equity trend after fees.</p>
-            <div class="chart-box" id="homeChart"><div class="chart-empty">Loading…</div></div>
+            <div class="chart-box" id="homeChart" aria-label="Seven day realised profit and loss chart"><div class="chart-empty">Loading…</div></div>
           </section>
           <section class="hcard" aria-labelledby="actTitle"><h3 id="actTitle">Recent activity</h3><ul class="act-list" id="homeActivity"><li class="empty-note">Loading…</li></ul></section>
           <nav class="quick" aria-label="Quick actions"><a href="#trade"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h12l-3-3M17 17H5l3 3"/></svg>Create paper trade</a><a href="#wallet"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>Deposit</a><a href="#wallet"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m0 0-4 4m4-4 4 4M5 20h14"/></svg>Withdraw</a><a href="#analytics"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h4v8H4zM10 7h4v13h-4zM16 4h4v16h-4z"/></svg>Analytics</a></nav>
@@ -255,7 +255,7 @@ function groupLedger(lines){const m=new Map();for(const l of lines){if(!String(l
 const HOME_ACT={DEPOSIT_CREDIT:['Deposit','dep','↓'],TRADE_SETTLEMENT:['Trade result','trd','↔'],TRADING_FEE:['Trading fee','fee','%'],WITHDRAWAL_SETTLEMENT:['Withdrawal sent','wd','↑']};
 function homeNote(el,text){el.replaceChildren();const li=document.createElement('li');li.className='empty-note';li.textContent=text;el.appendChild(li);}
 function renderActivity(journals){const ul=document.getElementById('homeActivity');const rows=journals.filter(j=>Math.abs(j.net)>1e-9).slice(0,4);if(!rows.length){homeNote(ul,'No activity yet. Deposits, trades and withdrawals will show up here.');return;}ul.replaceChildren();for(const j of rows){const meta=HOME_ACT[j.type]||[String(j.type||'Activity').replace(/_/g,' ').replace(/^./,c=>c.toUpperCase()),'fee','•'];const li=document.createElement('li');li.className='act-row';const b=document.createElement('span');b.className='badge '+meta[1];b.textContent=meta[2];const lbl=document.createElement('span');lbl.className='lbl';lbl.textContent=meta[0];const when=document.createElement('small');when.className='muted';when.textContent=' '+new Date(j.at).toLocaleDateString(undefined,{month:'short',day:'numeric'});lbl.appendChild(when);const amt=document.createElement('span');amt.className='amt '+pnlClass(j.net);amt.textContent=fmtUsd(j.net,true);li.append(b,lbl,amt);ul.appendChild(li);}}
-let perfDays = 30;
+let perfDays = 7;
 let cachedJournals = [];
 
 function setPerfTimeframe(days) {
@@ -319,7 +319,13 @@ function drawRechartsAreaChart(box, points, min, range, total, w, h, pad) {
   grad.setAttribute('id', 'rechartsGrad');
   grad.setAttribute('x1', '0'); grad.setAttribute('y1', '0'); grad.setAttribute('x2', '0'); grad.setAttribute('y2', '1');
   const color = total >= 0 ? '#10b981' : '#ef4444';
-  grad.innerHTML = `<stop offset="0%" stop-color="${color}" stop-opacity="0.38"/><stop offset="85%" stop-color="${color}" stop-opacity="0.04"/><stop offset="100%" stop-color="${color}" stop-opacity="0.0"/>`;
+  [['0%', '0.38'], ['85%', '0.04'], ['100%', '0.0']].forEach(([offset, opacity]) => {
+    const stop = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+    stop.setAttribute('offset', offset);
+    stop.setAttribute('stop-color', color);
+    stop.setAttribute('stop-opacity', opacity);
+    grad.appendChild(stop);
+  });
   defs.appendChild(grad);
   svg.appendChild(defs);
 

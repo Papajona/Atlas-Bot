@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     usdt_tron_scan_pages: int = 10
     usdt_tron_cursor_overlap_seconds: int = 120
     usdt_tron_verify_receipt: bool = True
+    usdt_tron_scan_concurrency: int = 4
+    usdt_tron_max_qps: float = 10.0
     usdt_tron_sweep_enabled: bool = False
     usdt_tron_sweep_min_confirmations: int = 19
     usdt_tron_sweep_min_amount: float = 1.0
@@ -193,6 +195,7 @@ class Settings(BaseSettings):
     max_total_exposure_usd: float = 20_000.0
     max_open_positions: int = 3
     max_slippage_bps: float = 30.0
+    max_spread_bps: float = 100.0
     # Edge-decay halt: block NEW entries when the last N closed-trade net returns are significantly below zero.
     edge_decay_halt_enabled: bool = True
     edge_decay_window_trades: int = 100
@@ -234,6 +237,7 @@ class Settings(BaseSettings):
     exchange_api_secret: str = ""
     exchange_password: str = ""
     exchange_timeout_ms: int = 10_000
+    emergency_stop_concurrency: int = 8
 
     log_level: str = "INFO"
     metrics_enabled: bool = True

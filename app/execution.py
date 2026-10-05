@@ -789,6 +789,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
         # In live mode, the exchange quote is authoritative. Never trust a client-supplied price for risk sizing.
         broker = None
         quote = price
+        spread_bps = None
         if live:
             # Customer live trading requires a verified isolated exchange/subaccount adapter.
             # Customer crypto execution must resolve only the customer's verified venue mapping.
@@ -823,10 +824,18 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     timeout_ms=settings.exchange_timeout_ms,
                 ))
             ticker = await asyncio.to_thread(broker.ticker, symbol)
-            quote = float(ticker.get("ask") if side == "buy" and ticker.get("ask") else
-                          ticker.get("bid") if side == "sell" and ticker.get("bid") else ticker.get("last") or 0)
+            bid = float(ticker.get("bid") or 0)
+            ask = float(ticker.get("ask") or 0)
+            quote = float(ask if side == "buy" and ask > 0 else
+                          bid if side == "sell" and bid > 0 else ticker.get("last") or 0)
             if quote <= 0:
                 raise RiskBlocked("Broker returned no usable market price")
+            spread_bps = None
+            if bid > 0 and ask > 0 and ask >= bid:
+                mid = (ask + bid) / 2.0
+                spread_bps = ((ask - bid) / mid) * 10_000 if mid > 0 else None
+            elif live:
+                raise RiskBlocked("Broker did not return a usable bid/ask spread for live execution")
             if price > 0:
                 slip = abs(quote / price - 1) * 10_000
                 if slip > settings.max_slippage_bps:
@@ -856,7 +865,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     raise RiskBlocked("OANDA instrument is not tradeable for this account")
             except Exception as exc:
                 raise RiskBlocked(str(exc)) from exc
-        governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {})
+        governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps)
         if governor.action != "ALLOW":
             raise RiskBlocked("Risk Governor blocked order: " + ",".join(governor.reasons))
         await risk_gate(symbol, quote, quantity, live=live, signal_timestamp=signal_timestamp, side=side, customer_id=customer_id, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {})
@@ -1603,7 +1612,7 @@ async def emergency_stop(exchange: str | None = None):
                     CustomerBinanceAccount.can_trade.is_(True),
                 )
             )).scalars().all()
-        for account in customer_accounts:
+        async def _sweep_customer(account):
             try:
                 broker = await asyncio.to_thread(
                     build_customer_binance_broker, account, timeout_ms=settings.exchange_timeout_ms, sandbox=False
@@ -1626,6 +1635,12 @@ async def emergency_stop(exchange: str | None = None):
                     )
                 except Exception:
                     logging.getLogger(__name__).warning("emergency_stop_incident_write_failed", exc_info=True)
+
+        sweep_slots = asyncio.Semaphore(max(1, int(settings.emergency_stop_concurrency)))
+        async def _bounded_sweep(account):
+            async with sweep_slots:
+                await _sweep_customer(account)
+        await asyncio.gather(*(_bounded_sweep(account) for account in customer_accounts))
 
     broker_halt_confirmed = not failures
     await audit("EMERGENCY_STOP", {

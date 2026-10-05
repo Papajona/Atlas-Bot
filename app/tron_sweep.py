@@ -67,7 +67,7 @@ def serialize_sweep_intent(intent: SweepIntent) -> dict[str, Any]:
         "status": intent.status,
     }
 
-TRANSFER_TOPIC = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a9df523b3ef"
+TRANSFER_TOPIC = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a9df523b3ef"  # keccak256("Transfer(address,address,uint256)")
 
 
 def _hex_topic_to_tron_address(value: str) -> str | None:
@@ -83,14 +83,37 @@ def _hex_topic_to_tron_address(value: str) -> str | None:
     return Base58Encoder.CheckEncode(b"\x41" + payload[-20:])
 
 
+
+def _address_to_hex20(value: str) -> str | None:
+    """Normalize TRON Base58/hex contract addresses to the same 20-byte lowercase hex form."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    hexpart = raw[2:] if raw.lower().startswith("0x") else raw
+    if len(hexpart) in (40, 42) and all(c in "0123456789abcdefABCDEF" for c in hexpart):
+        hexpart = hexpart.lower()
+        if len(hexpart) == 42:
+            if not hexpart.startswith("41"):
+                return None
+            hexpart = hexpart[2:]
+        return hexpart
+    if raw.startswith("T") and len(raw) == 34:
+        try:
+            from bip_utils import Base58Decoder
+            decoded = Base58Decoder.CheckDecode(raw)
+        except Exception:
+            return None
+        return decoded[1:].hex() if len(decoded) == 21 and decoded[0] == 0x41 else None
+    return None
+
 def extract_trc20_transfer(receipt: dict[str, Any], contract: str, source: str, destination: str) -> int | None:
     """Return the raw USDT amount for a matching solidified Transfer event, else None."""
     for log in receipt.get("log", []) or receipt.get("logs", []) or []:
         topics = [str(x) for x in (log.get("topics") or [])]
         if len(topics) < 3 or topics[0].lower().removeprefix("0x") != TRANSFER_TOPIC:
             continue
-        log_contract = str(log.get("address") or "")
-        if log_contract.lower().removeprefix("0x") not in {contract.lower().removeprefix("0x"), contract.lower()}:
+        wanted_contract = _address_to_hex20(contract)
+        if wanted_contract is None or _address_to_hex20(str(log.get("address") or "")) != wanted_contract:
             continue
         from_addr = _hex_topic_to_tron_address(topics[1])
         to_addr = _hex_topic_to_tron_address(topics[2])
