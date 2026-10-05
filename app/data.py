@@ -1,5 +1,6 @@
 from __future__ import annotations
 from datetime import datetime, timezone
+import hashlib
 import time
 import numpy as np
 import pandas as pd
@@ -38,6 +39,22 @@ def _validate_ohlcv(df: pd.DataFrame, timeframe: str, reject_gaps: bool = True) 
     return out
 
 
+def _attach_data_provenance(df: pd.DataFrame, *, source: str, symbol: str, exchange: str,
+                            timeframe: str, fetched_at: str) -> pd.DataFrame:
+    """Attach a deterministic hash and source metadata to the exact cleaned frame."""
+    canonical = df.reset_index().to_csv(index=False, float_format="%.17g", lineterminator="\n")
+    df.attrs["data_provenance"] = {
+        "source": source,
+        "symbol": symbol,
+        "exchange": exchange,
+        "timeframe": timeframe,
+        "fetched_at_utc": fetched_at,
+        "row_count": int(len(df)),
+        "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+    }
+    return df
+
+
 def fetch_crypto(symbol: str, exchange: str = "bybit", timeframe: str = "1h", days: int = 365,
                  closed_only: bool = True) -> pd.DataFrame:
     import ccxt
@@ -72,7 +89,15 @@ def fetch_crypto(symbol: str, exchange: str = "bybit", timeframe: str = "1h", da
         if closed_only:
             cutoff = pd.Timestamp(datetime.fromtimestamp((now_ms - tf_ms) / 1000, tz=timezone.utc))
             df = df[df.index <= cutoff]
-        return _validate_ohlcv(df, timeframe)
+        cleaned = _validate_ohlcv(df, timeframe)
+        return _attach_data_provenance(
+            cleaned,
+            source="ccxt_ohlcv",
+            symbol=symbol,
+            exchange=exchange,
+            timeframe=timeframe,
+            fetched_at=datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).isoformat(),
+        )
     finally:
         if hasattr(ex, "close") and callable(ex.close):
             ex.close()
@@ -92,7 +117,15 @@ def fetch_forex(symbol: str = "EURUSD", timeframe: str = "1h", days: int = 365) 
         raw.columns = [str(c).lower() for c in raw.columns]
     raw = raw[["open", "high", "low", "close", "volume"]].dropna()
     raw.index = pd.to_datetime(raw.index, utc=True)
-    return _validate_ohlcv(raw, timeframe, reject_gaps=False)
+    cleaned = _validate_ohlcv(raw, timeframe, reject_gaps=False)
+    return _attach_data_provenance(
+        cleaned,
+        source="yfinance",
+        symbol=symbol,
+        exchange="yfinance",
+        timeframe=timeframe,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+    )
 
 
 def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int = 365) -> pd.DataFrame:
@@ -120,4 +153,12 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
         raise RuntimeError("No completed OANDA candles returned")
     df = pd.DataFrame(rows, columns=["ts","open","high","low","close","volume"])
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
-    return _validate_ohlcv(df.set_index("ts"), timeframe, reject_gaps=False)
+    cleaned = _validate_ohlcv(df.set_index("ts"), timeframe, reject_gaps=False)
+    return _attach_data_provenance(
+        cleaned,
+        source="oanda_v20_mid",
+        symbol=symbol,
+        exchange="oanda",
+        timeframe=timeframe,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+    )
