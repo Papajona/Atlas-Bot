@@ -51,14 +51,14 @@
           <div class="kpi-row" role="list" aria-label="Account summary"><div class="kpi" role="listitem"><span>Account equity</span><strong id="homeBalance">—</strong></div><div class="kpi" role="listitem"><span>Open positions</span><strong id="homeActive">—</strong></div><div class="kpi" role="listitem"><span>Open P&amp;L</span><strong id="homeOpenPnl" class="flat">—</strong></div></div>
           <section class="hcard" aria-labelledby="perfTitle">
             <div style="display:flex;justify-content:space-between;align-items:center;">
-              <h3 id="perfTitle">Portfolio Performance · 30 days</h3>
+              <h3 id="perfTitle">Realised P&amp;L · 7 days</h3>
               <div class="time-toggles" style="display:flex;gap:4px;">
                 <button type="button" class="chip" onclick="setPerfTimeframe(7)" id="btnTf7" style="padding:2px 8px;font-size:11px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;cursor:pointer;">7D</button>
                 <button type="button" class="chip active" onclick="setPerfTimeframe(30)" id="btnTf30" style="padding:2px 8px;font-size:11px;border-radius:6px;border:1px solid #10b981;background:#10b981;color:#fff;cursor:pointer;">30D</button>
               </div>
             </div>
             <p class="sub" id="perfSub">Closed-trade result and equity trend after fees.</p>
-            <div class="chart-box" id="homeChart"><div class="chart-empty">Loading…</div></div>
+            <div class="chart-box" id="homeChart" aria-label="Seven day realised profit and loss chart"><div class="chart-empty">Loading…</div></div>
           </section>
           <section class="hcard" aria-labelledby="actTitle"><h3 id="actTitle">Recent activity</h3><ul class="act-list" id="homeActivity"><li class="empty-note">Loading…</li></ul></section>
           <nav class="quick" aria-label="Quick actions"><a href="#trade"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h12l-3-3M17 17H5l3 3"/></svg>Create paper trade</a><a href="#wallet"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>Deposit</a><a href="#wallet"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m0 0-4 4m4-4 4 4M5 20h14"/></svg>Withdraw</a><a href="#analytics"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h4v8H4zM10 7h4v13h-4zM16 4h4v16h-4z"/></svg>Analytics</a></nav>
