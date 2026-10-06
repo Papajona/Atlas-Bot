@@ -273,7 +273,7 @@ async function kycDecision(id,decision){
 async function loadMoneyControl(){
   const checks=[
     ['/api/admin/ledger/invariants','moneyLedger',j=>j.ok===false?'BREACH':'HEALTHY'],
-    ['/api/admin/custody/reconciliation','moneyCustody',j=>j.status||j.state||'CHECKED'],
+    ['/api/admin/custody/reconciliation','moneyCustody',j=>j.chain_error?'REVIEW':(j.coverage_gap!==null&&Number(j.coverage_gap)<0?'SHORTFALL':'COVERED')],
     ['/api/admin/custody/tron/sweeps','moneySweeps',j=>Array.isArray(j)?String(j.length):String(j.count??'CHECKED')]
   ];
   const out=[];
@@ -292,7 +292,7 @@ async function loadControlCenter(){
     const j=await api('/api/admin/ledger/invariants'); $('ccLedger').textContent=j.ok===false?'BREACH':'HEALTHY'; $('ccLedgerDetail').textContent=j.ok===false?'Immediate review required':'Invariants pass';
   }catch(e){$('ccLedger').textContent='REVIEW';$('ccLedgerDetail').textContent=e.message}
   try{
-    const j=await api('/api/admin/custody/reconciliation'); $('ccCustody').textContent=j.status||j.state||'CHECKED'; $('ccCustodyDetail').textContent='Reconciliation endpoint reachable';
+    const j=await api('/api/admin/custody/reconciliation'); const gap=j.coverage_gap; $('ccCustody').textContent=j.chain_error?'REVIEW':(gap!==null&&Number(gap)<0?'SHORTFALL':'COVERED'); $('ccCustodyDetail').textContent=j.chain_error||('Coverage gap '+(gap===null?'unknown':Number(gap).toFixed(2))+' USDT');
   }catch(e){$('ccCustody').textContent='REVIEW';$('ccCustodyDetail').textContent=e.message}
   try{
     const j=await api('/api/admin/kyc?status=PENDING'); $('ccKyc').textContent=String(j.length);
@@ -305,7 +305,7 @@ async function loadControlCenter(){
   if($('ccTrading').textContent==='LIVE')attention.push('Live trading is enabled — verify all live gates before operating.');
   if($('ccTradingDetail').textContent==='HALTED')attention.push('Trading kill switch is active.');
   if($('ccLedger').textContent==='BREACH')attention.push('Ledger invariant breach.');
-  if($('ccCustody').textContent==='UNKNOWN'||$('ccCustody').textContent==='REVIEW')attention.push('Custody reconciliation requires review.');
+  if($('ccCustody').textContent==='SHORTFALL'||$('ccCustody').textContent==='REVIEW')attention.push('Custody reconciliation requires review.');
   if(Number($('ccKyc').textContent)>0)attention.push($('ccKyc').textContent+' KYC case(s) pending.');
   if(Number($('ccWithdrawals').textContent)>0)attention.push($('ccWithdrawals').textContent+' withdrawal(s) pending approval.');
   $('ccAttention').textContent=attention.length?attention.join(' · '):'No outstanding control-plane alerts detected by the available admin checks.';
