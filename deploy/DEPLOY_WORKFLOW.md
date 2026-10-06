@@ -91,7 +91,7 @@ Each gets `secretAccessor` only on the secrets in the table above. Review the bu
 | `GEMINI_MODEL`, `GEMINI_STRATEGY_MODEL` | `gemini-3.5-flash` | `gemini-2.5-*` is scheduled for shutdown in Oct 2026; override via env at deploy |
 | `GROQ_MODEL`, `GROQ_STRATEGY_MODEL` | `openai/gpt-oss-20b` | check with `python -m scripts.check_ai_models` before every deploy |
 | `RESEARCH_REQUIRE_COST_STRESS` / `RESEARCH_COST_STRESS_MULTIPLIER` | `true` / `2.0` | promotion needs a positive net edge at 2x costs |
-| `RESEARCH_MIN_DEFLATED_SHARPE` | `0.0` (off) | set ~0.95 once you have seen real values |
+| `RESEARCH_MIN_DEFLATED_SHARPE` | `0.95` in production | production adaptive-model promotion fails closed below 0.95; development/staging may use a lower value for research |
 | `EDGE_DECAY_HALT_ENABLED`, `EDGE_DECAY_WINDOW_TRADES`, `EDGE_DECAY_MIN_TRADES`, `EDGE_DECAY_Z_HALT` | `true`, 100, 60, 2.0 | blocks **new** entries when recent realized net returns are significantly negative; closes always pass |
 | `CUSTOMER_KEY_AUDIT_INTERVAL_SECONDS` | 900 (0 disables) | worker re-verifies customer exchange-key permissions |
 | `MAX_DRAWDOWN`, `DAILY_LOSS_LIMIT`, `MAX_LEVERAGE`, `RISK_PER_TRADE` | 0.15, 0.03, 3.0, 0.005 | keep customer trading unlevered; pilot with smaller caps |

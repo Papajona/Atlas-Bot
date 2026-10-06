@@ -145,8 +145,12 @@ def main() -> int:
         record("limit order open/cancel", "FAIL", repr(exc))
 
     record("worker-crash-mid-fill / timeout drill", "SKIP", "needs a staging worker kill; run the fake-broker tests + manual kill -9 of the worker during step 3")
-    print("\nSummary:", {s: sum(1 for _, x, _ in RESULTS if x == s) for s in ("PASS", "WARN", "FAIL", "SKIP")})
-    return 0 if not any(s == "FAIL" for _, s, _ in RESULTS) else 1
+    counts = {s: sum(1 for _, x, _ in RESULTS if x == s) for s in ("PASS", "WARN", "FAIL", "SKIP")}
+    print("\nSummary:", counts)
+    # A real sandbox gate is evidence-driven: WARN/SKIP are not successful completion.
+    # In particular, the worker-crash step intentionally remains open until an operator
+    # performs the staging kill/restart drill and records the result.
+    return 0 if counts["FAIL"] == 0 and counts["WARN"] == 0 and counts["SKIP"] == 0 else 1
 
 
 if __name__ == "__main__":

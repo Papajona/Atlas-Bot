@@ -201,6 +201,22 @@ def strategy_signal(df: pd.DataFrame, config: StrategyConfig | None = None, asse
     }
 
 
+def next_open_returns(df: pd.DataFrame) -> pd.Series:
+    """Return the executable next-open to next-open bar return.
+
+    A signal computed from completed bar t is represented by a position shifted
+    onto bar t+1. That position earns the move from open[t+1] to open[t+2].
+    The final bar has no next open and therefore contributes zero return.
+    """
+    if "open" not in df.columns:
+        raise ValueError("OHLCV data must contain an open column")
+    return (
+        df["open"].shift(-1).div(df["open"])
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0.0)
+    )
+
+
 def strategy_backtest(
     df: pd.DataFrame,
     config: StrategyConfig | None = None,
@@ -217,7 +233,11 @@ def strategy_backtest(
     pos = (raw * lev).clip(-cfg.max_leverage, cfg.max_leverage)
     pos = pos.where(raw.abs() >= cfg.signal_threshold, 0.0).shift(1).fillna(0.0)
 
-    ret = df["close"].pct_change().fillna(0.0)
+    # Execute at the next bar's open. The position at bar t was formed from
+    # information available through bar t-1, so its return is the open-to-open
+    # move from t to t+1. This avoids treating the signal-bar close as an
+    # executable fill.
+    ret = next_open_returns(df) - 1.0
     turnover = pos.diff().abs().fillna(pos.abs())
     costs = turnover * ((taker_bps + slippage_bps) / 10_000.0)
     net = pos * ret - costs
@@ -230,7 +250,7 @@ def strategy_backtest(
     active = pos != 0
     return {
         "strategy": "trend_momentum_breakout_mean_reversion",
-        "backtest_model": "signal_return_with_next_bar_lag_and_transaction_costs; not intrabar stop-target execution",
+        "backtest_model": "next-open execution with open-to-open returns and transaction costs; not intrabar stop-target execution",
         "asset_class": asset,
         "bars": int(len(df)),
         "validated_bars": int(s.notna().all(axis=1).sum()),

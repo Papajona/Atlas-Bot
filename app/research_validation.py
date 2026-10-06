@@ -4,6 +4,7 @@ from typing import Iterable
 import math
 import numpy as np
 import pandas as pd
+from .strategy_engine import next_open_returns
 
 
 @dataclass(frozen=True)
@@ -161,9 +162,10 @@ def fixed_signal_walk_forward_oos(df: pd.DataFrame, signal: pd.Series, costs_bps
     if not splits:
         return {"status": "INSUFFICIENT_DATA", "folds": []}
     s = pd.Series(signal, index=df.index).astype(float).fillna(0.0)
-    ret = df["close"].pct_change().fillna(0.0)
-    turnover = s.diff().abs().fillna(s.abs())
-    net = s.shift(1).fillna(0.0) * ret - turnover * float(costs_bps) / 10000.0
+    position = s.shift(1).fillna(0.0)
+    ret = next_open_returns(df) - 1.0
+    turnover = position.diff().abs().fillna(position.abs())
+    net = position * ret - turnover * float(costs_bps) / 10000.0
     fold_rows = []
     oos = []
     for fold in splits:

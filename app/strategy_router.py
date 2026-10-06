@@ -17,7 +17,7 @@ import math
 import numpy as np
 import pandas as pd
 
-from .strategy_engine import StrategyConfig, strategy_signals
+from .strategy_engine import StrategyConfig, strategy_signals, next_open_returns
 from .research_validation import purged_walk_forward_splits
 
 STRATEGIES = ("trend", "momentum", "breakout", "mean_reversion", "ensemble")
@@ -54,7 +54,7 @@ def _strategy_returns(df: pd.DataFrame, cfg: StrategyConfig, strategy: str,
     lev = (cfg.target_vol_annual / vol.replace(0, np.nan)).clip(upper=cfg.max_leverage)
     pos = (raw * lev).clip(-cfg.max_leverage, cfg.max_leverage)
     pos = pos.where(raw.abs() >= cfg.signal_threshold, 0.0).shift(1).fillna(0.0)
-    ret = df["close"].pct_change().fillna(0.0)
+    ret = next_open_returns(df) - 1.0
     turnover = pos.diff().abs().fillna(pos.abs())
     return pos * ret - turnover * float(costs_bps) / 10000.0
 
@@ -317,7 +317,7 @@ def router_walk_forward_backtest(df: pd.DataFrame, cfg: StrategyConfig | None = 
             chosen_by_regime[regime] = ranked[0][0] if ranked else "ensemble"
         test = df.iloc[fold.test_start:fold.test_end]
         test_regimes = regimes.iloc[fold.test_start:fold.test_end]
-        test_ret = test["close"].pct_change().fillna(0.0)
+        test_ret = next_open_returns(test) - 1.0
         selected = []
         for idx in test.index:
             regime = str(test_regimes.loc[idx])
