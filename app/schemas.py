@@ -1,6 +1,7 @@
 """Pydantic request/response models for the HTTP API (extracted from main.py in 3.10.46; no behaviour change)."""
 from __future__ import annotations
 from decimal import Decimal
+from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -298,6 +299,17 @@ class RevenueEventRequest(BaseModel):
     refunds: float = Field(default=0, ge=0)
     currency: str = Field(default="USD", min_length=3, max_length=10)
 
+
+
+class CustomerPilotRequest(BaseModel):
+    action: str = Field(pattern="^(REQUEST|APPROVE|SUSPEND)$")
+    stage: int = Field(default=1, ge=1, le=3)
+    max_position_notional_usd: float | None = Field(default=None, gt=0, le=100000)
+    max_total_exposure_usd: float | None = Field(default=None, gt=0, le=100000)
+    max_open_positions: int | None = Field(default=None, ge=1, le=10)
+    max_leverage: float | None = Field(default=None, gt=0, le=1.0)
+    daily_loss_limit: float | None = Field(default=None, gt=0, le=0.15)
+    expires_at: datetime | None = None
 
 class BinanceSubAccountProvisionRequest(BaseModel):
     customer_id: int = Field(gt=0)
