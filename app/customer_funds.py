@@ -321,12 +321,12 @@ async def release_withdrawal(db, customer_id: int, amount: float, *, reference_i
         raise ValueError("withdrawal release amount must be positive")
     ledger = await get_or_create_ledger(db, customer_id, USDT)
     idem = f"withdrawal-release:{reference_id}"
-    if (await db.execute(select(LedgerJournal).where(LedgerJournal.idempotency_key == idem))).scalar_one_or_none():
-        return ledger
     fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
         CustomerLedgerAccount.customer_id == customer_id,
         CustomerLedgerAccount.currency == USDT,
     ).with_for_update())).scalar_one()
+    if (await db.execute(select(LedgerJournal).where(LedgerJournal.idempotency_key == idem).with_for_update())).scalar_one_or_none():
+        return fresh_ledger
     release = min(amount_d, D(str(fresh_ledger.withdrawal_reserved)))
     if release <= 0:
         return fresh_ledger
