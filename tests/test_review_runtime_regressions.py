@@ -39,7 +39,6 @@ def test_models_create_and_financial_values_reload():
             await db.commit()
         async with sessions() as db:
             account = (await db.execute(select(TradingAccount))).scalar_one()
-            # FinancialNumeric materializes floats so trading arithmetic (price * qty * 1.0015) works.
             assert isinstance(account.cash_equity, float)
             account.cash_equity -= 0.25
             assert account.cash_equity == pytest.approx(100.00)
@@ -130,10 +129,10 @@ def test_news_feed_rejects_xml_entities():
 
 
 def test_multidict_production_backend_guard(monkeypatch):
-    from app.main import _assert_multidict_safe_backend
+    from app.startup_guards import assert_multidict_safe_backend
     monkeypatch.setattr(settings, "environment", "production")
     monkeypatch.delenv("MULTIDICT_NO_EXTENSIONS", raising=False)
     with pytest.raises(RuntimeError, match="MULTIDICT_NO_EXTENSIONS=1"):
-        _assert_multidict_safe_backend()
+        assert_multidict_safe_backend()
     monkeypatch.setenv("MULTIDICT_NO_EXTENSIONS", "1")
-    _assert_multidict_safe_backend()
+    assert_multidict_safe_backend()
