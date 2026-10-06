@@ -3,7 +3,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "0033_sweep_reconciliation_integrity"
-down_revision = "0032_platform_hardening"
+down_revision = ("0032_platform_hardening", "0045_merge_application_heads")
 branch_labels = None
 depends_on = None
 
