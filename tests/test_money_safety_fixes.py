@@ -410,3 +410,86 @@ def test_tron_sweep_settlement_requires_exact_onchain_transfer_evidence():
     assert "matching TRC-20 Transfer event not found" in block
     assert "transfer amount mismatch" in block
     assert 'return "SETTLED"' in block
+
+
+def test_tron_sweep_failure_matrix_is_fail_closed():
+    from app.tron_sweep import classify_solidified_sweep
+
+    txid = "a" * 64
+    common = dict(transaction_id=txid, source="T" + "S" * 33, treasury="T" + "R" * 33,
+                  contract="41" + "11" * 20, expected_raw_amount=1_000_000)
+
+    status, evidence = classify_solidified_sweep(tx_body={}, receipt={}, **common)
+    assert status == "UNKNOWN"
+
+    status, evidence = classify_solidified_sweep(
+        tx_body={"txID": txid, "ret": [{"contractRet": "REVERT"}]},
+        receipt={"id": txid, "receipt": {"result": "SUCCESS"}},
+        **common,
+    )
+    assert status == "FAILED"
+
+    status, evidence = classify_solidified_sweep(
+        tx_body={"txID": txid, "ret": [{"contractRet": "SUCCESS"}]},
+        receipt={"id": txid, "receipt": {"result": "SUCCESS"}, "log": []},
+        **common,
+    )
+    assert status == "REVIEW"
+
+    src = Path("app/main.py").read_text()
+    assert '"outcome") or "").strip().upper()' in src
+    assert 'outcome == "TIMEOUT"' in src
+    assert 'outcome == "REJECTED"' in src
+    assert 'result == "UNKNOWN"' in src
+    assert 'status="RECONCILIATION_REQUIRED"' in src
+
+
+def test_tron_sweep_unknown_can_recover_once_with_one_onchain_tx_and_no_liability_change():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(CustomerLedgerAccount(customer_id=901, available=Decimal("10")))
+            await db.commit()
+            transfer = await __import__("app.custody_locations", fromlist=["create_custody_transfer"]).create_custody_transfer(
+                db, customer_id=901, currency="USDT", amount=Decimal("5"),
+                source_location="TRON:WALLET:901", destination_location="TRON:TREASURY:Treasury",
+                idempotency_key="drill:timeout:901",
+            )
+            await db.commit()
+            await __import__("app.custody_locations", fromlist=["transition_custody_transfer"]).transition_custody_transfer(
+                db, transfer.id, status="UNKNOWN", detail={"scenario": "broadcast_timeout"})
+            await __import__("app.custody_locations", fromlist=["transition_custody_transfer"]).transition_custody_transfer(
+                db, transfer.id, status="SUBMITTED", provider_reference="tx-" + "9" * 64)
+            await __import__("app.custody_locations", fromlist=["transition_custody_transfer"]).transition_custody_transfer(
+                db, transfer.id, status="CONFIRMED", provider_reference="tx-" + "9" * 64,
+                detail={"on_chain": True, "amount_raw": 5_000_000})
+            await db.commit()
+            row = (await db.execute(select(CustomerLedgerAccount).where(CustomerLedgerAccount.customer_id == 901))).scalar_one()
+            assert row.available == Decimal("10")
+            transfer2 = (await db.execute(select(__import__("app.db", fromlist=["CustodyTransfer"]).CustodyTransfer).where(
+                __import__("app.db", fromlist=["CustodyTransfer"]).CustodyTransfer.id == transfer.id
+            ))).scalar_one()
+            assert transfer2.status == "CONFIRMED"
+            assert transfer2.provider_reference == "tx-" + "9" * 64
+    asyncio.run(with_database(check))
+
+
+def test_tron_sweep_duplicate_callback_is_idempotent_at_state_machine_boundary():
+    async def check(sessions):
+        async with sessions() as db:
+            transfer = await __import__("app.custody_locations", fromlist=["create_custody_transfer"]).create_custody_transfer(
+                db, customer_id=902, currency="USDT", amount=5,
+                source_location="TRON:WALLET:902", destination_location="TRON:TREASURY:Treasury",
+                idempotency_key="drill:duplicate:902",
+            )
+            await __import__("app.custody_locations", fromlist=["transition_custody_transfer"]).transition_custody_transfer(
+                db, transfer.id, status="SUBMITTED", provider_reference="tx-" + "8" * 64)
+            await __import__("app.custody_locations", fromlist=["transition_custody_transfer"]).transition_custody_transfer(
+                db, transfer.id, status="CONFIRMED", provider_reference="tx-" + "8" * 64)
+            await __import__("app.custody_locations", fromlist=["transition_custody_transfer"]).transition_custody_transfer(
+                db, transfer.id, status="CONFIRMED", provider_reference="tx-" + "8" * 64)
+            await db.commit()
+            row = (await db.execute(select(__import__("app.db", fromlist=["CustodyTransfer"]).CustodyTransfer).where(
+                __import__("app.db", fromlist=["CustodyTransfer"]).CustodyTransfer.id == transfer.id
+            ))).scalar_one()
+            assert row.status == "CONFIRMED"
+    asyncio.run(with_database(check))
