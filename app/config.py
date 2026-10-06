@@ -222,6 +222,14 @@ class Settings(BaseSettings):
     discipline_enforce_risk_per_trade: bool = True
     discipline_risk_tolerance: float = 0.10
 
+    # Automatic execution-health circuit breakers. These are independent of strategy
+    # quality and fail closed before a new live entry is submitted.
+    max_consecutive_losses: int = 3
+    max_order_latency_ms_p95: int = 2_000
+    max_order_error_rate_5m: float = 0.05
+    execution_health_window_orders: int = 20
+    continuous_risk_check_interval_seconds: int = 5
+
     # Research-backed multi-strategy engine. Paper-first and independently testable.
     strategy_engine_enabled: bool = True
     strategy_signal_threshold: float = 0.20
