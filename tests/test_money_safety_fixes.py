@@ -394,9 +394,9 @@ def test_tron_sweep_is_bound_to_custody_transfer_and_unique_txid():
     assert "transition_custody_transfer" in main
     assert "an in-flight sweep already exists for this deposit wallet" in main
     assert "transaction id is already assigned to another sweep" in main
-    assert "status="CONFIRMED"" in main
-    assert "status="RECONCILIATION_REQUIRED"" in main
-    assert "status="FAILED"" in main
+    assert 'status="CONFIRMED"' in main
+    assert 'status="RECONCILIATION_REQUIRED"' in main
+    assert 'status="FAILED"' in main
     assert "custody_transfer_id" in migration
 
 
