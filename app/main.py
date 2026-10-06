@@ -63,6 +63,8 @@ from .deriv import DerivBroker, DerivConfig, DerivError, DerivUnknown
 from .binance_arbitrage_live import BinanceArbitrageBroker, BinanceArbConfig, BinanceArbitrageError
 from .binance_subaccounts import build_provision_plan, BinanceSubAccountError
 from .customer_oanda import build_customer_oanda_broker
+from .customer_binance_execution import build_customer_binance_broker, CustomerBinanceExecutionError
+from .trading_requirements import spot_requirement, oanda_requirement, deriv_requirement
 from .executor_engine import ExecutorConfig, ExecutorValidationError, build_executor_plan, next_slice
 from .admin_rbac import require_role, get_roles, upsert_role, ROLES
 from .transaction_policy import register_or_check_destination, verify_destination
@@ -158,6 +160,7 @@ from .schemas import (
     MfaChallengeRequest,
     MfaVerifyRequest,
     CustomerOandaConnectRequest,
+    TradingRequirementsRequest,
     CustomerPilotRequest,
 )  # noqa: F401
 
@@ -2836,6 +2839,77 @@ async def customer_connect_oanda(req: CustomerOandaConnectRequest, authorization
             row.account_id=req.account_id.strip(); row.api_token=req.api_token.strip(); row.practice=True; row.can_trade=True; row.scope_status="OANDA_PROVIDER_TOKEN_ACCESS_CONFIRMED"; row.status="VERIFIED"; row.last_verified_at=datetime.now(timezone.utc)
         await db.commit()
         return {"ok": True, "status": "VERIFIED", "practice": True, "environment": "practice", "execution_authority": "demo-only", "account_id": row.account_id}
+
+
+@app.post("/api/customer/trading-requirements")
+async def customer_trading_requirements(req: TradingRequirementsRequest, authorization: str | None = Header(default=None)):
+    """Calculate the minimum balance supported by the selected provider's live constraints.
+
+    This endpoint never submits an order and never enables live execution. It returns
+    PROVIDER_QUOTE_REQUIRED/INSUFFICIENT_PROVIDER_DATA when the provider does not expose
+    enough evidence to calculate a safe minimum.
+    """
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        account = await _get_or_create_customer_trading_account(db, profile)
+        if req.venue == "deriv":
+            return asdict(deriv_requirement()) | {"customer_balance": float(account.equity or 0)}
+        if req.venue == "binance":
+            row = (await db.execute(
+                select(CustomerBinanceAccount).where(CustomerBinanceAccount.customer_id == profile.id)
+            )).scalar_one_or_none()
+            try:
+                broker = build_customer_binance_broker(row, sandbox=False)
+                market = await asyncio.to_thread(broker.market_info, req.symbol)
+                ticker = await asyncio.to_thread(broker.ticker, req.symbol)
+                price = float(ticker.get("last") or ticker.get("close") or 0)
+                if price <= 0:
+                    raise ValueError("Binance returned no positive last price")
+                result = spot_requirement(
+                    venue="binance",
+                    symbol=req.symbol,
+                    price=price,
+                    market=market,
+                    stop_loss_price=req.stop_loss_price,
+                    risk_per_trade=settings.risk_per_trade,
+                    risk_tolerance=settings.discipline_risk_tolerance,
+                    currency="USDT",
+                )
+            except (CustomerBinanceExecutionError, ValueError, KeyError) as exc:
+                raise HTTPException(409, f"Binance requirement unavailable: {exc}") from exc
+            return asdict(result) | {"customer_balance": float(account.equity or 0)}
+        if req.venue == "oanda":
+            row = (await db.execute(
+                select(CustomerOandaAccount).where(CustomerOandaAccount.customer_id == profile.id)
+            )).scalar_one_or_none()
+            broker = None
+            try:
+                broker = build_customer_oanda_broker(row, timeout_seconds=settings.oanda_timeout_seconds)
+                info = await asyncio.to_thread(broker.market_info, req.symbol)
+                summary = await asyncio.to_thread(broker.account)
+                account_info = summary.get("account") or {}
+                currency = str(account_info.get("currency") or "USD")
+                price_data = await asyncio.to_thread(broker.pricing, req.symbol)
+                asks = price_data.get("asks") or []
+                bids = price_data.get("bids") or []
+                price = float((asks[0] if asks else bids[0]).get("price") or 0)
+                if price <= 0:
+                    raise ValueError("OANDA returned no executable price")
+                result = oanda_requirement(
+                    symbol=req.symbol,
+                    price=price,
+                    minimum_trade_size=float(info.get("minimumTradeSize") or 0),
+                    stop_loss_price=req.stop_loss_price,
+                    risk_per_trade=settings.risk_per_trade,
+                    risk_tolerance=settings.discipline_risk_tolerance,
+                    account_currency=currency,
+                )
+            except Exception as exc:
+                raise HTTPException(409, f"OANDA requirement unavailable: {exc}") from exc
+            finally:
+                if broker is not None:
+                    broker.close()
+            return asdict(result) | {"customer_balance": float(account.equity or 0)}
 
 
 @app.get("/api/customer/bot")
