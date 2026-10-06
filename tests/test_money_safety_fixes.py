@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import time
 import uuid
 from decimal import Decimal
 
@@ -201,9 +202,11 @@ def test_confirming_a_pending_funding_credits_the_stored_amount_not_the_payload(
     cid = asyncio.run(seed())
     body = json.dumps({"customer_auth_user_id": uid, "provider": "wire", "provider_reference": ref,
                        "amount": 1000.0, "currency": "USDT", "status": "CONFIRMED"}).encode()
-    sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    timestamp = str(int(time.time()))
+    signed = timestamp.encode() + b"." + body
+    sig = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
     with TestClient(main.app) as client:
-        r = client.post("/api/internal/funding/webhook", content=body, headers={"x-funding-signature": sig})
+        r = client.post("/api/internal/funding/webhook", content=body, headers={"x-funding-signature": sig, "x-funding-timestamp": timestamp})
     assert r.status_code == 200, r.text
 
     async def balance():
@@ -230,7 +233,7 @@ def test_position_flip_reserve_failure_does_not_abort_the_fill(monkeypatch):
             db.add(Position(customer_id=1, exchange="binance", symbol="BTC/USDT", quantity=1.0,
                             average_entry_price=100.0, mark_price=100.0, reserved_capital=100.0))
             trade = Trade(customer_id=1, exchange="binance", symbol="BTC/USDT", side="sell", timeframe="1h",
-                          mode="paper", quantity=3.0, requested_quantity=3.0, filled_quantity=0.0, remaining_quantity=3.0,
+                          mode="LIVE", quantity=3.0, requested_quantity=3.0, filled_quantity=0.0, remaining_quantity=3.0,
                           requested_price=100.0, client_order_id="c-flip", signal_id="s-flip", status="FILLED")
             db.add(trade)
             await db.flush()
