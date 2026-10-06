@@ -120,7 +120,7 @@ jobs:
           )
           ORDER BY constraint_name;
 
-          DO $
+          DO $$
           DECLARE
             required_count integer;
           BEGIN
@@ -134,7 +134,7 @@ jobs:
             IF required_count <> 3 THEN
               RAISE EXCEPTION 'Expected 3 customer ledger nonnegative checks, found %', required_count;
             END IF;
-          END $;
+          END $$;
           SQL
 
       - name: Run ledger invariants test (SQLite baseline)
