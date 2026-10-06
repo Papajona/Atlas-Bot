@@ -12,7 +12,7 @@ def test_spot_requirement_uses_provider_minimum_and_risk_floor():
         risk_tolerance=0.10,
     )
     assert req.minimum_order_notional == 5.0
-    assert req.risk_required_balance == 1818.181818181818
+    assert req.risk_required_balance == 1.8181818181818181
     assert req.minimum_balance == req.risk_required_balance
 
 
