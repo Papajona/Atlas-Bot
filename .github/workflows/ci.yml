@@ -61,9 +61,9 @@ jobs:
       - name: Verify multidict pure-Python security workaround
         run: |
           python - <<'PY'
-import multidict
-assert multidict.CIMultiDict.__module__ == "multidict._multidict_py", multidict.CIMultiDict.__module__
-PY
+          import multidict
+          assert multidict.CIMultiDict.__module__ == "multidict._multidict_py", multidict.CIMultiDict.__module__
+          PY
       - name: Dependency audit
         # CVE-2026-104874 affects the multidict C extension 6.7.0-6.9.0; the upstream advisory documents MULTIDICT_NO_EXTENSIONS=1 as the pure-Python workaround.
         run: python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325 --ignore-vuln CVE-2026-104874
