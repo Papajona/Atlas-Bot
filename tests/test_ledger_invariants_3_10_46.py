@@ -3,6 +3,7 @@ import asyncio
 from decimal import Decimal
 
 import pytest
+from pathlib import Path
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
