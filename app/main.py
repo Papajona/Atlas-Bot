@@ -1471,7 +1471,11 @@ async def get_customer(authorization: str | None, db, require_aal2: bool = True)
         # the caller's transaction.
         try:
             async with db.begin_nested():
-                profile = CustomerProfile(auth_user_id=uid, email=email, display_name=name, status="ACTIVE")
+                metadata = claims.get("user_metadata") or {}
+                username = str(metadata.get("username") or "").strip()
+                if not username:
+                    raise HTTPException(409, "Customer username is required")
+                profile = CustomerProfile(auth_user_id=uid, email=email, username=username, display_name=str(metadata.get("display_name") or name)[:160], status="ACTIVE")
                 db.add(profile)
                 await db.flush()
         except IntegrityError:
@@ -1851,7 +1855,7 @@ async def admin_auth_login(req: AdminLoginRequest):
     allowed, _ = await allow_rate_limit(f"admin-login:account:{key}", max(1, settings.auth_rate_limit_per_minute))
     if not allowed:
         raise HTTPException(429, "Administrator login rate limit exceeded")
-    result = await _supabase_request("/auth/v1/token?grant_type=password", payload={"email": req.email, "password": req.password})
+    result = await _supabase_request("/auth/v1/token?grant_type=password", payload={"email": req.email, "password": req.password, "data": {"username": req.username, "display_name": req.display_name}})
     access_token = str(result.get("access_token") or "")
     if not access_token:
         raise HTTPException(401, "Administrator login failed")
@@ -2601,7 +2605,7 @@ async def customer_me(authorization: str | None = Header(default=None)):
         sub = await _get_active_subscription(db, profile.id)
         await db.commit()
         return {"id": profile.id, "auth_user_id": profile.auth_user_id, "email": profile.email,
-                "display_name": profile.display_name, "status": profile.status, "plan": sub.plan_code if sub else "free", "subscription_status": sub.status if sub else "active"}
+                "username": profile.username, "display_name": profile.display_name, "status": profile.status, "plan": sub.plan_code if sub else "free", "subscription_status": sub.status if sub else "active"}
 
 
 @app.get("/api/customer/wallets")
