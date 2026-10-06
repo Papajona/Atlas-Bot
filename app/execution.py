@@ -1,7 +1,6 @@
 from __future__ import annotations
 import logging
 import asyncio
-import hashlib
 import json
 import os
 import uuid
@@ -14,12 +13,10 @@ from sqlalchemy.exc import IntegrityError
 
 from .broker import Broker, BrokerConfig
 from .customer_binance_execution import build_customer_binance_broker, CustomerBinanceExecutionError
-from .customer_oanda import build_customer_oanda_broker
 from .risk_governor import evaluate_trade
 from .forex_oanda import OandaBroker, OandaConfig
 from .config import settings
-from .db import (SessionLocal, OandaReconciliationState, AppState, TradingAccount, Trade, Position, AuditLog,
-                  Wallet, CustomerOandaAccount, CustomerBinanceAccount, StrategyOutcome, TradeLearningEpisode, OrderCommand,
+from .db import (SessionLocal, OandaReconciliationState, AppState, TradingAccount, Trade, Position, CustomerBinanceAccount, StrategyOutcome, TradeLearningEpisode, OrderCommand,
                   LiveExecutionLease, utcnow, quantize_money)
 from .trading_core import PROFILES
 from .customer_funds import get_or_create_ledger, reserve_trading, release_trading, sync_wallet_from_ledger, settle_realized_pnl, settle_trading_fee, customer_balance
@@ -863,7 +860,6 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             if asset in {"forex", "commodity"} and forex_live and settings.oanda_practice:
                 raise RiskBlocked("OANDA practice mode is enabled; live Forex is locked")
             mode = "FOREX_DEMO" if forex_demo else ("LIVE" if live else "PAPER")
-            equity = account.equity if account is not None else s.equity
             trading_account_id = account.id if account is not None else None
 
         base_scope = f"{strategy}:customer:{customer_id if customer_id is not None else 'platform'}"
@@ -1555,7 +1551,6 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                 trade_broker = build_customer_binance_broker(
                     customer_binance, timeout_ms=settings.exchange_timeout_ms, sandbox=settings.broker_sandbox
                 )
-                trade_is_customer = True
             order = None
             if is_oanda:
                 if broker_order_id:
