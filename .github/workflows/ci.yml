@@ -89,6 +89,8 @@ jobs:
           bash -n deploy/verify-live-money-runtime.sh
           bash -n deploy/verify-cloud-audit.sh
           bash -n deploy/gcp-security-audit-retention.sh
+          bash -n deploy/cloud-run-canary.sh
+          bash -n deploy/cloud-run-rollback.sh
           bash -n scripts/apply_final_fixes.sh
           bash -n deploy/verify-deployed-release.sh
 

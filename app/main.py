@@ -323,6 +323,7 @@ async def startup():
         if settings.usdt_tron_enabled and settings.usdt_trongrid_api_key:
             _usdt_task = _track_worker_task(_usdt_tron_monitor_loop())
         _track_worker_task(_heartbeat_loop())
+        _track_worker_task(_continuous_risk_enforcement_loop())
         _track_worker_task(_withdrawal_recovery_loop())
         _track_worker_task(_customer_key_audit_loop())
         if settings.daily_research_enabled:
@@ -1136,6 +1137,65 @@ async def _worker_health_snapshot(db) -> dict:
     rows=(await db.execute(select(ServiceHeartbeat).where(ServiceHeartbeat.role=="worker")
                            .order_by(ServiceHeartbeat.updated_at.desc()).limit(1000))).scalars().all()
     return _classify_worker_health(rows, stale_after_seconds=settings.stale_instance_seconds)
+
+
+async def _continuous_risk_enforcement_loop():
+    """Continuously enforce portfolio loss limits outside the order-request path."""
+    while True:
+        try:
+            breached = []
+            async with SessionLocal() as db:
+                state = await db.get(AppState, 1)
+                if state:
+                    peak = float(state.peak_equity or state.equity or 0.0)
+                    daily_start = float(state.daily_start_equity or state.equity or 0.0)
+                    equity = max(0.0, float(state.equity or 0.0))
+                    drawdown = 1.0 - equity / peak if peak > 0 else 0.0
+                    daily_loss = 1.0 - equity / daily_start if daily_start > 0 else 0.0
+                    if drawdown >= float(settings.max_drawdown) or daily_loss >= float(settings.daily_loss_limit):
+                        state.kill_switch = True
+                        state.live_enabled = False
+                        state.mode = "HALTED"
+                        breached.append({
+                            "scope": "platform",
+                            "drawdown": drawdown,
+                            "daily_loss": daily_loss,
+                        })
+                accounts = (await db.execute(select(TradingAccount).where(TradingAccount.status != "CLOSED"))).scalars().all()
+                for account in accounts:
+                    peak = float(account.peak_equity or account.equity or 0.0)
+                    daily_start = float(account.daily_start_equity or account.equity or 0.0)
+                    equity = max(0.0, float(account.equity or 0.0))
+                    drawdown = 1.0 - equity / peak if peak > 0 else 0.0
+                    daily_loss = 1.0 - equity / daily_start if daily_start > 0 else 0.0
+                    if drawdown >= float(settings.max_drawdown) or daily_loss >= float(settings.daily_loss_limit):
+                        account.status = "HALTED"
+                        breached.append({
+                            "scope": "customer",
+                            "customer_id": account.customer_id,
+                            "drawdown": drawdown,
+                            "daily_loss": daily_loss,
+                        })
+                if breached:
+                    await db.commit()
+
+            if breached:
+                await open_incident(
+                    key="CONTINUOUS_RISK_LIMIT_BREACH",
+                    severity="CRITICAL",
+                    category="EXECUTION_PROTECTION",
+                    summary="Continuous risk monitor breached an equity loss limit",
+                    detail={"breaches": breached},
+                )
+                # The emergency stop fences submissions first, then cancels/validates
+                # broker orders. It is deliberately invoked outside the DB transaction.
+                try:
+                    await emergency_stop()
+                except Exception:
+                    logger.exception("continuous risk monitor emergency stop failed")
+        except Exception:
+            logger.exception("continuous_risk_enforcement_loop: pass failed")
+        await asyncio.sleep(max(1, int(settings.continuous_risk_check_interval_seconds)))
 
 
 async def _heartbeat_loop():
