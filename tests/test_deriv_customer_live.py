@@ -78,4 +78,4 @@ def test_deriv_practice_preflight_is_read_only_and_fail_closed_for_execution():
 
     asyncio.run(run())
     assert [x[0].get("req_id") for x in calls] == [1, 2, 3]
-    assert all(authenticated is True for _, authenticated in calls[:2])
+    assert [authenticated for _, authenticated in calls] == [False, True, False]
