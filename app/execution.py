@@ -1709,6 +1709,28 @@ async def emergency_stop(exchange: str | None = None):
                 still_open = [str(o.get("id") or "") for o in remaining if str(o.get("state") or "").upper() in {"PENDING", "OPEN"}]
                 if still_open:
                     failures.append({"scope": "platform_oanda", "error": f"Open orders remain after cancellation: {still_open[:20]}"})
+                positions = await asyncio.to_thread(broker.positions)
+                for position in positions or []:
+                    instrument = str(position.get("instrument") or "")
+                    long_units = str((position.get("long") or {}).get("units") or "NONE")
+                    short_units = str((position.get("short") or {}).get("units") or "NONE")
+                    if not instrument:
+                        failures.append({"scope": "platform_oanda", "error": "Open OANDA position has no instrument; refusing to guess"})
+                        continue
+                    try:
+                        if long_units not in {"NONE", "0", "0.0"} or short_units not in {"NONE", "0", "0.0"}:
+                            await asyncio.to_thread(broker.close_position, instrument, long_units, short_units)
+                            canceled.append({"scope": "platform_oanda", "position_symbol": instrument, "order_id": ""})
+                    except Exception as exc:
+                        failures.append({"scope": "platform_oanda", "symbol": instrument, "error": f"OANDA position close failed: {exc}"})
+                remaining_positions = await asyncio.to_thread(broker.positions)
+                unresolved_positions = [
+                    str(p.get("instrument") or "") for p in remaining_positions or []
+                    if str((p.get("long") or {}).get("units") or "0") not in {"0", "0.0", "NONE"}
+                    or str((p.get("short") or {}).get("units") or "0") not in {"0", "0.0", "NONE"}
+                ]
+                if unresolved_positions:
+                    failures.append({"scope": "platform_oanda", "error": f"OANDA positions remain after flatten: {unresolved_positions[:20]}"})
             except Exception as exc:
                 cancel_error = str(exc)
                 failures.append({"scope": "platform_oanda", "error": cancel_error})
