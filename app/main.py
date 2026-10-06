@@ -1232,7 +1232,18 @@ async def _withdrawal_recovery_loop():
             for w in rows:
                 # Recovery is intentionally status-only; no blind payout retry is performed.
                 if _should_alert_recovery(w.id):
-                    await _audit("WITHDRAWAL_RECOVERY_DUE", {"id": w.id, "request_id": w.request_id, "status": w.status})
+                    payload = {"id": w.id, "request_id": w.request_id, "status": w.status}
+                    await _audit("WITHDRAWAL_RECOVERY_DUE", payload)
+                    async with SessionLocal() as incident_db:
+                        await open_incident(
+                            incident_db,
+                            key=f"WITHDRAWAL_RECOVERY_DUE:{w.id}",
+                            severity="HIGH",
+                            category="WITHDRAWAL_RECOVERY",
+                            summary=f"Withdrawal {w.request_id or w.id} requires provider reconciliation",
+                            detail=payload,
+                        )
+                        await incident_db.commit()
         except Exception:
             logger.exception("withdrawal_recovery_loop: failed to scan pending withdrawals")
 
