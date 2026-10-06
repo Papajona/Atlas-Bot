@@ -30,3 +30,5 @@ bip-utils==2.12.2
 
 # ccxt 4.5.85 pins multidict 6.7.1. CVE-2026-104874 affects the C extension in 6.7.0-6.9.0; production/CI force the documented pure-Python backend via MULTIDICT_NO_EXTENSIONS=1.
 multidict==6.7.1
+
+defusedxml==0.7.1

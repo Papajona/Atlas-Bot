@@ -108,10 +108,10 @@ def test_production_model_integrity_uses_public_key_and_worker_private_key():
     assert "verify_artifact_signature" in registry
 
 
-def test_current_release_identity_is_3_10_45():
+def test_current_release_identity_is_3_10_47():
     assert 'app_version: str = "3.10.47"' in (ROOT / "app" / "config.py").read_text()
     assert '__version__ = "3.10.47"' in (ROOT / "app" / "__init__.py").read_text()
-    assert 'versionName = "3.10.47"' in (ROOT / "android" / "app" / "build.gradle.kts").read_text()
+    assert 'versionName = "3.10.47"' in (ROOT / "app" / "build.gradle.kts").read_text()
 
 
 def test_bootstrap_grants_api_only_supabase_and_funding_secrets():

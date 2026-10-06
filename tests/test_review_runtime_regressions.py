@@ -128,3 +128,13 @@ def test_news_feed_rejects_xml_entities():
     payload = '<!DOCTYPE rss [<!ENTITY entity "injected">]><rss><item><title>&entity;</title></item></rss>'
     with pytest.raises(EntitiesForbidden):
         _parse_rss(payload, {"name": "test", "tier": "test"})
+
+
+def test_multidict_production_backend_guard(monkeypatch):
+    from app.main import _assert_multidict_safe_backend
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.delenv("MULTIDICT_NO_EXTENSIONS", raising=False)
+    with pytest.raises(RuntimeError, match="MULTIDICT_NO_EXTENSIONS=1"):
+        _assert_multidict_safe_backend()
+    monkeypatch.setenv("MULTIDICT_NO_EXTENSIONS", "1")
+    _assert_multidict_safe_backend()

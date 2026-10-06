@@ -1,5 +1,6 @@
 from __future__ import annotations
 import math
+import logging
 from .derivatives_risk import DerivativesSnapshot, derivatives_stress, normalize_open_interest_change
 
 async def fetch_public_derivatives_context(exchange_id: str, symbol: str) -> dict:
@@ -18,11 +19,13 @@ async def fetch_public_derivatives_context(exchange_id: str, symbol: str) -> dic
         funding=None; oi=None; prev_oi=None; basis=None
         if ex.has.get("fetchFundingRate"):
             try: funding=float((await ex.fetch_funding_rate(symbol)).get("fundingRate"))
-            except Exception: pass
+            except Exception:
+                logging.getLogger(__name__).warning("derivatives_funding_rate_unavailable", exc_info=True)
         if ex.has.get("fetchOpenInterest"):
             try:
                 row=await ex.fetch_open_interest(symbol); oi=float(row.get("openInterestValue") or row.get("openInterestAmount") or row.get("openInterest"))
-            except Exception: pass
+            except Exception:
+                logging.getLogger(__name__).warning("derivatives_open_interest_unavailable", exc_info=True)
         # Some exchanges expose a prior OI only through history; don't invent one.
         snap=DerivativesSnapshot(symbol=symbol,funding_rate=funding,open_interest=oi,open_interest_change_pct=normalize_open_interest_change(prev_oi,oi),observed_at_ms=ex.milliseconds())
         result=derivatives_stress(snap)

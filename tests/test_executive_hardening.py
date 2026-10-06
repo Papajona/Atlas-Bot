@@ -46,7 +46,7 @@ def test_adaptive_wfo_emits_promotion_evidence():
 def test_release_identity_files_are_consistent():
     assert 'app_version: str = "3.10.47"' in (ROOT / "app/config.py").read_text()
     assert '__version__ = "3.10.47"' in (ROOT / "app/__init__.py").read_text()
-    android = (ROOT / "android/app/build.gradle.kts").read_text()
+    android = (ROOT / "app/build.gradle.kts").read_text()
     assert "versionCode = 1047" in android
     assert 'versionName = "3.10.47"' in android
 

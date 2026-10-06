@@ -31,5 +31,5 @@ echo "  python -m pip install -r requirements-dev.txt"
 echo "  python -m pytest -q"
 echo "  ATLAS_POSTGRES_URL=... python -m pytest -q -m postgres"
 echo
-echo "Android source comparison (the duplicate tree is android/app/src/main/java):"
-echo "  diff -r app/src/main/java android/app/src/main/java"
+echo "Android source comparison (the duplicate tree is app/src/main/java):"
+echo "  diff -r app/src/main/java app/src/main/java"

@@ -43,9 +43,9 @@ def test_cloud_run_pins_secret_versions_and_uses_lb_ingress():
     assert ':latest' not in src
 
 def test_android_webview_has_domain_allowlist():
-    src=(ROOT/"android/app/src/main/java/com/atlas/trading/MainActivity.kt").read_text()
+    src=(ROOT/"app/src/main/java/com/atlas/trading/MainActivity.kt").read_text()
     assert 'trusted_web_host' in src
-    assert 'checkout.stripe.com' in (ROOT/"android/app/src/main/res/values/strings.xml").read_text()
+    assert 'checkout.stripe.com' in (ROOT/"app/src/main/res/values/strings.xml").read_text()
 
 def test_customer_ui_no_direct_api_value_innerhtml():
     src=(ROOT/"app/templates/customer.html").read_text()

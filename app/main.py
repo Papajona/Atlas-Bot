@@ -254,6 +254,23 @@ def _trusted_client_ip(request: Request) -> str:
     return str(chain[0]) if chain else peer
 
 
+def _assert_multidict_safe_backend() -> None:
+    """Refuse production/staging startup unless multidict uses the safe Python backend."""
+    environment = str(settings.environment).lower()
+    if environment not in {"production", "staging"}:
+        return
+    if os.environ.get("MULTIDICT_NO_EXTENSIONS") != "1":
+        raise RuntimeError("MULTIDICT_NO_EXTENSIONS=1 is required outside development")
+    try:
+        import multidict
+        if str(multidict.CIMultiDict.__module__) != "multidict._multidict_py":
+            raise RuntimeError("multidict is not using the required pure-Python backend")
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Unable to verify multidict safety backend: {exc}") from exc
+
+
 async def _assert_database_migrations_current() -> None:
     """Fail closed in staging/production when the database is not at Alembic head."""
     if str(settings.environment).lower() == "development":
@@ -277,6 +294,7 @@ async def _assert_database_migrations_current() -> None:
 @app.on_event("startup")
 async def startup():
     global _background_task, _usdt_task
+    _assert_multidict_safe_backend()
     if settings.forex_live_enabled:
         raise RuntimeError("OANDA live trading is permanently disabled in AtlasRisk; use OANDA practice/demo for learning and backtesting")
     if settings.deriv_live_enabled:

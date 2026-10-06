@@ -119,7 +119,7 @@ async def dual_ai_research_review(research: dict[str, Any], intelligence: dict[s
     )
     providers: dict[str, Any] = {}
     errors: dict[str, str] = {}
-    for name, result in zip(("gemini", "groq"), results):
+    for name, result in zip(("gemini", "groq"), results, strict=True):
         if isinstance(result, Exception):
             errors[name] = str(result)
         else:
