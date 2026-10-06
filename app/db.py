@@ -374,6 +374,9 @@ class Withdrawal(Base):
         UniqueConstraint("request_id", name="uq_withdrawal_request_id"),
         ForeignKeyConstraint(["wallet_id", "customer_id"], ["wallets.id", "wallets.customer_id"], name="fk_withdrawal_wallet_customer"),
         Index("ix_withdrawal_status_created", "status", "created_at"),
+        Index("uq_withdrawal_provider_id_nonempty", "provider", "provider_id", unique=True,
+              postgresql_where=sa.text("provider_id <> ''"),
+              sqlite_where=sa.text("provider_id <> ''")),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
