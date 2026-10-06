@@ -2,7 +2,6 @@
 was imported in main.py but never called -- confirmed dead code during review. These tests
 cover the function itself (previously untested) and verify it is now actually wired into the
 live per-symbol decision pipeline in the correct position."""
-import pytest
 
 from app.correlation_risk import adjusted_group_exposure, risk_group
 
