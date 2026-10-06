@@ -100,7 +100,7 @@ def test_withdrawal_reconciliation_never_turns_unresolved_provider_state_into_su
     assert "PayoutUnknown" in text
     assert "raise _safe_http_error" in text
     assert "result.status == 'COMPLETED'" in text
-    assert 'result.status == "FAILED"' in text
+    assert "result.status == 'FAILED'" in text
     assert "w.status = 'RELEASED'" in text
     assert "w.status = 'FAILED'" in text
 
