@@ -143,6 +143,18 @@ class TradingAccount(Base):
     realized_pnl: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
     unrealized_pnl: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
     reserved_margin: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
+    pilot_status: Mapped[str] = mapped_column(String(20), default="NONE")
+    pilot_stage: Mapped[int] = mapped_column(Integer, default=0)
+    pilot_requested_by: Mapped[str] = mapped_column(String(160), default="")
+    pilot_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    pilot_approved_by: Mapped[str] = mapped_column(String(160), default="")
+    pilot_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    pilot_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    pilot_max_position_notional_usd: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
+    pilot_max_total_exposure_usd: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
+    pilot_max_open_positions: Mapped[int] = mapped_column(Integer, default=0)
+    pilot_max_leverage: Mapped[float] = mapped_column(Float, default=0.0)
+    pilot_daily_loss_limit: Mapped[float] = mapped_column(Float, default=0.0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
