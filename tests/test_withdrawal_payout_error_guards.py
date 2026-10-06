@@ -61,7 +61,6 @@ def test_mark_not_sent_requires_dual_control_and_unknown_status_and_evidence():
 
 
 def test_immediate_provider_failure_releases_the_withdrawal_reserve():
-    src = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
     fn = _fn("release_withdrawal")
     text = ast.unparse(fn)
     assert "w3.status = 'FAILED'" in text
