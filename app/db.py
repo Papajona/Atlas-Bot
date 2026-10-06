@@ -1196,6 +1196,9 @@ class TronSweep(Base):
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_tron_sweep_idempotency"),
         Index("ix_tron_sweep_wallet_status", "wallet_id", "status"),
+        Index("uq_tron_sweep_transaction_id_nonempty", "transaction_id", unique=True,
+              postgresql_where=sa.text("transaction_id <> ''"),
+              sqlite_where=sa.text("transaction_id <> ''")),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     wallet_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
@@ -1206,6 +1209,7 @@ class TronSweep(Base):
     contract_address: Mapped[str] = mapped_column(String(64), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="READY_FOR_SIGNER")
+    custody_transfer_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     transaction_id: Mapped[str] = mapped_column(String(128), default="")
     detail_json: Mapped[str] = mapped_column(EncryptedText, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
