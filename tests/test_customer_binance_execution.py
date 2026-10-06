@@ -1,4 +1,7 @@
+from pathlib import Path
 from types import SimpleNamespace
+
+ROOT = Path(__file__).resolve().parents[1]
 import pytest
 
 from app.customer_binance_execution import (
