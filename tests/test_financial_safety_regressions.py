@@ -10,7 +10,7 @@ def _source(path: str) -> str:
 
 def test_customer_paper_execution_fails_closed_before_real_ledger_use():
     source = _source("app/execution.py")
-    assert 'if customer_id is not None and mode == "PAPER":' in source
+    assert 'if customer_id is not None and force_paper:' in source
     assert "Customer paper execution requires an isolated simulation ledger" in source
     assert 'and mode == "LIVE"' in source
     assert 'str(trade.mode or "").upper() == "LIVE"' in source
