@@ -1425,7 +1425,7 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
         trades = (await db.execute(query.order_by(Trade.updated_at).limit(200))).scalars().all()
         snapshots = [(t.id, t.customer_id, t.exchange, t.symbol, t.broker_order_id, t.client_order_id) for t in trades]
     results = []
-    for trade_id, customer_id, exchange, symbol, broker_order_id, client_order_id in snapshots:
+    for trade_id, customer_id, exchange, symbol, broker_order_id, trade_client_order_id in snapshots:
         try:
             if str(exchange).lower() != "binance":
                 raise RuntimeError("Customer live reconciliation is only enabled for Binance isolation")
@@ -1441,7 +1441,7 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
                 order = await asyncio.to_thread(broker.fetch_order, broker_order_id, symbol)
             if order is None:
                 opens = await asyncio.to_thread(broker.fetch_open_orders, symbol)
-                order = next((o for o in opens if str(o.get("clientOrderId") or o.get("info", {}).get("clientOrderId") or "") == client_order_id), None)
+                order = next((o for o in opens if str(o.get("clientOrderId") or o.get("info", {}).get("clientOrderId") or "") == trade_client_order_id), None)
                 if order is None:
                     history = await asyncio.to_thread(broker.fetch_orders, symbol)
                     order = next((o for o in history if str(o.get("clientOrderId") or o.get("info", {}).get("clientOrderId") or "") == client_order_id), None)
@@ -1454,7 +1454,7 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
                         severity="CRITICAL" if unresolved_trade.status == "UNKNOWN" else "HIGH",
                         category="RECONCILIATION",
                         summary="Customer exchange order could not be reconciled",
-                        detail={"trade_id": trade_id, "customer_id": customer_id, "exchange": exchange, "symbol": symbol, "broker_order_id": broker_order_id, "client_order_id": client_order_id, "status": unresolved_trade.status},
+                        detail={"trade_id": trade_id, "customer_id": customer_id, "exchange": exchange, "symbol": symbol, "broker_order_id": broker_order_id, "client_order_id": trade_client_order_id, "status": unresolved_trade.status},
                         customer_id=customer_id,
                     )
                 results.append({"trade_id": trade_id, "customer_id": customer_id, "resolved": False, "reason": "order_not_found"})
