@@ -22,7 +22,7 @@ from .db import (SessionLocal, OandaReconciliationState, AppState, TradingAccoun
                   Wallet, CustomerOandaAccount, CustomerBinanceAccount, StrategyOutcome, TradeLearningEpisode, OrderCommand,
                   LiveExecutionLease, utcnow, quantize_money)
 from .trading_core import PROFILES
-from .customer_funds import get_or_create_ledger, reserve_trading, release_trading, sync_wallet_from_ledger, settle_realized_pnl, settle_trading_fee
+from .customer_funds import get_or_create_ledger, reserve_trading, release_trading, sync_wallet_from_ledger, settle_realized_pnl, settle_trading_fee, customer_balance
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
 from .incidents import open_incident
 from .research_validation import edge_decay_check
@@ -476,7 +476,7 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                             strategy=str(trade_context.get("strategy") or "unknown"),
                             entry_regime=str(trade_context.get("regime") or "UNKNOWN"),
                             entry_trade_id=trade.id,
-                            reserved_capital=(delta * fill_price if settings.customer_cash_only_trading and trade.customer_id is not None else 0.0))
+                            reserved_capital=(delta * fill_price if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE" else 0.0))
         db.add(position)
     else:
         old_qty = position.quantity
@@ -486,14 +486,14 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 abs(old_qty) * position.average_entry_price + abs(signed) * fill_price
             ) / total_abs
             position.quantity = old_qty + signed
-            if settings.customer_cash_only_trading and trade.customer_id is not None:
+            if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE":
                 position.reserved_capital += delta * fill_price
         else:
             closing = min(abs(old_qty), abs(signed))
             direction = 1 if old_qty > 0 else -1
             realized = closing * (fill_price - position.average_entry_price) * direction
             position.quantity = old_qty + signed
-            if settings.customer_cash_only_trading and trade.customer_id is not None and abs(old_qty) > 0:
+            if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE" and abs(old_qty) > 0:
                 released = position.reserved_capital * (closing / abs(old_qty))
                 position.reserved_capital = max(0.0, position.reserved_capital - released)
                 if released > 0:
@@ -506,7 +506,7 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 position.entry_regime = str(trade_context.get("regime") or "UNKNOWN")
                 position.entry_trade_id = trade.id
                 position.average_entry_price = fill_price
-                if settings.customer_cash_only_trading and trade.customer_id is not None:
+                if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE":
                     flip_cost = abs(position.quantity) * fill_price
                     try:
                         # The broker fill already happened: never let a reserve failure abort recording it.
@@ -604,8 +604,22 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         # but an unbounded position.realized_pnl is still a reporting-accuracy issue over a
         # long-lived position with many partial fills.
         position.realized_pnl = quantize_money(position.realized_pnl + realized)
-        if realized and trade.customer_id is not None:
+        if realized and trade.customer_id is not None and str(trade.mode or "").upper() == "LIVE":
             await settle_realized_pnl(db, customer_id=trade.customer_id, amount=realized, reference_id=f"trade:{trade.id}:realized:{_qty_ref(new_filled)}", strict=False)
+            account_live = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == trade.customer_id).with_for_update())).scalar_one_or_none()
+            if account_live:
+                balance = await customer_balance(db, trade.customer_id, "USDT")
+                positions_live = (await db.execute(select(Position).where(Position.customer_id == trade.customer_id))).scalars().all()
+                unrealized_live = sum(float(p.unrealized_pnl or 0.0) for p in positions_live)
+                realized_live = sum(float(p.realized_pnl or 0.0) for p in positions_live)
+                account_live.cash_equity = max(0.0, balance["available"] + balance["trading_reserved"])
+                account_live.realized_pnl = realized_live
+                account_live.unrealized_pnl = unrealized_live
+                account_live.equity = max(0.0, account_live.cash_equity + unrealized_live)
+                account_live.peak_equity = max(float(account_live.peak_equity or 0.0), account_live.equity)
+                if account_live.daily_start_date != _today_utc():
+                    account_live.daily_start_date = _today_utc()
+                    account_live.daily_start_equity = account_live.equity
         if realized != 0.0:
             # Store observed outcome against the strategy that opened the position.
             # This avoids attributing a close to the strategy of the closing order.
@@ -770,6 +784,8 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             if asset in {"forex", "commodity"} and not forex_demo and not force_paper:
                 raise RiskBlocked("OANDA is demo/backtesting-only in AtlasRisk; live Forex/commodity execution is disabled")
             live = crypto_live or forex_demo
+            if customer_id is not None and mode == "PAPER":
+                raise RiskBlocked("Customer paper execution requires an isolated simulation ledger")
             if crypto_live and settings.broker_sandbox:
                 raise RiskBlocked("Live crypto trading cannot run while broker sandbox mode is enabled")
             if asset in {"forex", "commodity"} and demo_forex and not forex_demo:
@@ -885,7 +901,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                         "average_fill_price": float(existing.average_fill_price or 0.0)}
         reserved_cash = 0.0
         command: OrderCommand | None = None
-        if customer_id is not None and settings.customer_cash_only_trading:
+        if customer_id is not None and settings.customer_cash_only_trading and mode == "LIVE":
             async with SessionLocal() as db:
                 qpos = select(Position).where(Position.customer_id == customer_id, Position.symbol == symbol, Position.quantity != 0).with_for_update()
                 positions_now = (await db.execute(qpos)).scalars().all()
@@ -1552,14 +1568,11 @@ async def emergency_stop(exchange: str | None = None):
         failure = {"scope": "live_submission_barrier", "error": "A live broker submission is still in flight or the distributed barrier is unavailable"}
         failures.append(failure)
         try:
-            await open_incident(key="EMERGENCY_STOP_SUBMISSION_BARRIER", severity="CRITICAL", category="EMERGENCY_STOP", summary="Emergency stop cannot confirm the live submission barrier", detail=failure)
+            await open_incident(key="EMERGENCY_STOP_SUBMISSION_BARRIER", severity="CRITICAL", category="EMERGENCY_STOP", summary="Emergency stop could not confirm the live submission barrier; cancellation/reconciliation will continue", detail=failure)
         except Exception:
             logging.getLogger(__name__).warning("emergency_stop_barrier_incident_write_failed", exc_info=True)
         await audit("EMERGENCY_CANCEL_FAILED", failure)
-        return {"ok": False, "broker_halt_confirmed": False, "canceled_count": 0, "failure_count": len(failures),
-                "cancel_error": "Live submission barrier not confirmed", "failures": failures, "mode": "HALTED"}
     canceled: list[dict[str, str]] = []
-    failures: list[dict[str, str]] = []
     cancel_error = None
 
     if exchange and exchange.lower() == "oanda":
