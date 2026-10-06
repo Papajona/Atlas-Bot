@@ -70,6 +70,7 @@ from .executor_engine import ExecutorConfig, ExecutorValidationError, build_exec
 from .admin_rbac import require_role, get_roles, upsert_role, ROLES
 from .transaction_policy import register_or_check_destination, verify_destination
 from .audit_chain import append_audit
+from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current
 
 def _stepup_token(uid: str, purpose: str = "withdrawal", destination_fingerprint: str = "", proposal_digest_value: str = "") -> tuple[str, str, int]:
     if not settings.secret_key:
@@ -254,47 +255,10 @@ def _trusted_client_ip(request: Request) -> str:
     return str(chain[0]) if chain else peer
 
 
-def _assert_multidict_safe_backend() -> None:
-    """Refuse production/staging startup unless multidict uses the safe Python backend."""
-    environment = str(settings.environment).lower()
-    if environment not in {"production", "staging"}:
-        return
-    if os.environ.get("MULTIDICT_NO_EXTENSIONS") != "1":
-        raise RuntimeError("MULTIDICT_NO_EXTENSIONS=1 is required outside development")
-    try:
-        import multidict
-        if str(multidict.CIMultiDict.__module__) != "multidict._multidict_py":
-            raise RuntimeError("multidict is not using the required pure-Python backend")
-    except RuntimeError:
-        raise
-    except Exception as exc:
-        raise RuntimeError(f"Unable to verify multidict safety backend: {exc}") from exc
-
-
-async def _assert_database_migrations_current() -> None:
-    """Fail closed in staging/production when the database is not at Alembic head."""
-    if str(settings.environment).lower() == "development":
-        return
-    try:
-        from alembic.config import Config as AlembicConfig
-        from alembic.migration import MigrationContext
-        from alembic.script import ScriptDirectory
-        cfg = AlembicConfig(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
-        expected = set(ScriptDirectory.from_config(cfg).get_heads())
-        async with engine.connect() as conn:
-            current = await conn.run_sync(lambda sync_conn: set(MigrationContext.configure(sync_conn).get_current_heads()))
-        if current != expected:
-            raise RuntimeError(f"Database migrations are not at Alembic head: current={sorted(current)} expected={sorted(expected)}; run 'alembic upgrade head' before starting Atlas")
-    except RuntimeError:
-        raise
-    except Exception as exc:
-        raise RuntimeError(f"Unable to verify Alembic migration state: {exc}") from exc
-
-
 @app.on_event("startup")
 async def startup():
     global _background_task, _usdt_task
-    _assert_multidict_safe_backend()
+    assert_multidict_safe_backend()
     if settings.forex_live_enabled:
         raise RuntimeError("OANDA live trading is permanently disabled in AtlasRisk; use OANDA practice/demo for learning and backtesting")
     if settings.deriv_live_enabled:
@@ -352,7 +316,7 @@ async def startup():
     if settings.usdt_tron_enabled:
         from .usdt_tron import require_tron_wallet_backend
         require_tron_wallet_backend()
-    await _assert_database_migrations_current()
+    await assert_database_migrations_current()
     await init_db()
     async with SessionLocal() as billing_db:
         await _ensure_billing_plans(billing_db)
