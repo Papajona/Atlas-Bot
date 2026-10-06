@@ -52,3 +52,15 @@ def test_invariants_hold_after_normal_and_deficit_activity_then_detect_tampering
             bad = await ledger_invariant_report(db)
             assert bad["ok"] is False and bad["drift_count"] >= 1
     asyncio.run(with_database(check))
+
+
+def test_settle_withdrawal_rechecks_idempotency_after_customer_ledger_lock():
+    source = Path("app/customer_funds.py").read_text()
+    start = source.index("async def settle_withdrawal(")
+    end = source.index("async def customer_balance(", start)
+    block = source[start:end]
+    lock_pos = block.index("with_for_update")).scalar_one()")
+    recheck_pos = block.index("pre-lock idempotency check is only a fast path")
+    assert recheck_pos > lock_pos
+    assert 'LedgerJournal.idempotency_key == idem' in block
+    assert 'return fresh_ledger' in block[recheck_pos:]
