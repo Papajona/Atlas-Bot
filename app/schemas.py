@@ -13,6 +13,12 @@ class MarketRequest(BaseModel):
     days: int = Field(default=365, ge=30, le=1500)
 
 
+class TradingRequirementsRequest(BaseModel):
+    venue: str = Field(pattern="^(binance|oanda|deriv)$")
+    symbol: str = Field(min_length=2, max_length=80)
+    stop_loss_price: float | None = Field(default=None, gt=0)
+
+
 class CustomerBotStartRequest(MarketRequest):
     risk_fraction: float | None = Field(default=None, gt=0, le=0.02)
     autonomous: bool = True
