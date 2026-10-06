@@ -13,7 +13,7 @@ numpy==2.3.5
 scikit-learn==1.6.1
 lightgbm==4.6.0
 joblib==1.5.1
-ccxt==4.5.85
+ccxt==4.6.25
 yfinance==0.2.55
 pyarrow==23.0.1
 httpx==0.28.1
@@ -27,5 +27,6 @@ websockets==15.0.1
 
 bip-utils==2.12.2
 
-# Direct pin to remediate CVE-2026-104874 reported by CI pip-audit.
+
+# Direct pin for CVE-2026-104874; compatible with the upgraded ccxt release.
 multidict==6.9.1
