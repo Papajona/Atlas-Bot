@@ -21,6 +21,7 @@ def test_live_execution_requires_customer_pilot_approval_and_expiry():
     src = (ROOT / "app/live_execution.py").read_text()
     assert 'pilot_status = str(account.pilot_status or "NONE").upper()' in src
     assert 'if pilot_status != "APPROVED":' in src
+    assert 'account.pilot_requested_by == account.pilot_approved_by' in src
     assert 'if pilot_expires_at is None:' in src
     assert 'if pilot_expires_at <= datetime.now(timezone.utc):' in src
 
@@ -29,6 +30,7 @@ def test_risk_gate_enforces_customer_pilot_caps_for_live_orders():
     src = (ROOT / "app/execution.py").read_text()
     assert 'if live and customer_id is not None:' in src
     assert 'Customer is not approved for the live pilot' in src
+    assert 'Customer pilot approval is not valid' in src
     assert 'pilot_max_notional = float(account.pilot_max_position_notional_usd or 0)' in src
     assert 'pilot_max_exposure = float(account.pilot_max_total_exposure_usd or 0)' in src
     assert 'pilot_max_positions = int(account.pilot_max_open_positions or 0)' in src
@@ -49,3 +51,10 @@ def test_customer_pilot_endpoint_requires_dual_risk_officer_approval():
     assert 'A different RISK_OFFICER must approve the customer pilot' in block
     assert 'account.pilot_status = "APPROVED"' in block
     assert 'account.pilot_status = "SUSPENDED"' in block
+
+
+def test_pilot_request_schema_allows_approval_without_reposting_caps():
+    src = (ROOT / "app/schemas.py").read_text()
+    assert "class CustomerPilotRequest(BaseModel):" in src
+    assert "max_position_notional_usd: float | None" in src
+    assert "expires_at: datetime | None = None" in src
