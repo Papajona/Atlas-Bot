@@ -282,8 +282,11 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
         pred_signal.iloc[te] = sig
         scores.extend(score.tolist())
         fold_ret = aligned.close.iloc[te].pct_change().fillna(0).to_numpy()
-        fold_turnover = np.abs(np.diff(np.r_[0, sig]))
-        fold_net = sig * fold_ret - fold_turnover * ((profile.taker_bps + profile.slippage_bps) / 10_000) - np.abs(sig) * (profile.carry_bps_per_bar / 10_000)
+        # A signal generated from bar t can only earn the return beginning at t+1.
+        # Using sig[t] * return[t] would leak the realized bar return into OOS metrics.
+        fold_position = np.r_[0, sig[:-1]]
+        fold_turnover = np.abs(np.diff(np.r_[0, fold_position]))
+        fold_net = fold_position * fold_ret - fold_turnover * ((profile.taker_bps + profile.slippage_bps) / 10_000) - np.abs(fold_position) * (profile.carry_bps_per_bar / 10_000)
         fold_equity = np.cumprod(1.0 + fold_net) if len(fold_net) else np.array([1.0])
         fold_peak = np.maximum.accumulate(fold_equity)
         fold_dd = fold_equity / fold_peak - 1.0
