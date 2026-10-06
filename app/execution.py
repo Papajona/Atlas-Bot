@@ -640,23 +640,6 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         position.realized_pnl = quantize_money(position.realized_pnl + realized)
         if realized and trade.customer_id is not None and str(trade.mode or "").upper() == "LIVE":
             await settle_realized_pnl(db, customer_id=trade.customer_id, amount=realized, reference_id=f"trade:{trade.id}:realized:{_qty_ref(new_filled)}", strict=False)
-            account_live = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == trade.customer_id).with_for_update())).scalar_one_or_none()
-            if account_live:
-                balance = await customer_balance(db, trade.customer_id, "USDT")
-                positions_live = (await db.execute(select(Position).where(
-                    Position.customer_id == trade.customer_id,
-                    Position.entry_trade_id.in_(select(Trade.id).where(Trade.mode == "LIVE")),
-                ))).scalars().all()
-                unrealized_live = sum(float(p.unrealized_pnl or 0.0) for p in positions_live)
-                realized_live = sum(float(p.realized_pnl or 0.0) for p in positions_live)
-                account_live.cash_equity = max(0.0, balance["available"] + balance["trading_reserved"])
-                account_live.realized_pnl = realized_live
-                account_live.unrealized_pnl = unrealized_live
-                account_live.equity = max(0.0, account_live.cash_equity + unrealized_live)
-                account_live.peak_equity = max(float(account_live.peak_equity or 0.0), account_live.equity)
-                if account_live.daily_start_date != _today_utc():
-                    account_live.daily_start_date = _today_utc()
-                    account_live.daily_start_equity = account_live.equity
         if realized != 0.0:
             # Store observed outcome against the strategy that opened the position.
             # This avoids attributing a close to the strategy of the closing order.
@@ -823,6 +806,15 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             live = crypto_live or forex_demo
             if customer_id is not None and mode == "PAPER":
                 raise RiskBlocked("Customer paper execution requires an isolated simulation ledger")
+            if live and customer_id is not None:
+                mixed_positions = (await db.execute(
+                    select(Position, Trade.mode).outerjoin(Trade, Trade.id == Position.entry_trade_id).where(
+                        Position.customer_id == customer_id,
+                        Position.quantity != 0,
+                    )
+                )).all()
+                if any(str(mode_value or "").upper() != "LIVE" for _, mode_value in mixed_positions):
+                    raise RiskBlocked("Customer has non-live or legacy positions; reconcile them before live execution")
             if crypto_live and settings.broker_sandbox:
                 raise RiskBlocked("Live crypto trading cannot run while broker sandbox mode is enabled")
             if asset in {"forex", "commodity"} and demo_forex and not forex_demo:
