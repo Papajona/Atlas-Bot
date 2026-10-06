@@ -1,3 +1,7 @@
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
 from app.trading_requirements import deriv_requirement, oanda_requirement, spot_requirement
 
 
@@ -49,3 +53,16 @@ def test_deriv_minimum_is_provider_quoted_not_hardcoded():
     req = deriv_requirement()
     assert req.status == "PROVIDER_QUOTE_REQUIRED"
     assert req.minimum_balance is None
+
+
+def test_customer_requirement_endpoint_never_enables_execution():
+    source = (ROOT / "app/main.py").read_text()
+    start = source.index('@app.post("/api/customer/trading-requirements")')
+    end = source.index('@app.get("/api/customer/bot")', start)
+    block = source[start:end]
+    assert "never submits an order" in block
+    assert "build_customer_binance_broker" in block
+    assert "build_customer_oanda_broker" in block
+    assert "deriv_requirement" in block
+    assert ".market_order(" not in block
+    assert ".buy(" not in block
