@@ -46,7 +46,7 @@ jobs:
           POSTGRES_USER: atlas
           POSTGRES_PASSWORD: test_password
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U atlas -d atlas_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
