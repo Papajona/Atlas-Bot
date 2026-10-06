@@ -3945,6 +3945,29 @@ async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorizatio
         if not destination_policy["allowed"]:
             await db.commit()
             raise HTTPException(409, f"Withdrawal destination is not yet trusted: {destination_policy['reason']}; ready_at={destination_policy.get('ready_at')}")
+        # Build the final canonical proposal before consuming step-up or reserving funds.
+        # Retries of the same customer request must resolve to the existing active withdrawal
+        # rather than creating a second ledger reservation.
+        request_id_seed = f"{profile.id}:{req.destination.strip()}:{req.amount}:{req.destination_tag or ''}:TRON:USDT:{settings.payout_provider}"
+        request_id = f"cust-wd-{profile.id}-{hashlib.sha256(request_id_seed.encode()).hexdigest()[:24]}"
+        final_digest = proposal_digest(
+            request_id=request_id, amount=req.amount, currency="USDT",
+            destination=req.destination.strip(), tag=req.destination_tag or "",
+            network="TRON", provider=settings.payout_provider,
+        )
+        existing = (await db.execute(select(Withdrawal).where(
+            Withdrawal.customer_id == profile.id,
+            Withdrawal.proposal_digest == final_digest,
+            Withdrawal.status.in_(["PENDING", "PARTIALLY_APPROVED", "APPROVED", "SUBMITTING", "SUBMITTED", "UNKNOWN"])
+        ).order_by(desc(Withdrawal.id)).limit(1))).scalar_one_or_none()
+        if existing:
+            return {
+                "ok": True, "id": existing.id, "request_id": existing.request_id,
+                "status": existing.status, "amount": existing.amount,
+                "currency": existing.currency, "network": existing.network,
+                "destination_masked": existing.destination_masked,
+                "required_approvals": existing.required_approvals, "idempotent": True,
+            }
         # Consume the single-use step-up only after the destination gate succeeds.
         # A cooldown response commits the destination registration but must not burn the OTP.
         stepup.used_at = datetime.now(timezone.utc)
@@ -3972,7 +3995,6 @@ async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorizatio
             await db.rollback()
             await _audit("CUSTOMER_WITHDRAWAL_BLOCKED", {"customer_id": profile.id, "amount": req.amount, "risk_score": risk["score"], "risk_flags": risk["flags"]})
             raise HTTPException(403, "Withdrawal blocked by the transaction risk engine; contact support")
-        request_id = f"cust-wd-{profile.id}-{hashlib.sha256(f'{profile.id}:{datetime.now(timezone.utc).isoformat()}:{req.destination}:{req.amount}'.encode()).hexdigest()[:24]}"
         w = Withdrawal(
             customer_id=profile.id, wallet_id=wallet.id, request_id=request_id,
             account_ref=str(profile.id), amount=req.amount, currency="USDT",
@@ -3981,8 +4003,7 @@ async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorizatio
             provider=settings.payout_provider, status="PENDING", risk_score=risk["score"], risk_flags=json.dumps(risk["flags"], separators=(",", ":")),
             required_approvals=2 if settings.withdrawal_dual_approval else 1,
         )
-        w.proposal_digest = proposal_digest(request_id=request_id, amount=req.amount, currency="USDT",
-            destination=w.destination, tag=w.destination_tag, network="TRON", provider=w.provider)
+        w.proposal_digest = final_digest
         try:
             await reserve_withdrawal(db, profile.id, req.amount, reference_id=w.request_id)
         except ValueError as exc:
@@ -4388,6 +4409,9 @@ async def create_withdrawal(req: WithdrawalCreate, x_admin_token: str | None = H
 async def approve_withdrawal(withdrawal_id: int, req: WithdrawalDecision, x_admin_token: str | None = Header(default=None), x_approver_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
+    authenticated_approver = str(claims.get("sub") or claims.get("user_id") or "").strip()
+    if not authenticated_approver or not hmac.compare_digest(authenticated_approver, str(req.admin_id or "").strip()):
+        raise HTTPException(403, "Approver identity must match the authenticated user")
     approver_auth(req.admin_id, x_approver_token, x_admin_token)
     if not settings.withdrawals_enabled:
         raise HTTPException(403, "Withdrawal administration is disabled")
