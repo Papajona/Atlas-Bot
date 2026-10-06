@@ -42,7 +42,7 @@ async def _sessions():
 async def _customer(sessions, available):
     from app.db import CustomerProfile, CustomerLedgerAccount
     async with sessions() as db:
-        p = CustomerProfile(auth_user_id=f"drill-{uuid.uuid4().hex}", email="drill@example.invalid", display_name="drill", status="ACTIVE")
+        p = CustomerProfile(auth_user_id=f"drill-{uuid.uuid4().hex}", username=f"drill_{uuid.uuid4().hex[:26]}", email="drill@example.invalid", display_name="drill", status="ACTIVE")
         db.add(p)
         await db.flush()
         db.add(CustomerLedgerAccount(customer_id=p.id, available=Decimal(available)))
