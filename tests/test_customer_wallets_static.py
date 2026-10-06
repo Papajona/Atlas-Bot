@@ -282,3 +282,31 @@ def test_kyc_has_no_verification_provider_fields():
     schema_block = schema[schema.index("class CustomerKYCSubmitRequest"):schema.index("class OtpSendRequest")]
     assert "verification_provider" not in schema_block
     assert "verification_provider_reference" not in schema_block
+
+
+def test_admin_dashboard_has_structured_control_center():
+    dashboard = (ROOT / "app/templates/dashboard.html").read_text()
+    for section in (
+        'id="control-center"',
+        'id="customers"',
+        'id="money"',
+        'id="withdrawals"',
+        'id="executions"',
+        'id="strategy"',
+        'id="risk"',
+        'id="security"',
+        'loadControlCenter()',
+        'loadKyc()',
+        'loadMoneyControl()',
+    ):
+        assert section in dashboard
+
+
+def test_admin_dashboard_uses_protected_admin_endpoints():
+    dashboard = (ROOT / "app/templates/dashboard.html").read_text()
+    assert "/api/admin/ledger/invariants" in dashboard
+    assert "/api/admin/custody/reconciliation" in dashboard
+    assert "/api/admin/kyc" in dashboard
+    assert "/api/admin/withdrawals" in dashboard
+    assert "/api/admin/security/roles" in dashboard
+    assert "Server-side authorization remains the security boundary" in dashboard
