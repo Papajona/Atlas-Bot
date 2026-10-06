@@ -60,12 +60,13 @@ async def assert_live_system_enabled(
     pilot_expires_at = account.pilot_expires_at
     if pilot_status != "APPROVED":
         raise LiveExecutionBlocked("Customer is not approved for the live pilot")
+    if not account.pilot_requested_by or not account.pilot_approved_by or account.pilot_requested_by == account.pilot_approved_by:
+        raise LiveExecutionBlocked("Customer pilot approval is not valid")
     if pilot_expires_at is None:
         raise LiveExecutionBlocked("Customer pilot expiry is not configured")
     if pilot_expires_at.tzinfo is None:
         pilot_expires_at = pilot_expires_at.replace(tzinfo=timezone.utc)
     if pilot_expires_at <= datetime.now(timezone.utc):
-        account.pilot_status = "EXPIRED"
         raise LiveExecutionBlocked("Customer live pilot has expired")
 
     sub = (await db.execute(
