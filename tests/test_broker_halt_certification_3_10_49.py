@@ -1,6 +1,5 @@
 from pathlib import Path
 import ast
-import re
 
 ROOT = Path(__file__).resolve().parents[1]
 EXEC = (ROOT / "app/execution.py").read_text()
