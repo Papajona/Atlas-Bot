@@ -1,5 +1,4 @@
 from __future__ import annotations
-import math
 import logging
 from .derivatives_risk import DerivativesSnapshot, derivatives_stress, normalize_open_interest_change
 
@@ -16,7 +15,7 @@ async def fetch_public_derivatives_context(exchange_id: str, symbol: str) -> dic
     try:
         await ex.load_markets()
         if symbol not in ex.markets: return {"status":"SYMBOL_UNAVAILABLE"}
-        funding=None; oi=None; prev_oi=None; basis=None
+        funding=None; oi=None; prev_oi=None
         if ex.has.get("fetchFundingRate"):
             try: funding=float((await ex.fetch_funding_rate(symbol)).get("fundingRate"))
             except Exception:
