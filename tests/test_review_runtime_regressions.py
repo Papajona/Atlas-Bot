@@ -136,3 +136,17 @@ def test_multidict_production_backend_guard(monkeypatch):
         assert_multidict_safe_backend()
     monkeypatch.setenv("MULTIDICT_NO_EXTENSIONS", "1")
     assert_multidict_safe_backend()
+
+
+def test_live_order_requires_signal_timestamp():
+    from app.execution import RiskBlocked
+    src = (ROOT / "app" / "execution.py").read_text() if "ROOT" in globals() else ""
+    assert "if live and not signal_timestamp:" in src
+    assert 'raise RiskBlocked("Live signal timestamp is required")' in src
+
+
+def test_allowlisted_admin_without_explicit_role_is_read_only():
+    src = (Path(__file__).resolve().parents[1] / "app" / "admin_rbac.py").read_text()
+    assert 'env_role = _env_assignments().get(uid)' in src
+    assert 'return {"READ_ONLY"}' in src
+    assert 'get(uid, "ADMINISTRATOR")' not in src
