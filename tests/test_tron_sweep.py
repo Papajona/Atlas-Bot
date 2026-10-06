@@ -44,7 +44,6 @@ def test_solidified_sweep_success_with_transfer_event():
     _to_topic = '0' * 24 + '41' + '00' * 19 + '02'
     # Replace topic addresses with deterministic encodings derived from the actual addresses.
     def addr_topic(addr):
-        import hashlib
         alphabet='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
         n=0
         for ch in addr:
