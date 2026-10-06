@@ -108,7 +108,7 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
     candidate_result = {"model_sha256": "abc123", "features": 20, "folds": 3}
     wfo = {"sharpe": 1.0, "max_drawdown": -0.10, "trades": 40, "total_return": 0.20,
            "folds": [{"total_return": 0.03}, {"total_return": 0.02}, {"total_return": 0.04}, {"total_return": 0.05}, {"total_return": 0.06}],
-           "cost_stress_ok": True}
+           "cost_stress_ok": True, "status": "OK", "oos_total_return": 0.20, "deflated_sharpe": 1.0}
 
     monkeypatch.setattr(adaptive_bot, "ai_walk_forward_backtest", lambda *a, **k: wfo)
     def fake_train(df, path, **kwargs):
@@ -121,6 +121,10 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
     out = adaptive_bot.ensure_adaptive_model(object(), str(model_path), policy=adaptive_bot.AdaptiveModelPolicy(min_trades=1))
     assert out["status"] == "CHALLENGER_PASSED_AWAITING_CONFIRMATION"  # consecutive-pass gate: first pass doesn't promote yet
     assert not model_path.exists()
+    streak = pathlib.Path(str(model_path) + ".candidate_streak.json")
+    value = json.loads(streak.read_text())
+    value["evaluated_at"] = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=21)).isoformat()
+    streak.write_text(json.dumps(value))
     out = adaptive_bot.ensure_adaptive_model(object(), str(model_path), policy=adaptive_bot.AdaptiveModelPolicy(min_trades=1))
     assert out["status"] == "CHAMPION_PROMOTED"
     assert model_path.exists()
