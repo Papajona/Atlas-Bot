@@ -9,7 +9,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.customer_funds import (
+import pytest\n\nfrom app.config import settings\n\n\n@pytest.fixture(autouse=True)\ndef encryption_key(monkeypatch):\n    from cryptography.fernet import Fernet\n    monkeypatch.setattr(settings, "app_encryption_key", Fernet.generate_key().decode())\n    monkeypatch.setattr(settings, "app_encryption_keys_json", "")\n    monkeypatch.setattr(settings, "app_encryption_active_key_id", "v1")\n\n\nfrom app.customer_funds import (
     customer_balance,
     post_deposit,
     reserve_withdrawal,
