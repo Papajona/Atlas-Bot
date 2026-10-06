@@ -192,3 +192,14 @@ def test_emergency_stop_flattens_oanda_positions():
     assert "broker.positions()" in emergency
     assert "broker.close_position" in emergency
     assert "unresolved_positions" in emergency
+
+
+def test_platform_spot_emergency_stop_does_not_send_derivative_reduce_only_order():
+    assert 'if _is_derivatives_market(broker):' in EXEC
+    assert 'await _flatten_exchange_positions(broker, "platform_exchange", failures, canceled)' in EXEC
+
+
+def test_emergency_stop_does_not_reset_cancellation_state_after_barrier_failure():
+    emergency = _function_source(EXEC, "emergency_stop")
+    assert emergency.count("canceled: list[dict[str, str]] = []") == 1
+    assert emergency.count("cancel_error = None") == 1
