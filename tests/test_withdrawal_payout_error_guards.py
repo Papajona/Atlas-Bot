@@ -64,8 +64,8 @@ def test_immediate_provider_failure_releases_the_withdrawal_reserve():
     src = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
     fn = _fn("release_withdrawal")
     text = ast.unparse(fn)
-    assert 'w3.status = "FAILED"' in text
-    assert 'result.status == "FAILED"' in text
+    assert "w3.status = 'FAILED'" in text
+    assert "result.status == 'FAILED'" in text
     assert 'ledger_release_withdrawal(db3, w3.customer_id, w3.amount' in text
 
 
@@ -76,7 +76,7 @@ def test_immediate_provider_unknown_never_releases_reserve():
                    if isinstance(n, ast.ExceptHandler)
                    and ast.unparse(n.type) == "PayoutUnknown")
     assert "ledger_release_withdrawal" not in ast.unparse(unknown)
-    assert 'w2.status = "UNKNOWN"' in text
+    assert "w2.status = 'UNKNOWN'" in text
 
 
 def test_withdrawal_provider_identifier_is_unique_and_recovery_is_durable():
@@ -99,10 +99,10 @@ def test_withdrawal_reconciliation_never_turns_unresolved_provider_state_into_su
     text = ast.unparse(fn)
     assert "PayoutUnknown" in text
     assert "raise _safe_http_error" in text
-    assert 'result.status == "COMPLETED"' in text
+    assert "result.status == 'COMPLETED'" in text
     assert 'result.status == "FAILED"' in text
-    assert 'w.status = "RELEASED"' in text
-    assert 'w.status = "FAILED"' in text
+    assert "w.status = 'RELEASED'" in text
+    assert "w.status = 'FAILED'" in text
 
 
 def test_final_money_safety_has_no_direct_blind_retry_after_restart():
