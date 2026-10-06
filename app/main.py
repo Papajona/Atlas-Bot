@@ -1484,10 +1484,17 @@ async def get_customer(authorization: str | None, db, require_aal2: bool = True)
     return profile, claims
 
 
-def _funding_signature_valid(raw_body: bytes, signature: str | None) -> bool:
-    if not settings.funding_webhook_secret or not signature:
+def _funding_signature_valid(raw_body: bytes, signature: str | None, timestamp: str | None) -> bool:
+    if not settings.funding_webhook_secret or not signature or not timestamp:
         return False
-    expected = hmac.new(settings.funding_webhook_secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    try:
+        ts = int(str(timestamp).strip())
+    except (TypeError, ValueError):
+        return False
+    if abs(int(time.time()) - ts) > int(settings.funding_webhook_max_skew_seconds):
+        return False
+    signed = str(timestamp).strip().encode() + b"." + raw_body
+    expected = hmac.new(settings.funding_webhook_secret.encode(), signed, hashlib.sha256).hexdigest()
     supplied = signature.removeprefix("sha256=").strip()
     return hmac.compare_digest(expected, supplied)
 
@@ -2695,9 +2702,13 @@ async def customer_funding(authorization: str | None = Header(default=None)):
 
 
 @app.post("/api/internal/funding/webhook")
-async def funding_webhook(request: Request, x_funding_signature: str | None = Header(default=None)):
+async def funding_webhook(
+    request: Request,
+    x_funding_signature: str | None = Header(default=None),
+    x_funding_timestamp: str | None = Header(default=None),
+):
     raw = await request.body()
-    if not _funding_signature_valid(raw, x_funding_signature):
+    if not _funding_signature_valid(raw, x_funding_signature, x_funding_timestamp):
         raise HTTPException(401, "Invalid funding webhook signature")
     payload = FundingWebhook.model_validate(json.loads(raw))
     async with SessionLocal() as db:
