@@ -44,8 +44,10 @@ async def get_roles(auth_user_id: str) -> set[str]:
         }
     allowed = {x.strip() for x in str(settings.admin_supabase_user_ids or "").split(",") if x.strip()}
     if uid in allowed:
-        env_role = _env_assignments().get(uid, "ADMINISTRATOR")
-        return {env_role}
+        env_role = _env_assignments().get(uid)
+        if env_role:
+            return {env_role}
+        return {"READ_ONLY"}
     return set()
 
 async def require_role(claims: dict, *required: str) -> str:
