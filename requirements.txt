@@ -26,3 +26,6 @@ redis==6.4.0
 websockets==15.0.1
 
 bip-utils==2.12.2
+
+# Direct pin to remediate CVE-2026-104874 reported by CI pip-audit.
+multidict==6.9.1
