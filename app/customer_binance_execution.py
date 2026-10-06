@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .broker import Broker, BrokerConfig
+from .config import settings
 
 
 class CustomerBinanceExecutionError(RuntimeError):
@@ -51,6 +52,10 @@ def build_customer_binance_broker(
     """Build a broker strictly from a verified customer Binance account."""
     if account is None:
         raise CustomerBinanceExecutionError("Customer Binance account mapping not found")
+    if str(settings.customer_live_exchange).lower() != "binance":
+        raise CustomerBinanceExecutionError("Customer live venue is not configured for Binance")
+    if str(settings.customer_live_market_type).lower() != "spot":
+        raise CustomerBinanceExecutionError("Customer live market type must be spot")
     if str(getattr(account, "status", "")).upper() != "VERIFIED":
         raise CustomerBinanceExecutionError("Customer Binance account is not verified")
     if not bool(getattr(account, "can_trade", False)):
@@ -64,6 +69,9 @@ def build_customer_binance_broker(
     if not api_key or not secret_ref:
         raise CustomerBinanceExecutionError("Customer Binance credentials are incomplete")
     secret = resolve_secret(secret_ref, secret_fetcher)
+    market_type = str(getattr(account, "market_type", "spot") or "spot").lower()
+    if market_type != str(settings.customer_live_market_type).lower():
+        raise CustomerBinanceExecutionError("Customer Binance account market type does not match the approved customer-live market type")
     return Broker.get(BrokerConfig(
         exchange_id="binance",
         api_key=api_key,
