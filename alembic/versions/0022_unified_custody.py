@@ -3,7 +3,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "0022_unified_custody"
-down_revision = "0021_tron_sweeps"
+down_revision = "0043_live_trading_dual_control"
 branch_labels = None
 depends_on = None
 
