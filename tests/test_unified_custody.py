@@ -16,7 +16,7 @@ from app.custody_locations import (
     record_custody_observation,
     transition_custody_transfer,
 )
-from app.db import Base, CustodyTransfer, CustodyAssetObservation, utcnow
+from app.db import Base, CustodyTransfer, utcnow
 
 
 @pytest.fixture(autouse=True)
