@@ -3,7 +3,7 @@
 from alembic import op
 
 revision = "0045_merge_application_heads"
-down_revision = ("0044_customer_kyc_username", "0023_security_billing_hardening")
+down_revision = ("0044_customer_kyc_username", "0022_unified_custody")
 branch_labels = None
 depends_on = None
 
