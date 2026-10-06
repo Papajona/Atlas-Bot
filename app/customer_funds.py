@@ -156,7 +156,7 @@ async def post_deposit(db, *, customer_id: int, wallet_id: int, amount: float, p
     keys = {idem, legacy_idem}
     existing = (await db.execute(select(LedgerEntry).where(LedgerEntry.idempotency_key.in_(keys)))).scalars().first()
     if existing:
-        return ledger
+        return await get_or_create_ledger(db, customer_id, USDT)
     fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
         CustomerLedgerAccount.customer_id == customer_id,
         CustomerLedgerAccount.currency == USDT,
