@@ -1,6 +1,7 @@
 """Pydantic request/response models for the HTTP API (extracted from main.py in 3.10.46; no behaviour change)."""
 from __future__ import annotations
 from decimal import Decimal
+from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
