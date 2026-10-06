@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select, desc, or_, func
 from sqlalchemy.exc import IntegrityError
 from .config import settings
-from .db import init_db, engine, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, LedgerEntry, TronDepositCursor, TronSweep, CustomerBinanceAccount, CustomerKYCProfile, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, StripeWebhookEvent, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, WithdrawalDestination, Incident, quantize_money
+from .db import init_db, engine, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, LedgerEntry, TronDepositCursor, TronSweep, CustomerBinanceAccount, CustomerKYCProfile, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, CustomerKYCProfile, StripeWebhookEvent, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, WithdrawalDestination, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
 from .trading_core import train_model, predict_latest, ai_walk_forward_backtest, PROFILES
 from .adaptive_bot import AdaptiveModelPolicy, ensure_adaptive_model, adaptive_model_status
@@ -158,6 +158,7 @@ from .schemas import (
     MfaChallengeRequest,
     MfaVerifyRequest,
     CustomerOandaConnectRequest,
+    CustomerKYCSubmitRequest,
 )  # noqa: F401
 
 
