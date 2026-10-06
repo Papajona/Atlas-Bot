@@ -312,6 +312,8 @@ class AdminLoginRequest(BaseModel):
 class CustomerCredentials(BaseModel):
     email: str
     password: str = Field(min_length=8, max_length=128)
+    username: str = Field(min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_]+$")
+    display_name: str = Field(min_length=1, max_length=80)
     referral_code: str | None = Field(default=None, min_length=4, max_length=40)
 
 
