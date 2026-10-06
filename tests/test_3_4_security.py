@@ -47,3 +47,16 @@ def test_withdrawal_recovery_persists_incident():
     assert 'WITHDRAWAL_RECOVERY_DUE:{w.id}' in block
     assert 'category="WITHDRAWAL_RECOVERY"' in block
     assert 'await incident_db.commit()' in block
+
+
+def test_risk_reset_blocks_unresolved_financial_safety_incidents():
+    main = Path("app/main.py").read_text()
+    start = main.index('@app.post("/api/risk/reset")')
+    end = main.index('async def _audit', start)
+    block = main[start:end]
+    assert 'Incident.resolved_at.is_(None)' in block
+    assert 'Incident.severity.in_(["CRITICAL", "HIGH"])' in block
+    assert '"WITHDRAWAL_RECOVERY"' in block
+    assert '"EXECUTION_PROTECTION"' in block
+    assert 'Risk reset is blocked while critical financial-safety incidents remain unresolved' in block
+    assert block.index("unresolved =") < block.index("s.kill_switch = False")
