@@ -28,3 +28,22 @@ def test_production_compose_has_redis():
     compose = Path("docker-compose.production.yml").read_text()
     assert 'redis:8-alpine' in compose
     assert 'REDIS_URL: redis://redis:6379/0' in compose
+
+
+def test_binance_custody_gate_is_fail_closed_by_default():
+    cfg = Path("app/config.py").read_text()
+    assert "binance_custody_reconciliation_enabled: bool = True" in cfg
+    custody = Path("app/custody_reconciliation.py").read_text()
+    assert 'if settings.binance_custody_reconciliation_enabled:' in custody
+    assert '"status": "UNKNOWN"' in custody
+    assert '"No fresh Binance custody observation is available; exchange assets are not assumed to be zero"' in custody
+
+
+def test_withdrawal_recovery_persists_incident():
+    main = Path("app/main.py").read_text()
+    start = main.index("async def _withdrawal_recovery_loop")
+    end = main.index("def _tron_base58check_valid", start)
+    block = main[start:end]
+    assert 'WITHDRAWAL_RECOVERY_DUE:{w.id}' in block
+    assert 'category="WITHDRAWAL_RECOVERY"' in block
+    assert 'await incident_db.commit()' in block
