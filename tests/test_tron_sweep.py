@@ -60,6 +60,6 @@ def test_solidified_sweep_success_with_transfer_event():
     assert evidence['observed_raw'] == 1000000
 
 
-def test_solidified_sweep_missing_receipt_is_pending():
+def test_solidified_sweep_missing_receipt_is_unknown():
     status,_=classify_solidified_sweep(tx_body={},receipt={},transaction_id='a'*64,source='TSource',treasury='TTreasury',contract='41'+'11'*20,expected_raw_amount=1)
-    assert status == 'PENDING_CONFIRMATION'
+    assert status == 'UNKNOWN'
