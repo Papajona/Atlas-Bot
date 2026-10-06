@@ -95,7 +95,7 @@ def test_scan_skips_reverification_of_credited_deposits_and_runs_wallets_in_para
         wallet_ids, customer_ids = [], []
         async with SessionLocal() as db:
             for i in range(N):
-                prof = CustomerProfile(auth_user_id=f"tronscan-{uuid.uuid4().hex}")
+                prof = CustomerProfile(auth_user_id=f"tronscan-{uuid.uuid4().hex}", username=f"tron_{uuid.uuid4().hex[:27]}")
                 db.add(prof)
                 await db.flush()
                 addr = "T" + uuid.uuid4().hex[:33]
