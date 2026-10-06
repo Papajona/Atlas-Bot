@@ -393,7 +393,9 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
         max_open_position_limit = min(settings.max_open_positions, pilot_max_positions) if pilot_max_positions is not None else settings.max_open_positions
         if symbol not in {p.symbol for p in open_positions} and len(open_positions) >= max_open_position_limit:
             raise RiskBlocked("Maximum open position count reached")
-        if live and signal_timestamp:
+        if live and not signal_timestamp:
+            raise RiskBlocked("Live signal timestamp is required")
+        if live:
             try:
                 ts = datetime.fromisoformat(signal_timestamp.replace("Z", "+00:00"))
                 age = (datetime.now(timezone.utc) - ts).total_seconds()
