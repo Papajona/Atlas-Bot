@@ -56,6 +56,18 @@ async def assert_live_system_enabled(
     if account_status != "ACTIVE" and not (account_status == "HALTED" and reduce_only):
         raise LiveExecutionBlocked("Customer trading account is not active")
 
+    pilot_status = str(account.pilot_status or "NONE").upper()
+    pilot_expires_at = account.pilot_expires_at
+    if pilot_status != "APPROVED":
+        raise LiveExecutionBlocked("Customer is not approved for the live pilot")
+    if pilot_expires_at is None:
+        raise LiveExecutionBlocked("Customer pilot expiry is not configured")
+    if pilot_expires_at.tzinfo is None:
+        pilot_expires_at = pilot_expires_at.replace(tzinfo=timezone.utc)
+    if pilot_expires_at <= datetime.now(timezone.utc):
+        account.pilot_status = "EXPIRED"
+        raise LiveExecutionBlocked("Customer live pilot has expired")
+
     sub = (await db.execute(
         select(Subscription).where(
             Subscription.customer_id == customer_id,
