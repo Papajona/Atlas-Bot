@@ -295,8 +295,6 @@ class CustomerKYCProfile(Base):
     document_reference: Mapped[str] = mapped_column(EncryptedText, default="")
     document_issued_at: Mapped[str] = mapped_column(EncryptedText, default="")
     document_expires_at: Mapped[str] = mapped_column(EncryptedText, default="")
-    verification_provider: Mapped[str] = mapped_column(String(80), default="")
-    verification_provider_reference: Mapped[str] = mapped_column(EncryptedText, default="")
     verification_result: Mapped[str] = mapped_column(String(30), default="PENDING")
     status: Mapped[str] = mapped_column(String(30), default="PENDING")
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
