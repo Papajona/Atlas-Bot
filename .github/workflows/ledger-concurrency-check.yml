@@ -6,6 +6,9 @@ on:
       - 'app/customer_funds.py'
       - 'app/audit_chain.py'
       - 'app/db.py'
+      - 'app/execution.py'
+      - 'app/main.py'
+      - 'app/withdrawal_security.py'
       - 'app/audit_chain.py'
       - 'tests/test_opening_balance_journaled.py'
       - 'tests/test_audit_chain_lock_order.py'
@@ -86,7 +89,7 @@ jobs:
           ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
           DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
         run: |
-          pytest -q tests/test_postgres_ledger_concurrency_3_10_46.py -v
+          pytest -q -rs --junitxml=pg-ledger.xml tests/test_postgres_ledger_concurrency_3_10_46.py -v
           EXIT_CODE=$?
           if [ $EXIT_CODE -ne 0 ]; then
             echo "ERROR: Postgres concurrency tests failed. This is a BLOCKER for ledger safety."
@@ -98,12 +101,15 @@ jobs:
           ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
           DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
         run: |
-          pytest -q tests/test_ledger_all_paths_concurrent_3_10_46.py -v --tb=short
+          pytest -q -rs --junitxml=pg-paths.xml tests/test_ledger_all_paths_concurrent_3_10_46.py -v --tb=short
           EXIT_CODE=$?
           if [ $EXIT_CODE -ne 0 ]; then
             echo "ERROR: Ledger path concurrency tests failed. Some mutation paths may not be properly locked."
             exit $EXIT_CODE
           fi
+
+      - name: Reject skipped mandatory PostgreSQL tests
+        run: python scripts/assert_no_skips.py pg-ledger.xml pg-paths.xml
 
       - name: Report success
         if: success()
