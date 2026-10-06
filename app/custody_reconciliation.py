@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from .config import settings
 from .db import AppState, CustomerLedgerAccount, Incident, Wallet
+from .custody_locations import fresh_external_assets
 
 USDT = "USDT"
 TRON = "TRON"
@@ -183,6 +184,35 @@ async def reconcile_usdt_custody(db) -> dict:
         return report
 
     assets = sum(balances.values(), D("0"))
+    exchange_report = None
+    if settings.binance_custody_reconciliation_enabled:
+        exchange_report = await fresh_external_assets(db, currency=USDT)
+        if not exchange_report["fresh_observation_available"]:
+            report = {
+                "status": "UNKNOWN",
+                "asset": USDT,
+                "network": "UNIFIED_CUSTODY",
+                "customer_liabilities": liabilities,
+                "tron_custody_onchain_balance": assets,
+                "exchange_assets": None,
+                "coverage_gap": None,
+                "solvency_ratio": None,
+                "error": "No fresh Binance custody observation is available; exchange assets are not assumed to be zero",
+            }
+            state = await db.get(AppState, 1)
+            if state:
+                state.kill_switch = True
+                state.live_enabled = False
+            await _upsert_incident(
+                db,
+                key="CUSTODY_RECONCILIATION:USDT:BINANCE:UNKNOWN",
+                severity="CRITICAL",
+                category="CUSTODY_RECONCILIATION",
+                summary="Unified custody reconciliation has no fresh Binance observation",
+                detail=report,
+            )
+            return report
+        assets += D(str(exchange_report["assets"]))
     decision = solvency_decision(
         assets=assets,
         liabilities=liabilities,
@@ -194,9 +224,12 @@ async def reconcile_usdt_custody(db) -> dict:
         "network": TRON,
         "customer_liabilities": liabilities,
         "custody_onchain_balance": assets,
+        "tron_custody_onchain_balance": sum(balances.values(), D("0")),
+        "exchange_assets": exchange_report["assets"] if exchange_report else None,
+        "exchange_observation_count": exchange_report["observation_count"] if exchange_report else 0,
         "addresses_checked": len(balances),
         "treasury_balance": balances.get(settings.usdt_tron_treasury_address, D("0")),
-        "virtual_wallet_balance": assets - balances.get(settings.usdt_tron_treasury_address, D("0")),
+        "virtual_wallet_balance": sum(balances.values(), D("0")) - balances.get(settings.usdt_tron_treasury_address, D("0")),
     }
 
     if decision["status"] == "OK":
