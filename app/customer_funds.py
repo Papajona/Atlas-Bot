@@ -161,6 +161,16 @@ async def post_deposit(db, *, customer_id: int, wallet_id: int, amount: float, p
         CustomerLedgerAccount.customer_id == customer_id,
         CustomerLedgerAccount.currency == USDT,
     ).with_for_update())).scalar_one()
+    # The initial idempotency lookup is only a fast path. A concurrent deposit can
+    # commit while this transaction waits for the customer ledger lock, so the key
+    # must be rechecked while holding the authoritative lock before crediting funds.
+    existing = (await db.execute(select(LedgerEntry).where(
+        LedgerEntry.idempotency_key.in_(keys)
+    ).with_for_update())).scalars().first()
+    if existing:
+        if existing.customer_id != customer_id or D(str(existing.amount)) != amount_d:
+            raise ValueError("deposit idempotency key already belongs to a different deposit")
+        return fresh_ledger
     fresh_ledger.available = D(str(fresh_ledger.available)) + amount_d
     await post_journal(db, currency=USDT, entry_type="DEPOSIT_CREDIT", reference_type="TRON_TX",
                        reference_id=provider_reference, idempotency_key=idem,
