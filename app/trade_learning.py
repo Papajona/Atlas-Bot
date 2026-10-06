@@ -109,7 +109,7 @@ def replay_trade_episode(
     exit_regime = str(regimes.iloc[exit_idx]) if len(regimes) > exit_idx else "UNKNOWN"
     regime_path = [str(x) for x in regimes.iloc[entry_idx : exit_idx + 1].tolist()]
     transitions = 0
-    for a, b in zip(regime_path, regime_path[1:], strict=True):
+    for a, b in zip(regime_path, regime_path[1:]):
         if a != b:
             transitions += 1
 
