@@ -158,6 +158,7 @@ from .schemas import (
     MfaChallengeRequest,
     MfaVerifyRequest,
     CustomerOandaConnectRequest,
+    CustomerPilotRequest,
 )  # noqa: F401
 
 
@@ -5096,6 +5097,81 @@ async def reconcile_api(req: MarketRequest, x_admin_token: str | None = Header(d
         return await reconcile(req.exchange, req.symbol)
     except Exception as e:
         raise _safe_http_error(502, e, "Upstream provider request failed") from e
+
+
+@app.post("/api/admin/customers/{customer_id}/pilot")
+async def manage_customer_pilot(
+    customer_id: int,
+    body: CustomerPilotRequest,
+    authorization: str | None = Header(default=None),
+):
+    claims = await auth(None, authorization)
+    await require_role(claims, "RISK_OFFICER")
+    actor_id = str(claims.get("sub") or _audit_actor.get() or "")
+    now = datetime.now(timezone.utc)
+    if body.action in {"REQUEST", "APPROVE"}:
+        expires_at = body.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= now:
+            raise HTTPException(400, "Pilot expiry must be in the future")
+        if body.max_total_exposure_usd < body.max_position_notional_usd:
+            raise HTTPException(400, "Pilot total exposure cap must cover the position cap")
+    async with SessionLocal() as db:
+        account = (
+            await db.execute(
+                select(TradingAccount)
+                .where(TradingAccount.customer_id == customer_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if not account:
+            raise HTTPException(404, "Customer trading account is unavailable")
+
+        if body.action == "REQUEST":
+            account.pilot_status = "PENDING"
+            account.pilot_stage = body.stage
+            account.pilot_requested_by = actor_id
+            account.pilot_requested_at = now
+            account.pilot_approved_by = ""
+            account.pilot_approved_at = None
+            account.pilot_expires_at = expires_at
+            account.pilot_max_position_notional_usd = body.max_position_notional_usd
+            account.pilot_max_total_exposure_usd = body.max_total_exposure_usd
+            account.pilot_max_open_positions = body.max_open_positions
+            account.pilot_max_leverage = body.max_leverage
+            account.pilot_daily_loss_limit = body.daily_loss_limit
+            await db.commit()
+            await _audit("CUSTOMER_PILOT_REQUESTED", {"customer_id": customer_id, "stage": body.stage, "actor_id": actor_id})
+            return {"ok": True, "customer_id": customer_id, "status": "PENDING"}
+
+        if body.action == "APPROVE":
+            if str(account.pilot_status or "NONE").upper() != "PENDING":
+                raise HTTPException(409, "Customer pilot is not pending approval")
+            if account.pilot_requested_by == actor_id:
+                raise HTTPException(409, "A different RISK_OFFICER must approve the customer pilot")
+            if not account.pilot_expires_at or account.pilot_expires_at <= now:
+                raise HTTPException(409, "Customer pilot expiry is missing or expired")
+            if min(
+                float(account.pilot_max_position_notional_usd or 0),
+                float(account.pilot_max_total_exposure_usd or 0),
+                float(account.pilot_max_leverage or 0),
+                float(account.pilot_daily_loss_limit or 0),
+            ) <= 0 or int(account.pilot_max_open_positions or 0) <= 0:
+                raise HTTPException(409, "Customer pilot risk caps are incomplete")
+            account.pilot_status = "APPROVED"
+            account.pilot_approved_by = actor_id
+            account.pilot_approved_at = now
+            await db.commit()
+            await _audit("CUSTOMER_PILOT_APPROVED", {"customer_id": customer_id, "stage": account.pilot_stage, "requested_by": account.pilot_requested_by, "approved_by": actor_id})
+            return {"ok": True, "customer_id": customer_id, "status": "APPROVED", "stage": account.pilot_stage}
+
+        account.pilot_status = "SUSPENDED"
+        account.pilot_approved_by = ""
+        account.pilot_approved_at = None
+        await db.commit()
+        await _audit("CUSTOMER_PILOT_SUSPENDED", {"customer_id": customer_id, "actor_id": actor_id})
+        return {"ok": True, "customer_id": customer_id, "status": "SUSPENDED"}
 
 
 @app.post("/api/live/enable")
