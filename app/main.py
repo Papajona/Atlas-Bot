@@ -43,6 +43,7 @@ from .payout import get_payout_provider, PayoutError, PayoutUnknown, PayoutNotFo
 from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, release_separation_violation, verify_release_operator
 from .usdt_tron import derive_usdt_tron_address_from_xpub, validate_tron_account_xpub
 from .tron_sweep import build_sweep_intent, serialize_sweep_intent, SweepError, classify_solidified_sweep
+from .custody_locations import create_custody_transfer, transition_custody_transfer
 from .customer_funds import get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, ledger_statement, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal
 from .distributed import allow_rate_limit, check_redis, acquire_lock, release_lock, refresh_lock
 from .withdrawal_risk import score_withdrawal
@@ -1958,18 +1959,32 @@ async def admin_prepare_tron_sweep(req: dict, authorization: str | None = Header
                 raise HTTPException(400, "sweep amount is below configured minimum")
             # Sweeping only moves on-chain custody; it must not alter the customer liability ledger.
             intent = build_sweep_intent(wallet_id=wallet.id, source_address=wallet.deposit_address, amount_usdt=amount)
-            existing = (await db.execute(select(TronSweep).where(TronSweep.idempotency_key == intent.idempotency_key))).scalar_one_or_none()
+            existing = (await db.execute(select(TronSweep).where(TronSweep.idempotency_key == intent.idempotency_key).with_for_update())).scalar_one_or_none()
             if existing:
                 return {"status": existing.status, "sweep_id": existing.id, "idempotency_key": existing.idempotency_key}
+            active = (await db.execute(select(TronSweep).where(
+                TronSweep.wallet_id == wallet.id,
+                TronSweep.status.in_({"READY_FOR_SIGNER", "SUBMITTED", "REVIEW", "UNKNOWN"})
+            ).with_for_update())).scalars().first()
+            if active:
+                raise HTTPException(409, "an in-flight sweep already exists for this deposit wallet")
+            transfer = await create_custody_transfer(
+                db, customer_id=wallet.customer_id, currency="USDT",
+                amount=amount, source_location=f"TRON:WALLET:{wallet.id}",
+                destination_location=f"TRON:TREASURY:{intent.treasury_address}",
+                idempotency_key=f"tron-sweep-transfer:{intent.idempotency_key}",
+            )
             sweep = TronSweep(wallet_id=wallet.id, source_address=wallet.deposit_address,
                               treasury_address=intent.treasury_address, amount_raw=intent.raw_amount,
                               currency="USDT", contract_address=intent.contract,
-                              idempotency_key=intent.idempotency_key, status="READY_FOR_SIGNER",
+                              idempotency_key=intent.idempotency_key, custody_transfer_id=transfer.id,
+                              status="READY_FOR_SIGNER",
                               detail_json=json.dumps({"customer_id": wallet.customer_id, "available_ledger": balance["available"],
+                                                      "custody_transfer_id": transfer.id,
                                                       "note": "custody movement only; customer liability unchanged"}, separators=(",", ":")))
             db.add(sweep)
             await db.commit()
-            return {"status": sweep.status, "sweep_id": sweep.id, "intent": serialize_sweep_intent(intent)}
+            return {"status": sweep.status, "sweep_id": sweep.id, "custody_transfer_id": transfer.id, "intent": serialize_sweep_intent(intent)}
     except SweepError as exc:
         raise _safe_http_error(400, exc, "Unable to prepare the sweep request") from exc
 
@@ -1988,9 +2003,17 @@ async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorizat
             raise HTTPException(404, "sweep not found")
         if sweep.transaction_id and sweep.transaction_id != txid:
             raise HTTPException(409, "sweep already has a different transaction id")
+        duplicate = (await db.execute(select(TronSweep).where(
+            TronSweep.transaction_id == txid, TronSweep.id != sweep.id
+        ).with_for_update())).scalar_one_or_none()
+        if duplicate:
+            raise HTTPException(409, "transaction id is already assigned to another sweep")
         sweep.transaction_id = txid
         sweep.status = "SUBMITTED"
         sweep.submitted_at = datetime.now(timezone.utc)
+        if sweep.custody_transfer_id:
+            await transition_custody_transfer(db, sweep.custody_transfer_id, status="SUBMITTED",
+                                              provider_reference=txid, detail={"transaction_id": txid})
         await db.commit()
         return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": sweep.transaction_id}
 
@@ -2029,10 +2052,19 @@ async def admin_reconcile_tron_sweep(sweep_id: int, authorization: str | None = 
             if result == "SETTLED":
                 sweep.status = "SETTLED"
                 sweep.confirmed_at = datetime.now(timezone.utc)
+                if sweep.custody_transfer_id:
+                    await transition_custody_transfer(db, sweep.custody_transfer_id, status="CONFIRMED",
+                                                      provider_reference=txid, detail=evidence)
             elif result == "FAILED":
                 sweep.status = "FAILED"
+                if sweep.custody_transfer_id:
+                    await transition_custody_transfer(db, sweep.custody_transfer_id, status="FAILED",
+                                                      provider_reference=txid, detail=evidence)
             elif result == "REVIEW":
                 sweep.status = "REVIEW"
+                if sweep.custody_transfer_id:
+                    await transition_custody_transfer(db, sweep.custody_transfer_id, status="RECONCILIATION_REQUIRED",
+                                                      provider_reference=txid, detail=evidence)
             await db.commit()
             return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": txid, "evidence": evidence}
         except httpx.HTTPError as exc:
