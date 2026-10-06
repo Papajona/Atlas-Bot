@@ -453,6 +453,32 @@ async def _post_live_fee(db, trade: Trade, delta: float, cumulative: float, qual
             customer_id=trade.customer_id)
 
 
+async def _refresh_live_customer_equity(db, customer_id: int) -> None:
+    """Refresh customer live risk equity from ledger balances plus open-position MTM."""
+    account = (await db.execute(select(TradingAccount).where(
+        TradingAccount.customer_id == customer_id
+    ).with_for_update())).scalar_one_or_none()
+    if not account:
+        return
+    balance = await customer_balance(db, customer_id, "USDT")
+    positions = (await db.execute(select(Position).where(
+        Position.customer_id == customer_id
+    ))).scalars().all()
+    unrealized = sum(float(p.unrealized_pnl or 0.0) for p in positions)
+    realized = sum(float(p.realized_pnl or 0.0) for p in positions)
+    account.cash_equity = max(0.0, balance["available"] + balance["trading_reserved"])
+    account.realized_pnl = realized
+    account.unrealized_pnl = unrealized
+    # Realized P&L is already reflected in the ledger balance; adding it again would
+    # double-count it. This is the authoritative value used by live drawdown gates.
+    account.equity = max(0.0, account.cash_equity + unrealized)
+    account.peak_equity = max(float(account.peak_equity or 0.0), account.equity)
+    today = _today_utc()
+    if account.daily_start_date != today:
+        account.daily_start_date = today
+        account.daily_start_equity = account.equity
+
+
 async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_price: float):
     delta = max(0.0, new_filled - trade.filled_quantity)
     if delta <= 0 or fill_price <= 0:
@@ -1141,6 +1167,8 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             fee_delta, fee_cum, fee_quality, fee_note = _prepare_live_fee(t, order, filled, fill_price, PROFILES.get(asset, PROFILES["crypto"]).taker_bps)
             await _apply_fill_to_position(db, t, filled, fill_price)
             await _post_live_fee(db, t, fee_delta, fee_cum, fee_quality, fee_note)
+            if customer_id is not None and str(t.mode or "").upper() == "LIVE":
+                await _refresh_live_customer_equity(db, customer_id)
             if status in {"closed", "filled"} and t.remaining_quantity <= 0:
                 t.status = "FILLED"
             elif filled > 0:
