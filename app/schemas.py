@@ -299,6 +299,17 @@ class RevenueEventRequest(BaseModel):
     currency: str = Field(default="USD", min_length=3, max_length=10)
 
 
+
+class CustomerPilotRequest(BaseModel):
+    action: str = Field(pattern="^(REQUEST|APPROVE|SUSPEND)$")
+    stage: int = Field(default=1, ge=1, le=3)
+    max_position_notional_usd: float = Field(gt=0, le=100000)
+    max_total_exposure_usd: float = Field(gt=0, le=100000)
+    max_open_positions: int = Field(ge=1, le=10)
+    max_leverage: float = Field(gt=0, le=1.0)
+    daily_loss_limit: float = Field(gt=0, le=0.15)
+    expires_at: datetime
+
 class BinanceSubAccountProvisionRequest(BaseModel):
     customer_id: int = Field(gt=0)
     tag: str = Field(min_length=1, max_length=31)
