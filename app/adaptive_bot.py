@@ -274,7 +274,7 @@ def ensure_adaptive_model(
     )
     oos_gate = oos_promotion_gate(
         wfo,
-        min_dsr=(policy.research_min_deflated_sharpe or None),
+        min_dsr=policy.research_min_deflated_sharpe,
         require_cost_stress=policy.research_require_cost_stress,
         min_folds=5,
         min_total_return=policy.min_total_return,
@@ -332,6 +332,28 @@ def ensure_adaptive_model(
         }
 
     streak = _read_streak(model_path)
+    now = datetime.now(timezone.utc)
+    last_evaluated_at = str(streak.get("evaluated_at") or "").strip()
+    if last_evaluated_at:
+        try:
+            previous = datetime.fromisoformat(last_evaluated_at.replace("Z", "+00:00"))
+            if previous.tzinfo is None:
+                previous = previous.replace(tzinfo=timezone.utc)
+            if (now - previous).total_seconds() < 20 * 3600:
+                return {
+                    "status": "CHALLENGER_PASSED_AWAITING_CONFIRMATION",
+                    "model_path": str(model_path),
+                    "promotion": "RETAIN_CHAMPION" if model_path.exists() else "NO_MODEL",
+                    "consecutive_passes": int(streak.get("consecutive_passes", 0)),
+                    "consecutive_passes_required": policy.consecutive_passes_required,
+                    "reason": "Promotion streak evaluations must be at least 20 hours apart",
+                    "wfo": wfo,
+                    "gate": gate,
+                    "policy": asdict(policy),
+                    "feature_drift": compute_feature_drift(df, (existing or {}).get("feature_baseline")),
+                }
+        except (TypeError, ValueError):
+            pass
     consecutive_passes = int(streak.get("consecutive_passes", 0)) + 1
     if consecutive_passes < max(1, policy.consecutive_passes_required):
         _write_json_atomic(_streak_path(model_path), {
