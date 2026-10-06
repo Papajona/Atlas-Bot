@@ -226,7 +226,7 @@ def predict_latest(df: pd.DataFrame, model_path: str, threshold: float = 0.05) -
         raise RuntimeError("Insufficient recent data")
     row = X.iloc[[-1]]
     probs_raw = np.asarray(model.predict_proba(row))[0]
-    mapped = {int(cls): float(p) for cls, p in zip(model.classes_, probs_raw)}
+    mapped = {int(cls): float(p) for cls, p in zip(model.classes_, probs_raw, strict=True)}
     short_p = mapped.get(0, 0.0)
     flat_p = mapped.get(1, 0.0)
     long_p = mapped.get(2, 0.0)
