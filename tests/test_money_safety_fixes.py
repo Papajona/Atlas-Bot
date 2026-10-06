@@ -374,3 +374,11 @@ def test_tron_duplicate_transfer_signature_fails_closed():
     assert 'duplicate transfer signature without stable event index' in scan
     assert 'prior_count > 0' in scan
     assert 'continue' in scan[scan.index("prior_count > 0"):scan.index("prior_count > 0") + 1800]
+
+
+def test_custody_reconciliation_resolves_stale_binance_unknown_after_fresh_observation():
+    source = Path("app/custody_reconciliation.py").read_text()
+    marker = 'await _resolve_incident(db, key="CUSTODY_RECONCILIATION:USDT:BINANCE:UNKNOWN")'
+    decision = source.index("decision = solvency_decision(")
+    assert marker in source
+    assert source.index(marker) < decision
