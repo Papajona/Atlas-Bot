@@ -1154,7 +1154,7 @@ class CustodyTransfer(Base):
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_custody_transfer_idempotency"),
         Index("ix_custody_transfer_status_updated", "status", "updated_at"),
-        Index("ix_custody_transfer_customer", "customer_id", "created_at"),
+        Index("ix_custody_transfer_customer", "customer_id", "requested_at"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
