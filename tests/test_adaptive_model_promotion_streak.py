@@ -139,6 +139,10 @@ def test_required_count_is_configurable_toward_longer_evidence_windows(mocked_tr
                 value = json.loads(streak.read_text())
                 value["evaluated_at"] = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=21)).isoformat()
                 streak.write_text(json.dumps(value))
+        streak = _streak_path(model_path)
+        value = json.loads(streak.read_text())
+        value["evaluated_at"] = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=21)).isoformat()
+        streak.write_text(json.dumps(value))
         final = ensure_adaptive_model(_synthetic_ohlcv(seed=99), str(model_path), policy=policy)
         assert final["status"] == "CHAMPION_PROMOTED"
         assert final["consecutive_passes"] == 4
