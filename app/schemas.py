@@ -317,6 +317,22 @@ class CustomerCredentials(BaseModel):
     referral_code: str | None = Field(default=None, min_length=4, max_length=40)
 
 
+class CustomerKYCSubmitRequest(BaseModel):
+    legal_first_name: str = Field(min_length=1, max_length=120)
+    legal_middle_name: str | None = Field(default=None, max_length=120)
+    legal_last_name: str = Field(min_length=1, max_length=120)
+    date_of_birth: str = Field(min_length=10, max_length=10)
+    citizenship_country: str = Field(min_length=2, max_length=2)
+    residence_country: str = Field(min_length=2, max_length=2)
+    residential_address: str = Field(min_length=5, max_length=500)
+    phone: str = Field(min_length=5, max_length=40)
+    document_type: str = Field(pattern=r"^(PASSPORT|NATIONAL_ID|DRIVERS_LICENSE)$")
+    document_issuing_country: str = Field(min_length=2, max_length=2)
+    document_reference: str = Field(min_length=4, max_length=160)
+    document_issued_at: str = Field(min_length=4, max_length=20)
+    document_expires_at: str = Field(min_length=4, max_length=20)
+
+
 class OtpSendRequest(BaseModel):
     email: str | None = None
     phone: str | None = None
