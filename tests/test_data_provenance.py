@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 
 from app.data import _attach_data_provenance
 

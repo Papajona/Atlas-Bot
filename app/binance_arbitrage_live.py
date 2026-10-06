@@ -5,7 +5,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from .binance_arb_reconcile import validate_symbol_filters, partial_leg_exposure, neutralization_side, BinanceArbRecoveryError
+from .binance_arb_reconcile import validate_symbol_filters, partial_leg_exposure, neutralization_side
 
 
 @dataclass(frozen=True)

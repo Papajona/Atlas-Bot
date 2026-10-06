@@ -5,7 +5,6 @@ Gemini: GET /v1beta/models/<id>   Groq: GET /openai/v1/models   (needs GEMINI_AP
 Exit 0 = every configured id is served, 1 = at least one id is missing/unreachable, 2 = nothing could be checked.
 """
 import json
-import os
 import sys
 import urllib.error
 import urllib.request

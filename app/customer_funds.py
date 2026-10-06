@@ -4,7 +4,7 @@ import json
 import logging
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from .db import CustomerLedgerAccount, Incident, LedgerEntry, LedgerJournal, LedgerJournalLine, SessionLocal, Wallet, TradingAccount, utcnow
+from .db import CustomerLedgerAccount, Incident, LedgerEntry, LedgerJournal, LedgerJournalLine, SessionLocal, Wallet, utcnow
 
 USDT = "USDT"
 D = Decimal
@@ -150,13 +150,13 @@ async def post_deposit(db, *, customer_id: int, wallet_id: int, amount: float, p
     amount_d = _q(amount)
     if amount_d <= 0:
         raise ValueError("deposit amount must be positive")
-    ledger = await get_or_create_ledger(db, customer_id, USDT)
+    await get_or_create_ledger(db, customer_id, USDT)
     legacy_idem = f"deposit:{provider_reference}"
     idem = f"deposit:{provider}:{provider_reference}" if provider else legacy_idem
     keys = {idem, legacy_idem}
     existing = (await db.execute(select(LedgerEntry).where(LedgerEntry.idempotency_key.in_(keys)))).scalars().first()
     if existing:
-        return ledger
+        return await get_or_create_ledger(db, customer_id, USDT)
     fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
         CustomerLedgerAccount.customer_id == customer_id,
         CustomerLedgerAccount.currency == USDT,

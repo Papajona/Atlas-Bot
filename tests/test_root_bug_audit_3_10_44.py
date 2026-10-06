@@ -1,5 +1,4 @@
 from pathlib import Path
-import ast
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = (ROOT / "app/main.py").read_text(encoding="utf-8")

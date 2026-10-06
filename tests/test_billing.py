@@ -1,6 +1,4 @@
-import asyncio
 import pytest
-from datetime import datetime, timezone, timedelta
 from app.main import PLAN_DEFINITIONS, _plan_price
 
 def test_plan_prices_are_reasonable():

@@ -20,22 +20,21 @@ from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocke
 from fastapi.responses import HTMLResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select, desc, or_, func
 from sqlalchemy.exc import IntegrityError
 from .config import settings
-from .db import init_db, engine, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, LedgerEntry, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, StripeWebhookEvent, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, WithdrawalDestination, Incident, quantize_money
+from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, StripeWebhookEvent, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
-from .trading_core import train_model, predict_latest, ai_walk_forward_backtest, PROFILES
+from .trading_core import train_model, predict_latest, ai_walk_forward_backtest
 from .adaptive_bot import AdaptiveModelPolicy, ensure_adaptive_model, adaptive_model_status
 from .strategy_engine import StrategyConfig, strategy_signal, strategy_backtest
 from .strategy_router import select_strategy, policy_walk_forward_backtest, strategy_trade_plan, online_strategy_scores, classify_regime
 from .trade_learning import process_trade_learning_episodes
-from .entry_exit_engine import EntryExitConfig, gated_entry_exit_analysis, start_bot_decision, gated_entry_exit_backtest
+from .entry_exit_engine import EntryExitConfig, start_bot_decision, gated_entry_exit_backtest
 from .ai_providers import dual_ai_trade_safety_review, AIProviderError
 from .strategy_ai import generate_strategy_draft
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates, live_strategy_signals
-from .research_validation import oos_promotion_gate, monte_carlo_bootstrap, parameter_plateau_score
+from .research_validation import oos_promotion_gate, monte_carlo_bootstrap
 from .daily_research import run_daily_research, latest_macro_context
 from .execution import execute_signal, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
@@ -49,9 +48,9 @@ from .distributed import allow_rate_limit, check_redis, acquire_lock, release_lo
 from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
 from .incidents import open_incident
-from .model_registry import verify_model_file, backup_champion, rollback_champion
+from .model_registry import verify_model_file, rollback_champion
 from .correlation_risk import adjusted_group_exposure
-from .custody_signer import custody_signing_required, validate_signer_config
+from .custody_signer import validate_signer_config
 from .custody_reconciliation import reconcile_usdt_custody
 from .meta_labeling import meta_label_gate
 from .derivatives_context import fetch_public_derivatives_context
@@ -61,7 +60,7 @@ from .arbitrage import TriangleQuote, evaluate_triangle, compounded_stake
 from .execution_optimizer import BookLevel, build_execution_plan
 from .fx_engine import FXModelConfig, fx_model_signal, fx_walk_forward_score
 from .deriv import DerivBroker, DerivConfig, DerivError, DerivUnknown
-from .binance_arbitrage_live import BinanceArbitrageBroker, BinanceArbConfig, BinanceArbitrageError
+
 from .binance_subaccounts import build_provision_plan, BinanceSubAccountError
 from .customer_oanda import build_customer_oanda_broker
 from .customer_binance_execution import build_customer_binance_broker, CustomerBinanceExecutionError
@@ -70,6 +69,7 @@ from .executor_engine import ExecutorConfig, ExecutorValidationError, build_exec
 from .admin_rbac import require_role, get_roles, upsert_role, ROLES
 from .transaction_policy import register_or_check_destination, verify_destination
 from .audit_chain import append_audit
+from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current
 
 def _stepup_token(uid: str, purpose: str = "withdrawal", destination_fingerprint: str = "", proposal_digest_value: str = "") -> tuple[str, str, int]:
     if not settings.secret_key:
@@ -129,8 +129,6 @@ from .schemas import (
     StrategyBuilderRequest,
     GridBotRequest,
     WebhookCreateRequest,
-    ConnectorTestRequest,
-    ArbitrageLeg,
     DerivPreflightRequest,
     DerivConnectRequest,
     DerivTradeRequest,
@@ -254,61 +252,16 @@ def _trusted_client_ip(request: Request) -> str:
     return str(chain[0]) if chain else peer
 
 
-def _assert_multidict_safe_backend() -> None:
-    """Refuse production/staging startup unless multidict uses the safe Python backend."""
-    environment = str(settings.environment).lower()
-    if environment not in {"production", "staging"}:
-        return
-    if os.environ.get("MULTIDICT_NO_EXTENSIONS") != "1":
-        raise RuntimeError("MULTIDICT_NO_EXTENSIONS=1 is required outside development")
-    try:
-        import multidict
-        if str(multidict.CIMultiDict.__module__) != "multidict._multidict_py":
-            raise RuntimeError("multidict is not using the required pure-Python backend")
-    except RuntimeError:
-        raise
-    except Exception as exc:
-        raise RuntimeError(f"Unable to verify multidict safety backend: {exc}") from exc
-
-
-async def _assert_database_migrations_current() -> None:
-    """Fail closed in staging/production when the database is not at Alembic head."""
-    if str(settings.environment).lower() == "development":
-        return
-    try:
-        from alembic.config import Config as AlembicConfig
-        from alembic.migration import MigrationContext
-        from alembic.script import ScriptDirectory
-        cfg = AlembicConfig(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
-        expected = set(ScriptDirectory.from_config(cfg).get_heads())
-        async with engine.connect() as conn:
-            current = await conn.run_sync(lambda sync_conn: set(MigrationContext.configure(sync_conn).get_current_heads()))
-        if current != expected:
-            raise RuntimeError(f"Database migrations are not at Alembic head: current={sorted(current)} expected={sorted(expected)}; run 'alembic upgrade head' before starting Atlas")
-    except RuntimeError:
-        raise
-    except Exception as exc:
-        raise RuntimeError(f"Unable to verify Alembic migration state: {exc}") from exc
-
-
 @app.on_event("startup")
 async def startup():
     global _background_task, _usdt_task
-    _assert_multidict_safe_backend()
+    assert_multidict_safe_backend()
     if settings.forex_live_enabled:
         raise RuntimeError("OANDA live trading is permanently disabled in AtlasRisk; use OANDA practice/demo for learning and backtesting")
     if settings.deriv_live_enabled:
         raise RuntimeError("Deriv real-account live execution is disabled until it is integrated into the unified live execution outbox/ledger path")
     if settings.binance_arbitrage_live_enabled:
         raise RuntimeError("Binance arbitrage live execution is disabled until it is integrated into the unified live execution outbox/ledger path")
-    live_requested = any((
-        settings.live_trading_enabled,
-        settings.customer_live_trading_enabled,
-        settings.forex_live_enabled,
-        settings.deriv_live_enabled,
-        settings.payout_live_enabled,
-        settings.usdt_tron_sweep_enabled,
-    ))
     if settings.database_url.lower().startswith("sqlite") and settings.environment.lower() in {"production", "staging"}:
         raise RuntimeError("PostgreSQL is required outside development; SQLite row-level locks are unavailable")
     if settings.environment.lower() == "production":
@@ -352,7 +305,7 @@ async def startup():
     if settings.usdt_tron_enabled:
         from .usdt_tron import require_tron_wallet_backend
         require_tron_wallet_backend()
-    await _assert_database_migrations_current()
+    await assert_database_migrations_current()
     await init_db()
     async with SessionLocal() as billing_db:
         await _ensure_billing_plans(billing_db)
@@ -1933,7 +1886,7 @@ async def admin_mfa_status(authorization: str | None = Header(default=None)):
 
 @app.post("/api/admin/auth/mfa/enroll")
 async def admin_mfa_enroll(authorization: str | None = Header(default=None)):
-    claims = await admin_claims(authorization, require_aal2=False)
+    await admin_claims(authorization, require_aal2=False)
     token = authorization.split(" ", 1)[1].strip()
     return await _supabase_request("/auth/v1/factors", payload={"factor_type": "totp", "friendly_name": "Atlas Trading Admin / Google Authenticator"}, access_token=token)
 
@@ -2360,7 +2313,6 @@ async def customer_otp_send(req: OtpSendRequest, authorization: str | None = Hea
             raise HTTPException(422, "A valid TRON destination is required")
         if purpose == "withdrawal" and req.amount is None:
             raise HTTPException(422, "Withdrawal OTP requires the withdrawal amount")
-        profile_id: int
         async with SessionLocal() as db:
             profile = (await db.execute(select(CustomerProfile).where(CustomerProfile.auth_user_id == user_id))).scalar_one_or_none()
             if not profile:
@@ -2401,7 +2353,7 @@ async def customer_otp_send(req: OtpSendRequest, authorization: str | None = Hea
         raise HTTPException(422, "Provide exactly one of email or phone")
     contact_type = "email" if req.email else "phone"
     contact = req.email.strip().lower() if req.email else req.phone.strip()
-    result = await _supabase_request("/auth/v1/otp", payload={contact_type: contact, "create_user": bool(req.create_user)})
+    await _supabase_request("/auth/v1/otp", payload={contact_type: contact, "create_user": bool(req.create_user)})
     return {"ok": True, "purpose": "login", "contact_type": contact_type, "message": "Verification code sent."}
 
 
@@ -4169,7 +4121,7 @@ async def readyz():
         checks["database"] = False
 
     try:
-        await _assert_database_migrations_current()
+        await assert_database_migrations_current()
         checks["migrations_current"] = True
     except Exception:
         checks["migrations_current"] = False
@@ -5637,7 +5589,6 @@ async def research_fx_execution_tca(req: dict[str, object], x_admin_token: str |
         result = evaluate_fx_execution(obs)
         return {"tca": asdict(result), "execution_authority": False, "mode": "RESEARCH_ONLY"}
     except (TypeError, ValueError) as exc:
-        from fastapi import HTTPException
         raise _safe_http_error(400, exc, "Invalid request") from exc
 
 @app.post("/api/research/fx-execution-route")

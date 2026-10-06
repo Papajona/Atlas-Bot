@@ -1,7 +1,7 @@
 """Runtime regression coverage for accounting, proxy trust, and XML parsing fixes."""
+from pathlib import Path
 import asyncio
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -40,7 +40,6 @@ def test_models_create_and_financial_values_reload():
             await db.commit()
         async with sessions() as db:
             account = (await db.execute(select(TradingAccount))).scalar_one()
-            # FinancialNumeric materializes floats so trading arithmetic (price * qty * 1.0015) works.
             assert isinstance(account.cash_equity, float)
             account.cash_equity -= 0.25
             assert account.cash_equity == pytest.approx(100.00)
@@ -131,10 +130,23 @@ def test_news_feed_rejects_xml_entities():
 
 
 def test_multidict_production_backend_guard(monkeypatch):
-    from app.main import _assert_multidict_safe_backend
+    from app.startup_guards import assert_multidict_safe_backend
     monkeypatch.setattr(settings, "environment", "production")
     monkeypatch.delenv("MULTIDICT_NO_EXTENSIONS", raising=False)
     with pytest.raises(RuntimeError, match="MULTIDICT_NO_EXTENSIONS=1"):
-        _assert_multidict_safe_backend()
+        assert_multidict_safe_backend()
     monkeypatch.setenv("MULTIDICT_NO_EXTENSIONS", "1")
-    _assert_multidict_safe_backend()
+    assert_multidict_safe_backend()
+
+
+def test_live_order_requires_signal_timestamp():
+    src = (Path(__file__).resolve().parents[1] / "app" / "execution.py").read_text()
+    assert "if live and not signal_timestamp:" in src
+    assert 'raise RiskBlocked("Live signal timestamp is required")' in src
+
+
+def test_allowlisted_admin_without_explicit_role_is_read_only():
+    src = (Path(__file__).resolve().parents[1] / "app" / "admin_rbac.py").read_text()
+    assert 'env_role = _env_assignments().get(uid)' in src
+    assert 'return {"READ_ONLY"}' in src
+    assert 'get(uid, "ADMINISTRATOR")' not in src

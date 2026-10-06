@@ -1,7 +1,6 @@
 from __future__ import annotations
 import logging
 import asyncio
-import hashlib
 import json
 import os
 import uuid
@@ -14,12 +13,10 @@ from sqlalchemy.exc import IntegrityError
 
 from .broker import Broker, BrokerConfig
 from .customer_binance_execution import build_customer_binance_broker, CustomerBinanceExecutionError
-from .customer_oanda import build_customer_oanda_broker
 from .risk_governor import evaluate_trade
 from .forex_oanda import OandaBroker, OandaConfig
 from .config import settings
-from .db import (SessionLocal, OandaReconciliationState, AppState, TradingAccount, Trade, Position, AuditLog,
-                  Wallet, CustomerOandaAccount, CustomerBinanceAccount, StrategyOutcome, TradeLearningEpisode, OrderCommand,
+from .db import (SessionLocal, OandaReconciliationState, AppState, TradingAccount, Trade, Position, CustomerBinanceAccount, StrategyOutcome, TradeLearningEpisode, OrderCommand,
                   LiveExecutionLease, utcnow, quantize_money)
 from .trading_core import PROFILES
 from .customer_funds import get_or_create_ledger, reserve_trading, release_trading, sync_wallet_from_ledger, settle_realized_pnl, settle_trading_fee, customer_balance
@@ -396,7 +393,9 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
         max_open_position_limit = min(settings.max_open_positions, pilot_max_positions) if pilot_max_positions is not None else settings.max_open_positions
         if symbol not in {p.symbol for p in open_positions} and len(open_positions) >= max_open_position_limit:
             raise RiskBlocked("Maximum open position count reached")
-        if live and signal_timestamp:
+        if live and not signal_timestamp:
+            raise RiskBlocked("Live signal timestamp is required")
+        if live:
             try:
                 ts = datetime.fromisoformat(signal_timestamp.replace("Z", "+00:00"))
                 age = (datetime.now(timezone.utc) - ts).total_seconds()
@@ -863,7 +862,6 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             if asset in {"forex", "commodity"} and forex_live and settings.oanda_practice:
                 raise RiskBlocked("OANDA practice mode is enabled; live Forex is locked")
             mode = "FOREX_DEMO" if forex_demo else ("LIVE" if live else "PAPER")
-            equity = account.equity if account is not None else s.equity
             trading_account_id = account.id if account is not None else None
 
         base_scope = f"{strategy}:customer:{customer_id if customer_id is not None else 'platform'}"
@@ -1429,7 +1427,7 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
         trades = (await db.execute(query.order_by(Trade.updated_at).limit(200))).scalars().all()
         snapshots = [(t.id, t.customer_id, t.exchange, t.symbol, t.broker_order_id, t.client_order_id) for t in trades]
     results = []
-    for trade_id, customer_id, exchange, symbol, broker_order_id, client_order_id in snapshots:
+    for trade_id, customer_id, exchange, symbol, broker_order_id, trade_client_order_id in snapshots:
         try:
             if str(exchange).lower() != "binance":
                 raise RuntimeError("Customer live reconciliation is only enabled for Binance isolation")
@@ -1445,7 +1443,7 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
                 order = await asyncio.to_thread(broker.fetch_order, broker_order_id, symbol)
             if order is None:
                 opens = await asyncio.to_thread(broker.fetch_open_orders, symbol)
-                order = next((o for o in opens if str(o.get("clientOrderId") or o.get("info", {}).get("clientOrderId") or "") == client_order_id), None)
+                order = next((o for o in opens if str(o.get("clientOrderId") or o.get("info", {}).get("clientOrderId") or "") == trade_client_order_id), None)
                 if order is None:
                     history = await asyncio.to_thread(broker.fetch_orders, symbol)
                     order = next((o for o in history if str(o.get("clientOrderId") or o.get("info", {}).get("clientOrderId") or "") == client_order_id), None)
@@ -1458,7 +1456,7 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
                         severity="CRITICAL" if unresolved_trade.status == "UNKNOWN" else "HIGH",
                         category="RECONCILIATION",
                         summary="Customer exchange order could not be reconciled",
-                        detail={"trade_id": trade_id, "customer_id": customer_id, "exchange": exchange, "symbol": symbol, "broker_order_id": broker_order_id, "client_order_id": client_order_id, "status": unresolved_trade.status},
+                        detail={"trade_id": trade_id, "customer_id": customer_id, "exchange": exchange, "symbol": symbol, "broker_order_id": broker_order_id, "client_order_id": trade_client_order_id, "status": unresolved_trade.status},
                         customer_id=customer_id,
                     )
                 results.append({"trade_id": trade_id, "customer_id": customer_id, "resolved": False, "reason": "order_not_found"})
@@ -1555,7 +1553,6 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                 trade_broker = build_customer_binance_broker(
                     customer_binance, timeout_ms=settings.exchange_timeout_ms, sandbox=settings.broker_sandbox
                 )
-                trade_is_customer = True
             order = None
             if is_oanda:
                 if broker_order_id:
