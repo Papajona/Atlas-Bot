@@ -198,3 +198,45 @@ def test_quantize_money_bounds_float_drift():
         total += 0.1
     assert total != 1.0  # the raw float drift this guards against
     assert quantize_money(total) == 1.0
+
+
+def test_signup_requires_username_and_display_name():
+    source = (ROOT / "app/schemas.py").read_text()
+    block = source[source.index("class CustomerCredentials"):source.index("class OtpSendRequest")]
+    assert 'username: str = Field(min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_]+$")' in block
+    assert 'display_name: str = Field(min_length=1, max_length=80)' in block
+
+
+def test_customer_profile_keeps_username_unique_and_display_name_separate():
+    source = (ROOT / "app/db.py").read_text()
+    block = source[source.index("class CustomerProfile"):source.index("class Wallet")]
+    assert 'UniqueConstraint("username", name="uq_customer_username")' in block
+    assert 'username: Mapped[str]' in block
+    assert 'display_name: Mapped[str]' in block
+
+
+def test_signup_passes_public_identity_fields_to_auth_metadata():
+    source = (ROOT / "app/main.py").read_text()
+    block = source[source.index('@app.post("/api/auth/signup")'):source.index('@app.post("/api/auth/login")')]
+    assert '"username": req.username' in block
+    assert '"display_name": req.display_name' in block
+
+
+def test_withdrawal_wallets_are_masked_and_require_aal2():
+    source = (ROOT / "app/main.py").read_text()
+    start = source.index('@app.get("/api/customer/withdrawal-wallets")')
+    end = source.index('@app.get("/api/customer/withdrawals")', start)
+    block = source[start:end]
+    assert 'require_aal2=True' in block
+    assert 'destination_masked' in block
+    assert 'row.destination[:6]' in block
+    assert 'row.destination[-6:]' in block
+
+
+def test_withdrawals_require_admin_approval_before_release():
+    source = (ROOT / "app/main.py").read_text()
+    start = source.index('@app.post("/api/customer/withdrawals")')
+    end = source.index('@app.get("/api/customer/withdrawals")', start)
+    block = source[start:end]
+    assert 'status="PENDING"' in block
+    assert 'required_approvals=2 if settings.withdrawal_dual_approval else 1' in block
