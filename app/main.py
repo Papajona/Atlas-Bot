@@ -151,7 +151,8 @@ from .schemas import (
     RevenueEventRequest,
     BinanceSubAccountProvisionRequest,
     AdminLoginRequest,
-    CustomerCredentials,
+    CustomerSignupCredentials,
+    CustomerLoginCredentials,
     OtpSendRequest,
     OtpVerifyRequest,
     FundingWebhook,
@@ -2150,8 +2151,8 @@ async def admin_dashboard(request: Request):
 
 
 @app.post("/api/auth/signup")
-async def customer_signup(req: CustomerCredentials):
-    payload={"email": req.email, "password": req.password}
+async def customer_signup(req: CustomerSignupCredentials):
+    payload={"email": req.email, "password": req.password, "data": {"username": req.username, "display_name": req.display_name}}
     result = await _supabase_request("/auth/v1/signup", payload=payload)
     # Referral attribution is completed when the authenticated customer profile is first created.
     if req.referral_code:
@@ -2160,7 +2161,7 @@ async def customer_signup(req: CustomerCredentials):
 
 
 @app.post("/api/auth/login")
-async def customer_login(req: CustomerCredentials):
+async def customer_login(req: CustomerLoginCredentials):
     return await _supabase_request("/auth/v1/token?grant_type=password", payload={"email": req.email, "password": req.password})
 
 
