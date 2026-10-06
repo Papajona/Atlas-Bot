@@ -230,13 +230,14 @@ def test_position_flip_reserve_failure_does_not_abort_the_fill(monkeypatch):
         async with sessions() as db:
             # long 1 @100 with 100 reserved; customer has nothing else available
             db.add(CustomerLedgerAccount(customer_id=1, available=Decimal("0"), trading_reserved=Decimal("100")))
-            db.add(Position(customer_id=1, exchange="binance", symbol="BTC/USDT", quantity=1.0,
-                            average_entry_price=100.0, mark_price=100.0, reserved_capital=100.0))
             trade = Trade(customer_id=1, exchange="binance", symbol="BTC/USDT", side="sell", timeframe="1h",
                           mode="LIVE", quantity=3.0, requested_quantity=3.0, filled_quantity=0.0, remaining_quantity=3.0,
                           requested_price=100.0, client_order_id="c-flip", signal_id="s-flip", status="FILLED")
             db.add(trade)
             await db.flush()
+            db.add(Position(customer_id=1, exchange="binance", symbol="BTC/USDT", quantity=1.0,
+                            average_entry_price=100.0, mark_price=100.0, reserved_capital=100.0,
+                            entry_trade_id=trade.id))
             # Sell 3: closes the long (frees 100) then flips short 2 @100 which needs 200 -> deficit of 100.
             await ex._apply_fill_to_position(db, trade, 3.0, 100.0)   # must not raise
             await db.commit()
