@@ -1658,7 +1658,12 @@ async def _flatten_customer_spot_positions(account: Any, broker: Any, failures: 
             if amount <= 0:
                 raise RuntimeError("exchange precision normalized the flatten quantity to zero")
             order = await asyncio.to_thread(broker.market_order, symbol, "sell", amount, f"emergency-spot-flat-{uuid.uuid4().hex[:16]}", None, None, False)
-            canceled.append({"scope": f"customer:{account.customer_id}", "position_symbol": symbol, "order_id": str(order.get("id") or "")})
+            order_id = str(order.get("id") or "")
+            status = str(order.get("status") or "").lower()
+            filled = float(order.get("filled") or 0.0)
+            if not order_id or status not in {"closed", "filled"} or filled + 1e-12 < amount:
+                raise RuntimeError(f"Spot flatten order was not fully filled: id={order_id!r} status={status!r} filled={filled} requested={amount}")
+            canceled.append({"scope": f"customer:{account.customer_id}", "position_symbol": symbol, "order_id": order_id})
         except Exception as exc:
             failures.append({"scope": f"customer:{account.customer_id}", "symbol": symbol, "error": f"Spot flatten failed: {exc}"})
     return
