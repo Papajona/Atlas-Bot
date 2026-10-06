@@ -1691,9 +1691,6 @@ async def emergency_stop(exchange: str | None = None):
         except Exception:
             logging.getLogger(__name__).warning("emergency_stop_barrier_incident_write_failed", exc_info=True)
         await audit("EMERGENCY_CANCEL_FAILED", failure)
-    canceled: list[dict[str, str]] = []
-    cancel_error = None
-
     if exchange and exchange.lower() == "oanda":
         if settings.oanda_account_id and settings.oanda_api_token:
             broker = OandaBroker(OandaConfig(settings.oanda_account_id, settings.oanda_api_token, settings.oanda_practice, settings.oanda_timeout_seconds))
@@ -1752,7 +1749,8 @@ async def emergency_stop(exchange: str | None = None):
             remaining = await asyncio.to_thread(broker.fetch_open_orders)
             if remaining:
                 failures.append({"scope": "platform_exchange", "error": f"Open orders remain after cancellation: {len(remaining)}"})
-            await _flatten_exchange_positions(broker, "platform_exchange", failures, canceled)
+            if _is_derivatives_market(broker):
+                await _flatten_exchange_positions(broker, "platform_exchange", failures, canceled)
         except Exception as exc:
             cancel_error = str(exc)
             failures.append({"scope": "platform_exchange", "error": cancel_error})
