@@ -26,7 +26,7 @@ def test_no_root_level_github_actions_workflow_copy():
 
 def test_application_zip_with_equal_length_invariant_is_strict():
     source = (ROOT / "app" / "trade_learning.py").read_text(encoding="utf-8")
-    assert "zip(regime_path, regime_path[1:], strict=True)" in source
+    assert "zip(regime_path[:-1], regime_path[1:], strict=True)" in source
 
 
 def test_startup_guards_are_not_duplicated_in_main():
