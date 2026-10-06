@@ -202,7 +202,7 @@ def test_quantize_money_bounds_float_drift():
 
 def test_signup_requires_username_and_display_name():
     source = (ROOT / "app/schemas.py").read_text()
-    block = source[source.index("class CustomerCredentials"):source.index("class OtpSendRequest")]
+    block = source[source.index("class CustomerSignupCredentials"):source.index("class OtpSendRequest")]
     assert 'username: str = Field(min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_]+$")' in block
     assert 'display_name: str = Field(min_length=1, max_length=80)' in block
 
@@ -251,7 +251,7 @@ def test_tier1_kyc_submission_and_admin_decision_are_explicit():
     admin = source[source.index('@app.get("/api/admin/kyc")'):source.index('@app.get("/api/admin/withdrawals")')]
     assert 'await require_role(claims, "READ_ONLY")' in admin
     assert 'await require_role(claims, "ADMIN")' in admin
-    assert 'decision in {"VERIFIED", "REVIEW", "REJECTED"}' in admin
+    assert 'if decision not in {"VERIFIED", "REVIEW", "REJECTED"}' in admin
 
 
 def test_withdrawal_destination_is_persisted_encrypted_and_not_auto_released():
