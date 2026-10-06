@@ -344,6 +344,8 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
         if live and customer_id is not None:
             if str(account.pilot_status or "NONE").upper() != "APPROVED":
                 raise RiskBlocked("Customer is not approved for the live pilot")
+            if not account.pilot_requested_by or not account.pilot_approved_by or account.pilot_requested_by == account.pilot_approved_by:
+                raise RiskBlocked("Customer pilot approval is not valid")
             pilot_expires_at = account.pilot_expires_at
             if pilot_expires_at is None:
                 raise RiskBlocked("Customer pilot expiry is not configured")
