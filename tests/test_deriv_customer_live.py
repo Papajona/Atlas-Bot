@@ -1,7 +1,5 @@
-import asyncio
 import ast
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
 from app.deriv import DerivBroker, DerivConfig, DerivError
 
