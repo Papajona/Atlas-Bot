@@ -179,6 +179,59 @@ def _today_utc() -> date:
     return datetime.now(timezone.utc).date()
 
 
+async def _execution_health_block(db, customer_id: int | None) -> str | None:
+    """Return a deterministic execution-health circuit-breaker reason, if any.
+
+    The checks use persisted execution/research records only. No broker state is
+    inferred and no threshold is silently substituted.
+    """
+    window = max(1, int(settings.execution_health_window_orders))
+    outcomes_q = select(StrategyOutcome.net_return_bps).order_by(StrategyOutcome.created_at.desc()).limit(
+        int(settings.max_consecutive_losses)
+    )
+    if customer_id is not None:
+        outcomes_q = outcomes_q.where(StrategyOutcome.customer_id == customer_id)
+    returns = [float(v) for v in (await db.execute(outcomes_q)).scalars().all() if v is not None]
+    losses = 0
+    for value in returns:
+        if value < 0:
+            losses += 1
+        else:
+            break
+    if int(settings.max_consecutive_losses) > 0 and losses >= int(settings.max_consecutive_losses):
+        return "consecutive-loss threshold reached"
+
+    recent_q = (
+        select(OrderCommand)
+        .where(OrderCommand.updated_at >= datetime.now(timezone.utc) - __import__("datetime").timedelta(minutes=5))
+        .order_by(OrderCommand.updated_at.desc())
+        .limit(window)
+    )
+    if customer_id is not None:
+        recent_q = recent_q.where(OrderCommand.customer_id == customer_id)
+    commands = (await db.execute(recent_q)).scalars().all()
+    if commands:
+        errors = sum(1 for row in commands if str(row.error or "").strip() or str(row.status).upper() in {"ERROR", "FAILED", "REJECTED"})
+        error_rate = errors / len(commands)
+        if float(settings.max_order_error_rate_5m) > 0 and error_rate > float(settings.max_order_error_rate_5m):
+            return f"order error rate {error_rate:.3f} exceeded threshold"
+
+        latencies = []
+        for row in commands:
+            if row.submitted_at is not None and row.created_at is not None:
+                created = row.created_at.replace(tzinfo=timezone.utc) if row.created_at.tzinfo is None else row.created_at
+                submitted = row.submitted_at.replace(tzinfo=timezone.utc) if row.submitted_at.tzinfo is None else row.submitted_at
+                latency_ms = max(0.0, (submitted - created).total_seconds() * 1000.0)
+                latencies.append(latency_ms)
+        if latencies and int(settings.max_order_latency_ms_p95) > 0:
+            latencies.sort()
+            index = min(len(latencies) - 1, max(0, int((len(latencies) - 1) * 0.95 + 0.999999)))
+            if latencies[index] > float(settings.max_order_latency_ms_p95):
+                return f"order p95 latency {latencies[index]:.1f}ms exceeded threshold"
+    return None
+
+
+
 async def _ensure_daily_boundary(db, state: AppState):
     today = _today_utc()
     if state.daily_start_date != today:
@@ -300,6 +353,19 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
                 elapsed = (now - last_entry).total_seconds()
                 if elapsed < settings.discipline_entry_cooldown_seconds:
                     raise RiskBlocked("Trading-discipline entry cooldown is active")
+
+        if settings.max_consecutive_losses > 0 or settings.max_order_latency_ms_p95 > 0 or settings.max_order_error_rate_5m > 0:
+            health_block = await _execution_health_block(db, customer_id)
+            if health_block and not reducing:
+                await open_incident(
+                    key=f"EXECUTION_HEALTH:{customer_id or 'platform'}",
+                    severity="CRITICAL",
+                    category="EXECUTION_PROTECTION",
+                    summary="Execution-health circuit breaker halted new entries",
+                    detail={"customer_id": customer_id, "reason": health_block},
+                    customer_id=customer_id,
+                )
+                raise RiskBlocked(f"Execution-health halt: {health_block}")
 
         if settings.edge_decay_halt_enabled and not reducing:
             # Stop NEW entries when realized net returns are statistically negative (z <= -edge_decay_z_halt vs a zero-edge null).
