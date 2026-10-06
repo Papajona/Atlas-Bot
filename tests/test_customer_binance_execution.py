@@ -1,4 +1,7 @@
+from pathlib import Path
 from types import SimpleNamespace
+
+ROOT = Path(__file__).resolve().parents[1]
 import pytest
 
 from app.customer_binance_execution import (
@@ -58,3 +61,18 @@ def test_verified_customer_binance_broker_uses_customer_credentials(monkeypatch)
 def test_unverified_or_overprivileged_customer_mapping_is_rejected(changes):
     with pytest.raises(CustomerBinanceExecutionError):
         build_customer_binance_broker(account(**changes), secret_fetcher=lambda _: "secret")
+
+
+def test_customer_live_venue_is_explicit_and_fail_closed():
+    config = (ROOT / "app" / "config.py").read_text()
+    execution = (ROOT / "app" / "customer_binance_execution.py").read_text()
+    assert 'customer_live_exchange: str = "binance"' in config
+    assert 'customer_live_market_type: str = "spot"' in config
+    assert 'Customer live venue is not configured for Binance' in execution
+    assert 'Customer live market type must be spot' in execution
+    assert 'Customer Binance account market type does not match the approved customer-live market type' in execution
+
+
+def test_customer_binance_account_market_type_mismatch_is_rejected():
+    with pytest.raises(CustomerBinanceExecutionError):
+        build_customer_binance_broker(account(market_type="swap"), secret_fetcher=lambda _: "secret")
