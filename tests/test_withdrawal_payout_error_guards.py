@@ -89,7 +89,7 @@ def test_withdrawal_provider_identifier_is_unique_and_recovery_is_durable():
     loop_start = main.index("async def _withdrawal_recovery_loop")
     loop_end = main.index("\ndef _tron_base58check_valid", loop_start)
     recovery_loop = main[loop_start:loop_end]
-    assert "Withdrawal.status.in_(["UNKNOWN", "SUBMITTED"])" in recovery_loop
+    assert 'Withdrawal.status.in_(["UNKNOWN", "SUBMITTED"])' in recovery_loop
     assert "WITHDRAWAL_RECOVERY_DUE" in recovery_loop
     assert "no blind payout retry" in recovery_loop
 
