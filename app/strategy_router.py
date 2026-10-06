@@ -262,7 +262,7 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
             weights = np.exp(scores)
             weights = weights / weights.sum()
             blend = [{"strategy": x["strategy"], "weight": float(w), "score": x["score"]}
-                     for x, w in zip(eligible, weights)]
+                     for x, w in zip(eligible, weights, strict=True)]
     signal_frame = strategy_signals(df, cfg, asset=asset)
     row = signal_frame.iloc[-1]
     signals = {name: float(row.get(name, 0.0) or 0.0) for name in STRATEGIES}
