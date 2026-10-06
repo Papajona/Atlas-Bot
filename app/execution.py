@@ -804,7 +804,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             if asset in {"forex", "commodity"} and not forex_demo and not force_paper:
                 raise RiskBlocked("OANDA is demo/backtesting-only in AtlasRisk; live Forex/commodity execution is disabled")
             live = crypto_live or forex_demo
-            if customer_id is not None and mode == "PAPER":
+            if customer_id is not None and str(mode or "").upper() == "PAPER":
                 raise RiskBlocked("Customer paper execution requires an isolated simulation ledger")
             if live and customer_id is not None:
                 mixed_positions = (await db.execute(
