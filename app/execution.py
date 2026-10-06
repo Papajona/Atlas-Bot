@@ -462,7 +462,8 @@ async def _refresh_live_customer_equity(db, customer_id: int) -> None:
         return
     balance = await customer_balance(db, customer_id, "USDT")
     positions = (await db.execute(select(Position).where(
-        Position.customer_id == customer_id
+        Position.customer_id == customer_id,
+        Position.entry_trade_id.in_(select(Trade.id).where(Trade.mode == "LIVE")),
     ))).scalars().all()
     unrealized = sum(float(p.unrealized_pnl or 0.0) for p in positions)
     realized = sum(float(p.realized_pnl or 0.0) for p in positions)
@@ -491,7 +492,14 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         trade_context = json.loads(trade.reason or "{}")
     except Exception:
         trade_context = {}
-    position = (await db.execute(select(Position).where(Position.symbol == trade.symbol, Position.exchange == trade.exchange, Position.customer_id == trade.customer_id).with_for_update())).scalar_one_or_none()
+    live_entry_ids = select(Trade.id).where(Trade.mode == "LIVE")
+    position_query = select(Position).where(
+        Position.symbol == trade.symbol,
+        Position.exchange == trade.exchange,
+        Position.customer_id == trade.customer_id,
+        Position.entry_trade_id.in_(live_entry_ids),
+    ).with_for_update()
+    position = (await db.execute(position_query)).scalar_one_or_none()
     realized = 0.0
     realized_strategy = str(getattr(position, "strategy", "") or trade_context.get("strategy") or "unknown") if position else str(trade_context.get("strategy") or "unknown")
     realized_regime = str(getattr(position, "entry_regime", "UNKNOWN") or trade_context.get("regime") or "UNKNOWN") if position else str(trade_context.get("regime") or "UNKNOWN")
@@ -635,7 +643,10 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
             account_live = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == trade.customer_id).with_for_update())).scalar_one_or_none()
             if account_live:
                 balance = await customer_balance(db, trade.customer_id, "USDT")
-                positions_live = (await db.execute(select(Position).where(Position.customer_id == trade.customer_id))).scalars().all()
+                positions_live = (await db.execute(select(Position).where(
+                    Position.customer_id == trade.customer_id,
+                    Position.entry_trade_id.in_(select(Trade.id).where(Trade.mode == "LIVE")),
+                ))).scalars().all()
                 unrealized_live = sum(float(p.unrealized_pnl or 0.0) for p in positions_live)
                 realized_live = sum(float(p.realized_pnl or 0.0) for p in positions_live)
                 account_live.cash_equity = max(0.0, balance["available"] + balance["trading_reserved"])
