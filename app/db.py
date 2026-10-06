@@ -1127,6 +1127,50 @@ class FundingTransaction(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+
+class CustodyAssetObservation(Base):
+    """Latest independently observed asset balance at a named custody/exchange location."""
+    __tablename__ = "custody_asset_observations"
+    __table_args__ = (
+        UniqueConstraint("location", "currency", name="uq_custody_observation_location_currency"),
+        Index("ix_custody_observation_status_observed", "status", "observed_at"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    location: Mapped[str] = mapped_column(String(180), nullable=False)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    customer_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    currency: Mapped[str] = mapped_column(String(20), nullable=False, default="USDT")
+    balance: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="ACTIVE")
+    source_reference: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class CustodyTransfer(Base):
+    """Durable custody-location transfer state; never authorizes a withdrawal by itself."""
+    __tablename__ = "custody_transfers"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_custody_transfer_idempotency"),
+        Index("ix_custody_transfer_status_updated", "status", "updated_at"),
+        Index("ix_custody_transfer_customer", "customer_id", "created_at"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    currency: Mapped[str] = mapped_column(String(20), nullable=False, default="USDT")
+    amount: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
+    source_location: Mapped[str] = mapped_column(String(180), nullable=False)
+    destination_location: Mapped[str] = mapped_column(String(180), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="REQUESTED")
+    idempotency_key: Mapped[str] = mapped_column(String(220), nullable=False)
+    provider_reference: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    detail_json: Mapped[str] = mapped_column(EncryptedText, default="{}")
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
 class TronDepositCursor(Base):
     __tablename__ = "tron_deposit_cursors"
     __table_args__ = (UniqueConstraint("wallet_id", name="uq_tron_deposit_cursor_wallet"),)
