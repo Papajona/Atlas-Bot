@@ -1995,12 +1995,34 @@ async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorizat
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
     txid = str(req.get("transaction_id") or "").strip()
-    if not txid:
-        raise HTTPException(400, "transaction_id is required")
+    outcome = str(req.get("outcome") or "").strip().upper()
+    if outcome not in {"", "TIMEOUT", "REJECTED"}:
+        raise HTTPException(400, "unsupported broadcast outcome")
+    if not txid and not outcome:
+        raise HTTPException(400, "transaction_id or broadcast outcome is required")
     async with SessionLocal() as db:
         sweep = (await db.execute(select(TronSweep).where(TronSweep.id == sweep_id).with_for_update())).scalar_one_or_none()
         if not sweep:
             raise HTTPException(404, "sweep not found")
+        if outcome == "TIMEOUT":
+            sweep.status = "UNKNOWN"
+            sweep.detail_json = json.dumps({**(json.loads(sweep.detail_json or "{}") or {}),
+                                            "broadcast_outcome": "TIMEOUT",
+                                            "reason": "signer response timed out; transaction identity unknown"}, separators=(",", ":"))
+            if sweep.custody_transfer_id:
+                await transition_custody_transfer(db, sweep.custody_transfer_id, status="UNKNOWN",
+                                                  detail={"broadcast_outcome": "TIMEOUT"})
+            await db.commit()
+            return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": ""}
+        if outcome == "REJECTED":
+            sweep.status = "FAILED"
+            sweep.detail_json = json.dumps({**(json.loads(sweep.detail_json or "{}") or {}),
+                                            "broadcast_outcome": "REJECTED"}, separators=(",", ":"))
+            if sweep.custody_transfer_id:
+                await transition_custody_transfer(db, sweep.custody_transfer_id, status="FAILED",
+                                                  detail={"broadcast_outcome": "REJECTED"})
+            await db.commit()
+            return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": ""}
         if sweep.transaction_id and sweep.transaction_id != txid:
             raise HTTPException(409, "sweep already has a different transaction id")
         duplicate = (await db.execute(select(TronSweep).where(
@@ -2065,9 +2087,22 @@ async def admin_reconcile_tron_sweep(sweep_id: int, authorization: str | None = 
                 if sweep.custody_transfer_id:
                     await transition_custody_transfer(db, sweep.custody_transfer_id, status="RECONCILIATION_REQUIRED",
                                                       provider_reference=txid, detail=evidence)
+            elif result == "UNKNOWN":
+                sweep.status = "UNKNOWN"
+                if sweep.custody_transfer_id:
+                    await transition_custody_transfer(db, sweep.custody_transfer_id, status="UNKNOWN",
+                                                      provider_reference=txid, detail=evidence)
             await db.commit()
+            if result == "UNKNOWN":
+                raise HTTPException(503, "TRON transaction evidence is not yet available; reconcile again")
             return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": txid, "evidence": evidence}
         except httpx.HTTPError as exc:
+            sweep.status = "UNKNOWN"
+            if sweep.custody_transfer_id:
+                await transition_custody_transfer(db, sweep.custody_transfer_id, status="UNKNOWN",
+                                                  provider_reference=txid,
+                                                  detail={"reason": "TRON reconciliation API unavailable"})
+            await db.commit()
             raise _safe_http_error(503, exc, "TRON reconciliation is temporarily unavailable") from exc
 
 
