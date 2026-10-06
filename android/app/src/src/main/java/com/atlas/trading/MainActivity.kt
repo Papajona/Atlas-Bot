@@ -20,7 +20,6 @@ class MainActivity : AppCompatActivity() {
     private val securityAuditLog by lazy { SecurityAuditLog(applicationContext) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        window.clearFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 

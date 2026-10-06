@@ -3,7 +3,6 @@ package com.atlas.trading
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.view.WindowManager
 import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -37,7 +36,6 @@ class MainActivity : AppCompatActivity() {
     private val securityAuditLog by lazy { SecurityAuditLog(applicationContext) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        window.clearFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
