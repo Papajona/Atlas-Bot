@@ -4622,13 +4622,21 @@ async def release_withdrawal(withdrawal_id: int, req: WithdrawalExecuteRequest, 
             raise _safe_http_error(502, e, "Upstream provider request failed") from e
         async with SessionLocal() as db3:
             w3 = (await db3.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id).with_for_update())).scalar_one()
-            w3.status = "RELEASED" if result.status == "COMPLETED" else "SUBMITTED"
+            if result.status == "COMPLETED":
+                w3.status = "RELEASED"
+            elif result.status == "FAILED":
+                w3.status = "FAILED"
+            else:
+                w3.status = "SUBMITTED"
             w3.provider = result.provider
             w3.provider_id = result.provider_id
             w3.provider_status = result.raw_status or result.status
             w3.provider_error = ""
             if result.status == "COMPLETED":
                 await settle_withdrawal(db3, w3.customer_id, w3.amount, reference_id=w3.request_id)
+                await sync_wallet_from_ledger(db3, w3.customer_id, "USDT")
+            elif result.status == "FAILED":
+                await ledger_release_withdrawal(db3, w3.customer_id, w3.amount, reference_id=w3.request_id + ":failed")
                 await sync_wallet_from_ledger(db3, w3.customer_id, "USDT")
             await db3.commit()
         await _audit("WITHDRAWAL_RELEASED", {"id": withdrawal_id, "provider": result.provider,
