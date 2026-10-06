@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select, desc, or_, func
 from sqlalchemy.exc import IntegrityError
 from .config import settings
-from .db import init_db, engine, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, LedgerEntry, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, StripeWebhookEvent, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, WithdrawalDestination, Incident, quantize_money
+from .db import init_db, engine, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, LedgerEntry, TronDepositCursor, TronSweep, CustomerBinanceAccount, CustomerKYCProfile, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, StripeWebhookEvent, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, WithdrawalDestination, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
 from .trading_core import train_model, predict_latest, ai_walk_forward_backtest, PROFILES
 from .adaptive_bot import AdaptiveModelPolicy, ensure_adaptive_model, adaptive_model_status
@@ -3934,6 +3934,60 @@ async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorizatio
             "destination_masked": w.destination_masked, "required_approvals": w.required_approvals}
 
 
+@app.get("/api/customer/kyc")
+async def customer_kyc(authorization: str | None = Header(default=None)):
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=True)
+        row = (await db.execute(select(CustomerKYCProfile).where(CustomerKYCProfile.customer_id == profile.id))).scalar_one_or_none()
+        if not row:
+            return {"status": "NOT_SUBMITTED"}
+        return {
+            "status": row.status,
+            "verification_result": row.verification_result,
+            "legal_first_name": row.legal_first_name,
+            "legal_middle_name": row.legal_middle_name,
+            "legal_last_name": row.legal_last_name,
+            "date_of_birth": row.date_of_birth,
+            "citizenship_country": row.citizenship_country,
+            "residence_country": row.residence_country,
+            "residential_address": row.residential_address,
+            "phone": row.phone,
+            "document_type": row.document_type,
+            "document_issuing_country": row.document_issuing_country,
+            "document_reference": row.document_reference,
+            "document_issued_at": row.document_issued_at,
+            "document_expires_at": row.document_expires_at,
+            "verification_provider": row.verification_provider,
+            "submitted_at": row.submitted_at.isoformat() if row.submitted_at else None,
+            "verified_at": row.verified_at.isoformat() if row.verified_at else None,
+        }
+
+
+@app.post("/api/customer/kyc")
+async def customer_kyc_submit(req: CustomerKYCSubmitRequest, authorization: str | None = Header(default=None)):
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=True)
+        row = (await db.execute(select(CustomerKYCProfile).where(CustomerKYCProfile.customer_id == profile.id).with_for_update())).scalar_one_or_none()
+        if row and row.status == "VERIFIED":
+            raise HTTPException(409, "Verified KYC cannot be replaced through the customer endpoint")
+        values = req.model_dump()
+        for key in ("citizenship_country", "residence_country", "document_issuing_country"):
+            values[key] = values[key].upper()
+        if row is None:
+            row = CustomerKYCProfile(customer_id=profile.id)
+            db.add(row)
+        for key, value in values.items():
+            setattr(row, key, value)
+        row.status = "PENDING"
+        row.verification_result = "PENDING"
+        row.verification_provider = ""
+        row.verification_provider_reference = ""
+        row.submitted_at = datetime.now(timezone.utc)
+        row.verified_at = None
+        await db.commit()
+        await _audit("CUSTOMER_KYC_SUBMITTED", {"customer_id": profile.id, "document_type": row.document_type})
+        return {"ok": True, "status": "PENDING"}
+
 @app.get("/api/customer/withdrawal-wallets")
 async def customer_withdrawal_wallets(authorization: str | None = Header(default=None)):
     """List the customer's saved withdrawal destinations without exposing full addresses."""
@@ -4260,6 +4314,53 @@ async def trades(x_admin_token: str | None = Header(default=None), authorization
                  "reason": r.reason, "error": r.error, "stop_loss_price": r.stop_loss_price,
                  "take_profit_price": r.take_profit_price, "created_at": r.created_at.isoformat()} for r in rows]
 
+
+@app.get("/api/admin/kyc")
+async def admin_kyc_list(status: str = "PENDING", x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "READ_ONLY")
+    allowed = {"PENDING", "VERIFIED", "REVIEW", "REJECTED", "ALL"}
+    if status not in allowed:
+        raise HTTPException(400, "Invalid KYC status")
+    async with SessionLocal() as db:
+        q = select(CustomerKYCProfile).order_by(desc(CustomerKYCProfile.submitted_at)).limit(500)
+        if status != "ALL":
+            q = q.where(CustomerKYCProfile.status == status)
+        rows = (await db.execute(q)).scalars().all()
+        return [{
+            "id": row.id,
+            "customer_id": row.customer_id,
+            "status": row.status,
+            "verification_result": row.verification_result,
+            "legal_name": " ".join(x for x in [row.legal_first_name, row.legal_middle_name, row.legal_last_name] if x),
+            "date_of_birth": row.date_of_birth,
+            "citizenship_country": row.citizenship_country,
+            "residence_country": row.residence_country,
+            "document_type": row.document_type,
+            "document_issuing_country": row.document_issuing_country,
+            "document_reference": row.document_reference,
+            "submitted_at": row.submitted_at.isoformat() if row.submitted_at else None,
+            "verified_at": row.verified_at.isoformat() if row.verified_at else None,
+        } for row in rows]
+
+
+@app.post("/api/admin/kyc/{kyc_id}/decision")
+async def admin_kyc_decision(kyc_id: int, decision: str, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "ADMIN")
+    decision = decision.upper()
+    if decision not in {"VERIFIED", "REVIEW", "REJECTED"}:
+        raise HTTPException(400, "Invalid KYC decision")
+    async with SessionLocal() as db:
+        row = (await db.execute(select(CustomerKYCProfile).where(CustomerKYCProfile.id == kyc_id).with_for_update())).scalar_one_or_none()
+        if not row:
+            raise HTTPException(404, "KYC record not found")
+        row.status = decision
+        row.verification_result = decision
+        row.verified_at = datetime.now(timezone.utc) if decision == "VERIFIED" else None
+        await db.commit()
+        await _audit("ADMIN_KYC_DECISION", {"kyc_id": kyc_id, "customer_id": row.customer_id, "decision": decision, "admin": str(claims.get("sub") or claims.get("email") or "")})
+        return {"ok": True, "status": decision}
 
 @app.get("/api/admin/withdrawals")
 async def list_withdrawals(status: str = "PENDING", x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
