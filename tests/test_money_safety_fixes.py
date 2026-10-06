@@ -382,3 +382,31 @@ def test_custody_reconciliation_resolves_stale_binance_unknown_after_fresh_obser
     decision = source.index("decision = solvency_decision(")
     assert marker in source
     assert source.index(marker) < decision
+
+
+def test_tron_sweep_is_bound_to_custody_transfer_and_unique_txid():
+    db = Path("app/db.py").read_text()
+    main = Path("app/main.py").read_text()
+    migration = Path("alembic/versions/0033_sweep_reconciliation_integrity.py").read_text()
+    assert "custody_transfer_id" in db
+    assert "uq_tron_sweep_transaction_id_nonempty" in db
+    assert "create_custody_transfer" in main
+    assert "transition_custody_transfer" in main
+    assert "an in-flight sweep already exists for this deposit wallet" in main
+    assert "transaction id is already assigned to another sweep" in main
+    assert "status="CONFIRMED"" in main
+    assert "status="RECONCILIATION_REQUIRED"" in main
+    assert "status="FAILED"" in main
+    assert "custody_transfer_id" in migration
+
+
+def test_tron_sweep_settlement_requires_exact_onchain_transfer_evidence():
+    source = Path("app/tron_sweep.py").read_text()
+    start = source.index("def classify_solidified_sweep")
+    block = source[start:]
+    assert "walletsolidity" not in block
+    assert "transaction id mismatch" in block
+    assert "solidified receipt result" in block
+    assert "matching TRC-20 Transfer event not found" in block
+    assert "transfer amount mismatch" in block
+    assert 'return "SETTLED"' in block
