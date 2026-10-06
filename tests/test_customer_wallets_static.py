@@ -240,3 +240,26 @@ def test_withdrawals_require_admin_approval_before_release():
     block = source[start:end]
     assert 'status="PENDING"' in block
     assert 'required_approvals=2 if settings.withdrawal_dual_approval else 1' in block
+
+
+def test_tier1_kyc_submission_and_admin_decision_are_explicit():
+    source = (ROOT / "app/main.py").read_text()
+    submit = source[source.index('@app.post("/api/customer/kyc")'):source.index('@app.get("/api/customer/withdrawal-wallets")')]
+    assert 'require_aal2=True' in submit
+    assert 'row.status = "PENDING"' in submit
+    assert 'CustomerKYCProfile' in submit
+    admin = source[source.index('@app.get("/api/admin/kyc")'):source.index('@app.get("/api/admin/withdrawals")')]
+    assert 'await require_role(claims, "READ_ONLY")' in admin
+    assert 'await require_role(claims, "ADMIN")' in admin
+    assert 'decision in {"VERIFIED", "REVIEW", "REJECTED"}' in admin
+
+
+def test_withdrawal_destination_is_persisted_encrypted_and_not_auto_released():
+    policy = (ROOT / "app/transaction_policy.py").read_text()
+    assert 'destination=destination.strip()' in policy
+    source = (ROOT / "app/main.py").read_text()
+    block = source[source.index('@app.post("/api/customer/withdrawals")'):source.index('@app.get("/api/customer/withdrawals")')]
+    assert 'status="PENDING"' in block
+    assert 'destination=req.destination.strip()' in block
+    assert 'register_or_check_destination' in block
+    assert 'verify_destination(db, customer_id=profile.id, fingerprint=destination_policy["fingerprint"])' not in block
