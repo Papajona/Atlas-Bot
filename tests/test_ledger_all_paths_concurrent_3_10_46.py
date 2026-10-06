@@ -59,6 +59,7 @@ async def _customer(sessions, available):
     async with sessions() as db:
         p = CustomerProfile(
             auth_user_id=f"drill-{uuid.uuid4().hex}",
+            username=f"drill_{uuid.uuid4().hex[:26]}",
             email="drill@example.invalid",
             display_name="drill",
             status="ACTIVE",

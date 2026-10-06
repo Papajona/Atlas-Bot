@@ -198,3 +198,115 @@ def test_quantize_money_bounds_float_drift():
         total += 0.1
     assert total != 1.0  # the raw float drift this guards against
     assert quantize_money(total) == 1.0
+
+
+def test_signup_requires_username_and_display_name():
+    source = (ROOT / "app/schemas.py").read_text()
+    block = source[source.index("class CustomerSignupCredentials"):source.index("class OtpSendRequest")]
+    assert 'username: str = Field(min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_]+$")' in block
+    assert 'display_name: str = Field(min_length=1, max_length=80)' in block
+
+
+def test_customer_profile_keeps_username_unique_and_display_name_separate():
+    source = (ROOT / "app/db.py").read_text()
+    block = source[source.index("class CustomerProfile"):source.index("class Wallet")]
+    assert 'UniqueConstraint("username", name="uq_customer_username")' in block
+    assert 'username: Mapped[str]' in block
+    assert 'display_name: Mapped[str]' in block
+
+
+def test_signup_passes_public_identity_fields_to_auth_metadata():
+    source = (ROOT / "app/main.py").read_text()
+    block = source[source.index('@app.post("/api/auth/signup")'):source.index('@app.post("/api/auth/login")')]
+    assert '"username": req.username' in block
+    assert '"display_name": req.display_name' in block
+
+
+def test_withdrawal_wallets_are_masked_and_require_aal2():
+    source = (ROOT / "app/main.py").read_text()
+    start = source.index('@app.get("/api/customer/withdrawal-wallets")')
+    end = source.index('@app.get("/api/customer/withdrawals")', start)
+    block = source[start:end]
+    assert 'require_aal2=True' in block
+    assert 'destination_masked' in block
+    assert 'row.destination[:6]' in block
+    assert 'row.destination[-6:]' in block
+
+
+def test_withdrawals_require_admin_approval_before_release():
+    source = (ROOT / "app/main.py").read_text()
+    start = source.index('@app.post("/api/customer/withdrawals")')
+    end = source.index('@app.get("/api/customer/withdrawals")', start)
+    block = source[start:end]
+    assert 'status="PENDING"' in block
+    assert 'required_approvals=2 if settings.withdrawal_dual_approval else 1' in block
+
+
+def test_tier1_kyc_submission_and_admin_decision_are_explicit():
+    source = (ROOT / "app/main.py").read_text()
+    submit = source[source.index('@app.post("/api/customer/kyc")'):source.index('@app.get("/api/customer/withdrawal-wallets")')]
+    assert 'require_aal2=True' in submit
+    assert 'row.status = "PENDING"' in submit
+    assert 'CustomerKYCProfile' in submit
+    admin = source[source.index('@app.get("/api/admin/kyc")'):source.index('@app.get("/api/admin/withdrawals")')]
+    assert 'await require_role(claims, "READ_ONLY")' in admin
+    assert 'await require_role(claims, "ADMIN")' in admin
+    assert 'if decision not in {"VERIFIED", "REVIEW", "REJECTED"}' in admin
+
+
+def test_withdrawal_destination_is_persisted_encrypted_and_not_auto_released():
+    policy = (ROOT / "app/transaction_policy.py").read_text()
+    assert 'destination=destination.strip()' in policy
+    source = (ROOT / "app/main.py").read_text()
+    block = source[source.index('@app.post("/api/customer/withdrawals")'):source.index('@app.get("/api/customer/withdrawals")')]
+    assert 'status="PENDING"' in block
+    assert 'destination=req.destination.strip()' in block
+    assert 'register_or_check_destination' in block
+    assert 'verify_destination(db, customer_id=profile.id, fingerprint=destination_policy["fingerprint"])' not in block
+
+
+def test_kyc_has_no_verification_provider_fields():
+    db = (ROOT / "app/db.py").read_text()
+    migration = (ROOT / "alembic/versions/0044_customer_kyc_username.py").read_text()
+    main = (ROOT / "app/main.py").read_text()
+    schema = (ROOT / "app/schemas.py").read_text()
+    db_block = db[db.index("class CustomerKYCProfile"):db.index("class WithdrawalDestination")]
+    migration_block = migration[migration.index('"customer_kyc_profiles"'):]
+    assert "verification_provider" not in db_block
+    assert "verification_provider_reference" not in db_block
+    assert "verification_provider" not in migration_block
+    assert "verification_provider_reference" not in migration_block
+    kyc = main[main.index('@app.get("/api/customer/kyc")'):main.index('@app.get("/api/customer/withdrawal-wallets")')]
+    assert "verification_provider" not in kyc
+    assert "verification_provider_reference" not in kyc
+    schema_block = schema[schema.index("class CustomerKYCSubmitRequest"):schema.index("class OtpSendRequest")]
+    assert "verification_provider" not in schema_block
+    assert "verification_provider_reference" not in schema_block
+
+
+def test_admin_dashboard_has_structured_control_center():
+    dashboard = (ROOT / "app/templates/dashboard.html").read_text()
+    for section in (
+        'id="control-center"',
+        'id="customers"',
+        'id="money"',
+        'id="withdrawals"',
+        'id="executions"',
+        'id="strategy"',
+        'id="risk"',
+        'id="security"',
+        'loadControlCenter()',
+        'loadKyc()',
+        'loadMoneyControl()',
+    ):
+        assert section in dashboard
+
+
+def test_admin_dashboard_uses_protected_admin_endpoints():
+    dashboard = (ROOT / "app/templates/dashboard.html").read_text()
+    assert "/api/admin/ledger/invariants" in dashboard
+    assert "/api/admin/custody/reconciliation" in dashboard
+    assert "/api/admin/kyc" in dashboard
+    assert "/api/admin/withdrawals" in dashboard
+    assert "/api/admin/security/roles" in dashboard
+    assert "Server-side authorization remains the security boundary" in dashboard

@@ -277,12 +277,38 @@ class AdminRole(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class CustomerKYCProfile(Base):
+    __tablename__ = "customer_kyc_profiles"
+    __table_args__ = (UniqueConstraint("customer_id", name="uq_customer_kyc_customer"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    legal_first_name: Mapped[str] = mapped_column(EncryptedText, default="")
+    legal_middle_name: Mapped[str] = mapped_column(EncryptedText, default="")
+    legal_last_name: Mapped[str] = mapped_column(EncryptedText, default="")
+    date_of_birth: Mapped[str] = mapped_column(EncryptedText, default="")
+    citizenship_country: Mapped[str] = mapped_column(String(2), default="")
+    residence_country: Mapped[str] = mapped_column(String(2), default="")
+    residential_address: Mapped[str] = mapped_column(EncryptedText, default="")
+    phone: Mapped[str] = mapped_column(EncryptedText, default="")
+    document_type: Mapped[str] = mapped_column(String(30), default="")
+    document_issuing_country: Mapped[str] = mapped_column(String(2), default="")
+    document_reference: Mapped[str] = mapped_column(EncryptedText, default="")
+    document_issued_at: Mapped[str] = mapped_column(EncryptedText, default="")
+    document_expires_at: Mapped[str] = mapped_column(EncryptedText, default="")
+    verification_result: Mapped[str] = mapped_column(String(30), default="PENDING")
+    status: Mapped[str] = mapped_column(String(30), default="PENDING")
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class WithdrawalDestination(Base):
     __tablename__ = "withdrawal_destinations"
     __table_args__ = (UniqueConstraint("customer_id", "fingerprint", name="uq_withdrawal_destination_customer_fingerprint"), Index("ix_withdrawal_destination_customer", "customer_id", "status"))
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int] = mapped_column(Integer, nullable=False)
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    destination: Mapped[str] = mapped_column(EncryptedText, default="")
     currency: Mapped[str] = mapped_column(String(20), nullable=False)
     network: Mapped[str] = mapped_column(String(40), nullable=False)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -417,10 +443,14 @@ async def init_db():
 
 class CustomerProfile(Base):
     __tablename__ = "customer_profiles"
-    __table_args__ = (UniqueConstraint("auth_user_id", name="uq_customer_auth_user_id"),)
+    __table_args__ = (
+        UniqueConstraint("auth_user_id", name="uq_customer_auth_user_id"),
+        UniqueConstraint("username", name="uq_customer_username"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     auth_user_id: Mapped[str] = mapped_column(String(120), nullable=False)
     email: Mapped[str] = mapped_column(EncryptedText, default="")
+    username: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     display_name: Mapped[str] = mapped_column(EncryptedText, default="")
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

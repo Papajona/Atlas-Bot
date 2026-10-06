@@ -13,12 +13,19 @@
 <aside class="sidebar">
   <div class="brand"><div class="brand-mark">AI</div><div><strong>Atlas</strong><span>Trading OS</span></div></div>
   <nav>
-    <a class="active" href="#overview"><span>⌂</span>Overview</a>
-    <a href="#strategy"><span>◈</span>Strategy</a>
-    <a href="#risk"><span>◇</span>Risk control</a>
+    <a class="active" href="#overview"><span>⌂</span>Command Center</a>
+    <div class="nav-group"><small>OPERATIONS</small>
+    <a href="#customers"><span>◎</span>Customers & KYC</a>
+    <a href="#money"><span>◉</span>Money & Custody</a>
     <a href="#withdrawals"><span>↗</span>Withdrawals</a>
-    <a href="#executions"><span>≋</span>Executions</a>
-    <a href="#security"><span>▣</span>Security</a>
+    <a href="#executions"><span>≋</span>Trading Operations</a>
+    </div>
+    <div class="nav-group"><small>CONTROL</small>
+    <a href="#strategy"><span>◈</span>Research & Models</a>
+    <a href="#risk"><span>◇</span>Risk Control</a>
+    <a href="#security"><span>▣</span>Security & RBAC</a>
+    <a href="#commercial"><span>¤</span>Finance</a>
+    </div>
   </nav>
   <div class="sidebar-foot"><span class="pulse-dot"></span><div><b>Protected mode</b><small>Fail-closed controls active</small></div></div>
 </aside>
@@ -42,6 +49,38 @@
   <div id="adminMfaBox" class="field" style="display:none"><label>Authenticator code</label><input id="adminMfaCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit code"></div>
   <button id="adminMfaVerifyBtn" style="display:none" onclick="adminMfaVerify()">Verify Authenticator</button>
   <span id="authState" class="muted">Production admin access requires Google Authenticator (TOTP).</span>
+</section>
+
+<section id="control-center" class="panel" style="margin-bottom:18px">
+  <div class="section-head"><div><div class="eyebrow">ATLAS COMMAND CENTER</div><h2>System health & attention</h2><p class="muted">One operational view. Server-side authorization remains the security boundary.</p></div><button onclick="loadControlCenter()">Refresh</button></div>
+  <div class="grid cards mini-cards">
+    <div class="card"><span>Trading</span><strong id="ccTrading">—</strong><small id="ccTradingDetail">Loading</small></div>
+    <div class="card"><span>Ledger</span><strong id="ccLedger">—</strong><small id="ccLedgerDetail">Loading</small></div>
+    <div class="card"><span>Custody</span><strong id="ccCustody">—</strong><small id="ccCustodyDetail">Loading</small></div>
+    <div class="card"><span>KYC queue</span><strong id="ccKyc">—</strong><small>Pending review</small></div>
+    <div class="card"><span>Withdrawals</span><strong id="ccWithdrawals">—</strong><small>Pending approval</small></div>
+    <div class="card"><span>Admin session</span><strong id="ccSession">—</strong><small>Authentication state</small></div>
+  </div>
+  <div id="ccAttention" class="warning" style="margin-top:14px">Loading operational checks…</div>
+</section>
+
+<section id="customers" class="panel" style="margin-bottom:18px">
+  <div class="section-head"><div><div class="eyebrow">CUSTOMERS & COMPLIANCE</div><h2>KYC review queue</h2><p class="muted">Identity decisions are restricted to the protected admin workflow. Sensitive fields are shown only after authenticated retrieval.</p></div><button onclick="loadKyc()">Refresh queue</button></div>
+  <div class="actions">
+    <button onclick="loadKyc('PENDING')">Pending</button><button onclick="loadKyc('REVIEW')">Review</button><button onclick="loadKyc('VERIFIED')">Verified</button><button onclick="loadKyc('REJECTED')">Rejected</button>
+  </div>
+  <div class="table-wrap"><table><thead><tr><th>ID</th><th>Customer</th><th>Status</th><th>Citizenship</th><th>Document</th><th>Submitted</th><th>Decision</th></tr></thead><tbody id="kycRows"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody></table></div>
+</section>
+
+<section id="money" class="panel" style="margin-bottom:18px">
+  <div class="section-head"><div><div class="eyebrow">MONEY & TREASURY</div><h2>Customer funds control</h2><p class="muted">Ledger, custody and reconciliation are separated from platform revenue.</p></div><button onclick="loadMoneyControl()">Refresh controls</button></div>
+  <div class="grid cards mini-cards">
+    <div class="card"><span>Ledger invariants</span><strong id="moneyLedger">—</strong><small>Accounting integrity</small></div>
+    <div class="card"><span>Custody reconciliation</span><strong id="moneyCustody">—</strong><small>External asset coverage</small></div>
+    <div class="card"><span>TRON sweeps</span><strong id="moneySweeps">—</strong><small>Operational custody</small></div>
+    <div class="card"><span>Platform margin</span><strong id="moneyMargin">—</strong><small>Separate from customer funds</small></div>
+  </div>
+  <pre id="moneyOutput" class="output" style="margin-top:14px">No money-control action has been run.</pre>
 </section>
 
 <section class="grid cards kpi-grid">
@@ -214,7 +253,64 @@ async function reconcile(){run('/api/reconcile',req())}
 async function halt(){try{$('output').textContent=JSON.stringify(await api('/api/risk/kill',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent=e.message}}
 async function resetRisk(){try{$('output').textContent=JSON.stringify(await api('/api/risk/reset',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent=e.message}}
 async function disableLive(){try{$('output').textContent=JSON.stringify(await api('/api/live/disable',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent=e.message}}
-if(token())$('authState').textContent='Admin session present; verify Authenticator if prompted.';refresh();loadWithdrawals();loadRoles();loadMargin();setInterval(refresh,5000);setInterval(loadWithdrawals,10000)
+
+async function loadKyc(status='PENDING'){
+  try{
+    const rows=await api('/api/admin/kyc?status='+encodeURIComponent(status));
+    $('kycRows').innerHTML=rows.map(x=>{
+      const decision=x.status==='PENDING'||x.status==='REVIEW'
+        ? '<button onclick="kycDecision('+x.id+',\'VERIFIED\')">Verify</button><button class="danger" onclick="kycDecision('+x.id+',\'REVIEW\')">Review</button><button class="danger" onclick="kycDecision('+x.id+',\'REJECTED\')">Reject</button>'
+        : '—';
+      return '<tr><td>'+esc(x.id)+'</td><td><b>Customer #'+esc(x.customer_id)+'</b><small class="muted">'+esc(x.legal_name||'')+'</small></td><td><span class="tag">'+esc(x.status)+'</span></td><td>'+esc(x.citizenship_country||'—')+'</td><td>'+esc(x.document_type||'—')+' · '+esc(x.document_issuing_country||'—')+'</td><td>'+esc(x.submitted_at||'—')+'</td><td>'+decision+'</td></tr>';
+    }).join('')||'<tr><td colspan="7">No records.</td></tr>';
+  }catch(e){$('kycRows').innerHTML='<tr><td colspan="7">KYC unavailable: '+esc(e.message)+'</td></tr>'}
+}
+async function kycDecision(id,decision){
+  if(decision!=='VERIFIED' && decision!=='REVIEW' && decision!=='REJECTED')return;
+  if(!confirm('Confirm KYC decision: '+decision+'?'))return;
+  try{const j=await api('/api/admin/kyc/'+id+'/decision?decision='+encodeURIComponent(decision),{method:'POST'});$('output').textContent=JSON.stringify(j,null,2);loadKyc();loadControlCenter()}catch(e){$('output').textContent='KYC decision failed: '+e.message}
+}
+async function loadMoneyControl(){
+  const checks=[
+    ['/api/admin/ledger/invariants','moneyLedger',j=>j.ok===false?'BREACH':'HEALTHY'],
+    ['/api/admin/custody/reconciliation','moneyCustody',j=>j.chain_error?'REVIEW':(j.coverage_gap!==null&&Number(j.coverage_gap)<0?'SHORTFALL':'COVERED')],
+    ['/api/admin/custody/tron/sweeps','moneySweeps',j=>Array.isArray(j)?String(j.length):String(j.count??'CHECKED')]
+  ];
+  const out=[];
+  for(const [path,id,fmt] of checks){
+    try{const j=await api(path);$(id).textContent=fmt(j);out.push(path+': OK')}catch(e){$(id).textContent='REVIEW';out.push(path+': '+e.message)}
+  }
+  $('moneyOutput').textContent=out.join('\n');
+}
+async function loadControlCenter(){
+  try{
+    const s=await api('/api/state');
+    $('ccTrading').textContent=s.live_enabled?'LIVE':'PAPER';
+    $('ccTradingDetail').textContent=s.kill_switch?'HALTED':'Risk engine active';
+  }catch(e){$('ccTrading').textContent='UNKNOWN';$('ccTradingDetail').textContent=e.message}
+  try{
+    const j=await api('/api/admin/ledger/invariants'); $('ccLedger').textContent=j.ok===false?'BREACH':'HEALTHY'; $('ccLedgerDetail').textContent=j.ok===false?'Immediate review required':'Invariants pass';
+  }catch(e){$('ccLedger').textContent='REVIEW';$('ccLedgerDetail').textContent=e.message}
+  try{
+    const j=await api('/api/admin/custody/reconciliation'); const gap=j.coverage_gap; $('ccCustody').textContent=j.chain_error?'REVIEW':(gap!==null&&Number(gap)<0?'SHORTFALL':'COVERED'); $('ccCustodyDetail').textContent=j.chain_error||('Coverage gap '+(gap===null?'unknown':Number(gap).toFixed(2))+' USDT');
+  }catch(e){$('ccCustody').textContent='REVIEW';$('ccCustodyDetail').textContent=e.message}
+  try{
+    const j=await api('/api/admin/kyc?status=PENDING'); $('ccKyc').textContent=String(j.length);
+  }catch(e){$('ccKyc').textContent='—'}
+  try{
+    const j=await api('/api/admin/withdrawals/summary'); $('ccWithdrawals').textContent=String(j.pending_count??'—');
+  }catch(e){$('ccWithdrawals').textContent='—'}
+  $('ccSession').textContent=token()?'AUTHENTICATED':'SIGNED OUT';
+  const attention=[];
+  if($('ccTrading').textContent==='LIVE')attention.push('Live trading is enabled — verify all live gates before operating.');
+  if($('ccTradingDetail').textContent==='HALTED')attention.push('Trading kill switch is active.');
+  if($('ccLedger').textContent==='BREACH')attention.push('Ledger invariant breach.');
+  if($('ccCustody').textContent==='SHORTFALL'||$('ccCustody').textContent==='REVIEW')attention.push('Custody reconciliation requires review.');
+  if(Number($('ccKyc').textContent)>0)attention.push($('ccKyc').textContent+' KYC case(s) pending.');
+  if(Number($('ccWithdrawals').textContent)>0)attention.push($('ccWithdrawals').textContent+' withdrawal(s) pending approval.');
+  $('ccAttention').textContent=attention.length?attention.join(' · '):'No outstanding control-plane alerts detected by the available admin checks.';
+}
+if(token())$('authState').textContent='Admin session present; verify Authenticator if prompted.';refresh();loadWithdrawals();loadRoles();loadMargin();loadControlCenter();loadKyc();loadMoneyControl();setInterval(refresh,5000);setInterval(loadWithdrawals,10000)
 </script>
 </body>
 </html>

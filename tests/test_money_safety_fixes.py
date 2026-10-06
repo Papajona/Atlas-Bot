@@ -190,7 +190,7 @@ def test_confirming_a_pending_funding_credits_the_stored_amount_not_the_payload(
     async def seed():
         await init_db()
         async with SessionLocal() as db:
-            c = CustomerProfile(auth_user_id=uid)
+            c = CustomerProfile(auth_user_id=uid, username=f"drill_{uuid.uuid4().hex[:26]}")
             db.add(c); await db.flush()
             w = Wallet(customer_id=c.id, currency="USDT", wallet_type="INTERNAL_TRADING", status="PENDING")
             db.add(w); await db.flush()
