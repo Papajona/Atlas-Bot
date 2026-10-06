@@ -1,6 +1,0 @@
-<resources>
-    <string name="app_name">Atlas Trading</string>
-    <string name="backend_url">https://ais-dev-kuk646o5is6tprck63zv3a-882434298722.europe-west2.run.app</string>
-    <string name="trusted_web_host">ais-dev-kuk646o5is6tprck63zv3a-882434298722.europe-west2.run.app</string>
-    <string name="trusted_checkout_host">checkout.stripe.com</string>
-</resources>
