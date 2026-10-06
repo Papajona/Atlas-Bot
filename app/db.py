@@ -445,10 +445,14 @@ async def init_db():
 
 class CustomerProfile(Base):
     __tablename__ = "customer_profiles"
-    __table_args__ = (UniqueConstraint("auth_user_id", name="uq_customer_auth_user_id"),)
+    __table_args__ = (
+        UniqueConstraint("auth_user_id", name="uq_customer_auth_user_id"),
+        UniqueConstraint("username", name="uq_customer_username"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     auth_user_id: Mapped[str] = mapped_column(String(120), nullable=False)
     email: Mapped[str] = mapped_column(EncryptedText, default="")
+    username: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     display_name: Mapped[str] = mapped_column(EncryptedText, default="")
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
