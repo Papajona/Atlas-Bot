@@ -960,7 +960,24 @@ async def _usdt_tron_monitor_loop():
                                 if not txid or block_ts <= 0:
                                     continue
 
-                                provider_ref = _tron_deposit_reference(seen_refs, txid=txid, sender=sender,
+                                transfer_key = f"{txid}:{sender}:{wallet.deposit_address}:{raw_value}:{block_ts}"
+                                prior_count = seen_refs.get(transfer_key, 0)
+                                # A TRON transaction can contain multiple transfers. If the upstream
+                                # response does not expose a stable event/log index, identical transfer
+                                # records inside one tx cannot be distinguished safely. Do not invent an
+                                # ordinal (#1/#2) as a financial identity: API pagination/order can change.
+                                if prior_count > 0:
+                                    await _audit("TRON_DEPOSIT_IDENTITY_AMBIGUOUS", {
+                                        "wallet_id": wallet.id, "txid": txid,
+                                        "sender": sender, "recipient": wallet.deposit_address,
+                                        "raw_value": str(raw_value), "block_timestamp": block_ts,
+                                        "reason": "duplicate transfer signature without stable event index",
+                                    })
+                                    _defer(block_ts)
+                                    seen_refs[transfer_key] = prior_count + 1
+                                    continue
+                                seen_refs[transfer_key] = 1
+                                provider_ref = _tron_deposit_reference({}, txid=txid, sender=sender,
                                                                        address=wallet.deposit_address, raw_value=raw_value, block_ts=block_ts)
                                 async with SessionLocal() as db:
                                     already_credited = (await db.execute(select(FundingTransaction.id).where(
