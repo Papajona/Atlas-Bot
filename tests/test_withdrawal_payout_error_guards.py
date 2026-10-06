@@ -58,3 +58,66 @@ def test_mark_not_sent_requires_dual_control_and_unknown_status_and_evidence():
     schemas = ast.parse((ROOT / "app" / "schemas.py").read_text(encoding="utf-8"))
     cls = next(n for n in schemas.body if isinstance(n, ast.ClassDef) and n.name == "WithdrawalNotSentRequest")
     assert "min_length=20" in ast.unparse(cls), "evidence must have a minimum length"
+
+
+def test_immediate_provider_failure_releases_the_withdrawal_reserve():
+    src = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    fn = _fn("release_withdrawal")
+    text = ast.unparse(fn)
+    assert "w3.status = 'FAILED'" in text
+    assert "result.status == 'FAILED'" in text
+    assert 'ledger_release_withdrawal(db3, w3.customer_id, w3.amount' in text
+
+
+def test_immediate_provider_unknown_never_releases_reserve():
+    fn = _fn("release_withdrawal")
+    text = ast.unparse(fn)
+    unknown = next(n for n in ast.walk(fn)
+                   if isinstance(n, ast.ExceptHandler)
+                   and ast.unparse(n.type) == "PayoutUnknown")
+    assert "ledger_release_withdrawal" not in ast.unparse(unknown)
+    assert "w2.status = 'UNKNOWN'" in text
+
+
+def test_withdrawal_provider_identifier_is_unique_and_recovery_is_durable():
+    db = (ROOT / "app" / "db.py").read_text(encoding="utf-8")
+    migration = (ROOT / "alembic" / "versions" / "0034_withdrawal_provider_identity.py").read_text(encoding="utf-8")
+    assert "uq_withdrawal_provider_id_nonempty" in db
+    assert "unique=True" in db
+    assert "provider_id <> ''" in migration
+    main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    loop_start = main.index("async def _withdrawal_recovery_loop")
+    loop_end = main.index("\ndef _tron_base58check_valid", loop_start)
+    recovery_loop = main[loop_start:loop_end]
+    assert 'Withdrawal.status.in_(["UNKNOWN", "SUBMITTED"])' in recovery_loop
+    assert "WITHDRAWAL_RECOVERY_DUE" in recovery_loop
+    assert "no blind payout retry" in recovery_loop
+
+
+def test_withdrawal_reconciliation_never_turns_unresolved_provider_state_into_success():
+    fn = _fn("reconcile_withdrawal")
+    text = ast.unparse(fn)
+    assert "PayoutUnknown" in text
+    assert "raise _safe_http_error" in text
+    assert "result.status == 'COMPLETED'" in text
+    assert "result.status == 'FAILED'" in text
+    assert "w.status = 'RELEASED'" in text
+    assert "'FAILED' if result.status == 'FAILED'" in text
+
+
+def test_final_money_safety_has_no_direct_blind_retry_after_restart():
+    main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    loop_start = main.index("async def _withdrawal_recovery_loop")
+    loop_end = main.index("\ndef _tron_base58check_valid", loop_start)
+    recovery_loop = main[loop_start:loop_end]
+    assert ".send(" not in recovery_loop
+    assert "provider.send" not in recovery_loop
+    assert "reconcile" not in recovery_loop.lower() or "no blind payout retry" in recovery_loop
+
+
+def test_sweep_and_withdrawal_terminal_states_are_explicit():
+    custody = (ROOT / "app" / "custody_locations.py").read_text(encoding="utf-8")
+    assert '"CONFIRMED"' in custody and '"FAILED"' in custody and '"RECONCILIATION_REQUIRED"' in custody
+    assert '"UNKNOWN"' in custody
+    sweep = (ROOT / "app" / "tron_sweep.py").read_text(encoding="utf-8")
+    assert 'return "UNKNOWN"' in sweep
