@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     require_live_confirmation: bool = True
     live_confirmation_text: str = "ENABLE_LIVE_TRADING"
     require_single_worker_for_live: bool = True
+    # A live-enable request is temporary approval state. Expire it before a stale
+    # request can be approved after operational context has changed.
+    live_enable_request_ttl_seconds: int = 300
     # Daily autonomous market intelligence + research cycle.
     daily_research_enabled: bool = True
     daily_research_hour_utc: int = 1
@@ -418,6 +421,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _production_security_requirements(self):
+        if self.live_enable_request_ttl_seconds < 30:
+            raise ValueError("LIVE_ENABLE_REQUEST_TTL_SECONDS must be >= 30")
         if self.customer_live_trading_enabled:
             if self.paper_trading:
                 raise ValueError("CUSTOMER_LIVE_TRADING_ENABLED cannot be true while PAPER_TRADING=true")
@@ -428,6 +433,8 @@ class Settings(BaseSettings):
             if str(self.customer_live_market_type).lower() != "spot":
                 raise ValueError("CUSTOMER_LIVE_MARKET_TYPE must be spot for customer live execution")
         if self.environment in {"staging", "production"}:
+            if self.environment == "production" and not self.admin_totp_required:
+                raise ValueError("ADMIN_TOTP_REQUIRED must remain true in production")
             if self.usdt_tron_enabled and not self.usdt_tron_account_xpub:
                 raise ValueError("USDT_TRON_ACCOUNT_XPUB is required when TRON deposits are enabled")
             if self.process_role == "api":
