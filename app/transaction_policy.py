@@ -21,7 +21,7 @@ async def register_or_check_destination(db, *, customer_id: int, destination: st
     ).with_for_update())).scalar_one_or_none()
     if not row:
         row = WithdrawalDestination(
-            customer_id=customer_id, fingerprint=fp, currency=currency.upper(),
+            customer_id=customer_id, fingerprint=fp, destination=destination.strip(), currency=currency.upper(),
             network=network.upper(), first_seen_at=now, status="PENDING",
         )
         db.add(row)
@@ -29,6 +29,8 @@ async def register_or_check_destination(db, *, customer_id: int, destination: st
         return {"allowed": False, "reason": "new_destination_cooling_off", "fingerprint": fp, "ready_at": (now + timedelta(hours=max(0, settings.withdrawal_address_cooling_off_hours))).isoformat()}
 
     row.last_used_at = now
+    if not row.destination:
+        row.destination = destination.strip()
     if row.status == "VERIFIED":
         return {"allowed": True, "reason": "verified_destination", "fingerprint": fp}
 
