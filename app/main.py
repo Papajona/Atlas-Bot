@@ -5109,7 +5109,16 @@ async def manage_customer_pilot(
     await require_role(claims, "RISK_OFFICER")
     actor_id = str(claims.get("sub") or _audit_actor.get() or "")
     now = datetime.now(timezone.utc)
-    if body.action in {"REQUEST", "APPROVE"}:
+    if body.action == "REQUEST":
+        if (
+            body.expires_at is None
+            or body.max_position_notional_usd is None
+            or body.max_total_exposure_usd is None
+            or body.max_open_positions is None
+            or body.max_leverage is None
+            or body.daily_loss_limit is None
+        ):
+            raise HTTPException(400, "Pilot request requires expiry and all risk caps")
         expires_at = body.expires_at
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
