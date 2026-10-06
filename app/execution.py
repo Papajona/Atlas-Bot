@@ -1581,6 +1581,89 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
     return {"results": results, "account": account, "reconciliation": reconciliation_meta}
 
 
+def _position_amount_from_exchange_row(row: dict[str, Any]) -> float:
+    for key in ("contracts", "contractSize", "amount", "quantity"):
+        value = row.get(key)
+        if value is not None:
+            try:
+                return abs(float(value))
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def _position_side_from_exchange_row(row: dict[str, Any]) -> str:
+    side = str(row.get("side") or "").lower()
+    if side in {"long", "short"}:
+        return side
+    info = row.get("info") if isinstance(row.get("info"), dict) else {}
+    raw = str(info.get("positionSide") or info.get("side") or "").lower()
+    return raw if raw in {"long", "short"} else ""
+
+
+async def _flatten_exchange_positions(broker: Any, scope: str, failures: list[dict[str, str]], canceled: list[dict[str, str]]) -> None:
+    try:
+        rows = await asyncio.to_thread(broker.fetch_positions)
+    except Exception as exc:
+        failures.append({"scope": scope, "error": f"Unable to read open positions for flattening: {exc}"})
+        return
+    for row in rows or []:
+        symbol = str(row.get("symbol") or "")
+        amount = _position_amount_from_exchange_row(row)
+        side = _position_side_from_exchange_row(row)
+        if not symbol or amount <= 0:
+            continue
+        if side not in {"long", "short"}:
+            failures.append({"scope": scope, "symbol": symbol, "error": "Open position has no unambiguous long/short side; refusing to submit a flattening order"})
+            continue
+        close_side = "sell" if side == "long" else "buy"
+        try:
+            order = await asyncio.to_thread(broker.market_order, symbol, close_side, amount, f"emergency-flat-{uuid.uuid4().hex[:20]}", None, None, True)
+            canceled.append({"scope": scope, "position_symbol": symbol, "order_id": str(order.get("id") or "")})
+        except Exception as exc:
+            failures.append({"scope": scope, "symbol": symbol, "error": f"Reduce-only flatten failed: {exc}"})
+    try:
+        remaining = await asyncio.to_thread(broker.fetch_positions)
+        unresolved = [str(row.get("symbol") or "") for row in remaining or [] if str(row.get("symbol") or "") and _position_amount_from_exchange_row(row) > 0]
+        if unresolved:
+            failures.append({"scope": scope, "error": f"Positions remain after reduce-only flatten: {unresolved[:20]}"})
+    except Exception as exc:
+        failures.append({"scope": scope, "error": f"Unable to verify positions after flattening: {exc}"})
+
+
+async def _flatten_customer_spot_positions(account: Any, broker: Any, failures: list[dict[str, str]], canceled: list[dict[str, str]]) -> None:
+    async with SessionLocal() as db:
+        positions = (await db.execute(select(Position).where(
+            Position.customer_id == account.customer_id,
+            Position.exchange == "binance",
+            Position.quantity != 0,
+            Position.entry_trade_id.in_(select(Trade.id).where(Trade.mode == "LIVE")),
+        ).with_for_update())).scalars().all()
+        snapshot = [(p.symbol, float(p.quantity or 0.0)) for p in positions]
+    for symbol, quantity in snapshot:
+        if quantity < 0:
+            failures.append({"scope": f"customer:{account.customer_id}", "symbol": symbol, "error": "Negative Spot position is unsupported; refusing to guess a close"})
+            continue
+        if quantity <= 0:
+            continue
+        try:
+            market = await asyncio.to_thread(broker.market_info, symbol)
+            base = str(market.get("base") or symbol.split("/")[0] or "").strip()
+            balance = await asyncio.to_thread(broker.fetch_balance)
+            free = float((balance.get("free") or {}).get(base) or 0.0)
+            amount = min(quantity, free)
+            if amount <= 0:
+                raise RuntimeError(f"no free {base} balance available to close recorded live position")
+            amount = await asyncio.to_thread(broker.normalize_amount, symbol, amount)
+            if amount <= 0:
+                raise RuntimeError("exchange precision normalized the flatten quantity to zero")
+            order = await asyncio.to_thread(broker.market_order, symbol, "sell", amount, f"emergency-spot-flat-{uuid.uuid4().hex[:16]}", None, None, False)
+            canceled.append({"scope": f"customer:{account.customer_id}", "position_symbol": symbol, "order_id": str(order.get("id") or "")})
+        except Exception as exc:
+            failures.append({"scope": f"customer:{account.customer_id}", "symbol": symbol, "error": f"Spot flatten failed: {exc}"})
+    return
+
+
 async def emergency_stop(exchange: str | None = None):
     """Fence new live submissions, wait for any in-flight broker call, then cancel and verify open orders."""
     async with SessionLocal() as db:
@@ -1642,6 +1725,7 @@ async def emergency_stop(exchange: str | None = None):
             remaining = await asyncio.to_thread(broker.fetch_open_orders)
             if remaining:
                 failures.append({"scope": "platform_exchange", "error": f"Open orders remain after cancellation: {len(remaining)}"})
+            await _flatten_exchange_positions(broker, "platform_exchange", failures, canceled)
         except Exception as exc:
             cancel_error = str(exc)
             failures.append({"scope": "platform_exchange", "error": cancel_error})
@@ -1667,6 +1751,7 @@ async def emergency_stop(exchange: str | None = None):
                 remaining = await asyncio.to_thread(broker.fetch_open_orders)
                 if remaining:
                     failures.append({"scope": f"customer:{account.customer_id}", "error": f"Open orders remain after cancellation: {len(remaining)}"})
+                await _flatten_customer_spot_positions(account, broker, failures, canceled)
             except Exception as exc:
                 failure = {"scope": f"customer:{account.customer_id}", "error": str(exc)[:1000]}
                 failures.append(failure)
