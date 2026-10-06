@@ -263,3 +263,22 @@ def test_withdrawal_destination_is_persisted_encrypted_and_not_auto_released():
     assert 'destination=req.destination.strip()' in block
     assert 'register_or_check_destination' in block
     assert 'verify_destination(db, customer_id=profile.id, fingerprint=destination_policy["fingerprint"])' not in block
+
+
+def test_kyc_has_no_verification_provider_fields():
+    db = (ROOT / "app/db.py").read_text()
+    migration = (ROOT / "alembic/versions/0044_customer_kyc_username.py").read_text()
+    main = (ROOT / "app/main.py").read_text()
+    schema = (ROOT / "app/schemas.py").read_text()
+    db_block = db[db.index("class CustomerKYCProfile"):db.index("class WithdrawalDestination")]
+    migration_block = migration[migration.index('"customer_kyc_profiles"'):]
+    assert "verification_provider" not in db_block
+    assert "verification_provider_reference" not in db_block
+    assert "verification_provider" not in migration_block
+    assert "verification_provider_reference" not in migration_block
+    kyc = main[main.index('@app.get("/api/customer/kyc")'):main.index('@app.get("/api/customer/withdrawal-wallets")')]
+    assert "verification_provider" not in kyc
+    assert "verification_provider_reference" not in kyc
+    schema_block = schema[schema.index("class CustomerKYCSubmitRequest"):schema.index("class OtpSendRequest")]
+    assert "verification_provider" not in schema_block
+    assert "verification_provider_reference" not in schema_block
