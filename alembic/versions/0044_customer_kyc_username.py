@@ -51,8 +51,6 @@ def upgrade():
             sa.Column("document_reference", sa.Text(), nullable=False, server_default=""),
             sa.Column("document_issued_at", sa.Text(), nullable=False, server_default=""),
             sa.Column("document_expires_at", sa.Text(), nullable=False, server_default=""),
-            sa.Column("verification_provider", sa.String(80), nullable=False, server_default=""),
-            sa.Column("verification_provider_reference", sa.Text(), nullable=False, server_default=""),
             sa.Column("verification_result", sa.String(30), nullable=False, server_default="PENDING"),
             sa.Column("status", sa.String(30), nullable=False, server_default="PENDING"),
             sa.Column("submitted_at", sa.DateTime(timezone=True), nullable=True),
