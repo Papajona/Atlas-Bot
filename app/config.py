@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     supabase_jwks_url: str = ""
     supabase_auth_audience: str = "authenticated"
     funding_webhook_secret: str = ""
+    funding_webhook_max_skew_seconds: int = 300
 
     # Real USDT funding (TRON / TRC-20). Production API receives only a public
     # account-level extended public key (xpub) for new deposit-address derivation.
