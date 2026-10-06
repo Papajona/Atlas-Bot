@@ -36,6 +36,12 @@ android {
     val releaseKeyPassword = providers.environmentVariable("ATLAS_RELEASE_KEY_PASSWORD").orNull
 
     signingConfigs {
+        create("debugConfig") {
+            storeFile = file("${rootDir}/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
         create("releaseConfig") {
             if (!releaseStoreFile.isNullOrBlank() && !releaseStorePassword.isNullOrBlank() &&
                 !releaseKeyAlias.isNullOrBlank() && !releaseKeyPassword.isNullOrBlank()) {
@@ -48,7 +54,9 @@ android {
     }
 
     buildTypes {
-        debug { }
+        debug {
+            signingConfig = signingConfigs.getByName("debugConfig")
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
