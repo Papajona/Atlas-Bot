@@ -46,7 +46,7 @@ def upgrade():
         sa.UniqueConstraint("idempotency_key", name="uq_custody_transfer_idempotency"),
     )
     op.create_index("ix_custody_transfer_status_updated", "custody_transfers", ["status", "updated_at"])
-    op.create_index("ix_custody_transfer_customer", "custody_transfers", ["customer_id", "created_at"])
+    op.create_index("ix_custody_transfer_customer", "custody_transfers", ["customer_id", "requested_at"])
 
 
 def downgrade():
