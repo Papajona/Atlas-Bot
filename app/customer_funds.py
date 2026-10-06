@@ -4,7 +4,7 @@ import json
 import logging
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from .db import CustomerLedgerAccount, Incident, LedgerEntry, LedgerJournal, LedgerJournalLine, SessionLocal, Wallet, TradingAccount, utcnow
+from .db import CustomerLedgerAccount, Incident, LedgerEntry, LedgerJournal, LedgerJournalLine, SessionLocal, Wallet, utcnow
 
 USDT = "USDT"
 D = Decimal
