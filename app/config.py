@@ -251,7 +251,10 @@ class Settings(BaseSettings):
     custody_reconciliation_enabled: bool = True
     custody_reconciliation_interval_seconds: int = 300
     custody_solvency_min_ratio: float = 1.0
-    # When enabled, fresh external exchange observations become part of the solvency gate. Disabled by default until an exchange observer is deployed and verified.\n    binance_custody_reconciliation_enabled: bool = False\n    custody_observation_max_age_seconds: int = 300\n    # API abuse/resource controls. Per-process limiter; put a gateway limiter in front for multi-worker deployments.
+    # When enabled, fresh external exchange observations become part of the solvency gate.
+    # Disabled by default until an exchange observer is deployed and verified.
+    binance_custody_reconciliation_enabled: bool = False
+    custody_observation_max_age_seconds: int = 300
     api_rate_limit_per_minute: int = 120
     auth_rate_limit_per_minute: int = 10
     otp_rate_limit_per_minute: int = 5
