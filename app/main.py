@@ -3958,7 +3958,6 @@ async def customer_kyc(authorization: str | None = Header(default=None)):
             "document_reference": row.document_reference,
             "document_issued_at": row.document_issued_at,
             "document_expires_at": row.document_expires_at,
-            "verification_provider": row.verification_provider,
             "submitted_at": row.submitted_at.isoformat() if row.submitted_at else None,
             "verified_at": row.verified_at.isoformat() if row.verified_at else None,
         }
@@ -3981,8 +3980,6 @@ async def customer_kyc_submit(req: CustomerKYCSubmitRequest, authorization: str 
             setattr(row, key, value)
         row.status = "PENDING"
         row.verification_result = "PENDING"
-        row.verification_provider = ""
-        row.verification_provider_reference = ""
         row.submitted_at = datetime.now(timezone.utc)
         row.verified_at = None
         await db.commit()
