@@ -102,7 +102,7 @@ def test_withdrawal_reconciliation_never_turns_unresolved_provider_state_into_su
     assert "result.status == 'COMPLETED'" in text
     assert "result.status == 'FAILED'" in text
     assert "w.status = 'RELEASED'" in text
-    assert "w.status = 'FAILED'" in text
+    assert '"FAILED" if result.status == \'FAILED\'' in text
 
 
 def test_final_money_safety_has_no_direct_blind_retry_after_restart():
