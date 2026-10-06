@@ -365,3 +365,12 @@ def test_post_deposit_rechecks_idempotency_after_customer_ledger_lock():
     assert "existing.customer_id != customer_id" in block[recheck_pos:]
     assert "existing.amount" in block[recheck_pos:]
     assert block.index("fresh_ledger.available") > recheck_pos
+
+
+def test_tron_duplicate_transfer_signature_fails_closed():
+    src = Path("app/main.py").read_text()
+    scan = src[src.index("async def _usdt_tron_monitor_loop"):src.index("async def _reconciliation_loop")]
+    assert 'TRON_DEPOSIT_IDENTITY_AMBIGUOUS' in scan
+    assert 'duplicate transfer signature without stable event index' in scan
+    assert 'prior_count > 0' in scan
+    assert 'continue' in scan[scan.index("prior_count > 0"):scan.index("prior_count > 0") + 1800]
