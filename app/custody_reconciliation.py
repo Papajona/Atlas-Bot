@@ -213,6 +213,11 @@ async def reconcile_usdt_custody(db) -> dict:
             )
             return report
         assets += D(str(exchange_report["assets"]))
+    # A prior UNKNOWN result must not permanently pin the kill switch once a
+    # fresh external custody observation has actually been obtained. A fresh
+    # observation can still produce SHORTFALL; that state is represented by the
+    # dedicated solvency incident below.
+    await _resolve_incident(db, key="CUSTODY_RECONCILIATION:USDT:BINANCE:UNKNOWN")
     decision = solvency_decision(
         assets=assets,
         liabilities=liabilities,
