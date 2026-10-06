@@ -185,3 +185,10 @@ def test_emergency_stop_does_not_report_clean_halt_after_unresolved_positions():
     emergency = _function_source(EXEC, "emergency_stop")
     assert "Positions remain after reduce-only flatten" in EXEC
     assert "broker_halt_confirmed = not failures" in emergency
+
+
+def test_emergency_stop_flattens_oanda_positions():
+    emergency = _function_source(EXEC, "emergency_stop")
+    assert "broker.positions()" in emergency
+    assert "broker.close_position" in emergency
+    assert "unresolved_positions" in emergency
