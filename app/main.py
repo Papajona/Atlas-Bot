@@ -659,9 +659,10 @@ async def _run_persisted_adaptive_bot_cycle(bot_id: int, req: CustomerBotStartRe
     # code in review. Scaled down (not a hard block), the same treatment already used for
     # derivatives_context ELEVATED state a few lines above, so one correlated bot doesn't
     # starve every other bot in the same risk group outright.
-    open_positions = (await db.execute(select(Position).where(
-        Position.customer_id == profile.id, Position.quantity != 0,
-    ))).scalars().all()
+    async with SessionLocal() as db2:
+        open_positions = (await db2.execute(select(Position).where(
+            Position.customer_id == profile.id, Position.quantity != 0,
+        ))).scalars().all()
     proposed_notional = quantity * float(plan["entry_price"])
     group_check = adjusted_group_exposure(
         open_positions, proposed_symbol=req.symbol, proposed_notional=proposed_notional,
