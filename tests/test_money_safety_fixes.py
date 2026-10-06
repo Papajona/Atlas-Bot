@@ -173,7 +173,7 @@ def test_tron_scanner_marks_deferrals_before_advancing_cursor():
     src = open("app/main.py").read()
     scan = src[src.index("async def _usdt_tron_monitor_loop"):]
     scan = scan[:scan.index("\nasync def ", 10)] if "\nasync def " in scan[10:] else scan
-    assert scan.count("_defer(block_ts)") == 3                   # receipt, block number, confirmations
+    assert scan.count("_defer(block_ts)") == 4                   # receipt, block number, confirmations, ambiguous identity
     assert scan.index("_defer(block_ts)") < scan.index("highest_ts = max(highest_ts, block_ts)")
     assert "_next_tron_cursor(" in scan
 
