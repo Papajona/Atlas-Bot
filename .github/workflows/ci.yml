@@ -26,6 +26,7 @@ jobs:
       BROKER_SANDBOX: "true"
       BACKGROUND_RECONCILIATION_ENABLED: "false"
       ADMIN_TOKEN: test-admin-token-for-ci
+      MULTIDICT_NO_EXTENSIONS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -57,8 +58,15 @@ jobs:
         run: python scripts/check_no_secrets.py
       - name: Security scan
         run: python -m bandit -r app -lll
+      - name: Verify multidict pure-Python security workaround
+        run: |
+          python - <<'PY'
+          import multidict
+          assert multidict.CIMultiDict.__module__ == "multidict._multidict_py", multidict.CIMultiDict.__module__
+          PY
       - name: Dependency audit
-        run: python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325
+        # CVE-2026-104874 affects the multidict C extension 6.7.0-6.9.0; the upstream advisory documents MULTIDICT_NO_EXTENSIONS=1 as the pure-Python workaround.
+        run: python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325 --ignore-vuln CVE-2026-104874
       - name: Full PostgreSQL ledger concurrency suite
         run: |
           python -m pytest -q tests/test_postgres_ledger_concurrency_3_10_46.py

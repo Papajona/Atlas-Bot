@@ -659,9 +659,10 @@ async def _run_persisted_adaptive_bot_cycle(bot_id: int, req: CustomerBotStartRe
     # code in review. Scaled down (not a hard block), the same treatment already used for
     # derivatives_context ELEVATED state a few lines above, so one correlated bot doesn't
     # starve every other bot in the same risk group outright.
-    open_positions = (await db.execute(select(Position).where(
-        Position.customer_id == profile.id, Position.quantity != 0,
-    ))).scalars().all()
+    async with SessionLocal() as db2:
+        open_positions = (await db2.execute(select(Position).where(
+            Position.customer_id == profile.id, Position.quantity != 0,
+        ))).scalars().all()
     proposed_notional = quantity * float(plan["entry_price"])
     group_check = adjusted_group_exposure(
         open_positions, proposed_symbol=req.symbol, proposed_notional=proposed_notional,
@@ -1483,10 +1484,17 @@ async def get_customer(authorization: str | None, db, require_aal2: bool = True)
     return profile, claims
 
 
-def _funding_signature_valid(raw_body: bytes, signature: str | None) -> bool:
-    if not settings.funding_webhook_secret or not signature:
+def _funding_signature_valid(raw_body: bytes, signature: str | None, timestamp: str | None) -> bool:
+    if not settings.funding_webhook_secret or not signature or not timestamp:
         return False
-    expected = hmac.new(settings.funding_webhook_secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    try:
+        ts = int(str(timestamp).strip())
+    except (TypeError, ValueError):
+        return False
+    if abs(int(time.time()) - ts) > int(settings.funding_webhook_max_skew_seconds):
+        return False
+    signed = str(timestamp).strip().encode() + b"." + raw_body
+    expected = hmac.new(settings.funding_webhook_secret.encode(), signed, hashlib.sha256).hexdigest()
     supplied = signature.removeprefix("sha256=").strip()
     return hmac.compare_digest(expected, supplied)
 
@@ -2694,9 +2702,13 @@ async def customer_funding(authorization: str | None = Header(default=None)):
 
 
 @app.post("/api/internal/funding/webhook")
-async def funding_webhook(request: Request, x_funding_signature: str | None = Header(default=None)):
+async def funding_webhook(
+    request: Request,
+    x_funding_signature: str | None = Header(default=None),
+    x_funding_timestamp: str | None = Header(default=None),
+):
     raw = await request.body()
-    if not _funding_signature_valid(raw, x_funding_signature):
+    if not _funding_signature_valid(raw, x_funding_signature, x_funding_timestamp):
         raise HTTPException(401, "Invalid funding webhook signature")
     payload = FundingWebhook.model_validate(json.loads(raw))
     async with SessionLocal() as db:
@@ -3638,7 +3650,7 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
         positive_ratio=(sum(1 for f in folds if float(f.get("total_return",0))>0)/len(folds)) if folds else 0.0
         gate["oos_total_return"]=float(oos.get("oos_total_return",-1))
         gate["oos_positive_fold_ratio"]=positive_ratio
-        oos_gate=oos_promotion_gate(oos,min_dsr=(settings.research_min_deflated_sharpe or None),require_cost_stress=settings.research_require_cost_stress,min_folds=settings.strategy_oos_min_folds,min_total_return=settings.research_min_oos_total_return,min_positive_fold_ratio=settings.research_min_oos_positive_fold_ratio,max_negative_fold_return=settings.strategy_oos_max_negative_fold_return,require_last_fold_positive=settings.strategy_oos_require_last_fold_positive,min_sharpe=settings.strategy_oos_min_sharpe,max_drawdown=settings.strategy_oos_max_drawdown,min_trades=settings.strategy_oos_min_trades)
+        oos_gate=oos_promotion_gate(oos,min_dsr=settings.research_min_deflated_sharpe,require_cost_stress=settings.research_require_cost_stress,min_folds=settings.strategy_oos_min_folds,min_total_return=settings.research_min_oos_total_return,min_positive_fold_ratio=settings.research_min_oos_positive_fold_ratio,max_negative_fold_return=settings.strategy_oos_max_negative_fold_return,require_last_fold_positive=settings.strategy_oos_require_last_fold_positive,min_sharpe=settings.strategy_oos_min_sharpe,max_drawdown=settings.strategy_oos_max_drawdown,min_trades=settings.strategy_oos_min_trades)
         gate["oos_gate"]=oos_gate
         gate["robustness_monte_carlo"]=monte_carlo_bootstrap([float(x.get("total_return",0)) for x in (oos.get("folds") or [])],trials=500)
         passed=(gate["sharpe"]>=settings.adaptive_min_sharpe and gate["max_drawdown"]>=-abs(settings.adaptive_max_drawdown) and gate["trades"]>=settings.adaptive_min_trades and gate["total_return"]>=settings.adaptive_min_total_return and oos_gate["passed"])

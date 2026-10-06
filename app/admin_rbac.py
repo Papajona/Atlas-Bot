@@ -32,12 +32,16 @@ async def get_roles(auth_user_id: str) -> set[str]:
     if not uid:
         return set()
     async with SessionLocal() as db:
-        rows = (await db.execute(select(AdminRole.role).where(AdminRole.auth_user_id == uid, AdminRole.active.is_(True)))).all()
-    roles = {str(r[0]).upper() for r in rows if str(r[0]).upper() in ROLES}
-    if roles:
-        return roles
-    # Backward-compatible bootstrap: an explicitly allowlisted Supabase admin is ADMIN
-    # until a database role is assigned. Once any role exists, the database is authoritative.
+        rows = (await db.execute(select(AdminRole.role, AdminRole.active).where(AdminRole.auth_user_id == uid))).all()
+    # Any DB assignment, including an inactive one, makes the database authoritative.
+    # This prevents a demoted allow-listed administrator from regaining access via
+    # the environment bootstrap fallback.
+    if rows:
+        return {
+            str(role).upper()
+            for role, active in rows
+            if bool(active) and str(role).upper() in ROLES
+        }
     allowed = {x.strip() for x in str(settings.admin_supabase_user_ids or "").split(",") if x.strip()}
     if uid in allowed:
         env_role = _env_assignments().get(uid, "ADMINISTRATOR")

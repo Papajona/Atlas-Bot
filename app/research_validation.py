@@ -213,9 +213,9 @@ def oos_promotion_gate(oos: dict, *, min_dsr: float | None = None, require_cost_
     sharpe = float(oos.get("sharpe", 0.0)) if "sharpe" in oos else None
     max_dd = float(oos.get("max_drawdown", -1.0)) if "max_drawdown" in oos else None
     trades = int(oos.get("trades", 0)) if "trades" in oos else None
-    sharpe_ok = True if min_sharpe is None or sharpe is None else sharpe >= float(min_sharpe)
-    dd_ok = True if max_drawdown is None or max_dd is None else max_dd >= float(max_drawdown)
-    trades_ok = True if min_trades is None or trades is None else trades >= int(min_trades)
+    sharpe_ok = True if min_sharpe is None else (sharpe is not None and sharpe >= float(min_sharpe))
+    dd_ok = True if max_drawdown is None else (max_dd is not None and max_dd >= float(max_drawdown))
+    trades_ok = True if min_trades is None else (trades is not None and trades >= int(min_trades))
     dsr_value = oos.get("deflated_sharpe")
     # Fail closed: when a DSR floor is configured, a missing/insufficient DSR is NOT a pass.
     dsr_ok = True if min_dsr is None else (dsr_value is not None and float(dsr_value) >= float(min_dsr))
@@ -224,7 +224,8 @@ def oos_promotion_gate(oos: dict, *, min_dsr: float | None = None, require_cost_
     stress_ok = True if not require_cost_stress else bool(stress_value is True)
     passed = bool(
         str(oos.get("status", "OK")) == "OK" and len(returns) >= int(min_folds) and
-        float(oos.get("oos_total_return", oos.get("total_return", -1.0))) >= float(min_total_return) and
+        ("oos_total_return" in oos or "total_return" in oos) and
+        float(oos.get("oos_total_return", oos.get("total_return"))) >= float(min_total_return) and
         positive_ratio >= float(min_positive_fold_ratio) and worst >= float(max_negative_fold_return) and
         (last_positive if require_last_fold_positive else True) and sharpe_ok and dd_ok and trades_ok and dsr_ok and stress_ok
     )

@@ -29,7 +29,7 @@ def _passing_wfo():
     folds = [{"total_return": 0.05}, {"total_return": 0.04}, {"total_return": 0.03},
               {"total_return": 0.02}, {"total_return": 0.06}]
     return {"sharpe": 1.2, "max_drawdown": -0.05, "trades": 50, "total_return": 0.10,
-            "folds": folds, "cost_stress_ok": True}
+            "folds": folds, "cost_stress_ok": True, "status": "OK", "oos_total_return": 0.10, "deflated_sharpe": 1.0}
 
 
 def _failing_wfo():
@@ -79,6 +79,10 @@ def test_two_consecutive_passes_promotes_with_default_policy(mocked_training):
     try:
         first = ensure_adaptive_model(_synthetic_ohlcv(), str(model_path), policy=AdaptiveModelPolicy())
         assert first["status"] == "CHALLENGER_PASSED_AWAITING_CONFIRMATION"
+        streak = _streak_path(model_path)
+        value = json.loads(streak.read_text())
+        value["evaluated_at"] = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=21)).isoformat()
+        streak.write_text(json.dumps(value))
         second = ensure_adaptive_model(_synthetic_ohlcv(seed=12), str(model_path), policy=AdaptiveModelPolicy())
         assert second["status"] == "CHAMPION_PROMOTED"
         assert second["consecutive_passes"] == 2
@@ -104,6 +108,10 @@ def test_a_failure_resets_the_streak(mocked_training):
 
         # One pass after the reset must NOT be enough -- the earlier pass doesn't carry over.
         ab.ai_walk_forward_backtest = lambda *a, **k: _passing_wfo()
+        streak = _streak_path(model_path)
+        value = json.loads(streak.read_text())
+        value["evaluated_at"] = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=21)).isoformat()
+        streak.write_text(json.dumps(value))
         r3 = ensure_adaptive_model(_synthetic_ohlcv(seed=3), str(model_path), policy=AdaptiveModelPolicy())
         assert r3["status"] == "CHALLENGER_PASSED_AWAITING_CONFIRMATION"
         assert r3["consecutive_passes"] == 1
@@ -126,6 +134,15 @@ def test_required_count_is_configurable_toward_longer_evidence_windows(mocked_tr
             assert r["status"] == "CHALLENGER_PASSED_AWAITING_CONFIRMATION"
             assert r["consecutive_passes"] == i + 1
             assert not model_path.exists()
+            if i < 2:
+                streak = _streak_path(model_path)
+                value = json.loads(streak.read_text())
+                value["evaluated_at"] = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=21)).isoformat()
+                streak.write_text(json.dumps(value))
+        streak = _streak_path(model_path)
+        value = json.loads(streak.read_text())
+        value["evaluated_at"] = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=21)).isoformat()
+        streak.write_text(json.dumps(value))
         final = ensure_adaptive_model(_synthetic_ohlcv(seed=99), str(model_path), policy=policy)
         assert final["status"] == "CHAMPION_PROMOTED"
         assert final["consecutive_passes"] == 4
@@ -140,6 +157,10 @@ def test_promotion_clears_the_streak_file_for_the_next_cycle(mocked_training):
     ab.ai_walk_forward_backtest = lambda *a, **k: _passing_wfo()
     try:
         ensure_adaptive_model(_synthetic_ohlcv(seed=1), str(model_path), policy=AdaptiveModelPolicy())
+        streak = _streak_path(model_path)
+        value = json.loads(streak.read_text())
+        value["evaluated_at"] = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=21)).isoformat()
+        streak.write_text(json.dumps(value))
         ensure_adaptive_model(_synthetic_ohlcv(seed=2), str(model_path), policy=AdaptiveModelPolicy())
         assert not _streak_path(model_path).exists()
     finally:

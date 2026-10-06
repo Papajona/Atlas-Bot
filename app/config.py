@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     supabase_jwks_url: str = ""
     supabase_auth_audience: str = "authenticated"
     funding_webhook_secret: str = ""
+    funding_webhook_max_skew_seconds: int = 300
 
     # Real USDT funding (TRON / TRC-20). Production API receives only a public
     # account-level extended public key (xpub) for new deposit-address derivation.
@@ -86,6 +87,9 @@ class Settings(BaseSettings):
     paper_trading: bool = True
     live_trading_enabled: bool = False
     customer_live_trading_enabled: bool = False  # Requires an isolated exchange/subaccount mapping per customer.
+    # Customer-live execution is deliberately fixed to Binance Spot; research venue defaults are separate.
+    customer_live_exchange: str = "binance"
+    customer_live_market_type: str = "spot"
     binance_customer_subaccounts_enabled: bool = True
     binance_customer_universal_transfer_allowed: bool = False
     broker_sandbox: bool = True
@@ -406,6 +410,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _production_security_requirements(self):
+        if self.customer_live_trading_enabled:
+            if self.paper_trading:
+                raise ValueError("CUSTOMER_LIVE_TRADING_ENABLED cannot be true while PAPER_TRADING=true")
+            if not self.live_trading_enabled:
+                raise ValueError("CUSTOMER_LIVE_TRADING_ENABLED requires LIVE_TRADING_ENABLED=true")
+            if str(self.customer_live_exchange).lower() != "binance":
+                raise ValueError("CUSTOMER_LIVE_EXCHANGE must be binance for customer live execution")
+            if str(self.customer_live_market_type).lower() != "spot":
+                raise ValueError("CUSTOMER_LIVE_MARKET_TYPE must be spot for customer live execution")
         if self.environment in {"staging", "production"}:
             if self.usdt_tron_enabled and not self.usdt_tron_account_xpub:
                 raise ValueError("USDT_TRON_ACCOUNT_XPUB is required when TRON deposits are enabled")

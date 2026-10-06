@@ -157,3 +157,49 @@ def test_network_delay_race_cannot_return_confirmed_halt_before_reconciliation()
     assert "LIVE_SUBMISSION_LOCK_KEY" in EXEC
     assert "broker_halt_confirmed" in emergency
     assert '"ok": broker_halt_confirmed' in emergency
+
+
+def test_emergency_stop_flattens_derivative_positions_reduce_only():
+    emergency = _function_source(EXEC, "emergency_stop")
+    assert "_flatten_exchange_positions" in emergency
+    assert "fetch_positions" in EXEC
+    assert "Reduce-only flatten failed" in EXEC
+    assert "reduce_only" in EXEC
+    assert 'close_side = "sell" if side == "long" else "buy"' in EXEC
+
+
+def test_emergency_stop_flattens_customer_spot_positions_only_from_live_atlas_positions():
+    emergency = _function_source(EXEC, "emergency_stop")
+    assert "_flatten_customer_spot_positions" in emergency
+    assert 'Position.exchange == "binance"' in EXEC
+    assert 'Trade.mode == "LIVE"' in EXEC
+    assert "Negative Spot position is unsupported" in EXEC
+
+
+def test_emergency_spot_flatten_requires_full_fill():
+    assert 'status not in {"closed", "filled"}' in EXEC
+    assert "Spot flatten order was not fully filled" in EXEC
+
+
+def test_emergency_stop_does_not_report_clean_halt_after_unresolved_positions():
+    emergency = _function_source(EXEC, "emergency_stop")
+    assert "Positions remain after reduce-only flatten" in EXEC
+    assert "broker_halt_confirmed = not failures" in emergency
+
+
+def test_emergency_stop_flattens_oanda_positions():
+    emergency = _function_source(EXEC, "emergency_stop")
+    assert "broker.positions" in EXEC
+    assert "broker.close_position" in emergency
+    assert "unresolved_positions" in emergency
+
+
+def test_platform_spot_emergency_stop_does_not_send_derivative_reduce_only_order():
+    assert 'if _is_derivatives_market(broker):' in EXEC
+    assert 'await _flatten_exchange_positions(broker, "platform_exchange", failures, canceled)' in EXEC
+
+
+def test_emergency_stop_does_not_reset_cancellation_state_after_barrier_failure():
+    emergency = _function_source(EXEC, "emergency_stop")
+    assert emergency.count("canceled: list[dict[str, str]] = []") == 1
+    assert emergency.count("cancel_error = None") == 1
