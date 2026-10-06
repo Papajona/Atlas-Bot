@@ -7,8 +7,8 @@ def test_production_legacy_admin_token_is_not_an_auth_path():
     assert 'Administrator authentication requires Supabase Auth with MFA outside development' in s
 
 def test_production_migration_gate_exists():
-    s=(ROOT/"app/main.py").read_text()
-    assert '_assert_database_migrations_current' in s
+    s=(ROOT/"app/startup_guards.py").read_text()
+    assert "async def assert_database_migrations_current" in s
     assert "alembic upgrade head" in s
 
 def test_security_headers_use_actual_environment():
@@ -25,7 +25,7 @@ def test_market_controls_are_functional():
     assert 'data-market-filter="bullish"' in s
     assert "globalSearch')?.addEventListener('input',applyMarketFilters)" in s
 
-def test_current_release_identity_is_3_10_43():
+def test_current_release_identity_is_3_10_47():
     assert 'app_version: str = "3.10.47"' in (ROOT/"app/config.py").read_text()
     assert '__version__ = "3.10.47"' in (ROOT/"app/__init__.py").read_text()
     assert 'versionName = "3.10.47"' in (ROOT/"app/build.gradle.kts").read_text()
