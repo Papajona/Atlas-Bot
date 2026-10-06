@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Read-only CCXT sandbox connectivity check. It never creates an order."""
 import os
-import sys
 from app.broker import Broker, BrokerConfig
 
 exchange = os.getenv("DEFAULT_EXCHANGE", "bybit")
