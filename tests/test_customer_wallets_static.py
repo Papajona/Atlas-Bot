@@ -198,3 +198,31 @@ def test_quantize_money_bounds_float_drift():
         total += 0.1
     assert total != 1.0  # the raw float drift this guards against
     assert quantize_money(total) == 1.0
+
+
+def test_tron_auto_credit_is_customer_wallet_bound_and_confirmed_only():
+    source = (ROOT / "app/main.py").read_text()
+    scanner = source[source.index("async def _usdt_tron_monitor_loop"):source.index("async def _daily_research_loop")]
+    assert 'Wallet.currency == "USDT", Wallet.network == "TRON", Wallet.status == "ACTIVE"' in scanner
+    assert 'str(item.get("to", "")) != wallet.deposit_address' in scanner
+    assert 'FundingTransaction.provider == "tron-usdt"' in scanner
+    assert 'status="CONFIRMED"' in scanner
+    assert 'await post_deposit(db, customer_id=locked_wallet.customer_id, wallet_id=locked_wallet.id' in scanner
+    assert 'await sync_wallet_from_ledger(db, locked_wallet.customer_id, "USDT")' in scanner
+    assert 'account.cash_equity = bal["available"] + bal["trading_reserved"]' in scanner
+
+
+def test_tron_shared_address_mode_never_auto_credits_by_amount():
+    source = (ROOT / "app/main.py").read_text()
+    block = source[source.index('@app.get("/api/customer/usdt/deposit")'):source.index('@app.get("/api/customer/ledger")')]
+    assert 'if settings.usdt_tron_shared_deposit_mode:' in block
+    assert 'credit_mode": "MANUAL_REVIEW"' in block
+    assert 'Shared-address deposits cannot be auto-attributed safely' in block
+    assert 'credit_mode": "AUTOMATIC"' in block
+
+
+def test_tron_customer_id_is_wallet_ownership_key_not_transfer_amount():
+    source = (ROOT / "app/main.py").read_text()
+    scanner = source[source.index("async def _usdt_tron_monitor_loop"):source.index("async def _daily_research_loop")]
+    assert 'locked_wallet.customer_id' in scanner
+    assert 'where(Wallet' in scanner
