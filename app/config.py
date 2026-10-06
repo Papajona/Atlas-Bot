@@ -465,6 +465,16 @@ class Settings(BaseSettings):
                     "RESEARCH_MIN_DEFLATED_SHARPE must be >= 0.95 in production "
                     "when adaptive AI promotion is enabled"
                 )
+        if self.max_consecutive_losses < 0:
+            raise ValueError("MAX_CONSECUTIVE_LOSSES must be >= 0")
+        if self.max_order_latency_ms_p95 < 0:
+            raise ValueError("MAX_ORDER_LATENCY_MS_P95 must be >= 0")
+        if not 0 <= self.max_order_error_rate_5m <= 1:
+            raise ValueError("MAX_ORDER_ERROR_RATE_5M must be between 0 and 1")
+        if self.execution_health_window_orders < 1:
+            raise ValueError("EXECUTION_HEALTH_WINDOW_ORDERS must be >= 1")
+        if self.continuous_risk_check_interval_seconds < 1:
+            raise ValueError("CONTINUOUS_RISK_CHECK_INTERVAL_SECONDS must be >= 1")
         return self
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
