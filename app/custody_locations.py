@@ -114,8 +114,11 @@ async def transition_custody_transfer(db, transfer_id: int, *, status: str,
     now = utcnow()
     if target == "SUBMITTED" and row.submitted_at is None:
         row.submitted_at = now
-    if target == "CONFIRMED" and row.confirmed_at is None:
-        row.confirmed_at = now
+    if target == "CONFIRMED":
+        if not str(provider_reference or row.provider_reference).strip():
+            raise ValueError("confirmed custody transfer requires provider_reference")
+        if row.confirmed_at is None:
+            row.confirmed_at = now
     if provider_reference:
         row.provider_reference = str(provider_reference)
     if detail is not None:
@@ -124,12 +127,13 @@ async def transition_custody_transfer(db, transfer_id: int, *, status: str,
     row.updated_at = now
     return row
 
-async def fresh_external_assets(db, *, currency: str = "USDT") -> dict:
+async def fresh_external_assets(db, *, currency: str = "USDT", provider: str = "binance") -> dict:
     """Only fresh observations count; in-flight transfers never count as assets."""
     cutoff = utcnow() - timedelta(seconds=max(1, int(settings.custody_observation_max_age_seconds)))
     rows = (await db.execute(
         select(CustodyAssetObservation).where(
             CustodyAssetObservation.currency == currency.upper(),
+            CustodyAssetObservation.provider == provider.lower(),
             CustodyAssetObservation.status == "ACTIVE",
             CustodyAssetObservation.observed_at >= cutoff,
         )
