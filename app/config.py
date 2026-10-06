@@ -86,6 +86,9 @@ class Settings(BaseSettings):
     paper_trading: bool = True
     live_trading_enabled: bool = False
     customer_live_trading_enabled: bool = False  # Requires an isolated exchange/subaccount mapping per customer.
+    # Authoritative venue for customer live execution. Generic research defaults remain separate.
+    customer_live_exchange: str = "binance"
+    customer_live_market_type: str = "spot"
     binance_customer_subaccounts_enabled: bool = True
     binance_customer_universal_transfer_allowed: bool = False
     broker_sandbox: bool = True
