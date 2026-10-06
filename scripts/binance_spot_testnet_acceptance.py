@@ -51,13 +51,21 @@ def main() -> int:
         raise RuntimeError(f"Testnet market order did not fill: {order}")
     report["steps"].append({"step":"spot_market_fill","ok":True,"order_id":oid,"filled":str(order.get("filled"))})
 
-    if not broker.supports_feature(symbol,"stopLoss"):
-        raise RuntimeError("Installed CCXT/Binance Testnet does not advertise stopLoss support for this symbol; refusing a false protective-stop PASS")
-    report["steps"].append({"step":"protective_stop_capability","ok":True})
+    order_types=set((market.get("info") or {}).get("orderTypes") or [])
+    if "STOP_LOSS" not in order_types:
+        raise RuntimeError("Binance exchangeInfo does not advertise STOP_LOSS for this Spot symbol; refusing a false protective-stop PASS")
+    report["steps"].append({"step":"protective_stop_capability","ok":True,"order_type":"STOP_LOSS"})
 
-    filled=dec(order["filled"]); stop_price=dec(broker.normalize_price(symbol,float(last*Decimal("0.80"))))
-    stop=client.create_order(symbol,"market","sell",float(dec(broker.normalize_amount(symbol,float(filled)))),None,
-        {"stopLossPrice":float(stop_price),"clientOrderId":"atlas-sl-"+uuid.uuid4().hex[:20]})
+    filled=dec(order["filled"])
+    stop_price=dec(broker.normalize_price(symbol,float(last*Decimal("0.80"))))
+    stop=client.create_order(
+        symbol,
+        "STOP_LOSS",
+        "sell",
+        float(dec(broker.normalize_amount(symbol,float(filled)))),
+        None,
+        {"stopPrice":float(stop_price),"clientOrderId":"atlas-sl-"+uuid.uuid4().hex[:20]},
+    )
     stop_id=str(stop["id"])
     report["steps"].append({"step":"protective_stop_created","ok":True,"order_id":stop_id})
 
