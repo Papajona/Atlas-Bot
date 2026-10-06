@@ -139,8 +139,7 @@ def test_multidict_production_backend_guard(monkeypatch):
 
 
 def test_live_order_requires_signal_timestamp():
-    from app.execution import RiskBlocked
-    src = (ROOT / "app" / "execution.py").read_text() if "ROOT" in globals() else ""
+    src = (Path(__file__).resolve().parents[1] / "app" / "execution.py").read_text()
     assert "if live and not signal_timestamp:" in src
     assert 'raise RiskBlocked("Live signal timestamp is required")' in src
 
