@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+import sqlalchemy as sa
 from sqlalchemy import String, Float, Boolean, DateTime, Integer, BigInteger, Text, UniqueConstraint, Index, Numeric, ForeignKey, ForeignKeyConstraint
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
