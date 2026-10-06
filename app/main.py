@@ -3934,6 +3934,28 @@ async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorizatio
             "destination_masked": w.destination_masked, "required_approvals": w.required_approvals}
 
 
+@app.get("/api/customer/withdrawal-wallets")
+async def customer_withdrawal_wallets(authorization: str | None = Header(default=None)):
+    """List the customer's saved withdrawal destinations without exposing full addresses."""
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=True)
+        rows = (await db.execute(
+            select(WithdrawalDestination)
+            .where(WithdrawalDestination.customer_id == profile.id)
+            .order_by(WithdrawalDestination.last_used_at.desc().nullslast(), WithdrawalDestination.first_seen_at.desc())
+        )).scalars().all()
+        await db.commit()
+        return [{
+            "id": row.id,
+            "currency": row.currency,
+            "network": row.network,
+            "destination_masked": (row.destination[:6] + "…" + row.destination[-6:]) if row.destination else "",
+            "status": row.status,
+            "verified_at": row.verified_at.isoformat() if row.verified_at else None,
+            "first_seen_at": row.first_seen_at.isoformat(),
+            "last_used_at": row.last_used_at.isoformat() if row.last_used_at else None,
+        } for row in rows]
+
 @app.get("/api/customer/withdrawals")
 async def customer_withdrawals(authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
