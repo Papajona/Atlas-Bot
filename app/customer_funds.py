@@ -150,7 +150,7 @@ async def post_deposit(db, *, customer_id: int, wallet_id: int, amount: float, p
     amount_d = _q(amount)
     if amount_d <= 0:
         raise ValueError("deposit amount must be positive")
-    ledger = await get_or_create_ledger(db, customer_id, USDT)
+    await get_or_create_ledger(db, customer_id, USDT)
     legacy_idem = f"deposit:{provider_reference}"
     idem = f"deposit:{provider}:{provider_reference}" if provider else legacy_idem
     keys = {idem, legacy_idem}
