@@ -5403,7 +5403,8 @@ async def enable_live(body: LiveEnableRequest, x_admin_token: str | None = Heade
 
         if not s.live_enable_requested_by or not s.live_enable_requested_at:
             raise HTTPException(409, "No pending live-trading enablement request exists")
-        request_age = (now - s.live_enable_requested_at).total_seconds()
+        requested_at = s.live_enable_requested_at
+        request_age = (now - requested_at).total_seconds()
         if request_age > settings.live_enable_request_ttl_seconds:
             s.live_enable_requested_by = ""
             s.live_enable_requested_at = None
@@ -5412,7 +5413,7 @@ async def enable_live(body: LiveEnableRequest, x_admin_token: str | None = Heade
             s.live_enabled = False
             s.mode = "PAPER"
             await db.commit()
-            await _audit("LIVE_ENABLE_REQUEST_EXPIRED", {"requested_at": s.live_enable_requested_at, "actor_id": actor_id})
+            await _audit("LIVE_ENABLE_REQUEST_EXPIRED", {"requested_at": requested_at.isoformat(), "actor_id": actor_id})
             raise HTTPException(409, "Live-trading enablement request has expired; create a new request")
         if s.live_enable_requested_by == actor_id:
             raise HTTPException(409, "A different RISK_OFFICER must approve the live-trading request")
