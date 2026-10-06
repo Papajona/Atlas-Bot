@@ -93,3 +93,25 @@ def test_customer_withdrawal_maps_concurrent_reserve_conflict_to_409():
     assert "except ValueError as exc:" in block
     assert 'await db.rollback()' in block
     assert 'raise HTTPException(409, "Insufficient available USDT balance") from exc' in block
+
+def test_approval_binds_request_identity_to_authenticated_admin():
+    main = Path("app/main.py").read_text()
+    start = main.index('@app.post("/api/admin/withdrawals/{withdrawal_id}/approve")')
+    end = main.index('@app.post("/api/admin/withdrawals/{withdrawal_id}/release")', start)
+    block = main[start:end]
+    assert 'authenticated_approver = str(claims.get("sub") or claims.get("user_id") or "").strip()' in block
+    assert 'hmac.compare_digest(authenticated_approver, str(req.admin_id or "").strip())' in block
+    assert 'Approver identity must match the authenticated user' in block
+
+
+def test_customer_withdrawal_retry_is_idempotent_before_reservation():
+    main = Path("app/main.py").read_text()
+    start = main.index('@app.post("/api/customer/withdrawals")')
+    end = main.index('@app.get("/api/customer/withdrawals")', start)
+    block = main[start:end]
+    assert 'request_id_seed = f"{profile.id}:{req.destination.strip()}:{req.amount}:{req.destination_tag or \'\'}:TRON:USDT:{settings.payout_provider}"' in block
+    assert 'Withdrawal.proposal_digest == final_digest' in block
+    assert 'Withdrawal.status.in_(["PENDING", "PARTIALLY_APPROVED", "APPROVED", "SUBMITTING", "SUBMITTED", "UNKNOWN"])' in block
+    assert '"idempotent": True' in block
+    assert block.index("existing =") < block.index("stepup.used_at =")
+    assert block.index("existing =") < block.index("reserve_withdrawal(")
