@@ -59,7 +59,7 @@ def test_settle_withdrawal_rechecks_idempotency_after_customer_ledger_lock():
     start = source.index("async def settle_withdrawal(")
     end = source.index("async def customer_balance(", start)
     block = source[start:end]
-    lock_pos = block.index("with_for_update")).scalar_one()")
+    lock_pos = block.index("with_for_update")
     recheck_pos = block.index("pre-lock idempotency check is only a fast path")
     assert recheck_pos > lock_pos
     assert 'LedgerJournal.idempotency_key == idem' in block
