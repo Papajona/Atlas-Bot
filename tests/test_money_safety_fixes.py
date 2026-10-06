@@ -350,3 +350,17 @@ def test_stepup_is_consumed_only_after_destination_gate():
         'stepup.used_at = datetime.now(timezone.utc)'
     )
     assert block.count('stepup.used_at = datetime.now(timezone.utc)') == 1
+
+
+def test_post_deposit_rechecks_idempotency_after_customer_ledger_lock():
+    source = Path("app/customer_funds.py").read_text()
+    start = source.index("async def post_deposit(")
+    end = source.index("async def sync_wallet_from_ledger(", start)
+    block = source[start:end]
+    lock_pos = block.index("with_for_update")
+    recheck_pos = block.index("The initial idempotency lookup is only a fast path")
+    assert recheck_pos > lock_pos
+    assert "LedgerEntry.idempotency_key.in_(keys)" in block[recheck_pos:]
+    assert "existing.customer_id != customer_id" in block[recheck_pos:]
+    assert "existing.amount" in block[recheck_pos:]
+    assert block.index("fresh_ledger.available") > recheck_pos
