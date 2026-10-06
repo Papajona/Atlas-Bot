@@ -22,9 +22,13 @@ on:
       - main
       - hardening/*
 
+permissions:
+  contents: read
+
 jobs:
   postgres-ledger-concurrency:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       ENVIRONMENT: development
       PAPER_TRADING: "true"
