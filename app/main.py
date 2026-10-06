@@ -5432,6 +5432,21 @@ async def reset(x_admin_token: str | None = Header(default=None), authorization:
         s = await db.get(AppState, 1)
         if not s:
             raise HTTPException(503, "Risk state is unavailable")
+        unresolved = (await db.execute(
+            select(Incident).where(
+                Incident.resolved_at.is_(None),
+                Incident.severity.in_(["CRITICAL", "HIGH"]),
+                Incident.category.in_([
+                    "CUSTODY", "UNIFIED_CUSTODY", "WITHDRAWAL_RECOVERY",
+                    "EXECUTION_PROTECTION", "LIVE_EXECUTION", "LEDGER",
+                ]),
+            ).order_by(Incident.created_at.desc()).limit(25)
+        )).scalars().all()
+        if unresolved:
+            raise HTTPException(
+                409,
+                "Risk reset is blocked while critical financial-safety incidents remain unresolved",
+            )
         s.kill_switch = False
         s.live_enabled = False
         s.mode = "PAPER"
