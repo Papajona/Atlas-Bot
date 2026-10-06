@@ -27,7 +27,7 @@ The 28-day period must use the exact release/configuration intended for the next
 | >=28 days and all interim gates pass | CONDITIONAL — four-week evidence gate passed |
 | >=90 days and all final gates pass | FINAL — full forward-evidence requirement satisfied |
 
-A 28-day pass must **not** be represented as a 90-day pass.
+A 28-day pass must not be represented as a 90-day pass.
 
 ## Required evidence record
 
