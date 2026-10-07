@@ -23,7 +23,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, desc, or_, func
 from sqlalchemy.exc import IntegrityError
 from .config import settings
-from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, StripeWebhookEvent, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
+from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, PaymentIntent, UsdtPaymentVerification, SubscriptionEvent, SubscriptionTradeUsage, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, StripeWebhookEvent, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
 from .trading_core import train_model, predict_latest, ai_walk_forward_backtest
 from .adaptive_bot import AdaptiveModelPolicy, ensure_adaptive_model, adaptive_model_status
@@ -1802,10 +1802,10 @@ def model_file(req):
 
 
 PLAN_DEFINITIONS = {
-    "free": {"name": "Atlas Free", "monthly": 0.0, "annual": 0.0, "ai_credits": 100, "exchanges": 0, "strategies": 0, "live": False, "paper": True, "features": ["market_analysis", "paper_trading", "basic_backtesting"]},
-    "starter": {"name": "Atlas Starter", "monthly": 7.99, "annual": 79.90, "ai_credits": 1000, "exchanges": 1, "strategies": 1, "live": True, "paper": True, "features": ["market_analysis", "paper_trading", "backtesting", "automated_entry_exit", "daily_research", "smart_trade", "market_scanner", "alerts","grid_bot", "arbitrage"]},
-    "pro": {"name": "Atlas Pro", "monthly": 17.99, "annual": 179.90, "ai_credits": 5000, "exchanges": 3, "strategies": 5, "live": True, "paper": True, "features": ["advanced_ai", "daily_research", "multi_timeframe", "risk_engine", "portfolio_analytics", "automated_entry_exit", "dca_bot", "smart_trade", "market_scanner", "alerts", "trading_journal","grid_bot", "arbitrage"]},
-    "elite": {"name": "Atlas Elite", "monthly": 39.99, "annual": 399.90, "ai_credits": 20000, "exchanges": 10, "strategies": 20, "live": True, "paper": True, "features": ["advanced_ai", "daily_research", "walk_forward", "portfolio_risk", "api_access", "priority_support", "dca_bot", "smart_trade", "market_scanner", "alerts", "trading_journal", "strategy_builder", "webhooks", "grid_bot", "arbitrage"]},
+    "free": {"name": "Atlas Free", "monthly": 0.0, "annual": 0.0, "ai_credits": 100, "exchanges": 0, "strategies": 0, "monthly_trade_limit": 1, "live": False, "paper": True, "features": ["market_analysis", "paper_trading", "basic_backtesting"]},
+    "starter": {"name": "Atlas Starter", "monthly": 7.99, "annual": 79.90, "ai_credits": 1000, "exchanges": 1, "strategies": 1, "monthly_trade_limit": 0, "live": True, "paper": True, "features": ["market_analysis", "paper_trading", "backtesting", "automated_entry_exit", "daily_research", "smart_trade", "market_scanner", "alerts","grid_bot", "arbitrage"]},
+    "pro": {"name": "Atlas Pro", "monthly": 17.99, "annual": 179.90, "ai_credits": 5000, "exchanges": 3, "strategies": 5, "monthly_trade_limit": 0, "live": True, "paper": True, "features": ["advanced_ai", "daily_research", "multi_timeframe", "risk_engine", "portfolio_analytics", "automated_entry_exit", "dca_bot", "smart_trade", "market_scanner", "alerts", "trading_journal","grid_bot", "arbitrage"]},
+    "elite": {"name": "Atlas Elite", "monthly": 39.99, "annual": 399.90, "ai_credits": 20000, "exchanges": 10, "strategies": 20, "monthly_trade_limit": 0, "live": True, "paper": True, "features": ["advanced_ai", "daily_research", "walk_forward", "portfolio_risk", "api_access", "priority_support", "dca_bot", "smart_trade", "market_scanner", "alerts", "trading_journal", "strategy_builder", "webhooks", "grid_bot", "arbitrage"]},
 }
 
 
@@ -1820,7 +1820,7 @@ async def _ensure_billing_plans(db):
     for code, d in PLAN_DEFINITIONS.items():
         row = (await db.execute(select(Plan).where(Plan.code == code))).scalar_one_or_none()
         if not row:
-            db.add(Plan(code=code, name=d["name"], monthly_price=d["monthly"], annual_price=d["annual"], ai_credits=d["ai_credits"], exchange_connections=d["exchanges"], active_strategies=d["strategies"], live_trading=d["live"], paper_trading=d["paper"], features_json=json.dumps(d["features"])))
+            db.add(Plan(code=code, name=d["name"], monthly_price=d["monthly"], annual_price=d["annual"], ai_credits=d["ai_credits"], exchange_connections=d["exchanges"], active_strategies=d["strategies"], monthly_trade_limit=d["monthly_trade_limit"], live_trading=d["live"], paper_trading=d["paper"], features_json=json.dumps(d["features"])))
         else:
             row.name=d["name"]; row.monthly_price=d["monthly"]; row.annual_price=d["annual"]; row.ai_credits=d["ai_credits"]; row.exchange_connections=d["exchanges"]; row.active_strategies=d["strategies"]; row.live_trading=d["live"]; row.paper_trading=d["paper"]; row.features_json=json.dumps(d["features"])
     await db.flush()
@@ -1828,12 +1828,20 @@ async def _ensure_billing_plans(db):
 
 async def _get_active_subscription(db, customer_id: int):
     sub = (await db.execute(select(Subscription).where(Subscription.customer_id == customer_id, Subscription.status.in_(["trialing", "active", "past_due"])).order_by(desc(Subscription.created_at)).limit(1))).scalar_one_or_none()
-    if sub and sub.status == "trialing" and sub.trial_end and sub.trial_end <= datetime.now(timezone.utc):
-        sub.status = "active"
-        sub.plan_code = "free"
-        sub.current_period_start = datetime.now(timezone.utc)
-        sub.current_period_end = datetime.now(timezone.utc)
-        await db.flush()
+    if sub:
+        now = datetime.now(timezone.utc)
+        if sub.current_period_end and sub.current_period_end <= now:
+            from datetime import timedelta
+            sub.status = "active"
+            sub.plan_code = "free"
+            sub.provider = "internal"
+            sub.provider_subscription_id = f"atlas-free-{customer_id}"
+            sub.billing_interval = "monthly"
+            sub.current_period_start = now
+            sub.current_period_end = now + timedelta(days=31)
+            sub.trial_end = None
+            sub.cancel_at_period_end = False
+            await db.flush()
     return sub
 
 
@@ -1844,10 +1852,20 @@ async def _ensure_customer_subscription(db, profile: CustomerProfile, referral_c
         return sub
     now = datetime.now(timezone.utc)
     from datetime import timedelta
-    trial_end = now + timedelta(days=max(0, settings.billing_trial_days))
+    period_end = now + timedelta(days=31)
     try:
         async with db.begin_nested():
-            sub = Subscription(customer_id=profile.id, plan_code="pro" if settings.billing_trial_days else "free", billing_interval="monthly", status="trialing" if settings.billing_trial_days else "active", provider="internal", provider_subscription_id=f"atlas-free-{profile.id}", current_period_start=now, current_period_end=trial_end, trial_end=trial_end)
+            sub = Subscription(
+                customer_id=profile.id,
+                plan_code="free",
+                billing_interval="monthly",
+                status="active",
+                provider="internal",
+                provider_subscription_id=f"atlas-free-{profile.id}",
+                current_period_start=now,
+                current_period_end=period_end,
+                trial_end=None,
+            )
             db.add(sub)
             await db.flush()
     except IntegrityError:
@@ -2520,8 +2538,200 @@ async def customer_billing(authorization: str | None = Header(default=None)):
         return {"plan": {"code": sub.plan_code if sub else "free", **plan}, "subscription": {"status": sub.status if sub else "active", "interval": sub.billing_interval if sub else "monthly", "period_end": sub.current_period_end.isoformat() if sub else None, "cancel_at_period_end": bool(sub.cancel_at_period_end) if sub else False}, "referral": {"code": code.code if code else None, "referred_count": len(referrals), "pending_commissions": float(commissions or 0)}}
 
 
+@app.post("/api/customer/billing/usdt-intent")
+async def customer_billing_usdt_intent(req: PlanChangeRequest, authorization: str | None = Header(default=None)):
+    if req.plan == "free":
+        raise HTTPException(409, "Free plan does not require payment")
+    if req.plan not in PLAN_DEFINITIONS:
+        raise HTTPException(400, "Unknown plan")
+    if not settings.billing_enabled:
+        raise HTTPException(503, "Billing is disabled")
+    receiving = str(settings.usdt_tron_treasury_address or "").strip()
+    contract = str(settings.usdt_tron_usdt_contract or "").strip()
+    if not receiving or not contract:
+        raise HTTPException(503, "USDT/TRON collection configuration is unavailable")
+    if not _tron_base58check_valid(receiving):
+        raise HTTPException(503, "Configured USDT/TRON receiving address is invalid")
+    now = datetime.now(timezone.utc)
+    from datetime import timedelta
+    amount_usd = Decimal(str(_plan_price(req.plan, req.interval))).quantize(Decimal("0.000001"))
+    amount_usdt = amount_usd
+    reference = f"ATLAS-{uuid.uuid4().hex[:20].upper()}"
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db)
+        intent = PaymentIntent(
+            customer_id=profile.id,
+            plan_code=req.plan,
+            billing_interval=req.interval,
+            amount_usd=amount_usd,
+            amount_usdt=amount_usdt,
+            usdt_usd_rate=Decimal("1"),
+            network="TRON",
+            token_contract=contract,
+            receiving_address=receiving,
+            payment_reference=reference,
+            status="PENDING",
+            expires_at=now + timedelta(minutes=30),
+        )
+        db.add(intent)
+        await db.commit()
+        await db.refresh(intent)
+        return {
+            "payment_intent_id": intent.id,
+            "plan": req.plan,
+            "interval": req.interval,
+            "currency": "USD",
+            "amount_usd": format(amount_usd, "f"),
+            "amount_usdt": format(amount_usdt, "f"),
+            "usdt_usd_rate": "1.00000000",
+            "network": "TRON",
+            "token": "USDT",
+            "token_contract": contract,
+            "receiving_address": receiving,
+            "payment_reference": reference,
+            "expires_at": intent.expires_at.isoformat(),
+            "instructions": "Send the exact USDT amount on TRON/TRC-20, then submit the transaction hash for server verification.",
+        }
+
+
+@app.post("/api/customer/billing/usdt-submit")
+async def customer_billing_usdt_submit(req: dict, authorization: str | None = Header(default=None)):
+    tx_hash = str(req.get("tx_hash") or "").strip().lower()
+    try:
+        intent_id = int(req.get("payment_intent_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "payment_intent_id is required")
+    if len(tx_hash) != 64 or any(c not in "0123456789abcdef" for c in tx_hash):
+        raise HTTPException(400, "Invalid TRON transaction hash")
+    import httpx
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db)
+        intent = (await db.execute(select(PaymentIntent).where(
+            PaymentIntent.id == intent_id,
+            PaymentIntent.customer_id == profile.id,
+        ).with_for_update())).scalar_one_or_none()
+        if not intent:
+            raise HTTPException(404, "Payment intent not found")
+        if intent.status == "CONFIRMED":
+            return {"ok": True, "status": "CONFIRMED", "subscription_plan": intent.plan_code}
+        now = datetime.now(timezone.utc)
+        if intent.expires_at <= now:
+            intent.status = "EXPIRED"
+            await db.commit()
+            raise HTTPException(409, "Payment intent has expired")
+        duplicate = (await db.execute(select(UsdtPaymentVerification).where(UsdtPaymentVerification.tx_hash == tx_hash))).scalar_one_or_none()
+        if duplicate and duplicate.payment_intent_id != intent.id:
+            raise HTTPException(409, "Transaction hash has already been submitted for another payment")
+        headers = {"accept": "application/json"}
+        if settings.usdt_trongrid_api_key:
+            headers["TRON-PRO-API-KEY"] = settings.usdt_trongrid_api_key
+        base = settings.usdt_trongrid_base_url.rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                txr = await client.post(f"{base}/walletsolidity/gettransactionbyid", json={"value": tx_hash}, headers=headers)
+                rr = await client.post(f"{base}/walletsolidity/gettransactioninfobyid", json={"value": tx_hash}, headers=headers)
+                br = await client.post(f"{base}/wallet/getnowblock", json={}, headers=headers)
+            tx_body = txr.json() if txr.status_code == 200 else {}
+            receipt = rr.json() if rr.status_code == 200 else {}
+            now_block = br.json() if br.status_code == 200 else {}
+        except httpx.HTTPError as exc:
+            raise _safe_http_error(503, exc, "TRON verification service is temporarily unavailable") from exc
+        if str(tx_body.get("txID") or tx_body.get("txid") or "").lower() != tx_hash:
+            raise HTTPException(409, "TRON transaction was not found")
+        if str((receipt.get("receipt") or {}).get("result") or "").upper() != "SUCCESS":
+            raise HTTPException(409, "TRON transaction is not successfully confirmed on-chain")
+        block_number = int(receipt.get("blockNumber") or 0)
+        current_height = int(((now_block.get("block_header") or {}).get("raw_data") or {}).get("number") or 0)
+        confirmations = current_height - block_number + 1 if block_number > 0 and current_height >= block_number else 0
+        required = max(1, int(settings.usdt_tron_min_confirmations))
+        if confirmations < required:
+            raise HTTPException(409, f"Payment has {confirmations} confirmations; {required} are required")
+        logs = receipt.get("log", []) or receipt.get("logs", []) or []
+        match = None
+        wanted_contract = str(intent.token_contract).lower()
+        for log in logs:
+            topics = [str(x).lower().removeprefix("0x") for x in (log.get("topics") or [])]
+            if len(topics) < 3 or topics[0] != "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a9df523b3ef":
+                continue
+            if str(log.get("address") or "").lower() not in {wanted_contract, _address_to_hex20_for_billing(wanted_contract)}:
+                continue
+            data = str(log.get("data") or "").removeprefix("0x")
+            if len(data) != 64:
+                continue
+            try:
+                from .tron_sweep import _hex_topic_to_tron_address
+                sender = _hex_topic_to_tron_address(topics[1])
+                recipient = _hex_topic_to_tron_address(topics[2])
+                raw_value = int(data, 16)
+            except Exception:
+                continue
+            if recipient == intent.receiving_address and raw_value == int((Decimal(intent.amount_usdt) * Decimal("1000000")).to_integral_value()):
+                match = (sender, recipient, raw_value)
+                break
+        if not match:
+            raise HTTPException(409, "No exact TRC-20 USDT transfer to the configured receiving address was found")
+        sender, recipient, raw_value = match
+        if duplicate:
+            duplicate.verification_status = "CONFIRMED"
+            duplicate.confirmations = confirmations
+            duplicate.verified_at = now
+            duplicate.verification_detail_json = json.dumps({"tx_hash": tx_hash, "raw_value": str(raw_value)}, separators=(",", ":"))
+        else:
+            db.add(UsdtPaymentVerification(
+                payment_intent_id=intent.id,
+                customer_id=profile.id,
+                tx_hash=tx_hash,
+                network="TRON",
+                token_contract=intent.token_contract,
+                sender_address=sender or "",
+                recipient_address=recipient or "",
+                amount_usdt=Decimal(raw_value) / Decimal("1000000"),
+                confirmations=confirmations,
+                verification_status="CONFIRMED",
+                verification_detail_json=json.dumps({"tx_hash": tx_hash, "block_number": block_number, "current_height": current_height}, separators=(",", ":")),
+                verified_at=now,
+            ))
+        intent.status = "CONFIRMED"
+        period_days = 365 if intent.billing_interval == "annual" else 31
+        from datetime import timedelta
+        sub = (await db.execute(select(Subscription).where(
+            Subscription.customer_id == profile.id,
+            Subscription.status.in_(["active", "trialing", "past_due"]),
+        ).order_by(desc(Subscription.created_at)).limit(1).with_for_update())).scalar_one_or_none()
+        if not sub:
+            sub = Subscription(customer_id=profile.id, plan_code=intent.plan_code, billing_interval=intent.billing_interval, status="active",
+                               provider="usdt_tron", provider_subscription_id=f"usdt-{intent.payment_reference}",
+                               current_period_start=now, current_period_end=now + timedelta(days=period_days), trial_end=None)
+            db.add(sub)
+            await db.flush()
+        else:
+            sub.plan_code = intent.plan_code
+            sub.billing_interval = intent.billing_interval
+            sub.status = "active"
+            sub.provider = "usdt_tron"
+            sub.provider_subscription_id = f"usdt-{intent.payment_reference}"
+            sub.current_period_start = now
+            sub.current_period_end = now + timedelta(days=period_days)
+            sub.trial_end = None
+            sub.cancel_at_period_end = False
+        intent.subscription_id = sub.id
+        db.add(SubscriptionEvent(subscription_id=sub.id, customer_id=profile.id, event_type="PAYMENT_CONFIRMED", reference_id=tx_hash,
+                                  metadata_json=json.dumps({"plan": intent.plan_code, "interval": intent.billing_interval, "amount_usdt": str(intent.amount_usdt)}, separators=(",", ":"))))
+        await db.commit()
+        return {"ok": True, "status": "CONFIRMED", "subscription": {"plan": sub.plan_code, "status": sub.status, "period_end": sub.current_period_end.isoformat()}}
+
+
+def _address_to_hex20_for_billing(address: str) -> str:
+    try:
+        from .tron_sweep import _address_to_hex20
+        return _address_to_hex20(address) or ""
+    except Exception:
+        return ""
+
+
 @app.post("/api/customer/billing/checkout")
 async def customer_billing_checkout(req: PlanChangeRequest, authorization: str | None = Header(default=None)):
+    raise HTTPException(410, "Stripe checkout is disabled. Atlas subscriptions accept USDT on TRON/TRC-20 only.")
     if req.plan == "free":
         raise HTTPException(409, "Free plan does not require checkout")
     async with SessionLocal() as db:
@@ -2608,6 +2818,7 @@ async def admin_billing_margin(months: int = 1, authorization: str | None = Head
 
 @app.post("/api/billing/stripe/webhook")
 async def stripe_webhook(request: Request):
+    raise HTTPException(410, "Stripe billing is disabled. Atlas subscriptions accept USDT on TRON/TRC-20 only.")
     raw = await request.body()
     if not settings.stripe_enabled or not settings.stripe_webhook_secret:
         raise HTTPException(503, "Stripe webhook is not configured")
