@@ -996,6 +996,7 @@ class StrategyOutcome(Base):
         UniqueConstraint("trade_id", "sequence", name="uq_strategy_outcome_trade_sequence"),
         Index("ix_strategy_outcome_customer_strategy_created", "customer_id", "strategy", "created_at"),
         Index("ix_strategy_outcome_symbol_regime_created", "symbol", "regime", "created_at"),
+        Index("ix_strategy_outcome_lifecycle_created", "lifecycle_status", "created_at"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     trade_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
@@ -1013,6 +1014,8 @@ class StrategyOutcome(Base):
     return_bps: Mapped[float] = mapped_column(Float, default=0.0)
     net_pnl: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
     net_return_bps: Mapped[float] = mapped_column(Float, default=0.0)
+    # Partial-close observations remain in history but are not routing evidence until the lifecycle closes.
+    lifecycle_status: Mapped[str] = mapped_column(String(20), nullable=False, default="OPEN", index=True)
     mode: Mapped[str] = mapped_column(String(20), default="")
     sequence: Mapped[int] = mapped_column(Integer, default=1)
     model_version: Mapped[str] = mapped_column(String(128), default="")
