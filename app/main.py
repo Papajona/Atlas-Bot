@@ -3523,6 +3523,29 @@ async def customer_portfolio(authorization: str | None = Header(default=None)):
                 "positions":[{"id":p.id,"exchange":p.exchange,"symbol":p.symbol,"quantity":float(p.quantity),"entry":float(p.average_entry_price),"mark":float(p.mark_price),"unrealized_pnl":float(p.unrealized_pnl)} for p in positions]}
 
 
+@app.get("/api/customer/portfolio/analytics")
+async def customer_portfolio_analytics(authorization: str | None = Header(default=None)):
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        await _require_feature(db, profile.id, "portfolio_analytics")
+        trades = (await db.execute(select(Trade).where(Trade.customer_id == profile.id).order_by(desc(Trade.created_at)).limit(500))).scalars().all()
+        closed = [t for t in trades if str(t.status).upper() in {"CLOSED", "FILLED", "SETTLED"}]
+        pnl = sum(float(t.notional or 0.0) * (1.0 if str(t.side).lower() == "sell" else -1.0) for t in closed)
+        fees = sum(float(t.fee or 0.0) for t in closed)
+        return {"closed_trades": len(closed), "gross_notional": sum(abs(float(t.notional or 0.0)) for t in closed), "estimated_directional_pnl": pnl, "fees": fees, "net_estimate": pnl - fees, "scope": "customer_only"}
+
+
+@app.get("/api/customer/portfolio/risk")
+async def customer_portfolio_risk(authorization: str | None = Header(default=None)):
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        await _require_feature(db, profile.id, "portfolio_risk")
+        positions = (await db.execute(select(Position).where(Position.customer_id == profile.id, Position.quantity != 0))).scalars().all()
+        notionals = [abs(float(p.quantity or 0.0) * float(p.mark_price or p.average_entry_price or 0.0)) for p in positions]
+        total = sum(notionals)
+        return {"positions": len(positions), "gross_exposure": total, "largest_position": max(notionals, default=0.0), "concentration_ratio": (max(notionals, default=0.0) / total) if total else 0.0, "scope": "customer_only"}
+
+
 @app.post("/api/customer/smart-trades")
 async def create_smart_trade(req: SmartTradeRequest, authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
@@ -3874,7 +3897,6 @@ async def create_strategy_candidate(req: StrategyLabRequest, authorization: str 
     async with SessionLocal() as db:
         profile,_=await get_customer(authorization,db,require_aal2=True)
         await _require_feature(db, profile.id, "strategy_builder")
-        await _consume_ai_credit(db, profile.id, "strategy_builder_generation")
         try:
             generated = await generate_strategy_draft(
                 prompt=req.prompt,
@@ -3885,6 +3907,7 @@ async def create_strategy_candidate(req: StrategyLabRequest, authorization: str 
             )
         except AIProviderError as exc:
             raise _safe_http_error(503, exc, "Strategy generation is temporarily unavailable") from exc
+        await _consume_ai_credit(db, profile.id, "strategy_builder_generation")
         spec = generated["strategy"]
         spec["requested_market"] = {
             "asset": req.asset,
@@ -3978,7 +4001,7 @@ async def create_customer_executor(req:ExecutorCreateRequest, authorization:str|
     try: validate=build_executor_plan(cfg,market_price=1.0)
     except ExecutorValidationError as exc: raise _safe_http_error(422, exc, "Invalid executor configuration") from exc
     async with SessionLocal() as db:
-        profile,_=await get_customer(authorization,db,require_aal2=True); account=await _get_or_create_customer_trading_account(db,profile)
+        profile,_=await get_customer(authorization,db,require_aal2=True); await _enforce_strategy_limit(db, profile.id); account=await _get_or_create_customer_trading_account(db,profile)
         if req.mode == "LIVE":
             if req.asset in {"forex", "commodity"}:
                 raise HTTPException(403, "OANDA customer automation is demo/paper-only; live Forex and commodities are disabled")
