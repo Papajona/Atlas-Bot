@@ -1,5 +1,5 @@
 """AtlasRisk 3.10.45: validate legacy FKs and enforce immutable balanced ledger journals."""
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 revision = "0040_database_integrity_and_ledger_immutability"
@@ -10,6 +10,51 @@ depends_on = None
 
 def upgrade():
     bind = op.get_bind()
+    if context.is_offline_mode():
+        op.execute(sa.text('ALTER TABLE "wallets" VALIDATE CONSTRAINT "fk_wallets_customer_id"'))
+        op.execute(sa.text('ALTER TABLE "customer_ledger_accounts" VALIDATE CONSTRAINT "fk_customer_ledger_accounts_customer_id"'))
+        op.execute(sa.text('ALTER TABLE "withdrawals" VALIDATE CONSTRAINT "fk_withdrawals_customer_id"'))
+        op.execute(sa.text('ALTER TABLE "withdrawals" VALIDATE CONSTRAINT "fk_withdrawals_wallet_id"'))
+        op.execute(sa.text('ALTER TABLE "tron_deposit_cursors" VALIDATE CONSTRAINT "fk_tron_deposit_cursors_wallet_id"'))
+        op.execute(sa.text('ALTER TABLE "tron_sweeps" VALIDATE CONSTRAINT "fk_tron_sweeps_wallet_id"'))
+        op.execute(sa.text('ALTER TABLE "ledger_journal_lines" VALIDATE CONSTRAINT "fk_ledger_journal_lines_journal_id"'))
+        op.execute(sa.text('ALTER TABLE "smart_trades" VALIDATE CONSTRAINT "fk_smart_trades_customer"'))
+        op.execute(sa.text('ALTER TABLE "smart_trades" VALIDATE CONSTRAINT "fk_smart_trades_account"'))
+        op.execute(sa.text('ALTER TABLE "dca_bots" VALIDATE CONSTRAINT "fk_dca_bots_customer"'))
+        op.execute(sa.text('ALTER TABLE "dca_bots" VALIDATE CONSTRAINT "fk_dca_bots_account"'))
+        op.execute(sa.text('ALTER TABLE "grid_bots" VALIDATE CONSTRAINT "fk_grid_bots_customer"'))
+        op.execute(sa.text('ALTER TABLE "grid_bots" VALIDATE CONSTRAINT "fk_grid_bots_account"'))
+        op.execute(sa.text('ALTER TABLE "trade_executors" VALIDATE CONSTRAINT "fk_trade_executors_customer"'))
+        op.execute(sa.text('ALTER TABLE "trade_executors" VALIDATE CONSTRAINT "fk_trade_executors_account"'))
+        op.execute(sa.text('ALTER TABLE "strategy_candidates" VALIDATE CONSTRAINT "fk_strategy_candidates_customer"'))
+        op.execute(sa.text('ALTER TABLE "strategy_drafts" VALIDATE CONSTRAINT "fk_strategy_drafts_customer"'))
+        op.execute(sa.text('ALTER TABLE "customer_binance_accounts" VALIDATE CONSTRAINT "fk_customer_binance_customer"'))
+        op.execute(sa.text('ALTER TABLE "customer_deriv_accounts" VALIDATE CONSTRAINT "fk_customer_deriv_customer"'))
+        op.execute(sa.text('ALTER TABLE "customer_oanda_accounts" VALIDATE CONSTRAINT "fk_customer_oanda_customer"'))
+        op.execute(sa.text('ALTER TABLE "withdrawal_step_up_tokens" VALIDATE CONSTRAINT "fk_withdrawal_stepup_customer"'))
+        op.execute(sa.text('ALTER TABLE "funding_transactions" VALIDATE CONSTRAINT "fk_funding_transaction_customer"'))
+        op.execute(sa.text('ALTER TABLE "funding_transactions" VALIDATE CONSTRAINT "fk_funding_transaction_wallet"'))
+        op.execute(sa.text('ALTER TABLE "trades" VALIDATE CONSTRAINT "fk_trade_account_customer"'))
+        op.execute(sa.text('ALTER TABLE "order_commands" VALIDATE CONSTRAINT "fk_order_command_trade_customer"'))
+        op.execute(sa.text('ALTER TABLE "positions" VALIDATE CONSTRAINT "fk_position_account_customer"'))
+        op.execute(sa.text('ALTER TABLE "positions" VALIDATE CONSTRAINT "fk_position_trade_customer"'))
+        op.execute(sa.text('ALTER TABLE "smart_trades" VALIDATE CONSTRAINT "fk_smart_trade_account_customer"'))
+        op.execute(sa.text('ALTER TABLE "dca_bots" VALIDATE CONSTRAINT "fk_dca_bot_account_customer"'))
+        op.execute(sa.text('ALTER TABLE "grid_bots" VALIDATE CONSTRAINT "fk_grid_bot_account_customer"'))
+        op.execute(sa.text('ALTER TABLE "adaptive_trading_bots" VALIDATE CONSTRAINT "fk_adaptive_bot_account_customer"'))
+        op.execute(sa.text('ALTER TABLE "trade_executors" VALIDATE CONSTRAINT "fk_executor_account_customer"'))
+        op.execute(sa.text('ALTER TABLE "withdrawals" VALIDATE CONSTRAINT "fk_withdrawal_wallet_customer"'))
+        op.execute(sa.text('ALTER TABLE "funding_transactions" VALIDATE CONSTRAINT "fk_funding_wallet_customer"'))
+        for table,name,expr in [
+            ("ledger_journal_lines","ck_ledger_line_amount_scale","debit = round(debit, 6) AND credit = round(credit, 6)"),
+            ("ledger_entries","ck_ledger_entry_debit_nonnegative","debit >= 0"),
+            ("ledger_entries","ck_ledger_entry_credit_nonnegative","credit >= 0"),
+            ("ledger_entries","ck_ledger_entry_not_both_sides","NOT (debit > 0 AND credit > 0)"),
+            ("ledger_entries","ck_ledger_entry_amount_positive","amount > 0"),
+            ("ledger_entries","ck_ledger_entry_amount_matches_side","(debit = amount AND credit = 0) OR (credit = amount AND debit = 0)")]:
+            op.create_check_constraint(name,table,expr)
+        return
+
     if bind.dialect.name != "postgresql":
         return
 
