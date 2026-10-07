@@ -36,6 +36,16 @@ def test_exchange_connection_routes_enforce_limits_before_new_connection():
         assert "await _enforce_exchange_limit(db, profile.id)" in block
 
 
+def test_binance_provisioning_path_enforces_exchange_limit():
+    main = MAIN.read_text(encoding="utf-8")
+    start = main.index('@app.post("/api/admin/binance/customer-subaccount/plan")')
+    end = main.index('@app.post("/api/customer/broker/oanda/connect")', start)
+    block = main[start:end]
+    assert "CustomerBinanceAccount" in block
+    assert "if existing is None:" in block
+    assert "await _enforce_exchange_limit(db, req.customer_id)" in block
+
+
 def test_strategy_creation_paths_enforce_active_strategy_limit():
     main = MAIN.read_text(encoding="utf-8")
     for route in ("customer_start_bot", "create_customer_executor"):
