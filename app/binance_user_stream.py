@@ -116,14 +116,17 @@ class BinanceUserStreamSession:
     reconcile: Any
     heartbeat_seconds: float = 15.0
     max_backoff_seconds: float = 30.0
+    stable_seconds: float = 30.0
 
     async def run(self, stop_event: Any) -> None:
         import asyncio
+        import time
         import websockets
 
         backoff = 1.0
         first_connection = True
         while not stop_event.is_set():
+            connected_at = None
             try:
                 async with websockets.connect(
                     self.uri,
@@ -137,7 +140,7 @@ class BinanceUserStreamSession:
                     if not first_connection:
                         await self.reconcile()
                     first_connection = False
-                    backoff = 1.0
+                    connected_at = time.monotonic()
                     while not stop_event.is_set():
                         try:
                             message = await asyncio.wait_for(ws.recv(), timeout=self.heartbeat_seconds)
@@ -152,5 +155,7 @@ class BinanceUserStreamSession:
             except Exception:
                 if stop_event.is_set():
                     break
+                if connected_at is not None and time.monotonic() - connected_at >= self.stable_seconds:
+                    backoff = 1.0
                 await asyncio.sleep(min(backoff, self.max_backoff_seconds))
                 backoff = min(backoff * 2.0, self.max_backoff_seconds)
