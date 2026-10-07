@@ -773,10 +773,16 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 symbol=trade.symbol, timeframe=trade.timeframe, side=trade.side,
                 realized_pnl=realized, fee=float(trade.fee or 0.0), return_bps=return_bps,
                 net_pnl=net_pnl, net_return_bps=net_return_bps,
-                lifecycle_status="OPEN",
+                lifecycle_status="CLOSED" if abs(float(position.quantity or 0.0)) < 1e-12 else "OPEN",
                 mode=trade.mode, sequence=sequence, model_version=str(trade_context.get("model_version") or ""),
                 metadata_json=json.dumps({"entry_trade_id": attribution_trade_id, "closing_trade_id": trade.id, "fill_price": fill_price, "entry_fee": entry_fee, "allocated_entry_fee": allocated_entry_fee, "net_pnl": net_pnl}, default=str),
             ))
+            if abs(float(position.quantity or 0.0)) < 1e-12:
+                completed_outcomes = (await db.execute(
+                    select(StrategyOutcome).where(StrategyOutcome.trade_id == attribution_trade_id).with_for_update()
+                )).scalars().all()
+                for outcome in completed_outcomes:
+                    outcome.lifecycle_status = "CLOSED"
         position.unrealized_pnl = position.quantity * (position.mark_price - position.average_entry_price) if position.quantity else 0.0
         position.updated_at = utcnow()
     trade.filled_quantity = new_filled
