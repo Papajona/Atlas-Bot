@@ -3455,7 +3455,9 @@ async def _require_feature(db, customer_id: int, feature: str):
 
 
 async def _enforce_exchange_limit(db, customer_id: int):
-    plan, _ = await _subscription_entitlements(db, customer_id)
+    plan, sub = await _subscription_entitlements(db, customer_id)
+    if sub is not None:
+        sub = (await db.execute(select(Subscription).where(Subscription.id == sub.id).with_for_update())).scalar_one()
     limit = int(plan.get("exchanges", 0))
     connected = 0
     for model in (CustomerBinanceAccount, CustomerOandaAccount, CustomerDerivAccount):
@@ -3466,7 +3468,9 @@ async def _enforce_exchange_limit(db, customer_id: int):
 
 
 async def _enforce_strategy_limit(db, customer_id: int):
-    plan, _ = await _subscription_entitlements(db, customer_id)
+    plan, sub = await _subscription_entitlements(db, customer_id)
+    if sub is not None:
+        sub = (await db.execute(select(Subscription).where(Subscription.id == sub.id).with_for_update())).scalar_one()
     limit = int(plan.get("strategies", 0))
     bots = int((await db.execute(select(func.count()).select_from(AdaptiveTradingBot).where(AdaptiveTradingBot.customer_id == customer_id, AdaptiveTradingBot.status.in_(["RUNNING", "PAUSED"])))).scalar_one())
     executors = int((await db.execute(select(func.count()).select_from(TradeExecutor).where(TradeExecutor.customer_id == customer_id, TradeExecutor.status.in_(["ARMED", "RUNNING"])))).scalar_one())
@@ -3652,6 +3656,9 @@ async def grid_bot_action(bot_id:int, req:BotActionRequest, authorization:str|No
 async def customer_connect_deriv(req: DerivConnectRequest, authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
         profile, _ = await get_customer(authorization, db, require_aal2=True)
+        existing = (await db.execute(select(CustomerDerivAccount).where(CustomerDerivAccount.customer_id == profile.id))).scalar_one_or_none()
+        if existing is None:
+            await _enforce_exchange_limit(db, profile.id)
     if not settings.deriv_app_id:
         raise HTTPException(503, "Atlas Deriv application is not configured")
     broker = DerivBroker(DerivConfig(settings.deriv_app_id, req.api_token.strip(), req.account_id.strip(), timeout_seconds=settings.deriv_timeout_seconds, live=True))
