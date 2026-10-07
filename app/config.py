@@ -293,7 +293,7 @@ class Settings(BaseSettings):
     # Commercial plans / subscriptions / referrals. Payment provider secrets belong in Secret Manager.
     billing_enabled: bool = True
     billing_currency: str = "USD"
-    billing_trial_days: int = 7
+    billing_trial_days: int = 0
     billing_referral_discount_pct: float = 5.0
     billing_referral_commission_pct: float = 1.0
     billing_referral_payout_delay_days: int = 45
