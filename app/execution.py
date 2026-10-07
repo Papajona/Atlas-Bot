@@ -1785,6 +1785,38 @@ async def _flatten_customer_spot_positions(account: Any, broker: Any, failures: 
     return
 
 
+async def enforce_platform_loss_limits() -> dict[str, Any]:
+    """Evaluate live platform equity limits from the latest broker-synchronized AppState and halt on breach."""
+    if not settings.auto_kill_on_loss_limit:
+        return {"status": "DISABLED"}
+    async with SessionLocal() as db:
+        s = await _get_state_locked(db)
+        if s.kill_switch or not s.live_enabled:
+            return {"status": "NOT_LIVE"}
+        await _ensure_daily_boundary(db, s)
+        equity = max(0.0, float(s.equity or 0.0))
+        peak = float(s.peak_equity or equity)
+        daily_start = float(s.daily_start_equity or equity)
+        dd = 1 - (equity / peak) if peak else 0.0
+        daily_loss = 1 - (equity / daily_start) if daily_start else 0.0
+    if not (dd >= settings.max_drawdown or daily_loss >= settings.daily_loss_limit):
+        return {"status": "WITHIN_LIMITS", "drawdown": dd, "daily_loss": daily_loss}
+    await open_incident(
+        key="LOSS_LIMIT_AUTO_KILL", severity="CRITICAL", category="RISK_LIMIT",
+        summary="Platform loss limit breached; emergency stop triggered automatically",
+        detail={"drawdown": dd, "daily_loss": daily_loss, "equity": equity,
+                "peak_equity": peak, "daily_start_equity": daily_start,
+                "max_drawdown": settings.max_drawdown, "daily_loss_limit": settings.daily_loss_limit},
+    )
+    exchange = settings.default_exchange if (settings.exchange_api_key and settings.exchange_api_secret) else None
+    result = await emergency_stop(exchange)
+    await audit("LOSS_LIMIT_AUTO_KILL", {
+        "drawdown": dd, "daily_loss": daily_loss,
+        "broker_halt_confirmed": bool(result.get("broker_halt_confirmed")),
+    })
+    return {"status": "KILLED", "drawdown": dd, "daily_loss": daily_loss, "result": result}
+
+
 async def emergency_stop(exchange: str | None = None):
     """Fence new live submissions, wait for any in-flight broker call, then cancel and verify open orders."""
     async with SessionLocal() as db:
@@ -1867,6 +1899,33 @@ async def emergency_stop(exchange: str | None = None):
                 failures.append({"scope": "platform_exchange", "error": f"Open orders remain after cancellation: {len(remaining)}"})
             if _is_derivatives_market(broker):
                 await _flatten_exchange_positions(broker, "platform_exchange", failures, canceled)
+            else:
+                # Platform SPOT positions require a separately verified, symbol-aware flatten path.
+                # Never report the broker halt as fully confirmed while residual spot exposure is present.
+                try:
+                    spot_positions = await asyncio.to_thread(broker.fetch_positions)
+                except Exception as exc:
+                    spot_positions = None
+                    failures.append({"scope": "platform_exchange_spot", "error": f"Could not verify spot positions: {exc}"})
+                if spot_positions is not None:
+                    unresolved_spot = []
+                    for position in spot_positions or []:
+                        symbol = str(position.get("symbol") or position.get("info", {}).get("symbol") or "")
+                        contracts = position.get("contracts")
+                        if contracts is None:
+                            contracts = position.get("contractSize")
+                        try:
+                            exposure = float(contracts or 0.0)
+                        except (TypeError, ValueError):
+                            exposure = 0.0
+                        if symbol and exposure != 0.0:
+                            unresolved_spot.append({"symbol": symbol, "quantity": exposure})
+                    if unresolved_spot:
+                        failures.append({
+                            "scope": "platform_exchange_spot",
+                            "error": "Unflattened platform spot positions remain",
+                            "positions": unresolved_spot[:50],
+                        })
         except Exception as exc:
             cancel_error = str(exc)
             failures.append({"scope": "platform_exchange", "error": cancel_error})
@@ -1913,6 +1972,7 @@ async def emergency_stop(exchange: str | None = None):
         await asyncio.gather(*(_bounded_sweep(account) for account in customer_accounts))
 
     broker_halt_confirmed = not failures
+    broker_halt_confirmed = bool(barrier_confirmed and not failures)
     await audit("EMERGENCY_STOP", {
         "exchange": exchange, "canceled_count": len(canceled),
         "failure_count": len(failures), "cancel_error": cancel_error,

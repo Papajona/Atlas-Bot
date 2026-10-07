@@ -36,7 +36,7 @@ from .strategy_ai import generate_strategy_draft
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates, live_strategy_signals
 from .research_validation import oos_promotion_gate, monte_carlo_bootstrap
 from .daily_research import run_daily_research, latest_macro_context
-from .execution import execute_signal, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders
+from .execution import execute_signal, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
 from .payout import get_payout_provider, PayoutError, PayoutUnknown, PayoutNotFound
 from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, release_separation_violation, verify_release_operator
@@ -1061,14 +1061,20 @@ async def _reconciliation_loop():
         if should_crypto:
             try:
                 await reconcile(settings.default_exchange, settings.default_symbol)
+                await sync_live_account(settings.default_exchange)
             except Exception:
-                logger.exception("reconciliation_loop: crypto reconcile failed (%s/%s)",
+                logger.exception("reconciliation_loop: crypto reconcile/equity sync failed (%s/%s)",
                                   settings.default_exchange, settings.default_symbol)
         if should_oanda:
             try:
                 await reconcile("oanda")
             except Exception:
                 logger.exception("reconciliation_loop: oanda reconcile failed")
+        if should_crypto:
+            try:
+                await enforce_platform_loss_limits()
+            except Exception:
+                logger.exception("reconciliation_loop: platform loss-limit enforcement failed")
         try:
             async with SessionLocal() as db:
                 customer_exchanges = (await db.execute(

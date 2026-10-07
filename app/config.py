@@ -280,6 +280,10 @@ class Settings(BaseSettings):
     admin_supabase_user_ids: str = ""  # comma-separated Supabase auth user UUIDs allowed to access admin APIs
     # Server-side admin RBAC. Format: user_uuid:ROLE,user_uuid:ROLE. Database assignments take precedence.
     admin_role_assignments: str = ""
+    auto_kill_on_loss_limit: bool = True
+    alert_webhook_url: str = ""
+    alert_webhook_timeout_seconds: float = 3.0
+    alert_min_severity: str = "HIGH"
     process_role: str = "api"  # api | worker | job
     withdrawal_address_cooling_off_hours: int = 24
     withdrawal_new_address_requires_verification: bool = True
@@ -411,6 +415,14 @@ class Settings(BaseSettings):
         value = int(value)
         if not 1 <= value <= 3:
             raise ValueError("WITHDRAWAL_STEP_UP_MINUTES must be between 1 and 3 minutes")
+        return value
+
+    @field_validator("alert_webhook_url")
+    @classmethod
+    def _validate_alert_webhook_url(cls, value: str) -> str:
+        value = str(value or "").strip()
+        if value and not value.lower().startswith("https://"):
+            raise ValueError("ALERT_WEBHOOK_URL must be an https:// URL")
         return value
 
     @field_validator("environment")
