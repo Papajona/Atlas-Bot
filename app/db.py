@@ -568,7 +568,7 @@ class Subscription(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     stripe_last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
+    # Atomic per-subscription AI allowance meter. Usage resets when the billing period changes.\n    ai_credits_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)\n    ai_usage_period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)\n
 
 class ReferralCode(Base):
     __tablename__ = "referral_codes"
