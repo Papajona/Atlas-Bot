@@ -677,6 +677,11 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
             # initializing the new one below.
             episode.status = "COMPLETED"
             episode.closing_trade_id = trade.id
+            completed_outcomes = (await db.execute(
+                select(StrategyOutcome).where(StrategyOutcome.trade_id == episode_trade_id).with_for_update()
+            )).scalars().all()
+            for outcome in completed_outcomes:
+                outcome.lifecycle_status = "CLOSED"
             episode.exit_price = float(fill_price)
             episode.exit_at = utcnow()
 
@@ -768,6 +773,7 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 symbol=trade.symbol, timeframe=trade.timeframe, side=trade.side,
                 realized_pnl=realized, fee=float(trade.fee or 0.0), return_bps=return_bps,
                 net_pnl=net_pnl, net_return_bps=net_return_bps,
+                lifecycle_status="OPEN",
                 mode=trade.mode, sequence=sequence, model_version=str(trade_context.get("model_version") or ""),
                 metadata_json=json.dumps({"entry_trade_id": attribution_trade_id, "closing_trade_id": trade.id, "fill_price": fill_price, "entry_fee": entry_fee, "allocated_entry_fee": allocated_entry_fee, "net_pnl": net_pnl}, default=str),
             ))
