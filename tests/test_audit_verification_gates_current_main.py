@@ -34,3 +34,10 @@ def test_strategy_outcome_closed_state_is_explicit_and_fail_closed():
     assert 'revision = "0047_strategy_outcome_lifecycle"' in migration
     assert 'down_revision = "0046_subscription_ai_usage"' in migration
     assert "Unknown historical" in migration
+
+
+def test_normal_position_exit_closes_strategy_outcomes():
+    execution = (ROOT / "app/execution.py").read_text(encoding="utf-8")
+    assert 'lifecycle_status="CLOSED" if abs(float(position.quantity or 0.0)) < 1e-12 else "OPEN"' in execution
+    assert 'if abs(float(position.quantity or 0.0)) < 1e-12:' in execution
+    assert 'outcome.lifecycle_status = "CLOSED"' in execution
