@@ -38,3 +38,23 @@ def test_billing_migration_is_single_child_of_current_application_head():
     assert 'monthly_trade_limit' in migration
     assert '"payment_intents"' in migration
     assert '"usdt_payment_verifications"' in migration
+
+
+def test_customer_subscription_interface_is_wired_to_usdt_flow():
+    html = (ROOT / "app" / "templates" / "customer.html").read_text(encoding="utf-8")
+    assert "function checkoutPlan(" in html
+    assert "/api/customer/billing/usdt-intent" in html
+    assert "/api/customer/billing/usdt-submit" in html
+    assert "TRON / TRC-20" in html
+    assert "7-day trial available" not in html
+    assert "Choose "+'Atlas Pro' not in html
+    assert "Live-trading entitlement · currently gated by platform/customer controls" in html
+
+
+def test_customer_subscription_interface_exposes_verified_plan_data():
+    html = (ROOT / "app" / "templates" / "customer.html").read_text(encoding="utf-8")
+    assert "monthly_trade_limit" in html
+    assert "ai_credits" in html
+    assert "exchanges" in html
+    assert "annual" in html
+    assert "payment_channels" not in html  # payment channel is server data, not hard-coded as an entitlement source
