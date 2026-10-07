@@ -280,6 +280,10 @@ class Settings(BaseSettings):
     admin_supabase_user_ids: str = ""  # comma-separated Supabase auth user UUIDs allowed to access admin APIs
     # Server-side admin RBAC. Format: user_uuid:ROLE,user_uuid:ROLE. Database assignments take precedence.
     admin_role_assignments: str = ""
+    auto_kill_on_loss_limit: bool = True
+    alert_webhook_url: str = ""
+    alert_webhook_timeout_seconds: float = 3.0
+    alert_min_severity: str = "HIGH"
     process_role: str = "api"  # api | worker | job
     withdrawal_address_cooling_off_hours: int = 24
     withdrawal_new_address_requires_verification: bool = True
