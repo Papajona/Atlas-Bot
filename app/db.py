@@ -544,6 +544,7 @@ class Plan(Base):
     ai_credits: Mapped[int] = mapped_column(Integer, default=0)
     exchange_connections: Mapped[int] = mapped_column(Integer, default=0)
     active_strategies: Mapped[int] = mapped_column(Integer, default=0)
+    monthly_trade_limit: Mapped[int] = mapped_column(Integer, default=0)
     live_trading: Mapped[bool] = mapped_column(Boolean, default=False)
     paper_trading: Mapped[bool] = mapped_column(Boolean, default=True)
     features_json: Mapped[str] = mapped_column(Text, default="[]")
@@ -568,6 +569,103 @@ class Subscription(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     stripe_last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SubscriptionTradeUsage(Base):
+    __tablename__ = "subscription_trade_usage"
+    __table_args__ = (
+        UniqueConstraint("subscription_id", "period_start", name="uq_subscription_trade_usage_period"),
+        Index("ix_subscription_trade_usage_customer_period", "customer_id", "period_start"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    subscription_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    trades_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class SubscriptionTradeEvent(Base):
+    __tablename__ = "subscription_trade_events"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_subscription_trade_event_idempotency"),
+        Index("ix_subscription_trade_events_customer_created", "customer_id", "created_at"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    subscription_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    usage_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(220), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    units: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    remaining_after: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PaymentIntent(Base):
+    __tablename__ = "payment_intents"
+    __table_args__ = (
+        UniqueConstraint("payment_reference", name="uq_payment_intent_reference"),
+        Index("ix_payment_intents_customer_status", "customer_id", "status"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    subscription_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    plan_code: Mapped[str] = mapped_column(String(40), nullable=False)
+    billing_interval: Mapped[str] = mapped_column(String(20), nullable=False)
+    currency_usd: Mapped[str] = mapped_column(String(10), default="USD", nullable=False)
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(38, 6), nullable=False)
+    amount_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 6), nullable=False)
+    usdt_usd_rate: Mapped[Decimal] = mapped_column(Numeric(38, 8), default=Decimal("1"), nullable=False)
+    network: Mapped[str] = mapped_column(String(20), default="TRON", nullable=False)
+    token_contract: Mapped[str] = mapped_column(String(64), nullable=False)
+    receiving_address: Mapped[str] = mapped_column(String(64), nullable=False)
+    payment_reference: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class UsdtPaymentVerification(Base):
+    __tablename__ = "usdt_payment_verifications"
+    __table_args__ = (
+        UniqueConstraint("tx_hash", name="uq_usdt_payment_tx_hash"),
+        Index("ix_usdt_payment_verifications_intent_status", "payment_intent_id", "verification_status"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    payment_intent_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    tx_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    network: Mapped[str] = mapped_column(String(20), default="TRON", nullable=False)
+    token_contract: Mapped[str] = mapped_column(String(64), nullable=False)
+    sender_address: Mapped[str] = mapped_column(String(64), nullable=False)
+    recipient_address: Mapped[str] = mapped_column(String(64), nullable=False)
+    amount_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 6), nullable=False)
+    confirmations: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    verification_status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    verification_detail_json: Mapped[str] = mapped_column(Text, default="{}")
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class SubscriptionEvent(Base):
+    __tablename__ = "subscription_events"
+    __table_args__ = (
+        UniqueConstraint("event_type", "reference_id", name="uq_subscription_event_reference"),
+        Index("ix_subscription_events_customer_created", "customer_id", "created_at"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    subscription_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    reference_id: Mapped[str] = mapped_column(String(180), default="", nullable=False)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ReferralCode(Base):
