@@ -1940,6 +1940,7 @@ async def emergency_stop(exchange: str | None = None):
         await asyncio.gather(*(_bounded_sweep(account) for account in customer_accounts))
 
     broker_halt_confirmed = not failures
+    broker_halt_confirmed = bool(barrier_confirmed and not failures)
     await audit("EMERGENCY_STOP", {
         "exchange": exchange, "canceled_count": len(canceled),
         "failure_count": len(failures), "cancel_error": cancel_error,
