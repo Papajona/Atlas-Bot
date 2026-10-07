@@ -2535,7 +2535,33 @@ async def customer_billing(authorization: str | None = Header(default=None)):
         code = (await db.execute(select(ReferralCode).where(ReferralCode.customer_id == profile.id))).scalar_one_or_none()
         referrals = (await db.execute(select(Referral).where(Referral.referrer_customer_id == profile.id))).scalars().all()
         commissions = (await db.execute(select(func.coalesce(func.sum(ReferralCommission.commission_amount), 0.0)).where(ReferralCommission.referral_customer_id == profile.id, ReferralCommission.status.in_(["PENDING","ELIGIBLE"])))).scalar_one()
-        return {"plan": {"code": sub.plan_code if sub else "free", **plan}, "subscription": {"status": sub.status if sub else "active", "interval": sub.billing_interval if sub else "monthly", "period_end": sub.current_period_end.isoformat() if sub else None, "cancel_at_period_end": bool(sub.cancel_at_period_end) if sub else False}, "referral": {"code": code.code if code else None, "referred_count": len(referrals), "pending_commissions": float(commissions or 0)}}
+        usage = None
+        if sub:
+            usage = (await db.execute(
+                select(SubscriptionTradeUsage).where(
+                    SubscriptionTradeUsage.subscription_id == sub.id,
+                    SubscriptionTradeUsage.period_start == sub.current_period_start,
+                )
+            )).scalar_one_or_none()
+        trade_limit = int(plan.get("monthly_trade_limit") or 0)
+        trades_used = int(usage.trades_used or 0) if usage else 0
+        return {
+            "plan": {"code": sub.plan_code if sub else "free", **plan},
+            "subscription": {
+                "status": sub.status if sub else "active",
+                "interval": sub.billing_interval if sub else "monthly",
+                "period_end": sub.current_period_end.isoformat() if sub else None,
+                "cancel_at_period_end": bool(sub.cancel_at_period_end) if sub else False,
+            },
+            "usage": {
+                "trades_used": trades_used,
+                "monthly_trade_limit": trade_limit,
+                "trades_remaining": max(0, trade_limit - trades_used) if trade_limit > 0 else None,
+                "unlimited": trade_limit == 0,
+            },
+            "payment_channels": ["USDT_TRON_TR20"],
+            "referral": {"code": code.code if code else None, "referred_count": len(referrals), "pending_commissions": float(commissions or 0)},
+        }
 
 
 @app.post("/api/customer/billing/usdt-intent")
@@ -2653,7 +2679,8 @@ async def customer_billing_usdt_submit(req: dict, authorization: str | None = He
             topics = [str(x).lower().removeprefix("0x") for x in (log.get("topics") or [])]
             if len(topics) < 3 or topics[0] != "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a9df523b3ef":
                 continue
-            if str(log.get("address") or "").lower() not in {wanted_contract, _address_to_hex20_for_billing(wanted_contract)}:
+            log_contract = str(log.get("address") or "").strip()
+            if not log_contract or _address_to_hex20_for_billing(log_contract) != _address_to_hex20_for_billing(intent.token_contract):
                 continue
             data = str(log.get("data") or "").removeprefix("0x")
             if len(data) != 64:
@@ -2665,7 +2692,7 @@ async def customer_billing_usdt_submit(req: dict, authorization: str | None = He
                 raw_value = int(data, 16)
             except Exception:
                 continue
-            if recipient == intent.receiving_address and raw_value == int((Decimal(intent.amount_usdt) * Decimal("1000000")).to_integral_value()):
+            if sender and recipient == intent.receiving_address and raw_value == int((Decimal(intent.amount_usdt) * Decimal("1000000")).to_integral_value()):
                 match = (sender, recipient, raw_value)
                 break
         if not match:
