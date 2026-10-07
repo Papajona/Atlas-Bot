@@ -1,7 +1,7 @@
 """Add atomic AI credit usage tracking to subscriptions.
 
 Revision ID: 0046_subscription_ai_usage
-Revises: 0045_merge_application_heads
+Revises: 0034_withdrawal_provider_identity
 """
 from alembic import op
 import sqlalchemy as sa
