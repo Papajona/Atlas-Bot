@@ -26,6 +26,9 @@ def cfg(monkeypatch):
     monkeypatch.setattr(settings, "usdt_tron_scan_concurrency", 3)
     monkeypatch.setattr(settings, "usdt_tron_max_qps", 500.0)   # pacing itself is covered by its own test
     monkeypatch.setattr(settings, "redis_url", "")
+    # This suite verifies the scanner's automatic-credit path; pilot manual review
+    # is exercised separately by the funding-review tests.
+    monkeypatch.setattr(settings, "funding_manual_review_required", False)
 
 
 def test_rate_gate_spaces_concurrent_requests():
