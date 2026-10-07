@@ -28,7 +28,7 @@ def test_strategy_outcome_closed_state_is_explicit_and_fail_closed():
     main = (ROOT / "app/main.py").read_text(encoding="utf-8")
     migration = (ROOT / "alembic/versions/0047_strategy_outcome_lifecycle.py").read_text(encoding="utf-8")
     assert "lifecycle_status: Mapped[str]" in db
-    assert 'lifecycle_status="OPEN"' in db
+    assert 'default="OPEN"' in db
     assert 'lifecycle_status="OPEN"' in migration
     assert 'outcome.lifecycle_status = "CLOSED"' in execution
     assert 'StrategyOutcome.lifecycle_status == "CLOSED"' in main
