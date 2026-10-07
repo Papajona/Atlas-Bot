@@ -16,7 +16,7 @@ def upgrade():
     bind = op.get_bind()
     if context.is_offline_mode():
         for n,t,d in [("proposal_digest",sa.String(64),""),("execution_operator",sa.String(120),""),("execution_started_at",sa.DateTime(timezone=True),None),("reconciled_at",sa.DateTime(timezone=True),None)]:
-            kw={"nullable":True}
+            kw={"nullable":False if n in ("proposal_digest","execution_operator") else True}
             if d is not None: kw["server_default"]=d
             op.add_column("withdrawals",sa.Column(n,t,**kw))
         op.add_column("oanda_reconciliation_state",sa.Column("consecutive_errors",sa.Integer(),nullable=False,server_default="0"))
