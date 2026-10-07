@@ -15,13 +15,13 @@ def _has_col(bind, table: str, column: str) -> bool:
 def upgrade():
     if context.is_offline_mode():
         columns = (
-            ("live_enable_requested_by", sa.String(160), ""),
-            ("live_enable_requested_at", sa.DateTime(timezone=True), None),
-            ("live_enable_approved_by", sa.String(160), ""),
-            ("live_enable_approved_at", sa.DateTime(timezone=True), None),
+            ("live_enable_requested_by", sa.String(160), False, ""),
+            ("live_enable_requested_at", sa.DateTime(timezone=True), True, None),
+            ("live_enable_approved_by", sa.String(160), False, ""),
+            ("live_enable_approved_at", sa.DateTime(timezone=True), True, None),
         )
-        for name, typ, default in columns:
-            kwargs = {"nullable": True}
+        for name, typ, nullable, default in columns:
+            kwargs = {"nullable": nullable}
             if default is not None:
                 kwargs["server_default"] = default
             op.add_column("app_state", sa.Column(name, typ, **kwargs))
