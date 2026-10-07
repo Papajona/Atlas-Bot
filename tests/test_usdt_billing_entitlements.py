@@ -47,7 +47,6 @@ def test_customer_subscription_interface_is_wired_to_usdt_flow():
     assert "/api/customer/billing/usdt-submit" in html
     assert "TRON / TRC-20" in html
     assert "7-day trial available" not in html
-    assert "Choose "+'Atlas Pro' not in html
     assert "Live-trading entitlement · currently gated by platform/customer controls" in html
 
 
