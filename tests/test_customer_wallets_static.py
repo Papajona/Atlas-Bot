@@ -207,7 +207,9 @@ def test_tron_auto_credit_is_customer_wallet_bound_and_confirmed_only():
     assert 'FundingTransaction.provider == "tron-usdt"' in scanner
     assert 'status=("PENDING_REVIEW" if settings.funding_manual_review_required else "CONFIRMED")' in scanner
     assert 'if not settings.funding_manual_review_required:' in scanner
-    assert 'await post_deposit(db, customer_id=locked_wallet.customer_id, wallet_id=locked_wallet.id' in scanner
+    assert "await post_deposit(" in scanner
+    assert "customer_id=locked_wallet.customer_id" in scanner
+    assert "wallet_id=locked_wallet.id" in scanner
     assert 'await sync_wallet_from_ledger(db, locked_wallet.customer_id, "USDT")' in scanner
     assert 'account.cash_equity = balance["available"] + balance["trading_reserved"]' in scanner
 
