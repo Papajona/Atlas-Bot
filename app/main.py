@@ -2932,6 +2932,12 @@ async def admin_binance_customer_subaccount_plan(req: BinanceSubAccountProvision
     # All production admin APIs must use the centralized Supabase + AAL2 gate.
     claims = await auth(None, authorization)
     await require_role(claims, "OPERATIONS")
+    async with SessionLocal() as db:
+        existing = (await db.execute(
+            select(CustomerBinanceAccount).where(CustomerBinanceAccount.customer_id == req.customer_id)
+        )).scalar_one_or_none()
+        if existing is None:
+            await _enforce_exchange_limit(db, req.customer_id)
     try:
         return build_provision_plan(req.customer_id, req.tag)
     except BinanceSubAccountError as exc:
@@ -2946,6 +2952,9 @@ async def customer_connect_oanda(req: CustomerOandaConnectRequest, authorization
         raise HTTPException(403, "AtlasRisk supports OANDA practice/demo only; live OANDA accounts are not supported")
     async with SessionLocal() as db:
         profile, _ = await get_customer(authorization, db, require_aal2=True)
+        existing = (await db.execute(select(CustomerOandaAccount).where(CustomerOandaAccount.customer_id == profile.id))).scalar_one_or_none()
+        if existing is None:
+            await _enforce_exchange_limit(db, profile.id)
         from .forex_oanda import OandaBroker, OandaConfig, OandaError
         broker = OandaBroker(OandaConfig(req.account_id.strip(), req.api_token.strip(), True, settings.oanda_timeout_seconds))
         try:
@@ -3141,6 +3150,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
         if req.autonomous:
             existing_bot = (await db.execute(select(AdaptiveTradingBot).where(AdaptiveTradingBot.customer_id == profile.id, AdaptiveTradingBot.name == "Atlas Adaptive AI").with_for_update())).scalar_one_or_none()
             if not existing_bot:
+                await _enforce_strategy_limit(db, profile.id)
                 existing_bot = AdaptiveTradingBot(customer_id=profile.id, trading_account_id=account.id, name="Atlas Adaptive AI", asset=req.asset, symbol=req.symbol, exchange=req.exchange, timeframe=req.timeframe, days=req.days, risk_fraction=req.risk_fraction or settings.risk_per_trade, interval_seconds=req.interval_seconds, strategy_candidate_id=req.strategy_candidate_id, status="RUNNING", mode="LIVE" if not paper_mode else "PAPER")
                 db.add(existing_bot)
                 await db.flush()
@@ -3450,6 +3460,66 @@ async def _require_feature(db, customer_id: int, feature: str):
     return plan
 
 
+async def _enforce_exchange_limit(db, customer_id: int):
+    plan, sub = await _subscription_entitlements(db, customer_id)
+    if sub is not None:
+        sub = (await db.execute(select(Subscription).where(Subscription.id == sub.id).with_for_update())).scalar_one()
+    limit = int(plan.get("exchanges", 0))
+    connected = 0
+    for model in (CustomerBinanceAccount, CustomerOandaAccount, CustomerDerivAccount):
+        connected += int((await db.execute(select(func.count()).select_from(model).where(model.customer_id == customer_id))).scalar_one())
+    if connected >= limit:
+        raise HTTPException(403, f"Your Atlas plan allows {limit} exchange connection(s); upgrade to connect another exchange")
+    return plan
+
+
+async def _enforce_strategy_limit(db, customer_id: int):
+    plan, sub = await _subscription_entitlements(db, customer_id)
+    if sub is not None:
+        sub = (await db.execute(select(Subscription).where(Subscription.id == sub.id).with_for_update())).scalar_one()
+    limit = int(plan.get("strategies", 0))
+    bots = int((await db.execute(select(func.count()).select_from(AdaptiveTradingBot).where(AdaptiveTradingBot.customer_id == customer_id, AdaptiveTradingBot.status.in_(["RUNNING", "PAUSED"])))).scalar_one())
+    executors = int((await db.execute(select(func.count()).select_from(TradeExecutor).where(TradeExecutor.customer_id == customer_id, TradeExecutor.status.in_(["ARMED", "RUNNING"])))).scalar_one())
+    if bots + executors >= limit:
+        raise HTTPException(403, f"Your Atlas plan allows {limit} active strategy/executor(s); stop one or upgrade")
+    return plan
+
+
+async def _consume_ai_credit(db, customer_id: int, action: str):
+    """Atomically consume one AI credit after a successful gated AI operation."""
+    sub = await _get_active_subscription(db, customer_id)
+    if sub is None:
+        raise HTTPException(403, "An active Atlas subscription is required for this AI feature")
+    sub = (await db.execute(select(Subscription).where(Subscription.id == sub.id).with_for_update())).scalar_one()
+    plan = PLAN_DEFINITIONS.get(sub.plan_code, PLAN_DEFINITIONS["free"])
+    period_start = sub.current_period_start or datetime.now(timezone.utc)
+    if sub.ai_usage_period_start != period_start:
+        sub.ai_usage_period_start = period_start
+        sub.ai_credits_used = 0
+    used = int(sub.ai_credits_used or 0)
+    allowance = int(plan.get("ai_credits", 0))
+    if used >= allowance:
+        raise HTTPException(429, f"Your {plan.get('name', 'Atlas')} AI allowance is exhausted for this billing period")
+    sub.ai_credits_used = used + 1
+    await db.flush()
+    await _audit("CUSTOMER_AI_CREDIT_CONSUMED", {"customer_id": customer_id, "action": action, "credit_number": used + 1, "allowance": allowance}, actor_id=f"customer:{customer_id}")
+    return {"used": used + 1, "remaining": allowance - used - 1, "allowance": allowance}
+
+
+@app.get("/api/customer/subscription/entitlements")
+async def customer_subscription_entitlements(authorization: str | None = Header(default=None)):
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        plan, sub = await _subscription_entitlements(db, profile.id)
+        connected = sum(int((await db.execute(select(func.count()).select_from(model).where(model.customer_id == profile.id))).scalar_one()) for model in (CustomerBinanceAccount, CustomerOandaAccount, CustomerDerivAccount))
+        active_bots = int((await db.execute(select(func.count()).select_from(AdaptiveTradingBot).where(AdaptiveTradingBot.customer_id == profile.id, AdaptiveTradingBot.status.in_(["RUNNING", "PAUSED"])))).scalar_one())
+        active_executors = int((await db.execute(select(func.count()).select_from(TradeExecutor).where(TradeExecutor.customer_id == profile.id, TradeExecutor.status.in_(["ARMED", "RUNNING"])))).scalar_one())
+        used = int(sub.ai_credits_used or 0) if sub else 0
+        plan_code = next((code for code, definition in PLAN_DEFINITIONS.items() if definition == plan), "free")
+        return {"plan": plan["name"], "plan_code": plan_code, "limits": {"ai_credits": int(plan["ai_credits"]), "exchanges": int(plan["exchanges"]), "strategies": int(plan["strategies"])}, "usage": {"ai_credits": used, "exchanges": connected, "strategies": active_bots + active_executors}, "features": list(plan.get("features", [])), "subscription_status": sub.status if sub else "free"}
+
+
+
 @app.get("/api/customer/portfolio")
 async def customer_portfolio(authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
@@ -3462,6 +3532,30 @@ async def customer_portfolio(authorization: str | None = Header(default=None)):
                 "reserved_margin": bal["trading_reserved"], "withdrawal_reserved": bal["withdrawal_reserved"],
                 "wallets":[{"currency":w.currency,"available":(await customer_balance(db, profile.id, w.currency))["available"],"locked":(await customer_balance(db, profile.id, w.currency))["trading_reserved"] + (await customer_balance(db, profile.id, w.currency))["withdrawal_reserved"]} for w in wallets],
                 "positions":[{"id":p.id,"exchange":p.exchange,"symbol":p.symbol,"quantity":float(p.quantity),"entry":float(p.average_entry_price),"mark":float(p.mark_price),"unrealized_pnl":float(p.unrealized_pnl)} for p in positions]}
+
+
+@app.get("/api/customer/portfolio/analytics")
+async def customer_portfolio_analytics(authorization: str | None = Header(default=None)):
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        await _require_feature(db, profile.id, "portfolio_analytics")
+        trades = (await db.execute(select(Trade).where(Trade.customer_id == profile.id).order_by(desc(Trade.created_at)).limit(500))).scalars().all()
+        closed = [t for t in trades if str(t.status).upper() in {"CLOSED", "FILLED", "SETTLED"}]
+        gross = sum(abs(float(t.notional or 0.0)) for t in closed)
+        fees = sum(float(t.fee or 0.0) for t in closed)
+        return {"closed_trades": len(closed), "gross_notional": gross, "fees": fees, "scope": "customer_only"}
+
+
+@app.get("/api/customer/portfolio/risk")
+async def customer_portfolio_risk(authorization: str | None = Header(default=None)):
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        await _require_feature(db, profile.id, "portfolio_risk")
+        positions = (await db.execute(select(Position).where(Position.customer_id == profile.id, Position.quantity != 0))).scalars().all()
+        notionals = [abs(float(p.quantity or 0.0) * float(p.mark_price or p.average_entry_price or 0.0)) for p in positions]
+        total = sum(notionals)
+        largest = max(notionals, default=0.0)
+        return {"positions": len(positions), "gross_exposure": total, "largest_position": largest, "concentration_ratio": largest / total if total else 0.0, "scope": "customer_only"}
 
 
 @app.post("/api/customer/smart-trades")
@@ -3568,6 +3662,9 @@ async def grid_bot_action(bot_id:int, req:BotActionRequest, authorization:str|No
 async def customer_connect_deriv(req: DerivConnectRequest, authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
         profile, _ = await get_customer(authorization, db, require_aal2=True)
+        existing = (await db.execute(select(CustomerDerivAccount).where(CustomerDerivAccount.customer_id == profile.id))).scalar_one_or_none()
+        if existing is None:
+            await _enforce_exchange_limit(db, profile.id)
     if not settings.deriv_app_id:
         raise HTTPException(503, "Atlas Deriv application is not configured")
     broker = DerivBroker(DerivConfig(settings.deriv_app_id, req.api_token.strip(), req.account_id.strip(), timeout_seconds=settings.deriv_timeout_seconds, live=True))
@@ -3822,6 +3919,7 @@ async def create_strategy_candidate(req: StrategyLabRequest, authorization: str 
             )
         except AIProviderError as exc:
             raise _safe_http_error(503, exc, "Strategy generation is temporarily unavailable") from exc
+        await _consume_ai_credit(db, profile.id, "strategy_builder_generation")
         spec = generated["strategy"]
         spec["requested_market"] = {
             "asset": req.asset,
@@ -3915,7 +4013,7 @@ async def create_customer_executor(req:ExecutorCreateRequest, authorization:str|
     try: validate=build_executor_plan(cfg,market_price=1.0)
     except ExecutorValidationError as exc: raise _safe_http_error(422, exc, "Invalid executor configuration") from exc
     async with SessionLocal() as db:
-        profile,_=await get_customer(authorization,db,require_aal2=True); account=await _get_or_create_customer_trading_account(db,profile)
+        profile,_=await get_customer(authorization,db,require_aal2=True); await _enforce_strategy_limit(db, profile.id); account=await _get_or_create_customer_trading_account(db,profile)
         if req.mode == "LIVE":
             if req.asset in {"forex", "commodity"}:
                 raise HTTPException(403, "OANDA customer automation is demo/paper-only; live Forex and commodities are disabled")
