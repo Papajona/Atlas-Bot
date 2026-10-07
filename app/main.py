@@ -2932,6 +2932,12 @@ async def admin_binance_customer_subaccount_plan(req: BinanceSubAccountProvision
     # All production admin APIs must use the centralized Supabase + AAL2 gate.
     claims = await auth(None, authorization)
     await require_role(claims, "OPERATIONS")
+    async with SessionLocal() as db:
+        existing = (await db.execute(
+            select(CustomerBinanceAccount).where(CustomerBinanceAccount.customer_id == req.customer_id)
+        )).scalar_one_or_none()
+        if existing is None:
+            await _enforce_exchange_limit(db, req.customer_id)
     try:
         return build_provision_plan(req.customer_id, req.tag)
     except BinanceSubAccountError as exc:
