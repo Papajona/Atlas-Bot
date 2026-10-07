@@ -996,29 +996,32 @@ async def _usdt_tron_monitor_loop():
                                     funding = FundingTransaction(
                                         customer_id=locked_wallet.customer_id, wallet_id=locked_wallet.id,
                                         provider="tron-usdt", provider_reference=provider_ref,
-                                        amount=amount, currency="USDT", status=("PENDING_REVIEW" if settings.funding_manual_review_required else "CONFIRMED"),
+                                        amount=amount, currency="USDT",
+                                        status=("PENDING_REVIEW" if settings.funding_manual_review_required else "CONFIRMED"),
                                         metadata_json=json.dumps({"network": "TRON", "contract": settings.usdt_tron_usdt_contract,
                                                                   "txid": txid, "from": sender, "to": wallet.deposit_address,
                                                                   "raw_value": str(raw_value), "decimals": decimals,
                                                                   "block_timestamp": block_ts, "confirmed_history": True}, separators=(",", ":")))
+                                    db.add(funding)
                                     if not settings.funding_manual_review_required:
                                         funding.confirmed_at = datetime.now(timezone.utc)
-                                        db.add(funding)
-                                        await post_deposit(db, customer_id=locked_wallet.customer_id, wallet_id=locked_wallet.id,
-                                        amount=amount, provider_reference=provider_ref, provider="tron-usdt",
-                                        metadata={"network": "TRON", "contract": settings.usdt_tron_usdt_contract,
-                                        "txid": txid, "from": sender, "to": wallet.deposit_address,
-                                        "raw_value": str(raw_value), "decimals": decimals,
-                                        "block_timestamp": block_ts})
+                                        await post_deposit(
+                                            db, customer_id=locked_wallet.customer_id, wallet_id=locked_wallet.id,
+                                            amount=amount, provider_reference=provider_ref, provider="tron-usdt",
+                                            metadata={"network": "TRON", "contract": settings.usdt_tron_usdt_contract,
+                                                      "txid": txid, "from": sender, "to": wallet.deposit_address,
+                                                      "raw_value": str(raw_value), "decimals": decimals,
+                                                      "block_timestamp": block_ts},
+                                        )
                                         await sync_wallet_from_ledger(db, locked_wallet.customer_id, "USDT")
                                         account = (await db.execute(select(TradingAccount).where(
-                                        TradingAccount.customer_id == locked_wallet.customer_id).with_for_update())).scalar_one_or_none()
+                                            TradingAccount.customer_id == locked_wallet.customer_id).with_for_update())).scalar_one_or_none()
                                         if account:
-                                        balance = await customer_balance(db, locked_wallet.customer_id, "USDT")
-                                        account.cash_equity = balance["available"] + balance["trading_reserved"]
-                                        account.equity = max(0.0, account.cash_equity + account.realized_pnl + account.unrealized_pnl)
-                                        account.peak_equity = max(account.peak_equity, account.equity)
-                                        await db.commit()
+                                            balance = await customer_balance(db, locked_wallet.customer_id, "USDT")
+                                            account.cash_equity = balance["available"] + balance["trading_reserved"]
+                                            account.equity = max(0.0, account.cash_equity + account.realized_pnl + account.unrealized_pnl)
+                                            account.peak_equity = max(account.peak_equity, account.equity)
+                                    await db.commit()
 
                             meta = body.get("meta") or {}
                             next_fingerprint = meta.get("fingerprint")
