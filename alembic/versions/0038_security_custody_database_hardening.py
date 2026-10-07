@@ -1,5 +1,5 @@
 """AtlasRisk 3.10.45: custody, auth, deployment and database hardening."""
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 revision = "0038_security_custody_database_hardening"
@@ -12,6 +12,31 @@ def _has_col(bind, table, column):
 
 def upgrade():
     bind = op.get_bind()
+    if context.is_offline_mode():
+        op.add_column("withdrawal_step_up_tokens", sa.Column("proposal_digest", sa.String(length=64), nullable=False, server_default=""))
+        op.execute(sa.text("UPDATE withdrawal_step_up_tokens SET proposal_digest = '0000000000000000000000000000000000000000000000000000000000000000' WHERE proposal_digest = '' OR proposal_digest IS NULL"))
+        for cname, table, col, ref in [
+            ("fk_smart_trades_customer", "smart_trades", "customer_id", "customer_profiles(id)"),
+            ("fk_smart_trades_account", "smart_trades", "trading_account_id", "trading_accounts(id)"),
+            ("fk_dca_bots_customer", "dca_bots", "customer_id", "customer_profiles(id)"),
+            ("fk_dca_bots_account", "dca_bots", "trading_account_id", "trading_accounts(id)"),
+            ("fk_grid_bots_customer", "grid_bots", "customer_id", "customer_profiles(id)"),
+            ("fk_grid_bots_account", "grid_bots", "trading_account_id", "trading_accounts(id)"),
+            ("fk_trade_executors_customer", "trade_executors", "customer_id", "customer_profiles(id)"),
+            ("fk_trade_executors_account", "trade_executors", "trading_account_id", "trading_accounts(id)"),
+            ("fk_strategy_candidates_customer", "strategy_candidates", "customer_id", "customer_profiles(id)"),
+            ("fk_strategy_drafts_customer", "strategy_drafts", "customer_id", "customer_profiles(id)"),
+            ("fk_customer_binance_customer", "customer_binance_accounts", "customer_id", "customer_profiles(id)"),
+            ("fk_customer_deriv_customer", "customer_deriv_accounts", "customer_id", "customer_profiles(id)"),
+            ("fk_customer_oanda_customer", "customer_oanda_accounts", "customer_id", "customer_profiles(id)"),
+            ("fk_withdrawal_stepup_customer", "withdrawal_step_up_tokens", "auth_user_id", "customer_profiles(auth_user_id)"),
+            ("fk_funding_transaction_customer", "funding_transactions", "customer_id", "customer_profiles(id)"),
+            ("fk_funding_transaction_wallet", "funding_transactions", "wallet_id", "wallets(id)"),
+        ]:
+            op.execute(sa.text(f'ALTER TABLE "{table}" ADD CONSTRAINT "{cname}" FOREIGN KEY ("{col}") REFERENCES {ref} NOT VALID'))
+        op.create_check_constraint("ck_trades_reserved_cash_nonnegative", "trades", "reserved_cash >= 0")
+        op.create_check_constraint("ck_stepup_proposal_digest_nonempty", "withdrawal_step_up_tokens", "proposal_digest <> ''")
+        return
     if not _has_col(bind, "withdrawal_step_up_tokens", "proposal_digest"):
         op.add_column("withdrawal_step_up_tokens", sa.Column("proposal_digest", sa.String(length=64), nullable=False, server_default=""))
     if bind.dialect.name == "postgresql":
