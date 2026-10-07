@@ -3355,7 +3355,14 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             "strategy_router": router,
             "ml_signal": ml_signal if settings.adaptive_ai_enabled else {"status": "DISABLED"},
         }
-        ai_review = await dual_ai_trade_safety_review(packet)
+        try:
+            ai_review = await asyncio.wait_for(
+                dual_ai_trade_safety_review(packet),
+                timeout=settings.ai_strategy_provider_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            await _audit("CUSTOMER_BOT_AI_TIMEOUT", {"customer_id": profile.id, "symbol": req.symbol, "timeout_seconds": settings.ai_strategy_provider_timeout_seconds})
+            return {"decision": "NO_TRADE", "stage": "ai_safety_timeout", "analysis": deterministic, "execution": None}
         if not ai_review["safe"]:
             stage = "ai_safety_not_configured" if not ai_review.get("configured", True) else "ai_safety_gate"
             await _audit("CUSTOMER_BOT_AI_NOT_CONFIGURED" if stage == "ai_safety_not_configured" else "CUSTOMER_BOT_AI_VETO",
@@ -4968,6 +4975,8 @@ async def execute_forex_demo(req: ExecuteRequest, x_admin_token: str | None = He
             raise HTTPException(403, "Forex demo trading is not enabled; enable it first")
     if req.quantity > settings.oanda_demo_max_units:
         raise HTTPException(422, f"Demo quantity exceeds configured cap of {settings.oanda_demo_max_units:g} units")
+    if not req.signal_timestamp and settings.require_signal_timestamp_for_live:
+        raise HTTPException(422, "signal_timestamp is required for broker-demo execution")
     from .forex_oanda import OandaBroker, OandaConfig, OandaError
     broker = OandaBroker(OandaConfig(settings.oanda_account_id, settings.oanda_api_token, True, settings.oanda_timeout_seconds))
     try:
@@ -5317,6 +5326,8 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
 async def execute(req: ExecuteRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "OPERATIONS")
+    if not req.signal_timestamp and settings.require_signal_timestamp_for_live and (not req.force_paper or req.demo_forex):
+        raise HTTPException(422, "signal_timestamp is required for live or broker-demo execution")
     signal_timestamp = req.signal_timestamp or datetime.now(timezone.utc).isoformat()
     sig = {"score": req.score, "long_probability": req.long_probability,
            "short_probability": req.short_probability, "flat_probability": req.flat_probability}
