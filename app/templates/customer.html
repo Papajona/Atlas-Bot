@@ -125,6 +125,17 @@
     </main>
   </div>
 </div>
+<dialog id="usdtPaymentDialog" class="usdt-payment-dialog" aria-labelledby="usdtPaymentTitle">
+  <form method="dialog" class="usdt-payment-card">
+    <div class="settings-card-head"><div><div class="eyebrow">SECURE PAYMENT</div><h3 id="usdtPaymentTitle">Pay with USDT</h3><p class="muted" id="usdtPaymentSubtitle">TRON / TRC-20 · on-chain verification</p></div><button class="icon-btn" value="cancel" aria-label="Close payment dialog">×</button></div>
+    <div class="payment-amount"><span>Exact amount</span><strong id="usdtPaymentAmount">—</strong><small id="usdtPaymentExpiry">Payment request expires in 30 minutes.</small></div>
+    <div class="payment-address"><label for="usdtPaymentAddress">TRON / TRC-20 receiving address</label><code id="usdtPaymentAddress">—</code><button type="button" class="secondary small" id="copyUsdtAddress">Copy address</button></div>
+    <div class="payment-reference"><label for="usdtPaymentReference">Payment reference</label><code id="usdtPaymentReference">—</code><small>Use the exact amount and network. The reference helps reconciliation; the transaction hash is the authoritative verification identifier.</small></div>
+    <div class="formgrid"><label>Transaction hash<input id="usdtTxHash" inputmode="text" autocomplete="off" maxlength="64" placeholder="Paste the 64-character TRON transaction hash"></label></div>
+    <div class="actions"><button type="button" class="secondary" id="usdtRefreshStatus">I have sent the payment</button><button type="button" class="primary-cta" id="usdtVerifyPayment">Verify payment & activate</button></div>
+    <pre id="usdtPaymentOut" class="feedback" role="status" aria-live="polite"></pre>
+  </form>
+</dialog>
 <nav class="mobile-nav" aria-label="Mobile navigation"><a href="#overview" class="nav-link active" data-section="overview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11 12 4l8 7v9H4z"/></svg><small>Home</small></a><a href="#wallet" class="nav-link" data-section="wallet"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9h9A9 9 0 1 1 12 3z"/></svg><small>Portfolio</small></a><a href="#markets" class="nav-link" data-section="markets"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20V10M12 20V4M19 20v-7"/></svg><small>Market</small></a><a href="#settings" class="nav-link" data-section="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg><small>Settings</small></a></nav>
 <script>
 function esc(value){const d=document.createElement('div');d.textContent=value==null?'':String(value);return d.innerHTML;}
@@ -376,7 +387,7 @@ const meta=document.createElement('div');meta.className='subscription-meta';cons
 const list=document.createElement('ul');list.className='subscription-features';for(const feature of (p.features||[]).slice(0,5)){const li=document.createElement('li');li.textContent=planFeatureLabel(feature);list.appendChild(li);}if(p.code!=='free'){const live=document.createElement('li');live.textContent=p.live?'Live-trading entitlement · currently gated by platform/customer controls':'Paper only';list.appendChild(live);}card.appendChild(list);
 const btn=document.createElement('button');btn.className=p.code==='free'?'secondary full':'primary-cta full';btn.type='button';btn.textContent=p.code==='free'?'Current plan':'Choose '+p.name.replace('Atlas ','');if(p.code!=='free')btn.addEventListener('click',()=>checkoutPlan(p.code,billingInterval));card.appendChild(btn);return card;}
 async function loadBilling(){try{const d=await api('/api/customer/billing');const plan=d.plan||{};const current=document.getElementById('billingCurrentPlan');if(current)current.textContent=(plan.name||plan.code||'FREE').replace(/^Atlas /,'');const usage=d.usage||{};const used=Number(usage.trades_used||0);const limit=Number(usage.monthly_trade_limit||0);document.getElementById('billingCurrentUsage').textContent=limit>0?used+' of '+limit+' trades used this period · '+Math.max(0,limit-used)+' remaining':'Unlimited trades · '+used+' used this period';document.getElementById('customerPlan').textContent=(plan.name||plan.code||'FREE').toUpperCase();document.getElementById('customerPlanStatus').textContent=(d.subscription?.status||'active')+' · '+(d.subscription?.interval||'monthly');const plans=await api('/api/plans');const box=document.getElementById('billingPlans');box.replaceChildren(...plans.map(renderPlanCard));document.getElementById('billingOut').textContent=`Payment: USDT on TRON / TRC-20 · Referral code: ${d.referral?.code||'not created'} · Referred: ${d.referral?.referred_count||0}`; }catch(e){document.getElementById('billingOut').textContent=e.message;}}
-function ensurePaymentDialog(){let el=document.getElementById('usdtPaymentDialog');if(el)return el;el=document.createElement('dialog');el.id='usdtPaymentDialog';el.className='usdt-payment-dialog';el.innerHTML=`<form method="dialog" class="usdt-payment-card"><div class="settings-card-head"><div><div class="eyebrow">SECURE PAYMENT</div><h3 id="usdtPaymentTitle">Pay with USDT</h3><p class="muted" id="usdtPaymentSubtitle">TRON / TRC-20 · on-chain verification</p></div><button class="icon-btn" value="cancel" aria-label="Close payment dialog">×</button></div><div class="payment-amount"><span>Exact amount</span><strong id="usdtPaymentAmount">—</strong><small id="usdtPaymentExpiry">Payment request expires in 30 minutes.</small></div><div class="payment-address"><label>TRON / TRC-20 receiving address</label><code id="usdtPaymentAddress">—</code><button type="button" class="secondary small" id="copyUsdtAddress">Copy address</button></div><div class="payment-reference"><label>Payment reference</label><code id="usdtPaymentReference">—</code><small>Use the exact amount and network. The reference helps you reconcile the payment; the transaction hash is the authoritative verification identifier.</small></div><div class="formgrid"><label>Transaction hash<input id="usdtTxHash" inputmode="text" autocomplete="off" maxlength="64" placeholder="Paste the 64-character TRON transaction hash"></label></div><div class="actions"><button type="button" class="secondary" id="usdtRefreshStatus">I have sent the payment</button><button type="button" class="primary-cta" id="usdtVerifyPayment">Verify payment & activate</button></div><pre id="usdtPaymentOut" class="feedback" role="status" aria-live="polite"></pre></form></dialog>`;document.body.appendChild(el);el.querySelector('#copyUsdtAddress').addEventListener('click',async()=>{const v=document.getElementById('usdtPaymentAddress').textContent;try{await navigator.clipboard.writeText(v);document.getElementById('usdtPaymentOut').textContent='Receiving address copied.';}catch(e){document.getElementById('usdtPaymentOut').textContent='Copy unavailable; select the address manually.';}});return el;}
+function ensurePaymentDialog(){return document.getElementById('usdtPaymentDialog');}
 async function checkoutPlan(plan,interval='monthly'){const dialog=ensurePaymentDialog();const out=document.getElementById('usdtPaymentOut');out.textContent='Creating a locked payment request…';document.getElementById('usdtPaymentTitle').textContent='Subscribe to '+plan.charAt(0).toUpperCase()+plan.slice(1);try{const d=await api('/api/customer/billing/usdt-intent',{method:'POST',body:JSON.stringify({plan,interval})});dialog.dataset.paymentIntentId=String(d.payment_intent_id);document.getElementById('usdtPaymentAmount').textContent=String(d.amount_usdt)+' USDT';document.getElementById('usdtPaymentAddress').textContent=d.receiving_address;document.getElementById('usdtPaymentReference').textContent=d.payment_reference;document.getElementById('usdtTxHash').value='';document.getElementById('usdtPaymentOut').textContent=d.instructions||'Send the exact amount on TRON/TRC-20, then submit the transaction hash.';dialog.showModal();}catch(e){out.textContent=e.message;dialog.showModal();}}
 async function verifyUsdtPayment(){const dialog=document.getElementById('usdtPaymentDialog');const tx=document.getElementById('usdtTxHash').value.trim();if(!/^[0-9a-fA-F]{64}$/.test(tx)){document.getElementById('usdtPaymentOut').textContent='Enter a valid 64-character TRON transaction hash.';return}const intent=dialog?.dataset.paymentIntentId;if(!intent){document.getElementById('usdtPaymentOut').textContent='Payment request is missing. Start again from the plan card.';return}const btn=document.getElementById('usdtVerifyPayment');btn.disabled=true;document.getElementById('usdtPaymentOut').textContent='Verifying the transaction on TRON…';try{const d=await api('/api/customer/billing/usdt-submit',{method:'POST',body:JSON.stringify({payment_intent_id:Number(intent),tx_hash:tx})});document.getElementById('usdtPaymentOut').textContent=d.status==='CONFIRMED'?'Payment verified. Your subscription is active.':'Payment submitted; verification status: '+(d.status||'PENDING');if(d.status==='CONFIRMED'){setTimeout(()=>{dialog.close();loadBilling();},900);}}catch(e){document.getElementById('usdtPaymentOut').textContent=e.message;}finally{btn.disabled=false;}}
 function bindUsdtPaymentDialog(){const dialog=ensurePaymentDialog();document.getElementById('usdtVerifyPayment').onclick=verifyUsdtPayment;document.getElementById('usdtRefreshStatus').onclick=verifyUsdtPayment;}
@@ -423,186 +434,5 @@ window.addEventListener('hashchange',()=>setActiveSection(location.hash.replace(
 if(location.hash)setActiveSection(location.hash.replace('#',''));
 document.querySelectorAll('[data-setting]').forEach(el=>{const saved=localStorage.getItem('atlas_ui_'+el.dataset.setting);if(saved!==null)el.checked=saved==='1';el.addEventListener('change',()=>{localStorage.setItem('atlas_ui_'+el.dataset.setting,el.checked?'1':'0');if(el.id==='reduceMotion')document.body.classList.toggle('reduce-motion',el.checked);if(el.id==='compactMarkets')document.body.classList.toggle('compact-markets',el.checked);});});
 /* Keep one wrapper per lifecycle function: predictable, testable, and easy to maintain. */
-async function showAccount(){
-  document.getElementById('auth').style.display='none';
-  document.getElementById('mfaBox').style.display='none';
-  document.getElementById('account').style.display='block';
-  await loadAccount();
-  await loadProductWorkspace();
-  for(const fn of [loadBilling,loadCandidates,loadExecutors,refreshBotStatus]){try{await fn();}catch(e){}}
-  syncUiAccount();
-}
-function syncUiAccount(){
-  const email=document.getElementById('customerEmail')?.textContent||'—';
-  const status=document.getElementById('customerStatus')?.textContent||'—';
-  const se=document.getElementById('settingsEmail'), ss=document.getElementById('settingsStatus');
-  if(se)se.textContent=email;
-  if(ss)ss.textContent=status;
-  const wb=document.getElementById('walletTotal')?.textContent||'—';
-  const wh=document.getElementById('walletBalanceHero');
-  if(wh)wh.textContent=wb;
-}
-const _loadAccount=loadAccount;
-loadAccount=async function(){
-  await _loadAccount();
-  syncUiAccount();
-  try{
-    const p=await api('/api/customer/portfolio');
-    document.getElementById('snapshotEquity').textContent='$'+Number(p.equity||0).toFixed(2);
-    document.getElementById('snapshotCash').textContent='$'+Number(p.cash_equity||0).toFixed(2);
-    document.getElementById('snapshotPositions').textContent=String((p.positions||[]).length);
-    const po=document.getElementById('portfolioOut');
-    if(po)po.textContent='Equity: $'+Number(p.equity||0).toFixed(2)+' · Cash: $'+Number(p.cash_equity||0).toFixed(2)+' · Positions: '+((p.positions||[]).length);
-  }catch(e){}
-  await renderHome().catch(()=>{});
-};
-const _loadProductWorkspace=loadProductWorkspace;
-loadProductWorkspace=async function(){
-  await _loadProductWorkspace();
-  const src=document.getElementById('scannerOut'), rows=document.getElementById('marketRows');
-  if(src&&rows){
-    const items=src.querySelectorAll('div');
-    rows.replaceChildren();
-    if(items.length){
-      for(const x of items){
-        const t=x.textContent.trim().split(' ');
-        const tr=document.createElement('tr');
-        for(const val of [t[0]||'—',t[1]||'—',t[4]||'—',t[7]||'—','READY']){
-          const td=document.createElement('td');td.textContent=val;tr.appendChild(td);
-        }
-        rows.appendChild(tr);
-      }
-      applyMarketFilters();
-    }else{
-      const tr=document.createElement('tr'),td=document.createElement('td');
-      td.colSpan=5;td.className='muted';td.textContent='No scanner results.';
-      tr.appendChild(td);rows.appendChild(tr);
-    }
-  }
-  await renderWatch().catch(()=>{});
-};
-const _loadDeposit=loadDeposit;
-loadDeposit=async function(){await _loadDeposit();document.getElementById('depositBox')?.classList.add('loaded');};
-
-async function createLabCandidate(){try{const d=await api('/api/customer/strategy-lab/candidates',{method:'POST',body:JSON.stringify({name:document.getElementById('labName').value,prompt:document.getElementById('labPrompt').value,asset:document.getElementById('labAsset').value,symbol:document.getElementById('labSymbol').value,exchange:document.getElementById('labAsset').value==='crypto'?'binance':'oanda',timeframe:document.getElementById('labTf').value,days:365})});document.getElementById('labOut').textContent='Candidate #'+d.id+' created. Validating...';await validateCandidate(d.id);}catch(e){document.getElementById('labOut').textContent=e.message;}}
-async function validateCandidate(id){try{const d=await api(`/api/customer/strategy-lab/candidates/${id}/validate`,{method:'POST'});document.getElementById('labOut').textContent=summarizeValidation(d);await loadCandidates();}catch(e){document.getElementById('labOut').textContent=e.message;}}
-async function approveCandidate(id){try{const d=await api(`/api/customer/strategy-lab/candidates/${id}/approve-live`,{method:'POST'});document.getElementById('labOut').textContent=JSON.stringify(d,null,2);await loadCandidates();}catch(e){document.getElementById('labOut').textContent=e.message;}}
-async function showCandidateHistory(id){const out=document.getElementById('labOut');try{const rows=await api(`/api/customer/strategy-lab/candidates/${id}/runs`);if(!rows.length){out.textContent='No validation attempts recorded yet.';return;}out.textContent=rows.map(r=>{const g=r.gate||{};const dl=r.delta_vs_previous;const delta=dl?` | vs previous: Sharpe ${dl.sharpe>=0?'+':''}${fmtNum(dl.sharpe)}, return ${dl.total_return>=0?'+':''}${fmtPct(dl.total_return)}`:'';return `Attempt ${r.attempt} (${r.created_at.slice(0,16).replace('T',' ')}): ${r.passed?'PASSED':'REJECTED'} | Sharpe ${fmtNum(g.sharpe)} | DD ${fmtPct(g.max_drawdown)} | Return ${fmtPct(g.total_return)}${delta}`;}).join('\n');}catch(e){out.textContent=e.message;}}
-async function loadCandidates(){try{const rows=await api('/api/customer/strategy-lab/candidates');const box=document.getElementById('candidateList');box.replaceChildren();for(const r of rows){const div=document.createElement('div');div.className='activity-item';const title=document.createElement('b');title.textContent=`${r.name} · ${r.symbol}`;const meta=document.createElement('span');meta.textContent=`${r.status} · ${r.live_approved?'LIVE APPROVED':'not live approved'}`;div.append(title,meta);if(r.status==='DRAFT'||r.status==='REJECTED'){const b=document.createElement('button');b.textContent='Validate';b.onclick=()=>validateCandidate(r.id);div.append(b);}if(r.status==='VALIDATED'&&!r.live_approved){const b=document.createElement('button');b.textContent='Approve live';b.onclick=()=>approveCandidate(r.id);div.append(b);}if(r.status!=='DRAFT'){const h=document.createElement('button');h.textContent='History';h.onclick=()=>showCandidateHistory(r.id);div.append(h);}box.appendChild(div);}}catch(e){document.getElementById('labOut').textContent=e.message;}}
-async function createExecutor(mode){try{const d=await api('/api/customer/executors',{method:'POST',body:JSON.stringify({kind:document.getElementById('execKind').value,asset:document.getElementById('botAsset').value,symbol:document.getElementById('botSymbol').value,exchange:document.getElementById('botAsset').value==='crypto'?'binance':'oanda',timeframe:document.getElementById('botTimeframe').value,side:document.getElementById('execSide').value,total_quantity:Number(document.getElementById('execQty').value),slices:Number(document.getElementById('execSlices').value),interval_seconds:60,max_slippage_bps:25,mode})});document.getElementById('executorOut').textContent=JSON.stringify(d,null,2);await loadExecutors();}catch(e){document.getElementById('executorOut').textContent=e.message;}}
-async function loadExecutors(){try{const rows=await api('/api/customer/executors');const box=document.getElementById('executorList');box.replaceChildren();for(const r of rows){const div=document.createElement('div');div.className='activity-item';const title=document.createElement('b');title.textContent=`${r.kind} · ${r.symbol}`;const meta=document.createElement('span');meta.textContent=`${r.status} · ${r.mode} · ${Number(r.executed_quantity).toFixed(6)} / ${Number(r.target_quantity).toFixed(6)}`;div.append(title,meta);if(r.status==='ARMED'){const stop=document.createElement('button');stop.textContent='Stop';stop.onclick=()=>executorAction(r.id,'STOP');div.append(stop);}if(r.mode==='PAPER'&&r.status==='ARMED'){const live=document.createElement('button');live.textContent='Approve live';live.onclick=()=>executorAction(r.id,'APPROVE_LIVE');div.append(live);}box.appendChild(div);}}catch(e){document.getElementById('executorOut').textContent=e.message;}}
-/* Home data is API-backed; no synthetic balances or performance values. */
-const HOME_USD=new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'});
-function fmtUsd(n,signed){const v=Number(n)||0;const s=HOME_USD.format(Math.abs(v));return (v<0?'−':(signed&&v>0?'+':''))+s;} function fmtUsdt(n,signed){const v=Number(n)||0;const s=Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:6})+' USDT';return (v<0?'−':(signed&&v>0?'+':''))+s;} 
-function pnlClass(v){return v>0?'pos':(v<0?'neg':'flat');}
-function homeName(email){const m=/^[A-Za-z]{2,}/.exec(String(email||'').split('@')[0]);return m?'Welcome, '+m[0][0].toUpperCase()+m[0].slice(1).toLowerCase():'Welcome back';}
-function groupLedger(lines){const m=new Map();for(const l of lines){if(!String(l.account_code||'').startsWith('LIABILITY:CUSTOMER:'))continue;let j=m.get(l.journal_id);if(!j){j={id:l.journal_id,type:l.entry_type,at:l.created_at,net:0};m.set(l.journal_id,j);}j.net+=Number(l.credit||0)-Number(l.debit||0);}return [...m.values()].sort((a,b)=>Date.parse(b.at)-Date.parse(a.at));}
-const HOME_ACT={DEPOSIT_CREDIT:['Deposit','dep','↓'],TRADE_SETTLEMENT:['Trade result','trd','↔'],TRADING_FEE:['Trading fee','fee','%'],WITHDRAWAL_SETTLEMENT:['Withdrawal sent','wd','↑']};
-function homeNote(el,text){el.replaceChildren();const li=document.createElement('li');li.className='empty-note';li.textContent=text;el.appendChild(li);}
-function renderActivity(journals){const ul=document.getElementById('homeActivity');const rows=journals.filter(j=>Math.abs(j.net)>1e-9).slice(0,4);if(!rows.length){homeNote(ul,'No activity yet. Deposits, trades and withdrawals will show up here.');return;}ul.replaceChildren();for(const j of rows){const meta=HOME_ACT[j.type]||[String(j.type||'Activity').replace(/_/g,' ').replace(/^./,c=>c.toUpperCase()),'fee','•'];const li=document.createElement('li');li.className='act-row';const b=document.createElement('span');b.className='badge '+meta[1];b.textContent=meta[2];const lbl=document.createElement('span');lbl.className='lbl';lbl.textContent=meta[0];const when=document.createElement('small');when.className='muted';when.textContent=' '+new Date(j.at).toLocaleDateString(undefined,{month:'short',day:'numeric'});lbl.appendChild(when);const amt=document.createElement('span');amt.className='amt '+pnlClass(j.net);amt.textContent=fmtUsd(j.net,true);li.append(b,lbl,amt);ul.appendChild(li);}}
-let perfDays = 7;
-let cachedJournals = [];
-
-function setPerfTimeframe(days) {
-  perfDays = days;
-  document.getElementById('perfTitle').textContent = `Portfolio Performance · ${days} days`;
-  const btn7 = document.getElementById('btnTf7');
-  const btn30 = document.getElementById('btnTf30');
-  if (btn7 && btn30) {
-    if (days === 7) {
-      btn7.style.background = '#10b981'; btn7.style.color = '#fff'; btn7.style.borderColor = '#10b981';
-      btn30.style.background = '#fff'; btn30.style.color = '#334155'; btn30.style.borderColor = '#cbd5e1';
-    } else {
-      btn30.style.background = '#10b981'; btn30.style.color = '#fff'; btn30.style.borderColor = '#10b981';
-      btn7.style.background = '#fff'; btn7.style.color = '#334155'; btn7.style.borderColor = '#cbd5e1';
-    }
-  }
-  if (cachedJournals.length) renderPerformance(cachedJournals);
-}
-
-function renderPerformance(journals){
-  cachedJournals = journals;
-  const box=document.getElementById('homeChart'),sub=document.getElementById('perfSub'),cutoff=Date.now()-perfDays*864e5;
-  const rows=journals.filter(j=>(j.type==='TRADE_SETTLEMENT'||j.type==='TRADING_FEE')&&Date.parse(j.at)>=cutoff).sort((a,b)=>Date.parse(a.at)-Date.parse(b.at));
-  box.replaceChildren();
-  if(!rows.length){
-    // If no closed trades in DB yet, show the calibrated 30-day trend curve
-    renderMock30DayCurve(box, sub, perfDays);
-    return;
-  }
-  let run=0;
-  const points=rows.map(j=>{run+=j.net;return {at:j.at,v:run};});
-  const total=run,vals=points.map(x=>x.v),min=Math.min(0,...vals),max=Math.max(0,...vals),range=Math.max(max-min,1),w=720,h=210,pad=18;
-  sub.textContent='Net '+fmtUsd(total,true)+' realised after fees ('+perfDays+' days). Deposits and withdrawals are excluded.';
-  drawRechartsAreaChart(box, points, min, range, total, w, h, pad);
-}
-
-function renderMock30DayCurve(box, sub, days) {
-  const count = days === 7 ? 7 : 30;
-  const changes = [
-    4.20, 8.50, -3.10, 6.40, 12.30, -5.20, 9.10,
-    14.50, -4.80, 11.20, 7.60, -6.10, 18.40, 10.50,
-    -7.20, 15.30, 8.90, -4.50, 13.20, 16.80, -8.10,
-    12.40, 9.50, -3.80, 14.60, 17.20, -5.40, 12.80,
-    10.60, 9.50
-  ].slice(-count);
-  let run = 0;
-  const points = changes.map((c, i) => { run += c; return { at: `Day ${i+1}`, v: run }; });
-  const total = run, vals = points.map(x=>x.v), min = Math.min(0, ...vals), max = Math.max(0, ...vals), range = Math.max(max - min, 1), w = 720, h = 210, pad = 18;
-  sub.textContent = 'Simulated net +' + fmtUsd(total, false) + ' realised profit trend (' + days + ' days). 2.0x cost stress active.';
-  drawRechartsAreaChart(box, points, min, range, total, w, h, pad);
-}
-
-function drawRechartsAreaChart(box, points, min, range, total, w, h, pad) {
-  const xy=(x,i)=>{const xx=pad+(i/Math.max(points.length-1,1))*(w-pad*2);const yy=h-pad-((x.v-min)/range)*(h-pad*2);return [xx,yy];};
-  const coords = points.map((p, i) => xy(p, i));
-  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
-  svg.setAttribute('viewBox','0 0 '+w+' '+h);svg.setAttribute('preserveAspectRatio','none');svg.setAttribute('role','img');svg.setAttribute('style','width:100%;height:100%;display:block;');
-  
-  const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-  const grad = document.createElementNS('http://www.w3.org/2000/svg', 'linearGradient');
-  grad.setAttribute('id', 'rechartsGrad');
-  grad.setAttribute('x1', '0'); grad.setAttribute('y1', '0'); grad.setAttribute('x2', '0'); grad.setAttribute('y2', '1');
-  const color = total >= 0 ? '#10b981' : '#ef4444';
-  [['0%', '0.38'], ['85%', '0.04'], ['100%', '0.0']].forEach(([offset, opacity]) => {
-    const stop = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-    stop.setAttribute('offset', offset);
-    stop.setAttribute('stop-color', color);
-    stop.setAttribute('stop-opacity', opacity);
-    grad.appendChild(stop);
-  });
-  defs.appendChild(grad);
-  svg.appendChild(defs);
-
-  let pathD = `M ${coords[0][0]} ${coords[0][1]}`;
-  for (let i = 0; i < coords.length - 1; i++) {
-    const cp1x = coords[i][0] + (coords[i+1][0] - coords[i][0]) / 2;
-    const cp1y = coords[i][1];
-    const cp2x = coords[i][0] + (coords[i+1][0] - coords[i][0]) / 2;
-    const cp2y = coords[i+1][1];
-    pathD += ` C ${cp1x.toFixed(1)} ${cp1y.toFixed(1)}, ${cp2x.toFixed(1)} ${cp2y.toFixed(1)}, ${coords[i+1][0].toFixed(1)} ${coords[i+1][1].toFixed(1)}`;
-  }
-
-  const fillD = `${pathD} L ${coords[coords.length-1][0]} ${h-pad} L ${coords[0][0]} ${h-pad} Z`;
-  const fillPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  fillPath.setAttribute('d', fillD); fillPath.setAttribute('fill', 'url(#rechartsGrad)');
-  svg.appendChild(fillPath);
-
-  const strokePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  strokePath.setAttribute('d', pathD); strokePath.setAttribute('fill', 'none'); strokePath.setAttribute('stroke', color); strokePath.setAttribute('stroke-width', '3.5'); strokePath.setAttribute('stroke-linecap', 'round'); strokePath.setAttribute('stroke-linejoin', 'round');
-  svg.appendChild(strokePath);
-
-  const last = coords[coords.length - 1];
-  const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  dot.setAttribute('cx', last[0]); dot.setAttribute('cy', last[1]); dot.setAttribute('r', '5'); dot.setAttribute('fill', color); dot.setAttribute('stroke', '#fff'); dot.setAttribute('stroke-width', '2');
-  svg.appendChild(dot);
-  box.appendChild(svg);
-}
-
-async function renderHome(){const email=(document.getElementById('customerEmail')?.textContent||'').trim();document.getElementById('homeGreeting').textContent=homeName(email);const av=document.getElementById('homeAvatar');if(av)av.textContent=(email[0]||'A').toUpperCase();try{const p=await api('/api/customer/portfolio');const pnl=(p.positions||[]).reduce((sum,x)=>sum+Number(x.unrealized_pnl||0),0);document.getElementById('homeBalance').textContent=fmtUsdt(p.equity);document.getElementById('homeActive').textContent=String((p.positions||[]).length);const el=document.getElementById('homeOpenPnl');el.textContent=fmtUsdt(pnl,true);el.className=pnlClass(pnl);}catch(e){for(const id of ['homeBalance','homeActive','homeOpenPnl'])document.getElementById(id).textContent='—';}try{const l=await api('/api/customer/ledger');const entries=l.entries||[];const j=groupLedger(entries);renderActivity(j);renderPerformance(j);}catch(e){homeNote(document.getElementById('homeActivity'),'Activity is unavailable right now.');const box=document.getElementById('homeChart');box.replaceChildren();const d=document.createElement('div');d.className='chart-empty';d.textContent='Performance is unavailable right now.';box.appendChild(d);}}
-function coinClass(base){return base==='BTC'?'coin-b':base==='ETH'?'coin-e':base==='SOL'?'coin-s':'coin-x';}
-function fmtPrice(v){const n=Number(v);if(!isFinite(n))return '—';return n>=1000?n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):n.toLocaleString('en-US',{maximumFractionDigits:4});}
-async function renderWatch(){const ul=document.getElementById('homeWatch');try{const s=await api('/api/customer/market-scanner?exchange=bybit&symbols=BTC%2FUSDT%3AUSDT%2CETH%2FUSDT%3AUSDT%2CSOL%2FUSDT%3AUSDT');const rows=(s.results||[]).filter(x=>x.signal!=='ERROR');if(!rows.length){homeNote(ul,'No market data right now.');return;}ul.replaceChildren();for(const x of rows){const base=String(x.symbol||'').split('/')[0];const li=document.createElement('li');li.className='watch-row';const b=document.createElement('span');b.className='badge '+coinClass(base);b.textContent=base.slice(0,1);const lbl=document.createElement('span');lbl.className='lbl';lbl.textContent=base+' $'+fmtPrice(x.price);const sig=String(x.signal||'NEUTRAL').toUpperCase();const pill=document.createElement('span');pill.className='pill '+(sig==='LONG'?'long':sig==='SHORT'?'short':'neutral');pill.textContent=sig.charAt(0)+sig.slice(1).toLowerCase();li.append(b,lbl,pill);ul.appendChild(li);}}catch(e){homeNote(ul,'Market signals are unavailable right now.');}}
-async function executorAction(id,action){try{const d=await api(`/api/customer/executors/${id}/action`,{method:'POST',body:JSON.stringify({action})});document.getElementById('executorOut').textContent=JSON.stringify(d,null,2);await loadExecutors();}catch(e){document.getElementById('executorOut').textContent=e.message;}}
 </script>
 </body></html>
