@@ -77,28 +77,40 @@ async def consume_subscription_trade(db, *, customer_id: int, idempotency_key: s
     ).scalar_one_or_none()
 
     if not usage:
-        usage = SubscriptionTradeUsage(
-            subscription_id=sub.id,
-            customer_id=customer_id,
-            period_start=period_start,
-            period_end=period_end,
-            trades_used=0,
-        )
-        async with db.begin_nested():
-            db.add(usage)
-            try:
-                await db.flush()
-            except IntegrityError:
-                usage = (
-                    await db.execute(
-                        select(SubscriptionTradeUsage)
-                        .where(
-                            SubscriptionTradeUsage.subscription_id == sub.id,
-                            SubscriptionTradeUsage.period_start == period_start,
-                        )
-                        .with_for_update()
+        try:
+            async with db.begin_nested():
+                db.add(
+                    SubscriptionTradeUsage(
+                        subscription_id=sub.id,
+                        customer_id=customer_id,
+                        period_start=period_start,
+                        period_end=period_end,
+                        trades_used=0,
                     )
-                ).scalar_one()
+                )
+                await db.flush()
+        except IntegrityError:
+            usage = (
+                await db.execute(
+                    select(SubscriptionTradeUsage)
+                    .where(
+                        SubscriptionTradeUsage.subscription_id == sub.id,
+                        SubscriptionTradeUsage.period_start == period_start,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+        else:
+            usage = (
+                await db.execute(
+                    select(SubscriptionTradeUsage)
+                    .where(
+                        SubscriptionTradeUsage.subscription_id == sub.id,
+                        SubscriptionTradeUsage.period_start == period_start,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
 
     limit = int(plan.monthly_trade_limit or 0)
     used = int(usage.trades_used or 0)
