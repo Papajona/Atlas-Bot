@@ -2946,6 +2946,9 @@ async def customer_connect_oanda(req: CustomerOandaConnectRequest, authorization
         raise HTTPException(403, "AtlasRisk supports OANDA practice/demo only; live OANDA accounts are not supported")
     async with SessionLocal() as db:
         profile, _ = await get_customer(authorization, db, require_aal2=True)
+        existing = (await db.execute(select(CustomerOandaAccount).where(CustomerOandaAccount.customer_id == profile.id))).scalar_one_or_none()
+        if existing is None:
+            await _enforce_exchange_limit(db, profile.id)
         from .forex_oanda import OandaBroker, OandaConfig, OandaError
         broker = OandaBroker(OandaConfig(req.account_id.strip(), req.api_token.strip(), True, settings.oanda_timeout_seconds))
         try:
@@ -3141,6 +3144,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
         if req.autonomous:
             existing_bot = (await db.execute(select(AdaptiveTradingBot).where(AdaptiveTradingBot.customer_id == profile.id, AdaptiveTradingBot.name == "Atlas Adaptive AI").with_for_update())).scalar_one_or_none()
             if not existing_bot:
+                await _enforce_strategy_limit(db, profile.id)
                 existing_bot = AdaptiveTradingBot(customer_id=profile.id, trading_account_id=account.id, name="Atlas Adaptive AI", asset=req.asset, symbol=req.symbol, exchange=req.exchange, timeframe=req.timeframe, days=req.days, risk_fraction=req.risk_fraction or settings.risk_per_trade, interval_seconds=req.interval_seconds, strategy_candidate_id=req.strategy_candidate_id, status="RUNNING", mode="LIVE" if not paper_mode else "PAPER")
                 db.add(existing_bot)
                 await db.flush()
@@ -3443,6 +3447,68 @@ async def _require_feature(db, customer_id: int, feature: str):
     return plan
 
 
+async def _enforce_exchange_limit(db, customer_id: int, *, adding: bool = True):
+    plan, _ = await _subscription_entitlements(db, customer_id)
+    if not adding:
+        return plan
+    connected = 0
+    for model in (CustomerBinanceAccount, CustomerOandaAccount, CustomerDerivAccount):
+        exists = (await db.execute(select(func.count()).select_from(model).where(model.customer_id == customer_id))).scalar_one()
+        connected += int(exists)
+    if connected >= int(plan.get("exchanges", 0)):
+        raise HTTPException(403, f"Your Atlas plan allows {int(plan.get('exchanges', 0))} exchange connection(s); upgrade to connect another exchange")
+    return plan
+
+
+async def _enforce_strategy_limit(db, customer_id: int, *, adding: bool = True):
+    plan, _ = await _subscription_entitlements(db, customer_id)
+    if not adding:
+        return plan
+    bots = (await db.execute(select(func.count()).select_from(AdaptiveTradingBot).where(AdaptiveTradingBot.customer_id == customer_id, AdaptiveTradingBot.status.in_(["RUNNING", "PAUSED"]))))).scalar_one()
+    executors = (await db.execute(select(func.count()).select_from(TradeExecutor).where(TradeExecutor.customer_id == customer_id, TradeExecutor.status.in_(["ARMED", "RUNNING"]))))).scalar_one()
+    active = int(bots) + int(executors)
+    if active >= int(plan.get("strategies", 0)):
+        raise HTTPException(403, f"Your Atlas plan allows {int(plan.get('strategies', 0))} active strategy/executor(s); stop an active strategy or upgrade")
+    return plan
+
+
+async def _consume_ai_credit(db, customer_id: int, action: str):
+    """Atomically consume one customer AI credit for the current billing period."""
+    sub = await _get_active_subscription(db, customer_id)
+    if sub is None:
+        plan = PLAN_DEFINITIONS["free"]
+        used = 0
+        period_start = datetime.now(timezone.utc)
+    else:
+        sub = (await db.execute(select(Subscription).where(Subscription.id == sub.id).with_for_update())).scalar_one()
+        plan = PLAN_DEFINITIONS.get(sub.plan_code, PLAN_DEFINITIONS["free"])
+        period_start = sub.current_period_start or datetime.now(timezone.utc)
+        if sub.ai_usage_period_start != period_start:
+            sub.ai_usage_period_start = period_start
+            sub.ai_credits_used = 0
+        used = int(sub.ai_credits_used or 0)
+    allowance = int(plan.get("ai_credits", 0))
+    if used >= allowance:
+        raise HTTPException(429, f"Your {plan.get('name', 'Atlas')} AI allowance is exhausted for this billing period")
+    if sub is not None:
+        sub.ai_credits_used = used + 1
+    await db.flush()
+    await _audit("CUSTOMER_AI_CREDIT_CONSUMED", {"customer_id": customer_id, "action": action, "credit_number": used + 1, "allowance": allowance}, actor_id=f"customer:{customer_id}")
+    return {"used": used + 1, "remaining": max(0, allowance - used - 1), "allowance": allowance}
+
+
+@app.get("/api/customer/subscription/entitlements")
+async def customer_subscription_entitlements(authorization: str | None = Header(default=None)):
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        plan, sub = await _subscription_entitlements(db, profile.id)
+        connected = sum(int((await db.execute(select(func.count()).select_from(model).where(model.customer_id == profile.id))).scalar_one()) for model in (CustomerBinanceAccount, CustomerOandaAccount, CustomerDerivAccount))
+        active_bots = int((await db.execute(select(func.count()).select_from(AdaptiveTradingBot).where(AdaptiveTradingBot.customer_id == profile.id, AdaptiveTradingBot.status.in_(["RUNNING", "PAUSED"]))))).scalar_one()
+        active_executors = int((await db.execute(select(func.count()).select_from(TradeExecutor).where(TradeExecutor.customer_id == profile.id, TradeExecutor.status.in_(["ARMED", "RUNNING"]))))).scalar_one()
+        used = int(sub.ai_credits_used or 0) if sub else 0
+        return {"plan": plan["name"], "plan_code": next((k for k,v in PLAN_DEFINITIONS.items() if v is plan), "free"), "limits": {"ai_credits": int(plan["ai_credits"]), "exchanges": int(plan["exchanges"]), "strategies": int(plan["strategies"])}, "usage": {"ai_credits": used, "exchanges": connected, "strategies": active_bots + active_executors}, "features": list(plan.get("features", [])), "subscription_status": sub.status if sub else "free"}
+
+
 @app.get("/api/customer/portfolio")
 async def customer_portfolio(authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
@@ -3561,6 +3627,9 @@ async def grid_bot_action(bot_id:int, req:BotActionRequest, authorization:str|No
 async def customer_connect_deriv(req: DerivConnectRequest, authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
         profile, _ = await get_customer(authorization, db, require_aal2=True)
+        existing = (await db.execute(select(CustomerDerivAccount).where(CustomerDerivAccount.customer_id == profile.id))).scalar_one_or_none()
+        if existing is None:
+            await _enforce_exchange_limit(db, profile.id)
     if not settings.deriv_app_id:
         raise HTTPException(503, "Atlas Deriv application is not configured")
     broker = DerivBroker(DerivConfig(settings.deriv_app_id, req.api_token.strip(), req.account_id.strip(), timeout_seconds=settings.deriv_timeout_seconds, live=True))
@@ -3805,6 +3874,7 @@ async def create_strategy_candidate(req: StrategyLabRequest, authorization: str 
     async with SessionLocal() as db:
         profile,_=await get_customer(authorization,db,require_aal2=True)
         await _require_feature(db, profile.id, "strategy_builder")
+        await _consume_ai_credit(db, profile.id, "strategy_builder_generation")
         try:
             generated = await generate_strategy_draft(
                 prompt=req.prompt,
