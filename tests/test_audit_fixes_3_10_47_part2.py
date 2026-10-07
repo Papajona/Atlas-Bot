@@ -16,6 +16,11 @@ from app.db import AppState, Base, Incident
 ROOT = Path(__file__).resolve().parents[1]
 
 def _db(tmp_path, monkeypatch):
+    # Incident.detail_json is an encrypted field. Use a deterministic test-only
+    # Fernet key so these tests exercise the real encryption path without secrets.
+    monkeypatch.setattr(settings, 'app_encryption_key', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', raising=False)
+    monkeypatch.setattr(settings, 'app_encryption_keys_json', '', raising=False)
+    monkeypatch.setattr(settings, 'app_encryption_active_key_id', 'v1', raising=False)
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'risk.db'}")
     async def init():
         async with engine.begin() as conn:
@@ -119,8 +124,8 @@ def test_alert_webhook_never_sends_incident_detail(tmp_path, monkeypatch):
     assert '[Atlas CRITICAL]' in sent[1][1]['text']
 
 def test_alert_webhook_requires_https():
-    with pytest.raises(Exception, match='ALERT_WEBHOOK_URL must be an https'):
-        Settings(alert_webhook_url='http://insecure.example')
+    with pytest.raises(ValueError, match='ALERT_WEBHOOK_URL must be an https'):
+        Settings(environment='test', alert_webhook_url='http://insecure.example')
 
 def test_binance_stream_has_stability_gate():
     source = (ROOT / 'app' / 'binance_user_stream.py').read_text()
