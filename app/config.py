@@ -417,6 +417,14 @@ class Settings(BaseSettings):
             raise ValueError("WITHDRAWAL_STEP_UP_MINUTES must be between 1 and 3 minutes")
         return value
 
+    @field_validator("alert_webhook_url")
+    @classmethod
+    def _validate_alert_webhook_url(cls, value: str) -> str:
+        value = str(value or "").strip()
+        if value and not value.lower().startswith("https://"):
+            raise ValueError("ALERT_WEBHOOK_URL must be an https:// URL")
+        return value
+
     @field_validator("environment")
     @classmethod
     def _validate_environment(cls, value: str) -> str:
