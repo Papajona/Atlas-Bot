@@ -8,7 +8,7 @@ MATRIX = (ROOT / "docs" / "SUBSCRIPTION_VERIFICATION_MATRIX.md").read_text()
 
 def test_subscription_plan_values_are_explicit():
     expected = {
-        "free": (0.0, 0, 0),
+        "free": (0.0, 100, 0),
         "starter": (7.99, 1000, 1),
         "pro": (17.99, 5000, 3),
         "elite": (39.99, 20000, 10),
