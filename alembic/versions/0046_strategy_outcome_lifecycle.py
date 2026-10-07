@@ -52,4 +52,4 @@ def downgrade() -> None:
         op.drop_index("ix_strategy_outcome_lifecycle_created", table_name="strategy_outcomes")
     columns = {c["name"] for c in inspector.get_columns("strategy_outcomes")}
     if "lifecycle_status" in columns:
-        op.drop_column("strategy_outcome_lifecycle")
+        op.drop_column("strategy_outcomes", "lifecycle_status")
