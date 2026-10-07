@@ -7,7 +7,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "0046_subscription_ai_usage"
-down_revision = "0045_merge_application_heads"
+down_revision = "0034_withdrawal_provider_identity"
 branch_labels = None
 depends_on = None
 
