@@ -27,6 +27,7 @@ from .ids import make_signal_id, client_order_id
 from .audit_chain import record_audit
 from .live_fees import extract_order_fee_quote, ESTIMATED
 from .customer_funds import record_ledger_incident
+from .billing import consume_subscription_trade
 from .distributed import acquire_lock, release_lock
 
 
@@ -489,6 +490,8 @@ async def _create_trade(symbol: str, timeframe: str, side: str, quantity: float,
                         customer_id: int | None = None, trading_account_id: int | None = None):
     async with SessionLocal() as db:
         try:
+            if customer_id is not None:
+                await consume_subscription_trade(db, customer_id=customer_id, idempotency_key=f"trade:{cid}")
             trade = Trade(
                 customer_id=customer_id, trading_account_id=trading_account_id,
                 signal_id=signal_id, client_order_id=cid, symbol=symbol, timeframe=timeframe,
