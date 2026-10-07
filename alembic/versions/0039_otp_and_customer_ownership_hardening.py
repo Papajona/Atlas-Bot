@@ -1,5 +1,5 @@
 """AtlasRisk 3.10.45: bind OTP intents and customer/account ownership at DB level."""
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 revision = "0039_otp_and_customer_ownership_hardening"
@@ -21,6 +21,40 @@ def _has_col(bind, table, column):
 
 def upgrade():
     bind = op.get_bind()
+    if context.is_offline_mode():
+        op.create_table("withdrawal_otp_intents",
+            sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+            sa.Column("jti", sa.String(64), nullable=False),
+            sa.Column("auth_user_id", sa.String(120), nullable=False),
+            sa.Column("purpose", sa.String(40), nullable=False),
+            sa.Column("contact_hash", sa.String(64), nullable=False),
+            sa.Column("destination_fingerprint", sa.String(64), nullable=False, server_default=""),
+            sa.Column("proposal_digest", sa.String(64), nullable=False, server_default=""),
+            sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("consumed_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+            sa.UniqueConstraint("jti", name="uq_withdrawal_otp_intent_jti"))
+        op.create_index("ix_withdrawal_otp_intent_user_expiry","withdrawal_otp_intents",["auth_user_id","expires_at"])
+        op.create_unique_constraint("uq_trading_account_id_customer","trading_accounts",["id","customer_id"])
+        op.create_unique_constraint("uq_wallet_id_customer","wallets",["id","customer_id"])
+        op.create_unique_constraint("uq_trade_id_customer","trades",["id","customer_id"])
+        op.add_column("positions",sa.Column("entry_trade_id",sa.Integer(),nullable=True))
+        op.create_index("ix_positions_entry_trade_id","positions",["entry_trade_id"])
+        for t,n,l,r,rc in [
+            ("trades","fk_trade_account_customer",["trading_account_id","customer_id"],"trading_accounts",["id","customer_id"]),
+            ("order_commands","fk_order_command_trade_customer",["trade_id","customer_id"],"trades",["id","customer_id"]),
+            ("positions","fk_position_account_customer",["trading_account_id","customer_id"],"trading_accounts",["id","customer_id"]),
+            ("positions","fk_position_trade_customer",["entry_trade_id","customer_id"],"trades",["id","customer_id"]),
+            ("smart_trades","fk_smart_trade_account_customer",["trading_account_id","customer_id"],"trading_accounts",["id","customer_id"]),
+            ("dca_bots","fk_dca_bot_account_customer",["trading_account_id","customer_id"],"trading_accounts",["id","customer_id"]),
+            ("grid_bots","fk_grid_bot_account_customer",["trading_account_id","customer_id"],"trading_accounts",["id","customer_id"]),
+            ("adaptive_trading_bots","fk_adaptive_bot_account_customer",["trading_account_id","customer_id"],"trading_accounts",["id","customer_id"]),
+            ("trade_executors","fk_executor_account_customer",["trading_account_id","customer_id"],"trading_accounts",["id","customer_id"]),
+            ("withdrawals","fk_withdrawal_wallet_customer",["wallet_id","customer_id"],"wallets",["id","customer_id"]),
+            ("funding_transactions","fk_funding_wallet_customer",["wallet_id","customer_id"],"wallets",["id","customer_id"])]:
+            op.create_foreign_key(n,t,r,l,rc,initially=None,deferrable=False,use_alter=True,postgresql_not_valid=True)
+        return
+
     if not _table_exists(bind, "withdrawal_otp_intents"):
         op.create_table(
             "withdrawal_otp_intents",
