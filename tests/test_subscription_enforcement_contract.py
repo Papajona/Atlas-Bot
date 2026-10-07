@@ -23,7 +23,7 @@ def test_subscription_ai_meter_schema_and_migration_match():
     assert "ai_credits_used" in db
     assert "ai_usage_period_start" in db
     assert 'revision = "0046_subscription_ai_usage"' in migration
-    assert 'down_revision = "0045_merge_application_heads"' in migration
+    assert 'down_revision = "0034_withdrawal_provider_identity"' in migration
     assert 'op.add_column("subscriptions"' in migration
 
 
