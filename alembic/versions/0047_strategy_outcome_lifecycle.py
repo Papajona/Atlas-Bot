@@ -4,7 +4,7 @@ Revision ID: 0047_strategy_outcome_lifecycle
 Revises: 0046_subscription_ai_usage
 """
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 revision = "0047_strategy_outcome_lifecycle"
@@ -14,6 +14,18 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if context.is_offline_mode():
+        op.add_column(
+            "strategy_outcomes",
+            sa.Column("lifecycle_status", sa.String(20), nullable=False, server_default="OPEN"),
+        )
+        op.create_index(
+            "ix_strategy_outcome_lifecycle_created",
+            "strategy_outcomes",
+            ["lifecycle_status", "created_at"],
+        )
+        return
+
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     columns = {c["name"] for c in inspector.get_columns("strategy_outcomes")}
@@ -49,6 +61,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if context.is_offline_mode():
+        op.drop_index("ix_strategy_outcome_lifecycle_created", table_name="strategy_outcomes")
+        op.drop_column("strategy_outcomes", "lifecycle_status")
+        return
+
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     indexes = {i["name"] for i in inspector.get_indexes("strategy_outcomes")}
