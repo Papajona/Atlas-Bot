@@ -1785,6 +1785,38 @@ async def _flatten_customer_spot_positions(account: Any, broker: Any, failures: 
     return
 
 
+async def enforce_platform_loss_limits() -> dict[str, Any]:
+    """Evaluate live platform equity limits from the latest broker-synchronized AppState and halt on breach."""
+    if not settings.auto_kill_on_loss_limit:
+        return {"status": "DISABLED"}
+    async with SessionLocal() as db:
+        s = await _get_state_locked(db)
+        if s.kill_switch or not s.live_enabled:
+            return {"status": "NOT_LIVE"}
+        await _ensure_daily_boundary(db, s)
+        equity = max(0.0, float(s.equity or 0.0))
+        peak = float(s.peak_equity or equity)
+        daily_start = float(s.daily_start_equity or equity)
+        dd = 1 - (equity / peak) if peak else 0.0
+        daily_loss = 1 - (equity / daily_start) if daily_start else 0.0
+    if not (dd >= settings.max_drawdown or daily_loss >= settings.daily_loss_limit):
+        return {"status": "WITHIN_LIMITS", "drawdown": dd, "daily_loss": daily_loss}
+    await open_incident(
+        key="LOSS_LIMIT_AUTO_KILL", severity="CRITICAL", category="RISK_LIMIT",
+        summary="Platform loss limit breached; emergency stop triggered automatically",
+        detail={"drawdown": dd, "daily_loss": daily_loss, "equity": equity,
+                "peak_equity": peak, "daily_start_equity": daily_start,
+                "max_drawdown": settings.max_drawdown, "daily_loss_limit": settings.daily_loss_limit},
+    )
+    exchange = settings.default_exchange if (settings.exchange_api_key and settings.exchange_api_secret) else None
+    result = await emergency_stop(exchange)
+    await audit("LOSS_LIMIT_AUTO_KILL", {
+        "drawdown": dd, "daily_loss": daily_loss,
+        "broker_halt_confirmed": bool(result.get("broker_halt_confirmed")),
+    })
+    return {"status": "KILLED", "drawdown": dd, "daily_loss": daily_loss, "result": result}
+
+
 async def emergency_stop(exchange: str | None = None):
     """Fence new live submissions, wait for any in-flight broker call, then cancel and verify open orders."""
     async with SessionLocal() as db:
