@@ -273,6 +273,9 @@ class Settings(BaseSettings):
     otp_rate_limit_per_minute: int = 5
     withdrawal_step_up_minutes: int = 3
     ai_strategy_provider_timeout_seconds: float = 1.5
+    # Live and broker-demo execution must carry the originating signal timestamp;
+    # paper execution may continue to default the timestamp to request time.
+    require_signal_timestamp_for_live: bool = True
     # Customer TOTP MFA. Uses Supabase Auth native TOTP (Google Authenticator compatible).
     customer_totp_required: bool = True
     # Admin authentication uses Supabase Auth with mandatory TOTP (Google Authenticator compatible).
