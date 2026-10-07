@@ -1867,6 +1867,33 @@ async def emergency_stop(exchange: str | None = None):
                 failures.append({"scope": "platform_exchange", "error": f"Open orders remain after cancellation: {len(remaining)}"})
             if _is_derivatives_market(broker):
                 await _flatten_exchange_positions(broker, "platform_exchange", failures, canceled)
+            else:
+                # Platform SPOT positions require a separately verified, symbol-aware flatten path.
+                # Never report the broker halt as fully confirmed while residual spot exposure is present.
+                try:
+                    spot_positions = await asyncio.to_thread(broker.fetch_positions)
+                except Exception as exc:
+                    spot_positions = None
+                    failures.append({"scope": "platform_exchange_spot", "error": f"Could not verify spot positions: {exc}"})
+                if spot_positions is not None:
+                    unresolved_spot = []
+                    for position in spot_positions or []:
+                        symbol = str(position.get("symbol") or position.get("info", {}).get("symbol") or "")
+                        contracts = position.get("contracts")
+                        if contracts is None:
+                            contracts = position.get("contractSize")
+                        try:
+                            exposure = float(contracts or 0.0)
+                        except (TypeError, ValueError):
+                            exposure = 0.0
+                        if symbol and exposure != 0.0:
+                            unresolved_spot.append({"symbol": symbol, "quantity": exposure})
+                    if unresolved_spot:
+                        failures.append({
+                            "scope": "platform_exchange_spot",
+                            "error": "Unflattened platform spot positions remain",
+                            "positions": unresolved_spot[:50],
+                        })
         except Exception as exc:
             cancel_error = str(exc)
             failures.append({"scope": "platform_exchange", "error": cancel_error})
