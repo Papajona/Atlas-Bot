@@ -613,7 +613,7 @@ async def _run_persisted_adaptive_bot_cycle(bot_id: int, req: CustomerBotStartRe
     macro_context = await latest_macro_context()
     packet = {"symbol": req.symbol, "asset": req.asset, "exchange": req.exchange, "timeframe": req.timeframe, "market_timestamp": deterministic["timestamp"], "trade_plan": plan, "deterministic_rules": deterministic["rules"], "price_context": {"latest_close": float(df.close.iloc[-1]), "bars": int(len(df)), "spread_bps": spread_bps}, "data_quality": deterministic["data_quality"], "adaptive_model": adaptive, "ml_signal": ml_signal, "macro_context": macro_context}
     try:
-        ai_review = await asyncio.wait_for(dual_ai_trade_safety_review(packet), timeout=settings.ai_strategy_provider_timeout_seconds)
+        ai_review = await _run_ai_safety_review(packet)
     except asyncio.TimeoutError:
         await _audit("ADAPTIVE_BOT_AI_TIMEOUT", {"bot_id": bot_id, "customer_id": profile.id, "symbol": req.symbol, "timeout_seconds": settings.ai_strategy_provider_timeout_seconds})
         return {"decision": "NO_TRADE", "stage": "ai_safety_timeout", "analysis": deterministic, "adaptive_model": adaptive, "ml_signal": ml_signal}
@@ -4968,6 +4968,8 @@ async def execute_forex_demo(req: ExecuteRequest, x_admin_token: str | None = He
             raise HTTPException(403, "Forex demo trading is not enabled; enable it first")
     if req.quantity > settings.oanda_demo_max_units:
         raise HTTPException(422, f"Demo quantity exceeds configured cap of {settings.oanda_demo_max_units:g} units")
+    if not req.signal_timestamp and settings.require_signal_timestamp_for_live:
+        raise HTTPException(422, "signal_timestamp is required for broker-demo execution")
     from .forex_oanda import OandaBroker, OandaConfig, OandaError
     broker = OandaBroker(OandaConfig(settings.oanda_account_id, settings.oanda_api_token, True, settings.oanda_timeout_seconds))
     try:
@@ -5317,6 +5319,7 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
 async def execute(req: ExecuteRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "OPERATIONS")
+    _require_signal_timestamp_for_execution(req)
     signal_timestamp = req.signal_timestamp or datetime.now(timezone.utc).isoformat()
     sig = {"score": req.score, "long_probability": req.long_probability,
            "short_probability": req.short_probability, "flat_probability": req.flat_probability}
@@ -5593,6 +5596,28 @@ async def _audit(event: str, detail: dict, actor_id: str | None = None):
     # A sink outage must not turn a completed money movement into an ambiguous 5xx response
     # that could trigger client retries. Critical sink failures are visible in service logs.
     emit_security_audit(event=event, actor_id=actor, detail=safe_detail, event_hash=row.event_hash)
+
+
+async def _run_ai_safety_review(packet: dict) -> dict:
+    """Run the AI safety veto with a hard timeout; callers must fail closed on timeout."""
+    return await asyncio.wait_for(
+        dual_ai_trade_safety_review(packet),
+        timeout=settings.ai_strategy_provider_timeout_seconds,
+    )
+
+
+def _require_signal_timestamp_for_execution(req: ExecuteRequest) -> None:
+    """Reject missing timestamps for live or broker-demo execution.
+
+    Paper execution may synthesize a request-time timestamp because it does not
+    represent an externally originated live/broker signal.
+    """
+    if not settings.require_signal_timestamp_for_live or req.signal_timestamp:
+        return
+    if req.demo_forex:
+        raise HTTPException(422, "signal_timestamp is required for broker-demo execution")
+    if not req.force_paper:
+        raise HTTPException(422, "signal_timestamp is required for live or broker-demo execution")
 
 
 def json_loads(v):
