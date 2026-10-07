@@ -490,6 +490,11 @@ async def _create_trade(symbol: str, timeframe: str, side: str, quantity: float,
                         customer_id: int | None = None, trading_account_id: int | None = None):
     async with SessionLocal() as db:
         try:
+            existing = (await db.execute(
+                select(Trade).where(Trade.client_order_id == cid).with_for_update()
+            )).scalar_one_or_none()
+            if existing:
+                return existing.id, False
             if customer_id is not None:
                 await consume_subscription_trade(db, customer_id=customer_id, idempotency_key=f"trade:{cid}")
             trade = Trade(
