@@ -94,6 +94,8 @@ class Settings(BaseSettings):
     binance_customer_universal_transfer_allowed: bool = False
     broker_sandbox: bool = True
     require_live_confirmation: bool = True
+    # Pilot funding control: blockchain-confirmed deposits remain pending until an authorized admin approves them.
+    funding_manual_review_required: bool = True
     live_confirmation_text: str = "ENABLE_LIVE_TRADING"
     require_single_worker_for_live: bool = True
     # Daily autonomous market intelligence + research cycle.
