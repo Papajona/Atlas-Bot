@@ -32,8 +32,8 @@ def test_trade_entitlement_is_consumed_inside_trade_creation():
 
 def test_billing_migration_is_single_child_of_current_application_head():
     migration = (ROOT / "alembic" / "versions" / "0034_usdt_subscription_entitlements.py").read_text(encoding="utf-8")
-    assert 'revision = "0034_usdt_subscription_entitlements"' in migration
-    assert 'down_revision = "0033_sweep_reconciliation_integrity"' in migration
+    assert 'revision = "0046_usdt_subscription_entitlements"' in migration
+    assert 'down_revision = ("0034_withdrawal_provider_identity", "0045_merge_application_heads")' in migration
     assert 'monthly_trade_limit' in migration
     assert '"payment_intents"' in migration
     assert '"usdt_payment_verifications"' in migration
