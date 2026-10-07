@@ -737,6 +737,13 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 episode.status = "OPEN"
             episode.updated_at = utcnow()
 
+            if episode.status == "COMPLETED":
+                completed_outcomes = (await db.execute(
+                    select(StrategyOutcome).where(StrategyOutcome.trade_id == episode_trade_id).with_for_update()
+                )).scalars().all()
+                for outcome in completed_outcomes:
+                    outcome.lifecycle_status = "CLOSED"
+
         position.mark_price = fill_price
         # Bound float-drift on this running total across a position's lifetime. This doesn't
         # affect fund safety on its own -- settle_realized_pnl() below converts `realized`
@@ -769,6 +776,7 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 realized_pnl=realized, fee=float(trade.fee or 0.0), return_bps=return_bps,
                 net_pnl=net_pnl, net_return_bps=net_return_bps,
                 mode=trade.mode, sequence=sequence, model_version=str(trade_context.get("model_version") or ""),
+                lifecycle_status="OPEN",
                 metadata_json=json.dumps({"entry_trade_id": attribution_trade_id, "closing_trade_id": trade.id, "fill_price": fill_price, "entry_fee": entry_fee, "allocated_entry_fee": allocated_entry_fee, "net_pnl": net_pnl}, default=str),
             ))
         position.unrealized_pnl = position.quantity * (position.mark_price - position.average_entry_price) if position.quantity else 0.0
