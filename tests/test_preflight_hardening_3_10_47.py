@@ -23,7 +23,7 @@ def test_withdrawal_step_up_is_capped_at_three_minutes():
 
 def test_ai_safety_has_hard_latency_ceiling_and_fails_closed():
     main = (ROOT / "app/main.py").read_text()
-    assert "asyncio.wait_for(dual_ai_trade_safety_review(packet)" in main
+    assert "async def _run_ai_safety_review(packet: dict)" in main\n    assert "return await asyncio.wait_for(" in main\n    assert "dual_ai_trade_safety_review(packet)" in main
     assert "settings.ai_strategy_provider_timeout_seconds" in main
     assert '"stage": "ai_safety_timeout"' in main
     assert '"decision": "NO_TRADE"' in main
