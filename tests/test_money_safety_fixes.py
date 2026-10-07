@@ -178,8 +178,11 @@ def test_tron_scanner_marks_deferrals_before_advancing_cursor():
     assert "_next_tron_cursor(" in scan
 
 
-def test_confirming_a_pending_funding_credits_the_stored_amount_not_the_payload():
+def test_confirming_a_pending_funding_credits_the_stored_amount_not_the_payload(monkeypatch):
     from fastapi.testclient import TestClient
+    # This regression exercises the legacy automatic-confirmation webhook path.
+    # The pilot default is manual review, so explicitly disable it for this test.
+    monkeypatch.setattr(settings, "funding_manual_review_required", False)
     import app.main as main
     from app.db import init_db, SessionLocal, CustomerProfile, Wallet, FundingTransaction
 

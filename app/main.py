@@ -996,27 +996,31 @@ async def _usdt_tron_monitor_loop():
                                     funding = FundingTransaction(
                                         customer_id=locked_wallet.customer_id, wallet_id=locked_wallet.id,
                                         provider="tron-usdt", provider_reference=provider_ref,
-                                        amount=amount, currency="USDT", status="CONFIRMED",
+                                        amount=amount, currency="USDT",
+                                        status=("PENDING_REVIEW" if settings.funding_manual_review_required else "CONFIRMED"),
                                         metadata_json=json.dumps({"network": "TRON", "contract": settings.usdt_tron_usdt_contract,
                                                                   "txid": txid, "from": sender, "to": wallet.deposit_address,
                                                                   "raw_value": str(raw_value), "decimals": decimals,
                                                                   "block_timestamp": block_ts, "confirmed_history": True}, separators=(",", ":")))
-                                    funding.confirmed_at = datetime.now(timezone.utc)
                                     db.add(funding)
-                                    await post_deposit(db, customer_id=locked_wallet.customer_id, wallet_id=locked_wallet.id,
-                                                        amount=amount, provider_reference=provider_ref, provider="tron-usdt",
-                                                        metadata={"network": "TRON", "contract": settings.usdt_tron_usdt_contract,
-                                                                  "txid": txid, "from": sender, "to": wallet.deposit_address,
-                                                                  "raw_value": str(raw_value), "decimals": decimals,
-                                                                  "block_timestamp": block_ts})
-                                    await sync_wallet_from_ledger(db, locked_wallet.customer_id, "USDT")
-                                    account = (await db.execute(select(TradingAccount).where(
-                                        TradingAccount.customer_id == locked_wallet.customer_id).with_for_update())).scalar_one_or_none()
-                                    if account:
-                                        balance = await customer_balance(db, locked_wallet.customer_id, "USDT")
-                                        account.cash_equity = balance["available"] + balance["trading_reserved"]
-                                        account.equity = max(0.0, account.cash_equity + account.realized_pnl + account.unrealized_pnl)
-                                        account.peak_equity = max(account.peak_equity, account.equity)
+                                    if not settings.funding_manual_review_required:
+                                        funding.confirmed_at = datetime.now(timezone.utc)
+                                        await post_deposit(
+                                            db, customer_id=locked_wallet.customer_id, wallet_id=locked_wallet.id,
+                                            amount=amount, provider_reference=provider_ref, provider="tron-usdt",
+                                            metadata={"network": "TRON", "contract": settings.usdt_tron_usdt_contract,
+                                                      "txid": txid, "from": sender, "to": wallet.deposit_address,
+                                                      "raw_value": str(raw_value), "decimals": decimals,
+                                                      "block_timestamp": block_ts},
+                                        )
+                                        await sync_wallet_from_ledger(db, locked_wallet.customer_id, "USDT")
+                                        account = (await db.execute(select(TradingAccount).where(
+                                            TradingAccount.customer_id == locked_wallet.customer_id).with_for_update())).scalar_one_or_none()
+                                        if account:
+                                            balance = await customer_balance(db, locked_wallet.customer_id, "USDT")
+                                            account.cash_equity = balance["available"] + balance["trading_reserved"]
+                                            account.equity = max(0.0, account.cash_equity + account.realized_pnl + account.unrealized_pnl)
+                                            account.peak_equity = max(account.peak_equity, account.equity)
                                     await db.commit()
 
                             meta = body.get("meta") or {}
@@ -2823,6 +2827,76 @@ async def customer_ledger(authorization: str | None = Header(default=None)):
         return {"currency": "USDT", "balance": balance, "entries": entries}
 
 
+@app.get("/api/admin/funding")
+async def admin_funding(authorization: str | None = Header(default=None), status: str = "PENDING_REVIEW"):
+    claims = await auth(None, authorization)
+    await require_role(claims, "FINANCE")
+    wanted = str(status or "PENDING_REVIEW").upper()
+    async with SessionLocal() as db:
+        rows = (await db.execute(select(FundingTransaction).where(FundingTransaction.status == wanted)
+                                 .order_by(desc(FundingTransaction.created_at)).limit(200))).scalars().all()
+        return [{
+            "id": f.id, "customer_id": f.customer_id, "wallet_id": f.wallet_id,
+            "provider": f.provider, "provider_reference": f.provider_reference,
+            "amount": f.amount, "currency": f.currency, "status": f.status,
+            "created_at": f.created_at.isoformat(),
+            "confirmed_at": f.confirmed_at.isoformat() if f.confirmed_at else None,
+        } for f in rows]
+
+
+@app.post("/api/admin/funding/{funding_id}/approve")
+async def approve_funding(funding_id: int, authorization: str | None = Header(default=None)):
+    claims = await auth(None, authorization)
+    await require_role(claims, "FINANCE")
+    actor_id = str(claims.get("sub") or _audit_actor.get() or "")
+    async with SessionLocal() as db:
+        funding = (await db.execute(select(FundingTransaction).where(FundingTransaction.id == funding_id)
+                                    .with_for_update())).scalar_one_or_none()
+        if not funding:
+            raise HTTPException(404, "Funding transaction not found")
+        if str(funding.status or "").upper() != "PENDING_REVIEW":
+            raise HTTPException(409, "Funding transaction is not pending review")
+        wallet = (await db.execute(select(Wallet).where(Wallet.id == funding.wallet_id)
+                                   .with_for_update())).scalar_one_or_none()
+        if not wallet or wallet.customer_id != funding.customer_id:
+            raise HTTPException(409, "Funding wallet/customer mismatch")
+        metadata = json.loads(funding.metadata_json or "{}")
+        funding.status = "CONFIRMED"
+        funding.confirmed_at = funding.confirmed_at or datetime.now(timezone.utc)
+        await post_deposit(db, customer_id=funding.customer_id, wallet_id=funding.wallet_id,
+                            amount=float(funding.amount), provider_reference=funding.provider_reference,
+                            provider=funding.provider, metadata=metadata)
+        await sync_wallet_from_ledger(db, funding.customer_id, "USDT")
+        account = (await db.execute(select(TradingAccount).where(
+            TradingAccount.customer_id == funding.customer_id).with_for_update())).scalar_one_or_none()
+        if account:
+            balance = await customer_balance(db, funding.customer_id, "USDT")
+            account.cash_equity = balance["available"] + balance["trading_reserved"]
+            account.equity = max(0.0, account.cash_equity + account.realized_pnl + account.unrealized_pnl)
+            account.peak_equity = max(account.peak_equity or 0.0, account.equity)
+        await db.commit()
+        await _audit("FUNDING_APPROVED", {"funding_id": funding.id, "customer_id": funding.customer_id, "amount": funding.amount, "actor_id": actor_id})
+        return {"ok": True, "id": funding.id, "status": funding.status, "customer_id": funding.customer_id, "amount": funding.amount}
+
+
+@app.post("/api/admin/funding/{funding_id}/reject")
+async def reject_funding(funding_id: int, authorization: str | None = Header(default=None)):
+    claims = await auth(None, authorization)
+    await require_role(claims, "FINANCE")
+    actor_id = str(claims.get("sub") or _audit_actor.get() or "")
+    async with SessionLocal() as db:
+        funding = (await db.execute(select(FundingTransaction).where(FundingTransaction.id == funding_id)
+                                    .with_for_update())).scalar_one_or_none()
+        if not funding:
+            raise HTTPException(404, "Funding transaction not found")
+        if str(funding.status or "").upper() != "PENDING_REVIEW":
+            raise HTTPException(409, "Funding transaction is not pending review")
+        funding.status = "REJECTED"
+        await db.commit()
+        await _audit("FUNDING_REJECTED", {"funding_id": funding.id, "customer_id": funding.customer_id, "amount": funding.amount, "actor_id": actor_id})
+        return {"ok": True, "id": funding.id, "status": funding.status}
+
+
 @app.get("/api/customer/funding")
 async def customer_funding(authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
@@ -2859,7 +2933,7 @@ async def funding_webhook(
             current = str(existing.status or "PENDING").upper()
             if incoming == current:
                 return {"ok": True, "id": existing.id, "status": existing.status, "wallet_id": existing.wallet_id, "idempotent": True}
-            allowed = {"PENDING": {"CONFIRMED", "FAILED"}, "FAILED": {"CONFIRMED"}, "CONFIRMED": set()}
+            allowed = {"PENDING": {"CONFIRMED", "FAILED"}, "PENDING_REVIEW": {"CONFIRMED", "REJECTED"}, "FAILED": {"CONFIRMED"}, "CONFIRMED": set()}
             if incoming not in allowed.get(current, set()):
                 raise HTTPException(409, f"Invalid funding state transition: {current} -> {incoming}")
             currency = str(existing.currency or payload.currency).upper()
@@ -2877,7 +2951,9 @@ async def funding_webhook(
             if incoming == "CONFIRMED":
                 wallet.status = "ACTIVE"
                 existing.confirmed_at = existing.confirmed_at or datetime.now(timezone.utc)
-                if currency == "USDT" and current != "CONFIRMED":
+                if settings.funding_manual_review_required:
+                    existing.status = "PENDING_REVIEW"
+                elif currency == "USDT" and current != "CONFIRMED":
                     await post_deposit(db, customer_id=customer.id, wallet_id=wallet.id, amount=stored_amount,
                                         provider_reference=payload.provider_reference, metadata=payload.metadata, provider=existing.provider)
                     await sync_wallet_from_ledger(db, customer.id, "USDT")
@@ -2885,7 +2961,7 @@ async def funding_webhook(
                     if account:
                         bal = await customer_balance(db, customer.id, "USDT")
                         account.cash_equity = bal["available"] + bal["trading_reserved"]
-                        account.equity = max(0.0, account.cash_equity + account.realized_pnl + account.unrealized_pnl)
+                        account.equity = max(0.0, bal["available"] + bal["trading_reserved"] + account.realized_pnl + account.unrealized_pnl)
                         account.peak_equity = max(account.peak_equity, account.equity)
             await db.commit()
             return {"ok": True, "id": existing.id, "status": existing.status, "wallet_id": existing.wallet_id, "idempotent": False, "state_transition": f"{current}->{incoming}"}
@@ -2903,7 +2979,8 @@ async def funding_webhook(
             await db.flush()
         funding = FundingTransaction(customer_id=customer.id, wallet_id=wallet.id,
             provider=payload.provider, provider_reference=payload.provider_reference,
-            amount=payload.amount, currency=currency, status=payload.status,
+            amount=payload.amount, currency=currency,
+            status=("PENDING_REVIEW" if settings.funding_manual_review_required and payload.status == "CONFIRMED" else payload.status),
             metadata_json=json.dumps(payload.metadata, separators=(",", ":")))
         if payload.status == "CONFIRMED":
             wallet.status = "ACTIVE"
