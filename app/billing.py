@@ -84,12 +84,21 @@ async def consume_subscription_trade(db, *, customer_id: int, idempotency_key: s
             period_end=period_end,
             trades_used=0,
         )
-        db.add(usage)
-        try:
-            await db.flush()
-        except IntegrityError:
-            await db.rollback()
-            raise
+        async with db.begin_nested():
+            db.add(usage)
+            try:
+                await db.flush()
+            except IntegrityError:
+                usage = (
+                    await db.execute(
+                        select(SubscriptionTradeUsage)
+                        .where(
+                            SubscriptionTradeUsage.subscription_id == sub.id,
+                            SubscriptionTradeUsage.period_start == period_start,
+                        )
+                        .with_for_update()
+                    )
+                ).scalar_one()
 
     limit = int(plan.monthly_trade_limit or 0)
     used = int(usage.trades_used or 0)
