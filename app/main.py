@@ -2924,7 +2924,7 @@ async def funding_webhook(
             current = str(existing.status or "PENDING").upper()
             if incoming == current:
                 return {"ok": True, "id": existing.id, "status": existing.status, "wallet_id": existing.wallet_id, "idempotent": True}
-            allowed = {"PENDING": {"CONFIRMED", "FAILED"}, "FAILED": {"CONFIRMED"}, "CONFIRMED": set()}
+            allowed = {"PENDING": {"CONFIRMED", "FAILED"}, "PENDING_REVIEW": {"CONFIRMED", "REJECTED"}, "FAILED": {"CONFIRMED"}, "CONFIRMED": set()}
             if incoming not in allowed.get(current, set()):
                 raise HTTPException(409, f"Invalid funding state transition: {current} -> {incoming}")
             currency = str(existing.currency or payload.currency).upper()
@@ -2942,7 +2942,9 @@ async def funding_webhook(
             if incoming == "CONFIRMED":
                 wallet.status = "ACTIVE"
                 existing.confirmed_at = existing.confirmed_at or datetime.now(timezone.utc)
-                if currency == "USDT" and current != "CONFIRMED":
+                if settings.funding_manual_review_required:
+                    existing.status = "PENDING_REVIEW"
+                elif currency == "USDT" and current != "CONFIRMED":
                     await post_deposit(db, customer_id=customer.id, wallet_id=wallet.id, amount=stored_amount,
                                         provider_reference=payload.provider_reference, metadata=payload.metadata, provider=existing.provider)
                     await sync_wallet_from_ledger(db, customer.id, "USDT")
@@ -2950,7 +2952,7 @@ async def funding_webhook(
                     if account:
                         bal = await customer_balance(db, customer.id, "USDT")
                         account.cash_equity = bal["available"] + bal["trading_reserved"]
-                        account.equity = max(0.0, account.cash_equity + account.realized_pnl + account.unrealized_pnl)
+                        account.equity = max(0.0, bal["available"] + bal["trading_reserved"] + account.realized_pnl + account.unrealized_pnl)
                         account.peak_equity = max(account.peak_equity, account.equity)
             await db.commit()
             return {"ok": True, "id": existing.id, "status": existing.status, "wallet_id": existing.wallet_id, "idempotent": False, "state_transition": f"{current}->{incoming}"}
@@ -2968,7 +2970,8 @@ async def funding_webhook(
             await db.flush()
         funding = FundingTransaction(customer_id=customer.id, wallet_id=wallet.id,
             provider=payload.provider, provider_reference=payload.provider_reference,
-            amount=payload.amount, currency=currency, status=payload.status,
+            amount=payload.amount, currency=currency,
+            status=("PENDING_REVIEW" if settings.funding_manual_review_required and payload.status == "CONFIRMED" else payload.status),
             metadata_json=json.dumps(payload.metadata, separators=(",", ":")))
         if payload.status == "CONFIRMED":
             wallet.status = "ACTIVE"
