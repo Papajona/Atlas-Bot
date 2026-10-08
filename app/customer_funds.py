@@ -188,8 +188,8 @@ async def sync_wallet_from_ledger(db, customer_id: int, currency: str = USDT) ->
     ledger = await get_or_create_ledger(db, customer_id, currency)
     wallet = (await db.execute(select(Wallet).where(Wallet.customer_id == customer_id, Wallet.currency == currency).with_for_update())).scalar_one_or_none()
     if wallet:
-        wallet.available_balance = float(ledger.available)
-        wallet.locked_balance = float(ledger.trading_reserved + ledger.withdrawal_reserved)
+        wallet.available_balance = D(str(ledger.available))
+        wallet.locked_balance = D(str(ledger.trading_reserved + ledger.withdrawal_reserved))
         wallet.updated_at = utcnow()
 
 async def _check_reserve_replay(db, journal: LedgerJournal, customer_id: int, amount_d: Decimal, bucket: str) -> None:
