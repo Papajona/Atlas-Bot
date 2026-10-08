@@ -459,6 +459,10 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
         max_open_position_limit = min(settings.max_open_positions, pilot_max_positions) if pilot_max_positions is not None else settings.max_open_positions
         if symbol not in {p.symbol for p in open_positions} and len(open_positions) >= max_open_position_limit:
             raise RiskBlocked("Maximum open position count reached")
+        if settings.max_correlated_group_exposure_usd > 0 and not reducing:
+            group_exposure, group = _correlated_group_exposure_usd(open_positions, symbol, notional)
+            if group is not None and group_exposure > settings.max_correlated_group_exposure_usd:
+                raise RiskBlocked("Correlated-asset group exposure limit exceeded")
         if live and not signal_timestamp:
             raise RiskBlocked("Live signal timestamp is required")
         if live:
@@ -524,6 +528,27 @@ async def _create_trade(symbol: str, timeframe: str, side: str, quantity: float,
             return existing.id, False
 
 
+
+
+def _correlation_groups() -> list[set[str]]:
+    groups = []
+    for chunk in str(settings.correlated_symbol_groups or "").split(";"):
+        members = {x.strip().upper() for x in chunk.split(",") if x.strip()}
+        if len(members) > 1:
+            groups.append(members)
+    return groups
+
+
+def _correlated_group_exposure_usd(open_positions, symbol: str, new_notional: float) -> tuple[float, set[str] | None]:
+    """Gross notional (at average entry) of open positions in symbol's correlation group, plus the new order."""
+    sym = str(symbol).upper()
+    for group in _correlation_groups():
+        if sym in group:
+            held = sum(abs(float(p.quantity)) * float(p.average_entry_price or 0.0)
+                       for p in open_positions if str(p.symbol).upper() in group and str(p.symbol).upper() != sym)
+            same = sum(abs(float(p.quantity)) * float(p.average_entry_price or 0.0) for p in open_positions if str(p.symbol).upper() == sym)
+            return held + same + float(new_notional), group
+    return float(new_notional), None
 
 
 def _is_derivatives_market(broker) -> bool:
