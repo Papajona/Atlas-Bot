@@ -31,10 +31,10 @@ class SmartTradeRequest(BaseModel):
     symbol: str = Field(min_length=2, max_length=80)
     exchange: str = Field(default="bybit", min_length=2, max_length=50)
     side: str = Field(pattern="^(BUY|SELL)$")
-    entry_price: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
-    quantity: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
-    stop_loss_price: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
-    take_profit_1: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    entry_price: float = Field(gt=0)
+    quantity: float = Field(gt=0)
+    stop_loss_price: float = Field(gt=0)
+    take_profit_1: float = Field(gt=0)
     take_profit_2: float = Field(default=0, ge=0)
     take_profit_3: float = Field(default=0, ge=0)
     trailing_stop_pct: float = Field(default=0, ge=0, le=20)
@@ -46,8 +46,8 @@ class DcaBotRequest(BaseModel):
     symbol: str = Field(min_length=2, max_length=80)
     exchange: str = Field(default="bybit", min_length=2, max_length=50)
     side: str = Field(default="LONG", pattern="^(LONG|SHORT)$")
-    initial_quote: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
-    safety_order_quote: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    initial_quote: float = Field(gt=0)
+    safety_order_quote: float = Field(gt=0)
     max_safety_orders: int = Field(default=3, ge=1, le=20)
     deviation_pct: float = Field(default=1.0, gt=0, le=50)
     volume_scale: float = Field(default=1.5, ge=1, le=5)
@@ -83,7 +83,7 @@ class ExecutorCreateRequest(BaseModel):
     exchange: str = Field(default="binance", min_length=2, max_length=50)
     timeframe: str = Field(default="1h")
     side: str = Field(pattern="^(buy|sell)$")
-    total_quantity: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    total_quantity: float = Field(gt=0)
     slices: int = Field(default=1, ge=1, le=200)
     interval_seconds: int = Field(default=60, ge=1, le=86400)
     max_slippage_bps: float = Field(default=25, ge=0, le=500)
@@ -107,11 +107,11 @@ class GridBotRequest(BaseModel):
     symbol: str = Field(min_length=2, max_length=80)
     exchange: str = Field(default="bybit", min_length=2, max_length=50)
     grid_type: str = Field(default="NEUTRAL", pattern="^(LONG|NEUTRAL|SHORT)$")
-    lower_price: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
-    upper_price: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    lower_price: float = Field(gt=0)
+    upper_price: float = Field(gt=0)
     levels: int = Field(default=20, ge=2, le=200)
     arithmetic: bool = False
-    quote_per_grid: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    quote_per_grid: float = Field(gt=0)
     take_profit_pct: float = Field(default=0, ge=0, le=100)
     stop_loss_pct: float = Field(default=0, ge=0, le=100)
     trailing_stop_pct: float = Field(default=0, ge=0, le=50)
@@ -131,8 +131,8 @@ class ArbitrageLeg(BaseModel):
     side: str = Field(pattern="^(BUY|SELL)$")
     base_asset: str = Field(min_length=2, max_length=20, pattern=r"^[A-Za-z0-9_-]+$")
     quote_asset: str = Field(min_length=2, max_length=20, pattern=r"^[A-Za-z0-9_-]+$")
-    bid: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
-    ask: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    bid: float = Field(gt=0)
+    ask: float = Field(gt=0)
     bid_qty: float = Field(default=0, ge=0)
     ask_qty: float = Field(default=0, ge=0)
 
@@ -160,21 +160,21 @@ class DerivTradeRequest(BaseModel):
 
 class BinanceArbitrageLiveRequest(BaseModel):
     legs: list[ArbitrageLeg] = Field(min_length=3, max_length=3)
-    start_quote: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    start_quote: float = Field(gt=0)
     start_asset: str = Field(min_length=2, max_length=20, pattern=r"^[A-Za-z0-9_-]+$")
     confirmation: str = Field(default="", max_length=64)
 
 
 class ArbitragePaperRequest(BaseModel):
     legs: list[ArbitrageLeg] = Field(min_length=3, max_length=3)
-    start_quote: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    start_quote: float = Field(gt=0)
     start_asset: str = Field(min_length=2, max_length=20, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class ExecutionPlanRequest(BaseModel):
     side: str = Field(pattern="^(buy|sell)$")
-    quantity: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
-    best_price: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    quantity: float = Field(gt=0)
+    best_price: float = Field(gt=0)
     levels: list[dict[str, float]] = Field(min_length=1, max_length=100)
     maker_fee_bps: float = Field(default=0, ge=0, le=500)
     taker_fee_bps: float = Field(default=0, ge=0, le=500)
@@ -195,7 +195,7 @@ class TrainRequest(MarketRequest):
 
 class ExecuteRequest(MarketRequest):
     side: str = Field(pattern="^(buy|sell)$")
-    quantity: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    quantity: float = Field(gt=0)
     price: float = Field(default=0, ge=0)
     score: float = 0.0
     long_probability: float = 0.0
@@ -318,7 +318,7 @@ class CustomerPilotRequest(BaseModel):
     expires_at: datetime | None = None
 
 class BinanceSubAccountProvisionRequest(BaseModel):
-    customer_id: int = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    customer_id: int = Field(gt=0)
     tag: str = Field(min_length=1, max_length=31)
 
 
@@ -339,7 +339,7 @@ class OtpSendRequest(BaseModel):
     create_user: bool = False
     purpose: str = Field(default="login", pattern="^(login|withdrawal|destination_verification)$")
     destination: str | None = Field(default=None, min_length=30, max_length=50)
-    amount: float | None = Field(default=None, gt=0)
+    amount: float | None = Field(default=None, gt=0, le=1_000_000_000, allow_inf_nan=False)
     destination_tag: str | None = Field(default=None, max_length=120)
     network: str = Field(default="TRON", min_length=3, max_length=40)
 
@@ -350,7 +350,7 @@ class OtpVerifyRequest(BaseModel):
     token: str = Field(min_length=6, max_length=8)
     purpose: str = Field(default="login", pattern="^(login|withdrawal|destination_verification)$")
     destination: str | None = Field(default=None, min_length=30, max_length=50)
-    amount: float | None = Field(default=None, gt=0)
+    amount: float | None = Field(default=None, gt=0, le=1_000_000_000, allow_inf_nan=False)
     destination_tag: str | None = Field(default=None, max_length=120)
     network: str = Field(default="TRON", min_length=3, max_length=40)
     otp_intent_token: str | None = Field(default=None, min_length=20, max_length=1200)
