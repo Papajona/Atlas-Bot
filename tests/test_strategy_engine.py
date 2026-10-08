@@ -162,3 +162,36 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
 def test_strategy_backtest_reports_next_open_execution_model():
     result = strategy_backtest(sample_df(), taker_bps=0, slippage_bps=0)
     assert result["backtest_model"].startswith("next-open execution")
+
+
+def test_train_model_remaps_non_contiguous_fold_classes(tmp_path, monkeypatch):
+    from app import trading_core
+
+    df = sample_df(1800)
+    seen = []
+    original = trading_core.LGBMClassifier
+
+    class SpyModel:
+        classes_ = np.array([0, 1])
+
+        def __init__(self, *args, **kwargs):
+            seen.append(kwargs.get("num_class"))
+
+        def fit(self, X, y):
+            values = np.asarray(y)
+            assert np.array_equal(np.unique(values), np.arange(len(np.unique(values))))
+            return self
+
+        def predict(self, X):
+            return np.zeros(len(X), dtype=int)
+
+        def predict_proba(self, X):
+            return np.tile(np.array([[0.5, 0.5]]), (len(X), 1))
+
+    monkeypatch.setattr(trading_core, "LGBMClassifier", SpyModel)
+    monkeypatch.setattr(trading_core, "sha256_file", lambda path: "a" * 64)
+    monkeypatch.setattr(trading_core, "artifact_signature", lambda digest: "")
+    trading_core.train_model(df, str(tmp_path / "model.joblib"), min_train=500, folds=4, asset="commodity")
+    assert seen
+    assert all(value == 2 for value in seen)
+    monkeypatch.setattr(trading_core, "LGBMClassifier", original)
