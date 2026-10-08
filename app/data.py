@@ -173,6 +173,21 @@ def fetch_forex(symbol: str = "EURUSD", timeframe: str = "1h", days: int = 365) 
     )
 
 
+def _oanda_candle_count(days: int, timeframe: str) -> int:
+    candles_per_day = {
+        "1m": 1440,
+        "5m": 288,
+        "15m": 96,
+        "30m": 48,
+        "1h": 24,
+        "4h": 6,
+        "1d": 1,
+    }
+    if timeframe not in candles_per_day:
+        raise RuntimeError(f"Unsupported OANDA timeframe: {timeframe}")
+    return min(5000, max(250, int(days * candles_per_day[timeframe])))
+
+
 def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int = 365) -> pd.DataFrame:
     """Fetch completed OANDA v20 mid candles for the configured practice/demo account only."""
     from .config import settings
@@ -184,16 +199,7 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
         raise RuntimeError("OANDA live mode is disabled in AtlasRisk; use practice/demo for learning and backtesting")
     broker = OandaBroker(OandaConfig(settings.oanda_account_id, settings.oanda_api_token, True, settings.oanda_timeout_seconds))
     try:
-        candles_per_day = {
-            "1m": 1440,
-            "5m": 288,
-            "15m": 96,
-            "30m": 48,
-            "1h": 24,
-            "4h": 6,
-            "1d": 1,
-        }[timeframe]
-        count = min(5000, max(250, int(days * candles_per_day)))
+        count = _oanda_candle_count(days, timeframe)
         candles = broker.candles(symbol, granularity, count=count)
     finally:
         broker.close()
