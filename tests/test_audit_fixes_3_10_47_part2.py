@@ -5,7 +5,6 @@ import types
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.execution as execution
