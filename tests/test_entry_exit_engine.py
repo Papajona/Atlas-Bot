@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from app.entry_exit_engine import EntryExitConfig, gated_entry_exit_analysis, start_bot_decision, gated_entry_exit_backtest
+from app.entry_exit_engine import gated_entry_exit_analysis, start_bot_decision, gated_entry_exit_backtest
 
 
 def trend_df(n=1200):
