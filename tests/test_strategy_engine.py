@@ -171,11 +171,18 @@ def test_train_model_remaps_non_contiguous_fold_classes(tmp_path, monkeypatch):
     df = sample_df(1800)
     seen = []
 
-    class SpyModel:
-        classes_ = np.array([0, 1])
+    def deterministic_barriers(close, vol, high, low, max_hold):
+        labels = np.r_[
+            np.full(700, -1.0),
+            np.full(700, 1.0),
+            np.zeros(400),
+        ]
+        return pd.Series(labels, index=close.index)
 
+    class SpyModel:
         def __init__(self, *args, **kwargs):
-            seen.append(kwargs.get("num_class"))
+            self.classes_ = np.arange(kwargs["num_class"])
+            seen.append(kwargs["num_class"])
 
         def fit(self, X, y):
             values = np.asarray(y)
@@ -186,12 +193,22 @@ def test_train_model_remaps_non_contiguous_fold_classes(tmp_path, monkeypatch):
             return np.zeros(len(X), dtype=int)
 
         def predict_proba(self, X):
-            return np.tile(np.array([[0.5, 0.5]]), (len(X), 1))
+            return np.full((len(X), len(self.classes_)), 1.0 / len(self.classes_))
 
+    monkeypatch.setattr(trading_core, "triple_barrier", deterministic_barriers)
     monkeypatch.setattr(trading_core, "LGBMClassifier", SpyModel)
     monkeypatch.setattr(trading_core, "sha256_file", lambda path: "a" * 64)
     monkeypatch.setattr(trading_core, "artifact_signature", lambda digest: "")
     monkeypatch.setattr(joblib, "dump", lambda *args, **kwargs: None)
-    trading_core.train_model(df, str(tmp_path / "model.joblib"), min_train=500, folds=4, asset="commodity")
+
+    trading_core.train_model(
+        df,
+        str(tmp_path / "model.joblib"),
+        min_train=500,
+        folds=4,
+        asset="commodity",
+    )
+
     assert seen
-    assert all(value == 2 for value in seen)
+    assert 2 in seen
+    assert 3 in seen
