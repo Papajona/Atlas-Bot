@@ -1,4 +1,5 @@
 from __future__ import annotations
+import contextlib
 import logging
 from pathlib import Path
 import hmac
@@ -2407,7 +2408,7 @@ async def customer_otp_send(req: OtpSendRequest, authorization: str | None = Hea
         if not allowed_contact:
             raise HTTPException(429, "Verification code rate limit exceeded")
         try:
-            result = await _supabase_request(
+            await _supabase_request(
                 "/auth/v1/otp",
                 payload={contact_type: contact, "create_user": False},
             )
