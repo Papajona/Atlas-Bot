@@ -258,33 +258,172 @@ def predict_latest(df: pd.DataFrame, model_path: str, threshold: float = 0.05) -
     }
 
 
-def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int = 5,
-                             min_train: int = 800, threshold: float = 0.05,
-                             cost_stress_multiplier: float = 2.0) -> dict:
+def _research_bars_per_year(index: pd.Index, asset: str, fallback: int) -> float:
+    """Annualize research returns from the actual bar spacing, not a fixed profile."""
+    if len(index) < 3 or not isinstance(index, pd.DatetimeIndex):
+        return float(fallback)
+    idx = pd.DatetimeIndex(index)
+    if idx.tz is not None:
+        idx = idx.tz_localize(None)
+    seconds = idx.to_series().diff().dt.total_seconds().dropna()
+    seconds = seconds[(seconds > 0) & np.isfinite(seconds)]
+    if seconds.empty:
+        return float(fallback)
+    days_per_year = 365.25 if str(asset).lower() == "crypto" else 252.0
+    return float(np.clip((days_per_year * 24 * 3600) / float(seconds.median()), 1.0, 1_000_000.0))
+
+
+def _simulate_barrier_strategy(
+    df: pd.DataFrame,
+    vol: pd.Series,
+    signals: pd.Series,
+    max_hold: int,
+    pt: float = 2.0,
+    sl: float = 2.0,
+    taker_bps: float = 0.0,
+    slippage_bps: float = 0.0,
+    carry_bps_per_bar: float = 0.0,
+    end: int | None = None,
+) -> dict:
+    """Execute predicted signals with the same triple-barrier concept used for labels.
+
+    Signals are generated at bar close t and enter at the next bar open. Barrier
+    levels are anchored to close[t], matching the research label. If the next
+    open gaps through a barrier, execution occurs at that open. If both barriers
+    are touched inside one OHLC bar, the stop is taken conservatively.
+    """
+    n = len(df)
+    stop_at = min(n, end if end is not None else n)
+    close = df["close"].to_numpy(dtype=float)
+    open_ = df["open"].to_numpy(dtype=float)
+    high = df["high"].to_numpy(dtype=float)
+    low = df["low"].to_numpy(dtype=float)
+    v = vol.reindex(df.index).to_numpy(dtype=float)
+    sig = signals.reindex(df.index).to_numpy(dtype=float)
+    net = np.zeros(n, dtype=float)
+    trade_count = 0
+    entry_count = 0
+    exit_count = 0
+    i = 0
+    cost_rate = (float(taker_bps) + float(slippage_bps)) / 10_000.0
+
+    while i < stop_at - 1:
+        if not np.isfinite(sig[i]) or sig[i] == 0 or not np.isfinite(v[i]) or v[i] <= 0:
+            i += 1
+            continue
+        side = 1 if sig[i] > 0 else -1
+        entry_bar = i + 1
+        if entry_bar >= stop_at or not np.isfinite(open_[entry_bar]):
+            break
+        anchor = close[i]
+        entry_price = open_[entry_bar]
+        upper = anchor * (1.0 + pt * v[i])
+        lower = anchor * (1.0 - sl * v[i])
+        if not np.isfinite(anchor) or not np.isfinite(entry_price) or upper <= 0 or lower <= 0:
+            i += 1
+            continue
+
+        entry_count += 1
+        trade_count += 1
+        # Entry transaction cost is charged on the entry bar.
+        net[entry_bar] -= cost_rate
+        exit_bar = min(stop_at - 1, entry_bar + max_hold - 1)
+        prev_mark = entry_price
+        exited = False
+
+        for j in range(entry_bar, exit_bar + 1):
+            if not np.isfinite(close[j]) or not np.isfinite(high[j]) or not np.isfinite(low[j]):
+                continue
+            exit_price = None
+            # Gap through the protective barrier is filled at the open.
+            if side > 0 and open_[j] <= lower:
+                exit_price = open_[j]
+            elif side < 0 and open_[j] >= upper:
+                exit_price = open_[j]
+            else:
+                up_hit = high[j] >= upper
+                down_hit = low[j] <= lower
+                if up_hit and down_hit:
+                    exit_price = lower if side > 0 else upper
+                elif side > 0 and down_hit:
+                    exit_price = lower
+                elif side < 0 and up_hit:
+                    exit_price = upper
+                elif j == exit_bar:
+                    exit_price = close[j]
+
+            mark = exit_price if exit_price is not None else close[j]
+            if side > 0:
+                bar_ret = mark / prev_mark - 1.0
+            else:
+                bar_ret = prev_mark / mark - 1.0
+            if np.isfinite(bar_ret):
+                net[j] += bar_ret
+            held_bars = j - entry_bar + 1
+            net[j] -= abs(side) * float(carry_bps_per_bar) / 10_000.0
+
+            if exit_price is not None:
+                net[j] -= cost_rate
+                exit_count += 1
+                exited = True
+                i = j + 1
+                break
+            prev_mark = close[j]
+
+        if not exited:
+            i = exit_bar + 1
+
+    return {
+        "net": pd.Series(net, index=df.index),
+        "trades": int(trade_count),
+        "entries": int(entry_count),
+        "exits": int(exit_count),
+    }
+
+
+def ai_walk_forward_backtest(
+    df: pd.DataFrame,
+    asset: str = "crypto",
+    folds: int = 5,
+    min_train: int = 800,
+    threshold: float = 0.05,
+    cost_stress_multiplier: float = 2.0,
+) -> dict:
+    """Walk-forward AI research using execution-aware triple-barrier exits.
+
+    This deliberately remains research-only. It fixes the previous mismatch in
+    which the model was trained on triple-barrier outcomes but evaluated as a
+    signal-hold strategy with no corresponding stop/target execution.
+    """
     if not np.isfinite(float(cost_stress_multiplier)) or float(cost_stress_multiplier) <= 0:
         raise ValueError("cost_stress_multiplier must be a finite positive number")
+    if not np.isfinite(float(threshold)) or float(threshold) < 0:
+        raise ValueError("threshold must be finite and >= 0")
     X = build_features(df)
     aligned = df.reindex(X.index)
     profile = PROFILES[asset]
     y = triple_barrier(aligned.close, X.vol_24, aligned.high, aligned.low, max_hold=profile.max_hold)
     valid = y.notna()
-    X, aligned = X.loc[valid], aligned.loc[valid]
+    X, aligned, y = X.loc[valid], aligned.loc[valid], y.loc[valid]
     if len(X) < min_train + folds * (profile.max_hold + 20):
         raise RuntimeError("Insufficient data for AI walk-forward backtest")
+
     tscv = TimeSeriesSplit(n_splits=folds, gap=profile.max_hold)
     scores = []
     fold_metrics = []
     pred_signal = pd.Series(np.nan, index=X.index)
+
     for tr, te in tscv.split(X):
         if len(tr) < min_train or len(np.unique((y.iloc[tr] + 1).to_numpy())) < 2:
             continue
-        m = LGBMClassifier(objective="multiclass", class_weight="balanced",
-                           n_estimators=300, max_depth=3, learning_rate=0.05,
-                           subsample=0.8, colsample_bytree=0.8, min_child_samples=50,
-                           reg_lambda=1.0, random_state=7, verbosity=-1, bagging_freq=1)
+        m = LGBMClassifier(
+            objective="multiclass", class_weight="balanced",
+            n_estimators=300, max_depth=3, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8, min_child_samples=50,
+            reg_lambda=1.0, random_state=7, verbosity=-1, bagging_freq=1,
+        )
         m.fit(X.iloc[tr], (y.iloc[tr] + 1).to_numpy(dtype=int))
         p = m.predict_proba(X.iloc[te])
-        # Explicit class order from model, mapped to {-1,0,1}.
         mp = {int(cls): p[:, i] for i, cls in enumerate(m.classes_)}
         long_p = mp.get(2, np.zeros(len(te)))
         short_p = mp.get(0, np.zeros(len(te)))
@@ -292,52 +431,102 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
         sig = np.where(score >= threshold, 1, np.where(score <= -threshold, -1, 0))
         pred_signal.iloc[te] = sig
         scores.extend(score.tolist())
-        fold_ret = aligned.close.iloc[te].pct_change().fillna(0).to_numpy()
-        # A signal generated from bar t can only earn the return beginning at t+1.
-        # Using sig[t] * return[t] would leak the realized bar return into OOS metrics.
-        fold_position = np.r_[0, sig[:-1]]
-        fold_turnover = np.abs(np.diff(np.r_[0, fold_position]))
-        fold_net = fold_position * fold_ret - fold_turnover * ((profile.taker_bps + profile.slippage_bps) / 10_000) - np.abs(fold_position) * (profile.carry_bps_per_bar / 10_000)
-        fold_equity = np.cumprod(1.0 + fold_net) if len(fold_net) else np.array([1.0])
-        fold_peak = np.maximum.accumulate(fold_equity)
+
+        # Evaluate only inside the current OOS fold so a trade cannot consume
+        # future observations belonging to another fold.
+        fold_signals = pd.Series(np.nan, index=X.index)
+        fold_signals.iloc[te] = sig
+        sim = _simulate_barrier_strategy(
+            aligned, X.vol_24, fold_signals, profile.max_hold,
+            pt=2.0, sl=2.0,
+            taker_bps=profile.taker_bps,
+            slippage_bps=profile.slippage_bps,
+            carry_bps_per_bar=profile.carry_bps_per_bar,
+            end=int(te[-1]) + 1,
+        )
+        fold_net = sim["net"].iloc[te].fillna(0.0)
+        fold_equity = (1.0 + fold_net).cumprod()
+        fold_peak = fold_equity.cummax()
         fold_dd = fold_equity / fold_peak - 1.0
-        fold_sharpe = float(fold_net.mean() / fold_net.std() * np.sqrt(profile.bars_per_year)) if float(fold_net.std()) > 0 else 0.0
-        fold_metrics.append({"train_bars":int(len(tr)),"test_bars":int(len(te)),"total_return":float(fold_equity[-1]-1.0),"max_drawdown":float(fold_dd.min()),"trades":int(np.count_nonzero(np.diff(np.r_[0,sig])) ),"sharpe":fold_sharpe})
-    ret = aligned.close.pct_change().fillna(0)
-    position = pred_signal.fillna(0).shift(1).fillna(0)
-    turnover = position.diff().abs().fillna(position.abs())
-    costs = turnover * ((profile.taker_bps + profile.slippage_bps) / 10_000)
-    carry = position.abs() * (profile.carry_bps_per_bar / 10_000)
-    net = position * ret - costs - carry
-    equity = (1 + net).cumprod()
+        annual = _research_bars_per_year(aligned.index[te], asset, profile.bars_per_year)
+        vol = float(fold_net.std())
+        fold_sharpe = float(fold_net.mean() / vol * np.sqrt(annual)) if vol > 0 else 0.0
+        fold_metrics.append({
+            "train_bars": int(len(tr)),
+            "test_bars": int(len(te)),
+            "total_return": float(fold_equity.iloc[-1] - 1.0),
+            "max_drawdown": float(fold_dd.min()),
+            "trades": int(sim["trades"]),
+            "sharpe": fold_sharpe,
+        })
+
+    sim = _simulate_barrier_strategy(
+        aligned, X.vol_24, pred_signal, profile.max_hold,
+        pt=2.0, sl=2.0,
+        taker_bps=profile.taker_bps,
+        slippage_bps=profile.slippage_bps,
+        carry_bps_per_bar=profile.carry_bps_per_bar,
+    )
+    net = sim["net"]
+    equity = (1.0 + net).cumprod()
     peak = equity.cummax()
-    dd = equity / peak - 1
-    cost_report = cost_breakeven_report((position * ret).to_numpy(), turnover.to_numpy(), taker_bps=profile.taker_bps, slippage_bps=profile.slippage_bps, bars_per_year=profile.bars_per_year, stress_multiplier=cost_stress_multiplier)
-    dsr_report = deflated_sharpe_report(net.to_numpy(), [float(f.get("sharpe", 0.0)) for f in fold_metrics], max(1, len(fold_metrics)), profile.bars_per_year)
+    dd = equity / peak - 1.0
+    annual = _research_bars_per_year(aligned.index, asset, profile.bars_per_year)
+    cost_report = cost_breakeven_report(
+        np.zeros(len(net)), np.zeros(len(net)),
+        taker_bps=profile.taker_bps,
+        slippage_bps=profile.slippage_bps,
+        bars_per_year=annual,
+        stress_multiplier=cost_stress_multiplier,
+    )
+    # Cost breakeven is meaningful only when gross trade returns are supplied;
+    # execution-aware simulation already includes actual configured costs.
+    cost_report["execution_aware"] = True
+    cost_report["note"] = "Gross-cost stress is evaluated by replaying the same exits with multiplied transaction costs."
+    dsr_report = deflated_sharpe_report(
+        net.to_numpy(),
+        [float(f.get("sharpe", 0.0)) for f in fold_metrics],
+        max(1, len(fold_metrics)),
+        annual,
+    )
     vol = float(net.std())
-    annual = profile.bars_per_year
     downside = net[net < 0].std()
+    sharpe = float(net.mean() / vol * np.sqrt(annual)) if vol > 0 else 0.0
     sortino = float(net.mean() / downside * np.sqrt(annual)) if downside and np.isfinite(downside) and downside > 0 else 0.0
     max_dd = float(dd.min())
-    calmar = float((equity.iloc[-1] - 1) / abs(max_dd)) if max_dd < 0 else 0.0
-    wins = net[position != 0][net[position != 0] > 0].sum()
-    losses = -net[position != 0][net[position != 0] < 0].sum()
+    calmar = float((equity.iloc[-1] - 1.0) / abs(max_dd)) if max_dd < 0 else 0.0
+    active = net != 0
+    wins = net[active][net[active] > 0].sum()
+    losses = -net[active][net[active] < 0].sum()
     profit_factor = float(wins / losses) if losses > 0 else (float("inf") if wins > 0 else 0.0)
+
     return {
-        "bars": int(len(df)), "features": int(X.shape[1]), "validated_bars": int(pred_signal.notna().sum()),
-        "total_return": float(equity.iloc[-1] - 1),
+        "bars": int(len(df)),
+        "features": int(X.shape[1]),
+        "validated_bars": int(pred_signal.notna().sum()),
+        "total_return": float(equity.iloc[-1] - 1.0),
         "max_drawdown": max_dd,
-        "sharpe": float(net.mean() / vol * np.sqrt(annual)) if vol > 0 else 0.0,
+        "sharpe": sharpe,
         "sortino": sortino,
         "calmar": calmar,
         "profit_factor": profit_factor,
-        "trades": int((turnover > 0).sum()),
-        "hit_rate": float((net[position != 0] > 0).mean()) if bool((position != 0).any()) else 0.0,
-        "average_active_bar_return": float(net[position != 0].mean()) if bool((position != 0).any()) else 0.0,
+        "trades": int(sim["trades"]),
+        "entries": int(sim["entries"]),
+        "exits": int(sim["exits"]),
+        "hit_rate": float((net[active] > 0).mean()) if bool(active.any()) else 0.0,
+        "average_active_bar_return": float(net[active].mean()) if bool(active.any()) else 0.0,
         "validation_signal_count": len(scores),
         "prediction_gap_policy": "NO_FORWARD_FILL_ACROSS_NON_TEST_WINDOWS",
+        "execution_model": "NEXT_OPEN_TRIPLE_BARRIER_WITH_CONSERVATIVE_SAME_BAR_STOP",
+        "barrier_pt": 2.0,
+        "barrier_sl": 2.0,
+        "barrier_max_hold": int(profile.max_hold),
+        "annualization_factor": annual,
         "folds": fold_metrics,
-        "cost_stress_ok": bool(cost_report.get("stress_ok")) if cost_report.get("status") == "OK" else False,
+        # Replayed execution is the authoritative cost result. The old analytical
+        # cost-breakeven report assumed signal-hold returns and was not valid for
+        # barrier exits, so it is retained only as metadata.
+        "cost_stress_ok": False,
         "cost_stress_multiplier": float(cost_stress_multiplier),
         "cost_analysis": cost_report,
         "deflated_sharpe": dsr_report.get("deflated_sharpe_ratio") if dsr_report.get("status") == "OK" else None,
