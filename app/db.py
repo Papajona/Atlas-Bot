@@ -72,6 +72,23 @@ class FinancialNumeric(TypeDecorator):
         return None if value is None else float(value)
 
 
+class CustodialNumeric(TypeDecorator):
+    """Exact NUMERIC(38,18) materialization for customer wallet money."""
+    impl = Numeric(38, 18, asdecimal=True)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        d = value if isinstance(value, Decimal) else Decimal(str(value))
+        if not d.is_finite():
+            raise ValueError("financial values must be finite")
+        return d
+
+    def process_result_value(self, value, dialect):
+        return None if value is None else Decimal(value)
+
+
 def quantize_money(*values: float, places: int = 8) -> float:
     """Round a float-typed FinancialNumeric value through Decimal to bound float-drift.
 
@@ -455,8 +472,8 @@ class Wallet(Base):
     deposit_address: Mapped[str] = mapped_column(EncryptedText, default="")
     token_contract: Mapped[str] = mapped_column(EncryptedText, default="")
     derivation_path: Mapped[str] = mapped_column(String(100), default="")
-    available_balance: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
-    locked_balance: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
+    available_balance: Mapped[Decimal] = mapped_column(CustodialNumeric, default=Decimal("0"))
+    locked_balance: Mapped[Decimal] = mapped_column(CustodialNumeric, default=Decimal("0"))
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
