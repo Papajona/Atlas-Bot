@@ -2,11 +2,13 @@
 
 ## Custody model
 
-Atlas uses a **central TRON treasury/collection address** for controlled settlement and a **unique virtual TRC-20 deposit address per customer** for automatic attribution. The treasury address must never be used as a shared auto-credit address. TRC-20 transfer history contains sender, receiver, transaction and amount, but no native Atlas customer identifier; amount-only matching is therefore unsafe.
+Atlas uses a **central TRON treasury/collection address** only when that address is demonstrably Atlas-controlled. If the configured address is actually a Binance deposit/collection address, it is external custody and must not be treated as Atlas treasury custody. for controlled settlement and a **unique virtual TRC-20 deposit address per customer** for automatic attribution. The treasury address must never be used as a shared auto-credit address. TRC-20 transfer history contains sender, receiver, transaction and amount, but no native Atlas customer identifier; amount-only matching is therefore unsafe.
 
-Configured treasury address:
+Configured address:
 
 `TWFuigmmGbb5gsTS4KUtY5v2FmA1rJ3yC5`
+
+**Ownership is not established by this repository.** If Binance confirms this exact address as its deposit/collection address, configure `USDT_TRON_TREASURY_ADDRESS_ROLE=binance_deposit`; Atlas then excludes that address from Atlas-controlled TRON assets and relies on a fresh Binance custody observation instead.
 
 USDT TRC-20 contract:
 
@@ -56,4 +58,4 @@ The admin endpoint `/api/admin/custody/reconciliation` reports customer ledger l
 
 ## Sweep policy
 
-A future sweep worker should move confirmed USDT from virtual deposit addresses to the treasury address using an HSM/MPC or other controlled signer. The sweep must be separately idempotent and reconciled; the customer ledger credit must never depend on the sweep succeeding.
+A future sweep worker should move confirmed USDT from virtual deposit addresses to the treasury address only when `USDT_TRON_TREASURY_ADDRESS_ROLE=atlas_controlled`. A Binance deposit address must never be used as an Atlas sweep destination using an HSM/MPC or other controlled signer. The sweep must be separately idempotent and reconciled; the customer ledger credit must never depend on the sweep succeeding.

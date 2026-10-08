@@ -125,7 +125,7 @@ async def reconcile_usdt_custody(db) -> dict:
     ).scalars().all()
     addresses = []
     seen = set()
-    if settings.usdt_tron_treasury_address:
+    if settings.usdt_tron_treasury_address and settings.usdt_tron_treasury_address_role == "atlas_controlled":
         seen.add(settings.usdt_tron_treasury_address)
         addresses.append(settings.usdt_tron_treasury_address)
     for wallet in wallets:
@@ -184,6 +184,10 @@ async def reconcile_usdt_custody(db) -> dict:
         return report
 
     assets = sum(balances.values(), D("0"))
+    # A Binance-controlled address is external custody. Do not double-count its
+    # on-chain balance alongside a Binance balance observation.
+    if settings.usdt_tron_treasury_address_role == "binance_deposit":
+        assets = sum(balance for address, balance in balances.items() if address != settings.usdt_tron_treasury_address)
     exchange_report = None
     if settings.binance_custody_reconciliation_enabled:
         exchange_report = await fresh_external_assets(db, currency=USDT)
@@ -233,8 +237,13 @@ async def reconcile_usdt_custody(db) -> dict:
         "exchange_assets": exchange_report["assets"] if exchange_report else None,
         "exchange_observation_count": exchange_report["observation_count"] if exchange_report else 0,
         "addresses_checked": len(balances),
-        "treasury_balance": balances.get(settings.usdt_tron_treasury_address, D("0")),
-        "virtual_wallet_balance": sum(balances.values(), D("0")) - balances.get(settings.usdt_tron_treasury_address, D("0")),
+        "treasury_balance": balances.get(settings.usdt_tron_treasury_address, D("0")) if settings.usdt_tron_treasury_address_role == "atlas_controlled" else None,
+        "virtual_wallet_balance": (
+            sum(balance for address, balance in balances.items() if address != settings.usdt_tron_treasury_address)
+            if settings.usdt_tron_treasury_address_role == "binance_deposit"
+            else sum(balances.values(), D("0")) - balances.get(settings.usdt_tron_treasury_address, D("0"))
+        ),
+        "treasury_address_role": settings.usdt_tron_treasury_address_role,
     }
 
     if decision["status"] == "OK":
