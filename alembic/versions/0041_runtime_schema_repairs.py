@@ -21,7 +21,18 @@ def upgrade():
             op.add_column("withdrawals",sa.Column(n,t,**kw))
         op.add_column("oanda_reconciliation_state",sa.Column("consecutive_errors",sa.Integer(),nullable=False,server_default="0"))
         op.alter_column("customer_binance_accounts","api_key",existing_type=sa.String(180),type_=sa.Text(),existing_nullable=False)
-        op.execute(sa.text("CREATE OR REPLACE FUNCTION atlas_ledger_journal_deferred_check() RETURNS trigger AS $ BEGIN IF TG_TABLE_NAME = 'ledger_journals' THEN PERFORM atlas_validate_ledger_journal(NEW.id); ELSE PERFORM atlas_validate_ledger_journal(COALESCE(NEW.journal_id, OLD.journal_id)); END IF; RETURN COALESCE(NEW, OLD); END; $ LANGUAGE plpgsql;"))
+        op.execute(sa.text("""CREATE OR REPLACE FUNCTION atlas_ledger_journal_deferred_check()
+RETURNS trigger AS $
+BEGIN
+    IF TG_TABLE_NAME = 'ledger_journals' THEN
+        PERFORM atlas_validate_ledger_journal(NEW.id);
+    ELSE
+        PERFORM atlas_validate_ledger_journal(COALESCE(NEW.journal_id, OLD.journal_id));
+    END IF;
+    RETURN COALESCE(NEW, OLD);
+END;
+$ LANGUAGE plpgsql;
+"""))
         return
     additions = {
         "withdrawals": [
