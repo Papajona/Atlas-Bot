@@ -5876,5 +5876,4 @@ async def research_fx_execution_route(req: dict[str, object], x_admin_token: str
         )
         return {"plan": asdict(plan), "execution_authority": False, "mode": "RESEARCH_ONLY"}
     except (TypeError, ValueError) as exc:
-        from fastapi import HTTPException
         raise _safe_http_error(400, exc, "Invalid request") from exc
