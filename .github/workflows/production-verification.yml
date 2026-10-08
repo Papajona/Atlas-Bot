@@ -29,6 +29,7 @@ jobs:
       SUPABASE_ANON_KEY: verification-anon-key
       FUNDING_WEBHOOK_SECRET: verification-funding-secret
       ADMIN_SUPABASE_USER_IDS: verification-admin
+      ADMIN_ROLE_ASSIGNMENTS: verification-admin:ADMINISTRATOR
       FORWARDED_ALLOW_IPS: 127.0.0.1/32
       BACKUP_RECOVERY_URL: https://recovery.invalid/atlas-verification
       REDIS_URL: redis://127.0.0.1:6379/0
