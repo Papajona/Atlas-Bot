@@ -153,14 +153,21 @@ def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: 
         train_classes = np.unique(encoded.iloc[tr_idx])
         if len(train_classes) < 2:
             continue
+        # LightGBM multiclass labels must be contiguous from zero. A training
+        # fold may legitimately contain only a subset of {-1, 0, +1}; remap
+        # the observed encoded labels locally, just as the research WFO path
+        # does below.
+        class_to_local = {int(cls): i for i, cls in enumerate(train_classes)}
+        local_y = np.asarray([class_to_local[int(label)] for label in encoded.iloc[tr_idx]], dtype=int)
         model = LGBMClassifier(
             objective="multiclass",
+            num_class=len(train_classes),
             class_weight="balanced", n_estimators=300, max_depth=3,
             learning_rate=0.05, subsample=0.8, colsample_bytree=0.8,
             min_child_samples=50, reg_lambda=1.0, random_state=7,
             verbosity=-1, bagging_freq=1,
         )
-        model.fit(X.iloc[tr_idx], encoded.iloc[tr_idx].to_numpy(dtype=int))
+        model.fit(X.iloc[tr_idx], local_y)
         pred = model.predict(X.iloc[te_idx])
         probs = model.predict_proba(X.iloc[te_idx])
         scores.append({
