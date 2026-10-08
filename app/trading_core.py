@@ -28,6 +28,18 @@ class Profile:
 PROFILES = {
     "crypto": Profile(8760, 5.5, 2.0, 0.125, 12, 0.30, 3.0),
     "forex": Profile(6240, 0.5, 0.5, 0.0, 24, 0.10, 10.0),
+    # Commodity research currently reuses the existing research cost controls
+    # and non-crypto risk defaults. These are deliberately not tuned here;
+    # commodity-specific cost calibration is a later, evidence-gated step.
+    "commodity": Profile(
+        6240,
+        settings.research_taker_bps,
+        settings.research_slippage_bps,
+        0.0,
+        24,
+        settings.strategy_target_vol_annual,
+        settings.strategy_max_leverage,
+    ),
 }
 
 FEATURE_COLUMNS = [
