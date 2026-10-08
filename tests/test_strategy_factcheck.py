@@ -1,6 +1,7 @@
 from pathlib import Path
 import numpy as np
 import pandas as pd
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -63,3 +64,27 @@ def test_oos_gate_requires_forward_evidence():
     assert paper_candidates(base)
     bad={"strategies":[row],"validation":{"per_strategy_oos":{"trend":{"status":"OK","oos_total_return":-0.1,"folds":[{"total_return":0.05},{"total_return":-0.2}]}}}}
     assert paper_candidates(bad)==[]
+
+
+def test_ai_research_executes_triple_barrier_exits():
+    from app.trading_core import _simulate_barrier_strategy
+    idx = pd.date_range("2025-01-01", periods=4, freq="D", tz="UTC")
+    df = pd.DataFrame({
+        "open": [100.0, 100.0, 100.0, 100.0],
+        "high": [100.0, 103.0, 103.0, 100.0],
+        "low": [100.0, 99.0, 99.0, 100.0],
+        "close": [100.0, 102.0, 100.0, 100.0],
+    }, index=idx)
+    vol = pd.Series(0.01, index=idx)
+    signals = pd.Series([1.0, np.nan, np.nan, np.nan], index=idx)
+    out = _simulate_barrier_strategy(df, vol, signals, max_hold=3, pt=2.0, sl=2.0)
+    assert out["entries"] == 1
+    assert out["exits"] == 1
+    # Long target is 102; it is touched on the entry bar and therefore exits there.
+    assert out["net"].iloc[1] == pytest.approx(0.02, abs=1e-12)
+
+
+def test_ai_research_annualization_uses_daily_bar_spacing():
+    from app.trading_core import _research_bars_per_year
+    idx = pd.date_range("2025-01-01", periods=10, freq="D", tz="UTC")
+    assert _research_bars_per_year(idx, "commodity", 6240) == pytest.approx(252.0)
