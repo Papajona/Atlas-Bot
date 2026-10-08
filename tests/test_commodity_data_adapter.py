@@ -65,6 +65,9 @@ def test_fetch_commodity_uses_futures_mapping_and_provenance(monkeypatch):
     assert len(out.attrs["data_provenance"]["sha256"]) == 64
 
 
+def _append_placeholder():
+    pass
+
 def test_learning_commodity_dispatches_to_commodity_adapter(monkeypatch):
     from app import trade_learning
 
