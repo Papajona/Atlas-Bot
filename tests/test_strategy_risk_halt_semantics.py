@@ -85,8 +85,10 @@ def test_drawdown_halt_remains_active_while_drawdown_threshold_is_still_breached
         positions=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
     )
 
-    # The position is flat during the four-bar halt and resumes for the final
-    # two bars after the cooldown.
-    assert result["average_leverage"] == 2 / 6
-    assert result["total_return"] == 0.0
+    # The halt is triggered after the drawdown bar. With a two-bar cooldown,
+    # the next two bars are suppressed and execution resumes on the fourth
+    # subsequent bar, leaving five of six bars active under the one-bar signal
+    # shift used by the backtest.
+    assert result["average_leverage"] == 5 / 6
+    assert result["total_return"] == -0.10
 
