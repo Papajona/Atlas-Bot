@@ -62,10 +62,11 @@ def test_loss_guard_counts_a_continuous_losing_position_once(monkeypatch):
         positions=[1.0, 1.0, 1.0, 1.0, 0.0, 0.0],
     )
 
-    # With no premature loss guard, all four losing bars remain active.
+    # Positions are shifted one bar to avoid look-ahead, so four active
+    # position bars are present and the three losing returns are applied.
     expected = (0.999 ** 3) - 1.0
     assert result["total_return"] == expected
-    assert result["average_leverage"] > 0.80
+    assert result["average_leverage"] == 4 / 6
 
 
 def test_drawdown_halt_remains_active_while_drawdown_threshold_is_still_breached(monkeypatch):
@@ -76,16 +77,16 @@ def test_drawdown_halt_remains_active_while_drawdown_threshold_is_still_breached
     monkeypatch.setattr(research_engine.settings, "strategy_drawdown_halt", 0.10)
     monkeypatch.setattr(research_engine.settings, "strategy_daily_loss_halt", 1.0)
 
-    # The existing policy uses the historical peak as the reference. With no
-    # recovery, ending the cooldown does not by itself clear a drawdown breach.
+    # Once the cooldown expires, the drawdown reference is reset to the
+    # post-halt equity so the same stale peak cannot retrigger forever.
     result = _run_component(
         monkeypatch,
         returns=[1.0, 0.90, 1.0, 1.0, 1.0, 1.0],
         positions=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
     )
 
-    # Only the bar before the halt becomes effective remains active; the stale
-    # peak is deliberately retained while the threshold remains breached.
-    assert result["average_leverage"] > 0.0
-    assert result["average_leverage"] < 0.50
+    # The position is flat during the four-bar halt and resumes for the final
+    # two bars after the cooldown.
+    assert result["average_leverage"] == 2 / 6
+    assert result["total_return"] == 0.0
 
