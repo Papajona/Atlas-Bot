@@ -59,6 +59,13 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
             effective = 0.0
         else:
             effective = float(value)
+
+        # Once the cooldown has fully expired, establish a fresh drawdown
+        # reference at the recovered/remaining equity. Retaining the old peak
+        # would immediately re-trigger the same drawdown halt forever.
+        if i == halted_until + 1 and halted_until >= 0:
+            peak = equity
+
         equity = max(0.0, equity * (1.0 + effective))
         peak = max(peak, equity)
         dd = 1.0 - (equity / peak if peak else 0.0)
@@ -68,8 +75,8 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
 
         # Count loss events when a position actually closes, rather than
         # treating every negative active bar as a separate losing trade.
-        current_pos = float(pos.iloc[i])
-        current_sign = 1 if current_pos > 0 else (-1 if current_pos < 0 else 0)
+        executed_pos = 0.0 if i <= halted_until else float(pos.iloc[i])
+        current_sign = 1 if executed_pos > 0 else (-1 if executed_pos < 0 else 0)
         if trade_sign == 0 and current_sign != 0:
             trade_sign = current_sign
             trade_pnl = 0.0
@@ -79,7 +86,7 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
             trade_sign = current_sign
             trade_pnl = 0.0
         if trade_sign != 0 and current_sign == trade_sign:
-            trade_pnl += float(value)
+            trade_pnl += float(effective)
         elif trade_sign != 0 and current_sign == 0:
             if trade_pnl < 0:
                 loss_event_times.append(i)
@@ -117,7 +124,7 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
             "daily_loss_halt": settings.strategy_daily_loss_halt,
             "loss_event_guard": settings.strategy_stoploss_guard_trades,
             "cooldown_bars": settings.strategy_stoploss_guard_bars,
-            "note": "A negative active-bar return is treated as a loss event; this is NOT an exact stop-loss fill detector.",
+            "note": "Loss events are counted when an executed position closes with negative accumulated P&L; this is NOT an exact stop-loss fill detector.",
         },
     }
 
