@@ -41,6 +41,6 @@ def test_metrics_endpoint_exists():
         # must be rejected.
         r = client.get("/metrics")
         assert r.status_code == 401
-        r = client.get("/metrics", headers={"x-admin-token": os.environ.get("ADMIN_TOKEN", "")})
+        r = client.get("/metrics", headers={"x-admin-token": str(settings.admin_token)})
         assert r.status_code == 200
         assert b"trader_http_requests_total" in r.content
