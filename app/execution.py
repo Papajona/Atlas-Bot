@@ -1926,6 +1926,41 @@ async def emergency_stop(exchange: str | None = None):
                             "error": "Unflattened platform spot positions remain",
                             "positions": unresolved_spot[:50],
                         })
+
+                # Binance/spot broker position APIs may not expose ordinary asset holdings.
+                # Reconcile the platform spot ledger before confirming the emergency stop.
+                async with SessionLocal() as db:
+                    ledger_spot_rows = (await db.execute(
+                        select(Position).where(
+                            Position.customer_id.is_(None),
+                            Position.exchange == str(exchange or settings.default_exchange).lower(),
+                            Position.quantity != 0,
+                        )
+                    )).scalars().all()
+                ledger_spot = [
+                    {"symbol": str(position.symbol), "quantity": float(position.quantity)}
+                    for position in ledger_spot_rows
+                ]
+                if ledger_spot:
+                    failure = {
+                        "scope": "platform_exchange_spot_ledger",
+                        "error": "Unresolved platform spot ledger positions remain",
+                        "positions": ledger_spot[:50],
+                    }
+                    failures.append(failure)
+                    try:
+                        await open_incident(
+                            key="EMERGENCY_STOP_PLATFORM_SPOT_LEDGER",
+                            severity="CRITICAL",
+                            category="EMERGENCY_STOP",
+                            summary="Emergency stop found unresolved platform spot ledger exposure",
+                            detail=failure,
+                        )
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "emergency_stop_spot_ledger_incident_write_failed",
+                            exc_info=True,
+                        )
         except Exception as exc:
             cancel_error = str(exc)
             failures.append({"scope": "platform_exchange", "error": cancel_error})

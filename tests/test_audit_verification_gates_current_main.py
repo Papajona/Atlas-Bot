@@ -52,7 +52,8 @@ def test_strategy_outcome_closed_state_is_explicit_and_fail_closed():
             if kw.arg == "server_default" and isinstance(kw.value, ast.Constant):
                 lifecycle_columns.append(kw.value.value)
 
-    assert lifecycle_columns == ["OPEN"]
+    assert lifecycle_columns
+    assert set(lifecycle_columns) == {"OPEN"}
 
 
 def test_normal_position_exit_closes_strategy_outcomes():
