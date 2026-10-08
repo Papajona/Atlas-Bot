@@ -8,6 +8,17 @@ os.environ.setdefault("ADMIN_TOKEN", "test-admin-token-for-pytest-only")
 
 from fastapi.testclient import TestClient
 from app.main import app
+from app.config import settings
+
+
+@pytest.fixture(autouse=True)
+def _development_test_settings(monkeypatch):
+    # app.config.settings is a process-wide singleton and may have been
+    # imported by earlier tests before this module is collected. Setting the
+    # environment variable above does not retroactively change that object.
+    # Keep these API tests deterministic without changing production behavior.
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "database_url", "sqlite+aiosqlite:///./test_trading.db")
 
 
 def test_health_and_readiness_start():
