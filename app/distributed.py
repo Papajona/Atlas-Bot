@@ -18,7 +18,7 @@ def redis_enabled() -> bool:
 async def check_redis() -> bool:
     global _client
     if not settings.redis_url:
-        return settings.environment != "production" or not settings.distributed_rate_limit_required
+        return settings.environment not in {"production", "staging"} or not settings.distributed_rate_limit_required
     if Redis is None:
         return False
     try:
@@ -30,12 +30,12 @@ async def check_redis() -> bool:
 
 async def allow_rate_limit(key: str, limit: int, window_seconds: int = 60) -> tuple[bool, int]:
     if not settings.redis_url:
-        if settings.environment == "production" and settings.distributed_rate_limit_required:
+        if settings.environment in {"production", "staging"} and settings.distributed_rate_limit_required:
             return False, window_seconds
         return True, 0
     global _client
     if Redis is None:
-        return (settings.environment != "production"), 0
+        return (settings.environment not in {"production", "staging"}), 0
     if _client is None:
         _client = Redis.from_url(settings.redis_url, decode_responses=True, socket_connect_timeout=2, socket_timeout=2)
     bucket = int(time.time() // window_seconds)
@@ -48,7 +48,7 @@ async def allow_rate_limit(key: str, limit: int, window_seconds: int = 60) -> tu
         return count <= limit, remaining
     except Exception:
         # Fail closed in production; local development may continue without Redis.
-        return (settings.environment != "production"), 0
+        return (settings.environment not in {"production", "staging"}), 0
 
 async def acquire_lock(key: str, ttl_seconds: int = 900) -> bool:
     """Cross-instance Redis lock with owner-token release."""
