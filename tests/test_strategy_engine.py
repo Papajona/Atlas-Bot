@@ -166,10 +166,10 @@ def test_strategy_backtest_reports_next_open_execution_model():
 
 def test_train_model_remaps_non_contiguous_fold_classes(tmp_path, monkeypatch):
     from app import trading_core
+    import joblib
 
     df = sample_df(1800)
     seen = []
-    original = trading_core.LGBMClassifier
 
     class SpyModel:
         classes_ = np.array([0, 1])
@@ -191,8 +191,7 @@ def test_train_model_remaps_non_contiguous_fold_classes(tmp_path, monkeypatch):
     monkeypatch.setattr(trading_core, "LGBMClassifier", SpyModel)
     monkeypatch.setattr(trading_core, "sha256_file", lambda path: "a" * 64)
     monkeypatch.setattr(trading_core, "artifact_signature", lambda digest: "")
-    monkeypatch.setattr(trading_core.joblib, "dump", lambda *args, **kwargs: None)
+    monkeypatch.setattr(joblib, "dump", lambda *args, **kwargs: None)
     trading_core.train_model(df, str(tmp_path / "model.joblib"), min_train=500, folds=4, asset="commodity")
     assert seen
     assert all(value == 2 for value in seen)
-    monkeypatch.setattr(trading_core, "LGBMClassifier", original)
