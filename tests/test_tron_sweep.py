@@ -40,8 +40,6 @@ def test_solidified_sweep_success_with_transfer_event():
     source = 'TWFuigmmGbb5gsTS4KUtY5v2FmA1rJ3yC5'
     treasury = 'T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb'
     # Event topic is fixed by ERC/TRC-20 Transfer(address,address,uint256).
-    _from_topic = '0' * 24 + '41' + '00' * 19 + '01'
-    _to_topic = '0' * 24 + '41' + '00' * 19 + '02'
     # Replace topic addresses with deterministic encodings derived from the actual addresses.
     def addr_topic(addr):
         alphabet='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
