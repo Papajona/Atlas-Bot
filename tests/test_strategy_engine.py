@@ -182,8 +182,9 @@ def test_train_model_remaps_non_contiguous_fold_classes(tmp_path, monkeypatch):
 
     class SpyModel:
         def __init__(self, *args, **kwargs):
-            self.classes_ = np.arange(kwargs["num_class"])
-            seen.append(kwargs["num_class"])
+            num_class = kwargs.get("num_class", 3)
+            self.classes_ = np.arange(num_class)
+            seen.append(num_class)
 
         def fit(self, X, y):
             values = np.asarray(y)
