@@ -75,3 +75,9 @@ def test_android_sources_are_excluded_from_runtime_image():
     dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
     for entry in ("app/src/", "app/build.gradle.kts", "app/proguard-rules.pro"):
         assert entry in dockerignore
+
+
+def test_customer_reconciliation_explicitly_handles_missing_binance_mapping():
+    source = (ROOT / "app" / "execution.py").read_text(encoding="utf-8")
+    assert "customer_binance_account_missing" in source
+    assert "trade_is_customer = False" not in source
