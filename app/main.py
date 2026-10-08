@@ -4626,7 +4626,9 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
     except WebSocketDisconnect:
         pass
     except Exception:
-        pass
+        logger.exception("risk dashboard websocket failed")
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1011)
 
 
 @app.get("/api/trades")
