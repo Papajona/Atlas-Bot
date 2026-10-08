@@ -82,4 +82,4 @@ def test_drawdown_halt_does_not_retrigger_forever_after_cooldown(monkeypatch):
     )
 
     assert result["average_leverage"] > 0.0
-    assert result["trades"] > 1
+    assert result["trades"] == 2
