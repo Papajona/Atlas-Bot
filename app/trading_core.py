@@ -472,17 +472,27 @@ def ai_walk_forward_backtest(
     peak = equity.cummax()
     dd = equity / peak - 1.0
     annual = _research_bars_per_year(aligned.index, asset, profile.bars_per_year)
-    cost_report = cost_breakeven_report(
-        np.zeros(len(net)), np.zeros(len(net)),
-        taker_bps=profile.taker_bps,
-        slippage_bps=profile.slippage_bps,
-        bars_per_year=annual,
-        stress_multiplier=cost_stress_multiplier,
+    stress_sim = _simulate_barrier_strategy(
+        aligned, X.vol_24, pred_signal, profile.max_hold,
+        pt=2.0, sl=2.0,
+        taker_bps=profile.taker_bps * float(cost_stress_multiplier),
+        slippage_bps=profile.slippage_bps * float(cost_stress_multiplier),
+        carry_bps_per_bar=profile.carry_bps_per_bar * float(cost_stress_multiplier),
     )
-    # Cost breakeven is meaningful only when gross trade returns are supplied;
-    # execution-aware simulation already includes actual configured costs.
-    cost_report["execution_aware"] = True
-    cost_report["note"] = "Gross-cost stress is evaluated by replaying the same exits with multiplied transaction costs."
+    stress_net = stress_sim["net"]
+    stress_equity = (1.0 + stress_net).cumprod()
+    stress_total_return = float(stress_equity.iloc[-1] - 1.0)
+    cost_report = {
+        "status": "OK",
+        "execution_aware": True,
+        "configured_cost_bps": float(profile.taker_bps + profile.slippage_bps),
+        "stress_multiplier": float(cost_stress_multiplier),
+        "stress_cost_bps": float((profile.taker_bps + profile.slippage_bps) * float(cost_stress_multiplier)),
+        "base_total_return": float(equity.iloc[-1] - 1.0),
+        "stress_total_return": stress_total_return,
+        "stress_ok": bool(np.isfinite(stress_total_return) and stress_total_return > 0.0),
+        "note": "Base and stressed costs are replayed through the same execution-aware barrier model.",
+    }
     dsr_report = deflated_sharpe_report(
         net.to_numpy(),
         [float(f.get("sharpe", 0.0)) for f in fold_metrics],
@@ -526,7 +536,7 @@ def ai_walk_forward_backtest(
         # Replayed execution is the authoritative cost result. The old analytical
         # cost-breakeven report assumed signal-hold returns and was not valid for
         # barrier exits, so it is retained only as metadata.
-        "cost_stress_ok": False,
+        "cost_stress_ok": bool(cost_report["stress_ok"]),
         "cost_stress_multiplier": float(cost_stress_multiplier),
         "cost_analysis": cost_report,
         "deflated_sharpe": dsr_report.get("deflated_sharpe_ratio") if dsr_report.get("status") == "OK" else None,
