@@ -6,6 +6,8 @@ import os
 import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_EVEN
+
+# Decimal constructor alias used by the cash-reservation path.
 from typing import Any
 
 from sqlalchemy import select, func, or_
@@ -29,6 +31,8 @@ from .live_fees import extract_order_fee_quote, ESTIMATED
 from .customer_funds import record_ledger_incident
 from .distributed import acquire_lock, release_lock
 
+
+D = Decimal
 
 TERMINAL_STATUSES = {"FILLED", "CANCELED", "REJECTED", "FAILED", "SIMULATED"}
 
