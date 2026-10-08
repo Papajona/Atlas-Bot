@@ -92,4 +92,3 @@ def test_drawdown_halt_remains_active_while_drawdown_threshold_is_still_breached
     # shift used by the backtest.
     assert result["average_leverage"] == 5 / 6
     assert result["total_return"] == pytest.approx(-0.10)
-
