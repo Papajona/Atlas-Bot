@@ -102,6 +102,52 @@ def fetch_crypto(symbol: str, exchange: str = "bybit", timeframe: str = "1h", da
             ex.close()
 
 
+_COMMODITY_YAHOO_SYMBOLS = {
+    "XAU_USD": "GC=F",
+    "XAG_USD": "SI=F",
+    "WTICO_USD": "CL=F",
+    "BCO_USD": "BZ=F",
+    "NATGAS_USD": "NG=F",
+}
+
+
+def _commodity_yahoo_symbol(symbol: str) -> str:
+    normalized = str(symbol).strip().upper()
+    if not normalized:
+        raise RuntimeError("Commodity symbol is required")
+    if normalized in _COMMODITY_YAHOO_SYMBOLS:
+        return _COMMODITY_YAHOO_SYMBOLS[normalized]
+    if normalized.endswith("=F"):
+        return normalized
+    raise RuntimeError(f"Unsupported commodity symbol: {symbol}")
+
+
+def fetch_commodity(symbol: str = "XAU_USD", timeframe: str = "1h", days: int = 365) -> pd.DataFrame:
+    """Fetch Yahoo Finance commodity-futures research data for a supported Atlas symbol."""
+    import yfinance as yf
+    yf_sym = _commodity_yahoo_symbol(symbol)
+    interval = timeframe if timeframe in {"1m", "5m", "15m", "30m", "1h", "1d"} else "1h"
+    period = f"{min(days, 720)}d" if interval != "1d" else f"{days}d"
+    raw = yf.download(yf_sym, period=period, interval=interval, auto_adjust=False, progress=False)
+    if raw.empty:
+        raise RuntimeError("No commodity data returned")
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = [str(c[0]).lower() for c in raw.columns]
+    else:
+        raw.columns = [str(c).lower() for c in raw.columns]
+    raw = raw[["open", "high", "low", "close", "volume"]].dropna()
+    raw.index = pd.to_datetime(raw.index, utc=True)
+    cleaned = _validate_ohlcv(raw, timeframe, reject_gaps=False)
+    return _attach_data_provenance(
+        cleaned,
+        source="yfinance_commodity_futures",
+        symbol=symbol,
+        exchange="yfinance",
+        timeframe=timeframe,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
 def fetch_forex(symbol: str = "EURUSD", timeframe: str = "1h", days: int = 365) -> pd.DataFrame:
     import yfinance as yf
     yf_sym = symbol if "=X" in symbol else symbol + "=X"
