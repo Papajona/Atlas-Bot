@@ -11,6 +11,7 @@ def _run_component(monkeypatch, returns, positions):
     signals = pd.DataFrame(
         {
             "trend": positions,
+            "atr": np.full(len(returns), 1.0),
             "realized_vol": np.full(len(returns), 0.20),
             "atr": np.full(len(returns), 1.0),
         },
