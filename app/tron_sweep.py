@@ -38,16 +38,22 @@ def usdt_to_raw(amount: Decimal | str | float) -> int:
 
 
 def build_sweep_intent(*, wallet_id: int, source_address: str, amount_usdt: Decimal | str | float,
-                       treasury_address: str | None = None, idempotency_key: str | None = None) -> SweepIntent:
+                       treasury_address: str | None = None, idempotency_key: str | None = None,
+                       nonce: str | int | None = None) -> SweepIntent:
     treasury = treasury_address or settings.usdt_tron_treasury_address
     if not source_address or not treasury:
         raise SweepError("source and treasury addresses are required")
     if source_address == treasury:
         raise SweepError("source address cannot equal treasury address")
     raw = usdt_to_raw(amount_usdt)
-    key = idempotency_key or hashlib.sha256(
-        f"tron-sweep:{wallet_id}:{source_address}:{treasury}:{raw}:{settings.usdt_tron_usdt_contract}".encode()
-    ).hexdigest()
+    if idempotency_key:
+        key = str(idempotency_key)
+    else:
+        if nonce is None or not str(nonce).strip():
+            raise SweepError("a client idempotency_key or unique sweep nonce is required")
+        key = hashlib.sha256(
+            f"tron-sweep:{wallet_id}:{source_address}:{treasury}:{raw}:{settings.usdt_tron_usdt_contract}:{nonce}".encode()
+        ).hexdigest()
     return SweepIntent(wallet_id=wallet_id, source_address=source_address, treasury_address=treasury,
                        amount_usdt=Decimal(raw) / USDT_SCALE, raw_amount=raw,
                        idempotency_key=key, contract=settings.usdt_tron_usdt_contract)
