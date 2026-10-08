@@ -32,7 +32,6 @@ def test_correlation_group_blocks_concentration():
 def test_versioned_encryption_round_trip(monkeypatch):
     from app import crypto
     from app.config import settings
-    import base64
     from cryptography.fernet import Fernet
     v1=Fernet.generate_key().decode(); v2=Fernet.generate_key().decode()
     monkeypatch.setattr(settings,'app_encryption_key',v1)

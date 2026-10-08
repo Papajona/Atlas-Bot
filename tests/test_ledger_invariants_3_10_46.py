@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
 from app.customer_funds import ledger_invariant_report, reserve_withdrawal, settle_realized_pnl, settle_trading_fee
-from app.db import Base, CustomerLedgerAccount, LedgerJournal, LedgerJournalLine
+from app.db import Base, CustomerLedgerAccount, LedgerJournal
 
 
 @pytest.fixture(autouse=True)

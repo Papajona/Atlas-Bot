@@ -21,9 +21,9 @@ def encryption_key(monkeypatch):
 
 def test_paper_buy_then_sell_round_trip():
     from app import execution
-    from app.db import init_db, SessionLocal, Trade, Position, AuditLog
+    from app.db import init_db, SessionLocal, Trade, AuditLog
 
-    sym = f"BTC/USDT"
+    sym = "BTC/USDT"
     ts = uuid.uuid4().hex  # unique signal timestamp => unique idempotent client order id
 
     async def run():

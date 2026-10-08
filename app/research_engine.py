@@ -45,6 +45,8 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
     current_day = None
     halted_until = -1
     loss_event_times: list[int] = []
+    trade_pnl = 0.0
+    trade_sign = 0
     equity_curve = []
     protected_pos = []
     for i, value in enumerate(net.to_numpy(dtype=float)):
@@ -57,6 +59,13 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
             effective = 0.0
         else:
             effective = float(value)
+
+        # Once the cooldown has fully expired, establish a fresh drawdown
+        # reference at the recovered/remaining equity. Retaining the old peak
+        # would immediately re-trigger the same drawdown halt forever.
+        if i == halted_until + 1 and halted_until >= 0:
+            peak = equity
+
         equity = max(0.0, equity * (1.0 + effective))
         peak = max(peak, equity)
         dd = 1.0 - (equity / peak if peak else 0.0)
@@ -64,11 +73,25 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
         protected_pos.append(0.0 if i <= halted_until else float(pos.iloc[i]))
         equity_curve.append(equity)
 
-        # Approximate a stop-loss event from a negative active-bar return. This
-        # is intentionally conservative; execution-level backtests remain the
-        # authoritative place for exact stop ordering.
-        if pos.iloc[i] != 0 and value < 0:
-            loss_event_times.append(i)
+        # Count loss events when a position actually closes, rather than
+        # treating every negative active bar as a separate losing trade.
+        executed_pos = 0.0 if i <= halted_until else float(pos.iloc[i])
+        current_sign = 1 if executed_pos > 0 else (-1 if executed_pos < 0 else 0)
+        if trade_sign == 0 and current_sign != 0:
+            trade_sign = current_sign
+            trade_pnl = 0.0
+        if trade_sign != 0 and current_sign != 0 and current_sign != trade_sign:
+            if trade_pnl < 0:
+                loss_event_times.append(i)
+            trade_sign = current_sign
+            trade_pnl = 0.0
+        if trade_sign != 0 and current_sign == trade_sign:
+            trade_pnl += float(effective)
+        elif trade_sign != 0 and current_sign == 0:
+            if trade_pnl < 0:
+                loss_event_times.append(i)
+            trade_sign = 0
+            trade_pnl = 0.0
         cutoff = i - 24
         loss_event_times = [x for x in loss_event_times if x >= cutoff]
         if (dd >= settings.strategy_drawdown_halt or daily_loss >= settings.strategy_daily_loss_halt or len(loss_event_times) >= settings.strategy_stoploss_guard_trades):
@@ -101,7 +124,7 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
             "daily_loss_halt": settings.strategy_daily_loss_halt,
             "loss_event_guard": settings.strategy_stoploss_guard_trades,
             "cooldown_bars": settings.strategy_stoploss_guard_bars,
-            "note": "A negative active-bar return is treated as a loss event; this is NOT an exact stop-loss fill detector.",
+            "note": "Loss events are counted when an executed position closes with negative accumulated P&L; this is NOT an exact stop-loss fill detector.",
         },
     }
 

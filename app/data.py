@@ -102,6 +102,52 @@ def fetch_crypto(symbol: str, exchange: str = "bybit", timeframe: str = "1h", da
             ex.close()
 
 
+_COMMODITY_YAHOO_SYMBOLS = {
+    "XAU_USD": "GC=F",
+    "XAG_USD": "SI=F",
+    "WTICO_USD": "CL=F",
+    "BCO_USD": "BZ=F",
+    "NATGAS_USD": "NG=F",
+}
+
+
+def _commodity_yahoo_symbol(symbol: str) -> str:
+    normalized = str(symbol).strip().upper()
+    if not normalized:
+        raise RuntimeError("Commodity symbol is required")
+    if normalized in _COMMODITY_YAHOO_SYMBOLS:
+        return _COMMODITY_YAHOO_SYMBOLS[normalized]
+    if normalized.endswith("=F"):
+        return normalized
+    raise RuntimeError(f"Unsupported commodity symbol: {symbol}")
+
+
+def fetch_commodity(symbol: str = "XAU_USD", timeframe: str = "1h", days: int = 365) -> pd.DataFrame:
+    """Fetch Yahoo Finance commodity-futures research data for a supported Atlas symbol."""
+    import yfinance as yf
+    yf_sym = _commodity_yahoo_symbol(symbol)
+    interval = timeframe if timeframe in {"1m", "5m", "15m", "30m", "1h", "1d"} else "1h"
+    period = f"{min(days, 720)}d" if interval != "1d" else f"{days}d"
+    raw = yf.download(yf_sym, period=period, interval=interval, auto_adjust=False, progress=False)
+    if raw.empty:
+        raise RuntimeError("No commodity data returned")
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = [str(c[0]).lower() for c in raw.columns]
+    else:
+        raw.columns = [str(c).lower() for c in raw.columns]
+    raw = raw[["open", "high", "low", "close", "volume"]].dropna()
+    raw.index = pd.to_datetime(raw.index, utc=True)
+    cleaned = _validate_ohlcv(raw, timeframe, reject_gaps=False)
+    return _attach_data_provenance(
+        cleaned,
+        source="yfinance_commodity_futures",
+        symbol=symbol,
+        exchange="yfinance",
+        timeframe=timeframe,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
 def fetch_forex(symbol: str = "EURUSD", timeframe: str = "1h", days: int = 365) -> pd.DataFrame:
     import yfinance as yf
     yf_sym = symbol if "=X" in symbol else symbol + "=X"
@@ -127,6 +173,21 @@ def fetch_forex(symbol: str = "EURUSD", timeframe: str = "1h", days: int = 365) 
     )
 
 
+def _oanda_candle_count(days: int, timeframe: str) -> int:
+    candles_per_day = {
+        "1m": 1440,
+        "5m": 288,
+        "15m": 96,
+        "30m": 48,
+        "1h": 24,
+        "4h": 6,
+        "1d": 1,
+    }
+    if timeframe not in candles_per_day:
+        raise RuntimeError(f"Unsupported OANDA timeframe: {timeframe}")
+    return min(5000, max(250, int(days * candles_per_day[timeframe])))
+
+
 def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int = 365) -> pd.DataFrame:
     """Fetch completed OANDA v20 mid candles for the configured practice/demo account only."""
     from .config import settings
@@ -138,7 +199,7 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
         raise RuntimeError("OANDA live mode is disabled in AtlasRisk; use practice/demo for learning and backtesting")
     broker = OandaBroker(OandaConfig(settings.oanda_account_id, settings.oanda_api_token, True, settings.oanda_timeout_seconds))
     try:
-        count = min(5000, max(250, int(days * 24) if granularity == "H1" else int(days * 24 * 60 / max(1, int(timeframe[:-1])))))
+        count = _oanda_candle_count(days, timeframe)
         candles = broker.candles(symbol, granularity, count=count)
     finally:
         broker.close()

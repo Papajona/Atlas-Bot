@@ -162,3 +162,55 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
 def test_strategy_backtest_reports_next_open_execution_model():
     result = strategy_backtest(sample_df(), taker_bps=0, slippage_bps=0)
     assert result["backtest_model"].startswith("next-open execution")
+
+
+def test_train_model_remaps_non_contiguous_fold_classes(tmp_path, monkeypatch):
+    from app import trading_core
+    import joblib
+
+    df = sample_df(1800)
+    seen = []
+
+    def deterministic_barriers(close, vol, high, low, max_hold):
+        n = len(close)
+        labels = np.r_[
+            np.full(min(500, n), -1.0),
+            np.full(min(500, max(0, n - 500)), 1.0),
+            np.zeros(max(0, n - 1000)),
+        ]
+        return pd.Series(labels, index=close.index)
+
+    class SpyModel:
+        def __init__(self, *args, **kwargs):
+            num_class = kwargs.get("num_class", 3)
+            self.classes_ = np.arange(num_class)
+            seen.append(num_class)
+
+        def fit(self, X, y):
+            values = np.asarray(y)
+            assert np.array_equal(np.unique(values), np.arange(len(np.unique(values))))
+            return self
+
+        def predict(self, X):
+            return np.zeros(len(X), dtype=int)
+
+        def predict_proba(self, X):
+            return np.full((len(X), len(self.classes_)), 1.0 / len(self.classes_))
+
+    monkeypatch.setattr(trading_core, "triple_barrier", deterministic_barriers)
+    monkeypatch.setattr(trading_core, "LGBMClassifier", SpyModel)
+    monkeypatch.setattr(trading_core, "sha256_file", lambda path: "a" * 64)
+    monkeypatch.setattr(trading_core, "artifact_signature", lambda digest: "")
+    monkeypatch.setattr(joblib, "dump", lambda *args, **kwargs: None)
+
+    trading_core.train_model(
+        df,
+        str(tmp_path / "model.joblib"),
+        min_train=500,
+        folds=4,
+        asset="commodity",
+    )
+
+    assert seen
+    assert 2 in seen
+    assert 3 in seen

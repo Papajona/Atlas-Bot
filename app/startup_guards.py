@@ -41,3 +41,21 @@ async def assert_database_migrations_current() -> None:
         raise
     except Exception as exc:
         raise RuntimeError(f"Unable to verify Alembic migration state: {exc}") from exc
+
+
+async def assert_admin_roles_provisioned() -> None:
+    """Fail closed in staging/production API processes when no effective ADMINISTRATOR exists."""
+    if str(settings.environment).lower() not in {"production", "staging"} or str(settings.process_role) != "api":
+        return
+    from sqlalchemy import select
+    from .admin_rbac import _env_assignments
+    from .db import AdminRole, SessionLocal
+    allowed = {x.strip() for x in str(settings.admin_supabase_user_ids or "").split(",") if x.strip()}
+    env_admins = {uid for uid, role in _env_assignments().items() if role == "ADMINISTRATOR" and uid in allowed}
+    async with SessionLocal() as db:
+        rows = (await db.execute(select(AdminRole.auth_user_id, AdminRole.role, AdminRole.active))).all()
+    db_users = {str(r[0]) for r in rows}
+    db_admins = {str(r[0]) for r in rows if bool(r[2]) and str(r[1]).upper() == "ADMINISTRATOR"}
+    effective = db_admins | {u for u in env_admins if u not in db_users}
+    if not effective:
+        raise RuntimeError("No ADMINISTRATOR is provisioned: set ADMIN_ROLE_ASSIGNMENTS for an allow-listed user or grant the role in the database before starting the API in staging/production")

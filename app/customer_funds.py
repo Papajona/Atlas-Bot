@@ -264,7 +264,7 @@ async def reserve_trading(db, customer_id: int, amount: float, *, reference_id: 
 
 async def release_trading(db, customer_id: int, amount: float, *, reference_id: str) -> CustomerLedgerAccount:
     amount_d = _q(amount)
-    ledger = await get_or_create_ledger(db, customer_id, USDT)
+    await get_or_create_ledger(db, customer_id, USDT)
     idem = f"release:{reference_id}:{customer_id}"
     fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
         CustomerLedgerAccount.customer_id == customer_id,

@@ -150,3 +150,20 @@ def test_allowlisted_admin_without_explicit_role_is_read_only():
     assert 'env_role = _env_assignments().get(uid)' in src
     assert 'return {"READ_ONLY"}' in src
     assert 'get(uid, "ADMINISTRATOR")' not in src
+
+def test_reconcile_rejects_customer_trade_without_customer_binance_account():
+    source = Path("app/execution.py").read_text()
+    assert "trade_is_customer" not in source
+    assert '"error": "customer_binance_account_missing"' in source
+    block_start = source.index("if trade_customer_id is not None and not is_oanda:")
+    block_end = source.index("            order = None", block_start)
+    block = source[block_start:block_end]
+    assert "if customer_binance is None:" in block
+    assert "continue" in block
+
+
+def test_dashboard_websocket_logs_and_closes_on_unexpected_error():
+    source = Path("app/main.py").read_text()
+    assert 'logger.exception("dashboard websocket failed")' in source
+    assert "await websocket.close(code=1011)" in source
+

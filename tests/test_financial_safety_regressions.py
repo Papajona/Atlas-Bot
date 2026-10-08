@@ -40,8 +40,9 @@ def test_oos_gate_missing_required_metrics_fails_closed():
 
 def test_walk_forward_fold_returns_are_shifted():
     source = _source("app/trading_core.py")
-    assert "fold_position = np.r_[0, sig[:-1]]" in source
-    assert "fold_net = fold_position * fold_ret" in source
+    assert "fold_signals = pd.Series(np.nan, index=X.index)" in source
+    assert "fold_signals.iloc[te] = sig" in source
+    assert "prediction_gap_policy" in source
 
 
 def test_customer_live_venue_is_locked_to_binance_spot():
