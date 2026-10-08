@@ -53,7 +53,7 @@ async def allow_rate_limit(key: str, limit: int, window_seconds: int = 60) -> tu
 async def acquire_lock(key: str, ttl_seconds: int = 900) -> bool:
     """Cross-instance Redis lock with owner-token release."""
     if not settings.redis_url:
-        return settings.environment != "production"
+        return settings.environment not in {"production", "staging"}
     if Redis is None:
         return False
     global _client
