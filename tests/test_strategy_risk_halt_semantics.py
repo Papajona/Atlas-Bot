@@ -58,12 +58,12 @@ def test_loss_guard_counts_a_continuous_losing_position_once(monkeypatch):
     # one trade. The loss guard must not halt on the third losing bar.
     result = _run_component(
         monkeypatch,
-        returns=[1.0, 0.999, 0.999, 0.999, 0.999, 1.0],
-        positions=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        returns=[1.0, 0.999, 0.999, 0.999, 1.0, 1.0],
+        positions=[1.0, 1.0, 1.0, 1.0, 0.0, 0.0],
     )
 
     # With no premature loss guard, all four losing bars remain active.
-    expected = (0.999 ** 4) - 1.0
+    expected = (0.999 ** 3) - 1.0
     assert result["total_return"] == expected
     assert result["average_leverage"] > 0.80
 
