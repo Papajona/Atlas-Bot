@@ -69,7 +69,7 @@ from .executor_engine import ExecutorConfig, ExecutorValidationError, build_exec
 from .admin_rbac import require_role, get_roles, upsert_role, ROLES
 from .transaction_policy import register_or_check_destination, verify_destination
 from .audit_chain import append_audit
-from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current
+from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current, assert_admin_roles_provisioned
 
 def _stepup_token(uid: str, purpose: str = "withdrawal", destination_fingerprint: str = "", proposal_digest_value: str = "") -> tuple[str, str, int]:
     if not settings.secret_key:
@@ -306,6 +306,7 @@ async def startup():
         from .usdt_tron import require_tron_wallet_backend
         require_tron_wallet_backend()
     await assert_database_migrations_current()
+    await assert_admin_roles_provisioned()
     await init_db()
     async with SessionLocal() as billing_db:
         await _ensure_billing_plans(billing_db)
@@ -5659,6 +5660,11 @@ async def enable_live(body: LiveEnableRequest, x_admin_token: str | None = Heade
             raise HTTPException(409, "No pending live-trading enablement request exists")
         if s.live_enable_requested_by == actor_id:
             raise HTTPException(409, "A different RISK_OFFICER must approve the live-trading request")
+        requested_at = s.live_enable_requested_at
+        if requested_at.tzinfo is None:
+            requested_at = requested_at.replace(tzinfo=timezone.utc)
+        if (now - requested_at).total_seconds() > max(1, int(settings.live_enable_request_ttl_minutes)) * 60:
+            raise HTTPException(409, "The live-trading enablement request expired; submit a new REQUEST")
 
     if settings.require_single_worker_for_live and int(os.getenv("WEB_CONCURRENCY", "1")) != 1:
         raise HTTPException(409, "Live trading requires exactly one active execution worker")
