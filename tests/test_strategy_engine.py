@@ -172,10 +172,11 @@ def test_train_model_remaps_non_contiguous_fold_classes(tmp_path, monkeypatch):
     seen = []
 
     def deterministic_barriers(close, vol, high, low, max_hold):
+        n = len(close)
         labels = np.r_[
-            np.full(700, -1.0),
-            np.full(700, 1.0),
-            np.zeros(400),
+            np.full(min(500, n), -1.0),
+            np.full(min(500, max(0, n - 500)), 1.0),
+            np.zeros(max(0, n - 1000)),
         ]
         return pd.Series(labels, index=close.index)
 
