@@ -416,15 +416,24 @@ def ai_walk_forward_backtest(
     for tr, te in tscv.split(X):
         if len(tr) < min_train or len(np.unique((y.iloc[tr] + 1).to_numpy())) < 2:
             continue
+        train_labels = (y.iloc[tr] + 1).to_numpy(dtype=int)
+        train_classes = np.unique(train_labels)
+        if len(train_classes) < 2:
+            continue
+        # LightGBM multiclass labels must be contiguous from zero. A fold can
+        # legitimately contain only {-1, 0} or {0, +1}, so remap the observed
+        # labels for this fold and map probabilities back to trading classes.
+        class_to_local = {int(cls): i for i, cls in enumerate(train_classes)}
+        local_y = np.asarray([class_to_local[int(label)] for label in train_labels], dtype=int)
         m = LGBMClassifier(
-            objective="multiclass", class_weight="balanced",
+            objective="multiclass", num_class=len(train_classes), class_weight="balanced",
             n_estimators=300, max_depth=3, learning_rate=0.05,
             subsample=0.8, colsample_bytree=0.8, min_child_samples=50,
             reg_lambda=1.0, random_state=7, verbosity=-1, bagging_freq=1,
         )
-        m.fit(X.iloc[tr], (y.iloc[tr] + 1).to_numpy(dtype=int))
+        m.fit(X.iloc[tr], local_y)
         p = m.predict_proba(X.iloc[te])
-        mp = {int(cls): p[:, i] for i, cls in enumerate(m.classes_)}
+        mp = {int(train_classes[int(cls)]): p[:, i] for i, cls in enumerate(m.classes_)}
         long_p = mp.get(2, np.zeros(len(te)))
         short_p = mp.get(0, np.zeros(len(te)))
         score = long_p - short_p
