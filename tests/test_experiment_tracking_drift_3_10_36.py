@@ -11,7 +11,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 
 try:  # lightgbm may be absent in minimal CI images; the drift math doesn't need it.
-    import lightgbm  # noqa: F401
+    __import__("lightgbm")
 except ModuleNotFoundError:
     stub = types.ModuleType("lightgbm")
     stub.LGBMClassifier = type("LGBMClassifier", (), {})
