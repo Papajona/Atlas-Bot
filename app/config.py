@@ -213,6 +213,8 @@ class Settings(BaseSettings):
     edge_decay_z_halt: float = 2.0
     stale_data_minutes: int = 180
     max_signal_age_seconds: int = 7_200
+    # A pending live-enable request must receive second RISK_OFFICER approval within this window.
+    live_enable_request_ttl_minutes: int = 60
     stop_loss_pct: float = 0.01
     take_profit_pct: float = 0.02
     require_protective_stop_for_live: bool = True
@@ -449,6 +451,8 @@ class Settings(BaseSettings):
                 raise ValueError("CUSTOMER_LIVE_EXCHANGE must be binance for customer live execution")
             if str(self.customer_live_market_type).lower() != "spot":
                 raise ValueError("CUSTOMER_LIVE_MARKET_TYPE must be spot for customer live execution")
+        if self.environment == "production" and not self.admin_totp_required:
+            raise ValueError("ADMIN_TOTP_REQUIRED must be true in production")
         if self.environment in {"staging", "production"}:
             if self.usdt_tron_enabled and not self.usdt_tron_account_xpub:
                 raise ValueError("USDT_TRON_ACCOUNT_XPUB is required when TRON deposits are enabled")
