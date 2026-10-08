@@ -15,8 +15,8 @@ def test_reject_more_than_six_decimals():
 
 
 def test_sweep_intent_is_deterministic():
-    a = build_sweep_intent(wallet_id=7, source_address='TSource', amount_usdt='10.25', treasury_address='TTreasury')
-    b = build_sweep_intent(wallet_id=7, source_address='TSource', amount_usdt='10.25', treasury_address='TTreasury')
+    a = build_sweep_intent(wallet_id=7, source_address='TSource', amount_usdt='10.25', treasury_address='TTreasury', nonce='balance:10.25')
+    b = build_sweep_intent(wallet_id=7, source_address='TSource', amount_usdt='10.25', treasury_address='TTreasury', nonce='balance:10.25')
     assert a.idempotency_key == b.idempotency_key
     assert a.raw_amount == 10250000
 
@@ -62,3 +62,12 @@ def test_solidified_sweep_success_with_transfer_event():
 def test_solidified_sweep_missing_receipt_is_unknown():
     status,_=classify_solidified_sweep(tx_body={},receipt={},transaction_id='a'*64,source='TSource',treasury='TTreasury',contract='41'+'11'*20,expected_raw_amount=1)
     assert status == 'UNKNOWN'
+
+
+def test_sweep_intent_requires_unique_nonce_without_client_idempotency_key():
+    import pytest
+    with pytest.raises(SweepError, match="unique sweep nonce"):
+        build_sweep_intent(wallet_id=7, source_address='TSource', amount_usdt='10.25', treasury_address='TTreasury')
+    a = build_sweep_intent(wallet_id=7, source_address='TSource', amount_usdt='10.25', treasury_address='TTreasury', nonce='snapshot-1')
+    b = build_sweep_intent(wallet_id=7, source_address='TSource', amount_usdt='10.25', treasury_address='TTreasury', nonce='snapshot-2')
+    assert a.idempotency_key != b.idempotency_key

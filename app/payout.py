@@ -126,6 +126,9 @@ class CCXTPayoutProvider:
                     raw_status = str(raw.get("status") or "PENDING").upper()
                     mapped = {"OK":"COMPLETED","SUCCESS":"COMPLETED","DONE":"COMPLETED","FAILED":"FAILED","CANCELED":"FAILED","CANCELLED":"FAILED"}.get(raw_status, "PENDING")
                     return PayoutResult(self.name, provider_id, mapped, raw_status, raw)
+        if len(rows or []) >= 100:
+            # The lookup was explicitly capped at 100 rows; a miss on a full page is not proof the payout never happened.
+            raise PayoutUnknown("Provider history page is full; payout may exist beyond the lookup window")
         raise PayoutNotFound("No matching withdrawal was found in provider history")
 
 

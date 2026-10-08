@@ -149,7 +149,7 @@ class DerivConnectRequest(BaseModel):
 class DerivTradeRequest(BaseModel):
     contract_type: str = Field(min_length=2, max_length=40)
     underlying_symbol: str = Field(min_length=2, max_length=40)
-    amount: float = Field(gt=0)
+    amount: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     duration: int | None = Field(default=None, gt=0, le=86400)
     duration_unit: str | None = Field(default=None, max_length=4)
     basis: str = Field(default="stake", pattern="^(stake|payout)$")
@@ -218,7 +218,7 @@ class LiveEnableRequest(BaseModel):
 class WithdrawalCreate(BaseModel):
     request_id: str = Field(min_length=3, max_length=120)
     account_ref: str = Field(min_length=1, max_length=120)
-    amount: float = Field(gt=0)
+    amount: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     currency: str = Field(min_length=2, max_length=20)
     destination_masked: str = Field(min_length=3, max_length=180)
     risk_score: float = Field(default=0.0, ge=0, le=1)
@@ -238,7 +238,7 @@ class WithdrawalCreate(BaseModel):
 
 
 class CustomerWithdrawalCreate(BaseModel):
-    amount: float = Field(gt=0)
+    amount: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     destination: str = Field(min_length=30, max_length=50)
     destination_tag: str | None = Field(default=None, max_length=120)
     network: str = Field(default="TRON", min_length=3, max_length=40)
@@ -291,7 +291,7 @@ class CostEventRequest(BaseModel):
     customer_id: int | None = None
     category: str = Field(min_length=2, max_length=40)
     provider: str = Field(default="", max_length=60)
-    amount: float = Field(ge=0)
+    amount: float = Field(ge=0, le=1_000_000_000, allow_inf_nan=False)
     currency: str = Field(default="USD", min_length=3, max_length=10)
     reference: str = Field(default="", max_length=180)
 
@@ -301,7 +301,7 @@ class RevenueEventRequest(BaseModel):
     subscription_id: int | None = None
     provider: str = Field(default="manual", max_length=30)
     provider_reference: str = Field(min_length=2, max_length=180)
-    gross_amount: float = Field(ge=0)
+    gross_amount: float = Field(ge=0, le=1_000_000_000, allow_inf_nan=False)
     refunds: float = Field(default=0, ge=0)
     currency: str = Field(default="USD", min_length=3, max_length=10)
 
@@ -339,7 +339,7 @@ class OtpSendRequest(BaseModel):
     create_user: bool = False
     purpose: str = Field(default="login", pattern="^(login|withdrawal|destination_verification)$")
     destination: str | None = Field(default=None, min_length=30, max_length=50)
-    amount: float | None = Field(default=None, gt=0)
+    amount: float | None = Field(default=None, gt=0, le=1_000_000_000, allow_inf_nan=False)
     destination_tag: str | None = Field(default=None, max_length=120)
     network: str = Field(default="TRON", min_length=3, max_length=40)
 
@@ -350,7 +350,7 @@ class OtpVerifyRequest(BaseModel):
     token: str = Field(min_length=6, max_length=8)
     purpose: str = Field(default="login", pattern="^(login|withdrawal|destination_verification)$")
     destination: str | None = Field(default=None, min_length=30, max_length=50)
-    amount: float | None = Field(default=None, gt=0)
+    amount: float | None = Field(default=None, gt=0, le=1_000_000_000, allow_inf_nan=False)
     destination_tag: str | None = Field(default=None, max_length=120)
     network: str = Field(default="TRON", min_length=3, max_length=40)
     otp_intent_token: str | None = Field(default=None, min_length=20, max_length=1200)
@@ -360,7 +360,7 @@ class FundingWebhook(BaseModel):
     customer_auth_user_id: str = Field(min_length=10, max_length=120)
     provider: str = Field(min_length=2, max_length=50)
     provider_reference: str = Field(min_length=2, max_length=180)
-    amount: float = Field(gt=0)
+    amount: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     currency: str = Field(min_length=2, max_length=20)
     status: str = Field(default="CONFIRMED", pattern="^(PENDING|CONFIRMED|FAILED)$")
     metadata: dict = Field(default_factory=dict)
