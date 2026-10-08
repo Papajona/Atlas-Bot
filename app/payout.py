@@ -126,7 +126,7 @@ class CCXTPayoutProvider:
                     raw_status = str(raw.get("status") or "PENDING").upper()
                     mapped = {"OK":"COMPLETED","SUCCESS":"COMPLETED","DONE":"COMPLETED","FAILED":"FAILED","CANCELED":"FAILED","CANCELLED":"FAILED"}.get(raw_status, "PENDING")
                     return PayoutResult(self.name, provider_id, mapped, raw_status, raw)
-        raise PayoutNotFound("No matching withdrawal was found in provider history")
+        if len(rows or []) >= 100:\n            # A full provider history page is not evidence that the payout never occurred.\n            raise PayoutUnknown("Provider history page is full; payout may exist beyond the lookup window")\n        raise PayoutNotFound("No matching withdrawal was found in provider history")
 
 
 class GenericBankProvider:
