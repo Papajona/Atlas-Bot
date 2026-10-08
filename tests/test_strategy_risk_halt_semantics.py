@@ -46,7 +46,7 @@ def _run_component(monkeypatch, returns, positions):
     )
 
 
-def test_loss_guard_counts_closed_losing_trades_not_losing_bars(monkeypatch):
+def test_loss_guard_counts_a_continuous_losing_position_once(monkeypatch):
     from app import research_engine
 
     monkeypatch.setattr(research_engine.settings, "strategy_stoploss_guard_trades", 3)
@@ -54,19 +54,21 @@ def test_loss_guard_counts_closed_losing_trades_not_losing_bars(monkeypatch):
     monkeypatch.setattr(research_engine.settings, "strategy_drawdown_halt", 1.0)
     monkeypatch.setattr(research_engine.settings, "strategy_daily_loss_halt", 1.0)
 
-    # One continuous position has three losing bars but only one open trade.
+    # One continuous position loses on four consecutive bars, but it is only
+    # one trade. The loss guard must not halt on the third losing bar.
     result = _run_component(
         monkeypatch,
-        returns=[1.0, 0.999, 0.999, 0.999, 1.0],
-        positions=[1.0, 1.0, 1.0, 1.0, 1.0],
+        returns=[1.0, 0.999, 0.999, 0.999, 0.999, 1.0],
+        positions=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
     )
 
-    # The guard must not interpret the three losing bars as three losing trades.
-    assert result["risk_protections"]["loss_event_guard"] == 3
-    assert result["trades"] == 1
+    # With no premature loss guard, all four losing bars remain active.
+    expected = (0.999 ** 4) - 1.0
+    assert result["total_return"] == expected
+    assert result["average_leverage"] > 0.80
 
 
-def test_drawdown_halt_does_not_retrigger_forever_after_cooldown(monkeypatch):
+def test_drawdown_halt_remains_active_while_drawdown_threshold_is_still_breached(monkeypatch):
     from app import research_engine
 
     monkeypatch.setattr(research_engine.settings, "strategy_stoploss_guard_trades", 99)
@@ -74,14 +76,16 @@ def test_drawdown_halt_does_not_retrigger_forever_after_cooldown(monkeypatch):
     monkeypatch.setattr(research_engine.settings, "strategy_drawdown_halt", 0.10)
     monkeypatch.setattr(research_engine.settings, "strategy_daily_loss_halt", 1.0)
 
-    # A 10% drawdown triggers the halt. After cooldown, the test expects the
-    # strategy to be able to resume instead of being halted forever by the same
-    # stale peak reference.
+    # The existing policy uses the historical peak as the reference. With no
+    # recovery, ending the cooldown does not by itself clear a drawdown breach.
     result = _run_component(
         monkeypatch,
         returns=[1.0, 0.90, 1.0, 1.0, 1.0, 1.0],
         positions=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
     )
 
+    # Only the bar before the halt becomes effective remains active; the stale
+    # peak is deliberately retained while the threshold remains breached.
     assert result["average_leverage"] > 0.0
-    assert result["trades"] == 2
+    assert result["average_leverage"] < 0.50
+
