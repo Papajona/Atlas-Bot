@@ -31,10 +31,10 @@ class SmartTradeRequest(BaseModel):
     symbol: str = Field(min_length=2, max_length=80)
     exchange: str = Field(default="bybit", min_length=2, max_length=50)
     side: str = Field(pattern="^(BUY|SELL)$")
-    entry_price: float = Field(gt=0)
-    quantity: float = Field(gt=0)
-    stop_loss_price: float = Field(gt=0)
-    take_profit_1: float = Field(gt=0)
+    entry_price: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    quantity: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    stop_loss_price: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    take_profit_1: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     take_profit_2: float = Field(default=0, ge=0)
     take_profit_3: float = Field(default=0, ge=0)
     trailing_stop_pct: float = Field(default=0, ge=0, le=20)
@@ -46,8 +46,8 @@ class DcaBotRequest(BaseModel):
     symbol: str = Field(min_length=2, max_length=80)
     exchange: str = Field(default="bybit", min_length=2, max_length=50)
     side: str = Field(default="LONG", pattern="^(LONG|SHORT)$")
-    initial_quote: float = Field(gt=0)
-    safety_order_quote: float = Field(gt=0)
+    initial_quote: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    safety_order_quote: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     max_safety_orders: int = Field(default=3, ge=1, le=20)
     deviation_pct: float = Field(default=1.0, gt=0, le=50)
     volume_scale: float = Field(default=1.5, ge=1, le=5)
@@ -83,7 +83,7 @@ class ExecutorCreateRequest(BaseModel):
     exchange: str = Field(default="binance", min_length=2, max_length=50)
     timeframe: str = Field(default="1h")
     side: str = Field(pattern="^(buy|sell)$")
-    total_quantity: float = Field(gt=0)
+    total_quantity: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     slices: int = Field(default=1, ge=1, le=200)
     interval_seconds: int = Field(default=60, ge=1, le=86400)
     max_slippage_bps: float = Field(default=25, ge=0, le=500)
@@ -107,11 +107,11 @@ class GridBotRequest(BaseModel):
     symbol: str = Field(min_length=2, max_length=80)
     exchange: str = Field(default="bybit", min_length=2, max_length=50)
     grid_type: str = Field(default="NEUTRAL", pattern="^(LONG|NEUTRAL|SHORT)$")
-    lower_price: float = Field(gt=0)
-    upper_price: float = Field(gt=0)
+    lower_price: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    upper_price: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     levels: int = Field(default=20, ge=2, le=200)
     arithmetic: bool = False
-    quote_per_grid: float = Field(gt=0)
+    quote_per_grid: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     take_profit_pct: float = Field(default=0, ge=0, le=100)
     stop_loss_pct: float = Field(default=0, ge=0, le=100)
     trailing_stop_pct: float = Field(default=0, ge=0, le=50)
@@ -131,8 +131,8 @@ class ArbitrageLeg(BaseModel):
     side: str = Field(pattern="^(BUY|SELL)$")
     base_asset: str = Field(min_length=2, max_length=20, pattern=r"^[A-Za-z0-9_-]+$")
     quote_asset: str = Field(min_length=2, max_length=20, pattern=r"^[A-Za-z0-9_-]+$")
-    bid: float = Field(gt=0)
-    ask: float = Field(gt=0)
+    bid: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    ask: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     bid_qty: float = Field(default=0, ge=0)
     ask_qty: float = Field(default=0, ge=0)
 
@@ -149,7 +149,7 @@ class DerivConnectRequest(BaseModel):
 class DerivTradeRequest(BaseModel):
     contract_type: str = Field(min_length=2, max_length=40)
     underlying_symbol: str = Field(min_length=2, max_length=40)
-    amount: float = Field(gt=0)
+    amount: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     duration: int | None = Field(default=None, gt=0, le=86400)
     duration_unit: str | None = Field(default=None, max_length=4)
     basis: str = Field(default="stake", pattern="^(stake|payout)$")
@@ -160,21 +160,21 @@ class DerivTradeRequest(BaseModel):
 
 class BinanceArbitrageLiveRequest(BaseModel):
     legs: list[ArbitrageLeg] = Field(min_length=3, max_length=3)
-    start_quote: float = Field(gt=0)
+    start_quote: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     start_asset: str = Field(min_length=2, max_length=20, pattern=r"^[A-Za-z0-9_-]+$")
     confirmation: str = Field(default="", max_length=64)
 
 
 class ArbitragePaperRequest(BaseModel):
     legs: list[ArbitrageLeg] = Field(min_length=3, max_length=3)
-    start_quote: float = Field(gt=0)
+    start_quote: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     start_asset: str = Field(min_length=2, max_length=20, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class ExecutionPlanRequest(BaseModel):
     side: str = Field(pattern="^(buy|sell)$")
-    quantity: float = Field(gt=0)
-    best_price: float = Field(gt=0)
+    quantity: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    best_price: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     levels: list[dict[str, float]] = Field(min_length=1, max_length=100)
     maker_fee_bps: float = Field(default=0, ge=0, le=500)
     taker_fee_bps: float = Field(default=0, ge=0, le=500)
@@ -195,7 +195,7 @@ class TrainRequest(MarketRequest):
 
 class ExecuteRequest(MarketRequest):
     side: str = Field(pattern="^(buy|sell)$")
-    quantity: float = Field(gt=0)
+    quantity: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     price: float = Field(default=0, ge=0)
     score: float = 0.0
     long_probability: float = 0.0
@@ -218,7 +218,7 @@ class LiveEnableRequest(BaseModel):
 class WithdrawalCreate(BaseModel):
     request_id: str = Field(min_length=3, max_length=120)
     account_ref: str = Field(min_length=1, max_length=120)
-    amount: float = Field(gt=0)
+    amount: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     currency: str = Field(min_length=2, max_length=20)
     destination_masked: str = Field(min_length=3, max_length=180)
     risk_score: float = Field(default=0.0, ge=0, le=1)
@@ -238,7 +238,7 @@ class WithdrawalCreate(BaseModel):
 
 
 class CustomerWithdrawalCreate(BaseModel):
-    amount: float = Field(gt=0)
+    amount: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     destination: str = Field(min_length=30, max_length=50)
     destination_tag: str | None = Field(default=None, max_length=120)
     network: str = Field(default="TRON", min_length=3, max_length=40)
@@ -291,7 +291,7 @@ class CostEventRequest(BaseModel):
     customer_id: int | None = None
     category: str = Field(min_length=2, max_length=40)
     provider: str = Field(default="", max_length=60)
-    amount: float = Field(ge=0)
+    amount: float = Field(ge=0, le=1_000_000_000, allow_inf_nan=False)
     currency: str = Field(default="USD", min_length=3, max_length=10)
     reference: str = Field(default="", max_length=180)
 
@@ -301,7 +301,7 @@ class RevenueEventRequest(BaseModel):
     subscription_id: int | None = None
     provider: str = Field(default="manual", max_length=30)
     provider_reference: str = Field(min_length=2, max_length=180)
-    gross_amount: float = Field(ge=0)
+    gross_amount: float = Field(ge=0, le=1_000_000_000, allow_inf_nan=False)
     refunds: float = Field(default=0, ge=0)
     currency: str = Field(default="USD", min_length=3, max_length=10)
 
@@ -318,7 +318,7 @@ class CustomerPilotRequest(BaseModel):
     expires_at: datetime | None = None
 
 class BinanceSubAccountProvisionRequest(BaseModel):
-    customer_id: int = Field(gt=0)
+    customer_id: int = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     tag: str = Field(min_length=1, max_length=31)
 
 
@@ -360,7 +360,7 @@ class FundingWebhook(BaseModel):
     customer_auth_user_id: str = Field(min_length=10, max_length=120)
     provider: str = Field(min_length=2, max_length=50)
     provider_reference: str = Field(min_length=2, max_length=180)
-    amount: float = Field(gt=0)
+    amount: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
     currency: str = Field(min_length=2, max_length=20)
     status: str = Field(default="CONFIRMED", pattern="^(PENDING|CONFIRMED|FAILED)$")
     metadata: dict = Field(default_factory=dict)
