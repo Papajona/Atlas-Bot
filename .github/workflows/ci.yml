@@ -41,19 +41,17 @@ jobs:
         run: python -m compileall -q app alembic
       - name: Apply migrations
         run: python -m alembic upgrade head
-      - name: Verify migration head
+      - name: Verify migration graph and reversible head
         run: |
           python -m alembic current
           python -m alembic heads
+          HEAD_COUNT="$(python -m alembic heads | grep -c '(head)' || true)"
+          test "$HEAD_COUNT" -eq 1
+          python -m alembic check
+          python -m alembic downgrade base
+          python -m alembic upgrade head
       - name: Python lint (fatal static errors)
-        run: |
-          set +e
-          python -m pyflakes app scripts tests > /tmp/pyflakes.txt 2>&1
-          status=$?
-          set -e
-          cat /tmp/pyflakes.txt
-          if grep -E "undefined name|redefinition of" /tmp/pyflakes.txt; then exit 1; fi
-          echo "Pyflakes completed with status ${status}; only fatal static errors fail CI."
+        run: python -m pyflakes app scripts tests
       - name: Repository secret scan
         run: python scripts/check_no_secrets.py
       - name: Security scan
