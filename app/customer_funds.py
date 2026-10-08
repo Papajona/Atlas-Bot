@@ -188,8 +188,8 @@ async def sync_wallet_from_ledger(db, customer_id: int, currency: str = USDT) ->
     ledger = await get_or_create_ledger(db, customer_id, currency)
     wallet = (await db.execute(select(Wallet).where(Wallet.customer_id == customer_id, Wallet.currency == currency).with_for_update())).scalar_one_or_none()
     if wallet:
-        wallet.available_balance = float(ledger.available)
-        wallet.locked_balance = float(ledger.trading_reserved + ledger.withdrawal_reserved)
+        wallet.available_balance = D(str(ledger.available))
+        wallet.locked_balance = D(str(ledger.trading_reserved)) + D(str(ledger.withdrawal_reserved))
         wallet.updated_at = utcnow()
 
 async def _check_reserve_replay(db, journal: LedgerJournal, customer_id: int, amount_d: Decimal, bucket: str) -> None:
@@ -264,7 +264,7 @@ async def reserve_trading(db, customer_id: int, amount: float, *, reference_id: 
 
 async def release_trading(db, customer_id: int, amount: float, *, reference_id: str) -> CustomerLedgerAccount:
     amount_d = _q(amount)
-    ledger = await get_or_create_ledger(db, customer_id, USDT)
+    await get_or_create_ledger(db, customer_id, USDT)
     idem = f"release:{reference_id}:{customer_id}"
     fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
         CustomerLedgerAccount.customer_id == customer_id,
@@ -329,7 +329,7 @@ async def release_withdrawal(db, customer_id: int, amount: float, *, reference_i
     amount_d = _q(amount)
     if amount_d <= 0:
         raise ValueError("withdrawal release amount must be positive")
-    ledger = await get_or_create_ledger(db, customer_id, USDT)
+    await get_or_create_ledger(db, customer_id, USDT)
     idem = f"withdrawal-release:{reference_id}"
     fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
         CustomerLedgerAccount.customer_id == customer_id,

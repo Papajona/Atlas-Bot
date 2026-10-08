@@ -20,3 +20,9 @@ REVIEW*.md
 ROOT_BUG_AUDIT_*.md
 
 docs/
+
+
+# Android module shares the app/ directory name with the Python package
+app/src/
+app/build.gradle.kts
+app/proguard-rules.pro

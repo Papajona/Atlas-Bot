@@ -6,6 +6,8 @@ import os
 import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_EVEN
+
+# Decimal constructor alias used by the cash-reservation path.
 from typing import Any
 
 from sqlalchemy import select, func, or_
@@ -29,6 +31,8 @@ from .live_fees import extract_order_fee_quote, ESTIMATED
 from .customer_funds import record_ledger_incident
 from .distributed import acquire_lock, release_lock
 
+
+D = Decimal
 
 TERMINAL_STATUSES = {"FILLED", "CANCELED", "REJECTED", "FAILED", "SIMULATED"}
 
@@ -308,8 +312,8 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
                 # existing behavior. account_reduce_only above is the stricter, magnitude-capped
                 # check used only to decide whether a HALTED account may still place this order.
                 reducing = any((p.quantity > 0 > signed) or (p.quantity < 0 < signed) for p in positions_for_symbol)
-                required_cash = 0.0 if reducing else price * quantity
-                if float(ledger.available) + 1e-9 < required_cash:
+                required_cash = D("0") if reducing else Decimal(str(price)) * Decimal(str(quantity))
+                if D(str(ledger.available)) + Decimal("0.000000001") < required_cash:
                     raise RiskBlocked("Order exceeds the customer's available funded USDT balance")
             today = _today_utc()
             if account.daily_start_date != today:
@@ -1614,7 +1618,6 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                     raise
     for trade_id, broker_order_id, trade_symbol, cid in snapshots:
         trade_broker = broker
-        trade_is_customer = False
         try:
             async with SessionLocal() as lookup_db:
                 trade_row = await lookup_db.get(Trade, trade_id)
@@ -1628,6 +1631,10 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                     customer_binance = (await credential_db.execute(
                         select(CustomerBinanceAccount).where(CustomerBinanceAccount.customer_id == trade_customer_id)
                     )).scalar_one_or_none()
+                if customer_binance is None:
+                    results.append({"trade_id": trade_id, "resolved": False,
+                                    "error": "customer_binance_account_missing"})
+                    continue
                 trade_broker = build_customer_binance_broker(
                     customer_binance, timeout_ms=settings.exchange_timeout_ms, sandbox=settings.broker_sandbox
                 )

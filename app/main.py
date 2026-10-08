@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import contextlib
 from pathlib import Path
 import hmac
 import os
@@ -1421,7 +1422,7 @@ async def _supabase_claims(access_token: str, require_aal2: bool = False) -> dic
         if jwk_alg and jwk_alg != token_alg:
             raise HTTPException(401, "Invalid authentication token")
         key = jwt.PyJWK(jwk).key
-        claims = jwt.decode(token, key=key, algorithms=[token_alg], audience=settings.supabase_auth_audience, issuer=settings.supabase_url.rstrip("/") + "/auth/v1")
+        claims = jwt.decode(token, key=key, algorithms=[token_alg], audience=settings.supabase_auth_audience, issuer=settings.supabase_url.rstrip("/") + "/auth/v1", options={"require": ["exp", "sub", "aud", "iss"]})
         if not claims.get("sub"):
             raise HTTPException(401, "Invalid authentication token")
         if require_aal2 and claims.get("aal", "aal1") != "aal2":
@@ -4626,7 +4627,9 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
     except WebSocketDisconnect:
         pass
     except Exception:
-        pass
+        logging.getLogger(__name__).exception("dashboard websocket failed")
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1011)
 
 
 @app.get("/api/trades")

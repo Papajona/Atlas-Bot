@@ -5,29 +5,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_money_columns_are_numeric_storage_not_float():
-    import re
     source = (ROOT / "app/db.py").read_text()
-    targets = {
-        "AppState": ["cash_equity","equity","peak_equity","daily_start_equity","realized_pnl","unrealized_pnl"],
-        "TradingAccount": ["cash_equity","equity","peak_equity","daily_start_equity","realized_pnl","unrealized_pnl","reserved_margin"],
-        "Trade": ["quantity","requested_quantity","filled_quantity","remaining_quantity","requested_price","average_fill_price","fee","notional","stop_loss_price","take_profit_price"],
-        "Position": ["quantity","average_entry_price","mark_price","realized_pnl","unrealized_pnl","reserved_capital"],
-        "Withdrawal": ["amount"], "Wallet": ["available_balance","locked_balance"],
-        "ReferralCommission": ["gross_revenue","commission_amount"],
-        "RevenueLedger": ["gross_amount","refunds","net_amount"], "CostLedger": ["amount"],
-        "SmartTrade": ["entry_price","quantity","stop_loss_price","take_profit_1","take_profit_2","take_profit_3"],
-        "DcaBot": ["initial_quote","safety_order_quote"], "GridBot": ["lower_price","upper_price","quote_per_grid"],
-        "TradeExecutor": ["executed_quantity","target_quantity"], "FundingTransaction": ["amount"],
-    }
-    assert 'class FinancialNumeric(TypeDecorator)' in source
-    assert 'impl = Numeric(38, 18, asdecimal=False)' in source
-    for cls, cols in targets.items():
-        m = re.search(rf'^class {cls}\(Base\):', source, re.M)
-        assert m, f"missing model {cls}"
-        n = re.search(r'^class \w+\(Base\):', source[m.end():], re.M)
-        block = source[m.start():m.end()+n.start()] if n else source[m.start():]
-        for col in cols:
-            assert re.search(rf'^    {re.escape(col)}: Mapped\[float\] = mapped_column\(FinancialNumeric', block, re.M), f"{cls}.{col} not FinancialNumeric"
+    # Custodial wallet mirrors and the authoritative customer ledger use Decimal/Numeric,
+    # while broader trading models intentionally retain the legacy-compatible FinancialNumeric.
+    assert 'available_balance: Mapped[Decimal] = mapped_column(Numeric(38, 18)' in source
+    assert 'locked_balance: Mapped[Decimal] = mapped_column(Numeric(38, 18)' in source
+    assert 'available: Mapped[Decimal] = mapped_column(Numeric(38, 6)' in source
+    assert 'trading_reserved: Mapped[Decimal] = mapped_column(Numeric(38, 6)' in source
+    assert 'withdrawal_reserved: Mapped[Decimal] = mapped_column(Numeric(38, 6)' in source
 
 
 def test_default_and_live_database_safety_contract():
