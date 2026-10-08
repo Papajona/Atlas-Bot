@@ -1,5 +1,5 @@
 """Repair runtime schema columns and the deferred ledger trigger on existing databases."""
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 revision = "0041_runtime_schema_repairs"
@@ -14,6 +14,26 @@ def _has_col(bind, table: str, column: str) -> bool:
 
 def upgrade():
     bind = op.get_bind()
+    if context.is_offline_mode():
+        for n,t,d in [("proposal_digest",sa.String(64),""),("execution_operator",sa.String(120),""),("execution_started_at",sa.DateTime(timezone=True),None),("reconciled_at",sa.DateTime(timezone=True),None)]:
+            kw={"nullable":False if n in ("proposal_digest","execution_operator") else True}
+            if d is not None: kw["server_default"]=d
+            op.add_column("withdrawals",sa.Column(n,t,**kw))
+        op.add_column("oanda_reconciliation_state",sa.Column("consecutive_errors",sa.Integer(),nullable=False,server_default="0"))
+        op.alter_column("customer_binance_accounts","api_key",existing_type=sa.String(180),type_=sa.Text(),existing_nullable=False)
+        op.execute(sa.text("""CREATE OR REPLACE FUNCTION atlas_ledger_journal_deferred_check()
+RETURNS trigger AS $
+BEGIN
+    IF TG_TABLE_NAME = 'ledger_journals' THEN
+        PERFORM atlas_validate_ledger_journal(NEW.id);
+    ELSE
+        PERFORM atlas_validate_ledger_journal(COALESCE(NEW.journal_id, OLD.journal_id));
+    END IF;
+    RETURN COALESCE(NEW, OLD);
+END;
+$ LANGUAGE plpgsql;
+"""))
+        return
     additions = {
         "withdrawals": [
             sa.Column("proposal_digest", sa.String(64), nullable=False, server_default=""),

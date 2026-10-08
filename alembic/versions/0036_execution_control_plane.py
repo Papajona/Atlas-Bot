@@ -1,5 +1,5 @@
 """AtlasRisk 3.10.43: durable order commands and live execution fencing."""
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 revision = "0036_execution_control_plane"
@@ -10,7 +10,13 @@ depends_on = None
 
 def upgrade():
     bind = op.get_bind()
-    tables = set(sa.inspect(bind).get_table_names())
+
+    if context.is_offline_mode():
+        # Fresh linear migration state at 0036: these tables do not yet exist.
+        tables = set()
+    else:
+        tables = set(sa.inspect(bind).get_table_names())
+
     if "order_commands" not in tables:
         op.create_table(
             "order_commands",

@@ -1,5 +1,5 @@
 """Persist the daily macro/news snapshot on research_runs so it survives past the single async call that computes it."""
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 revision = "0042_research_run_macro_context"
@@ -14,6 +14,10 @@ def _has_col(bind, table: str, column: str) -> bool:
 
 def upgrade():
     bind = op.get_bind()
+    if context.is_offline_mode():
+        op.add_column("research_runs",sa.Column("macro_risk_state",sa.String(20),nullable=False,server_default=""))
+        op.add_column("research_runs",sa.Column("macro_risk_score",sa.Float(),nullable=False,server_default="0"))
+        return
     if not _has_col(bind, "research_runs", "macro_risk_state"):
         op.add_column("research_runs", sa.Column("macro_risk_state", sa.String(20), nullable=False, server_default=""))
     if not _has_col(bind, "research_runs", "macro_risk_score"):

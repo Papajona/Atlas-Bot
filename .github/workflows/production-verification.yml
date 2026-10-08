@@ -43,6 +43,10 @@ jobs:
       BROKER_SANDBOX: "true"
       BACKGROUND_RECONCILIATION_ENABLED: "false"
       ADMIN_TOKEN: production-verification-only
+      # CI-only fixtures: satisfy production research-cost validation without pretending these are real research evidence.
+      RESEARCH_FEE_SOURCE: "CI_VERIFICATION_FIXTURE"
+      RESEARCH_FEE_EVIDENCE_ID: "CI_VERIFICATION_FIXTURE"
+      RESEARCH_MIN_DEFLATED_SHARPE: "0.95"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

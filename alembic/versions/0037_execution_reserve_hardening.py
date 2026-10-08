@@ -1,5 +1,5 @@
 """AtlasRisk 3.10.44: explicit customer execution reserve tracking."""
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 revision = "0037_execution_reserve_hardening"
@@ -8,10 +8,30 @@ branch_labels = None
 depends_on = None
 
 def upgrade():
+    if context.is_offline_mode():
+        op.add_column(
+            "trades",
+            sa.Column(
+                "reserved_cash",
+                sa.Numeric(38, 18),
+                nullable=False,
+                server_default="0",
+            ),
+        )
+        return
+
     bind = op.get_bind()
     cols = {c["name"] for c in sa.inspect(bind).get_columns("trades")}
     if "reserved_cash" not in cols:
-        op.add_column("trades", sa.Column("reserved_cash", sa.Numeric(38, 18), nullable=False, server_default="0"))
+        op.add_column(
+            "trades",
+            sa.Column(
+                "reserved_cash",
+                sa.Numeric(38, 18),
+                nullable=False,
+                server_default="0",
+            ),
+        )
 
 def downgrade():
     bind = op.get_bind()

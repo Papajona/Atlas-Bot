@@ -109,12 +109,23 @@ def test_adaptive_policy_object_is_explicit_and_fail_closed():
 
 
 def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch):
-    from app import adaptive_bot
-    import hashlib, json
+    from app import adaptive_bot, model_registry
+    import hashlib, json, base64
     import pathlib
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
     model_path = tmp_path / "btc.joblib"
     candidate_result = {"model_sha256": "abc123", "features": 20, "folds": 3}
+
+    signing_key = Ed25519PrivateKey.generate()
+    public_pem = signing_key.public_key().public_bytes(
+        Encoding.PEM,
+        PublicFormat.SubjectPublicKeyInfo,
+    )
+    monkeypatch.setattr(model_registry.settings, "environment", "staging", raising=False)
+    monkeypatch.setattr(model_registry.settings, "model_integrity_required_for_live", True, raising=False)
+    monkeypatch.setattr(model_registry.settings, "model_signing_public_key", public_pem.decode(), raising=False)
     wfo = {"sharpe": 1.0, "max_drawdown": -0.10, "trades": 40, "total_return": 0.20,
            "folds": [{"total_return": 0.03}, {"total_return": 0.02}, {"total_return": 0.04}, {"total_return": 0.05}, {"total_return": 0.06}],
            "cost_stress_ok": True, "status": "OK", "oos_total_return": 0.20, "deflated_sharpe": 1.0}
@@ -123,7 +134,15 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
     def fake_train(df, path, **kwargs):
         pathlib.Path(path).write_bytes(b"model-bytes")
         digest = hashlib.sha256(b"model-bytes").hexdigest()
-        pathlib.Path(str(path) + ".meta.json").write_text(json.dumps({"model_sha256": digest}))
+        signature = base64.urlsafe_b64encode(
+            signing_key.sign(digest.encode())
+        ).decode().rstrip("=")
+        pathlib.Path(str(path) + ".meta.json").write_text(
+            json.dumps({
+                "model_sha256": digest,
+                "manifest_signature": signature,
+            })
+        )
         return {**candidate_result, "model_sha256": digest}
     monkeypatch.setattr(adaptive_bot, "train_model", fake_train)
 

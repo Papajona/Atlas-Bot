@@ -377,8 +377,10 @@ def ensure_adaptive_model(
     try:
         result = train_model(df, str(candidate), min_train=min_train, folds=folds, asset=asset)
         candidate_meta_path = candidate.with_suffix(candidate.suffix + ".meta.json")
-        # train_model writes its own integrity metadata; retain it and add the
-        # deployment-specific promotion record separately.
+        # Preserve the integrity metadata produced by train_model(), including its
+        # manifest signature, when creating the champion metadata.
+        candidate_meta = json.loads(candidate_meta_path.read_text())
+        manifest_signature = str(candidate_meta.get("manifest_signature") or "")
         if model_path.parent:
             model_path.parent.mkdir(parents=True, exist_ok=True)
         backup_champion(model_path)
@@ -396,6 +398,7 @@ def ensure_adaptive_model(
             "status": "CHAMPION",
             "trained_at": datetime.now(timezone.utc).isoformat(),
             "model_sha256": result.get("model_sha256", ""),
+            "manifest_signature": manifest_signature,
             "asset": asset,
             # BUGFIX: result["features"] from train_model() is a *count* (len(FEATURE_COLUMNS)),
             # not the column list. Storing that int here made model_is_fresh()'s
