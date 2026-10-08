@@ -183,14 +183,24 @@ def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: 
     if encoded.nunique() < 2:
         raise RuntimeError("Training target collapsed to fewer than two classes; adjust labeling or obtain richer market history")
 
+    # The final model has the same contiguous-label requirement as each WFO fold.
+    # It is possible for the complete training sample to contain only two of the
+    # three economic classes. Keep the model's local labels contiguous, but persist
+    # the local->global mapping so predict_latest can never mistake FLAT for LONG
+    # (or SHORT for FLAT) when one class is absent.
+    final_classes = np.unique(encoded.to_numpy(dtype=int))
+    final_class_to_local = {int(cls): i for i, cls in enumerate(final_classes)}
+    final_local_y = np.asarray([final_class_to_local[int(label)] for label in encoded], dtype=int)
     final_model = LGBMClassifier(
         objective="multiclass",
+        num_class=len(final_classes),
         class_weight="balanced", n_estimators=300, max_depth=3,
         learning_rate=0.05, subsample=0.8, colsample_bytree=0.8,
         min_child_samples=50, reg_lambda=1.0, random_state=7,
         verbosity=-1, bagging_freq=1,
     )
-    final_model.fit(X, encoded.to_numpy(dtype=int))
+    final_model.fit(X, final_local_y)
+    final_local_to_global = [int(cls) for cls in final_classes]
     model_file, meta_file = _model_paths(model_path)
     model_file.parent.mkdir(parents=True, exist_ok=True)
     import joblib
@@ -202,6 +212,7 @@ def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: 
         "samples": int(len(X)),
         "features": FEATURE_COLUMNS,
         "classes": [-1, 0, 1],
+        "model_local_classes": final_local_to_global,
         "validation": scores,
         "model_sha256": model_hash,
         "manifest_signature": manifest_signature,
@@ -244,7 +255,14 @@ def predict_latest(df: pd.DataFrame, model_path: str, threshold: float = 0.05) -
         raise RuntimeError("Insufficient recent data")
     row = X.iloc[[-1]]
     probs_raw = np.asarray(model.predict_proba(row))[0]
-    mapped = {int(cls): float(p) for cls, p in zip(model.classes_, probs_raw, strict=True)}
+    local_to_global = meta.get("model_local_classes")
+    if local_to_global is None:
+        # Backward compatibility for artifacts produced before the contiguous-label
+        # final-model fix. Those artifacts used global labels directly.
+        local_to_global = [int(cls) for cls in model.classes_]
+    if len(local_to_global) != len(probs_raw):
+        raise RuntimeError("Model class mapping is inconsistent with the probability output")
+    mapped = {int(global_cls): float(p) for global_cls, p in zip(local_to_global, probs_raw, strict=True)}
     short_p = mapped.get(0, 0.0)
     flat_p = mapped.get(1, 0.0)
     long_p = mapped.get(2, 0.0)
