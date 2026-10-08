@@ -71,7 +71,7 @@ def test_oanda_candle_count_matches_requested_days():
 
     assert _oanda_candle_count(1800, "1d") == 1800
     assert _oanda_candle_count(30, "1h") == 720
-    assert _oanda_candle_count(30, "4h") == 180
+    assert _oanda_candle_count(30, "4h") == 250  # 180 requested, 250 minimum applies
     assert _oanda_candle_count(30, "15m") == 2880
     assert _oanda_candle_count(30, "1m") == 5000
 
