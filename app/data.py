@@ -184,7 +184,16 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
         raise RuntimeError("OANDA live mode is disabled in AtlasRisk; use practice/demo for learning and backtesting")
     broker = OandaBroker(OandaConfig(settings.oanda_account_id, settings.oanda_api_token, True, settings.oanda_timeout_seconds))
     try:
-        count = min(5000, max(250, int(days * 24) if granularity == "H1" else int(days * 24 * 60 / max(1, int(timeframe[:-1])))))
+        candles_per_day = {
+            "1m": 1440,
+            "5m": 288,
+            "15m": 96,
+            "30m": 48,
+            "1h": 24,
+            "4h": 6,
+            "1d": 1,
+        }[timeframe]
+        count = min(5000, max(250, int(days * candles_per_day)))
         candles = broker.candles(symbol, granularity, count=count)
     finally:
         broker.close()
