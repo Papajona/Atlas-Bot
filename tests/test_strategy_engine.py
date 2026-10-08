@@ -162,3 +162,14 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
 def test_strategy_backtest_reports_next_open_execution_model():
     result = strategy_backtest(sample_df(), taker_bps=0, slippage_bps=0)
     assert result["backtest_model"].startswith("next-open execution")
+
+def test_next_open_returns_terminal_bar_is_zero_return():
+    from app.strategy_engine import next_open_returns
+    df = pd.DataFrame(
+        {"open": [100.0, 110.0, 120.0]},
+        index=pd.date_range("2026-01-01", periods=3, freq="h", tz="UTC"),
+    )
+    returns = next_open_returns(df)
+    assert returns.iloc[0] == 1.1
+    assert returns.iloc[1] == 120.0 / 110.0
+    assert returns.iloc[2] == 1.0
