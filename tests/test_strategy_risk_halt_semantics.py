@@ -2,6 +2,7 @@ import types
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 def _run_component(monkeypatch, returns, positions):
@@ -90,5 +91,5 @@ def test_drawdown_halt_remains_active_while_drawdown_threshold_is_still_breached
     # subsequent bar, leaving five of six bars active under the one-bar signal
     # shift used by the backtest.
     assert result["average_leverage"] == 5 / 6
-    assert result["total_return"] == -0.10
+    assert result["total_return"] == pytest.approx(-0.10)
 
