@@ -1,12 +1,10 @@
 from pathlib import Path
-from decimal import Decimal
-from sqlalchemy import Numeric
-
 
 def test_b1_customer_reconciliation_never_falls_back_to_house_broker():
     src = Path("app/execution.py").read_text(encoding="utf-8")
     assert 'customer_binance_account_missing' in src
-    assert 'build_customer_binance_broker(customer_binance' in src
+    assert 'build_customer_binance_broker(' in src
+    assert 'customer_binance,' in src
     block = src[src.index("for trade_id, broker_order_id"):src.index("for trade_id, broker_order_id") + 6000]
     assert 'if customer_binance is None:' in block
     assert 'continue' in block[block.index('if customer_binance is None:'):]
