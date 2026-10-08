@@ -43,10 +43,10 @@ def destination_fingerprint(destination: str, currency: str, network: str = '') 
 
 def destination_allowed(destination: str, currency: str, network: str = '') -> bool:
     if not settings.withdrawal_whitelist_enabled:
-        return False if settings.environment == 'production' else True
+        return False if settings.environment in {'production', 'staging'} else True
     allowed = {x.strip().lower() for x in settings.withdrawal_destination_fingerprints.split(',') if x.strip()}
     if not allowed:
-        return settings.environment != 'production'
+        return settings.environment not in {'production', 'staging'}
     return destination_fingerprint(destination, currency, network).lower() in allowed
 
 
