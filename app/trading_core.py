@@ -10,7 +10,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import balanced_accuracy_score, f1_score, log_loss
 from lightgbm import LGBMClassifier
 from .config import settings
-from .research_validation import deflated_sharpe_report, cost_breakeven_report
+from .research_validation import deflated_sharpe_report
 from .model_registry import sha256_file, artifact_signature, verify_artifact_signature
 
 
@@ -366,7 +366,6 @@ def _simulate_barrier_strategy(
                 bar_ret = prev_mark / mark - 1.0
             if np.isfinite(bar_ret):
                 net[j] += bar_ret
-            held_bars = j - entry_bar + 1
             net[j] -= abs(side) * float(carry_bps_per_bar) / 10_000.0
 
             if exit_price is not None:
