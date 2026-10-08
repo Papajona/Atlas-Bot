@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 import app.trading_core as tc
 
@@ -44,7 +45,7 @@ def test_train_model_persists_final_model_class_mapping_when_one_class_is_absent
         ),
     )
 
-    out = tc.train_model(str(df.index[0]) if False else df, str(tmp_path / "model.joblib"), min_train=20, folds=2)
+    out = tc.train_model(df, str(tmp_path / "model.joblib"), min_train=20, folds=2)
     assert out["folds"] >= 1
 
     meta_path = Path(str(tmp_path / "model.joblib") + ".meta.json")
@@ -56,4 +57,4 @@ def test_train_model_persists_final_model_class_mapping_when_one_class_is_absent
     assert prediction["long_probability"] == 0.0
     assert 0.0 <= prediction["short_probability"] <= 1.0
     assert 0.0 <= prediction["flat_probability"] <= 1.0
-    assert prediction["short_probability"] + prediction["flat_probability"] == 1.0
+    assert prediction["short_probability"] + prediction["flat_probability"] == pytest.approx(1.0)
