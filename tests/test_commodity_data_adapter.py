@@ -65,8 +65,21 @@ def test_fetch_commodity_uses_futures_mapping_and_provenance(monkeypatch):
     assert len(out.attrs["data_provenance"]["sha256"]) == 64
 
 
-def _append_placeholder():
-    pass
+
+def test_oanda_candle_count_matches_requested_days():
+    from app.data import _oanda_candle_count
+
+    assert _oanda_candle_count(1800, "1d") == 1800
+    assert _oanda_candle_count(30, "1h") == 720
+    assert _oanda_candle_count(30, "4h") == 180
+    assert _oanda_candle_count(30, "15m") == 2880
+    assert _oanda_candle_count(30, "1m") == 5000
+
+
+def test_oanda_candle_count_preserves_minimum_request_floor():
+    from app.data import _oanda_candle_count
+
+    assert _oanda_candle_count(1, "1d") == 250
 
 def test_learning_commodity_dispatches_to_commodity_adapter(monkeypatch):
     from app import trade_learning
