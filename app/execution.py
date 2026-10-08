@@ -308,8 +308,8 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
                 # existing behavior. account_reduce_only above is the stricter, magnitude-capped
                 # check used only to decide whether a HALTED account may still place this order.
                 reducing = any((p.quantity > 0 > signed) or (p.quantity < 0 < signed) for p in positions_for_symbol)
-                required_cash = 0.0 if reducing else price * quantity
-                if float(ledger.available) + 1e-9 < required_cash:
+                required_cash = D("0") if reducing else Decimal(str(price)) * Decimal(str(quantity))
+                if D(str(ledger.available)) + Decimal("0.000000001") < required_cash:
                     raise RiskBlocked("Order exceeds the customer's available funded USDT balance")
             today = _today_utc()
             if account.daily_start_date != today:
