@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import contextlib
 from pathlib import Path
 import hmac
 import os
@@ -4626,7 +4627,7 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
     except WebSocketDisconnect:
         pass
     except Exception:
-        logger.exception("dashboard websocket failed")
+        logging.getLogger(__name__).exception("dashboard websocket failed")
         with contextlib.suppress(Exception):
             await websocket.close(code=1011)
 
