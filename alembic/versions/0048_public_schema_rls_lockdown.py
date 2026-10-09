@@ -14,7 +14,7 @@ depends_on = None
 
 def upgrade():
     # Utility commands run dynamically so PostgreSQL parses them correctly
-    # inside the guarded DO blocks and plain-PostgreSQL CI need not define
+    # inside guarded DO blocks and plain-PostgreSQL CI need not define
     # Supabase-specific roles.
     op.execute(
         """
@@ -35,8 +35,11 @@ def upgrade():
                     EXECUTE format('REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM %I', role_name);
                     EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM %I', role_name);
                     EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON SEQUENCES FROM %I', role_name);
+                    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM %I', role_name);
                 END IF;
             END LOOP;
+
+            EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC';
         END
         $atlas_grants$;
         """
@@ -58,6 +61,37 @@ def upgrade():
             END IF;
         END
         $atlas_function_paths$;
+        """
+    )
+
+    # These three ledger functions are internal implementation/validation
+    # routines, not client RPC endpoints. Remove their default EXECUTE grants
+    # explicitly as well as preventing future functions from inheriting PUBLIC
+    # EXECUTE by default. Other RPC functions are left for a table/function-
+    # specific authorization review rather than blanket-revoked here.
+    op.execute(
+        """
+        DO $atlas_function_grants$
+        DECLARE
+            role_name text;
+            function_signature text;
+        BEGIN
+            FOREACH function_signature IN ARRAY ARRAY[
+                'public.atlas_block_ledger_mutation()',
+                'public.atlas_ledger_journal_deferred_check()',
+                'public.atlas_validate_ledger_journal(integer)'
+            ] LOOP
+                IF to_regprocedure(function_signature) IS NOT NULL THEN
+                    EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC', function_signature);
+                    FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+                        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+                            EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM %I', function_signature, role_name);
+                        END IF;
+                    END LOOP;
+                END IF;
+            END LOOP;
+        END
+        $atlas_function_grants$;
         """
     )
 
@@ -89,6 +123,6 @@ def upgrade():
 
 
 def downgrade():
-    # Keep the secure posture during downgrade; never silently restore direct
-    # public table access or disable RLS on financial tables.
+    # Keep the secure posture during downgrade; never silently restore unsafe
+    # direct public table access or disable RLS on financial tables.
     pass
