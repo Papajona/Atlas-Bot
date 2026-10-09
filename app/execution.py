@@ -618,6 +618,22 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                             entry_trade_id=trade.id,
                             reserved_capital=(delta * fill_price if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE" else 0.0))
         db.add(position)
+        # The episode row is created with the order, but its timestamps and fill
+        # facts must be populated from the first actual fill, not order submission.
+        episode = (await db.execute(
+            select(TradeLearningEpisode)
+            .where(TradeLearningEpisode.entry_trade_id == trade.id)
+            .with_for_update()
+        )).scalar_one_or_none()
+        if episode is not None:
+            if episode.entry_at is None:
+                episode.entry_at = utcnow()
+            if episode.entry_price <= 0:
+                episode.entry_price = float(fill_price)
+            if episode.entry_quantity <= 0:
+                episode.entry_quantity = abs(float(delta))
+            episode.status = "OPEN"
+            episode.updated_at = utcnow()
     else:
         old_qty = position.quantity
         if old_qty == 0 or (old_qty > 0 and signed > 0) or (old_qty < 0 and signed < 0):
@@ -700,6 +716,8 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 episode.exit_at = None
                 episode.closing_trade_id = None
         if episode is not None:
+            if episode.entry_at is None and signed * (1 if episode.side == "buy" else -1) > 0:
+                episode.entry_at = utcnow()
             if episode.entry_price <= 0:
                 episode.entry_price = float(fill_price)
             # For a position-opening fill, accumulate the actual filled quantity.
