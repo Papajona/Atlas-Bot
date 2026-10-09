@@ -51,13 +51,7 @@ jobs:
           else
             echo "=== Diagnostic only: generate the proposed schema diff, do not apply it ==="
             python -m alembic revision --autogenerate -m diagnostic_schema_drift
-            python - <<'PY'
-            from pathlib import Path
-            files = sorted(Path("alembic/versions").glob("*_diagnostic_schema_drift.py"))
-            for path in files:
-                print(f"=== {path} ===")
-                print(path.read_text())
-            PY
+            python -c 'from pathlib import Path; [print(f"=== {p} ===\\n{p.read_text()}") for p in sorted(Path("alembic/versions").glob("*_diagnostic_schema_drift.py"))]'
             exit 1
           fi
           python -m alembic downgrade base
