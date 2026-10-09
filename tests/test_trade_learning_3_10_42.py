@@ -6,6 +6,7 @@ import pytest
 
 from app.strategy_engine import StrategyConfig
 from app.trade_learning import (
+    _configured_replay_costs_bps,
     _fetch_learning_data,
     _last_completed_bar_index,
     replay_trade_episode,
@@ -132,3 +133,10 @@ def test_commodity_replay_refuses_to_substitute_forex_data():
     )
     with pytest.raises(ValueError, match="no verified commodity data adapter"):
         _fetch_learning_data(ep)
+
+
+def test_replay_costs_use_verified_asset_profile_values():
+    assert _configured_replay_costs_bps("crypto") == pytest.approx(7.5)
+    assert _configured_replay_costs_bps("forex") == pytest.approx(1.0)
+    with pytest.raises(ValueError, match="No configured replay cost profile"):
+        _configured_replay_costs_bps("commodity")
