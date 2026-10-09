@@ -348,6 +348,11 @@ def _fetch_decision_data(record: dict, *, days: int = 365) -> pd.DataFrame:
                 raise OutcomeLabelError("UNSUPPORTED_TIMEFRAME", f"Unsupported OANDA timeframe {timeframe!r}")
             return fetch_forex_oanda(symbol=symbol, timeframe=timeframe, days=days)
         if exchange == "yfinance":
+            if not re.fullmatch(r"[A-Z]{6}(?:=X)?", symbol.upper()):
+                raise OutcomeLabelError(
+                    "UNSUPPORTED_SYMBOL",
+                    "Yfinance FX labels require an explicit six-letter currency pair, optionally suffixed by =X",
+                )
             if timeframe not in _SUPPORTED_YFINANCE_TIMEFRAMES:
                 raise OutcomeLabelError("UNSUPPORTED_TIMEFRAME", f"Unsupported yfinance timeframe {timeframe!r}")
             return fetch_forex(symbol=symbol, timeframe=timeframe, days=days)
