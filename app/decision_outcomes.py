@@ -333,6 +333,8 @@ def build_decision_outcome_label(
         "decision_id": decision_id,
         "source_decision_sha256": snapshot_sha,
         "original_decision": str(decision_record.get("decision") or "UNKNOWN").upper(),
+        "mode": str(decision_record.get("mode") or "UNKNOWN").upper(),
+        "effective_mode": str(decision_record.get("effective_mode") or "UNKNOWN").upper(),
         "decision_stage": str(decision_record.get("stage") or "unknown")[:100],
         "decision_reason_code": reason_code,
         "strategy": strategy,
