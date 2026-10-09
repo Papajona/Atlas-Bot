@@ -30,6 +30,16 @@ def test_ledger_functions_have_guarded_fixed_search_paths():
     assert "SET search_path = pg_catalog, public" in source
 
 
+def test_internal_ledger_functions_revoke_execute_and_future_functions_default_deny():
+    source = MIGRATION.read_text()
+    assert "REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC" in source
+    assert "REVOKE EXECUTE ON FUNCTION %s FROM %I" in source
+    assert "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC" in source
+    assert "public.atlas_block_ledger_mutation()" in source
+    assert "public.atlas_ledger_journal_deferred_check()" in source
+    assert "public.atlas_validate_ledger_journal(integer)" in source
+
+
 def test_public_schema_lockdown_downgrade_does_not_restore_unsafe_access():
     source = MIGRATION.read_text()
     downgrade = source.split("def downgrade():", 1)[1]
