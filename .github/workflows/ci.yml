@@ -45,7 +45,9 @@ jobs:
         run: |
           python -m alembic current
           heads="$(python -m alembic heads)"
-          test "$(printf '%s\n' "$heads" | grep -c '(head)
+          test "$(printf '%s\n' "$heads" | grep -c '(head)')" -eq 1
+          python -m alembic downgrade base
+          python -m alembic upgrade head
       - name: Python lint (fatal static errors)
         run: |
           set +e
@@ -119,73 +121,3 @@ jobs:
 )" -eq 1
           python -m alembic downgrade base
           python -m alembic upgrade head
-      - name: Python lint (fatal static errors)
-        run: |
-          set +e
-          python -m pyflakes app scripts tests > /tmp/pyflakes.txt 2>&1
-          status=$?
-          set -e
-          cat /tmp/pyflakes.txt
-          if grep -E "undefined name|redefinition of" /tmp/pyflakes.txt; then exit 1; fi
-          echo "Pyflakes completed with status ${status}; only fatal static errors fail CI."
-      - name: Repository secret scan
-        run: python scripts/check_no_secrets.py
-      - name: Security scan
-        run: python -m bandit -r app -lll
-      - name: Verify multidict pure-Python security workaround
-        run: |
-          python - <<'PY'
-          import multidict
-          assert multidict.CIMultiDict.__module__ == "multidict._multidict_py", multidict.CIMultiDict.__module__
-          PY
-      - name: Dependency audit
-        # CVE-2026-104874 affects the multidict C extension 6.7.0-6.9.0; the upstream advisory documents MULTIDICT_NO_EXTENSIONS=1 as the pure-Python workaround.
-        run: python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325 --ignore-vuln CVE-2026-104874
-      - name: Full PostgreSQL ledger concurrency suite
-        run: |
-          python -m pytest -q tests/test_postgres_ledger_concurrency_3_10_46.py
-          python -m pytest -q tests/test_ledger_all_paths_concurrent_3_10_46.py
-          python -m pytest -q tests/test_opening_balance_journaled.py tests/test_audit_chain_lock_order.py
-      - name: Customer page integrity
-        run: python -m pytest -q tests/test_customer_page_integrity.py
-      - name: Withdrawal payout safety
-        run: python -m pytest -q tests/test_withdrawal_payout_error_guards.py tests/test_withdrawal_not_sent_db.py
-      - name: Full pytest suite
-        env:
-          DATABASE_URL: sqlite+aiosqlite:///./test_trading.db
-          ATLAS_POSTGRES_URL: ""
-        run: python -m pytest -q
-      - name: Shell syntax
-        run: |
-          bash -n deploy/cloud-run-deploy.sh
-          bash -n deploy/cloud-run-worker-deploy.sh
-          bash -n deploy/cloud-run-migration-job.sh
-          bash -n deploy/verify-live-money-runtime.sh
-          bash -n deploy/verify-cloud-audit.sh
-          bash -n deploy/gcp-security-audit-retention.sh
-          bash -n deploy/cloud-run-canary.sh
-          bash -n deploy/cloud-run-rollback.sh
-          bash -n scripts/apply_final_fixes.sh
-          bash -n deploy/verify-deployed-release.sh
-
-  android-security-and-build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - name: Install Android security test runner
-        run: python -m pip install --disable-pip-version-check pytest
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
-      - name: Compile Android debug artifact
-        run: gradle :app:assembleDebug
-      - name: Verify Android security source gates
-        run: |
-          python -m pytest -q tests/test_production_security_gates.py
