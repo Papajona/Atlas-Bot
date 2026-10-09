@@ -4,7 +4,7 @@ The application is deployed as three layers: Android control client, Google Clou
 
 The Android client is not the execution engine. This prevents Android process suspension, device reboot, battery loss, or network changes from silently stopping the trading service.
 
-Vercel is not part of this release.
+Cloudflare provides DNS and optional edge proxy/WAF. Google Cloud Run remains the application runtime; Cloudflare does not host the Python trading engine.
 
 ## 3.10.41 Adaptive strategy layer
 The adaptive stack now has four distinct responsibilities: (1) regime classification, (2) regime-conditioned strategy selection,

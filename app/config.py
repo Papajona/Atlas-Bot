@@ -304,16 +304,6 @@ class Settings(BaseSettings):
     billing_referral_commission_pct: float = 1.0
     billing_referral_payout_delay_days: int = 45
     billing_referral_min_payout: float = 25.0
-    stripe_enabled: bool = False
-    stripe_secret_key: str = ""
-    stripe_webhook_secret: str = ""
-    stripe_price_starter_monthly: str = ""
-    stripe_price_pro_monthly: str = ""
-    stripe_price_elite_monthly: str = ""
-    stripe_price_starter_annual: str = ""
-    stripe_price_pro_annual: str = ""
-    stripe_price_elite_annual: str = ""
-    stripe_referral_coupon_id: str = ""
 
     # 3.4 distributed controls. Redis is required in production for cross-instance rate limiting.
     redis_url: str = ""
