@@ -147,7 +147,6 @@ from .schemas import (
     WithdrawalReconcileRequest,
     WithdrawalNotSentRequest,
     ModelRollbackRequest,
-    PlanChangeRequest,
     ReferralCodeRequest,
     CostEventRequest,
     RevenueEventRequest,
