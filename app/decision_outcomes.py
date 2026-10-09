@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import math
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -165,6 +166,11 @@ def build_decision_outcome_label(
             "Forex labels require an explicit oanda or yfinance source; no source is inferred",
         )
     if asset == "forex":
+        if exchange == "yfinance" and not re.fullmatch(r"[A-Z]{6}(?:=X)?", symbol.upper()):
+            raise OutcomeLabelError(
+                "UNSUPPORTED_SYMBOL",
+                "Yfinance FX labels require an explicit six-letter currency pair, optionally suffixed by =X",
+            )
         supported = _SUPPORTED_OANDA_TIMEFRAMES if exchange == "oanda" else _SUPPORTED_YFINANCE_TIMEFRAMES
         if timeframe not in supported:
             raise OutcomeLabelError(
