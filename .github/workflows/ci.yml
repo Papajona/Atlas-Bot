@@ -41,11 +41,19 @@ jobs:
         run: python -m compileall -q app alembic
       - name: Apply migrations
         run: python -m alembic upgrade head
-      - name: Verify migration graph and round-trip
+      - name: Verify migration graph, metadata parity and round-trip
         run: |
           python -m alembic current
           heads="$(python -m alembic heads)"
           test "$(printf '%s\n' "$heads" | grep -c '(head)')" -eq 1
+          if python -m alembic check; then
+            echo "Alembic ORM metadata matches the migrated PostgreSQL schema."
+          else
+            echo "=== Diagnostic only: generate the proposed schema diff, do not apply it ==="
+            python -m alembic revision --autogenerate -m diagnostic_schema_drift || true
+            python -c 'from pathlib import Path; [print(f"=== {p} ===\\n{p.read_text()}") for p in sorted(Path("alembic/versions").glob("*_diagnostic_schema_drift.py"))]'
+            exit 1
+          fi
           python -m alembic downgrade base
           python -m alembic upgrade head
       - name: Python lint (fatal static errors)
