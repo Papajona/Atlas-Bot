@@ -205,11 +205,9 @@ class MainActivity : AppCompatActivity() {
     private fun openPortal() {
         val backendUrl = getString(R.string.backend_url).trimEnd('/')
         val trustedHost = getString(R.string.trusted_web_host).trim().lowercase()
-        val checkoutHost = getString(R.string.trusted_checkout_host).trim().lowercase()
-
         val targetUri = Uri.parse(backendUrl)
         val host = targetUri.host.orEmpty().lowercase()
-        val isAllowed = host == trustedHost || host == checkoutHost || host.endsWith(".run.app")
+        val isAllowed = host == trustedHost || host.endsWith(".run.app")
 
         if (isAllowed && backendUrl.startsWith("https://")) {
             val browserIntent = Intent(Intent.ACTION_VIEW, targetUri)
