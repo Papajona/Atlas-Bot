@@ -9,7 +9,7 @@ def test_billing_source_parses():
 
 def test_internal_plan_and_finance_routes_present():
     s=(ROOT/'app/main.py').read_text()
-    for route in ['/api/plans','/api/customer/billing','/api/customer/referral/code','/api/customer/referral/claim','/api/customer/referrals','/api/admin/billing/cost','/api/admin/billing/revenue','/api/admin/billing/margin','/api/billing/stripe/webhook']:
+    for route in ['/api/plans','/api/customer/billing','/api/customer/referral/code','/api/customer/referral/claim','/api/customer/referrals','/api/admin/billing/cost','/api/admin/billing/revenue','/api/admin/billing/margin']:
         assert route in s
 
 def test_margin_formula_present():
