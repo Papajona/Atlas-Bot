@@ -265,17 +265,28 @@ def upgrade():
     # Match ORM NOT NULL semantics only after the explicit NULL preflight.
     for table, column, existing_type in NOT_NULL_COLUMNS:
         info = _column_info(table, column)
-        if not info["nullable"]:
+        is_pilot_numeric = table == "trading_accounts" and column in PILOT_NUMERIC_COLUMNS
+        type_needs_change = False
+        if is_pilot_numeric:
+            current_type = info["type"]
+            precision = getattr(current_type, "precision", None)
+            scale = getattr(current_type, "scale", None)
+            if (precision, scale) == (38, 6):
+                type_needs_change = True
+            elif (precision, scale) != (38, 18):
+                raise RuntimeError(
+                    f"Unexpected type for trading_accounts.{column}: {current_type!r}"
+                )
+        if not info["nullable"] and not type_needs_change:
             continue
         kwargs = {
-            "existing_type": existing_type,
+            "existing_type": info["type"] if is_pilot_numeric else existing_type,
             "nullable": False,
         }
-        if table == "trading_accounts" and column in PILOT_NUMERIC_COLUMNS:
-            kwargs.update({
-                "type_": sa.Numeric(precision=38, scale=18),
-                "existing_server_default": sa.text("'0'::numeric"),
-            })
+        if is_pilot_numeric:
+            if type_needs_change:
+                kwargs["type_"] = sa.Numeric(precision=38, scale=18)
+            kwargs["existing_server_default"] = sa.text("'0'::numeric")
         elif table == "trading_accounts" and column == "pilot_status":
             kwargs["existing_server_default"] = sa.text("'NONE'::character varying")
         elif table == "trading_accounts" and column in ("pilot_requested_by", "pilot_approved_by"):
