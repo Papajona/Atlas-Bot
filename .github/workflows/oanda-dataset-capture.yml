@@ -34,6 +34,11 @@ jobs:
     timeout-minutes: 10
     env:
       OANDA_API_TOKEN: ${{ secrets.OANDA_API_TOKEN }}
+      CAPTURE_INSTRUMENT: ${{ inputs.instrument }}
+      CAPTURE_GRANULARITY: ${{ inputs.granularity }}
+      CAPTURE_FROM_UTC: ${{ inputs.from_utc }}
+      CAPTURE_TO_UTC: ${{ inputs.to_utc }}
+      CAPTURE_EXPECTED_ROWS: ${{ inputs.expected_rows }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,11 +49,11 @@ jobs:
       - name: Capture fixed-window OANDA practice candles
         run: |
           python scripts/capture_oanda_research_dataset.py \
-            --instrument "${{ inputs.instrument }}" \
-            --granularity "${{ inputs.granularity }}" \
-            --from-utc "${{ inputs.from_utc }}" \
-            --to-utc "${{ inputs.to_utc }}" \
-            --expected-rows "${{ inputs.expected_rows }}" \
+            --instrument "$CAPTURE_INSTRUMENT" \
+            --granularity "$CAPTURE_GRANULARITY" \
+            --from-utc "$CAPTURE_FROM_UTC" \
+            --to-utc "$CAPTURE_TO_UTC" \
+            --expected-rows "$CAPTURE_EXPECTED_ROWS" \
             --output-dir oanda_dataset_capture
       - name: Preserve capture files for inspection, including row-count mismatches
         if: always()
