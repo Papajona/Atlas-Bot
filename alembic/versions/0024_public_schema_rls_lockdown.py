@@ -14,22 +14,53 @@ depends_on = None
 
 
 def upgrade():
-    # Prevent public API roles from creating objects in the exposed schema.
-    op.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC, anon, authenticated")
+    # Use guarded role checks so the migration also runs on plain PostgreSQL CI,
+    # where Supabase's anon/authenticated roles may not exist.
+    op.execute(
+        """
+        DO $atlas_grants$
+        DECLARE
+            role_name text;
+        BEGIN
+            REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+            REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC;
+            REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC;
 
-    # Revoke existing direct access, including grants inherited from PUBLIC.
-    op.execute("REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC, anon, authenticated")
-    op.execute("REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, anon, authenticated")
+            FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+                IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+                    EXECUTE format('REVOKE CREATE ON SCHEMA public FROM %I', role_name);
+                    EXECUTE format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM %I', role_name);
+                    EXECUTE format('REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM %I', role_name);
+                    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM %I', role_name);
+                    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON SEQUENCES FROM %I', role_name);
+                END IF;
+            END LOOP;
+        END
+        $atlas_grants$;
+        """
+    )
 
-    # Close default grants for objects created by the role running this migration.
-    op.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC, anon, authenticated")
-    op.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC, anon, authenticated")
-
-    # Fix the three mutable-search_path warnings found by the Supabase advisor.
-    # Functions are SECURITY INVOKER in the audited database.
-    op.execute("ALTER FUNCTION public.atlas_block_ledger_mutation() SET search_path = pg_catalog, public")
-    op.execute("ALTER FUNCTION public.atlas_ledger_journal_deferred_check() SET search_path = pg_catalog, public")
-    op.execute("ALTER FUNCTION public.atlas_validate_ledger_journal(integer) SET search_path = pg_catalog, public")
+    # Pin search_path for the three ledger functions reported by the Supabase
+    # advisor. Guard each alteration for migration portability.
+    op.execute(
+        """
+        DO $atlas_function_paths$
+        BEGIN
+            IF to_regprocedure('public.atlas_block_ledger_mutation()') IS NOT NULL THEN
+                ALTER FUNCTION public.atlas_block_ledger_mutation() SET search_path = pg_catalog, public;
+            END IF;
+            IF to_regprocedure('public.atlas_ledger_journal_deferred_check()') IS NOT NULL THEN
+                ALTER FUNCTION public.atlas_ledger_journal_deferred_check() SET search_path = pg_catalog, public;
+            END IF;
+            IF to_regprocedure('public.atlas_validate_ledger_journal(integer)') IS NOT NULL THEN
+                ALTER FUNCTION public.atlas_validate_ledger_journal(integer) SET search_path = pg_catalog, public;
+            END IF;
+        END
+        $atlas_function_paths$;
+        """
+    )
 
     # No generic policies: customer ownership and finance permissions require
     # table-specific authorization rather than a blanket auth.uid() rule.
