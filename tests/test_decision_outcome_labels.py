@@ -176,3 +176,11 @@ def test_yfinance_fx_label_rejects_ambiguous_underscore_symbol():
     with pytest.raises(OutcomeLabelError) as exc:
         build_decision_outcome_label(record, _frame())
     assert exc.value.code == "UNSUPPORTED_SYMBOL"
+
+
+def test_label_rejects_data_whose_bytes_do_not_match_recorded_source_hash():
+    df = _frame()
+    df.iloc[3, df.columns.get_loc("close")] = 999.0
+    with pytest.raises(OutcomeLabelError) as exc:
+        build_decision_outcome_label(_decision(), df)
+    assert exc.value.code == "DATA_PROVENANCE_MISMATCH"
