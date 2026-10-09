@@ -192,6 +192,15 @@ def build_decision_outcome_label(
     )
     if str(provenance.get("source")) != expected_source:
         raise OutcomeLabelError("DATA_PROVENANCE_MISMATCH", "Fetched data source does not match the explicit market source")
+    canonical_source = df.reset_index().to_csv(
+        index=False, float_format="%.17g", lineterminator="\\n"
+    )
+    actual_source_sha = hashlib.sha256(canonical_source.encode("utf-8")).hexdigest()
+    if actual_source_sha.lower() != str(provenance.get("sha256") or "").lower():
+        raise OutcomeLabelError(
+            "DATA_PROVENANCE_MISMATCH",
+            "Fetched candle bytes do not match the recorded source dataset SHA-256",
+        )
     if asset == "crypto" and str(provenance.get("exchange") or "").lower() != exchange:
         raise OutcomeLabelError("DATA_PROVENANCE_MISMATCH", "Fetched crypto exchange does not match the decision")
     if asset == "forex" and exchange == "oanda" and str(provenance.get("exchange") or "").lower() != "oanda":
