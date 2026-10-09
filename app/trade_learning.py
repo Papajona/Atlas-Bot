@@ -24,10 +24,18 @@ from sqlalchemy import select
 if TYPE_CHECKING:
     from .db import TradeLearningEpisode
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda, fetch_commodity
+from .trading_core import PROFILES
 from .strategy_engine import StrategyConfig, strategy_signals
 from .strategy_router import STRATEGIES, classify_regime
 
 REPLAY_VERSION = "3.10.42-replay-v1"
+
+def learning_costs_bps(asset: str) -> float:
+    """Return configured per-side costs for the asset's research profile."""
+    profile = PROFILES.get(str(asset or "").strip().lower(), PROFILES["crypto"])
+    return float(profile.taker_bps) + float(profile.slippage_bps)
+
+
 
 
 def _parse_dt(value: Any) -> pd.Timestamp | None:
