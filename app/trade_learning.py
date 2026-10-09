@@ -130,14 +130,19 @@ def replay_trade_episode(
     These are counterfactual research measurements, not executable orders.
     """
     cfg = cfg or StrategyConfig()
+    asset = str(getattr(episode, "asset", "") or "").strip().lower()
+    if not asset:
+        raise ValueError("Replay requires the episode's recorded asset; refusing to assume crypto")
+    timeframe = str(getattr(episode, "timeframe", "") or "").strip()
+    if not timeframe:
+        raise ValueError("Replay requires the episode's recorded timeframe; refusing to assume 1h")
     configured_costs = costs_bps is None
     if configured_costs:
-        costs_bps = _configured_replay_costs_bps(episode.asset or "crypto")
+        costs_bps = _configured_replay_costs_bps(asset)
     else:
         costs_bps = float(costs_bps)
         if not isfinite(costs_bps) or costs_bps < 0:
             raise ValueError("Replay costs must be finite and non-negative")
-    timeframe = str(episode.timeframe or "1h")
     entry_idx = _last_completed_bar_index(df, episode.entry_at, timeframe)
     exit_idx = _last_completed_bar_index(df, episode.exit_at, timeframe)
     outcome_indices = _post_entry_completed_indices(
@@ -163,8 +168,8 @@ def replay_trade_episode(
         raise ValueError("Replay prices must be positive and finite")
 
     window = df.iloc[outcome_indices].copy()
-    signals = strategy_signals(df.iloc[: exit_idx + 1], cfg, asset=episode.asset or "crypto")
-    regimes = classify_regime(df.iloc[: exit_idx + 1], asset=episode.asset or "crypto")
+    signals = strategy_signals(df.iloc[: exit_idx + 1], cfg, asset=asset)
+    regimes = classify_regime(df.iloc[: exit_idx + 1], asset=asset)
     entry_regime = str(regimes.iloc[entry_idx]) if len(regimes) > entry_idx else "UNKNOWN"
     exit_regime = str(regimes.iloc[exit_idx]) if len(regimes) > exit_idx else "UNKNOWN"
     regime_path = [str(x) for x in regimes.iloc[entry_idx : exit_idx + 1].tolist()]
@@ -270,19 +275,29 @@ def replay_trade_episode(
 
 
 def _fetch_learning_data(episode: TradeLearningEpisode, *, days: int = 365) -> pd.DataFrame:
-    asset = str(episode.asset or "crypto").lower()
+    asset = str(episode.asset or "").strip().lower()
+    timeframe = str(episode.timeframe or "").strip()
+    if not asset:
+        raise ValueError("Learning-data fetch requires the episode's recorded asset")
+    if not timeframe:
+        raise ValueError("Learning-data fetch requires the episode's recorded timeframe")
+    if not str(episode.symbol or "").strip():
+        raise ValueError("Learning-data fetch requires the episode's recorded symbol")
     if asset == "crypto":
+        exchange = str(episode.exchange or "").strip().lower()
+        if not exchange:
+            raise ValueError("Crypto replay requires the episode's recorded exchange")
         return fetch_crypto(
             symbol=episode.symbol,
-            exchange=episode.exchange or "bybit",
-            timeframe=episode.timeframe or "1h",
+            exchange=exchange,
+            timeframe=timeframe,
             days=days,
             closed_only=True,
         )
     if asset == "forex":
-        if str(episode.exchange or "").lower() == "oanda":
-            return fetch_forex_oanda(symbol=episode.symbol, timeframe=episode.timeframe or "1h", days=days)
-        return fetch_forex(symbol=episode.symbol, timeframe=episode.timeframe or "1h", days=days)
+        if str(episode.exchange or "").strip().lower() == "oanda":
+            return fetch_forex_oanda(symbol=episode.symbol, timeframe=timeframe, days=days)
+        return fetch_forex(symbol=episode.symbol, timeframe=timeframe, days=days)
     if asset == "commodity":
         raise ValueError(
             "Commodity replay is unsupported: this branch has no verified commodity data adapter"
