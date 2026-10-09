@@ -70,6 +70,8 @@ def test_outcome_label_uses_subsequent_completed_bars_and_configured_costs():
     label = build_decision_outcome_label(_decision(), df)
 
     assert label["status"] == "VALID"
+    assert label["mode"] == "PAPER"
+    assert label["effective_mode"] == "NOT_EXECUTED"
     assert label["research_only"] is True
     assert label["not_for_training"] is True
     assert label["automatic_promotion"] is False
