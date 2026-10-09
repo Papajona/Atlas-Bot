@@ -24,6 +24,9 @@ from sqlalchemy import select
 if TYPE_CHECKING:
     from .db import TradeLearningEpisode
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
+from .strategy_engine import StrategyConfig, strategy_signals
+from .strategy_router import STRATEGIES, classify_regime
+
 
 def _timeframe_delta(timeframe: Any) -> pd.Timedelta:
     """Parse the candle interval used by the OHLCV fetchers."""
@@ -70,9 +73,6 @@ def _post_entry_completed_indices(
     eligible = (idx >= entry_ts) & ((idx + delta) <= exit_ts)
     return [int(i) for i in np.flatnonzero(eligible)]
 
-
-from .strategy_engine import StrategyConfig, strategy_signals
-from .strategy_router import STRATEGIES, classify_regime
 
 REPLAY_VERSION = "3.10.42-replay-v1"
 
