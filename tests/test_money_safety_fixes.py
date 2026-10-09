@@ -560,3 +560,54 @@ def test_trade_learning_entry_timestamp_is_recorded_on_first_fill():
             assert episode.entry_price == pytest.approx(100.6)
 
     asyncio.run(with_database(check))
+
+
+def test_old_completed_learning_replays_are_reprocessed_after_version_change(monkeypatch):
+    async def check(sessions):
+        from datetime import datetime, timezone
+
+        import app.db as db_module
+        import app.trade_learning as learning
+        from app.db import TradeLearningEpisode
+
+        monkeypatch.setattr(db_module, "SessionLocal", sessions)
+        monkeypatch.setattr(
+            learning, "_fetch_learning_data",
+            lambda episode, days=365: None,
+        )
+        monkeypatch.setattr(
+            learning, "replay_trade_episode",
+            lambda df, episode, costs_bps=7.5: {
+                "bars_held": 3,
+                "mfe_bps": 10.0,
+                "mae_bps": -5.0,
+                "market_flow": {"bars": 3},
+                "counterfactuals": [],
+            },
+        )
+        async with sessions() as db:
+            episode = TradeLearningEpisode(
+                entry_trade_id=987654,
+                status="COMPLETED",
+                replay_status="COMPLETE",
+                replay_version="3.10.42-replay-v1",
+                entry_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                exit_at=datetime(2026, 1, 1, 3, tzinfo=timezone.utc),
+                entry_price=100.0,
+                exit_price=101.0,
+                entry_quantity=1.0,
+            )
+            db.add(episode)
+            await db.commit()
+            episode_id = episode.id
+
+        result = await learning.process_trade_learning_episodes(limit=10)
+        assert result["processed"] == 1
+        async with sessions() as db:
+            updated = await db.get(TradeLearningEpisode, episode_id)
+            assert updated is not None
+            assert updated.replay_status == "COMPLETE"
+            assert updated.replay_version == learning.REPLAY_VERSION
+            assert updated.mfe_bps == pytest.approx(10.0)
+
+    asyncio.run(with_database(check))
