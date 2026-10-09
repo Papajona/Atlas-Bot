@@ -1614,7 +1614,6 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                     raise
     for trade_id, broker_order_id, trade_symbol, cid in snapshots:
         trade_broker = broker
-        trade_is_customer = False
         try:
             async with SessionLocal() as lookup_db:
                 trade_row = await lookup_db.get(Trade, trade_id)
@@ -1624,10 +1623,16 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                 if trade_exchange.lower() != "binance":
                     raise RuntimeError("Customer reconciliation requires the configured isolated exchange adapter")
                 async with SessionLocal() as credential_db:
-                    from .db import CustomerBinanceAccount
                     customer_binance = (await credential_db.execute(
                         select(CustomerBinanceAccount).where(CustomerBinanceAccount.customer_id == trade_customer_id)
                     )).scalar_one_or_none()
+                if customer_binance is None:
+                    results.append({
+                        "trade_id": trade_id,
+                        "resolved": False,
+                        "error": "customer_binance_account_missing",
+                    })
+                    continue
                 trade_broker = build_customer_binance_broker(
                     customer_binance, timeout_ms=settings.exchange_timeout_ms, sandbox=settings.broker_sandbox
                 )

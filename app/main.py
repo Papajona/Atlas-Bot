@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import contextlib
 from pathlib import Path
 import hmac
 import os
@@ -2410,6 +2411,10 @@ async def customer_otp_send(req: OtpSendRequest, authorization: str | None = Hea
                 "/auth/v1/otp",
                 payload={contact_type: contact, "create_user": False},
             )
+            if isinstance(result, dict):
+                provider_error = result.get("error") or result.get("error_code")
+                if provider_error:
+                    raise HTTPException(502, "Verification code provider rejected the request")
         except HTTPException:
             async with SessionLocal() as db:
                 row = (await db.execute(select(WithdrawalOtpIntent).where(WithdrawalOtpIntent.jti == jti))).scalar_one_or_none()
@@ -4626,7 +4631,9 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
     except WebSocketDisconnect:
         pass
     except Exception:
-        pass
+        logger.exception("risk dashboard websocket failed")
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1011)
 
 
 @app.get("/api/trades")
