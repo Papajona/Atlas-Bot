@@ -12,7 +12,7 @@ def test_money_columns_are_numeric_storage_not_float():
         "TradingAccount": ["cash_equity","equity","peak_equity","daily_start_equity","realized_pnl","unrealized_pnl","reserved_margin"],
         "Trade": ["quantity","requested_quantity","filled_quantity","remaining_quantity","requested_price","average_fill_price","fee","notional","stop_loss_price","take_profit_price"],
         "Position": ["quantity","average_entry_price","mark_price","realized_pnl","unrealized_pnl","reserved_capital"],
-        "Withdrawal": ["amount"], "Wallet": ["available_balance","locked_balance"],
+        "Withdrawal": ["amount"],
         "ReferralCommission": ["gross_revenue","commission_amount"],
         "RevenueLedger": ["gross_amount","refunds","net_amount"], "CostLedger": ["amount"],
         "SmartTrade": ["entry_price","quantity","stop_loss_price","take_profit_1","take_profit_2","take_profit_3"],
@@ -21,6 +21,12 @@ def test_money_columns_are_numeric_storage_not_float():
     }
     assert 'class FinancialNumeric(TypeDecorator)' in source
     assert 'impl = Numeric(38, 18, asdecimal=False)' in source
+    wallet_match = re.search(r'^class Wallet\\(Base\\):', source, re.M)
+    assert wallet_match, "missing model Wallet"
+    wallet_next = re.search(r'^class \\w+\\(Base\\):', source[wallet_match.end():], re.M)
+    wallet_block = source[wallet_match.start():wallet_match.end()+wallet_next.start()] if wallet_next else source[wallet_match.start():]
+    assert re.search(r'^    available_balance: Mapped\\[Decimal\\] = mapped_column\\(CustodialNumeric', wallet_block, re.M), "Wallet.available_balance must use exact Decimal storage"
+    assert re.search(r'^    locked_balance: Mapped\\[Decimal\\] = mapped_column\\(CustodialNumeric', wallet_block, re.M), "Wallet.locked_balance must use exact Decimal storage"
     for cls, cols in targets.items():
         m = re.search(rf'^class {cls}\(Base\):', source, re.M)
         assert m, f"missing model {cls}"
