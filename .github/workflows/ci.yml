@@ -41,11 +41,12 @@ jobs:
         run: python -m compileall -q app alembic
       - name: Apply migrations
         run: python -m alembic upgrade head
-      - name: Verify migration graph and round-trip
+      - name: Verify migration graph, metadata parity and round-trip
         run: |
           python -m alembic current
           heads="$(python -m alembic heads)"
           test "$(printf '%s\n' "$heads" | grep -c '(head)')" -eq 1
+          python -m alembic check
           python -m alembic downgrade base
           python -m alembic upgrade head
       - name: Python lint (fatal static errors)
