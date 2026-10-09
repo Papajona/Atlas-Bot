@@ -67,7 +67,7 @@ jobs:
                   IF EXISTS (
                       SELECT 1 FROM pg_class c
                       JOIN pg_namespace n ON n.oid = c.relnamespace
-                      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+                      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
                         AND (
                           has_table_privilege(api_role, c.oid, 'SELECT')
                           OR has_table_privilege(api_role, c.oid, 'INSERT')
@@ -78,7 +78,7 @@ jobs:
                           OR has_table_privilege(api_role, c.oid, 'TRIGGER')
                         )
                   ) THEN
-                      RAISE EXCEPTION 'role % retains a public table privilege', api_role;
+                      RAISE EXCEPTION 'role % retains privileges on a public table, view, materialized view, or foreign table', api_role;
                   END IF;
 
                   IF EXISTS (
@@ -122,7 +122,7 @@ jobs:
         run: |
           python -m alembic current
           heads="$(python -m alembic heads)"
-          test "$(printf '%s\n' "$heads" | grep -c '(head)')" -eq 1
+          test "$(printf '%s\\n' "$heads" | grep -c '(head)')" -eq 1
           python -m alembic downgrade base
           python -m alembic upgrade head
       - name: Python lint (fatal static errors)
