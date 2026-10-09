@@ -30,7 +30,7 @@ Use the deployment's approved database environment. The command does not need ex
 - The baseline is the close of that exact decision candle, after it is complete.
 - Horizons `1,3,6` mean the next 1, 3, and 6 observed completed candles, not a guessed wall-clock interval. Each outcome records actual elapsed seconds and the largest gap between observed candles.
 - Forward return is reported in basis points. Long and short gross returns and configured-cost-adjusted hypothetical returns are both retained. If the original record contains no unambiguous buy/sell candidate side, market outcomes are still labelled but candidate-side return is null.
-- Per-side costs come from Atlas's configured asset profile. Crypto currently uses the profile's 5.5 bps taker plus 2.0 bps slippage; forex uses 0.5 plus 0.5 bps. These are configured assumptions, not proof of actual execution costs.
+- Per-side costs come from Atlas's configured asset profile. Crypto currently uses the profile's 5.5 bps taker plus 2.0 bps slippage and 0.125 bps carry per observed bar; forex uses 0.5 plus 0.5 bps and 0.0 carry. Hypothetical net returns subtract two sides of taker-plus-slippage and the horizon's configured carry. These are configured assumptions, not proof of actual execution costs.
 - Labels include the source dataset provenance hash and a separate SHA-256 hash of the exact candles used for the outcome. The label identity does not change if candles strictly after the longest labelled horizon change.
 - The original decision snapshot hash is retained as the source link. Labels do not flow back into the original record.
 
