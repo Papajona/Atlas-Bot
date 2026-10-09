@@ -106,9 +106,9 @@ def test_deposit_idempotency_is_provider_namespaced_but_legacy_safe():
         async with sessions() as db:
             db.add(CustomerLedgerAccount(customer_id=1))
             await db.commit()
-            await post_deposit(db, customer_id=1, wallet_id=1, amount=5, provider_reference="ref-1", metadata={}, provider="stripe")
-            await post_deposit(db, customer_id=1, wallet_id=1, amount=5, provider_reference="ref-1", metadata={}, provider="stripe")   # replay
-            await post_deposit(db, customer_id=1, wallet_id=1, amount=7, provider_reference="ref-1", metadata={}, provider="wise")     # other provider, same ref
+            await post_deposit(db, customer_id=1, wallet_id=1, amount=5, provider_reference="ref-1", metadata={}, provider="gateway_a")
+            await post_deposit(db, customer_id=1, wallet_id=1, amount=5, provider_reference="ref-1", metadata={}, provider="gateway_a")   # replay
+            await post_deposit(db, customer_id=1, wallet_id=1, amount=7, provider_reference="ref-1", metadata={}, provider="gateway_b")     # other provider, same ref
             await db.commit()
             ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
             assert ledger.available == Decimal("12")
