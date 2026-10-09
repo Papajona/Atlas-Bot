@@ -89,7 +89,6 @@ jobs:
         run: python scripts/check_no_secrets.py
       - name: AI provider live inference verification
         env:
-          # Provider credentials are GitHub Actions secrets, never repository variables.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
@@ -98,12 +97,12 @@ jobs:
           status=$?
           set -e
           if [ "$status" -eq 0 ]; then
-            echo "AI provider verification: PASS (minimal inference requests succeeded)." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "AI provider verification: PASS (Gemini and Groq inference requests succeeded)." | tee -a "$GITHUB_STEP_SUMMARY"
           elif [ "$status" -eq 2 ]; then
-            echo "AI provider verification: NOT VERIFIED (no provider keys supplied)." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "AI provider verification: NOT VERIFIED (one or more required AI credentials/models are missing; see checker output)." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           else
-            echo "AI provider verification: FAIL (inference request failed; checker exit code $status)." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "AI provider verification: FAIL (one or more inference requests failed; checker exit code $status)." | tee -a "$GITHUB_STEP_SUMMARY"
             exit "$status"
           fi
       - name: Deriv token authentication (no trading)
