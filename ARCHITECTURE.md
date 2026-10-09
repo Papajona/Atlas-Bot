@@ -1,6 +1,6 @@
 # Architecture 3.10.35
 
-The application is deployed as three layers: Android control client, Google Cloud Run trading backend, and Supabase PostgreSQL persistence. Google Cloud Storage is used for model artifacts. Broker APIs remain external.
+The application uses Cloudflare for DNS and optional edge protection, Google Cloud Run for the trading API and worker runtime, Supabase PostgreSQL for persistence, and Google Cloud Storage for model artifacts. Broker APIs remain external. Cloudflare is not the application compute runtime.
 
 The Android client is not the execution engine. This prevents Android process suspension, device reboot, battery loss, or network changes from silently stopping the trading service.
 
