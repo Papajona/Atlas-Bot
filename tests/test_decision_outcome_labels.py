@@ -26,7 +26,7 @@ def _frame(*, as_of=None):
         },
         index=index,
     )
-    fetched_at = as_of or (index[-1] + pd.Timedelta(hours=1))
+    fetched_at = as_of if as_of is not None else (index[-1] + pd.Timedelta(hours=1))
     canonical = df.reset_index().to_csv(index=False, float_format="%.17g", lineterminator="\n")
     df.attrs["data_provenance"] = {
         "source": "ccxt_ohlcv",
@@ -41,7 +41,7 @@ def _frame(*, as_of=None):
 
 
 def _decision(timestamp=None):
-    timestamp = timestamp or pd.Timestamp("2026-01-01T02:00:00Z")
+    timestamp = timestamp if timestamp is not None else pd.Timestamp("2026-01-01T02:00:00Z")
     return {
         "record_type": "adaptive_trade_decision",
         "decision_id": "decision-001",
@@ -168,3 +168,11 @@ def test_label_with_no_candidate_side_still_reports_market_outcomes():
     assert label["outcomes"]["1"]["candidate_side_net_return_bps"] is None
     assert label["outcomes"]["1"]["long_net_return_bps"] is not None
     assert label["outcomes"]["1"]["short_net_return_bps"] is not None
+
+
+def test_yfinance_fx_label_rejects_ambiguous_underscore_symbol():
+    record = _decision()
+    record.update(asset="forex", symbol="EUR_USD", exchange="yfinance")
+    with pytest.raises(OutcomeLabelError) as exc:
+        build_decision_outcome_label(record, _frame())
+    assert exc.value.code == "UNSUPPORTED_SYMBOL"
