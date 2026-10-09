@@ -110,6 +110,20 @@ def _nearest_index(df: pd.DataFrame, timestamp: Any, *, side: str = "nearest") -
     return int(before)
 
 
+def _configured_replay_costs_bps(asset: Any) -> float:
+    """Return per-side taker-plus-slippage costs from Atlas's configured asset profile."""
+    from .trading_core import PROFILES
+
+    normalized = str(asset or "").strip().lower()
+    profile = PROFILES.get(normalized)
+    if profile is None:
+        raise ValueError(f"No configured replay cost profile for asset: {normalized or 'unknown'}")
+    costs = float(profile.taker_bps) + float(profile.slippage_bps)
+    if not isfinite(costs) or costs < 0:
+        raise ValueError(f"Invalid configured replay costs for asset: {normalized}")
+    return costs
+
+
 def _directional_bps(side: str, entry: float, exit_price: float) -> float:
     if entry <= 0 or exit_price <= 0:
         return 0.0
@@ -122,7 +136,7 @@ def replay_trade_episode(
     episode: "TradeLearningEpisode",
     *,
     cfg: StrategyConfig | None = None,
-    costs_bps: float = 7.5,
+    costs_bps: float | None = None,
 ) -> dict[str, Any]:
     """Replay one completed episode without changing the live decision state.
 
@@ -135,6 +149,13 @@ def replay_trade_episode(
     These are counterfactual research measurements, not executable orders.
     """
     cfg = cfg or StrategyConfig()
+    configured_costs = costs_bps is None
+    if configured_costs:
+        costs_bps = _configured_replay_costs_bps(episode.asset or "crypto")
+    else:
+        costs_bps = float(costs_bps)
+        if not isfinite(costs_bps) or costs_bps < 0:
+            raise ValueError("Replay costs must be finite and non-negative")
     timeframe = str(episode.timeframe or "1h")
     entry_idx = _last_completed_bar_index(df, episode.entry_at, timeframe)
     exit_idx = _last_completed_bar_index(df, episode.exit_at, timeframe)
@@ -231,6 +252,7 @@ def replay_trade_episode(
         "exit_index": int(exit_idx),
         "bars_held": int(len(window)),
         "costs_bps_per_side": float(costs_bps),
+        "cost_source": "configured_asset_profile" if configured_costs else "explicit_test_or_research_override",
         "bar_alignment": {
             "timestamp_semantics": "candle_open",
             "timeframe": timeframe,
@@ -309,7 +331,7 @@ async def process_trade_learning_episodes(*, limit: int = 10, lookback_days: int
     for episode in rows:
         try:
             df = await asyncio.to_thread(_fetch_learning_data, episode, days=lookback_days)
-            result = await asyncio.to_thread(replay_trade_episode, df, episode, costs_bps=7.5)
+            result = await asyncio.to_thread(replay_trade_episode, df, episode)
             async with SessionLocal() as db:
                 ep = await db.get(TradeLearningEpisode, episode.id, with_for_update=True)
                 if not ep:
