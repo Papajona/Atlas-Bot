@@ -226,7 +226,7 @@ class OrderCommand(Base):
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     trade_id: Mapped[int] = mapped_column(ForeignKey("trades.id"), nullable=False, index=True)
-    customer_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customer_profiles.id", name="order_commands_customer_id_fkey"), nullable=True, index=True)
     exchange: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     symbol: Mapped[str] = mapped_column(String(80), nullable=False)
     side: Mapped[str] = mapped_column(String(10), nullable=False)
@@ -348,7 +348,7 @@ class WithdrawalStepUpToken(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     jti: Mapped[str] = mapped_column(String(64), nullable=False)
-    auth_user_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    auth_user_id: Mapped[str] = mapped_column(ForeignKey("customer_profiles.auth_user_id", name="fk_withdrawal_stepup_customer"), nullable=False, index=True)
     purpose: Mapped[str] = mapped_column(String(40), nullable=False, default="withdrawal")
     destination_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     proposal_digest: Mapped[str] = mapped_column(String(64), nullable=False, default="")
@@ -397,8 +397,8 @@ class Withdrawal(Base):
               sqlite_where=sa.text("provider_id <> ''")),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    customer_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
-    wallet_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customer_profiles.id", name="fk_withdrawals_customer_id"), nullable=True, index=True)
+    wallet_id: Mapped[int | None] = mapped_column(ForeignKey("wallets.id", name="fk_withdrawals_wallet_id"), nullable=True, index=True)
     request_id: Mapped[str] = mapped_column(String(120), nullable=False)
     account_ref: Mapped[str] = mapped_column(String(120), default="")
     amount: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
@@ -470,7 +470,7 @@ class Wallet(Base):
         Index("ix_wallets_derivation_path", "derivation_path"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customer_profiles.id", name="fk_wallets_customer_id"), nullable=False, index=True)
     currency: Mapped[str] = mapped_column(String(20), nullable=False)
     wallet_type: Mapped[str] = mapped_column(String(40), default="TRADING")
     network: Mapped[str] = mapped_column(String(40), default="")
@@ -491,7 +491,7 @@ class CustomerLedgerAccount(Base):
         Index("ix_customer_ledger_account_customer", "customer_id"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customer_profiles.id", name="fk_customer_ledger_accounts_customer_id"), nullable=False, index=True)
     currency: Mapped[str] = mapped_column(String(20), nullable=False, default="USDT")
     available: Mapped[Decimal] = mapped_column(Numeric(38, 6), nullable=False, default=0)
     trading_reserved: Mapped[Decimal] = mapped_column(Numeric(38, 6), nullable=False, default=0)
@@ -524,7 +524,7 @@ class LedgerJournalLine(Base):
         Index("ix_ledger_journal_line_customer", "customer_id", "created_at"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    journal_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    journal_id: Mapped[int] = mapped_column(ForeignKey("ledger_journals.id", name="fk_ledger_journal_lines_journal_id"), nullable=False, index=True)
     line_no: Mapped[int] = mapped_column(Integer, nullable=False)
     account_code: Mapped[str] = mapped_column(String(180), nullable=False)
     customer_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
@@ -670,8 +670,8 @@ class SmartTrade(Base):
         Index("ix_smart_trade_customer_status", "customer_id", "status"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    trading_account_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customer_profiles.id", name="fk_smart_trades_customer"), nullable=False, index=True)
+    trading_account_id: Mapped[int] = mapped_column(ForeignKey("trading_accounts.id", name="fk_smart_trades_account"), nullable=False, index=True)
     exchange: Mapped[str] = mapped_column(String(50), default="")
     symbol: Mapped[str] = mapped_column(String(80))
     side: Mapped[str] = mapped_column(String(10))
@@ -696,8 +696,8 @@ class DcaBot(Base):
         Index("ix_dca_bot_customer_status", "customer_id", "status"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    trading_account_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customer_profiles.id", name="fk_dca_bots_customer"), nullable=False, index=True)
+    trading_account_id: Mapped[int] = mapped_column(ForeignKey("trading_accounts.id", name="fk_dca_bots_account"), nullable=False, index=True)
     exchange: Mapped[str] = mapped_column(String(50), default="")
     symbol: Mapped[str] = mapped_column(String(80))
     side: Mapped[str] = mapped_column(String(10), default="LONG")
@@ -723,8 +723,8 @@ class GridBot(Base):
         Index("ix_grid_bot_customer_status", "customer_id", "status"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    trading_account_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customer_profiles.id", name="fk_grid_bots_customer"), nullable=False, index=True)
+    trading_account_id: Mapped[int] = mapped_column(ForeignKey("trading_accounts.id", name="fk_grid_bots_account"), nullable=False, index=True)
     exchange: Mapped[str] = mapped_column(String(50), default="")
     symbol: Mapped[str] = mapped_column(String(80))
     grid_type: Mapped[str] = mapped_column(String(20), default="NEUTRAL")
@@ -836,7 +836,7 @@ class CustomerBinanceAccount(Base):
         Index("ix_customer_binance_account_status", "status"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customer_profiles.id", name="fk_customer_binance_customer"), nullable=False, index=True)
     subaccount_id: Mapped[str] = mapped_column(String(120), nullable=False)
     api_key: Mapped[str] = mapped_column(EncryptedText, default="")
     secret_ref: Mapped[str] = mapped_column(String(255), default="")
@@ -859,7 +859,7 @@ class CustomerDerivAccount(Base):
         Index("ix_customer_deriv_account_status", "status"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customer_profiles.id", name="fk_customer_deriv_customer"), nullable=False, index=True)
     account_id: Mapped[str] = mapped_column(String(80), nullable=False)
     app_id: Mapped[int] = mapped_column(Integer, nullable=False)
     api_token: Mapped[str] = mapped_column(EncryptedText, default="")
@@ -878,7 +878,7 @@ class CustomerOandaAccount(Base):
         Index("ix_customer_oanda_account_status", "status"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customer_profiles.id", name="fk_customer_oanda_customer"), nullable=False, index=True)
     account_id: Mapped[str] = mapped_column(String(80), nullable=False)
     api_token: Mapped[str] = mapped_column(EncryptedText, default="")
     practice: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -909,7 +909,7 @@ class StrategyCandidate(Base):
     __tablename__ = "strategy_candidates"
     __table_args__ = (Index("ix_strategy_candidate_customer_status", "customer_id", "status"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customer_profiles.id", name="fk_strategy_candidates_customer"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(120), default="Atlas Candidate")
     asset: Mapped[str] = mapped_column(String(20), default="crypto")
     symbol: Mapped[str] = mapped_column(String(80), default="BTC/USDT:USDT")
@@ -931,8 +931,8 @@ class TradeExecutor(Base):
         Index("ix_trade_executor_customer_status", "customer_id", "status"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    trading_account_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customer_profiles.id", name="fk_trade_executors_customer"), nullable=False, index=True)
+    trading_account_id: Mapped[int] = mapped_column(ForeignKey("trading_accounts.id", name="fk_trade_executors_account"), nullable=False, index=True)
     bot_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     kind: Mapped[str] = mapped_column(String(20), nullable=False)
     asset: Mapped[str] = mapped_column(String(20), default="crypto")
@@ -956,7 +956,7 @@ class StrategyDraft(Base):
     __tablename__ = "strategy_drafts"
     __table_args__ = (Index("ix_strategy_draft_customer_created", "customer_id", "created_at"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customer_profiles.id", name="fk_strategy_drafts_customer"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(120), default="Atlas AI Strategy")
     prompt: Mapped[str] = mapped_column(Text, default="")
     strategy_json: Mapped[str] = mapped_column(EncryptedText, default="{}")
@@ -1160,8 +1160,8 @@ class FundingTransaction(Base):
         Index("ix_funding_customer_status", "customer_id", "status"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    wallet_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customer_profiles.id", name="fk_funding_transaction_customer"), nullable=False, index=True)
+    wallet_id: Mapped[int] = mapped_column(ForeignKey("wallets.id", name="fk_funding_transaction_wallet"), nullable=False)
     provider: Mapped[str] = mapped_column(String(50), default="")
     provider_reference: Mapped[str] = mapped_column(String(180), nullable=False)
     amount: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
@@ -1219,7 +1219,7 @@ class TronDepositCursor(Base):
     __tablename__ = "tron_deposit_cursors"
     __table_args__ = (UniqueConstraint("wallet_id", name="uq_tron_deposit_cursor_wallet"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    wallet_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    wallet_id: Mapped[int] = mapped_column(ForeignKey("wallets.id", name="fk_tron_deposit_cursors_wallet_id"), nullable=False, index=True)
     last_block_timestamp: Mapped[int] = mapped_column(BigInteger, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -1233,7 +1233,7 @@ class TronSweep(Base):
               sqlite_where=sa.text("transaction_id <> ''")),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    wallet_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    wallet_id: Mapped[int] = mapped_column(ForeignKey("wallets.id", name="fk_tron_sweeps_wallet_id"), nullable=False, index=True)
     source_address: Mapped[str] = mapped_column(EncryptedText, nullable=False)
     treasury_address: Mapped[str] = mapped_column(EncryptedText, nullable=False)
     amount_raw: Mapped[int] = mapped_column(BigInteger, nullable=False)
