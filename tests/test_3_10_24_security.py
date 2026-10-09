@@ -24,12 +24,18 @@ def test_funding_state_transition_is_supported():
     assert 'Invalid funding state transition' in src
     assert 'PENDING": {"CONFIRMED", "FAILED"}' in src
 
-def test_stripe_event_inbox_and_ordering_protection():
-    db=(ROOT/"app/db.py").read_text(); main=(ROOT/"app/main.py").read_text()
-    assert 'class StripeWebhookEvent' in db
-    assert 'uq_stripe_webhook_event_id' in db
-    assert 'stripe_last_event_at' in db
-    assert "status = 'STALE'" in main
+def test_stripe_checkout_runtime_is_removed():
+    main=(ROOT/"app/main.py").read_text().lower()
+    config=(ROOT/"app/config.py").read_text().lower()
+    db=(ROOT/"app/db.py").read_text().lower()
+    ui=(ROOT/"app/templates/customer.html").read_text().lower()
+    strings=(ROOT/"app/src/main/res/values/strings.xml").read_text().lower()
+    assert "/api/billing/stripe/webhook" not in main
+    assert "/api/customer/billing/checkout" not in main
+    assert "stripewebhookevent" not in db
+    assert "stripe_" not in config
+    assert "checkout.stripe.com" not in strings
+    assert "stripe" not in ui
 
 def test_broker_cache_does_not_use_prefix_only():
     src=(ROOT/"app/broker.py").read_text()
@@ -44,7 +50,9 @@ def test_cloud_run_pins_secret_versions_and_uses_lb_ingress():
 def test_android_webview_has_domain_allowlist():
     src=(ROOT/"app/src/main/java/com/atlas/trading/MainActivity.kt").read_text()
     assert 'trusted_web_host' in src
-    assert 'checkout.stripe.com' in (ROOT/"app/src/main/res/values/strings.xml").read_text()
+    assert 'checkout.stripe.com' not in (ROOT/"app/src/main/res/values/strings.xml").read_text()
+    assert 'val isAllowed = host == trustedHost' in src
+    assert 'host.endsWith(".run.app")' not in src
 
 def test_customer_ui_no_direct_api_value_innerhtml():
     src=(ROOT/"app/templates/customer.html").read_text()
