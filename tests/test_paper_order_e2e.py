@@ -41,11 +41,7 @@ def test_paper_buy_then_sell_round_trip():
             assert trades
             assert all(isinstance(t.filled_quantity, float) and isinstance(t.requested_price, float) for t in trades)
             position_rows = (await db.execute(
-                select(Position).where(
-                    Position.customer_id.is_(None),
-                    Position.exchange == "binance",
-                    Position.symbol == sym,
-                )
+                select(Position).where(Position.entry_trade_id.in_([buy_id, sell_id]))
             )).scalars().all()
             assert len(position_rows) == 1, f"expected one consolidated paper position, got {len(position_rows)}"
             assert position_rows[0].quantity == pytest.approx(0.0, abs=1e-12)
