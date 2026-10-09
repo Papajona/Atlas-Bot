@@ -163,7 +163,7 @@ if(sessionStorage.getItem(tokenKey))continueLoginSecurity();
 
 
 // Atlas UI layer: responsive navigation and local display preferences.
-const uiSections={overview:['Your command center','Monitor balances, markets and customer-scoped trading tools.'],markets:['Market overview','Follow Atlas signals and customer-scoped market intelligence.'],trade:['Trade desk','Build paper trades and analyze setups before execution.'],wallet:['Wallet','Fund, monitor and protect your USDT trading wallet.'],security:['Security','Manage withdrawal verification and account protection.'],settings:['Settings','Preferences, billing, referrals and session controls.']};
+const uiSections={overview:['Your command center','Monitor balances, markets and customer-scoped trading tools.'],markets:['Market overview','Follow Atlas signals and customer-scoped market intelligence.'],trade:['Trade desk','Build paper trades and analyze setups before execution.'],wallet:['Wallet','Fund, monitor and protect your USDT trading wallet.'],security:['Security','Manage withdrawal verification and account protection.'],settings:['Settings','Preferences, plan and session controls.']};
 function setActiveSection(id){document.querySelectorAll('.nav-link').forEach(a=>a.classList.toggle('active',a.dataset.section===id));const meta=uiSections[id];if(meta){document.getElementById('pageTitle').textContent=meta[0];document.getElementById('pageSubtitle').textContent=meta[1];}}
 document.querySelectorAll('.nav-link').forEach(a=>a.addEventListener('click',()=>{setActiveSection(a.dataset.section);document.getElementById('appShell').classList.remove('nav-open');}));
 let activeMarketFilter='all';
