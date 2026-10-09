@@ -341,25 +341,35 @@ def downgrade():
 
     for table, column, existing_type in reversed(NOT_NULL_COLUMNS):
         info = _column_info(table, column)
-        kwargs = {
-            "existing_type": existing_type,
-            "nullable": True,
-        }
-        if table == "trading_accounts" and column in PILOT_NUMERIC_COLUMNS:
-            kwargs.update({
-                "existing_type": sa.Numeric(precision=38, scale=18),
-                "type_": sa.Numeric(precision=38, scale=6),
-                "existing_server_default": sa.text("'0'::numeric"),
-            })
-        elif table == "trading_accounts" and column == "pilot_status":
-            kwargs["existing_server_default"] = sa.text("'NONE'::character varying")
-        elif table == "trading_accounts" and column in ("pilot_requested_by", "pilot_approved_by"):
-            kwargs["existing_server_default"] = sa.text("''::character varying")
-        elif table == "trading_accounts" and column == "pilot_stage":
-            kwargs["existing_server_default"] = sa.text("0")
-        elif table == "trading_accounts" and column == "pilot_max_open_positions":
-            kwargs["existing_server_default"] = sa.text("0")
-        elif table == "trading_accounts" and column in ("pilot_max_leverage", "pilot_daily_loss_limit"):
-            kwargs["existing_server_default"] = sa.text("'0'::double precision")
-        if not info["nullable"] or (table == "trading_accounts" and column in PILOT_NUMERIC_COLUMNS):
+        is_pilot_numeric = table == "trading_accounts" and column in PILOT_NUMERIC_COLUMNS
+        type_needs_change = False
+        if is_pilot_numeric:
+            current_type = info["type"]
+            precision = getattr(current_type, "precision", None)
+            scale = getattr(current_type, "scale", None)
+            if (precision, scale) == (38, 18):
+                type_needs_change = True
+            elif (precision, scale) != (38, 6):
+                raise RuntimeError(
+                    f"Unexpected downgrade type for trading_accounts.{column}: {current_type!r}"
+                )
+        if not info["nullable"] or type_needs_change:
+            kwargs = {
+                "existing_type": info["type"] if is_pilot_numeric else existing_type,
+                "nullable": True,
+            }
+            if is_pilot_numeric:
+                if type_needs_change:
+                    kwargs["type_"] = sa.Numeric(precision=38, scale=6)
+                kwargs["existing_server_default"] = sa.text("'0'::numeric")
+            elif table == "trading_accounts" and column == "pilot_status":
+                kwargs["existing_server_default"] = sa.text("'NONE'::character varying")
+            elif table == "trading_accounts" and column in ("pilot_requested_by", "pilot_approved_by"):
+                kwargs["existing_server_default"] = sa.text("''::character varying")
+            elif table == "trading_accounts" and column == "pilot_stage":
+                kwargs["existing_server_default"] = sa.text("0")
+            elif table == "trading_accounts" and column == "pilot_max_open_positions":
+                kwargs["existing_server_default"] = sa.text("0")
+            elif table == "trading_accounts" and column in ("pilot_max_leverage", "pilot_daily_loss_limit"):
+                kwargs["existing_server_default"] = sa.text("'0'::double precision")
             op.alter_column(table, column, **kwargs)
