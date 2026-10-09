@@ -24,6 +24,53 @@ from sqlalchemy import select
 if TYPE_CHECKING:
     from .db import TradeLearningEpisode
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
+
+def _timeframe_delta(timeframe: Any) -> pd.Timedelta:
+    """Parse the candle interval used by the OHLCV fetchers."""
+    try:
+        delta = pd.Timedelta(str(timeframe))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Unsupported replay timeframe: {timeframe!r}") from exc
+    if pd.isna(delta) or delta <= pd.Timedelta(0):
+        raise ValueError(f"Unsupported replay timeframe: {timeframe!r}")
+    return delta
+
+
+def _last_completed_bar_index(
+    df: pd.DataFrame, timestamp: Any, timeframe: Any
+) -> int | None:
+    """Return the last bar whose open time plus timeframe is no later than timestamp.
+
+    Atlas OHLCV fetchers index candles by their open timestamp. A candle is not
+    available to a decision until its full interval has elapsed.
+    """
+    ts = _parse_dt(timestamp)
+    if ts is None or df.empty:
+        return None
+    idx = pd.DatetimeIndex(pd.to_datetime(df.index, utc=True))
+    if not idx.is_monotonic_increasing or idx.has_duplicates:
+        raise ValueError("Replay data index must be strictly increasing and unique")
+    delta = _timeframe_delta(timeframe)
+    completed = np.flatnonzero((idx + delta) <= ts)
+    return int(completed[-1]) if len(completed) else None
+
+
+def _post_entry_completed_indices(
+    df: pd.DataFrame, entry_at: Any, exit_at: Any, timeframe: Any
+) -> list[int]:
+    """Select full candles starting at/after entry and closing by exit."""
+    entry_ts = _parse_dt(entry_at)
+    exit_ts = _parse_dt(exit_at)
+    if entry_ts is None or exit_ts is None or exit_ts <= entry_ts or df.empty:
+        return []
+    idx = pd.DatetimeIndex(pd.to_datetime(df.index, utc=True))
+    if not idx.is_monotonic_increasing or idx.has_duplicates:
+        raise ValueError("Replay data index must be strictly increasing and unique")
+    delta = _timeframe_delta(timeframe)
+    eligible = (idx >= entry_ts) & ((idx + delta) <= exit_ts)
+    return [int(i) for i in np.flatnonzero(eligible)]
+
+
 from .strategy_engine import StrategyConfig, strategy_signals
 from .strategy_router import STRATEGIES, classify_regime
 
@@ -88,13 +135,24 @@ def replay_trade_episode(
     These are counterfactual research measurements, not executable orders.
     """
     cfg = cfg or StrategyConfig()
-    entry_idx = _nearest_index(df, episode.entry_at, side="nearest")
-    exit_idx = _nearest_index(df, episode.exit_at, side="nearest")
+    timeframe = str(episode.timeframe or "1h")
+    entry_idx = _last_completed_bar_index(df, episode.entry_at, timeframe)
+    exit_idx = _last_completed_bar_index(df, episode.exit_at, timeframe)
+    outcome_indices = _post_entry_completed_indices(
+        df, episode.entry_at, episode.exit_at, timeframe
+    )
     if entry_idx is None or exit_idx is None or exit_idx <= entry_idx:
-        raise ValueError("Replay requires a completed episode with valid entry and exit timestamps")
+        raise ValueError(
+            "Replay requires completed candles before entry and exit timestamps"
+        )
+    if not outcome_indices or outcome_indices[-1] > exit_idx:
+        raise ValueError(
+            "Replay has no fully completed post-entry candles at this timeframe; "
+            "intrabar counterfactual replay is unsupported"
+        )
 
-    # Never use bars prior to entry for the outcome window itself. Indicators may
-    # legitimately use earlier history through rolling windows.
+    # Signals are anchored to the last candle fully closed by entry. Outcome
+    # metrics use only full candles that opened at/after entry and closed by exit.
     entry_row = df.iloc[entry_idx]
     exit_row = df.iloc[exit_idx]
     entry_price = float(episode.entry_price or entry_row["close"])
@@ -102,7 +160,7 @@ def replay_trade_episode(
     if not all(isfinite(x) and x > 0 for x in (entry_price, exit_price)):
         raise ValueError("Replay prices must be positive and finite")
 
-    window = df.iloc[entry_idx : exit_idx + 1].copy()
+    window = df.iloc[outcome_indices].copy()
     signals = strategy_signals(df.iloc[: exit_idx + 1], cfg, asset=episode.asset or "crypto")
     regimes = classify_regime(df.iloc[: exit_idx + 1], asset=episode.asset or "crypto")
     entry_regime = str(regimes.iloc[entry_idx]) if len(regimes) > entry_idx else "UNKNOWN"
@@ -134,15 +192,20 @@ def replay_trade_episode(
 
         # Same future window, strategy policy held from one bar after entry. This
         # prevents the entry bar's close from becoming an execution input.
-        subset = df.iloc[entry_idx : exit_idx + 1]
-        strat_sig = signals[name].iloc[entry_idx : exit_idx + 1].fillna(0.0)
-        vol = signals["realized_vol"].iloc[entry_idx : exit_idx + 1]
+        subset = window
+        strat_sig = signals[name].fillna(0.0)
+        vol = signals["realized_vol"]
         lev = (cfg.target_vol_annual / vol.replace(0, np.nan)).clip(upper=cfg.max_leverage)
-        pos = (strat_sig * lev).clip(-cfg.max_leverage, cfg.max_leverage)
-        pos = pos.where(strat_sig.abs() >= cfg.signal_threshold, 0.0).shift(1).fillna(0.0)
-        returns = subset["close"].pct_change().fillna(0.0)
+        pos_all = (strat_sig * lev).clip(-cfg.max_leverage, cfg.max_leverage)
+        pos_all = pos_all.where(strat_sig.abs() >= cfg.signal_threshold, 0.0).shift(1).fillna(0.0)
+        pos = pos_all.iloc[outcome_indices]
+        returns = subset["close"].pct_change()
+        returns.iloc[0] = float(subset["close"].iloc[0]) / entry_price - 1.0
+        returns = returns.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         turnover = pos.diff().abs().fillna(pos.abs())
         net = pos * returns - turnover * float(costs_bps) / 10000.0
+        # Close any remaining simulated position at the end of the comparison window.
+        net.iloc[-1] -= abs(float(pos.iloc[-1])) * float(costs_bps) / 10000.0
         policy_bps = float(((1.0 + net).prod() - 1.0) * 10000.0)
         counterfactuals.append({
             "strategy": name,
@@ -150,8 +213,10 @@ def replay_trade_episode(
             "entry_side": cf_side,
             "entry_decision_return_bps": float(entry_bps),
             "policy_window_return_bps": policy_bps,
-            "confidence": "HIGH" if len(window) >= 5 and df.index.is_monotonic_increasing else "MEDIUM",
-            "comparison_scope": "same_entry_and_exit_window; strategy_policy_replay",
+            # Bar count alone is not sufficient evidence for HIGH confidence.
+            "confidence": "MEDIUM" if len(window) >= 5 else "LOW",
+            "confidence_basis": "heuristic_bar_count_only_not_statistical",
+            "comparison_scope": "completed_post_entry_bars; strategy_policy_replay",
         })
 
     actual_directional_bps = _directional_bps(episode.side, entry_price, exit_price)
@@ -164,7 +229,18 @@ def replay_trade_episode(
         "replay_version": REPLAY_VERSION,
         "entry_index": int(entry_idx),
         "exit_index": int(exit_idx),
-        "bars_held": int(len(window) - 1),
+        "bars_held": int(len(window)),
+        "costs_bps_per_side": float(costs_bps),
+        "bar_alignment": {
+            "timestamp_semantics": "candle_open",
+            "timeframe": timeframe,
+            "decision_bar_open": str(df.index[entry_idx]),
+            "outcome_first_bar_open": str(window.index[0]),
+            "outcome_last_bar_open": str(window.index[-1]),
+            "completed_candles_only": True,
+            "partial_entry_exit_candles_excluded": True,
+        },
+        "data_provenance": dict(df.attrs.get("data_provenance") or {}),
         "entry_regime": entry_regime,
         "exit_regime": exit_regime,
         "regime_transitions": int(transitions),
@@ -182,7 +258,7 @@ def replay_trade_episode(
             "exit_regime": exit_regime,
             "regime_path": regime_path[-24:],
             "regime_transitions": transitions,
-            "bars": len(window) - 1,
+            "bars": len(window),
         },
         "future_data_used_only_for_post_trade_learning": True,
     }
@@ -203,7 +279,9 @@ def _fetch_learning_data(episode: TradeLearningEpisode, *, days: int = 365) -> p
             return fetch_forex_oanda(symbol=episode.symbol, timeframe=episode.timeframe or "1h", days=days)
         return fetch_forex(symbol=episode.symbol, timeframe=episode.timeframe or "1h", days=days)
     if asset == "commodity":
-        return fetch_forex(symbol=episode.symbol, timeframe=episode.timeframe or "1h", days=days)
+        raise ValueError(
+            "Commodity replay is unsupported: this branch has no verified commodity data adapter"
+        )
     raise ValueError(f"Unsupported replay asset: {asset}")
 
 
