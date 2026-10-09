@@ -78,25 +78,23 @@ jobs:
           python -m alembic heads
       - name: Repository secret scan
         run: python scripts/check_no_secrets.py
-      - name: AI model/provider verification
+      - name: AI model/provider verification (required for this gate)
         env:
-          # Set repository Actions variable REQUIRE_AI_PROVIDER_VERIFICATION=true
-          # for release-acceptance runs. Leave unset/false for offline CI.
-          REQUIRE_AI_PROVIDER_VERIFICATION: ${{ vars.REQUIRE_AI_PROVIDER_VERIFICATION }}
+          # Provider credentials are GitHub Actions secrets, never repository variables.
+          # Offline tests belong in Atlas CI; this production acceptance gate fails closed.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           set +e
           python scripts/check_ai_models.py
           status=$?
           set -e
           if [ "$status" -eq 0 ]; then
-            echo "AI provider verification: PASS" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "AI provider verification: PASS (configured provider checks succeeded)." | tee -a "$GITHUB_STEP_SUMMARY"
           elif [ "$status" -eq 2 ]; then
-            echo "AI provider verification: NOT VERIFIED (no configured provider keys; no provider was checked)." | tee -a "$GITHUB_STEP_SUMMARY"
-            echo "::warning::AI provider verification is NOT VERIFIED because no provider keys were configured."
-            if [ "${REQUIRE_AI_PROVIDER_VERIFICATION,,}" = "true" ]; then
-              echo "Required AI provider verification cannot be skipped for this run." | tee -a "$GITHUB_STEP_SUMMARY"
-              exit 1
-            fi
+            echo "AI provider verification: NOT VERIFIED (no provider keys were available; no provider was checked)." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "Production Verification Gate requires provider verification; refusing to accept an unverified result." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
           else
             echo "AI provider verification: FAIL (checker exit code $status)." | tee -a "$GITHUB_STEP_SUMMARY"
             exit "$status"
