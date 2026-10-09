@@ -25,15 +25,8 @@ This matrix separates source implementation from server enforcement, automated t
 
 ## Evidence rule
 
-A green static or contract test proves source-code structure only. It does not prove payment-provider delivery, notification workers, exchange connectivity, Cloud Run deployment, customer UI behavior, or production operation.
+A green static or contract test proves source-code structure only. It does not prove worker execution, exchange connectivity, Cloud Run deployment, customer UI behavior, or production operation. Online payment and checkout are out of scope.
 
-## Required billing lifecycle evidence
+## Payment scope
 
-1. New customer receives the intended Free/subscription state.
-2. Authoritative payment-provider event is required before paid activation.
-3. Duplicate provider events are idempotent.
-4. Failed/past-due subscriptions lose protected entitlements according to policy.
-5. Cancellation honors the documented period-end policy.
-6. Lower-tier customers cannot invoke protected higher-tier actions.
-7. Upgraded customers receive the protected action after authoritative entitlement update.
-8. Billing records reconcile independently from customer trading funds.
+Online payment processing, checkout, payment-provider webhooks, recurring charges and referral commissions tied to paid invoices are not part of this release. Plan changes are operator-managed; catalog prices are not charges. Do not add payment secrets or activate paid entitlements from an external payment event without a separate approved product decision and reviewed implementation.
