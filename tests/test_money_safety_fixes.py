@@ -543,7 +543,12 @@ def test_trade_learning_entry_timestamp_is_recorded_on_first_fill():
             await db.refresh(episode)
             first_entry_at = episode.entry_at
             assert first_entry_at is not None
-            assert first_entry_at >= before_first_fill
+            comparable_entry_at = (
+                first_entry_at.replace(tzinfo=timezone.utc)
+                if first_entry_at.tzinfo is None
+                else first_entry_at
+            )
+            assert comparable_entry_at >= before_first_fill
             assert episode.entry_quantity == pytest.approx(0.4)
             assert episode.entry_price == pytest.approx(100.0)
 
