@@ -584,7 +584,6 @@ class Subscription(Base):
     cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
-    stripe_last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Atomic per-subscription AI allowance meter. Usage resets when the billing period changes.
     ai_credits_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     ai_usage_period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -791,21 +790,6 @@ class WebhookEvent(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     endpoint_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     event_id: Mapped[str] = mapped_column(String(160), nullable=False)
-    payload_json: Mapped[str] = mapped_column(EncryptedText, default="{}")
-    status: Mapped[str] = mapped_column(String(30), default="RECEIVED")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
-class StripeWebhookEvent(Base):
-    __tablename__ = "stripe_webhook_events"
-    __table_args__ = (
-        UniqueConstraint("event_id", name="uq_stripe_webhook_event_id"),
-        Index("ix_stripe_webhook_event_created", "created_at"),
-    )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    event_id: Mapped[str] = mapped_column(String(180), nullable=False)
-    event_type: Mapped[str] = mapped_column(String(120), nullable=False, default="")
-    stripe_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     payload_json: Mapped[str] = mapped_column(EncryptedText, default="{}")
     status: Mapped[str] = mapped_column(String(30), default="RECEIVED")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
