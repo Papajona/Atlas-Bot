@@ -99,7 +99,6 @@ NOT_NULL_COLUMNS = [
     ("admin_roles", "created_at", sa.DateTime(timezone=True)),
     ("admin_roles", "updated_at", sa.DateTime(timezone=True)),
     ("app_state", "updated_at", sa.DateTime(timezone=True)),
-    ("audit_chain_state", "updated_at", sa.DateTime(timezone=True)),
     ("audit_log", "created_at", sa.DateTime(timezone=True)),
     ("custody_asset_observations", "created_at", sa.DateTime(timezone=True)),
     ("custody_asset_observations", "updated_at", sa.DateTime(timezone=True)),
@@ -185,15 +184,10 @@ def _drop_index_if_present(name, table, columns):
     op.drop_index(name, table_name=table)
 
 
-def _assert_no_nulls(bind, table, column):
-    count = bind.execute(
+def _count_nulls(bind, table, column):
+    return bind.execute(
         sa.text(f'SELECT count(*) FROM "{table}" WHERE "{column}" IS NULL')
     ).scalar_one()
-    if count:
-        raise RuntimeError(
-            f"Cannot set {table}.{column} NOT NULL: found {count} NULL row(s). "
-            "Migration made no data substitutions; reconcile those rows from authoritative records and retry."
-        )
 
 
 def _assert_numeric_fits_scale_18(bind, column):
@@ -248,8 +242,17 @@ def upgrade():
     bind = _bind()
 
     # Preflight all data constraints before any schema mutation.
+    null_violations = []
     for table, column, _existing_type in NOT_NULL_COLUMNS:
-        _assert_no_nulls(bind, table, column)
+        count = _count_nulls(bind, table, column)
+        if count:
+            null_violations.append(f"{table}.{column}={count}")
+    if null_violations:
+        raise RuntimeError(
+            "Cannot enforce NOT NULL without changing existing data; "
+            "NULL rows found: " + ", ".join(null_violations) +
+            ". Migration made no data substitutions; reconcile from authoritative records and retry."
+        )
     for column in PILOT_NUMERIC_COLUMNS:
         _assert_numeric_fits_scale_18(bind, column)
     _assert_trade_customer_references(bind)
