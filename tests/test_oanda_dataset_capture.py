@@ -31,7 +31,7 @@ def test_export_keeps_provider_decimal_strings_and_only_completed_candles():
     rows = list(csv.DictReader(StringIO(encoded.decode("utf-8"))))
     assert len(rows) == 2
     assert rows[0]["close"] == "1.10009"
-    assert rows[0]["time"] == "2025-01-01T00:00:00Z"
+    assert rows[0]["time"] == "2025-01-01T00:00:00.000000000Z"
     assert timestamps == ["2025-01-01T00:00:00Z", "2025-01-01T02:00:00Z"]
 
 
