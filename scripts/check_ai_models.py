@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Verify configured AI providers with minimal real inference requests.
 
-Gemini: generateContent for each configured Gemini model.
-Groq: chat completions for each configured Groq model.
-Exit 0 = every configured provider/model request succeeded, 1 = any check failed,
-2 = no provider keys were supplied. Never prints keys or response bodies.
+Both Gemini and Groq must be configured and each configured model must return
+usable generated text. Exit 0 = all requests succeeded, 1 = request failed,
+2 = required credentials/configuration missing. Never prints keys or response bodies.
 """
 import json
 import sys
@@ -29,7 +28,6 @@ def _request_json(url: str, headers: dict[str, str], payload: dict) -> tuple[int
             status = response.status
             raw = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        # Do not print provider response bodies; they can contain request metadata.
         return exc.code, {}
     except Exception:
         return 0, {}
@@ -85,18 +83,32 @@ def _check_groq(model: str) -> bool:
 
 
 def main() -> int:
+    missing = []
+    if not settings.gemini_api_key:
+        missing.append("GEMINI_API_KEY")
+    if not settings.groq_api_key:
+        missing.append("GROQ_API_KEY")
+    if missing:
+        print("AI provider verification: NOT VERIFIED (missing " + ", ".join(missing) + ").")
+        return 2
+
+    models = (
+        ("Gemini", settings.gemini_api_key,
+         sorted({settings.gemini_model, settings.gemini_strategy_model} - {""}), _check_gemini),
+        ("Groq", settings.groq_api_key,
+         sorted({settings.groq_model, settings.groq_strategy_model} - {""}), _check_groq),
+    )
     checked = 0
     failures = 0
-    if settings.gemini_api_key:
-        for model in sorted({settings.gemini_model, settings.gemini_strategy_model} - {""}):
+    for provider, _key, provider_models, checker in models:
+        if not provider_models:
+            print(f"AI provider verification: NOT VERIFIED ({provider} has no configured model).")
+            return 2
+        for model in provider_models:
             checked += 1
-            failures += not _check_gemini(model)
-    if settings.groq_api_key:
-        for model in sorted({settings.groq_model, settings.groq_strategy_model} - {""}):
-            checked += 1
-            failures += not _check_groq(model)
+            failures += not checker(model)
     if not checked:
-        print("AI provider verification: NOT VERIFIED (no provider keys supplied).")
+        print("AI provider verification: NOT VERIFIED (no model checks were configured).")
         return 2
     return 1 if failures else 0
 
