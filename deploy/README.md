@@ -6,7 +6,7 @@ Android app -> Google Cloud Run -> Supabase PostgreSQL
                                -> Google Cloud Storage (models)
                                -> OANDA / crypto broker APIs
 
-Vercel is intentionally not used.
+Cloudflare is the DNS/edge layer; Google Cloud Run hosts the API and worker. Cloudflare DNS/proxy is not a replacement for the Cloud Run application runtime.
 
 ## Order of operations
 1. Create Supabase project and PostgreSQL connection string.
@@ -14,7 +14,7 @@ Vercel is intentionally not used.
 3. Create Google Cloud project, Artifact Registry, service account, Secret Manager secrets, and model bucket.
 4. Run `deploy/cloud-run-deploy.sh`.
 5. Verify `/healthz` and `/readyz`.
-6. Configure Android `backend_url` with the Cloud Run HTTPS URL.
+6. Configure the Atlas hostname in Cloudflare DNS to the approved Google Cloud HTTPS Load Balancer; keep Cloud Run behind the load balancer. Configure Android `backend_url` and `trusted_web_host` with the verified Atlas HTTPS hostname (do not invent a hostname before the domain is configured).
 7. Build/install the Android APK.
 8. Run the acceptance tests in `DEPLOYMENT_ACCEPTANCE.md`.
 9. Keep paper/sandbox mode until broker demo tests and failure/recovery tests pass.
