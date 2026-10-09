@@ -2,11 +2,12 @@
 
 Recommended production topology:
 
-Android app -> Google Cloud Run -> Supabase PostgreSQL
-                               -> Google Cloud Storage (models)
-                               -> OANDA / crypto broker APIs
+Cloudflare DNS/WAF/CDN -> Google Cloud external HTTPS Load Balancer -> Cloud Run API/worker
+Android app -> Cloud Run API -> Supabase PostgreSQL
+                         -> Google Cloud Storage (models)
+                         -> OANDA / crypto broker APIs
 
-Vercel is intentionally not used.
+Cloudflare provides DNS and optional edge protection; Google Cloud Run remains the application runtime.
 
 ## Order of operations
 1. Create Supabase project and PostgreSQL connection string.
