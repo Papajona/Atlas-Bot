@@ -52,7 +52,7 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def export_completed_candles(payload: dict[str, Any]) -> tuple[bytes, list[str], list[str]]:
+def export_completed_candles(payload: dict[str, Any]) -> tuple[bytes, list[str]]:
     candles = payload.get("candles")
     if not isinstance(candles, list):
         raise ValueError("OANDA response has no candles array")
@@ -91,7 +91,7 @@ def export_completed_candles(payload: dict[str, Any]) -> tuple[bytes, list[str],
     writer = csv.writer(stream, lineterminator="\n")
     writer.writerow(CSV_FIELDS)
     writer.writerows(rows)
-    return stream.getvalue().encode("utf-8"), timestamps, [str(c.get("time")) for c in candles if isinstance(c, dict)]
+    return stream.getvalue().encode("utf-8"), timestamps
 
 
 def capture(
@@ -148,7 +148,7 @@ def capture(
     except ValueError as exc:
         raise RuntimeError("OANDA returned invalid JSON; raw response was preserved.") from exc
 
-    csv_bytes, completed_times, response_times = export_completed_candles(payload)
+    csv_bytes, completed_times = export_completed_candles(payload)
     csv_path.write_bytes(csv_bytes)
     fetched_at = datetime.now(timezone.utc).isoformat()
     manifest: dict[str, Any] = {
