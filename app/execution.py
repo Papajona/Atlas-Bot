@@ -620,20 +620,28 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         db.add(position)
         # The episode row is created with the order, but its timestamps and fill
         # facts must be populated from the first actual fill, not order submission.
-        episode = (await db.execute(
-            select(TradeLearningEpisode)
-            .where(TradeLearningEpisode.entry_trade_id == trade.id)
-            .with_for_update()
-        )).scalar_one_or_none()
-        if episode is not None:
-            if episode.entry_at is None:
-                episode.entry_at = utcnow()
-            if episode.entry_price <= 0:
-                episode.entry_price = float(fill_price)
-            if episode.entry_quantity <= 0:
-                episode.entry_quantity = abs(float(delta))
-            episode.status = "OPEN"
-            episode.updated_at = utcnow()
+        # Keep this bookkeeping best-effort: a learning-memory failure must not
+        # prevent the already-received broker fill from being recorded.
+        try:
+            async with db.begin_nested():
+                episode = (await db.execute(
+                    select(TradeLearningEpisode)
+                    .where(TradeLearningEpisode.entry_trade_id == trade.id)
+                    .with_for_update()
+                )).scalar_one_or_none()
+                if episode is not None:
+                    if episode.entry_at is None:
+                        episode.entry_at = utcnow()
+                    if episode.entry_price <= 0:
+                        episode.entry_price = float(fill_price)
+                    if episode.entry_quantity <= 0:
+                        episode.entry_quantity = abs(float(delta))
+                    episode.status = "OPEN"
+                    episode.updated_at = utcnow()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "trade_learning_entry_record_failed trade_id=%s", trade.id, exc_info=True
+            )
     else:
         old_qty = position.quantity
         if old_qty == 0 or (old_qty > 0 and signed > 0) or (old_qty < 0 and signed < 0):
