@@ -9,7 +9,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from capture_oanda_research_dataset import export_completed_candles
+try:
+    from .capture_oanda_research_dataset import export_completed_candles
+except ImportError:  # Direct execution as `python scripts/verify_oanda_research_dataset.py`
+    from capture_oanda_research_dataset import export_completed_candles
 
 
 def verify_dataset(dataset_dir: Path) -> dict[str, Any]:
