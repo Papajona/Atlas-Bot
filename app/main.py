@@ -429,6 +429,227 @@ async def _adaptive_bot_runtime_gate(bot_id: int, customer_id: int, trading_acco
         return True, paper_mode, "ok"
 
 
+_DECISION_MEMORY_SECRET_KEYS = {
+    "token", "secret", "api_token", "api_key", "api_secret", "secret_key",
+    "client_secret", "authorization", "password", "access_token", "refresh_token",
+    "private_key", "mnemonic", "seed", "destination", "webhook_secret",
+    "credential", "credentials", "cookie", "session", "bearer",
+}
+
+
+def _decision_memory_sanitize(value, *, depth: int = 0):
+    """Bound and redact decision evidence before it enters the audit chain/log sink."""
+    if depth >= 5:
+        return "[depth-limited]"
+    if isinstance(value, dict):
+        out = {}
+        for key, item in list(value.items())[:80]:
+            name = str(key)
+            normalized = name.strip().lower().replace("-", "_")
+            if normalized in _DECISION_MEMORY_SECRET_KEYS or any(
+                marker in normalized
+                for marker in ("token", "secret", "password", "credential", "private_key", "authorization")
+            ):
+                continue
+            out[name[:100]] = _decision_memory_sanitize(item, depth=depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_decision_memory_sanitize(item, depth=depth + 1) for item in list(value)[:50]]
+    if isinstance(value, str):
+        return value[:500]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if value is None or isinstance(value, (bool, int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        return value
+    return f"[unsupported:{type(value).__name__}]"
+
+
+def _decision_memory_pick(value: dict, keys: tuple[str, ...]) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: _decision_memory_sanitize(value[key])
+        for key in keys
+        if key in value
+    }
+
+
+def _build_adaptive_decision_memory(
+    *,
+    decision_id: str,
+    bot_id: int | None,
+    customer_id: int,
+    mode: str,
+    req,
+    result: dict,
+    cycle_started_at: datetime,
+) -> dict:
+    """Build immutable point-in-time decision evidence, excluding realized outcomes."""
+    result = result if isinstance(result, dict) else {}
+    analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else {}
+    adaptive = result.get("adaptive_model") if isinstance(result.get("adaptive_model"), dict) else {}
+    ml_signal = result.get("ml_signal") if isinstance(result.get("ml_signal"), dict) else {}
+    ai_review = result.get("ai_review") if isinstance(result.get("ai_review"), dict) else {}
+    meta_label = result.get("meta_label") if isinstance(result.get("meta_label"), dict) else {}
+    mtf_context = result.get("mtf_context") if isinstance(result.get("mtf_context"), dict) else {}
+    drift = result.get("drift") if isinstance(result.get("drift"), dict) else {}
+    derivatives = result.get("derivatives_context") if isinstance(result.get("derivatives_context"), dict) else {}
+    group_exposure = result.get("group_exposure") if isinstance(result.get("group_exposure"), dict) else {}
+    strategy_router = result.get("strategy_router") if isinstance(result.get("strategy_router"), dict) else {}
+    trade_plan = result.get("trade_plan") if isinstance(result.get("trade_plan"), dict) else {}
+    decision = str(result.get("decision") or "ERROR").upper()
+    if decision not in {"TRADE", "NO_TRADE", "ERROR"}:
+        decision = "ERROR"
+
+    market_timestamp = analysis.get("timestamp")
+    decision_context = {
+        "decision_outcome": _decision_memory_pick(
+            result, ("reason", "gate_reason", "reason_code", "error_type", "http_status")
+        ),
+        "execution_policy": _decision_memory_pick(result, ("strategy", "regime", "model_version")),
+        "analysis": _decision_memory_pick(
+            analysis,
+            ("decision", "timestamp", "side", "signal", "score", "reward_risk",
+             "reasons", "rules", "data_quality", "trade_plan"),
+        ),
+        "adaptive_model": _decision_memory_pick(
+            adaptive, ("status", "promotion", "model_version", "feature_drift", "promotion_reason", "reasons")
+        ),
+        "ml_signal": _decision_memory_pick(
+            ml_signal, ("signal", "side", "confidence", "threshold", "model_version", "status")
+        ),
+        "ai_review": _decision_memory_pick(
+            ai_review, ("safe", "configured", "status", "reason", "reasons", "reason_codes",
+                        "veto_reason", "provider_status")
+        ),
+        "meta_label": _decision_memory_pick(
+            meta_label, ("status", "take_trade", "probability", "edge_bps", "reasons")
+        ),
+        "mtf_context": _decision_memory_pick(
+            mtf_context, ("status", "confirmed", "side", "reasons")
+        ),
+        "drift": _decision_memory_pick(drift, ("status", "mean_psi", "max_psi_feature")),
+        "derivatives_context": _decision_memory_pick(derivatives, ("status", "state")),
+        "group_exposure": _decision_memory_pick(
+            group_exposure, ("allowed", "existing_notional", "proposed_notional", "reason")
+        ),
+        "strategy_router": _decision_memory_pick(
+            strategy_router, ("status", "action", "strategy", "regime", "signal", "score",
+                              "ranked", "blend", "validation_gate", "policy", "reason")
+        ),
+        "trade_plan": _decision_memory_pick(
+            trade_plan, ("side", "entry_price", "stop_loss_price", "take_profit_price",
+                         "quantity", "risk_cash", "reward_risk")
+        ),
+    }
+    stage = str(result.get("stage") or ("execution" if decision == "TRADE" else "unknown"))[:100]
+    canonical_snapshot = {
+        "decision_id": str(decision_id),
+        "bot_id": int(bot_id) if bot_id else None,
+        "customer_id": int(customer_id) if customer_id else None,
+        "cycle_started_at": cycle_started_at.isoformat(),
+        "decision": decision,
+        "stage": stage,
+        "asset": str(getattr(req, "asset", "") or ""),
+        "symbol": str(getattr(req, "symbol", "") or ""),
+        "exchange": str(getattr(req, "exchange", "") or ""),
+        "timeframe": str(getattr(req, "timeframe", "") or ""),
+        "mode": str(mode or ""),
+        "market_timestamp": str(market_timestamp) if market_timestamp is not None else None,
+        "decision_context": decision_context,
+    }
+    canonical = json.dumps(
+        canonical_snapshot, sort_keys=True, separators=(",", ":"), default=str, allow_nan=False
+    )
+    execution = result.get("execution") if isinstance(result.get("execution"), dict) else {}
+    return {
+        "schema_version": 1,
+        "record_type": "adaptive_trade_decision",
+        "decision_id": str(decision_id),
+        "bot_id": int(bot_id) if bot_id else None,
+        "customer_id": int(customer_id) if customer_id else None,
+        "asset": str(getattr(req, "asset", "") or ""),
+        "symbol": str(getattr(req, "symbol", "") or ""),
+        "exchange": str(getattr(req, "exchange", "") or ""),
+        "timeframe": str(getattr(req, "timeframe", "") or ""),
+        "mode": str(mode or ""),
+        "effective_mode": str(result.get("mode") or execution.get("mode") or "NOT_EXECUTED"),
+        "decision": decision,
+        "stage": stage,
+        "cycle_started_at": cycle_started_at.isoformat(),
+        "market_timestamp": str(market_timestamp) if market_timestamp is not None else None,
+        "market_timestamp_source": "analysis_timestamp" if market_timestamp is not None else "unavailable",
+        "snapshot_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "decision_context": decision_context,
+        # Execution acknowledgement is deliberately separated from the point-in-time
+        # signal snapshot; no realized P&L, exit prices, or future candle data is included.
+        "execution_ack": _decision_memory_pick(execution, ("trade_id", "id", "status", "mode")),
+    }
+
+
+def _adaptive_decision_external_summary(payload: dict) -> dict:
+    """Allowlist the small subset safe for external security logs."""
+    return {
+        key: payload.get(key)
+        for key in (
+            "decision_id", "bot_id", "asset", "symbol", "timeframe",
+            "decision", "stage", "market_timestamp", "snapshot_sha256",
+        )
+    }
+
+
+async def _append_adaptive_decision_audit(payload: dict) -> None:
+    """Store the full encrypted snapshot; emit only a compact summary to external logs."""
+    async with SessionLocal() as db:
+        row = await append_audit(
+            db, event="ADAPTIVE_DECISION_MEMORY", detail=payload, actor_id="adaptive-bot"
+        )
+    summary = _adaptive_decision_external_summary(payload)
+    try:
+        emit_security_audit(
+            event="ADAPTIVE_DECISION_MEMORY",
+            actor_id="adaptive-bot",
+            detail=summary,
+            event_hash=row.event_hash,
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "adaptive_decision_memory_external_audit_failed decision_id=%s",
+            payload.get("decision_id"), exc_info=True,
+        )
+
+
+async def _record_adaptive_decision_memory(
+    *,
+    decision_id: str,
+    bot_id: int | None,
+    customer_id: int,
+    mode: str,
+    req,
+    result: dict,
+    cycle_started_at: datetime,
+) -> None:
+    """Append decision/no-trade evidence without allowing audit failure to affect trading."""
+    try:
+        payload = _build_adaptive_decision_memory(
+            decision_id=decision_id,
+            bot_id=bot_id,
+            customer_id=customer_id,
+            mode=mode,
+            req=req,
+            result=result,
+            cycle_started_at=cycle_started_at,
+        )
+        await _append_adaptive_decision_audit(payload)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "adaptive_decision_memory_write_failed bot_id=%s decision_id=%s",
+            bot_id, decision_id, exc_info=True,
+        )
+
+
 async def _adaptive_bot_controller_loop():
     """Continuously run persisted customer adaptive bots on completed-bar schedules.
 
@@ -446,6 +667,8 @@ async def _adaptive_bot_controller_loop():
                 lock_key = f"adaptive-bot:{bot_id}"
                 if not await acquire_lock(lock_key, ttl_seconds=max(120, int(interval_seconds) + 120)):
                     continue
+                decision_id = None
+                cycle_started_at = datetime.now(timezone.utc)
                 try:
                     req = CustomerBotStartRequest(asset=asset, symbol=symbol, exchange=exchange, timeframe=timeframe, days=days, risk_fraction=risk_fraction, autonomous=False, interval_seconds=interval_seconds)
                     # The Redis scheduler lease can expire while a slow market/model cycle runs.
@@ -454,7 +677,20 @@ async def _adaptive_bot_controller_loop():
                     if not await refresh_lock(lock_key, ttl_seconds=max(120, int(interval_seconds) + 120)):
                         continue
                     # Reuse the authenticated execution path through a dedicated internal runner.
-                    result = await _run_persisted_adaptive_bot_cycle(bot_id, req)
+                    decision_id = uuid.uuid4().hex
+                    cycle_started_at = datetime.now(timezone.utc)
+                    result = await _run_persisted_adaptive_bot_cycle(
+                        bot_id, req, decision_id=decision_id
+                    )
+                    await _record_adaptive_decision_memory(
+                        decision_id=decision_id,
+                        bot_id=bot_id,
+                        customer_id=customer_id,
+                        mode=mode,
+                        req=req,
+                        result=result,
+                        cycle_started_at=cycle_started_at,
+                    )
                     async with SessionLocal() as db:
                         row = await db.get(AdaptiveTradingBot, bot_id)
                         if row:
@@ -469,6 +705,17 @@ async def _adaptive_bot_controller_loop():
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    if decision_id:
+                        await _record_adaptive_decision_memory(
+                            decision_id=decision_id,
+                            bot_id=bot_id,
+                            customer_id=customer_id,
+                            mode=mode,
+                            req=req,
+                            result={"decision": "ERROR", "stage": "controller_exception",
+                                    "error_type": type(exc).__name__},
+                            cycle_started_at=cycle_started_at,
+                        )
                     async with SessionLocal() as db:
                         row = await db.get(AdaptiveTradingBot, bot_id)
                         if row:
@@ -521,7 +768,9 @@ async def _fetch_customer_oanda_data(customer_id: int, req: CustomerBotStartRequ
         broker.close()
 
 
-async def _run_persisted_adaptive_bot_cycle(bot_id: int, req: CustomerBotStartRequest) -> dict:
+async def _run_persisted_adaptive_bot_cycle(
+    bot_id: int, req: CustomerBotStartRequest, *, decision_id: str | None = None
+) -> dict:
     """Run one persisted bot cycle under the same gates as customer Start Bot."""
     async with SessionLocal() as db:
         bot = (await db.execute(select(AdaptiveTradingBot).where(AdaptiveTradingBot.id == bot_id).with_for_update())).scalar_one_or_none()
@@ -655,9 +904,39 @@ async def _run_persisted_adaptive_bot_cycle(bot_id: int, req: CustomerBotStartRe
     allowed, paper_mode, gate_reason = await _adaptive_bot_runtime_gate(bot_id, profile.id, account.id)
     if not allowed:
         return {"decision": "NO_TRADE", "stage": "runtime_gate", "reason": gate_reason, "analysis": deterministic, "adaptive_model": adaptive, "ml_signal": ml_signal, "ai_review": ai_review}
-    signal = {"score": float(deterministic.get("reward_risk", 0.0)), "side": plan["side"], "deterministic_gate": deterministic, "ai_safety_review": ai_review, "customer_id": profile.id, "trading_account_id": account.id}
+    signal = {
+        "score": float(deterministic.get("reward_risk", 0.0)),
+        "side": plan["side"],
+        "strategy": "atlas-adaptive-autonomous-v1",
+        "regime": str(
+            ((deterministic.get("strategy_router") or {}).get("regime")
+             if isinstance(deterministic.get("strategy_router"), dict) else "")
+            or deterministic.get("regime") or "UNKNOWN"
+        ),
+        "asset": req.asset,
+        "bot_id": bot_id,
+        "model_version": str(ml_signal.get("model_version") or model_meta.get("model_version") or ""),
+        "decision_id": str(decision_id or ""),
+        "decision_timestamp": str(deterministic.get("timestamp") or ""),
+        "deterministic_gate": deterministic,
+        "ai_safety_review": ai_review,
+        "ml_signal": _decision_memory_pick(ml_signal, ("signal", "model_version", "confidence", "status")),
+        "customer_id": profile.id,
+        "trading_account_id": account.id,
+    }
     execution = await execute_signal(req.symbol, plan["side"], quantity, float(plan["entry_price"]), signal, req.exchange, req.timeframe, deterministic["timestamp"], force_paper=paper_mode, stop_loss_price=float(plan["stop_loss_price"]), take_profit_price=float(plan["take_profit_price"]), strategy="atlas-adaptive-autonomous-v1", asset=req.asset, customer_id=profile.id)
-    return {"decision": "TRADE", "mode": execution.get("mode"), "analysis": deterministic, "adaptive_model": adaptive, "ml_signal": ml_signal, "ai_review": ai_review, "trade_plan": {**plan, "quantity": quantity, "risk_cash": risk_cash}, "execution": execution}
+    return {
+        "decision": "TRADE",
+        "mode": execution.get("mode"),
+        "analysis": deterministic,
+        "adaptive_model": adaptive,
+        "ml_signal": ml_signal,
+        "ai_review": ai_review,
+        "strategy": "atlas-adaptive-autonomous-v1",
+        "regime": str(signal.get("regime") or "UNKNOWN"),
+        "trade_plan": {**plan, "quantity": quantity, "risk_cash": risk_cash},
+        "execution": execution,
+    }
 
 
 async def _executor_controller_loop():
@@ -3260,6 +3539,49 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             bot_id = existing_bot.id
         await db.commit()
 
+    decision_id = uuid.uuid4().hex
+    cycle_started_at = datetime.now(timezone.utc)
+
+    async def _record_customer_decision(result: dict) -> dict:
+        await _record_adaptive_decision_memory(
+            decision_id=decision_id,
+            bot_id=bot_id,
+            customer_id=profile.id,
+            mode="PAPER" if paper_mode else "LIVE",
+            req=req,
+            result=result,
+            cycle_started_at=cycle_started_at,
+        )
+        return result
+
+    execution = None
+    deterministic = {}
+    adaptive = None
+    ml_signal = None
+    ai_review = None
+
+    async def _record_customer_exception(stage: str, fallback_decision: str, exc: Exception) -> None:
+        # If the broker/order path already returned a persisted trade ID, retain the
+        # accepted-trade decision instead of misclassifying a later error as NO_TRADE.
+        if isinstance(execution, dict) and execution.get("trade_id") is not None:
+            result = {
+                "decision": "TRADE",
+                "stage": "post_execution_exception",
+                "mode": execution.get("mode"),
+                "analysis": deterministic if isinstance(deterministic, dict) else {},
+                "adaptive_model": adaptive if isinstance(adaptive, dict) else {},
+                "ml_signal": ml_signal if isinstance(ml_signal, dict) else {},
+                "ai_review": ai_review if isinstance(ai_review, dict) else {},
+                "execution": execution,
+            }
+        else:
+            result = {
+                "decision": fallback_decision,
+                "stage": stage,
+                "error_type": type(exc).__name__,
+            }
+        await _record_customer_decision(result)
+
     try:
         df = await _fetch_customer_oanda_data(profile.id, req) if req.asset in {"forex", "commodity"} else await asyncio.to_thread(market_data, req)
         data_safe, data_reasons = _market_data_quality(df, req.timeframe, req.asset)
@@ -3390,7 +3712,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
 
         if deterministic["decision"] != "TRADE":
             await _audit("CUSTOMER_BOT_NO_TRADE", {"customer_id": profile.id, "symbol": req.symbol, "reasons": deterministic["reasons"], "strategy_router": router})
-            return {"decision": "NO_TRADE", "stage": "strategy_router_or_deterministic_gate", "analysis": deterministic, "strategy_router": router, "execution": None}
+            return await _record_customer_decision({"decision": "NO_TRADE", "stage": "strategy_router_or_deterministic_gate", "analysis": deterministic, "strategy_router": router, "execution": None})
 
         plan = deterministic["trade_plan"]
         adaptive = None
@@ -3410,37 +3732,37 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             )
             await _record_model_experiment(model_file(req), req.asset, adaptive)
             if adaptive.get("status") == "CHALLENGER_REJECTED" and adaptive.get("promotion") == "NO_MODEL":
-                return {
+                return await _record_customer_decision({
                     "decision": "NO_TRADE", "stage": "adaptive_model_gate",
                     "analysis": deterministic, "adaptive_model": adaptive, "execution": None,
-                }
+                })
             if adaptive.get("status") == "CHALLENGER_REJECTED" and adaptive.get("promotion") == "RETAIN_CHAMPION":
                 # A stale champion is safer than an unvalidated challenger, but it must
                 # be treated as research-only once it exceeds the configured freshness window.
                 if not adaptive_model_status(model_file(req), adaptive_policy).get("fresh", False):
-                    return {
+                    return await _record_customer_decision({
                         "decision": "NO_TRADE", "stage": "adaptive_model_stale",
                         "analysis": deterministic, "adaptive_model": adaptive, "execution": None,
-                    }
+                    })
             try:
                 ml_signal = await asyncio.to_thread(predict_latest, df, model_file(req), settings.research_ai_threshold)
             except Exception as exc:
-                return {
+                return await _record_customer_decision({
                     "decision": "NO_TRADE", "stage": "adaptive_model_prediction",
                     "analysis": deterministic, "adaptive_model": adaptive,
-                    "ml_error": str(exc), "execution": None,
-                }
+                    "ml_error_type": type(exc).__name__, "execution": None,
+                })
             deterministic_side = str(plan["side"]) if deterministic.get("trade_plan") else "flat"
             ml_side = "buy" if ml_signal["signal"] > 0 else ("sell" if ml_signal["signal"] < 0 else "flat")
             # The learned model is an independent confirmation layer: disagreement or
             # flat prediction vetoes the deterministic setup instead of overriding risk.
             if deterministic_side != ml_side:
                 await _audit("CUSTOMER_BOT_ML_VETO", {"customer_id": profile.id, "symbol": req.symbol, "deterministic_side": deterministic_side, "ml_side": ml_side, "model_version": ml_signal.get("model_version")})
-                return {
+                return await _record_customer_decision({
                     "decision": "NO_TRADE", "stage": "adaptive_model_confirmation",
                     "analysis": deterministic, "adaptive_model": adaptive,
                     "ml_signal": ml_signal, "execution": None,
-                }
+                })
 
         packet = {
             "symbol": req.symbol, "asset": req.asset, "exchange": req.exchange, "timeframe": req.timeframe,
@@ -3460,12 +3782,12 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             )
         except asyncio.TimeoutError:
             await _audit("CUSTOMER_BOT_AI_TIMEOUT", {"customer_id": profile.id, "symbol": req.symbol, "timeout_seconds": settings.ai_strategy_provider_timeout_seconds})
-            return {"decision": "NO_TRADE", "stage": "ai_safety_timeout", "analysis": deterministic, "execution": None}
+            return await _record_customer_decision({"decision": "NO_TRADE", "stage": "ai_safety_timeout", "analysis": deterministic, "execution": None})
         if not ai_review["safe"]:
             stage = "ai_safety_not_configured" if not ai_review.get("configured", True) else "ai_safety_gate"
             await _audit("CUSTOMER_BOT_AI_NOT_CONFIGURED" if stage == "ai_safety_not_configured" else "CUSTOMER_BOT_AI_VETO",
                          {"customer_id": profile.id, "symbol": req.symbol, "ai_review": ai_review})
-            return {"decision": "NO_TRADE", "stage": stage, "analysis": deterministic, "ai_review": ai_review, "execution": None}
+            return await _record_customer_decision({"decision": "NO_TRADE", "stage": stage, "analysis": deterministic, "ai_review": ai_review, "execution": None})
 
         risk_fraction = req.risk_fraction if req.risk_fraction is not None else settings.risk_per_trade
         risk_cash = equity * risk_fraction
@@ -3489,6 +3811,8 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             "regime": str(router.get("regime") or "UNKNOWN"),
             "strategy": str(router.get("strategy") or plan.get("strategy") or "ensemble"),
             "model_version": str((adaptive or {}).get("model_version") or ""),
+            "decision_id": decision_id,
+            "decision_timestamp": str(deterministic.get("timestamp") or ""),
         }
         execution = await execute_signal(
             req.symbol, plan["side"], quantity, float(plan["entry_price"]), signal,
@@ -3524,20 +3848,27 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     row.last_error = ""
                     row.consecutive_errors = 0
                     await state_db.commit()
-        return {
+        return await _record_customer_decision({
             "decision": "TRADE", "mode": execution.get("mode"), "analysis": deterministic,
             "adaptive_model": adaptive or {"status": "DISABLED"},
             "ml_signal": ml_signal if settings.adaptive_ai_enabled else {"status": "DISABLED"},
-            "ai_review": ai_review, "trade_plan": {**plan, "quantity": quantity, "risk_cash": risk_cash},
+            "ai_review": ai_review, "strategy_router": router,
+            "strategy": str(router.get("strategy") or plan.get("strategy") or "ensemble"),
+            "regime": str(router.get("regime") or "UNKNOWN"),
+            "trade_plan": {**plan, "quantity": quantity, "risk_cash": risk_cash},
             "execution": execution,
             "autonomous_bot_id": bot_id,
             "autonomous_status": "RUNNING" if bot_id else "DISABLED",
-        }
+        })
     except RiskBlocked as e:
+        await _record_customer_exception("risk_blocked", "NO_TRADE", e)
         raise _safe_http_error(409, e, "Operation could not be completed") from e
-    except HTTPException:
+    except HTTPException as exc:
+        fallback_decision = "NO_TRADE" if int(exc.status_code) in {403, 409, 422} else "ERROR"
+        await _record_customer_exception("http_gate", fallback_decision, exc)
         raise
     except Exception as e:
+        await _record_customer_exception("customer_bot_exception", "ERROR", e)
         raise _safe_http_error(400, e, "Invalid request") from e
 
 
