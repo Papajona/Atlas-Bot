@@ -93,14 +93,12 @@ def main() -> int:
         return 2
 
     models = (
-        ("Gemini", settings.gemini_api_key,
-         sorted({settings.gemini_model, settings.gemini_strategy_model} - {""}), _check_gemini),
-        ("Groq", settings.groq_api_key,
-         sorted({settings.groq_model, settings.groq_strategy_model} - {""}), _check_groq),
+        ("Gemini", sorted({settings.gemini_model, settings.gemini_strategy_model} - {""}), _check_gemini),
+        ("Groq", sorted({settings.groq_model, settings.groq_strategy_model} - {""}), _check_groq),
     )
     checked = 0
     failures = 0
-    for provider, _key, provider_models, checker in models:
+    for provider, provider_models, checker in models:
         if not provider_models:
             print(f"AI provider verification: NOT VERIFIED ({provider} has no configured model).")
             return 2
