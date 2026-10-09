@@ -19,6 +19,7 @@ import pandas as pd
 
 from .strategy_engine import StrategyConfig, strategy_signals, next_open_returns
 from .research_validation import purged_walk_forward_splits
+from .trading_core import PROFILES
 
 STRATEGIES = ("trend", "momentum", "breakout", "mean_reversion", "ensemble")
 REGIMES = ("TREND_UP", "TREND_DOWN", "RANGE", "HIGH_VOL", "TRANSITION")
@@ -126,6 +127,21 @@ def _recent_regime_stability(regimes: pd.Series, bars: int = 3) -> tuple[str, in
             break
         stable += 1
     return current, stable
+
+
+def router_costs_bps(asset: str, crypto_bps: float = 7.5) -> float:
+    """Return configured round-trip execution costs for the asset research profile.
+
+    Commodity costs are configuration-driven; this function deliberately does not
+    assume an unverified commodity-specific 1.0 bps cost.
+    """
+    normalized = str(asset or "").strip().lower()
+    if normalized == "crypto":
+        return float(crypto_bps)
+    profile = PROFILES.get(normalized)
+    if profile is None:
+        return float(crypto_bps)
+    return float(profile.taker_bps) + float(profile.slippage_bps)
 
 
 def online_strategy_scores(
