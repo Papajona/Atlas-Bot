@@ -76,7 +76,9 @@ def test_outcome_label_uses_subsequent_completed_bars_and_configured_costs():
     assert one["baseline_bar_open"] == "2026-01-01T02:00:00+00:00"
     assert one["outcome_bar_open"] == "2026-01-01T03:00:00+00:00"
     assert one["forward_return_bps"] == pytest.approx((104.0 / 102.0 - 1.0) * 10000)
-    assert one["candidate_side_net_return_bps"] == pytest.approx(one["forward_return_bps"] - 15.0)
+    assert one["carry_bps_per_bar"] == pytest.approx(0.125)
+    assert one["carry_cost_bps"] == pytest.approx(0.125)
+    assert one["candidate_side_net_return_bps"] == pytest.approx(one["forward_return_bps"] - 15.125)
     assert len(label["outcome_window_sha256"]) == 64
     assert len(label["label_id"]) == 64
 
