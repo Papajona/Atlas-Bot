@@ -496,3 +496,62 @@ def test_tron_sweep_duplicate_callback_is_idempotent_at_state_machine_boundary()
             ))).scalar_one()
             assert row.status == "CONFIRMED"
     asyncio.run(with_database(check))
+
+
+def test_trade_learning_entry_timestamp_is_recorded_on_first_fill():
+    async def check(sessions):
+        from datetime import datetime, timezone
+
+        import app.execution as execution
+        from app.db import Trade, TradeLearningEpisode
+
+        async with sessions() as db:
+            trade = Trade(
+                signal_id="learning-entry-signal",
+                client_order_id="learning-entry-order",
+                exchange="binance",
+                symbol="BTC/USDT",
+                timeframe="1h",
+                side="buy",
+                quantity=1.0,
+                requested_quantity=1.0,
+                filled_quantity=0.0,
+                remaining_quantity=1.0,
+                requested_price=100.0,
+                mode="LIVE",
+                status="SUBMITTED",
+                reason=json.dumps({"strategy": "trend", "regime": "TREND_UP"}),
+            )
+            db.add(trade)
+            await db.flush()
+            episode = TradeLearningEpisode(
+                entry_trade_id=trade.id,
+                asset="crypto",
+                exchange="binance",
+                symbol=trade.symbol,
+                timeframe="1h",
+                side="buy",
+                strategy="trend",
+                status="OPEN",
+            )
+            db.add(episode)
+            await db.flush()
+
+            before_first_fill = datetime.now(timezone.utc)
+            await execution._apply_fill_to_position(db, trade, 0.4, 100.0)
+            await db.commit()
+            await db.refresh(episode)
+            first_entry_at = episode.entry_at
+            assert first_entry_at is not None
+            assert first_entry_at >= before_first_fill
+            assert episode.entry_quantity == pytest.approx(0.4)
+            assert episode.entry_price == pytest.approx(100.0)
+
+            await execution._apply_fill_to_position(db, trade, 1.0, 101.0)
+            await db.commit()
+            await db.refresh(episode)
+            assert episode.entry_at == first_entry_at
+            assert episode.entry_quantity == pytest.approx(1.0)
+            assert episode.entry_price == pytest.approx(100.6)
+
+    asyncio.run(with_database(check))
