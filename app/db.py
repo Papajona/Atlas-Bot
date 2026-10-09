@@ -769,6 +769,7 @@ class AdaptiveTradingBot(Base):
     strategy_switch_count: Mapped[int] = mapped_column(Integer, default=0)
     strategy_selection_json: Mapped[str] = mapped_column(EncryptedText, default="{}")
     last_error: Mapped[str] = mapped_column(Text, default="")
+    consecutive_errors: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
