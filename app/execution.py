@@ -598,18 +598,26 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         trade_context = json.loads(trade.reason or "{}")
     except Exception:
         trade_context = {}
-    live_entry_ids = select(Trade.id).where(Trade.mode == "LIVE")
-    position_query = select(Position).where(
-        Position.symbol == trade.symbol,
-        Position.exchange == trade.exchange,
-        Position.customer_id == trade.customer_id,
-        Position.entry_trade_id.in_(live_entry_ids),
-    ).with_for_update()
+    # Position rows are scoped to the mode of their entry trade. Filtering
+    # unconditionally to LIVE makes every PAPER fill look like a new position,
+    # so a paper sell cannot close its matching paper buy.
+    position_query = (
+        select(Position)
+        .join(Trade, Position.entry_trade_id == Trade.id)
+        .where(
+            Position.symbol == trade.symbol,
+            Position.exchange == trade.exchange,
+            Position.customer_id == trade.customer_id,
+            Trade.mode == trade.mode,
+        )
+        .with_for_update()
+    )
     position = (await db.execute(position_query)).scalar_one_or_none()
     realized = 0.0
     realized_strategy = str(getattr(position, "strategy", "") or trade_context.get("strategy") or "unknown") if position else str(trade_context.get("strategy") or "unknown")
     realized_regime = str(getattr(position, "entry_regime", "UNKNOWN") or trade_context.get("regime") or "UNKNOWN") if position else str(trade_context.get("regime") or "UNKNOWN")
     entry_trade_id = getattr(position, "entry_trade_id", None) if position else trade.id
+    position_flipped = False
     if not position:
         position = Position(customer_id=trade.customer_id, trading_account_id=trade.trading_account_id, exchange=trade.exchange, symbol=trade.symbol, quantity=signed,
                             average_entry_price=fill_price, mark_price=fill_price,
@@ -767,6 +775,19 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
             elif episode.entry_quantity > 0:
                 episode.status = "OPEN"
             episode.updated_at = utcnow()
+
+        # Orders that add to or close an existing position are not new position
+        # lifecycles. Preserve their decision snapshot, but exclude their order-level
+        # episode from the completed-position replay queue.
+        if trade.id != int(entry_trade_id or trade.id) and not position_flipped:
+            order_episode = (await db.execute(
+                select(TradeLearningEpisode)
+                .where(TradeLearningEpisode.entry_trade_id == trade.id)
+                .with_for_update()
+            )).scalar_one_or_none()
+            if order_episode is not None and order_episode.status != "COMPLETED":
+                order_episode.status = "NOT_POSITION_ENTRY"
+                order_episode.updated_at = utcnow()
 
         position.mark_price = fill_price
         # Bound float-drift on this running total across a position's lifetime. This doesn't
