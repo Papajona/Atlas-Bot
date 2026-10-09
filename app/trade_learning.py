@@ -91,25 +91,6 @@ def _parse_dt(value: Any) -> pd.Timestamp | None:
         return None
 
 
-def _nearest_index(df: pd.DataFrame, timestamp: Any, *, side: str = "nearest") -> int | None:
-    ts = _parse_dt(timestamp)
-    if ts is None or df.empty:
-        return None
-    idx = pd.DatetimeIndex(df.index)
-    pos = idx.searchsorted(ts)
-    if side == "left":
-        return int(max(0, min(len(idx) - 1, pos - 1)))
-    if pos <= 0:
-        return 0
-    if pos >= len(idx):
-        return len(idx) - 1
-    before = pos - 1
-    after = pos
-    if abs((idx[after] - ts).total_seconds()) < abs((ts - idx[before]).total_seconds()):
-        return int(after)
-    return int(before)
-
-
 def _configured_replay_costs_bps(asset: Any) -> float:
     """Return per-side taker-plus-slippage costs from Atlas's configured asset profile."""
     from .trading_core import PROFILES
