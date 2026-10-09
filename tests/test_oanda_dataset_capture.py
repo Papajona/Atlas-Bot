@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 from io import StringIO
 
 import pytest
@@ -84,3 +86,35 @@ def test_timestamp_normalization_handles_timezone_offsets():
     assert normalize_timestamp_utc("2025-01-01T01:00:00.250000+01:00") == (
         "2025-01-01T00:00:00.25Z"
     )
+
+
+
+def test_verifier_accepts_consistent_capture_and_rejects_tampering(tmp_path):
+    from scripts.capture_oanda_research_dataset import export_completed_candles
+    from scripts.verify_oanda_research_dataset import verify_dataset
+
+    payload = {"candles": [
+        candle("2025-01-01T00:00:00.123456789Z"),
+        candle("2025-01-01T01:00:00.000000000Z"),
+    ]}
+    raw_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    csv_bytes, timestamps = export_completed_candles(payload)
+    (tmp_path / "oanda_raw_response.json").write_bytes(raw_bytes)
+    (tmp_path / "oanda_completed_mid_candles.csv").write_bytes(csv_bytes)
+    manifest = {
+        "raw_response_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "normalized_csv_sha256": hashlib.sha256(csv_bytes).hexdigest(),
+        "completed_row_count": len(timestamps),
+        "response_candle_count_including_incomplete": len(payload["candles"]),
+        "first_completed_timestamp_utc": timestamps[0],
+        "last_completed_timestamp_utc": timestamps[-1],
+        "instrument": "EUR_USD",
+        "granularity": "H1",
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert verify_dataset(tmp_path)["status"] == "verified"
+    (tmp_path / "oanda_completed_mid_candles.csv").write_bytes(csv_bytes + b"# tampered\\n")
+    with pytest.raises(ValueError, match="CSV SHA-256"):
+        verify_dataset(tmp_path)
