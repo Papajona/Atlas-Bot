@@ -24,7 +24,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, desc, or_, func
 from sqlalchemy.exc import IntegrityError
 from .config import settings
-from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, StripeWebhookEvent, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
+from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
 from .trading_core import train_model, predict_latest, ai_walk_forward_backtest
 from .adaptive_bot import AdaptiveModelPolicy, ensure_adaptive_model, adaptive_model_status
@@ -147,7 +147,6 @@ from .schemas import (
     WithdrawalReconcileRequest,
     WithdrawalNotSentRequest,
     ModelRollbackRequest,
-    PlanChangeRequest,
     ReferralCodeRequest,
     CostEventRequest,
     RevenueEventRequest,
@@ -2170,24 +2169,6 @@ async def _subscription_entitlements(db, customer_id: int):
 
 
 
-async def _stripe_checkout(plan: str, interval: str, customer_email: str, customer_id: int, referral_discount: bool = False):
-    if not settings.stripe_enabled or not settings.stripe_secret_key:
-        raise HTTPException(503, "Stripe billing is not configured")
-    price_map = {("starter","monthly"): settings.stripe_price_starter_monthly, ("pro","monthly"): settings.stripe_price_pro_monthly, ("elite","monthly"): settings.stripe_price_elite_monthly, ("starter","annual"): settings.stripe_price_starter_annual, ("pro","annual"): settings.stripe_price_pro_annual, ("elite","annual"): settings.stripe_price_elite_annual}
-    price_id = price_map.get((plan, interval), "")
-    if not price_id:
-        raise HTTPException(503, "Stripe price is not configured for this plan")
-    import httpx
-    headers={"Authorization": f"Bearer {settings.stripe_secret_key}"}
-    data={"mode":"subscription","line_items[0][price]":price_id,"line_items[0][quantity]":"1","customer_email":customer_email,"client_reference_id":str(customer_id),"metadata[atlas_customer_id]":str(customer_id),"metadata[atlas_plan]":plan,"metadata[atlas_interval]":interval,"success_url":"/billing/success","cancel_url":"/billing/cancel"}
-    if referral_discount and settings.stripe_referral_coupon_id:
-        data["discounts[0][coupon]"] = settings.stripe_referral_coupon_id
-    async with httpx.AsyncClient(timeout=20) as client:
-        r=await client.post("https://api.stripe.com/v1/checkout/sessions",headers=headers,data=data)
-    if r.status_code >= 400:
-        raise HTTPException(502, "Payment provider could not create checkout session")
-    return r.json()
-
 
 @app.get("/", response_class=HTMLResponse)
 async def customer_portal(request: Request):
@@ -2814,18 +2795,6 @@ async def customer_billing(authorization: str | None = Header(default=None)):
         return {"plan": {"code": sub.plan_code if sub else "free", **plan}, "subscription": {"status": sub.status if sub else "active", "interval": sub.billing_interval if sub else "monthly", "period_end": sub.current_period_end.isoformat() if sub else None, "cancel_at_period_end": bool(sub.cancel_at_period_end) if sub else False}, "referral": {"code": code.code if code else None, "referred_count": len(referrals), "pending_commissions": float(commissions or 0)}}
 
 
-@app.post("/api/customer/billing/checkout")
-async def customer_billing_checkout(req: PlanChangeRequest, authorization: str | None = Header(default=None)):
-    if req.plan == "free":
-        raise HTTPException(409, "Free plan does not require checkout")
-    async with SessionLocal() as db:
-        profile, _ = await get_customer(authorization, db, require_aal2=False)
-        if not settings.stripe_enabled:
-            return {"provider":"stripe", "configured":False, "plan":req.plan, "interval":req.interval, "amount":_plan_price(req.plan, req.interval), "message":"Stripe is not configured. Set Stripe price IDs and secret in Secret Manager before accepting payments."}
-        referral = (await db.execute(select(Referral).where(Referral.referred_customer_id == profile.id))).scalar_one_or_none()
-        session = await _stripe_checkout(req.plan, req.interval, profile.email, profile.id, referral_discount=bool(referral and settings.stripe_referral_coupon_id))
-        return {"provider":"stripe", "configured":True, "checkout_url":session.get("url"), "session_id":session.get("id"), "plan":req.plan, "interval":req.interval}
-
 
 @app.post("/api/customer/referral/code")
 async def customer_referral_code(authorization: str | None = Header(default=None)):
@@ -2899,122 +2868,6 @@ async def admin_billing_margin(months: int = 1, authorization: str | None = Head
         active=int((await db.execute(select(func.count(Subscription.id)).where(Subscription.status.in_(["trialing","active","past_due"]),Subscription.plan_code!="free"))).scalar_one() or 0)
         return {"period_days":31*months,"gross_subscription_revenue":revenue,"operating_costs":costs,"referral_commissions":commissions,"contribution_profit":contribution,"contribution_margin_pct":margin,"active_paying_customers":active}
 
-
-@app.post("/api/billing/stripe/webhook")
-async def stripe_webhook(request: Request):
-    raw = await request.body()
-    if not settings.stripe_enabled or not settings.stripe_webhook_secret:
-        raise HTTPException(503, "Stripe webhook is not configured")
-    signature = request.headers.get("stripe-signature", "")
-    import time as _time, hmac as _hmac
-    parts = {}
-    for item in signature.split(','):
-        if '=' in item:
-            k, v = item.split('=', 1)
-            parts.setdefault(k, []).append(v)
-    timestamp = (parts.get('t') or ['0'])[0]
-    try:
-        ts = int(timestamp)
-    except ValueError:
-        raise HTTPException(400, "Invalid webhook signature")
-    if abs(int(_time.time()) - ts) > 300:
-        raise HTTPException(400, "Expired webhook signature")
-    signed = f"{timestamp}.{raw.decode('utf-8')}".encode()
-    expected = _hmac.new(settings.stripe_webhook_secret.encode(), signed, hashlib.sha256).hexdigest()
-    if not any(_hmac.compare_digest(expected, v) for v in parts.get('v1', [])):
-        raise HTTPException(400, "Invalid webhook signature")
-    payload = json.loads(raw.decode('utf-8'))
-    event_id = str(payload.get('id') or '').strip()
-    event_type = str(payload.get('type') or '')
-    obj = ((payload.get('data') or {}).get('object') or {})
-    if not event_id:
-        raise HTTPException(400, "Stripe event id is required")
-    metadata = obj.get('metadata') or {}
-    event_created = payload.get('created')
-    stripe_created_at = datetime.fromtimestamp(int(event_created), tz=timezone.utc) if event_created else None
-    customer_id = int(metadata.get('atlas_customer_id') or obj.get('client_reference_id') or 0)
-
-    async with SessionLocal() as db:
-        try:
-            async with db.begin_nested():
-                existing_event = (await db.execute(select(StripeWebhookEvent).where(StripeWebhookEvent.event_id == event_id))).scalar_one_or_none()
-                if existing_event:
-                    return {"received": True, "duplicate": True}
-                db.add(StripeWebhookEvent(event_id=event_id, event_type=event_type, stripe_created_at=stripe_created_at,
-                                          payload_json=json.dumps(payload, separators=(",", ":")), status="RECEIVED"))
-                await db.flush()
-        except IntegrityError:
-            return {"received": True, "duplicate": True}
-
-        if event_type in ('checkout.session.completed', 'customer.subscription.created', 'customer.subscription.updated') and customer_id:
-            plan = metadata.get('atlas_plan') or 'free'
-            interval = metadata.get('atlas_interval') or 'monthly'
-            sub_id = str(obj.get('subscription') or obj.get('id') or '')
-            sub = None
-            if sub_id:
-                sub = (await db.execute(select(Subscription).where(Subscription.provider_subscription_id == sub_id).with_for_update())).scalar_one_or_none()
-            if sub is None:
-                sub = (await db.execute(select(Subscription).where(Subscription.customer_id == customer_id, Subscription.status.in_(["trialing", "active", "past_due"])).with_for_update())).scalars().first()
-            if sub and stripe_created_at and sub.stripe_last_event_at and stripe_created_at < sub.stripe_last_event_at:
-                ev = (await db.execute(select(StripeWebhookEvent).where(StripeWebhookEvent.event_id == event_id))).scalar_one()
-                ev.status = 'STALE'
-                await db.commit()
-                return {"received": True, "stale": True}
-            now = datetime.now(timezone.utc)
-            if not sub:
-                sub = Subscription(customer_id=customer_id, plan_code=plan, billing_interval=interval, status='active', provider='stripe',
-                                   provider_customer_id=str(obj.get('customer') or ''), provider_subscription_id=sub_id,
-                                   current_period_start=now, current_period_end=now, stripe_last_event_at=stripe_created_at)
-            else:
-                sub.plan_code = plan
-                sub.billing_interval = interval
-                sub.status = 'active'
-                sub.provider = 'stripe'
-                if sub_id and event_type != 'checkout.session.completed':
-                    sub.provider_subscription_id = sub_id
-                sub.provider_customer_id = str(obj.get('customer') or sub.provider_customer_id)
-                if stripe_created_at:
-                    sub.stripe_last_event_at = stripe_created_at
-            db.add(sub)
-
-        elif event_type == 'customer.subscription.deleted':
-            sub_id = str(obj.get('id') or '')
-            sub = (await db.execute(select(Subscription).where(Subscription.provider_subscription_id == sub_id).with_for_update())).scalar_one_or_none()
-            if sub and stripe_created_at and sub.stripe_last_event_at and stripe_created_at < sub.stripe_last_event_at:
-                ev = (await db.execute(select(StripeWebhookEvent).where(StripeWebhookEvent.event_id == event_id))).scalar_one()
-                ev.status = 'STALE'
-                await db.commit()
-                return {"received": True, "stale": True}
-            if sub:
-                sub.status = 'canceled'
-                sub.cancel_at_period_end = False
-                sub.stripe_last_event_at = stripe_created_at or sub.stripe_last_event_at
-
-        elif event_type == 'invoice.paid':
-            amount = float(obj.get('amount_paid') or 0) / 100.0
-            currency = str(obj.get('currency') or 'usd').upper()
-            ref = str(obj.get('id') or '')
-            if ref and not (await db.execute(select(RevenueLedger).where(RevenueLedger.provider == 'stripe', RevenueLedger.provider_reference == ref))).scalar_one_or_none():
-                sub_id = str(obj.get('subscription') or '')
-                sub = (await db.execute(select(Subscription).where(Subscription.provider_subscription_id == sub_id))).scalar_one_or_none()
-                if sub:
-                    db.add(RevenueLedger(customer_id=sub.customer_id, subscription_id=sub.id, provider='stripe', provider_reference=ref, gross_amount=amount, net_amount=amount, currency=currency))
-                    referral = (await db.execute(select(Referral).where(Referral.referred_customer_id == sub.customer_id))).scalar_one_or_none()
-                    if referral and amount > 0:
-                        referral.status = 'QUALIFIED'
-                        referral.qualified_at = referral.qualified_at or datetime.now(timezone.utc)
-                        exists = (await db.execute(select(ReferralCommission).where(ReferralCommission.subscription_id == sub.id, ReferralCommission.referral_id == referral.id, ReferralCommission.provider_reference == ref))).scalar_one_or_none()
-                        if not exists:
-                            from datetime import timedelta
-                            commission = quantize_money(amount * (settings.billing_referral_commission_pct / 100.0))
-                            db.add(ReferralCommission(referral_id=referral.id, referral_customer_id=referral.referrer_customer_id,
-                                referred_customer_id=sub.customer_id, subscription_id=sub.id, gross_revenue=amount,
-                                commission_pct=settings.billing_referral_commission_pct, commission_amount=commission, status='ELIGIBLE',
-                                provider_reference=ref, eligible_at=datetime.now(timezone.utc) + timedelta(days=settings.billing_referral_payout_delay_days)))
-        ev = (await db.execute(select(StripeWebhookEvent).where(StripeWebhookEvent.event_id == event_id))).scalar_one()
-        ev.status = 'PROCESSED'
-        await db.commit()
-    return {"received": True}
 
 
 @app.get("/api/customer/me")
