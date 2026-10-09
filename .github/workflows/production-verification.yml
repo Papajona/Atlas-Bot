@@ -40,6 +40,9 @@ jobs:
       USDT_TRON_ENABLED: "false"
       PAPER_TRADING: "true"
       LIVE_TRADING_ENABLED: "false"
+      CUSTOMER_LIVE_TRADING_ENABLED: "false"
+      PAYOUT_LIVE_ENABLED: "false"
+      DERIV_LIVE_ENABLED: "false"
       BROKER_SANDBOX: "true"
       BACKGROUND_RECONCILIATION_ENABLED: "false"
       ADMIN_TOKEN: production-verification-only
@@ -67,7 +70,13 @@ jobs:
           assert re.fullmatch(r"sha256:[0-9a-f]{64}", settings.image_digest)
           assert settings.process_role == "api"
           assert settings.withdrawal_step_up_minutes <= 3
-          print("production configuration and release identity validated")
+          assert settings.paper_trading is True
+          assert settings.live_trading_enabled is False
+          assert settings.customer_live_trading_enabled is False
+          assert settings.payout_live_enabled is False
+          assert settings.deriv_live_enabled is False
+          assert settings.broker_sandbox is True
+          print("production configuration and release identity validated; trading remains disabled")
           PY
       - name: Wait for PostgreSQL
         run: until pg_isready -h 127.0.0.1 -p 5432 -U atlas -d atlas_production_verify; do sleep 1; done
@@ -78,10 +87,9 @@ jobs:
           python -m alembic heads
       - name: Repository secret scan
         run: python scripts/check_no_secrets.py
-      - name: AI model/provider verification (required for this gate)
+      - name: AI provider live inference verification
         env:
           # Provider credentials are GitHub Actions secrets, never repository variables.
-          # Offline tests belong in Atlas CI; this production acceptance gate fails closed.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
@@ -90,19 +98,23 @@ jobs:
           status=$?
           set -e
           if [ "$status" -eq 0 ]; then
-            echo "AI provider verification: PASS (configured provider checks succeeded)." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "AI provider verification: PASS (minimal inference requests succeeded)." | tee -a "$GITHUB_STEP_SUMMARY"
           elif [ "$status" -eq 2 ]; then
-            echo "AI provider verification: NOT VERIFIED (no provider keys were available; no provider was checked)." | tee -a "$GITHUB_STEP_SUMMARY"
-            echo "Production Verification Gate requires provider verification; refusing to accept an unverified result." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "AI provider verification: NOT VERIFIED (no provider keys supplied)." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           else
-            echo "AI provider verification: FAIL (checker exit code $status)." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "AI provider verification: FAIL (inference request failed; checker exit code $status)." | tee -a "$GITHUB_STEP_SUMMARY"
             exit "$status"
           fi
+      - name: Deriv token authentication (no trading)
+        env:
+          DERIV_APP_ID: ${{ secrets.DERIV_APP_ID }}
+          DERIV_API_TOKEN: ${{ secrets.DERIV_API_TOKEN }}
+        run: python scripts/check_deriv_auth.py
       - name: Production-oriented static and security gates
         run: |
-          python -m compileall -q app alembic
-          python -m pyflakes app
+          python -m compileall -q app alembic scripts
+          python -m pyflakes app scripts
           python -m bandit -r app -lll
           python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325
       - name: Production startup smoke test
