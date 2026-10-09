@@ -239,6 +239,29 @@ def build_decision_outcome_label(
     baseline_close = float(df.iloc[baseline_index]["close"])
     if not math.isfinite(baseline_close) or baseline_close <= 0:
         raise OutcomeLabelError("INVALID_MARKET_DATA", "Decision-candle close must be positive and finite")
+    context = decision_record.get("decision_context")
+    context = context if isinstance(context, dict) else {}
+    execution_policy = context.get("execution_policy")
+    execution_policy = execution_policy if isinstance(execution_policy, dict) else {}
+    strategy_router = context.get("strategy_router")
+    strategy_router = strategy_router if isinstance(strategy_router, dict) else {}
+    analysis_context = context.get("analysis")
+    analysis_context = analysis_context if isinstance(analysis_context, dict) else {}
+    decision_outcome = context.get("decision_outcome")
+    decision_outcome = decision_outcome if isinstance(decision_outcome, dict) else {}
+    strategy = str(
+        execution_policy.get("strategy") or strategy_router.get("strategy")
+        or analysis_context.get("strategy") or ""
+    )[:100]
+    regime = str(
+        execution_policy.get("regime") or strategy_router.get("regime")
+        or analysis_context.get("regime") or "UNKNOWN"
+    )[:100]
+    reason_code = str(
+        decision_outcome.get("reason_code") or decision_outcome.get("reason")
+        or decision_outcome.get("error_type") or ""
+    )[:200]
+
     costs_bps = _configured_costs_bps(asset)
     from .trading_core import PROFILES
     carry_bps_per_bar = float(PROFILES[asset].carry_bps_per_bar)
@@ -311,6 +334,9 @@ def build_decision_outcome_label(
         "source_decision_sha256": snapshot_sha,
         "original_decision": str(decision_record.get("decision") or "UNKNOWN").upper(),
         "decision_stage": str(decision_record.get("stage") or "unknown")[:100],
+        "decision_reason_code": reason_code,
+        "strategy": strategy,
+        "regime": regime,
         "asset": asset,
         "symbol": symbol,
         "exchange": exchange,
