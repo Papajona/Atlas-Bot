@@ -1,0 +1,65 @@
+name: OANDA Practice Dataset Capture
+
+on:
+  workflow_dispatch:
+    inputs:
+      instrument:
+        description: Exact OANDA instrument (for example EUR_USD)
+        required: true
+        type: string
+      granularity:
+        description: Exact OANDA candle granularity (for example H1)
+        required: true
+        type: string
+      from_utc:
+        description: Inclusive start timestamp, ISO-8601 with timezone
+        required: true
+        type: string
+      to_utc:
+        description: End timestamp, ISO-8601 with timezone
+        required: true
+        type: string
+      expected_rows:
+        description: Expected number of completed candles (1799 for this recovery attempt)
+        required: true
+        default: "1799"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OANDA_API_TOKEN: ${{ secrets.OANDA_API_TOKEN }}
+      CAPTURE_INSTRUMENT: ${{ inputs.instrument }}
+      CAPTURE_GRANULARITY: ${{ inputs.granularity }}
+      CAPTURE_FROM_UTC: ${{ inputs.from_utc }}
+      CAPTURE_TO_UTC: ${{ inputs.to_utc }}
+      CAPTURE_EXPECTED_ROWS: ${{ inputs.expected_rows }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install capture dependency
+        run: python -m pip install "httpx>=0.27,<1"
+      - name: Capture fixed-window OANDA practice candles
+        run: |
+          python scripts/capture_oanda_research_dataset.py \
+            --instrument "$CAPTURE_INSTRUMENT" \
+            --granularity "$CAPTURE_GRANULARITY" \
+            --from-utc "$CAPTURE_FROM_UTC" \
+            --to-utc "$CAPTURE_TO_UTC" \
+            --expected-rows "$CAPTURE_EXPECTED_ROWS" \
+            --output-dir oanda_dataset_capture
+      - name: Preserve capture files for inspection, including row-count mismatches
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oanda-practice-dataset-${{ github.run_id }}
+          path: oanda_dataset_capture/
+          if-no-files-found: warn
+          retention-days: 90
