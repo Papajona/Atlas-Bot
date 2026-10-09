@@ -31,7 +31,7 @@ from .strategy_router import STRATEGIES, classify_regime
 REPLAY_VERSION = "3.10.42-replay-v1"
 
 def learning_costs_bps(asset: str) -> float:
-    """Return configured round-trip costs for the asset's research profile."""
+    """Return configured per-side costs for the asset's research profile."""
     profile = PROFILES.get(str(asset or "").strip().lower(), PROFILES["crypto"])
     return float(profile.taker_bps) + float(profile.slippage_bps)
 
