@@ -140,3 +140,31 @@ def test_replay_costs_use_verified_asset_profile_values():
     assert _configured_replay_costs_bps("forex") == pytest.approx(1.0)
     with pytest.raises(ValueError, match="No configured replay cost profile"):
         _configured_replay_costs_bps("commodity")
+
+
+def test_replay_refuses_to_guess_missing_asset_or_timeframe():
+    df = _df()
+    episode = _episode(df)
+    episode.asset = ""
+    with pytest.raises(ValueError, match="recorded asset"):
+        replay_trade_episode(df, episode, costs_bps=1.0)
+
+    episode = _episode(df)
+    episode.timeframe = ""
+    with pytest.raises(ValueError, match="recorded timeframe"):
+        replay_trade_episode(df, episode, costs_bps=1.0)
+
+
+def test_crypto_replay_refuses_to_guess_missing_exchange(monkeypatch):
+    episode = SimpleNamespace(
+        asset="crypto",
+        exchange="",
+        symbol="BTC/USDT",
+        timeframe="1h",
+    )
+    monkeypatch.setattr(
+        "app.trade_learning.fetch_crypto",
+        lambda **kwargs: pytest.fail("fetch_crypto must not run without recorded exchange"),
+    )
+    with pytest.raises(ValueError, match="recorded exchange"):
+        _fetch_learning_data(episode)
