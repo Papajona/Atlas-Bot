@@ -50,7 +50,7 @@ Basic safety controls, risk controls, authentication, auditability, and customer
 
 ## Payments
 
-Online payments, payment-provider webhooks, checkout and recurring charges are out of scope and have been removed from the active application path. Do not configure payment-provider secrets or describe any plan as purchasable. Wallet funding and trading-customer ledger flows are separate from subscription monetization.
+Online payments, payment-provider webhooks, checkout and recurring charges are out of scope and have been removed from the active application path. Do not configure payment-provider secrets or describe any plan as purchasable. Wallet funding and trading-customer ledger flows are separate from subscription monetization. USDT/TRON payment work remains a separate change for the subscription/payment scope; this wording does not mean the existing customer USDT/TRON deposit and ledger code should be removed. The Deriv crypto-wallet payment path is not verified as implemented end to end and must not be claimed as available until its detection, authentication, reconciliation, approval, and ledger-credit workflow is proven.
 
 ## Release wording
 
