@@ -13,12 +13,20 @@ def test_public_schema_lockdown_migration_is_chained_after_current_head():
 
 def test_public_schema_lockdown_revokes_api_roles_and_enables_rls_without_permissive_policies():
     source = MIGRATION.read_text()
+    assert "REVOKE CREATE ON SCHEMA public FROM PUBLIC, anon, authenticated" in source
     assert "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC, anon, authenticated" in source
     assert "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, anon, authenticated" in source
     assert "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES" in source
     assert "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON SEQUENCES" in source
     assert "ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY" in source
     assert "CREATE POLICY" not in source.upper()
+
+
+def test_ledger_trigger_functions_have_fixed_search_paths():
+    source = MIGRATION.read_text()
+    assert "ALTER FUNCTION public.atlas_block_ledger_mutation() SET search_path = pg_catalog, public" in source
+    assert "ALTER FUNCTION public.atlas_ledger_journal_deferred_check() SET search_path = pg_catalog, public" in source
+    assert "ALTER FUNCTION public.atlas_validate_ledger_journal(integer) SET search_path = pg_catalog, public" in source
 
 
 def test_public_schema_lockdown_downgrade_does_not_restore_unsafe_access():
