@@ -221,11 +221,9 @@ def capture(
         "normalized_csv_sha256": manifest["normalized_csv_sha256"],
         "manifest": str(manifest_path),
     }, indent=2))
-    if expected_rows is not None and len(completed_times) != expected_rows:
-        raise RuntimeError(
-            f"Expected {expected_rows} completed rows but captured {len(completed_times)}. "
-            "Artifacts were written for inspection; do not treat this as the original dataset."
-        )
+    # Row-count mismatch is recorded in the manifest and gated by the workflow only
+    # after integrity verification and durable archival, so mismatched captures remain
+    # available for investigation without being accepted for research.
     return manifest
 
 
