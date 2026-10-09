@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+from decimal import Decimal
 import json
 import os
 import re
@@ -44,6 +45,35 @@ def parse_utc(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+_TIMESTAMP_RE = re.compile(
+    r"^(?P<base>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
+    r"(?:\.(?P<fraction>\d+))?(?P<zone>Z|[+-]\d{2}:\d{2})$"
+)
+
+
+def normalize_timestamp_utc(value: str) -> str:
+    """Normalize ISO-8601 timestamps to UTC without discarding fractional seconds."""
+    match = _TIMESTAMP_RE.fullmatch(value.strip())
+    if not match:
+        raise ValueError(f"Invalid ISO-8601 timestamp: {value!r}")
+    zone = "+00:00" if match.group("zone") == "Z" else match.group("zone")
+    base = datetime.fromisoformat(match.group("base") + zone).astimezone(timezone.utc)
+    fraction = (match.group("fraction") or "").rstrip("0")
+    normalized = base.strftime("%Y-%m-%dT%H:%M:%S")
+    if fraction:
+        normalized += "." + fraction
+    return normalized + "Z"
+
+
+def timestamp_order_key(value: str) -> tuple[datetime, Decimal]:
+    normalized = normalize_timestamp_utc(value)
+    match = _TIMESTAMP_RE.fullmatch(normalized)
+    assert match is not None
+    base = datetime.fromisoformat(match.group("base") + "+00:00")
+    fraction = Decimal("0." + match.group("fraction")) if match.group("fraction") else Decimal(0)
+    return base, fraction
+
+
 def canonical_utc(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -69,11 +99,12 @@ def export_completed_candles(payload: dict[str, Any]) -> tuple[bytes, list[str]]
         timestamp = candle.get("time")
         if not isinstance(timestamp, str):
             raise ValueError("Completed OANDA candle is missing its timestamp")
-        parsed = parse_utc(timestamp)
-        timestamps.append(canonical_utc(parsed))
-        # Preserve provider decimal strings; do not round through binary floats.
+        normalized_timestamp = normalize_timestamp_utc(timestamp)
+        timestamps.append(normalized_timestamp)
+        # Preserve the provider's exact timestamp text and decimal strings in the CSV.
+        # The normalized UTC form is used only for ordering and duplicate checks.
         rows.append([
-            canonical_utc(parsed),
+            timestamp,
             str(candle.get("volume", "")),
             str(mid["o"]),
             str(mid["h"]),
@@ -82,9 +113,10 @@ def export_completed_candles(payload: dict[str, Any]) -> tuple[bytes, list[str]]
         ])
     if not rows:
         raise ValueError("OANDA returned no completed candles in the requested window")
-    if len(timestamps) != len(set(timestamps)):
+    timestamp_keys = [timestamp_order_key(value) for value in timestamps]
+    if len(timestamp_keys) != len(set(timestamp_keys)):
         raise ValueError("OANDA response contains duplicate completed-candle timestamps")
-    if timestamps != sorted(timestamps):
+    if timestamp_keys != sorted(timestamp_keys):
         raise ValueError("OANDA response completed-candle timestamps are not ascending")
     from io import StringIO
     stream = StringIO(newline="")
@@ -113,13 +145,14 @@ def capture(
         raise ValueError("Instrument must use OANDA format such as EUR_USD.")
     if granularity not in GRANULARITIES:
         raise ValueError(f"Unsupported OANDA granularity: {granularity}")
-    start_dt, end_dt = parse_utc(start), parse_utc(end)
-    if start_dt >= end_dt:
+    parse_utc(start)
+    parse_utc(end)
+    if timestamp_order_key(normalize_timestamp_utc(start)) >= timestamp_order_key(normalize_timestamp_utc(end)):
         raise ValueError("from_utc must be earlier than to_utc.")
 
     request_params = {
-        "from": canonical_utc(start_dt),
-        "to": canonical_utc(end_dt),
+        "from": normalize_timestamp_utc(start),
+        "to": normalize_timestamp_utc(end),
         "granularity": granularity,
         "price": "M",
         "smooth": "false",
@@ -188,11 +221,9 @@ def capture(
         "normalized_csv_sha256": manifest["normalized_csv_sha256"],
         "manifest": str(manifest_path),
     }, indent=2))
-    if expected_rows is not None and len(completed_times) != expected_rows:
-        raise RuntimeError(
-            f"Expected {expected_rows} completed rows but captured {len(completed_times)}. "
-            "Artifacts were written for inspection; do not treat this as the original dataset."
-        )
+    # Row-count mismatch is recorded in the manifest and gated by the workflow only
+    # after integrity verification and durable archival, so mismatched captures remain
+    # available for investigation without being accepted for research.
     return manifest
 
 

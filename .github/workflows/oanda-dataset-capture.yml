@@ -55,6 +55,13 @@ jobs:
             --to-utc "$CAPTURE_TO_UTC" \
             --expected-rows "$CAPTURE_EXPECTED_ROWS" \
             --output-dir oanda_dataset_capture
+      - name: Verify raw response, CSV, row count, and SHA-256 manifest
+        if: success()
+        run: python scripts/verify_oanda_research_dataset.py --dataset-dir oanda_dataset_capture
+      - name: Fail if the completed row count differs from the expected count
+        if: success()
+        run: |
+          python -c 'import json, sys; m=json.load(open("oanda_dataset_capture/manifest.json", encoding="utf-8")); ok=m.get("row_count_matches_expectation"); print("row_count_matches_expectation =", ok); sys.exit(0 if ok is True else 1)'
       - name: Preserve capture files for inspection, including row-count mismatches
         if: always()
         uses: actions/upload-artifact@v4
