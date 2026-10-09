@@ -130,7 +130,7 @@ def _recent_regime_stability(regimes: pd.Series, bars: int = 3) -> tuple[str, in
 
 
 def router_costs_bps(asset: str, crypto_bps: float = 7.5) -> float:
-    """Return configured round-trip execution costs for the asset research profile.
+    """Return configured per-side execution costs for the asset research profile.
 
     Commodity costs are configuration-driven; this function deliberately does not
     assume an unverified commodity-specific 1.0 bps cost.
