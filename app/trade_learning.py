@@ -169,7 +169,9 @@ def replay_trade_episode(
     exit_regime = str(regimes.iloc[exit_idx]) if len(regimes) > exit_idx else "UNKNOWN"
     regime_path = [str(x) for x in regimes.iloc[entry_idx : exit_idx + 1].tolist()]
     transitions = 0
-    for a, b in zip(regime_path[:-1], regime_path[1:], strict=True):
+    # Adjacent-pair slices intentionally differ in length by one.
+    # strict=True would raise ValueError for every path with two or more bars.
+    for a, b in zip(regime_path[:-1], regime_path[1:]):
         if a != b:
             transitions += 1
 
