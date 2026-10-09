@@ -187,7 +187,7 @@ class Trade(Base):
         Index("ix_trade_status_symbol", "status", "symbol"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customer_profiles.id"), nullable=True, index=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customer_profiles.id", name="fk_trades_customer_id"), nullable=True, index=True)
     trading_account_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     signal_id: Mapped[str] = mapped_column(String(160), nullable=False)
     client_order_id: Mapped[str] = mapped_column(String(120), nullable=False)
