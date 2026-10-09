@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 from collections import defaultdict
-from datetime import timezone
 from statistics import mean, median
 from typing import Any
 
@@ -327,7 +326,6 @@ def evaluate_decision_outcome_labels(
 
 async def load_decision_outcome_labels(*, limit: int = 10_000) -> list[dict]:
     """Read encrypted outcome-label audit records without writing to the database."""
-    from sqlalchemy import select
     from .db import AuditLog, SessionLocal
 
     limit = max(1, min(100_000, int(limit)))
