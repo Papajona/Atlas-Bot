@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: public.ecr.aws/docker/library/public.ecr.aws/docker/library/postgres:15-alpine
+        image: public.ecr.aws/docker/library/postgres:15-alpine
         env: {POSTGRES_DB: atlas_test, POSTGRES_USER: atlas, POSTGRES_PASSWORD: test_password}
         ports: ["5432:5432"]
         options: >-
