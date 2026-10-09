@@ -21,12 +21,12 @@ def test_money_columns_are_numeric_storage_not_float():
     }
     assert 'class FinancialNumeric(TypeDecorator)' in source
     assert 'impl = Numeric(38, 18, asdecimal=False)' in source
-    wallet_match = re.search(r'^class Wallet\\(Base\\):', source, re.M)
+    wallet_match = re.search(r'^class Wallet\(Base\):', source, re.M)
     assert wallet_match, "missing model Wallet"
-    wallet_next = re.search(r'^class \\w+\\(Base\\):', source[wallet_match.end():], re.M)
+    wallet_next = re.search(r'^class \w+\(Base\):', source[wallet_match.end():], re.M)
     wallet_block = source[wallet_match.start():wallet_match.end()+wallet_next.start()] if wallet_next else source[wallet_match.start():]
-    assert re.search(r'^    available_balance: Mapped\\[Decimal\\] = mapped_column\\(CustodialNumeric', wallet_block, re.M), "Wallet.available_balance must use exact Decimal storage"
-    assert re.search(r'^    locked_balance: Mapped\\[Decimal\\] = mapped_column\\(CustodialNumeric', wallet_block, re.M), "Wallet.locked_balance must use exact Decimal storage"
+    assert re.search(r'^    available_balance: Mapped\[Decimal\] = mapped_column\(CustodialNumeric', wallet_block, re.M), "Wallet.available_balance must use exact Decimal storage"
+    assert re.search(r'^    locked_balance: Mapped\[Decimal\] = mapped_column\(CustodialNumeric', wallet_block, re.M), "Wallet.locked_balance must use exact Decimal storage"
     for cls, cols in targets.items():
         m = re.search(rf'^class {cls}\(Base\):', source, re.M)
         assert m, f"missing model {cls}"
