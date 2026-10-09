@@ -57,6 +57,8 @@ def _decision(timestamp=None):
         "decision_context": {
             "analysis": {"trade_plan": {"side": "buy"}},
             "trade_plan": {},
+            "strategy_router": {"strategy": "trend", "regime": "TREND_UP"},
+            "decision_outcome": {"reason": "model_veto"},
         },
     }
 
@@ -71,6 +73,9 @@ def test_outcome_label_uses_subsequent_completed_bars_and_configured_costs():
     assert label["automatic_promotion"] is False
     assert label["horizons_bars"] == list(DEFAULT_HORIZONS_BARS)
     assert label["candidate_side"] == "buy"
+    assert label["strategy"] == "trend"
+    assert label["regime"] == "TREND_UP"
+    assert label["decision_reason_code"] == "model_veto"
     assert label["cost_bps_per_side"] == pytest.approx(7.5)
     one = label["outcomes"]["1"]
     assert one["baseline_bar_open"] == "2026-01-01T02:00:00+00:00"
