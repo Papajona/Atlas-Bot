@@ -1145,10 +1145,10 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 modeled_fill = quote * (1 + profile.slippage_bps / 10_000) if side == "buy" else quote * (1 - profile.slippage_bps / 10_000)
                 fee = quantity * modeled_fill * (profile.taker_bps / 10_000)
                 t.status = "SIMULATED"
-                t.filled_quantity = quantity
-                t.remaining_quantity = 0
-                t.average_fill_price = modeled_fill
-                t.notional = quantity * modeled_fill
+                # _apply_fill_to_position computes the incremental fill as
+                # new_filled - trade.filled_quantity. Do not pre-populate the
+                # cumulative fill fields here, or the helper sees delta == 0
+                # and silently skips position and learning-episode bookkeeping.
                 t.fee = fee
                 await _apply_fill_to_position(db, t, quantity, modeled_fill)
                 if customer_id is not None and fee > 0:
