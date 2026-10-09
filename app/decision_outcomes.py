@@ -104,10 +104,12 @@ def _configured_costs_bps(asset: str) -> float:
     return costs
 
 
-def _outcome_window_sha256(df: pd.DataFrame, index: pd.DatetimeIndex, end_index: int) -> str:
+def _outcome_window_sha256(
+    df: pd.DataFrame, index: pd.DatetimeIndex, start_index: int, end_index: int
+) -> str:
     columns = [column for column in ("open", "high", "low", "close", "volume") if column in df.columns]
     rows = []
-    for position in range(end_index + 1):
+    for position in range(start_index, end_index + 1):
         row = {"timestamp": index[position].isoformat()}
         for column in columns:
             value = float(df.iloc[position][column])
@@ -265,7 +267,7 @@ def build_decision_outcome_label(
             "max_interbar_gap_seconds": max(gaps, default=0.0),
         }
 
-    outcome_window_sha = _outcome_window_sha256(df, index, last_index)
+    outcome_window_sha = _outcome_window_sha256(df, index, baseline_index, last_index)
     label_identity = {
         "decision_id": decision_id,
         "label_version": LABEL_VERSION,
