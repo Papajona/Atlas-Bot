@@ -46,7 +46,14 @@ jobs:
           python -m alembic current
           heads="$(python -m alembic heads)"
           test "$(printf '%s\n' "$heads" | grep -c '(head)')" -eq 1
-          python -m alembic check
+          if python -m alembic check; then
+            echo "Alembic ORM metadata matches the migrated PostgreSQL schema."
+          else
+            echo "=== Diagnostic only: generate the proposed schema diff, do not apply it ==="
+            python -m alembic revision --autogenerate -m diagnostic_schema_drift
+            find alembic/versions -maxdepth 1 -name '*_diagnostic_schema_drift.py' -print -exec cat {} \\;
+            exit 1
+          fi
           python -m alembic downgrade base
           python -m alembic upgrade head
       - name: Python lint (fatal static errors)
