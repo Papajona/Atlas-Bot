@@ -78,8 +78,29 @@ jobs:
           python -m alembic heads
       - name: Repository secret scan
         run: python scripts/check_no_secrets.py
-      - name: AI model/provider verification when credentials are supplied
-        run: python scripts/check_ai_models.py || test $? -eq 2
+      - name: AI model/provider verification
+        env:
+          # Set repository Actions variable REQUIRE_AI_PROVIDER_VERIFICATION=true
+          # for release-acceptance runs. Leave unset/false for offline CI.
+          REQUIRE_AI_PROVIDER_VERIFICATION: ${{ vars.REQUIRE_AI_PROVIDER_VERIFICATION }}
+        run: |
+          set +e
+          python scripts/check_ai_models.py
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "AI provider verification: PASS" | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$status" -eq 2 ]; then
+            echo "AI provider verification: NOT VERIFIED (no configured provider keys; no provider was checked)." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "::warning::AI provider verification is NOT VERIFIED because no provider keys were configured."
+            if [ "${REQUIRE_AI_PROVIDER_VERIFICATION,,}" = "true" ]; then
+              echo "Required AI provider verification cannot be skipped for this run." | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          else
+            echo "AI provider verification: FAIL (checker exit code $status)." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit "$status"
+          fi
       - name: Production-oriented static and security gates
         run: |
           python -m compileall -q app alembic
