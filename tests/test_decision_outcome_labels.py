@@ -47,6 +47,8 @@ def _decision(timestamp=None):
         "decision_id": "decision-001",
         "snapshot_sha256": "a" * 64,
         "decision": "NO_TRADE",
+        "mode": "PAPER",
+        "effective_mode": "NOT_EXECUTED",
         "stage": "adaptive_model_confirmation",
         "asset": "crypto",
         "symbol": "BTC/USDT:USDT",
