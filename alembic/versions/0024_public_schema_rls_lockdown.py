@@ -14,6 +14,9 @@ depends_on = None
 
 
 def upgrade():
+    # Prevent public API roles from creating objects in the exposed schema.
+    op.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC, anon, authenticated")
+
     # Revoke existing direct access, including grants inherited from PUBLIC.
     op.execute("REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC, anon, authenticated")
     op.execute("REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, anon, authenticated")
@@ -21,6 +24,12 @@ def upgrade():
     # Close default grants for objects created by the role running this migration.
     op.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC, anon, authenticated")
     op.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC, anon, authenticated")
+
+    # Fix the three mutable-search_path warnings found by the Supabase advisor.
+    # Functions are SECURITY INVOKER in the audited database.
+    op.execute("ALTER FUNCTION public.atlas_block_ledger_mutation() SET search_path = pg_catalog, public")
+    op.execute("ALTER FUNCTION public.atlas_ledger_journal_deferred_check() SET search_path = pg_catalog, public")
+    op.execute("ALTER FUNCTION public.atlas_validate_ledger_journal(integer) SET search_path = pg_catalog, public")
 
     # No generic policies: customer ownership and finance permissions require
     # table-specific authorization rather than a blanket auth.uid() rule.
