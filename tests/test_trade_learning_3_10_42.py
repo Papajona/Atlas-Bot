@@ -120,7 +120,7 @@ def test_short_episode_without_completed_post_entry_candles_is_rejected():
     ep = _episode(
         df,
         entry_at=(df.index[450] + pd.Timedelta(minutes=5)).to_pydatetime(),
-        exit_at=(df.index[450] + pd.Timedelta(minutes=35)).to_pydatetime(),
+        exit_at=(df.index[451] + pd.Timedelta(minutes=5)).to_pydatetime(),
     )
     with pytest.raises(ValueError, match="no fully completed post-entry candles"):
         replay_trade_episode(df, ep, cfg=StrategyConfig())
