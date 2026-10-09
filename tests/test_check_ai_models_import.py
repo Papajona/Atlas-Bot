@@ -29,5 +29,5 @@ def test_ai_model_checker_runs_from_outside_repository_without_provider_keys(tmp
     )
 
     assert result.returncode == 2, result.stdout + result.stderr
-    assert "No provider keys set; nothing checked." in result.stdout
+    assert "AI provider verification: NOT VERIFIED (missing GEMINI_API_KEY, GROQ_API_KEY)." in result.stdout
     assert "ModuleNotFoundError" not in result.stderr
