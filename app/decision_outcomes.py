@@ -225,10 +225,13 @@ def build_decision_outcome_label(
     if not math.isfinite(baseline_close) or baseline_close <= 0:
         raise OutcomeLabelError("INVALID_MARKET_DATA", "Decision-candle close must be positive and finite")
     costs_bps = _configured_costs_bps(asset)
+    from .trading_core import PROFILES
+    carry_bps_per_bar = float(PROFILES[asset].carry_bps_per_bar)
+    if not math.isfinite(carry_bps_per_bar) or carry_bps_per_bar < 0:
+        raise OutcomeLabelError("INVALID_COST_PROFILE", f"Invalid configured carry for asset {asset!r}")
     side = _candidate_side(decision_record)
 
     horizon_results = {}
-    max_elapsed = 0.0
     for horizon in horizons:
         outcome_index = baseline_index + horizon
         outcome_close = float(df.iloc[outcome_index]["close"])
@@ -237,16 +240,16 @@ def build_decision_outcome_label(
         forward_bps = (outcome_close / baseline_close - 1.0) * 10_000.0
         short_bps = (baseline_close / outcome_close - 1.0) * 10_000.0
         elapsed_seconds = float((index[outcome_index] - index[baseline_index]).total_seconds())
-        max_elapsed = max(max_elapsed, elapsed_seconds)
         gaps = [
             float((index[position] - index[position - 1]).total_seconds())
             for position in range(baseline_index + 1, outcome_index + 1)
         ]
         candidate_net = None
+        carry_cost_bps = horizon * carry_bps_per_bar
         if side == "buy":
-            candidate_net = forward_bps - 2.0 * costs_bps
+            candidate_net = forward_bps - 2.0 * costs_bps - carry_cost_bps
         elif side == "sell":
-            candidate_net = short_bps - 2.0 * costs_bps
+            candidate_net = short_bps - 2.0 * costs_bps - carry_cost_bps
         horizon_results[str(horizon)] = {
             "status": "VALID",
             "horizon_bars": horizon,
@@ -258,8 +261,10 @@ def build_decision_outcome_label(
             "forward_return_bps": float(forward_bps),
             "long_gross_return_bps": float(forward_bps),
             "short_gross_return_bps": float(short_bps),
-            "long_net_return_bps": float(forward_bps - 2.0 * costs_bps),
-            "short_net_return_bps": float(short_bps - 2.0 * costs_bps),
+            "long_net_return_bps": float(forward_bps - 2.0 * costs_bps - carry_cost_bps),
+            "short_net_return_bps": float(short_bps - 2.0 * costs_bps - carry_cost_bps),
+            "carry_bps_per_bar": float(carry_bps_per_bar),
+            "carry_cost_bps": float(carry_cost_bps),
             "candidate_side": side,
             "candidate_side_net_return_bps": float(candidate_net) if candidate_net is not None else None,
             "cost_bps_per_side": float(costs_bps),
@@ -302,6 +307,7 @@ def build_decision_outcome_label(
         "horizon_unit": "subsequent_observed_completed_candles",
         "cost_source": "configured_asset_profile",
         "cost_bps_per_side": float(costs_bps),
+        "carry_bps_per_bar": float(carry_bps_per_bar),
         "outcomes": horizon_results,
         "outcome_window_sha256": outcome_window_sha,
         "data_provenance": {
