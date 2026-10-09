@@ -8,6 +8,13 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+# Direct execution (python scripts/check_ai_models.py) puts scripts/, not the
+# repository root, at sys.path[0]. Add the root so "app.config" resolves in CI.
+_REPOSITORY_ROOT = str(Path(__file__).resolve().parents[1])
+if _REPOSITORY_ROOT not in sys.path:
+    sys.path.insert(0, _REPOSITORY_ROOT)
 
 from app.config import settings
 
