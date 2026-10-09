@@ -278,11 +278,6 @@ class ModelRollbackRequest(BaseModel):
     timeframe: str = Field(default="1h", min_length=2, max_length=10)
 
 
-class PlanChangeRequest(BaseModel):
-    plan: str = Field(pattern="^(free|starter|pro|elite)$")
-    interval: str = Field(default="monthly", pattern="^(monthly|annual)$")
-
-
 class ReferralCodeRequest(BaseModel):
     code: str | None = Field(default=None, min_length=4, max_length=40)
 
