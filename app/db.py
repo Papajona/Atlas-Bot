@@ -294,7 +294,7 @@ class AuditChainState(Base):
     __tablename__ = "audit_chain_state"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     last_hash: Mapped[str] = mapped_column(String(64), default="")
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=utcnow, onupdate=utcnow)
 
 
 class AdminRole(Base):
