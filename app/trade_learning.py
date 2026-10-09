@@ -74,7 +74,7 @@ def _post_entry_completed_indices(
     return [int(i) for i in np.flatnonzero(eligible)]
 
 
-REPLAY_VERSION = "3.10.42-replay-v1"
+REPLAY_VERSION = "3.10.42-replay-v2-closed-bar"
 
 
 def _parse_dt(value: Any) -> pd.Timestamp | None:
@@ -292,7 +292,13 @@ async def process_trade_learning_episodes(*, limit: int = 10, lookback_days: int
         rows = (await db.execute(
             select(TradeLearningEpisode)
             .where(TradeLearningEpisode.status == "COMPLETED")
-            .where(TradeLearningEpisode.replay_status.in_(["PENDING", "ERROR"]))
+            .where(
+                TradeLearningEpisode.replay_status.in_(["PENDING", "ERROR"])
+                | (
+                    TradeLearningEpisode.replay_status.in_(["COMPLETE", "UNSUPPORTED"])
+                    & (TradeLearningEpisode.replay_version != REPLAY_VERSION)
+                )
+            )
             .order_by(TradeLearningEpisode.exit_at.asc())
             .limit(max(1, int(limit)))
         )).scalars().all()
@@ -340,6 +346,7 @@ async def process_trade_learning_episodes(*, limit: int = 10, lookback_days: int
                 ep = await db.get(TradeLearningEpisode, episode.id, with_for_update=True)
                 if ep:
                     ep.replay_status = "UNSUPPORTED"
+                    ep.replay_version = REPLAY_VERSION
                     ep.replay_error = str(exc)
                     ep.updated_at = datetime.now(timezone.utc)
                     await db.commit()
