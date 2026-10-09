@@ -280,6 +280,7 @@ class Position(Base):
 
 class AuditLog(Base):
     __tablename__ = "audit_log"
+    __table_args__ = (Index("ix_audit_log_created_event", "created_at", "event"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     event: Mapped[str] = mapped_column(String(100))
     detail: Mapped[str] = mapped_column(EncryptedText, default="")
@@ -462,8 +463,12 @@ class CustomerProfile(Base):
 
 class Wallet(Base):
     __tablename__ = "wallets"
-    __table_args__ = (UniqueConstraint("customer_id", "currency", name="uq_wallet_customer_currency"),
-        UniqueConstraint("id", "customer_id", name="uq_wallet_id_customer"),)
+    __table_args__ = (
+        UniqueConstraint("customer_id", "currency", name="uq_wallet_customer_currency"),
+        UniqueConstraint("id", "customer_id", name="uq_wallet_id_customer"),
+        Index("ix_wallets_deposit_address", "deposit_address"),
+        Index("ix_wallets_derivation_path", "derivation_path"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     currency: Mapped[str] = mapped_column(String(20), nullable=False)
