@@ -15,4 +15,4 @@ def test_release_identity_is_consistent_across_runtime_and_android():
 
 def test_replay_schema_version_remains_independent():
     replay = (ROOT / "app/trade_learning.py").read_text()
-    assert 'REPLAY_VERSION = "3.10.42-replay-v1"' in replay
+    assert 'REPLAY_VERSION = "3.10.42-replay-v2-closed-bar"' in replay

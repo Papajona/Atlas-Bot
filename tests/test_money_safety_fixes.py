@@ -496,3 +496,118 @@ def test_tron_sweep_duplicate_callback_is_idempotent_at_state_machine_boundary()
             ))).scalar_one()
             assert row.status == "CONFIRMED"
     asyncio.run(with_database(check))
+
+
+def test_trade_learning_entry_timestamp_is_recorded_on_first_fill():
+    async def check(sessions):
+        from datetime import datetime, timezone
+
+        import app.execution as execution
+        from app.db import Trade, TradeLearningEpisode
+
+        async with sessions() as db:
+            trade = Trade(
+                signal_id="learning-entry-signal",
+                client_order_id="learning-entry-order",
+                exchange="binance",
+                symbol="BTC/USDT",
+                timeframe="1h",
+                side="buy",
+                quantity=1.0,
+                requested_quantity=1.0,
+                filled_quantity=0.0,
+                remaining_quantity=1.0,
+                requested_price=100.0,
+                mode="LIVE",
+                status="SUBMITTED",
+                reason=json.dumps({"strategy": "trend", "regime": "TREND_UP"}),
+            )
+            db.add(trade)
+            await db.flush()
+            episode = TradeLearningEpisode(
+                entry_trade_id=trade.id,
+                asset="crypto",
+                exchange="binance",
+                symbol=trade.symbol,
+                timeframe="1h",
+                side="buy",
+                strategy="trend",
+                status="OPEN",
+            )
+            db.add(episode)
+            await db.flush()
+
+            before_first_fill = datetime.now(timezone.utc)
+            await execution._apply_fill_to_position(db, trade, 0.4, 100.0)
+            await db.commit()
+            await db.refresh(episode)
+            first_entry_at = episode.entry_at
+            assert first_entry_at is not None
+            comparable_entry_at = (
+                first_entry_at.replace(tzinfo=timezone.utc)
+                if first_entry_at.tzinfo is None
+                else first_entry_at
+            )
+            assert comparable_entry_at >= before_first_fill
+            assert episode.entry_quantity == pytest.approx(0.4)
+            assert episode.entry_price == pytest.approx(100.0)
+
+            await execution._apply_fill_to_position(db, trade, 1.0, 101.0)
+            await db.commit()
+            await db.refresh(episode)
+            assert episode.entry_at == first_entry_at
+            assert episode.entry_quantity == pytest.approx(1.0)
+            assert episode.entry_price == pytest.approx(100.6)
+
+    asyncio.run(with_database(check))
+
+
+def test_old_completed_learning_replays_are_reprocessed_after_version_change(monkeypatch):
+    async def check(sessions):
+        from datetime import datetime, timezone
+
+        import app.db as db_module
+        import app.trade_learning as learning
+        from app.db import TradeLearningEpisode
+
+        monkeypatch.setattr(db_module, "SessionLocal", sessions)
+        monkeypatch.setattr(
+            learning, "_fetch_learning_data",
+            lambda episode, days=365: None,
+        )
+        monkeypatch.setattr(
+            learning, "replay_trade_episode",
+            lambda df, episode, costs_bps=7.5: {
+                "bars_held": 3,
+                "mfe_bps": 10.0,
+                "mae_bps": -5.0,
+                "market_flow": {"bars": 3},
+                "counterfactuals": [],
+            },
+        )
+        async with sessions() as db:
+            episode = TradeLearningEpisode(
+                entry_trade_id=987654,
+                status="COMPLETED",
+                replay_status="COMPLETE",
+                replay_version="3.10.42-replay-v1",
+                entry_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                exit_at=datetime(2026, 1, 1, 3, tzinfo=timezone.utc),
+                entry_price=100.0,
+                exit_price=101.0,
+                entry_quantity=1.0,
+            )
+            db.add(episode)
+            await db.commit()
+            episode_id = episode.id
+
+        result = await learning.process_trade_learning_episodes(limit=10)
+        assert result["processed"] == 1
+        async with sessions() as db:
+            updated = await db.get(TradeLearningEpisode, episode_id)
+            assert updated is not None
+            assert updated.replay_status == "COMPLETE"
+            assert updated.replay_version == learning.REPLAY_VERSION
+            assert updated.mfe_bps == pytest.approx(10.0)
+
+    asyncio.run(with_database(check))

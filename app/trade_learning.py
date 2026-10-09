@@ -27,7 +27,54 @@ from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
 from .strategy_engine import StrategyConfig, strategy_signals
 from .strategy_router import STRATEGIES, classify_regime
 
-REPLAY_VERSION = "3.10.42-replay-v1"
+
+def _timeframe_delta(timeframe: Any) -> pd.Timedelta:
+    """Parse the candle interval used by the OHLCV fetchers."""
+    try:
+        delta = pd.Timedelta(str(timeframe))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Unsupported replay timeframe: {timeframe!r}") from exc
+    if pd.isna(delta) or delta <= pd.Timedelta(0):
+        raise ValueError(f"Unsupported replay timeframe: {timeframe!r}")
+    return delta
+
+
+def _last_completed_bar_index(
+    df: pd.DataFrame, timestamp: Any, timeframe: Any
+) -> int | None:
+    """Return the last bar whose open time plus timeframe is no later than timestamp.
+
+    Atlas OHLCV fetchers index candles by their open timestamp. A candle is not
+    available to a decision until its full interval has elapsed.
+    """
+    ts = _parse_dt(timestamp)
+    if ts is None or df.empty:
+        return None
+    idx = pd.DatetimeIndex(pd.to_datetime(df.index, utc=True))
+    if not idx.is_monotonic_increasing or idx.has_duplicates:
+        raise ValueError("Replay data index must be strictly increasing and unique")
+    delta = _timeframe_delta(timeframe)
+    completed = np.flatnonzero((idx + delta) <= ts)
+    return int(completed[-1]) if len(completed) else None
+
+
+def _post_entry_completed_indices(
+    df: pd.DataFrame, entry_at: Any, exit_at: Any, timeframe: Any
+) -> list[int]:
+    """Select full candles starting at/after entry and closing by exit."""
+    entry_ts = _parse_dt(entry_at)
+    exit_ts = _parse_dt(exit_at)
+    if entry_ts is None or exit_ts is None or exit_ts <= entry_ts or df.empty:
+        return []
+    idx = pd.DatetimeIndex(pd.to_datetime(df.index, utc=True))
+    if not idx.is_monotonic_increasing or idx.has_duplicates:
+        raise ValueError("Replay data index must be strictly increasing and unique")
+    delta = _timeframe_delta(timeframe)
+    eligible = (idx >= entry_ts) & ((idx + delta) <= exit_ts)
+    return [int(i) for i in np.flatnonzero(eligible)]
+
+
+REPLAY_VERSION = "3.10.42-replay-v2-closed-bar"
 
 
 def _parse_dt(value: Any) -> pd.Timestamp | None:
@@ -44,23 +91,18 @@ def _parse_dt(value: Any) -> pd.Timestamp | None:
         return None
 
 
-def _nearest_index(df: pd.DataFrame, timestamp: Any, *, side: str = "nearest") -> int | None:
-    ts = _parse_dt(timestamp)
-    if ts is None or df.empty:
-        return None
-    idx = pd.DatetimeIndex(df.index)
-    pos = idx.searchsorted(ts)
-    if side == "left":
-        return int(max(0, min(len(idx) - 1, pos - 1)))
-    if pos <= 0:
-        return 0
-    if pos >= len(idx):
-        return len(idx) - 1
-    before = pos - 1
-    after = pos
-    if abs((idx[after] - ts).total_seconds()) < abs((ts - idx[before]).total_seconds()):
-        return int(after)
-    return int(before)
+def _configured_replay_costs_bps(asset: Any) -> float:
+    """Return per-side taker-plus-slippage costs from Atlas's configured asset profile."""
+    from .trading_core import PROFILES
+
+    normalized = str(asset or "").strip().lower()
+    profile = PROFILES.get(normalized)
+    if profile is None:
+        raise ValueError(f"No configured replay cost profile for asset: {normalized or 'unknown'}")
+    costs = float(profile.taker_bps) + float(profile.slippage_bps)
+    if not isfinite(costs) or costs < 0:
+        raise ValueError(f"Invalid configured replay costs for asset: {normalized}")
+    return costs
 
 
 def _directional_bps(side: str, entry: float, exit_price: float) -> float:
@@ -75,7 +117,7 @@ def replay_trade_episode(
     episode: "TradeLearningEpisode",
     *,
     cfg: StrategyConfig | None = None,
-    costs_bps: float = 7.5,
+    costs_bps: float | None = None,
 ) -> dict[str, Any]:
     """Replay one completed episode without changing the live decision state.
 
@@ -88,13 +130,36 @@ def replay_trade_episode(
     These are counterfactual research measurements, not executable orders.
     """
     cfg = cfg or StrategyConfig()
-    entry_idx = _nearest_index(df, episode.entry_at, side="nearest")
-    exit_idx = _nearest_index(df, episode.exit_at, side="nearest")
+    asset = str(getattr(episode, "asset", "") or "").strip().lower()
+    if not asset:
+        raise ValueError("Replay requires the episode's recorded asset; refusing to assume crypto")
+    timeframe = str(getattr(episode, "timeframe", "") or "").strip()
+    if not timeframe:
+        raise ValueError("Replay requires the episode's recorded timeframe; refusing to assume 1h")
+    configured_costs = costs_bps is None
+    if configured_costs:
+        costs_bps = _configured_replay_costs_bps(asset)
+    else:
+        costs_bps = float(costs_bps)
+        if not isfinite(costs_bps) or costs_bps < 0:
+            raise ValueError("Replay costs must be finite and non-negative")
+    entry_idx = _last_completed_bar_index(df, episode.entry_at, timeframe)
+    exit_idx = _last_completed_bar_index(df, episode.exit_at, timeframe)
+    outcome_indices = _post_entry_completed_indices(
+        df, episode.entry_at, episode.exit_at, timeframe
+    )
     if entry_idx is None or exit_idx is None or exit_idx <= entry_idx:
-        raise ValueError("Replay requires a completed episode with valid entry and exit timestamps")
+        raise ValueError(
+            "Replay requires completed candles before entry and exit timestamps"
+        )
+    if not outcome_indices or outcome_indices[-1] > exit_idx:
+        raise ValueError(
+            "Replay has no fully completed post-entry candles at this timeframe; "
+            "intrabar counterfactual replay is unsupported"
+        )
 
-    # Never use bars prior to entry for the outcome window itself. Indicators may
-    # legitimately use earlier history through rolling windows.
+    # Signals are anchored to the last candle fully closed by entry. Outcome
+    # metrics use only full candles that opened at/after entry and closed by exit.
     entry_row = df.iloc[entry_idx]
     exit_row = df.iloc[exit_idx]
     entry_price = float(episode.entry_price or entry_row["close"])
@@ -102,14 +167,16 @@ def replay_trade_episode(
     if not all(isfinite(x) and x > 0 for x in (entry_price, exit_price)):
         raise ValueError("Replay prices must be positive and finite")
 
-    window = df.iloc[entry_idx : exit_idx + 1].copy()
-    signals = strategy_signals(df.iloc[: exit_idx + 1], cfg, asset=episode.asset or "crypto")
-    regimes = classify_regime(df.iloc[: exit_idx + 1], asset=episode.asset or "crypto")
+    window = df.iloc[outcome_indices].copy()
+    signals = strategy_signals(df.iloc[: exit_idx + 1], cfg, asset=asset)
+    regimes = classify_regime(df.iloc[: exit_idx + 1], asset=asset)
     entry_regime = str(regimes.iloc[entry_idx]) if len(regimes) > entry_idx else "UNKNOWN"
     exit_regime = str(regimes.iloc[exit_idx]) if len(regimes) > exit_idx else "UNKNOWN"
     regime_path = [str(x) for x in regimes.iloc[entry_idx : exit_idx + 1].tolist()]
     transitions = 0
-    for a, b in zip(regime_path[:-1], regime_path[1:], strict=True):
+    # Adjacent-pair slices intentionally differ in length by one.
+    # strict=True would raise ValueError for every path with two or more bars.
+    for a, b in zip(regime_path[:-1], regime_path[1:]):
         if a != b:
             transitions += 1
 
@@ -134,15 +201,20 @@ def replay_trade_episode(
 
         # Same future window, strategy policy held from one bar after entry. This
         # prevents the entry bar's close from becoming an execution input.
-        subset = df.iloc[entry_idx : exit_idx + 1]
-        strat_sig = signals[name].iloc[entry_idx : exit_idx + 1].fillna(0.0)
-        vol = signals["realized_vol"].iloc[entry_idx : exit_idx + 1]
+        subset = window
+        strat_sig = signals[name].fillna(0.0)
+        vol = signals["realized_vol"]
         lev = (cfg.target_vol_annual / vol.replace(0, np.nan)).clip(upper=cfg.max_leverage)
-        pos = (strat_sig * lev).clip(-cfg.max_leverage, cfg.max_leverage)
-        pos = pos.where(strat_sig.abs() >= cfg.signal_threshold, 0.0).shift(1).fillna(0.0)
-        returns = subset["close"].pct_change().fillna(0.0)
+        pos_all = (strat_sig * lev).clip(-cfg.max_leverage, cfg.max_leverage)
+        pos_all = pos_all.where(strat_sig.abs() >= cfg.signal_threshold, 0.0).shift(1).fillna(0.0)
+        pos = pos_all.iloc[outcome_indices]
+        returns = subset["close"].pct_change()
+        returns.iloc[0] = float(subset["close"].iloc[0]) / entry_price - 1.0
+        returns = returns.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         turnover = pos.diff().abs().fillna(pos.abs())
         net = pos * returns - turnover * float(costs_bps) / 10000.0
+        # Close any remaining simulated position at the end of the comparison window.
+        net.iloc[-1] -= abs(float(pos.iloc[-1])) * float(costs_bps) / 10000.0
         policy_bps = float(((1.0 + net).prod() - 1.0) * 10000.0)
         counterfactuals.append({
             "strategy": name,
@@ -150,8 +222,10 @@ def replay_trade_episode(
             "entry_side": cf_side,
             "entry_decision_return_bps": float(entry_bps),
             "policy_window_return_bps": policy_bps,
-            "confidence": "HIGH" if len(window) >= 5 and df.index.is_monotonic_increasing else "MEDIUM",
-            "comparison_scope": "same_entry_and_exit_window; strategy_policy_replay",
+            # Bar count alone is not sufficient evidence for HIGH confidence.
+            "confidence": "MEDIUM" if len(window) >= 5 else "LOW",
+            "confidence_basis": "heuristic_bar_count_only_not_statistical",
+            "comparison_scope": "completed_post_entry_bars; strategy_policy_replay",
         })
 
     actual_directional_bps = _directional_bps(episode.side, entry_price, exit_price)
@@ -164,7 +238,19 @@ def replay_trade_episode(
         "replay_version": REPLAY_VERSION,
         "entry_index": int(entry_idx),
         "exit_index": int(exit_idx),
-        "bars_held": int(len(window) - 1),
+        "bars_held": int(len(window)),
+        "costs_bps_per_side": float(costs_bps),
+        "cost_source": "configured_asset_profile" if configured_costs else "explicit_test_or_research_override",
+        "bar_alignment": {
+            "timestamp_semantics": "candle_open",
+            "timeframe": timeframe,
+            "decision_bar_open": str(df.index[entry_idx]),
+            "outcome_first_bar_open": str(window.index[0]),
+            "outcome_last_bar_open": str(window.index[-1]),
+            "completed_candles_only": True,
+            "partial_entry_exit_candles_excluded": True,
+        },
+        "data_provenance": dict(df.attrs.get("data_provenance") or {}),
         "entry_regime": entry_regime,
         "exit_regime": exit_regime,
         "regime_transitions": int(transitions),
@@ -182,28 +268,40 @@ def replay_trade_episode(
             "exit_regime": exit_regime,
             "regime_path": regime_path[-24:],
             "regime_transitions": transitions,
-            "bars": len(window) - 1,
+            "bars": len(window),
         },
         "future_data_used_only_for_post_trade_learning": True,
     }
 
 
 def _fetch_learning_data(episode: TradeLearningEpisode, *, days: int = 365) -> pd.DataFrame:
-    asset = str(episode.asset or "crypto").lower()
+    asset = str(episode.asset or "").strip().lower()
+    timeframe = str(episode.timeframe or "").strip()
+    if not asset:
+        raise ValueError("Learning-data fetch requires the episode's recorded asset")
+    if not timeframe:
+        raise ValueError("Learning-data fetch requires the episode's recorded timeframe")
+    if not str(episode.symbol or "").strip():
+        raise ValueError("Learning-data fetch requires the episode's recorded symbol")
     if asset == "crypto":
+        exchange = str(episode.exchange or "").strip().lower()
+        if not exchange:
+            raise ValueError("Crypto replay requires the episode's recorded exchange")
         return fetch_crypto(
             symbol=episode.symbol,
-            exchange=episode.exchange or "bybit",
-            timeframe=episode.timeframe or "1h",
+            exchange=exchange,
+            timeframe=timeframe,
             days=days,
             closed_only=True,
         )
     if asset == "forex":
-        if str(episode.exchange or "").lower() == "oanda":
-            return fetch_forex_oanda(symbol=episode.symbol, timeframe=episode.timeframe or "1h", days=days)
-        return fetch_forex(symbol=episode.symbol, timeframe=episode.timeframe or "1h", days=days)
+        if str(episode.exchange or "").strip().lower() == "oanda":
+            return fetch_forex_oanda(symbol=episode.symbol, timeframe=timeframe, days=days)
+        return fetch_forex(symbol=episode.symbol, timeframe=timeframe, days=days)
     if asset == "commodity":
-        return fetch_forex(symbol=episode.symbol, timeframe=episode.timeframe or "1h", days=days)
+        raise ValueError(
+            "Commodity replay is unsupported: this branch has no verified commodity data adapter"
+        )
     raise ValueError(f"Unsupported replay asset: {asset}")
 
 
@@ -214,7 +312,13 @@ async def process_trade_learning_episodes(*, limit: int = 10, lookback_days: int
         rows = (await db.execute(
             select(TradeLearningEpisode)
             .where(TradeLearningEpisode.status == "COMPLETED")
-            .where(TradeLearningEpisode.replay_status.in_(["PENDING", "ERROR"]))
+            .where(
+                TradeLearningEpisode.replay_status.in_(["PENDING", "ERROR"])
+                | (
+                    TradeLearningEpisode.replay_status.in_(["COMPLETE", "UNSUPPORTED"])
+                    & (TradeLearningEpisode.replay_version != REPLAY_VERSION)
+                )
+            )
             .order_by(TradeLearningEpisode.exit_at.asc())
             .limit(max(1, int(limit)))
         )).scalars().all()
@@ -225,7 +329,7 @@ async def process_trade_learning_episodes(*, limit: int = 10, lookback_days: int
     for episode in rows:
         try:
             df = await asyncio.to_thread(_fetch_learning_data, episode, days=lookback_days)
-            result = await asyncio.to_thread(replay_trade_episode, df, episode, costs_bps=7.5)
+            result = await asyncio.to_thread(replay_trade_episode, df, episode)
             async with SessionLocal() as db:
                 ep = await db.get(TradeLearningEpisode, episode.id, with_for_update=True)
                 if not ep:
@@ -262,6 +366,7 @@ async def process_trade_learning_episodes(*, limit: int = 10, lookback_days: int
                 ep = await db.get(TradeLearningEpisode, episode.id, with_for_update=True)
                 if ep:
                     ep.replay_status = "UNSUPPORTED"
+                    ep.replay_version = REPLAY_VERSION
                     ep.replay_error = str(exc)
                     ep.updated_at = datetime.now(timezone.utc)
                     await db.commit()

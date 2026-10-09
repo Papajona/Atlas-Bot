@@ -24,9 +24,14 @@ def test_no_root_level_github_actions_workflow_copy():
     assert (ROOT / ".github" / "workflows" / "ci.yml").exists()
 
 
-def test_application_zip_with_equal_length_invariant_is_strict():
+def test_replay_regime_transition_zip_does_not_raise_on_adjacent_slices():
     source = (ROOT / "app" / "trade_learning.py").read_text(encoding="utf-8")
-    assert "zip(regime_path[:-1], regime_path[1:], strict=True)" in source
+    assert "for a, b in zip(regime_path[:-1], regime_path[1:]):" in source
+    assert "zip(regime_path[:-1], regime_path[1:], strict=True)" not in source
+    regression_test = (
+        ROOT / "tests" / "test_trade_learning_replay_regime_transitions.py"
+    ).read_text(encoding="utf-8")
+    assert "test_replay_counts_adjacent_regime_transitions_without_strict_zip_failure" in regression_test
 
 
 def test_startup_guards_are_not_duplicated_in_main():
