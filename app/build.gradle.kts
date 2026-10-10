@@ -81,11 +81,8 @@ android {
     }
 }
 
-gradle.taskGraph.whenReady { graph ->
-    val releaseRequested = graph.allTasks.any { task ->
-        task.path.startsWith(":app:") && task.name.contains("Release", ignoreCase = true)
-    }
-    if (releaseRequested) {
+val verifyProductionReleaseConfiguration = tasks.register("verifyProductionReleaseConfiguration") {
+    doLast {
         val parsedBackend = runCatching { productionBackendUrl?.let { URI(it) } }.getOrNull()
         val actualHost = parsedBackend?.host?.lowercase()
         check(
@@ -107,6 +104,16 @@ gradle.taskGraph.whenReady { graph ->
         ) {
             "BLOCKED: production release signing requires all ATLAS_RELEASE_* signing environment variables."
         }
+    }
+}
+
+tasks.configureEach {
+    if (
+        path.startsWith(":app:") &&
+        name.contains("Release", ignoreCase = true) &&
+        name != "verifyProductionReleaseConfiguration"
+    ) {
+        dependsOn(verifyProductionReleaseConfiguration)
     }
 }
 
