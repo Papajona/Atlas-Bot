@@ -92,6 +92,7 @@ fun RiskDashboardScreen(
     val latencyMs by webSocketClient.lastMessageLatencyMs.collectAsState()
 
     var metrics by remember { mutableStateOf(initialMetrics) }
+    val telemetryIsDisplayable = metrics.telemetryAvailable && wsConnectionState is WebSocketConnectionState.Connected && metrics.lastUpdatedEpochMs > 0L
     var isSimulatingStress by remember { mutableStateOf(false) }
     var isRefreshing by remember { mutableStateOf(false) }
     var showAuditDialog by remember { mutableStateOf(false) }
@@ -229,64 +230,86 @@ fun RiskDashboardScreen(
                     .padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                // 1. Status & Live State Ribbon
-                item {
-                    SystemStateRibbon(
-                        metrics = metrics,
-                        cardSurface = cardSurface,
-                        cardBorder = cardBorder,
-                        emeraldColor = emeraldPass,
-                        redColor = redDanger,
-                        warningColor = amberWarning,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted,
-                        onInspectAudit = { showAuditDialog = true }
-                    )
-                }
-
-                // 2. Primary Risk-Adjusted Return Ratios (Sharpe & Calmar)
-                item {
-                    PrimaryRatiosCard(
-                        metrics = metrics,
-                        cardSurface = cardSurface,
-                        cardBorder = cardBorder,
-                        accentCyan = accentCyan,
-                        emeraldColor = emeraldPass,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                }
-
-                // 3. Drawdown & Capital Preservation Gauge
-                item {
-                    DrawdownGaugeCard(
-                        metrics = metrics,
-                        cardSurface = cardSurface,
-                        cardBorder = cardBorder,
-                        accentCyan = accentCyan,
-                        amberColor = amberWarning,
-                        redColor = redDanger,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                }
-
-                // 4. Regime & Ensemble Dynamic Allocation Matrix
-                item {
-                    RegimeAllocatorCard(
-                        metrics = metrics,
-                        cardSurface = cardSurface,
-                        cardBorder = cardBorder,
-                        accentCyan = accentCyan,
-                        emeraldColor = emeraldPass,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted,
-                        isSimulatingStress = isSimulatingStress,
-                        onToggleStress = {
-                            isSimulatingStress = false
-                            metrics = PortfolioRiskMetrics()
+                if (telemetryIsDisplayable) {
+                    // Show numeric risk metrics only when authenticated WebSocket telemetry is present.
+                    item {
+                        SystemStateRibbon(
+                            metrics = metrics,
+                            cardSurface = cardSurface,
+                            cardBorder = cardBorder,
+                            emeraldColor = emeraldPass,
+                            redColor = redDanger,
+                            warningColor = amberWarning,
+                            textPrimary = textPrimary,
+                            textMuted = textMuted,
+                            onInspectAudit = { showAuditDialog = true }
+                        )
+                    }
+                    item {
+                        PrimaryRatiosCard(
+                            metrics = metrics,
+                            cardSurface = cardSurface,
+                            cardBorder = cardBorder,
+                            accentCyan = accentCyan,
+                            emeraldColor = emeraldPass,
+                            textPrimary = textPrimary,
+                            textMuted = textMuted
+                        )
+                    }
+                    item {
+                        DrawdownGaugeCard(
+                            metrics = metrics,
+                            cardSurface = cardSurface,
+                            cardBorder = cardBorder,
+                            accentCyan = accentCyan,
+                            amberColor = amberWarning,
+                            redColor = redDanger,
+                            textPrimary = textPrimary,
+                            textMuted = textMuted
+                        )
+                    }
+                    item {
+                        RegimeAllocatorCard(
+                            metrics = metrics,
+                            cardSurface = cardSurface,
+                            cardBorder = cardBorder,
+                            accentCyan = accentCyan,
+                            emeraldColor = emeraldPass,
+                            textPrimary = textPrimary,
+                            textMuted = textMuted,
+                            isSimulatingStress = isSimulatingStress,
+                            onToggleStress = {
+                                isSimulatingStress = false
+                                metrics = PortfolioRiskMetrics()
+                            }
+                        )
+                    }
+                } else {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = cardSurface),
+                            shape = RoundedCornerShape(16.dp),
+                            border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(cardBorder))
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "LIVE RISK TELEMETRY UNAVAILABLE",
+                                    fontWeight = FontWeight.Bold,
+                                    color = redDanger,
+                                    fontSize = 13.sp
+                                )
+                                Text(
+                                    text = "Numeric risk values and pass/fail assessments are hidden until authenticated WebSocket data is received. Keep the engine halted while telemetry is unavailable.",
+                                    color = textMuted,
+                                    fontSize = 12.sp
+                                )
+                            }
                         }
-                    )
+                    }
                 }
 
                 // 5. On-Device Quantitative Strategy Replay & Backtesting
@@ -330,7 +353,7 @@ fun RiskDashboardScreen(
             onDismissRequest = { showAuditDialog = false },
             title = {
                 Text(
-                    text = "3.10.47 Institutional Risk Audit",
+                    text = "Risk Control Status (not a live audit)",
                     fontWeight = FontWeight.Bold,
                     color = textPrimary
                 )
@@ -353,7 +376,7 @@ fun RiskDashboardScreen(
                         fontSize = 13.sp
                     )
                     Text(
-                        text = "• Deflated Sharpe Ratio: ${metrics.deflatedSharpeRatio} (>= 0.95 PASS)",
+                        text = "• Deflated Sharpe Ratio: ${metrics.deflatedSharpeRatio} (configured threshold >= 0.95; not a pass unless verified)",
                         color = emeraldPass,
                         fontSize = 13.sp
                     )
@@ -363,12 +386,12 @@ fun RiskDashboardScreen(
                         fontSize = 13.sp
                     )
                     Text(
-                        text = "• Cost-Stress Multiplier: 2.0x Taker & Slippage (PASS)",
+                        text = "• Cost-stress multiplier: configured policy value; live status is not inferred here",
                         color = emeraldPass,
                         fontSize = 13.sp
                     )
                     Text(
-                        text = "• AI Safety Latency Ceiling: 1.5s Fail-Closed (NO_TRADE)",
+                        text = "• AI safety latency ceiling: configured policy value; runtime status requires verified telemetry",
                         color = textMuted,
                         fontSize = 13.sp
                     )
