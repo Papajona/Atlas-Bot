@@ -276,3 +276,19 @@ def test_provider_recovery_full_history_page_is_not_proof_of_absence(monkeypatch
     )
     with pytest.raises(PayoutUnknown, match="100-row limit"):
         asyncio.run(provider.recover("withdrawal:missing", currency="USDT"))
+
+
+def test_provider_recovery_short_history_page_does_not_prove_payout_absence(monkeypatch):
+    """Even with a configured client-id field, generic bounded history is not authoritative absence."""
+    monkeypatch.setattr(settings, "payout_client_id_param", "clientOrderId")
+    monkeypatch.setattr(settings, "payout_recovery_lookback_hours", 72)
+    provider = CCXTPayoutProvider.__new__(CCXTPayoutProvider)
+    provider.exchange = SimpleNamespace(
+        has={"fetchWithdrawals": True},
+        fetch_withdrawals=lambda currency, since, limit: [
+            {"id": "provider-1", "info": {"clientOrderId": "other-1"}},
+            {"id": "provider-2", "info": {"clientOrderId": "other-2"}},
+        ],
+    )
+    with pytest.raises(PayoutUnknown, match="absence is not proof"):
+        asyncio.run(provider.recover("withdrawal:missing", currency="USDT"))
