@@ -31,7 +31,7 @@ def test_customer_start_rejects_paper_mode_before_ai_work():
     source = _source("app/main.py")
     start = source[source.index('@app.post("/api/customer/bot/start")'):]
     guard = start.index("customer_paper_execution_blocked(profile.id, paper_mode)")
-    analysis = start.index("start_bot_decision(")
+    analysis = start.index("asyncio.to_thread(start_bot_decision")
     ai_review = start.index("dual_ai_trade_safety_review(")
     assert guard < analysis < ai_review
     assert "no analysis or AI review was run" in start[guard:analysis]
