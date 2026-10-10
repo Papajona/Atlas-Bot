@@ -65,6 +65,7 @@ jobs:
           require_success "ci.yml" "Atlas CI"
           require_success "ledger-concurrency-check.yml" "PostgreSQL ledger concurrency"
           require_success "production-verification.yml" "Production Verification Gate"
+          require_success "staging-identity-preflight.yml" "Supabase staging identity preflight"
           require_success "android-release.yml" "Protected signed Android release"
 
           # A green Android workflow is insufficient when its signing job was skipped.
