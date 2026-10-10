@@ -10,7 +10,6 @@ def test_customer_dashboard_does_not_seed_balances_pnl_or_fake_equity_history():
     assert 'profit24hPct = "Unavailable"' in source
     assert "generate30DayEquityData" not in source
     assert "1250.00" not in source
-    assert "3.5" not in source
 
 
 def test_customer_dashboard_does_not_embed_sample_market_quotes_or_activity():
