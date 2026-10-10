@@ -335,3 +335,41 @@ def test_release_route_binds_operator_identity_over_http(monkeypatch):
     )
     assert response.status_code == 403
     assert "identity" in response.json()["detail"].lower()
+
+
+def test_mark_not_sent_rejects_provider_recovery_result_without_transaction_id(monkeypatch):
+    async def run():
+        engine = _db()
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            sessions = async_sessionmaker(engine, expire_on_commit=False)
+            async with sessions() as db:
+                db.add(CustomerLedgerAccount(customer_id=1, available=0, withdrawal_reserved=25))
+                w = Withdrawal(
+                    customer_id=1, request_id="req-empty-recovery", amount=25, currency="USDT",
+                    destination_masked="T***", destination="T" + "A" * 33,
+                    network="TRON", provider="external_signer", provider_id=None, status="UNKNOWN",
+                )
+                db.add(w)
+                await db.commit()
+                await db.refresh(w)
+
+            class Provider:
+                async def recover(self, *args, **kwargs):
+                    return PayoutResult("external_signer", "", "UNKNOWN", "UNKNOWN")
+
+            monkeypatch.setattr(settings, "withdrawal_approver_tokens", "approver-1:approver-secret")
+            with pytest.raises(HTTPException) as exc:
+                await _call_endpoint(main, sessions, w, provider=Provider(), monkeypatch=monkeypatch)
+            assert exc.value.status_code == 409
+            async with sessions() as db:
+                saved = await db.get(Withdrawal, w.id)
+                ledger = (await db.execute(select(CustomerLedgerAccount).where(CustomerLedgerAccount.customer_id == 1))).scalar_one()
+                assert saved.status == "UNKNOWN"
+                assert ledger.withdrawal_reserved == 25
+                assert ledger.available == 0
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
