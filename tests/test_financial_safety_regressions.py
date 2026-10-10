@@ -73,3 +73,11 @@ def test_customer_cash_reserve_does_not_treat_a_position_flip_as_reduce_only():
     assert "opposing_qty = sum(" in block
     assert "quantity <= opposing_qty + 1e-9" in block
     assert "if not reducing:" in block
+
+
+def test_customer_execution_is_blocked_when_effective_mode_falls_back_to_paper():
+    source = _source("app/execution.py")
+    execute_start = source.index("async def execute_signal(")
+    execute_end = source.index("\nasync def ", execute_start + 1)
+    execute_body = source[execute_start:execute_end]
+    assert "customer_paper_execution_blocked(customer_id, force_paper or not live)" in execute_body
