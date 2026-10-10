@@ -18,3 +18,14 @@ def require_rls_bypass_role(
             f"role={role_name!r}. Migration 0049 enables RLS on public tables; "
             "configure DATABASE_URL with the approved trusted server-side PostgreSQL role."
         )
+
+
+
+def require_public_schema_rls_complete(public_table_count: int, tables_without_rls: int) -> None:
+    """Fail closed if public tables are missing RLS after the lockdown migration."""
+    if public_table_count < 1 or tables_without_rls != 0:
+        raise RuntimeError(
+            "Public-schema RLS lockdown is incomplete: "
+            f"public_tables={public_table_count}, tables_without_rls={tables_without_rls}. "
+            "Enable and verify RLS on every public table before starting Atlas."
+        )
