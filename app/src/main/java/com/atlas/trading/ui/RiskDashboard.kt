@@ -92,7 +92,18 @@ fun RiskDashboardScreen(
     val latencyMs by webSocketClient.lastMessageLatencyMs.collectAsState()
 
     var metrics by remember { mutableStateOf(initialMetrics) }
-    val telemetryIsDisplayable = metrics.telemetryAvailable && wsConnectionState is WebSocketConnectionState.Connected && metrics.lastUpdatedEpochMs > 0L
+    var nowEpochMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowEpochMs = System.currentTimeMillis()
+            delay(1_000)
+        }
+    }
+    val telemetryIsDisplayable = metrics.telemetryAvailable &&
+        wsConnectionState is WebSocketConnectionState.Connected &&
+        metrics.lastUpdatedEpochMs > 0L &&
+        nowEpochMs >= metrics.lastUpdatedEpochMs &&
+        nowEpochMs - metrics.lastUpdatedEpochMs <= 90_000L
     var isSimulatingStress by remember { mutableStateOf(false) }
     var isRefreshing by remember { mutableStateOf(false) }
     var showAuditDialog by remember { mutableStateOf(false) }
@@ -303,7 +314,7 @@ fun RiskDashboardScreen(
                                     fontSize = 13.sp
                                 )
                                 Text(
-                                    text = "Numeric risk values and pass/fail assessments are hidden until authenticated WebSocket data is received. Keep the engine halted while telemetry is unavailable.",
+                                    text = "Numeric risk values and pass/fail assessments are hidden until authenticated WebSocket data is received and remains fresh (90 seconds or less). Keep the engine halted while telemetry is unavailable or stale.",
                                     color = textMuted,
                                     fontSize = 12.sp
                                 )
