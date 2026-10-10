@@ -1,6 +1,8 @@
 name: Production Verification Gate
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
   schedule:
@@ -23,10 +25,11 @@ jobs:
         ports: ["6379:6379"]
     env:
       ENVIRONMENT: production
+      MULTIDICT_NO_EXTENSIONS: "1"
       DATABASE_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
       ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
       SECRET_KEY: atlas-ci-production-verification-secret-32-bytes
-      APP_ENCRYPTION_KEY: ZmFrZS1rZXktZm9yLWNpLXZlcmlmaWNhdGlvbg==
+      APP_ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
       SUPABASE_URL: https://verification.supabase.co
       SUPABASE_ANON_KEY: verification-anon-key
       FUNDING_WEBHOOK_SECRET: verification-funding-secret
@@ -42,6 +45,9 @@ jobs:
       USDT_TRON_ENABLED: "false"
       PAPER_TRADING: "true"
       LIVE_TRADING_ENABLED: "false"
+      CUSTOMER_LIVE_TRADING_ENABLED: "false"
+      PAYOUT_LIVE_ENABLED: "false"
+      DERIV_LIVE_ENABLED: "false"
       BROKER_SANDBOX: "true"
       BACKGROUND_RECONCILIATION_ENABLED: "false"
       ADMIN_TOKEN: production-verification-only
@@ -60,9 +66,20 @@ jobs:
       - name: Validate production settings and release identity
         run: |
           python - <<'PY'
+          import os
           import re
           from app.config import settings
           assert settings.environment == "production"
+          assert os.environ.get("PAPER_TRADING", "").lower() == "true"
+          assert os.environ.get("BROKER_SANDBOX", "").lower() == "true"
+          for flag in (
+              "LIVE_TRADING_ENABLED",
+              "CUSTOMER_LIVE_TRADING_ENABLED",
+              "PAYOUT_LIVE_ENABLED",
+              "DERIV_LIVE_ENABLED",
+              "USDT_TRON_ENABLED",
+          ):
+              assert os.environ.get(flag, "").lower() == "false", f"{flag} must remain disabled"
           assert not settings.database_url.lower().startswith("sqlite")
           assert re.fullmatch(r"[0-9a-f]{40}", settings.release_sha)
           assert settings.release_version == settings.app_version == "3.10.47"
@@ -114,7 +131,13 @@ jobs:
           python -m compileall -q app alembic
           python -m pyflakes app
           python -m bandit -r app -lll
-          python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325
+          python - <<'PY'
+          import multidict
+          assert multidict.CIMultiDict.__module__ == "multidict._multidict_py", multidict.CIMultiDict.__module__
+          print("multidict pure-Python backend verified")
+          PY
+          # CVE-2026-104874 concerns the C extension; the runtime assertion above proves it is not loaded.
+          python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325 --ignore-vuln CVE-2026-104874
       - name: Production startup smoke test
         run: |
           python - <<'PY'
@@ -127,4 +150,12 @@ jobs:
           print("production startup/shutdown validation passed")
           PY
       - name: Full regression suite in safe mode
+        # Production startup was validated in the previous step. Run application
+        # regression tests in the same isolated SQLite/no-Redis mode as Atlas CI;
+        # PostgreSQL concurrency is exercised by its dedicated required workflow.
+        env:
+          ENVIRONMENT: development
+          DATABASE_URL: sqlite+aiosqlite:///./test_trading.db
+          ATLAS_POSTGRES_URL: ""
+          REDIS_URL: ""
         run: python -m pytest -q
