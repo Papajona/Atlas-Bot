@@ -11,6 +11,10 @@ atlas_configure_tron_funding() {
   fi
 
   if [[ "$USDT_TRON_ENABLED" == "true" ]]; then
+    if [[ "$USDT_TRON_NETWORK" != "mainnet" ]]; then
+      echo "ERROR: production deployment only supports TRON mainnet; use an isolated staging deployment for testnets." >&2
+      return 2
+    fi
     if [[ "${ALLOW_TRON_FUNDING:-}" != "YES" ]]; then
       echo "ERROR: TRON funding is disabled by default; set ALLOW_TRON_FUNDING=YES only after funding-path approval." >&2
       return 2
