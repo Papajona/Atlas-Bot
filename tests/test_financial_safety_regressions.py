@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from app.execution import customer_paper_execution_blocked
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -8,9 +10,12 @@ def _source(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_customer_paper_execution_fails_closed_before_real_ledger_use():
+def test_customer_paper_execution_guard_behaviour():
+    assert customer_paper_execution_blocked(101, True) is True
+    assert customer_paper_execution_blocked(101, False) is False
+    assert customer_paper_execution_blocked(None, True) is False
+
     source = _source("app/execution.py")
-    assert 'if customer_id is not None and force_paper:' in source
     assert "Customer paper execution requires an isolated simulation ledger" in source
     assert 'and mode == "LIVE"' in source
     assert 'str(trade.mode or "").upper() == "LIVE"' in source

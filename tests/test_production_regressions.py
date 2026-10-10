@@ -92,7 +92,9 @@ def test_backtest_fills_reached_entry_and_records_risk_sizing(monkeypatch):
 def test_customer_live_crypto_never_uses_platform_credentials():
     source = Path("app/execution.py").read_text()
     assert "Customer live trading requires a verified isolated exchange/subaccount adapter" in source
-    assert 'customer_id is not None and asset != "forex"' in source
+    assert 'customer_id is not None and asset in {"forex", "commodity"}' in source
+    assert "Customer Forex/commodity execution requires a verified customer-specific OANDA account" in source
+    assert 'elif customer_id is not None:' in source
 
 
 def test_customer_paper_fee_is_not_charged_to_platform_state():
