@@ -113,6 +113,8 @@ def _check_groq(model: str) -> bool:
     headers = {
         "Authorization": f"Bearer {settings.groq_api_key}",
         "Content-Type": "application/json",
+        "User-Agent": "Atlas-Bot-Production-Verification/3.10.47",
+        "Accept": "application/json",
     }
 
     # The documented Models List endpoint is a useful diagnostic, but listing

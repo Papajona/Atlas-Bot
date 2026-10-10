@@ -156,3 +156,25 @@ def test_gemini_checker_uses_nontrivial_output_budget(monkeypatch):
 
     assert checker._check_gemini("test-model") is True
     assert captured["payload"]["generationConfig"]["maxOutputTokens"] == 1024
+
+
+def test_groq_checker_sends_explicit_user_agent(monkeypatch):
+    captured = []
+
+    def fake_request(url, headers, payload=None):
+        captured.append((url, dict(headers)))
+        if payload is None:
+            return 200, {"data": [{"id": "test-model"}]}
+        return 200, {"choices": [{"message": {"content": "OK"}}]}
+
+    monkeypatch.setattr(checker, "_request_json", fake_request)
+    monkeypatch.setattr(checker.settings, "groq_api_key", "test-key")
+
+    assert checker._check_groq("test-model") is True
+    assert len(captured) == 2
+    for _, headers in captured:
+        assert headers["User-Agent"] == (
+            "Atlas-Bot-Production-Verification/3.10.47"
+        )
+        assert headers["Accept"] == "application/json"
+        assert headers["Authorization"] == "Bearer test-key"
