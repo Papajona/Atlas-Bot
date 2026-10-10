@@ -44,7 +44,7 @@ from .payout import get_payout_provider, PayoutError, PayoutUnknown, PayoutNotFo
 from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, release_separation_violation, verify_release_operator
 from .usdt_tron import derive_usdt_tron_address_from_xpub, validate_tron_account_xpub
 from .tron_sweep import build_sweep_intent, serialize_sweep_intent, SweepError, classify_solidified_sweep, USDT_SCALE
-from .custody_locations import create_custody_transfer, transition_custody_transfer
+from .custody_locations import create_custody_transfer, transition_custody_transfer, flag_stale_custody_transfers
 from .customer_funds import record_ledger_incident, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, ledger_statement, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal
 from .distributed import allow_rate_limit, check_redis, acquire_lock, release_lock, refresh_lock
 from .withdrawal_risk import score_withdrawal
@@ -1511,8 +1511,16 @@ async def _custody_reconciliation_loop():
             continue
         try:
             async with SessionLocal() as db:
+                # Timed-out transfers require operator/provider reconciliation; timeout
+                # never proves failure and must never release funds automatically.
+                flagged_transfers = await flag_stale_custody_transfers(db, timeout_hours=24)
                 report = await reconcile_usdt_custody(db)
                 await db.commit()
+            if flagged_transfers:
+                logger.critical(
+                    "custody_transfers_require_reconciliation count=%s timeout_hours=24",
+                    flagged_transfers,
+                )
             if report.get("status") != "OK":
                 logger.critical("custody_solvency_reconciliation status=%s ratio=%s gap=%s",
                                 report.get("status"), report.get("solvency_ratio"), report.get("coverage_gap"))
