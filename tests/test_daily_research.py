@@ -36,3 +36,59 @@ def test_daily_run_does_not_trade(monkeypatch):
     out = asyncio.run(dr.run_daily_research())
     assert out["status"] == "NO_DATA"
     assert out["real_money_execution"] is False
+
+
+def test_async_retry_succeeds_after_transient_failure(monkeypatch):
+    import app.daily_research as dr
+
+    calls = {"count": 0}
+
+    async def operation():
+        calls["count"] += 1
+        if calls["count"] < 3:
+            raise RuntimeError("temporary source outage")
+        return {"ok": True}
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(dr.asyncio, "sleep", no_wait)
+    result = asyncio.run(dr._retry_async(operation, attempts=3, base_delay_seconds=0))
+    assert result == {"ok": True}
+    assert calls["count"] == 3
+
+
+def test_async_retry_raises_after_bounded_attempts(monkeypatch):
+    import app.daily_research as dr
+
+    calls = {"count": 0}
+
+    async def operation():
+        calls["count"] += 1
+        raise RuntimeError("source unavailable")
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(dr.asyncio, "sleep", no_wait)
+    try:
+        asyncio.run(dr._retry_async(operation, attempts=3, base_delay_seconds=0))
+    except RuntimeError as exc:
+        assert str(exc) == "source unavailable"
+    else:
+        raise AssertionError("retry helper must propagate the final failure")
+    assert calls["count"] == 3
+
+
+def test_async_retry_does_not_swallow_cancellation():
+    import app.daily_research as dr
+
+    async def operation():
+        raise asyncio.CancelledError()
+
+    try:
+        asyncio.run(dr._retry_async(operation, attempts=3, base_delay_seconds=0))
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("cancellation must propagate immediately")
