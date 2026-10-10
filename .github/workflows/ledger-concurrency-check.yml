@@ -16,6 +16,8 @@ on:
       - 'tests/test_ledger_invariants_3_10_46.py'
       - 'tests/test_ledger_all_paths_concurrent_3_10_46.py'
       - 'requirements-dev.txt'
+      - 'alembic/**'
+      - '.github/workflows/ci.yml'
       - '.github/workflows/ledger-concurrency-check.yml'
   push:
     branches:
