@@ -49,6 +49,49 @@ def upgrade():
         """
     )
 
+    # Do not claim the lockdown is complete if another role can create public
+    # objects with unsafe default ACLs. ALTER DEFAULT PRIVILEGES is role-scoped:
+    # this migration cannot rewrite another role's defaults unless the migration
+    # role is a member of that role. Fail closed and require an authorized owner
+    # to remediate the external role before retrying the migration.
+    op.execute(
+        """
+        DO $atlas_external_default_acl$
+        DECLARE
+            unsafe_creator text;
+            unsafe_acl text;
+        BEGIN
+            SELECT pg_get_userbyid(d.defaclrole),
+                   string_agg(DISTINCT
+                       format('%s:%s', d.defaclobjtype, acl.privilege_type),
+                       ', ' ORDER BY format('%s:%s', d.defaclobjtype, acl.privilege_type))
+              INTO unsafe_creator, unsafe_acl
+            FROM pg_default_acl d
+            CROSS JOIN LATERAL aclexplode(d.defaclacl) AS acl
+            LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
+            WHERE d.defaclnamespace = 'public'::regnamespace
+              AND d.defaclrole <> (SELECT oid FROM pg_roles WHERE rolname = current_user)
+              AND (acl.grantee = 0 OR grantee.rolname IN ('anon', 'authenticated'))
+              AND (
+                  (d.defaclobjtype = 'r' AND acl.privilege_type IN
+                      ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'))
+                  OR (d.defaclobjtype = 'S' AND acl.privilege_type IN ('USAGE', 'SELECT', 'UPDATE'))
+                  OR (d.defaclobjtype = 'f' AND acl.privilege_type = 'EXECUTE')
+              )
+            GROUP BY d.defaclrole
+            ORDER BY pg_get_userbyid(d.defaclrole)
+            LIMIT 1;
+
+            IF unsafe_creator IS NOT NULL THEN
+                RAISE EXCEPTION
+                    'public schema lockdown blocked: role % has unsafe default privileges (%) for PUBLIC/anon/authenticated; remediate defaults as that role or an authorized member, then retry',
+                    unsafe_creator, unsafe_acl;
+            END IF;
+        END
+        $atlas_external_default_acl$;
+        """
+    )
+
     # Pin search_path for the ledger functions flagged by the security advisor.
     op.execute(
         """
