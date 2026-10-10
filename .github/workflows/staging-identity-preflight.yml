@@ -141,11 +141,10 @@ jobs:
           if int(table_count) == 0:
               raise SystemExit("BLOCKED: public schema table inventory is empty")
           if bypass_rls.lower() != "true" and int(owned_count) != int(table_count):
-              print("MIGRATION BLOCKED: runtime role neither bypasses RLS nor owns every public table; review grants/policies before lockdown")
-          elif int(unprotected_count) > 0:
-              print("IDENTITY PASS; MIGRATION BLOCKED: public tables without RLS remain. This is expected before migration 0049; do not deploy until isolated staging migration tests pass.")
-          else:
-              print("IDENTITY PASS; RLS is enabled on all inventoried public tables. Migration readiness still requires separate access, ledger, upgrade/downgrade, and recovery tests.")
+              raise SystemExit("BLOCKED: runtime role neither bypasses RLS nor owns every public table; review grants/policies before lockdown")
+          if int(unprotected_count) > 0:
+              raise SystemExit("BLOCKED: public tables without RLS remain; do not deploy until isolated staging migration tests pass")
+          print("IDENTITY PASS: RLS is enabled on all inventoried public tables. Migration readiness still requires separate access, ledger, upgrade/downgrade, and recovery tests.")
           print("PASS: read-only target identity and current migration revision were verified; no migration or write was executed")
           PY
           rm -f "$RUNNER_TEMP/atlas-staging-db-url"
