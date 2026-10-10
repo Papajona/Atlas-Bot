@@ -259,3 +259,9 @@ def test_staging_preflight_owner_compatibility_matches_runtime_guard():
 def test_production_deploy_requires_staging_identity_preflight():
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
     assert 'require_success "staging-identity-preflight.yml" "Supabase staging identity preflight"' in workflow
+
+
+def test_production_verification_blocks_missing_provider_credentials():
+    workflow = (ROOT / ".github" / "workflows" / "production-verification.yml").read_text(encoding="utf-8")
+    assert "BLOCKED: provider credentials are not configured" in workflow
+    assert "this is not a provider verification pass" not in workflow
