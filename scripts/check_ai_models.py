@@ -157,7 +157,7 @@ def _check_groq(model: str) -> bool:
         {
             "model": model,
             "messages": [{"role": "user", "content": "Reply with OK."}],
-            "max_completion_tokens": 16,
+            "max_completion_tokens": 1024,
             "temperature": 0,
         },
     )
@@ -191,6 +191,18 @@ def _check_groq(model: str) -> bool:
             detail += "; provider_error=" + body["message"][:180]
         elif isinstance(body.get("response_preview"), str):
             detail += "; response=" + body["response_preview"][:120]
+        if status == 200:
+            choices = body.get("choices")
+            detail += "; choices=" + str(len(choices) if isinstance(choices, list) else 0)
+            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                finish = choices[0].get("finish_reason")
+                if finish:
+                    detail += "; finish_reason=" + str(finish)[:80]
+            usage = body.get("usage")
+            if isinstance(usage, dict):
+                completion_tokens = usage.get("completion_tokens")
+                if isinstance(completion_tokens, int):
+                    detail += "; completion_tokens=" + str(completion_tokens)
     print(f"[{'PASS' if ok else 'FAIL'}] Groq {model}: {detail}")
     return ok
 
