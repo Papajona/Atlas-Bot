@@ -137,10 +137,11 @@ class CCXTPayoutProvider:
         if len(rows) >= 100:
             # A full provider page may be truncated; do not interpret a missing id as proof of absence.
             raise PayoutUnknown("Provider withdrawal history reached the 100-row limit; payout absence is not proven")
-        if not settings.payout_client_id_param:
-            # Without a verified exchange-side client id, absence from a bounded history window proves nothing.
-            raise PayoutUnknown("Provider history has no match, but no verified client-id parameter is configured; absence is not proof the payout was not sent")
-        raise PayoutNotFound("No matching withdrawal was found in provider history")
+        # CCXT fetch_withdrawals is a bounded, exchange-dependent history query, not a definitive
+        # lookup by idempotency key. Even with a configured client-id parameter, a missing row can
+        # mean delayed indexing, unsupported response fields, or a transaction outside the lookback.
+        # Never authorize release of a customer reserve from absence in this generic history endpoint.
+        raise PayoutUnknown("No matching payout in bounded exchange history; absence is not proof it was not sent")
 
 
 class GenericBankProvider:
