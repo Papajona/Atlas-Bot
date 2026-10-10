@@ -103,7 +103,7 @@ jobs:
       - name: Download and independently verify signed Android artifact for this exact commit
         env:
           GH_TOKEN: ${{ github.token }}
-          EXPECTED_CERT_SHA256: ${{ vars.ATLAS_RELEASE_CERT_SHA256 }}
+          EXPECTED_CERT_SHA256: ${{ secrets.ATLAS_RELEASE_CERT_SHA256 }}
         run: |
           set -euo pipefail
           # Select only a successful run whose signing job succeeded. A newer successful
