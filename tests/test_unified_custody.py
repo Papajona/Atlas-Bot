@@ -12,6 +12,7 @@ from app.custody_locations import (
     create_custody_transfer,
     custody_gate,
     fresh_external_assets,
+    flag_stale_custody_transfers,
     location_for_binance,
     record_custody_observation,
     transition_custody_transfer,
@@ -130,4 +131,47 @@ def test_in_flight_transfer_does_not_count_as_exchange_asset():
         async with sessions() as db:
             report = await fresh_external_assets(db)
             assert report["assets"] == Decimal("0")
+    asyncio.run(with_database(check))
+
+
+def test_stale_custody_transfer_requires_reconciliation_without_release():
+    async def check(sessions):
+        old = utcnow() - timedelta(hours=25)
+        async with sessions() as db:
+            requested = await create_custody_transfer(
+                db, customer_id=11, currency="USDT", amount=75,
+                source_location="CUSTODY:TRON",
+                destination_location=location_for_binance(11),
+                idempotency_key="transfer:11:stale-requested",
+            )
+            submitted = await create_custody_transfer(
+                db, customer_id=12, currency="USDT", amount=80,
+                source_location="CUSTODY:TRON",
+                destination_location=location_for_binance(12),
+                idempotency_key="transfer:12:stale-submitted",
+            )
+            requested.requested_at = old
+            await transition_custody_transfer(
+                db, submitted.id, status="SUBMITTED", provider_reference="provider-pending"
+            )
+            submitted.submitted_at = old
+            await db.commit()
+
+        async with sessions() as db:
+            changed = await flag_stale_custody_transfers(db, timeout_hours=24)
+            assert changed == 2
+            await db.commit()
+
+        async with sessions() as db:
+            rows = (await db.execute(
+                select(CustodyTransfer).where(CustodyTransfer.id.in_([requested.id, submitted.id]))
+            )).scalars().all()
+            assert {row.status for row in rows} == {"RECONCILIATION_REQUIRED"}
+            for row in rows:
+                detail = __import__("json").loads(row.detail_json)
+                assert detail["timeout_review"]["action"] == "RECONCILIATION_REQUIRED_NO_AUTOMATIC_RELEASE"
+            # A timeout must not manufacture provider confirmation or erase provider evidence.
+            submitted_row = next(row for row in rows if row.id == submitted.id)
+            assert submitted_row.provider_reference == "provider-pending"
+            assert submitted_row.confirmed_at is None
     asyncio.run(with_database(check))
