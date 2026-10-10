@@ -120,3 +120,21 @@ def test_public_schema_rls_guard_accepts_all_tables_protected():
     from app.rls_role_policy import require_public_schema_rls_complete
 
     require_public_schema_rls_complete(public_table_count=57, tables_without_rls=0)
+
+def test_production_deploy_wires_required_research_evidence_settings():
+    workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text()
+    deploy = (ROOT / "deploy" / "cloud-run-deploy.sh").read_text()
+
+    for name in (
+        "RESEARCH_FEE_SOURCE",
+        "RESEARCH_FEE_EVIDENCE_ID",
+        "RESEARCH_MIN_DEFLATED_SHARPE",
+    ):
+        assert f"vars.{name}" in workflow
+        assert f"${{{name}}}" in deploy
+        assert f': "${{{name}:?' in deploy
+
+    assert "threshold < 0.95" in deploy
+    assert "@RESEARCH_FEE_SOURCE=" in deploy
+    assert "@RESEARCH_FEE_EVIDENCE_ID=" in deploy
+    assert "@RESEARCH_MIN_DEFLATED_SHARPE=" in deploy
