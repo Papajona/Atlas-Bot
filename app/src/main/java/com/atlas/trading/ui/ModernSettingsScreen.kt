@@ -574,7 +574,7 @@ fun ModernSettingsScreen(
                     badge = "v3.10.47",
                     badgeBg = Color(0xFFF1F5F9),
                     badgeText = Color(0xFF475569),
-                    subtitle = "Production release with zero mock data",
+                    subtitle = "Market data availability depends on a verified live data connection",
                     onClick = {
                         activeDialogTitle = "Atlas Trading System"
                         activeDialogContent = "Version: 3.10.47 (Build 1047)\nArchitecture: Jetpack Compose + Cloud Run FastAPI + PostgreSQL\nCompliance: Google Play Developer Program Compliant"
