@@ -20,18 +20,37 @@ async def assert_live_system_enabled(
     side: str,
     quantity: float,
     reduce_only: bool = False,
+    practice_demo: bool = False,
 ) -> None:
-    """Final deny-by-default server-side gate immediately before a live order call."""
+    """Final deny-by-default gate for live orders and explicitly enabled OANDA practice orders."""
     state = (await db.execute(select(AppState).where(AppState.id == 1).with_for_update())).scalar_one_or_none()
     if not state:
         raise LiveExecutionBlocked("Live execution state is unavailable")
-    if state.kill_switch or not state.live_enabled:
-        raise LiveExecutionBlocked("Live trading is halted by the platform risk state")
 
     normalized_asset = str(asset or "crypto").lower()
     normalized_exchange = str(exchange or "").lower()
     if normalized_asset in {"forex", "commodity"}:
-        raise LiveExecutionBlocked("OANDA Forex/commodity execution is demo-only in AtlasRisk")
+        # Practice orders are deliberately separate from the real-money live-trading gate:
+        # they must use the practice endpoint and platform account only, and must never be
+        # authorized for a customer or by the live-trading flags.
+        if not practice_demo:
+            raise LiveExecutionBlocked("OANDA Forex/commodity execution is demo-only in AtlasRisk")
+        if customer_id is not None:
+            raise LiveExecutionBlocked("Customer OANDA execution requires a separately verified customer practice-account flow")
+        if state.kill_switch:
+            raise LiveExecutionBlocked("OANDA practice execution is halted by the platform kill switch")
+        if not bool(state.forex_demo_enabled):
+            raise LiveExecutionBlocked("OANDA practice execution is not enabled in platform state")
+        if not settings.oanda_practice or settings.forex_live_enabled:
+            raise LiveExecutionBlocked("OANDA practice mode must be enabled and live OANDA must remain disabled")
+        if not settings.oanda_account_id or not settings.oanda_api_token:
+            raise LiveExecutionBlocked("OANDA practice credentials are not configured")
+        if quantity <= 0 or side not in {"buy", "sell"}:
+            raise LiveExecutionBlocked("Invalid OANDA practice order parameters")
+        return
+
+    if state.kill_switch or not state.live_enabled:
+        raise LiveExecutionBlocked("Live trading is halted by the platform risk state")
     if not settings.live_trading_enabled or settings.paper_trading or settings.broker_sandbox:
         raise LiveExecutionBlocked("Live execution is disabled by platform configuration")
     if quantity <= 0 or side not in {"buy", "sell"}:
