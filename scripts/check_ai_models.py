@@ -75,7 +75,7 @@ def _check_gemini(model: str) -> bool:
         {"Content-Type": "application/json", "x-goog-api-key": settings.gemini_api_key},
         {
             "contents": [{"parts": [{"text": "Reply with OK."}]}],
-            "generationConfig": {"maxOutputTokens": 64, "temperature": 0},
+            "generationConfig": {"maxOutputTokens": 1024, "temperature": 0},
         },
     )
     candidates = body.get("candidates")
@@ -147,37 +147,36 @@ def _check_groq(model: str) -> bool:
             detail += "; response=" + list_body["response_preview"][:120]
         print(f"[WARN] Groq models list: {detail}; checking inference separately")
 
-    # Groq's documented Responses API uses input + max_output_tokens, rather
-    # than the legacy chat-completions max_tokens parameter.
+    # Use the documented Chat Completions endpoint as the compatibility baseline.
+    # max_completion_tokens is preferred over the deprecated max_tokens parameter.
     status, body = _request_json(
-        "https://api.groq.com/openai/v1/responses",
+        "https://api.groq.com/openai/v1/chat/completions",
         headers,
         {
             "model": model,
-            "input": "Reply with OK.",
-            "max_output_tokens": 8,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "max_completion_tokens": 16,
+            "temperature": 0,
         },
     )
-    output_text = body.get("output_text")
-    if not isinstance(output_text, str):
-        output = body.get("output")
-        pieces = []
-        if isinstance(output, list):
-            for item in output:
-                if not isinstance(item, dict):
-                    continue
-                content = item.get("content")
-                if not isinstance(content, list):
-                    continue
-                for part in content:
-                    if isinstance(part, dict) and isinstance(part.get("text"), str):
-                        pieces.append(part["text"])
-        output_text = "".join(pieces)
-    ok = status == 200 and bool(output_text.strip()) if isinstance(output_text, str) else False
+    output_text = ""
+    choices = body.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        message = choices[0].get("message")
+        if isinstance(message, dict):
+            value = message.get("content")
+            if isinstance(value, str):
+                output_text = value
+            elif isinstance(value, list):
+                output_text = "".join(
+                    part.get("text", "") for part in value
+                    if isinstance(part, dict) and isinstance(part.get("text", ""), str)
+                )
+    ok = status == 200 and bool(output_text.strip())
     if ok:
-        detail = "Responses API inference succeeded"
+        detail = "Chat Completions inference succeeded"
     else:
-        detail = f"Responses API inference failed (HTTP {status or 'network/error'})"
+        detail = f"Chat Completions inference failed (HTTP {status or 'network/error'})"
         error = body.get("error")
         if isinstance(error, dict):
             message = error.get("message") or error.get("detail") or error.get("type")
