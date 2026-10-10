@@ -69,8 +69,11 @@ def upgrade():
             FROM pg_default_acl d
             CROSS JOIN LATERAL aclexplode(d.defaclacl) AS acl
             LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
-            WHERE d.defaclnamespace = 'public'::regnamespace
-              AND d.defaclrole <> (SELECT oid FROM pg_roles WHERE rolname = current_user)
+            WHERE d.defaclnamespace IN (0, 'public'::regnamespace)
+              AND (
+                  d.defaclrole <> (SELECT oid FROM pg_roles WHERE rolname = current_user)
+                  OR d.defaclnamespace = 0
+              )
               AND (acl.grantee = 0 OR grantee.rolname IN ('anon', 'authenticated'))
               AND (
                   (d.defaclobjtype = 'r' AND acl.privilege_type IN
