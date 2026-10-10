@@ -8,12 +8,62 @@ def _source(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_customer_paper_execution_fails_closed_before_real_ledger_use():
-    source = _source("app/execution.py")
-    assert 'if customer_id is not None and force_paper:' in source
-    assert "Customer paper execution requires an isolated simulation ledger" in source
-    assert 'and mode == "LIVE"' in source
-    assert 'str(trade.mode or "").upper() == "LIVE"' in source
+def test_customer_forex_cycle_fails_before_model_calls_without_simulation_ledger(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    import app.main as main
+    from app.config import settings
+
+    calls = []
+    bot = SimpleNamespace(
+        id=41, customer_id=7, trading_account_id=9, status="RUNNING",
+        asset="forex", symbol="EUR/USD", exchange="oanda", timeframe="1h",
+        days=30, risk_fraction=0.01, interval_seconds=300, mode="PAPER",
+    )
+    profile = SimpleNamespace(id=7)
+    account = SimpleNamespace(status="ACTIVE", equity=10000.0)
+    state = SimpleNamespace(kill_switch=False, live_enabled=False)
+
+    class Result:
+        def scalar_one_or_none(self):
+            return bot
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def execute(self, _statement):
+            return Result()
+
+        async def get(self, model, _ident):
+            if model is main.CustomerProfile:
+                return profile
+            if model is main.TradingAccount:
+                return account
+            if model is main.AppState:
+                return state
+            raise AssertionError(f"unexpected model lookup: {model}")
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(settings, "paper_trading", True)
+    monkeypatch.setattr(settings, "live_trading_enabled", False)
+
+    async def forbidden_model_or_data_call(*_args, **_kwargs):
+        calls.append("called")
+        raise AssertionError("unsupported customer forex cycle must stop before data/model/AI work")
+
+    monkeypatch.setattr(main, "_fetch_customer_oanda_data", forbidden_model_or_data_call)
+    monkeypatch.setattr(main, "_ensure_adaptive_model_locked", forbidden_model_or_data_call)
+
+    req = SimpleNamespace(asset="forex", symbol="EUR/USD", exchange="oanda", timeframe="1h", days=30)
+    result = asyncio.run(main._run_persisted_adaptive_bot_cycle(41, req))
+
+    assert result["decision"] == "NO_TRADE"
+    assert result["stage"] == "simulation_ledger_gate"
+    assert calls == []
 
 
 def test_live_customer_equity_is_recomputed_from_ledger_and_open_positions():
