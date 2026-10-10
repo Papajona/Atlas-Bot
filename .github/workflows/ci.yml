@@ -45,8 +45,43 @@ jobs:
           CREATE ROLE anon NOLOGIN;
           CREATE ROLE authenticated NOLOGIN;
           SQL
-      - name: Apply migrations through pre-lockdown revision
-        run: python -m alembic upgrade 0048_merge_subscription_and_application_heads
+      - name: Reproduce the connected database revision
+        run: python -m alembic upgrade 0047_strategy_outcome_lifecycle
+      - name: Verify production-revision schema contract
+        run: |
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          DO $production_0047_schema$
+          DECLARE
+              current_revision text;
+              missing_columns text;
+          BEGIN
+              SELECT version_num INTO current_revision FROM public.alembic_version;
+              IF current_revision IS DISTINCT FROM '0047_strategy_outcome_lifecycle' THEN
+                  RAISE EXCEPTION 'expected revision 0047_strategy_outcome_lifecycle, got %', current_revision;
+              END IF;
+
+              SELECT string_agg(format('%s.%s', required.table_name, required.column_name), ', ')
+                INTO missing_columns
+              FROM (VALUES
+                  ('app_state', 'live_enable_requested_by'),
+                  ('app_state', 'live_enable_approved_by'),
+                  ('trading_accounts', 'pilot_status'),
+                  ('tron_sweeps', 'custody_transfer_id'),
+                  ('subscriptions', 'ai_credits_used'),
+                  ('strategy_outcomes', 'lifecycle_status')
+              ) AS required(table_name, column_name)
+              LEFT JOIN information_schema.columns actual
+                ON actual.table_schema = 'public'
+               AND actual.table_name = required.table_name
+               AND actual.column_name = required.column_name
+              WHERE actual.column_name IS NULL;
+
+              IF missing_columns IS NOT NULL THEN
+                  RAISE EXCEPTION 'revision 0047 schema contract is missing columns: %', missing_columns;
+              END IF;
+          END
+          $production_0047_schema$;
+          SQL
       - name: Seed and verify pre-lockdown API grants
         run: |
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
@@ -93,7 +128,7 @@ jobs:
           END
           $seed_public_api_grants$;
           SQL
-      - name: Apply public-schema lockdown
+      - name: Upgrade from production revision through merge and lockdown
         run: python -m alembic upgrade 0049_public_schema_rls_lockdown
       - name: Verify public-schema lockdown at runtime
         run: |
