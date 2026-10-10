@@ -12,6 +12,28 @@ from .strategy_engine import StrategyConfig
 from .ai_providers import dual_ai_research_review
 
 
+async def _retry_async(operation, *, attempts: int = 3, base_delay_seconds: float = 1.0):
+    """Retry a transient async research operation with bounded exponential backoff.
+
+    Only the supplied operation is retried; completed per-symbol research is never
+    rerun by this helper, avoiding duplicate persistence side effects.
+    """
+    if attempts < 1 or base_delay_seconds < 0:
+        raise ValueError("attempts must be >= 1 and base_delay_seconds must be >= 0")
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            return await operation()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                await asyncio.sleep(base_delay_seconds * (2 ** attempt))
+    assert last_error is not None
+    raise last_error
+
+
 def _cfg() -> StrategyConfig:
     return StrategyConfig(
         signal_threshold=settings.strategy_signal_threshold,
@@ -202,11 +224,27 @@ async def run_daily_research() -> dict[str, Any]:
         return {"status": "ALREADY_RUNNING", "run_at": datetime.now(timezone.utc).isoformat()}
     try:
         symbols = [s.strip() for s in settings.research_symbols.split(",") if s.strip()]
-        intelligence = await gather_market_intelligence(
-            symbols=symbols,
-            yahoo_period=settings.research_yahoo_period,
-            alpha_vantage_api_key=settings.alpha_vantage_api_key,
-        )
+        try:
+            intelligence = await _retry_async(
+                lambda: gather_market_intelligence(
+                    symbols=symbols,
+                    yahoo_period=settings.research_yahoo_period,
+                    alpha_vantage_api_key=settings.alpha_vantage_api_key,
+                ),
+                attempts=3,
+                base_delay_seconds=1.0,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return {
+                "status": "FAILED",
+                "stage": "market_intelligence",
+                "attempts": 3,
+                "error": f"{type(exc).__name__}: {exc}",
+                "run_at": datetime.now(timezone.utc).isoformat(),
+                "real_money_execution": False,
+            }
         runs = []
         cfg = _cfg()
         for symbol, df in intelligence["histories"].items():
@@ -232,7 +270,7 @@ async def run_daily_research() -> dict[str, Any]:
             except Exception as exc:
                 runs.append({"symbol": symbol, "status": "FAILED", "error": str(exc)})
         return {
-            "status": "COMPLETE" if runs else "NO_DATA",
+            "status": ("PARTIAL_FAILURE" if any(r.get("status") == "FAILED" for r in runs) else ("COMPLETE" if runs else "NO_DATA")),
             "run_at": datetime.now(timezone.utc).isoformat(),
             "symbols_requested": symbols,
             "source_intelligence": {k: v for k, v in intelligence.items() if k != "histories"},
