@@ -281,6 +281,15 @@ def deflated_sharpe_report(net_returns, trial_sharpes_annual, n_trials: int, bar
     per_period = [float(s) / math.sqrt(max(1, bars_per_year)) for s in trial_sharpes_annual if np.isfinite(s)]
     var = float(np.var(per_period, ddof=1)) if len(per_period) > 1 else 0.0
     trials = max(1, int(n_trials))
+    if trials > 1 and (len(per_period) < 2 or var <= 0.0):
+        # Without observed Sharpe dispersion, the selection-bias hurdle collapses and DSR
+        # would silently become an un-deflated PSR(0); do not present that as a DSR.
+        return {
+            "status": "INSUFFICIENT_DATA",
+            "reason": "need at least two non-identical trial Sharpes to deflate for n_trials > 1",
+            "trials": trials,
+            "trial_sharpes_supplied": len(per_period),
+        }
     dsr = deflated_sharpe_ratio(sr, len(x), trials, var, skew=skew, kurt=kurt)
     return {"status": "OK", "deflated_sharpe_ratio": float(dsr), "per_period_sharpe": sr,
             "sharpe_hurdle_per_period": float(expected_max_sharpe(trials, var)), "trials": trials,
