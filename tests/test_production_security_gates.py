@@ -104,3 +104,19 @@ def test_rls_role_compatibility_guard_runs_before_database_initialization():
     role_check = src.index("await assert_database_role_compatible_with_rls_lockdown()")
     database_init = src.index("await init_db()", role_check)
     assert migration_check < role_check < database_init
+
+
+def test_public_schema_rls_guard_rejects_unprotected_or_empty_schema():
+    import pytest
+    from app.rls_role_policy import require_public_schema_rls_complete
+
+    with pytest.raises(RuntimeError, match="RLS lockdown is incomplete"):
+        require_public_schema_rls_complete(public_table_count=57, tables_without_rls=1)
+    with pytest.raises(RuntimeError, match="RLS lockdown is incomplete"):
+        require_public_schema_rls_complete(public_table_count=0, tables_without_rls=0)
+
+
+def test_public_schema_rls_guard_accepts_all_tables_protected():
+    from app.rls_role_policy import require_public_schema_rls_complete
+
+    require_public_schema_rls_complete(public_table_count=57, tables_without_rls=0)
