@@ -120,3 +120,39 @@ def test_groq_checker_fails_closed_on_malformed_payload(monkeypatch, body):
     monkeypatch.setattr(checker, "_request_json", lambda *args, **kwargs: (200, body))
     monkeypatch.setattr(checker.settings, "groq_api_key", "test-key")
     assert checker._check_groq("test-model") is False
+
+
+
+def test_groq_checker_uses_documented_chat_completions_and_parses_text(monkeypatch, capsys):
+    calls = []
+
+    def fake_request(url, headers, payload=None):
+        calls.append((url, payload))
+        if payload is None:
+            return 200, {"data": [{"id": "test-model"}]}
+        return 200, {"choices": [{"message": {"content": "OK"}}]}
+
+    monkeypatch.setattr(checker, "_request_json", fake_request)
+    monkeypatch.setattr(checker.settings, "groq_api_key", "test-key")
+
+    assert checker._check_groq("test-model") is True
+    assert calls[0][0] == "https://api.groq.com/openai/v1/models"
+    assert calls[1][0] == "https://api.groq.com/openai/v1/chat/completions"
+    assert calls[1][1]["model"] == "test-model"
+    assert calls[1][1]["messages"] == [{"role": "user", "content": "Reply with OK."}]
+    assert calls[1][1]["max_completion_tokens"] == 16
+    assert "Chat Completions inference succeeded" in capsys.readouterr().out
+
+
+def test_gemini_checker_uses_nontrivial_output_budget(monkeypatch):
+    captured = {}
+
+    def fake_request(url, headers, payload=None):
+        captured["payload"] = payload
+        return 200, {"candidates": [{"content": {"parts": [{"text": "OK"}]}}]}
+
+    monkeypatch.setattr(checker, "_request_json", fake_request)
+    monkeypatch.setattr(checker.settings, "gemini_api_key", "test-key")
+
+    assert checker._check_gemini("test-model") is True
+    assert captured["payload"]["generationConfig"]["maxOutputTokens"] == 1024
