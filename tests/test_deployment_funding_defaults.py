@@ -69,3 +69,16 @@ def test_api_and_worker_deployments_share_gate_and_keep_sweeps_off():
         assert "USDT_TRON_ENABLED=${USDT_TRON_ENABLED}" in script
         assert "USDT_TRON_SWEEP_ENABLED=false" in script
         assert "USDT_TRON_ENABLED=true" not in script
+    example = (ROOT / "deploy" / "cloud-run.env.example").read_text(encoding="utf-8")
+    assert "USDT_TRON_ENABLED=false" in example
+    assert "USDT_TRON_ENABLED=true" not in example
+
+def test_production_gate_rejects_testnet_even_with_funding_approval():
+    result = _run_gate({
+        "USDT_TRON_ENABLED": "true",
+        "USDT_TRON_NETWORK": "shasta",
+        "ALLOW_TRON_FUNDING": "YES",
+        "ALLOW_MAINNET_TRON_FUNDING": "YES",
+    })
+    assert result.returncode != 0
+    assert "production deployment only supports TRON mainnet" in result.stderr
