@@ -191,7 +191,7 @@ _expensive_paths = {"/api/train", "/api/backtest", "/api/strategy/backtest", "/a
 
 @app.middleware("http")
 async def api_rate_limit(request: Request, call_next):
-    if request.url.path in {"/health", "/healthz", "/readyz"}:
+    if request.url.path in {"/health", "/healthz", "/readyz", "/api/risk/kill"}:
         return await call_next(request)
     if request.url.path.startswith("/api/auth/otp/"):
         bucket, limit = "otp", settings.otp_rate_limit_per_minute
