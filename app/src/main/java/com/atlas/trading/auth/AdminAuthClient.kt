@@ -4,12 +4,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import java.util.concurrent.TimeUnit
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 
 class AdminAuthClient(private val baseUrl: String) {
-    private val client = OkHttpClient()
+    private val client = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS).callTimeout(15, TimeUnit.SECONDS).build()
     private val jsonType = "application/json".toMediaType()
     private var pendingAccessToken: String? = null
     private var pendingFactorId: String? = null
