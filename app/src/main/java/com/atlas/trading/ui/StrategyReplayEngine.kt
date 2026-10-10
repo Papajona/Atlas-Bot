@@ -272,7 +272,7 @@ fun StrategyReplaySection(
             ) {
                 Column {
                     Text(
-                        text = "QUANT STRATEGY REPLAY",
+                        text = "SYNTHETIC SCENARIO SIMULATION",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = accentCyan,
@@ -325,6 +325,12 @@ fun StrategyReplaySection(
                     }
                 }
             }
+
+            Text(
+                text = "Synthetic scenario only: generated prices and assumptions, not real exchange candles, verified historical backtests, or customer P&L.",
+                fontSize = 11.sp,
+                color = textMuted
+            )
 
             Spacer(modifier = Modifier.height(10.dp))
 
