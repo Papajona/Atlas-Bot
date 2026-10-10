@@ -189,7 +189,7 @@ def test_production_deploy_requires_verified_signed_android_artifact_for_exact_c
     assert "workflow_dispatch:" in android
     assert "github.ref == 'refs/heads/main'" in android
     assert "ATLAS_RELEASE_CERT_SHA256" in android
-    assert "atlas-release-bundle" in android
+    assert "atlas-release-apk" in android
     assert 'select(.name=="android-release")' in deploy
     assert "atlas-release-apk" in deploy
     assert "sha256sum --check atlas-release.sha256" in deploy
