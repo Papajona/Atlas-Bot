@@ -20,9 +20,10 @@ if _REPOSITORY_ROOT not in sys.path:
 from app.config import settings
 
 
-def _request_json(url: str, headers: dict[str, str], payload: dict) -> tuple[int, dict]:
-    data = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+def _request_json(url: str, headers: dict[str, str], payload: dict | None = None) -> tuple[int, dict]:
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    method = "POST" if payload is not None else "GET"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             status = response.status
@@ -109,45 +110,86 @@ def _check_gemini(model: str) -> bool:
 
 
 def _check_groq(model: str) -> bool:
+    headers = {
+        "Authorization": f"Bearer {settings.groq_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    # The documented Models List endpoint is a useful diagnostic, but listing
+    # failure alone must not mask whether the configured model can actually
+    # generate a response.
+    list_status, list_body = _request_json(
+        "https://api.groq.com/openai/v1/models", headers
+    )
+    listed = list_body.get("data")
+    model_list_ok = list_status == 200 and isinstance(listed, list)
+    model_available = model_list_ok and any(
+        isinstance(item, dict) and item.get("id") == model for item in listed
+    )
+    if model_list_ok:
+        print(
+            f"[{'PASS' if model_available else 'WARN'}] Groq models list: "
+            + (f"{model} is listed" if model_available else f"{model} is not listed")
+        )
+    else:
+        detail = f"HTTP {list_status or 'network/error'}"
+        error = list_body.get("error")
+        if isinstance(error, dict):
+            msg = error.get("message") or error.get("detail") or error.get("type")
+            code = error.get("code") or error.get("type")
+            if isinstance(code, (str, int)):
+                detail += "; provider_code=" + str(code)[:80]
+            if isinstance(msg, str):
+                detail += "; provider_error=" + msg[:180]
+        elif isinstance(list_body.get("message"), str):
+            detail += "; provider_error=" + list_body["message"][:180]
+        elif isinstance(list_body.get("response_preview"), str):
+            detail += "; response=" + list_body["response_preview"][:120]
+        print(f"[WARN] Groq models list: {detail}; checking inference separately")
+
+    # Groq's documented Responses API uses input + max_output_tokens, rather
+    # than the legacy chat-completions max_tokens parameter.
     status, body = _request_json(
-        "https://api.groq.com/openai/v1/chat/completions",
-        {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {settings.groq_api_key}",
-        },
+        "https://api.groq.com/openai/v1/responses",
+        headers,
         {
             "model": model,
-            "messages": [{"role": "user", "content": "Reply with OK."}],
-            "max_tokens": 8,
-            "temperature": 0,
+            "input": "Reply with OK.",
+            "max_output_tokens": 8,
         },
     )
-    choices = body.get("choices")
-    message = choices[0].get("message") if (
-        isinstance(choices, list) and choices and isinstance(choices[0], dict)
-    ) else None
-    content = message.get("content") if isinstance(message, dict) else None
-    ok = status == 200 and isinstance(content, str) and bool(content.strip())
+    output_text = body.get("output_text")
+    if not isinstance(output_text, str):
+        output = body.get("output")
+        pieces = []
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get("content")
+                if not isinstance(content, list):
+                    continue
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        pieces.append(part["text"])
+        output_text = "".join(pieces)
+    ok = status == 200 and bool(output_text.strip()) if isinstance(output_text, str) else False
     if ok:
-        detail = "chat completion succeeded"
+        detail = "Responses API inference succeeded"
     else:
-        detail = f"chat completion failed (HTTP {status or 'network/error'})"
+        detail = f"Responses API inference failed (HTTP {status or 'network/error'})"
         error = body.get("error")
         if isinstance(error, dict):
-            # Provider error messages help distinguish access policy from model
-            # errors; never print request headers or API keys.
             message = error.get("message") or error.get("detail") or error.get("type")
             error_code = error.get("code") or error.get("type")
             if isinstance(error_code, (str, int)):
                 detail += "; provider_code=" + str(error_code)[:80]
             if isinstance(message, str):
                 detail += "; provider_error=" + message[:180]
-        elif isinstance(error, str):
-            detail += "; provider_error=" + error[:180]
         elif isinstance(body.get("message"), str):
             detail += "; provider_error=" + body["message"][:180]
-        if status == 403 and not any(k in detail for k in ("provider_code=", "provider_error=")):
-            detail += "; provider_error_details=unavailable_or_unrecognized_response"
+        elif isinstance(body.get("response_preview"), str):
+            detail += "; response=" + body["response_preview"][:120]
     print(f"[{'PASS' if ok else 'FAIL'}] Groq {model}: {detail}")
     return ok
 
