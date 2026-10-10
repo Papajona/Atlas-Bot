@@ -63,3 +63,11 @@ def test_production_template_keeps_live_money_paths_disabled():
     assert "DERIV_LIVE_ENABLED=false" in source
     assert "USDT_TRON_ENABLED=false" in source
     assert "Secret Manager" in source
+
+
+def test_risk_dashboard_hides_numeric_metrics_when_telemetry_is_missing_or_stale():
+    source = (ROOT / "app/src/main/java/com/atlas/trading/ui/RiskDashboard.kt").read_text()
+    assert "LIVE RISK TELEMETRY UNAVAILABLE" in source
+    assert "if (telemetryIsDisplayable)" in source
+    assert "nowEpochMs - metrics.lastUpdatedEpochMs <= 90_000L" in source
+    assert "authenticated WebSocket data is received and remains fresh (90 seconds or less)" in source
