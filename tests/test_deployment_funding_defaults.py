@@ -72,6 +72,10 @@ def test_api_and_worker_deployments_share_gate_and_keep_sweeps_off():
     example = (ROOT / "deploy" / "cloud-run.env.example").read_text(encoding="utf-8")
     assert "USDT_TRON_ENABLED=false" in example
     assert "USDT_TRON_ENABLED=true" not in example
+    assert "BACKGROUND_RECONCILIATION_ENABLED=false" in example
+    assert "USDT_TRONGRID_API_KEY=" in example
+    assert not any(line.startswith("TRONGRID_API_KEY=") for line in example.splitlines())
+    assert not any(line.startswith("MODEL_SIGNING_PRIVATE_KEY=") for line in example.splitlines())
 
 def test_production_gate_rejects_testnet_even_with_funding_approval():
     result = _run_gate({
