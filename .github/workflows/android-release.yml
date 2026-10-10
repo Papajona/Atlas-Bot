@@ -8,6 +8,7 @@ on:
       - "settings.gradle.kts"
       - "gradle.properties"
       - ".github/workflows/android-release.yml"
+  workflow_dispatch:
   push:
     tags:
       - "android-v*"
@@ -31,7 +32,7 @@ jobs:
         run: gradle --no-daemon :app:assembleDebug
 
   android-release:
-    if: startsWith(github.ref, 'refs/tags/android-v')
+    if: startsWith(github.ref, 'refs/tags/android-v') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -80,15 +81,15 @@ jobs:
           test "$actual_cert" = "$expected_cert"
           package_name="$("$aapt" dump badging "$apk" | sed -n "s/^package: name='\\([^']*\\)'.*/\\1/p" | head -n 1)"
           test "$package_name" = "com.atlas.trading"
-          printf 'package=%s\\ncertificate_sha256=%s\\n' "$package_name" "$actual_cert" > "$RUNNER_TEMP/atlas-release-metadata.txt"
-          sha256sum "$apk" | tee "$RUNNER_TEMP/atlas-release.sha256"
+          bundle="$RUNNER_TEMP/atlas-release-bundle"
+          mkdir -p "$bundle"
+          cp "$apk" "$bundle/atlas-release.apk"
+          printf 'package=%s\ncertificate_sha256=%s\n' "$package_name" "$actual_cert" > "$bundle/atlas-release-metadata.txt"
+          cp "$RUNNER_TEMP/atlas-signing-report.txt" "$bundle/atlas-signing-report.txt"
+          (cd "$bundle" && sha256sum atlas-release.apk > atlas-release.sha256)
       - name: Upload signed artifact and verification evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: atlas-release-apk
-          path: |
-            app/build/outputs/apk/release/*.apk
-            ${{ runner.temp }}/atlas-release.sha256
-            ${{ runner.temp }}/atlas-release-metadata.txt
-            ${{ runner.temp }}/atlas-signing-report.txt
+          path: ${{ runner.temp }}/atlas-release-bundle/*
           if-no-files-found: error
