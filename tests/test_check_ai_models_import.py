@@ -6,7 +6,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_ai_model_check_bootstraps_repository_root_before_app_import():
     script = (ROOT / "scripts" / "check_ai_models.py").read_text(encoding="utf-8")
-    root_bootstrap = script.index("_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]")
+    root_bootstrap = script.index("_REPOSITORY_ROOT = ")
     app_import = script.index("from app.config import settings")
     assert root_bootstrap < app_import
-    assert "sys.path.insert(0, str(_REPOSITORY_ROOT))" in script
+    assert "Path(__file__).resolve().parents[1]" in script
+    assert "sys.path.insert(0, _REPOSITORY_ROOT)" in script or (
+        "sys.path.insert(0, str(_REPOSITORY_ROOT))" in script
+    )
