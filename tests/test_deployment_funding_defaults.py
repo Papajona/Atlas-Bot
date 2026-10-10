@@ -60,3 +60,12 @@ def test_invalid_tron_funding_boolean_fails_closed():
     result = _run_gate({"USDT_TRON_ENABLED": "1"})
     assert result.returncode != 0
     assert "must be exactly true or false" in result.stderr
+
+def test_api_and_worker_deployments_share_gate_and_keep_sweeps_off():
+    for relative in ("deploy/cloud-run-deploy.sh", "deploy/cloud-run-worker-deploy.sh"):
+        script = (ROOT / relative).read_text(encoding="utf-8")
+        assert 'source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/tron-funding-gate.sh"' in script
+        assert "atlas_configure_tron_funding" in script
+        assert "USDT_TRON_ENABLED=${USDT_TRON_ENABLED}" in script
+        assert "USDT_TRON_SWEEP_ENABLED=false" in script
+        assert "USDT_TRON_ENABLED=true" not in script
