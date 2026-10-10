@@ -63,3 +63,13 @@ def test_funding_webhook_requires_fresh_timestamp_bound_signature():
     assert "x_funding_timestamp" in source
     assert "funding_webhook_max_skew_seconds" in _source("app/config.py")
     assert 'signed = str(timestamp).strip().encode() + b"." + raw_body' in source
+
+
+def test_customer_cash_reserve_does_not_treat_a_position_flip_as_reduce_only():
+    source = _source("app/execution.py")
+    start = source.index("reserved_cash = 0.0")
+    end = source.index('if mode == "PAPER":', start)
+    block = source[start:end]
+    assert "opposing_qty = sum(" in block
+    assert "quantity <= opposing_qty + 1e-9" in block
+    assert "if not reducing:" in block
