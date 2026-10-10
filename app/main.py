@@ -106,6 +106,10 @@ def _parse_stepup_token(token: str | None, uid: str, purpose: str = "withdrawal"
         return None
 
 
+def _constant_time_text_equal(left: object, right: object) -> bool:
+    return hmac.compare_digest(str(left or "").encode("utf-8"), str(right or "").encode("utf-8"))
+
+
 def verify_local_signature(signature: str, digest: str) -> bool:
     if not settings.local_signing_enabled or not settings.local_signing_public_key or not signature:
         return False
@@ -238,6 +242,7 @@ async def _supervise_worker_loop(factory, name: str) -> None:
         state["last_started_at"] = datetime.now(timezone.utc).isoformat()
         try:
             await factory()
+            delay = 1.0
             raise RuntimeError(f"worker loop {name} returned unexpectedly")
         except asyncio.CancelledError:
             state["status"] = "STOPPED"
@@ -2771,13 +2776,13 @@ def _otp_contact(user: dict, requested_email: str | None, requested_phone: str |
     if supplied_email and supplied_phone:
         raise HTTPException(422, "Provide exactly one OTP contact")
     if supplied_email:
-        if not user_email or not hmac.compare_digest(supplied_email, user_email):
+        if not user_email or not _constant_time_text_equal(supplied_email, user_email):
             raise HTTPException(403, "OTP contact does not match the signed-in account")
         if not user.get("email_confirmed_at"):
             raise HTTPException(403, "The account email must be verified before withdrawal OTP can be used")
         return "email", user_email
     if supplied_phone:
-        if not user_phone or not hmac.compare_digest(supplied_phone, user_phone):
+        if not user_phone or not _constant_time_text_equal(supplied_phone, user_phone):
             raise HTTPException(403, "OTP contact does not match the signed-in account")
         if not user.get("phone_confirmed_at"):
             raise HTTPException(403, "The account phone must be verified before withdrawal OTP can be used")
@@ -2895,7 +2900,7 @@ async def customer_otp_verify(req: OtpVerifyRequest, authorization: str | None =
             raise HTTPException(401, "OTP verification session has expired or is invalid")
         if not hmac.compare_digest(intent.contact_hash, hashlib.sha256(contact.encode()).hexdigest()):
             raise HTTPException(403, "OTP contact does not match the issued verification")
-        if not hmac.compare_digest(str(intent.destination_fingerprint), fp) or (intent.purpose == "withdrawal" and not hmac.compare_digest(str(intent.proposal_digest), expected_digest)):
+        if not _constant_time_text_equal(str(intent.destination_fingerprint), fp) or (intent.purpose == "withdrawal" and not _constant_time_text_equal(str(intent.proposal_digest), expected_digest)):
             raise HTTPException(409, "Withdrawal details do not match the OTP verification request")
         # Verify the actual Supabase OTP before minting any local privilege.
         await _supabase_request(
@@ -5170,7 +5175,7 @@ async def approve_withdrawal(withdrawal_id: int, req: WithdrawalDecision, x_admi
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
     authenticated_approver = str(claims.get("sub") or claims.get("user_id") or "").strip()
-    if not authenticated_approver or not hmac.compare_digest(authenticated_approver, str(req.admin_id or "").strip()):
+    if not authenticated_approver or not _constant_time_text_equal(authenticated_approver, str(req.admin_id or "").strip()):
         raise HTTPException(403, "Approver identity must match the authenticated user")
     approver_auth(req.admin_id, x_approver_token, x_admin_token)
     if not settings.withdrawals_enabled:
@@ -5242,7 +5247,7 @@ async def release_withdrawal(withdrawal_id: int, req: WithdrawalExecuteRequest, 
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
     authenticated_operator = str(claims.get("sub") or claims.get("user_id") or "").strip()
-    if not authenticated_operator or not hmac.compare_digest(authenticated_operator, str(req.operator_id or "").strip()):
+    if not authenticated_operator or not _constant_time_text_equal(authenticated_operator, str(req.operator_id or "").strip()):
         raise HTTPException(403, "Release operator identity must match the authenticated user")
     if not verify_release_operator(req.operator_id, x_release_token):
         raise HTTPException(401, "Separate release-operator authentication required")
