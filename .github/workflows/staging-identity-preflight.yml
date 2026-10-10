@@ -1,0 +1,150 @@
+name: Supabase Staging Identity Preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: atlas-supabase-staging-identity-preflight
+  cancel-in-progress: false
+
+jobs:
+  verify-staging-identity:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Assert this is the protected main branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          test -n "${GITHUB_SHA}"
+
+      - name: Authenticate to Google Cloud using protected staging environment
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+
+      - name: Require explicit staging target configuration
+        shell: bash
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
+          STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
+          EXPECTED_RUNTIME_DB_ROLE: ${{ vars.ATLAS_STAGING_RUNTIME_DB_ROLE }}
+        run: |
+          set -euo pipefail
+          : "${GCP_PROJECT_ID:?Missing protected GCP_PROJECT_ID secret}"
+          : "${STAGING_SUPABASE_PROJECT_REF:?Set staging environment variable ATLAS_STAGING_SUPABASE_PROJECT_REF}"
+          : "${STAGING_DATABASE_SECRET:?Set staging environment variable ATLAS_STAGING_DATABASE_SECRET}"
+          : "${EXPECTED_RUNTIME_DB_ROLE:?Set staging environment variable ATLAS_STAGING_RUNTIME_DB_ROLE}"
+          [[ "$STAGING_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]] || { echo "BLOCKED: staging project ref must be an explicit 20-character Supabase project ref"; exit 1; }
+          [[ "$STAGING_DATABASE_SECRET" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "BLOCKED: invalid staging Secret Manager secret name"; exit 1; }
+          [[ "$EXPECTED_RUNTIME_DB_ROLE" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || { echo "BLOCKED: invalid expected runtime database role"; exit 1; }
+          echo "Explicit staging identity configuration is present."
+
+      - name: Read staging database secret without printing credentials
+        shell: bash
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
+        run: |
+          set -euo pipefail
+          umask 077
+          gcloud secrets versions access latest \
+            --secret="$STAGING_DATABASE_SECRET" \
+            --project="$GCP_PROJECT_ID" > "$RUNNER_TEMP/atlas-staging-db-url"
+          test -s "$RUNNER_TEMP/atlas-staging-db-url"
+          chmod 600 "$RUNNER_TEMP/atlas-staging-db-url"
+
+      - name: Verify Supabase project, runtime role, and migration revision (read-only)
+        shell: bash
+        env:
+          STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
+          EXPECTED_RUNTIME_DB_ROLE: ${{ vars.ATLAS_STAGING_RUNTIME_DB_ROLE }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from urllib.parse import unquote, urlparse
+          path = Path(os.environ["RUNNER_TEMP"]) / "atlas-staging-db-url"
+          uri = path.read_text().strip()
+          parsed = urlparse(uri)
+          if parsed.scheme not in ("postgres", "postgresql") or not parsed.hostname:
+              raise SystemExit("BLOCKED: staging database secret is not a valid PostgreSQL URI")
+          expected = os.environ["STAGING_SUPABASE_PROJECT_REF"]
+          host = parsed.hostname.lower()
+          allowed_hosts = {f"db.{expected}.supabase.co", f"{expected}.supabase.co"}
+          if host not in allowed_hosts:
+              raise SystemExit("BLOCKED: database hostname does not match the explicitly configured staging Supabase project")
+          if parsed.path.lstrip("/") != "postgres":
+              raise SystemExit("BLOCKED: staging database name is not the expected postgres database")
+          print("PASS: database URI hostname matches configured staging Supabase project; credentials were not printed")
+          PY
+
+          python - <<'PY'
+          import os, subprocess, sys
+          from pathlib import Path
+          from urllib.parse import urlparse
+          uri = Path(os.environ["RUNNER_TEMP"], "atlas-staging-db-url").read_text().strip()
+          parsed = urlparse(uri)
+          expected_role = os.environ["EXPECTED_RUNTIME_DB_ROLE"]
+          # Put parsed credentials only in the child environment, never argv or logs.
+          env = {k:v for k,v in os.environ.items() if k not in {"DATABASE_URL","PGPASSWORD","PGHOST","PGPORT","PGUSER","PGDATABASE"}}
+          env.update({
+              "PGHOST": parsed.hostname or "",
+              "PGPORT": str(parsed.port or 5432),
+              "PGUSER": unquote(parsed.username or ""),
+              "PGPASSWORD": unquote(parsed.password or ""),
+              "PGDATABASE": parsed.path.lstrip("/") or "",
+              "PGSSLMODE": "require",
+              "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=10000",
+          })
+          query = """
+          SELECT current_database(), current_user, session_user,
+                 (SELECT string_agg(version_num, ',' ORDER BY version_num) FROM public.alembic_version),
+                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p')),
+                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relrowsecurity),
+                 COALESCE((SELECT rolbypassrls OR rolsuper FROM pg_roles WHERE rolname=current_user), false),
+                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner)=current_user AND c.relrowsecurity AND NOT c.relforcerowsecurity);
+          """
+          p = subprocess.run(
+              ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", query],
+              check=False, capture_output=True, text=True, env=env,
+          )
+          if p.returncode:
+              print("BLOCKED: read-only database identity query failed; database output withheld")
+              sys.exit(1)
+          fields = p.stdout.strip().split("|")
+          if len(fields) != 8:
+              raise SystemExit("BLOCKED: unexpected identity query output")
+          db, role, login_role, revision, table_count, unprotected_count, bypass_rls, owned_count = fields
+          print(f"Observed database={db}, current_role={role}, login_role={login_role}, revision={revision or 'missing'}, public_tables={table_count}, tables_without_rls={unprotected_count}, role_bypasses_rls={bypass_rls}, rls_bypass_compatible_owned_tables={owned_count}")
+          if db != "postgres":
+              raise SystemExit("BLOCKED: unexpected staging database name")
+          if role != expected_role:
+              raise SystemExit("BLOCKED: connected database role does not match configured staging runtime role")
+          if not revision:
+              raise SystemExit("BLOCKED: Alembic revision is missing or ambiguous")
+          if int(table_count) == 0:
+              raise SystemExit("BLOCKED: public schema table inventory is empty")
+          if bypass_rls.lower() != "true" and int(owned_count) != int(table_count):
+              raise SystemExit("BLOCKED: runtime role neither bypasses RLS nor owns every public table; review grants/policies before lockdown")
+          if int(unprotected_count) > 0:
+              raise SystemExit("BLOCKED: public tables without RLS remain; do not deploy until isolated staging migration tests pass")
+          print("IDENTITY PASS: RLS is enabled on all inventoried public tables. Migration readiness still requires separate access, ledger, upgrade/downgrade, and recovery tests.")
+          print("PASS: read-only target identity and current migration revision were verified; no migration or write was executed")
+          PY
+          rm -f "$RUNNER_TEMP/atlas-staging-db-url"

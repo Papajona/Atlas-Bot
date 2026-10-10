@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from app.execution import customer_paper_execution_blocked
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -8,9 +10,12 @@ def _source(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_customer_paper_execution_fails_closed_before_real_ledger_use():
+def test_customer_paper_execution_guard_behaviour():
+    assert customer_paper_execution_blocked(101, True) is True
+    assert customer_paper_execution_blocked(101, False) is False
+    assert customer_paper_execution_blocked(None, True) is False
+
     source = _source("app/execution.py")
-    assert 'if customer_id is not None and force_paper:' in source
     assert "Customer paper execution requires an isolated simulation ledger" in source
     assert 'and mode == "LIVE"' in source
     assert 'str(trade.mode or "").upper() == "LIVE"' in source
@@ -58,3 +63,21 @@ def test_funding_webhook_requires_fresh_timestamp_bound_signature():
     assert "x_funding_timestamp" in source
     assert "funding_webhook_max_skew_seconds" in _source("app/config.py")
     assert 'signed = str(timestamp).strip().encode() + b"." + raw_body' in source
+
+
+def test_customer_cash_reserve_does_not_treat_a_position_flip_as_reduce_only():
+    source = _source("app/execution.py")
+    start = source.index("reserved_cash = 0.0")
+    end = source.index('if mode == "PAPER":', start)
+    block = source[start:end]
+    assert "opposing_qty = sum(" in block
+    assert "quantity <= opposing_qty + 1e-9" in block
+    assert "if not reducing:" in block
+
+
+def test_customer_execution_is_blocked_when_effective_mode_falls_back_to_paper():
+    source = _source("app/execution.py")
+    execute_start = source.index("async def execute_signal(")
+    execute_end = source.index("\nasync def ", execute_start + 1)
+    execute_body = source[execute_start:execute_end]
+    assert "customer_paper_execution_blocked(customer_id, force_paper or not live)" in execute_body

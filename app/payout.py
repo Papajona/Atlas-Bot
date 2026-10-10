@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import time
 import hashlib
 import hmac
 import json
@@ -85,10 +86,15 @@ class CCXTPayoutProvider:
     async def send(self, *, currency, amount, destination, tag, network, idempotency_key, metadata):
         if not self.exchange.has.get("withdraw"):
             raise PayoutError(f"{self.exchange.id} does not advertise withdrawal support")
-        params = {"clientOrderId": idempotency_key}
+        params = {}
+        # Only send a client id under the exchange-native parameter name an operator has verified on
+        # that exchange's testnet. An unverified name is ignored or rejected by the exchange, which
+        # would make idempotency and history recovery look safe when they are not.
+        if settings.payout_client_id_param:
+            params[settings.payout_client_id_param] = idempotency_key
         if network:
             params["network"] = network
-        # Some exchanges reject unsupported clientOrderId; callers must reconcile on UNKNOWN.
+        # Callers must reconcile on UNKNOWN.
         try:
             tx = await self._call(self.exchange.withdraw, currency, amount, destination, tag, params)
         except Exception as e:
@@ -114,19 +120,42 @@ class CCXTPayoutProvider:
         if not self.exchange.has.get("fetchWithdrawals"):
             raise PayoutError(f"{self.exchange.id} does not support withdrawal history lookup")
         try:
-            rows = await self._call(self.exchange.fetch_withdrawals, currency, None, 100)
+            since_ms = int((time.time() - max(1, int(settings.payout_recovery_lookback_hours)) * 3600) * 1000)
+            rows = await self._call(self.exchange.fetch_withdrawals, currency, since_ms, 100)
         except Exception as e:
             raise PayoutUnknown(str(e)) from e
-        for tx in rows or []:
+        rows = list(rows or [])
+        for tx in rows:
             raw = tx or {}
             info = raw.get("info") or {}
-            if idempotency_key in json.dumps(raw, sort_keys=True) or idempotency_key == str(info.get("clientOrderId") or info.get("idempotency_key") or ""):
+            # Match only exact client-id fields. Searching serialized transaction JSON for a substring
+            # can falsely associate an unrelated withdrawal whose memo/metadata merely contains this key.
+            candidate_ids = (
+                raw.get("clientOrderId"),
+                raw.get("clientOrderID"),
+                raw.get("client_id"),
+                raw.get("idempotency_key"),
+                raw.get(settings.payout_client_id_param) if settings.payout_client_id_param else None,
+                info.get("clientOrderId"),
+                info.get("clientOrderID"),
+                info.get("client_id"),
+                info.get("idempotency_key"),
+                info.get(settings.payout_client_id_param) if settings.payout_client_id_param else None,
+            )
+            if any(value is not None and str(value) == idempotency_key for value in candidate_ids):
                 provider_id = str(raw.get("id") or raw.get("txid") or "")
                 if provider_id:
                     raw_status = str(raw.get("status") or "PENDING").upper()
                     mapped = {"OK":"COMPLETED","SUCCESS":"COMPLETED","DONE":"COMPLETED","FAILED":"FAILED","CANCELED":"FAILED","CANCELLED":"FAILED"}.get(raw_status, "PENDING")
                     return PayoutResult(self.name, provider_id, mapped, raw_status, raw)
-        raise PayoutNotFound("No matching withdrawal was found in provider history")
+        if len(rows) >= 100:
+            # A full provider page may be truncated; do not interpret a missing id as proof of absence.
+            raise PayoutUnknown("Provider withdrawal history reached the 100-row limit; payout absence is not proven")
+        # CCXT fetch_withdrawals is a bounded, exchange-dependent history query, not a definitive
+        # lookup by idempotency key. Even with a configured client-id parameter, a missing row can
+        # mean delayed indexing, unsupported response fields, or a transaction outside the lookback.
+        # Never authorize release of a customer reserve from absence in this generic history endpoint.
+        raise PayoutUnknown("No matching payout in bounded exchange history; absence is not proof it was not sent")
 
 
 class GenericBankProvider:

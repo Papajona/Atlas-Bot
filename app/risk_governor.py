@@ -17,6 +17,10 @@ def evaluate_trade(*, side: str, price: float, quantity: float, live: bool,
     reasons=[]
     if side not in {"buy","sell"}: reasons.append("invalid_side")
     if not math.isfinite(price) or price <= 0 or not math.isfinite(quantity) or quantity <= 0: reasons.append("invalid_market_or_quantity")
+    if stop_loss_price is not None and not math.isfinite(stop_loss_price):
+        reasons.append("invalid_stop_loss")
+    if take_profit_price is not None and not math.isfinite(take_profit_price):
+        reasons.append("invalid_take_profit")
     if live and not stop_loss_price: reasons.append("live_protective_stop_missing")
     if live and stop_loss_price is not None:
         if (side=="buy" and stop_loss_price>=price) or (side=="sell" and stop_loss_price<=price): reasons.append("protective_stop_wrong_side")

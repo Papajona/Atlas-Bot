@@ -76,8 +76,11 @@ def test_customer_withdrawal_is_reserved_and_requires_admin():
 
 def test_customer_withdrawal_releases_reserved_balance_on_reject_or_failure():
     main = Path("app/main.py").read_text()
-    assert 'await ledger_release_withdrawal(db2, w2.customer_id, w2.amount, reference_id=w2.request_id + ":failed")' in main
-    assert 'await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=w.request_id + ":rejected")' in main
+    assert 'await ledger_release_withdrawal(db2, w2.customer_id, w2.amount, reference_id=_withdrawal_release_ref(w2.request_id))' in main
+    assert 'await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=_withdrawal_release_ref(w.request_id))' in main
+    # every release path must share one canonical ledger reference
+    for legacy in (':failed"', ':reconcile-failed"', ':not-sent"', ':rejected"'):
+        assert 'request_id + "' + legacy not in main, legacy
 
 def test_tron_destination_validation_is_server_side():
     main = Path("app/main.py").read_text()
@@ -110,8 +113,20 @@ def test_customer_withdrawal_retry_is_idempotent_before_reservation():
     end = main.index('@app.get("/api/customer/withdrawals")', start)
     block = main[start:end]
     assert 'request_id_seed = f"{profile.id}:{req.destination.strip()}:{req.amount}:{req.destination_tag or \'\'}:TRON:USDT:{settings.payout_provider}"' in block
-    assert 'Withdrawal.proposal_digest == final_digest' in block
-    assert 'Withdrawal.status.in_(["PENDING", "PARTIALLY_APPROVED", "APPROVED", "SUBMITTING", "SUBMITTED", "UNKNOWN"])' in block
+    assert 'Withdrawal.request_id.like(base_request_id + "%")' in block
+    assert '{"PENDING", "PARTIALLY_APPROVED", "APPROVED", "SUBMITTING", "SUBMITTED", "UNKNOWN"}' in block
+    assert 'next_customer_withdrawal_request_id(base_request_id' in block
+    assert "except IntegrityError:" in block
     assert '"idempotent": True' in block
     assert block.index("existing =") < block.index("stepup.used_at =")
     assert block.index("existing =") < block.index("reserve_withdrawal(")
+
+
+def test_mark_not_sent_binds_authenticated_operator_and_enforces_separation():
+    main = Path("app/main.py").read_text()
+    start = main.index('@app.post("/api/admin/withdrawals/{withdrawal_id}/mark-not-sent")')
+    end = main.index('@app.post("/api/admin/withdrawals/{withdrawal_id}/reject")', start)
+    block = main[start:end]
+    assert 'authenticated_operator = str(claims.get("sub") or claims.get("user_id") or "").strip()' in block
+    assert 'hmac.compare_digest(authenticated_operator, str(req.operator_id or "").strip())' in block
+    assert "release_separation_violation(req.operator_id, x_release_token, [w.first_approved_by, w.second_approved_by])" in block

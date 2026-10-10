@@ -8,6 +8,15 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+# When Python executes a file as "python scripts/check_ai_models.py", sys.path[0]
+# is the scripts directory, not necessarily the repository root. Bootstrap the
+# project root before importing the application package so CI and local invocations
+# behave consistently regardless of the caller's working directory.
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
 
 from app.config import settings
 

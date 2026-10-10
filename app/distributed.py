@@ -73,6 +73,8 @@ async def acquire_lock(key: str, ttl_seconds: int = 900) -> bool:
 
 async def refresh_lock(key: str, ttl_seconds: int = 900) -> bool:
     """Extend a Redis lease only if this process still owns it."""
+    if not settings.redis_url:
+        return settings.environment != "production"
     if not _client:
         return False
     owned = dict(_lock_tokens.get() or {})

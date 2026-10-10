@@ -40,8 +40,8 @@ jobs:
       CAPTURE_TO_UTC: ${{ inputs.to_utc }}
       CAPTURE_EXPECTED_ROWS: ${{ inputs.expected_rows }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
       - name: Install capture dependency
@@ -64,7 +64,7 @@ jobs:
           python -c 'import json, sys; m=json.load(open("oanda_dataset_capture/manifest.json", encoding="utf-8")); ok=m.get("row_count_matches_expectation"); print("row_count_matches_expectation =", ok); sys.exit(0 if ok is True else 1)'
       - name: Preserve capture files for inspection, including row-count mismatches
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: oanda-practice-dataset-${{ github.run_id }}
           path: oanda_dataset_capture/

@@ -90,7 +90,7 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
         "total_return": _safe(protected_equity.iloc[-1] - 1.0),
         "max_drawdown": _safe(protected_dd.min()),
         "sharpe": _safe(protected_net.mean() / std * math.sqrt(ann)) if std > 0 else 0.0,
-        "trades": int((turnover_protected > 0).sum()),
+        "trades": int(((protected != 0) & ((protected.shift(1).fillna(0.0) == 0.0) | (np.sign(protected) != np.sign(protected.shift(1).fillna(0.0))))).sum()),
         "hit_rate": _safe((protected_net[active] > 0).mean()) if bool(active.any()) else 0.0,
         "average_leverage": _safe(protected.abs().mean()),
         "max_leverage": _safe(protected.abs().max()),
