@@ -128,6 +128,8 @@ def test_oanda_practice_gate_requires_explicit_practice_state_and_credentials(mo
 
 def test_oanda_practice_outcomes_are_not_reported_as_real_money_live():
     source = Path("app/execution.py").read_text(encoding="utf-8")
-    assert 'submitted_event = "PRACTICE_ORDER_SUBMITTED" if mode == "FOREX_DEMO" else "LIVE_ORDER_SUBMITTED"' in source
-    assert 'unknown_event = "PRACTICE_ORDER_UNKNOWN" if mode == "FOREX_DEMO" else "LIVE_ORDER_UNKNOWN"' in source
+    assert 'await audit("PRACTICE_ORDER_SUBMITTED", submitted_detail)' in source
+    assert 'await audit("PRACTICE_ORDER_UNKNOWN", unknown_detail)' in source
+    assert 'await audit("LIVE_ORDER_SUBMITTED", submitted_detail)' in source
+    assert 'await audit("LIVE_ORDER_UNKNOWN", unknown_detail)' in source
     assert 'return {"duplicate": False, "trade_id": trade_id, "mode": mode, "status": status,' in source
