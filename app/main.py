@@ -206,8 +206,31 @@ async def api_rate_limit(request: Request, call_next):
     return await call_next(request)
 
 
-def _track_worker_task(coro):
-    task = asyncio.create_task(coro)
+async def _supervise_worker(name, factory, *, initial_backoff: float = 1.0, max_backoff: float = 60.0):
+    """Keep long-running worker loops alive across transient failures, including audit-store outages."""
+    delay = max(0.001, float(initial_backoff))
+    ceiling = max(delay, float(max_backoff))
+    while True:
+        try:
+            await factory()
+            raise RuntimeError("worker loop exited unexpectedly")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.getLogger(__name__).exception("worker_crashed name=%s; restarting", name)
+            try:
+                await _audit("WORKER_RESTART", {"worker": str(name), "backoff_seconds": delay}, "system")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.getLogger(__name__).exception("worker_restart_audit_failed name=%s", name)
+            await asyncio.sleep(delay)
+            delay = min(ceiling, delay * 2.0)
+
+
+def _track_worker_task(factory, *, name: str | None = None):
+    worker_name = name or getattr(factory, "__name__", "worker")
+    task = asyncio.create_task(_supervise_worker(worker_name, factory))
     _worker_tasks.add(task)
     task.add_done_callback(_worker_tasks.discard)
     return task
@@ -318,22 +341,22 @@ async def startup():
     # adaptive controllers and recovery loops belong to the worker pool.
     if process_role == "worker":
         if settings.background_reconciliation_enabled:
-            _background_task = _track_worker_task(_reconciliation_loop())
+            _background_task = _track_worker_task(lambda: _reconciliation_loop(), name="reconciliation")
         if settings.custody_reconciliation_enabled:
-            _track_worker_task(_custody_reconciliation_loop())
+            _track_worker_task(lambda: _custody_reconciliation_loop(), name="custody_reconciliation")
         if settings.usdt_tron_enabled and settings.usdt_trongrid_api_key:
-            _usdt_task = _track_worker_task(_usdt_tron_monitor_loop())
-        _track_worker_task(_heartbeat_loop())
-        _track_worker_task(_continuous_risk_enforcement_loop())
-        _track_worker_task(_withdrawal_recovery_loop())
-        _track_worker_task(_customer_key_audit_loop())
+            _usdt_task = _track_worker_task(lambda: _usdt_tron_monitor_loop(), name="usdt_tron_monitor")
+        _track_worker_task(lambda: _heartbeat_loop(), name="heartbeat")
+        _track_worker_task(lambda: _continuous_risk_enforcement_loop(), name="continuous_risk_enforcement")
+        _track_worker_task(lambda: _withdrawal_recovery_loop(), name="withdrawal_recovery")
+        _track_worker_task(lambda: _customer_key_audit_loop(), name="customer_key_audit")
         if settings.daily_research_enabled:
-            _track_worker_task(_daily_research_loop())
+            _track_worker_task(lambda: _daily_research_loop(), name="daily_research")
         if settings.adaptive_bot_controller_enabled:
-            _track_worker_task(_adaptive_bot_controller_loop())
-            _track_worker_task(_executor_controller_loop())
+            _track_worker_task(lambda: _adaptive_bot_controller_loop(), name="adaptive_bot_controller")
+            _track_worker_task(lambda: _executor_controller_loop(), name="executor_controller")
     elif process_role == "job":
-        _track_worker_task(_heartbeat_loop())
+        _track_worker_task(lambda: _heartbeat_loop(), name="heartbeat")
 
 
 @app.on_event("shutdown")
@@ -784,6 +807,12 @@ async def _run_persisted_adaptive_bot_cycle(
         equity = max(0.0, float(account.equity))
         risk_fraction = float(bot.risk_fraction or settings.risk_per_trade)
         paper_mode = bool(settings.paper_trading or not settings.live_trading_enabled or not state.live_enabled or bot.mode != "LIVE")
+        if req.asset in {"forex", "commodity"}:
+            return {
+                "decision": "NO_TRADE",
+                "stage": "simulation_ledger_gate",
+                "reason": "Customer forex/commodity automation requires an isolated simulation ledger",
+            }
     if req.asset in {"forex", "commodity"}:
         try:
             df = await _fetch_customer_oanda_data(profile.id, req)
@@ -3553,6 +3582,17 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
         state = await db.get(AppState, 1)
         if not state or state.kill_switch:
             raise HTTPException(409, "Trading is halted by the platform risk state")
+        paper_mode = bool(
+            settings.paper_trading
+            or not settings.live_trading_enabled
+            or not state.live_enabled
+            or req.asset in {"forex", "commodity"}
+        )
+        if req.asset in {"forex", "commodity"} and paper_mode:
+            raise HTTPException(
+                409,
+                "Customer forex/commodity automation is unavailable until an isolated simulation ledger is implemented",
+            )
         candidate = None
         if req.strategy_candidate_id is not None:
             candidate = (await db.execute(select(StrategyCandidate).where(StrategyCandidate.id == req.strategy_candidate_id, StrategyCandidate.customer_id == profile.id))).scalar_one_or_none()
@@ -3561,12 +3601,6 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             if candidate.asset != req.asset or candidate.symbol != req.symbol or candidate.exchange != req.exchange or candidate.timeframe != req.timeframe:
                 raise HTTPException(409, "Strategy candidate does not match the selected market configuration")
         account = await _get_or_create_customer_trading_account(db, profile)
-        paper_mode = bool(
-            settings.paper_trading
-            or not settings.live_trading_enabled
-            or not state.live_enabled
-            or req.asset in {"forex", "commodity"}
-        )
         if not paper_mode:
             try:
                 await assert_live_system_enabled(
