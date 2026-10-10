@@ -69,10 +69,8 @@ fun UserDashboardScreen(
     var selectedTimeframeDays by remember { mutableIntStateOf(30) } // 7 or 30 days
     var actionDialogMessage by remember { mutableStateOf<String?>(null) }
 
-    // Generate 30-day realistic historical equity curve
-    val equityHistory = remember {
-        generate30DayEquityData()
-    }
+    // No historical equity endpoint is currently wired; never synthesize portfolio history.
+    val equityHistory = emptyList<EquityPoint>()
 
     val displayPoints = remember(selectedTimeframeDays, equityHistory) {
         if (selectedTimeframeDays == 7) {
@@ -149,14 +147,9 @@ fun UserDashboardScreen(
                         // Three summary metric cards side by side
                         item {
                             SummaryKpiRow(
-                                totalBalance = 1250.00,
-                                activeTrades = when (selectedAssetClass) {
-                                    AssetClass.ALL -> 5
-                                    AssetClass.CRYPTO -> 2
-                                    AssetClass.FOREX -> 2
-                                    AssetClass.COMMODITIES -> 1
-                                },
-                                profit24hPct = 3.5,
+                                totalBalance = "Unavailable",
+                                activeTrades = "Unavailable",
+                                profit24hPct = "Unavailable",
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
                                 textPrimary = textPrimary,
@@ -202,9 +195,9 @@ fun UserDashboardScreen(
                                 textPrimary = textPrimary,
                                 onAction = { actionName ->
                                     when (actionName) {
-                                        "New Trade" -> actionDialogMessage = "New Paper Trade:\nSelect asset to place disciplined trade:\n• Crypto: BTC/USDT, ETH/USDT\n• Forex: EUR/USD, GBP/USD (OANDA demo)\n• Commodities: Gold XAU/USD (OANDA demo)"
-                                        "Deposit" -> actionDialogMessage = "Deposit USDT: Dedicated TRC-20 omnibus deposit addresses enabled."
-                                        "Withdraw" -> actionDialogMessage = "Withdrawal Portal: 2-man approval and AAL2 step-up authentication required."
+                                        "New Trade" -> actionDialogMessage = "Trading is unavailable until a verified account session and supported execution route are established."
+                                        "Deposit" -> actionDialogMessage = "Deposits are unavailable until the verified funding status is received from the backend."
+                                        "Withdraw" -> actionDialogMessage = "Withdrawal status is unavailable until verified backend account and authorization data is received."
                                         "Analytics" -> currentTab = DashboardTab.PORTFOLIO
                                     }
                                 }
@@ -364,8 +357,8 @@ fun UserDashboardScreen(
 
                 DashboardTab.SETTINGS -> {
                     ModernSettingsScreen(
-                        userName = "$userName Henderson",
-                        userEmail = "${userName.lowercase(Locale.US)}.henderson@atlas.trading",
+                        userName = userName,
+                        userEmail = "Unavailable",
                         onOpenOperatorConsole = onOpenOperatorConsole,
                         onOpenPortal = onOpenPortal,
                         modifier = Modifier.padding(innerPadding)
@@ -525,9 +518,9 @@ private fun AssetClassSelectorRow(
 
 @Composable
 private fun SummaryKpiRow(
-    totalBalance: Double,
-    activeTrades: Int,
-    profit24hPct: Double,
+    totalBalance: String,
+    activeTrades: String,
+    profit24hPct: String,
     cardSurface: Color,
     cardBorder: Color,
     textPrimary: Color,
@@ -550,7 +543,7 @@ private fun SummaryKpiRow(
                 Text(text = "Total Balance", fontSize = 11.sp, color = textMuted, maxLines = 1)
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
-                    text = "$${String.format(Locale.US, "%,.2f", totalBalance)}",
+                    text = totalBalance,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     color = textPrimary,
@@ -570,7 +563,7 @@ private fun SummaryKpiRow(
                 Text(text = "Active Trades", fontSize = 11.sp, color = textMuted, maxLines = 1)
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
-                    text = "$activeTrades",
+                    text = activeTrades,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     color = textPrimary
@@ -595,7 +588,7 @@ private fun SummaryKpiRow(
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
-                        text = "+${String.format(Locale.US, "%.1f", profit24hPct)}%",
+                        text = profit24hPct,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
                         color = emeraldBadgeText
@@ -711,16 +704,23 @@ private fun PortfolioPerformanceCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // The Recharts-style Area Curve
-            RechartsMonotoneAreaCanvas(
-                points = points,
-                selectedIndex = selectedIndex,
-                onSelectIndex = { selectedIndex = it },
-                accentColor = emeraldAccent,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(140.dp)
-            )
+            if (points.isEmpty()) {
+                Text(
+                    text = "Performance history unavailable: verified daily account history has not been received.",
+                    fontSize = 12.sp,
+                    color = textMuted
+                )
+            } else {
+                RechartsMonotoneAreaCanvas(
+                    points = points,
+                    selectedIndex = selectedIndex,
+                    onSelectIndex = { selectedIndex = it },
+                    accentColor = emeraldAccent,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(140.dp)
+                )
+            }
         }
     }
 }
@@ -906,87 +906,11 @@ private fun RecentActivityCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            when (selectedAssetClass) {
-                AssetClass.FOREX -> {
-                    // EUR/USD activity
-                    ActivityRow(
-                        badgeText = "€",
-                        badgeBg = Color(0xFF3B82F6),
-                        title = "EUR/USD bought:",
-                        value = "+25 pips",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    HorizontalDivider(color = theme.divider, thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(10.dp))
-                    // GBP/USD activity
-                    ActivityRow(
-                        badgeText = "£",
-                        badgeBg = Color(0xFF8B5CF6),
-                        title = "GBP/USD sold:",
-                        value = "+40 pips",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                }
-                AssetClass.COMMODITIES -> {
-                    // Gold activity
-                    ActivityRow(
-                        badgeText = "Au",
-                        badgeBg = Color(0xFFEAB308),
-                        title = "Gold (XAU) bought:",
-                        value = "+0.4 oz (TP)",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    HorizontalDivider(color = theme.divider, thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(10.dp))
-                    // Crude Oil activity
-                    ActivityRow(
-                        badgeText = "🛢",
-                        badgeBg = Color(0xFF475569),
-                        title = "Crude Oil (WTI) sold:",
-                        value = "+$1.20/bbl",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                }
-                else -> {
-                    // Crypto & Multi-Asset default
-                    ActivityRow(
-                        badgeText = "₿",
-                        badgeBg = Color(0xFFF7931A),
-                        title = "BTC bought:",
-                        value = "+0.05",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    HorizontalDivider(color = theme.divider, thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(10.dp))
-                    ActivityRow(
-                        badgeText = "Ξ",
-                        badgeBg = Color(0xFF627EEA),
-                        title = "ETH sold:",
-                        value = "-0.1",
-                        valueColor = redDanger,
-                        textPrimary = textPrimary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    HorizontalDivider(color = theme.divider, thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(10.dp))
-                    ActivityRow(
-                        badgeText = "€",
-                        badgeBg = Color(0xFF3B82F6),
-                        title = "EUR/USD limit filled:",
-                        value = "Unavailable",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                }
-            }
+            Text(
+                text = "Recent activity is unavailable until verified account activity is received.",
+                fontSize = 12.sp,
+                color = textMuted
+            )
         }
     }
 }
@@ -1115,7 +1039,7 @@ private fun WatchlistCard(
                     color = textPrimary
                 )
                 Text(
-                    text = "Live Scanner",
+                    text = "Provider data status",
                     fontSize = 11.sp,
                     color = emeraldAccent,
                     fontWeight = FontWeight.Bold
@@ -1124,154 +1048,11 @@ private fun WatchlistCard(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            when (selectedAssetClass) {
-                AssetClass.FOREX -> {
-                    // EUR/USD
-                    WatchlistItemRow(
-                        badge = "€",
-                        badgeBg = Color(0xFF3B82F6),
-                        symbol = "EUR/USD",
-                        price = "1.0852",
-                        changePct = "+0.35%",
-                        isBullish = true,
-                        color = emeraldAccent,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    // GBP/USD
-                    WatchlistItemRow(
-                        badge = "£",
-                        badgeBg = Color(0xFF8B5CF6),
-                        symbol = "GBP/USD",
-                        price = "1.2940",
-                        changePct = "-0.22%",
-                        isBullish = false,
-                        color = redDanger,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    // USD/JPY
-                    WatchlistItemRow(
-                        badge = "¥",
-                        badgeBg = Color(0xFFEC4899),
-                        symbol = "USD/JPY",
-                        price = "154.20",
-                        changePct = "+0.48%",
-                        isBullish = true,
-                        color = emeraldAccent,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                }
-                AssetClass.COMMODITIES -> {
-                    // Gold
-                    WatchlistItemRow(
-                        badge = "Au",
-                        badgeBg = Color(0xFFEAB308),
-                        symbol = "Gold (XAU)",
-                        price = "Unavailable",
-                        changePct = "+1.15%",
-                        isBullish = true,
-                        color = emeraldAccent,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    // Silver
-                    WatchlistItemRow(
-                        badge = "Ag",
-                        badgeBg = Color(0xFF94A3B8),
-                        symbol = "Silver (XAG)",
-                        price = "$28.45",
-                        changePct = "+0.82%",
-                        isBullish = true,
-                        color = emeraldAccent,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    // Crude Oil
-                    WatchlistItemRow(
-                        badge = "🛢",
-                        badgeBg = Color(0xFF475569),
-                        symbol = "Crude (WTI)",
-                        price = "$78.60",
-                        changePct = "-0.90%",
-                        isBullish = false,
-                        color = redDanger,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                }
-                else -> {
-                    // Crypto or ALL
-                    WatchlistItemRow(
-                        badge = "₿",
-                        badgeBg = Color(0xFFF7931A),
-                        symbol = "BTC",
-                        price = "Unavailable",
-                        changePct = "+2.4%",
-                        isBullish = true,
-                        color = emeraldAccent,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    WatchlistItemRow(
-                        badge = "Ξ",
-                        badgeBg = Color(0xFF627EEA),
-                        symbol = "ETH",
-                        price = "$3,480",
-                        changePct = "-1.1%",
-                        isBullish = false,
-                        color = redDanger,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    if (selectedAssetClass == AssetClass.ALL) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        WatchlistItemRow(
-                            badge = "€",
-                            badgeBg = Color(0xFF3B82F6),
-                            symbol = "EUR/USD",
-                            price = "1.0852",
-                            changePct = "+0.35%",
-                            isBullish = true,
-                            color = emeraldAccent,
-                            textPrimary = textPrimary,
-                            textMuted = textMuted
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        WatchlistItemRow(
-                            badge = "Au",
-                            badgeBg = Color(0xFFEAB308),
-                            symbol = "Gold (XAU)",
-                            price = "$2,354.20",
-                            changePct = "+1.15%",
-                            isBullish = true,
-                            color = emeraldAccent,
-                            textPrimary = textPrimary,
-                            textMuted = textMuted
-                        )
-                    }
-                }
-            }
+            Text(
+                text = "Market prices and percentage changes are unavailable until verified provider data is received.",
+                fontSize = 12.sp,
+                color = textMuted
+            )
         }
     }
 }
@@ -1400,39 +1181,4 @@ private fun DashboardBottomNavigation(
             }
         }
     }
-}
-
-/**
- * Generates realistic 30-day daily historical equity progression with positive trend.
- */
-private fun generate30DayEquityData(): List<EquityPoint> {
-    val result = mutableListOf<EquityPoint>()
-    var equity = 1064.60
-    var cumProfit = 0.0
-
-    // Historical performance is unavailable until the backend records verified daily history.
-    val dailyChanges = listOf(
-        +4.20, +8.50, -3.10, +6.40, +12.30, -5.20, +9.10,
-        +14.50, -4.80, +11.20, +7.60, -6.10, +18.40, +10.50,
-        -7.20, +15.30, +8.90, -4.50, +13.20, +16.80, -8.10,
-        +12.40, +9.50, -3.80, +14.60, +17.20, -5.40, +12.80,
-        +10.60, +9.50
-    )
-
-    for (day in 1..30) {
-        val change = dailyChanges[day - 1]
-        equity += change
-        cumProfit += change
-        val dateLabel = "Day $day"
-        result.add(
-            EquityPoint(
-                day = day,
-                dateLabel = dateLabel,
-                equity = Math.round(equity * 100.0) / 100.0,
-                dailyPnl = change,
-                cumProfit = Math.round(cumProfit * 100.0) / 100.0
-            )
-        )
-    }
-    return result
 }
