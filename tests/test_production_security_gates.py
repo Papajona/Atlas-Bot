@@ -138,3 +138,47 @@ def test_production_deploy_wires_required_research_evidence_settings():
     assert "@RESEARCH_FEE_SOURCE=" in deploy
     assert "@RESEARCH_FEE_EVIDENCE_ID=" in deploy
     assert "@RESEARCH_MIN_DEFLATED_SHARPE=" in deploy
+
+def test_tron_ambiguous_deposit_uses_one_persistent_incident_without_reopening_resolved():
+    main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    funds = (ROOT / "app" / "customer_funds.py").read_text(encoding="utf-8")
+    assert "TRON_DEPOSIT_IDENTITY_AMBIGUOUS:{wallet.id}:{txid}" in main
+    assert "reopen_resolved=False" in main
+    assert "async def record_ledger_incident(" in funds
+    assert 'in {"RESOLVED", "CLOSED"}' in funds
+    assert "row.resolved_at = None" in funds
+
+
+def test_withdrawal_idempotency_key_is_payload_bound_and_sent_by_customer_ui():
+    main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    html = (ROOT / "app" / "templates" / "customer.html").read_text(encoding="utf-8")
+    start = main.index("async def customer_create_withdrawal(")
+    end = main.index('@app.get("/api/customer/withdrawals")', start)
+    block = main[start:end]
+    assert 'alias="Idempotency-Key"' in block
+    assert "keyed_request_id" in block
+    assert "Idempotency-Key was already used for a different withdrawal payload" in block
+    assert block.index("keyed_existing") < block.index("_parse_stepup_token(")
+    assert "'Idempotency-Key':idemKey" in html
+    assert "atlas_withdrawal_idem_payload" in html
+
+
+def test_tron_broadcast_result_cannot_overwrite_terminal_or_unknown_outcomes():
+    main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    start = main.index("async def admin_record_tron_sweep_broadcast(")
+    end = main.index('@app.post("/api/admin/custody/tron/sweeps/{sweep_id}/reconcile")', start)
+    block = main[start:end]
+    assert "terminal_sweep_states" in block
+    assert 'sweep.status != "READY_FOR_SIGNER"' in block
+    assert "A rejection cannot override a prior timeout or known transaction" in block
+    assert 'sweep.status == "SUBMITTED" and sweep.transaction_id == txid' in block
+
+
+def test_production_deploy_requires_an_explicit_valid_administrator_bootstrap():
+    deploy = (ROOT / "deploy" / "cloud-run-deploy.sh").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+    assert ': "${ADMIN_ROLE_ASSIGNMENTS:?' in deploy
+    assert "at least one explicit ADMINISTRATOR assignment is required" in deploy
+    assert "every bootstrap role assignment must be present in ADMIN_SUPABASE_USER_IDS" in deploy
+    assert "@ADMIN_ROLE_ASSIGNMENTS=${ADMIN_ROLE_ASSIGNMENTS}" in deploy
+    assert "ADMIN_ROLE_ASSIGNMENTS: ${{ secrets.ADMIN_ROLE_ASSIGNMENTS }}" in workflow
