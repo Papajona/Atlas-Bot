@@ -178,6 +178,10 @@ _background_task: asyncio.Task | None = None
 _usdt_task: asyncio.Task | None = None
 _worker_tasks: set[asyncio.Task] = set()
 _worker_loop_health: dict[str, dict] = {}
+# Per-process cap on authenticated risk telemetry sockets; release reservations on every exit.
+_WS_MAX_CONNECTIONS_PER_USER = 5
+_ws_user_connections: dict[str, set[int]] = {}
+_ws_connection_lock = asyncio.Lock()
 _audit_actor: ContextVar[str] = ContextVar("atlas_audit_actor", default="system")
 _expensive_paths = {"/api/train", "/api/backtest", "/api/strategy/backtest", "/api/customer/bot/start"}
 
@@ -383,15 +387,28 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    """Cancel worker loops and allow up to 30 seconds for cancellation cleanup.
+
+    Tasks use async context managers for database sessions, so awaiting their
+    cancellation lets those contexts roll back/close before process exit. A task
+    that suppresses cancellation is force-cancelled after the bounded grace period.
+    """
     global _background_task, _usdt_task
-    tasks = set(_worker_tasks)
+    tasks = {task for task in _worker_tasks if not task.done()}
     for task in (_background_task, _usdt_task):
-        if task:
+        if task and not task.done():
             tasks.add(task)
     for task in tasks:
         task.cancel()
     if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+        done, pending = await asyncio.wait(tasks, timeout=30.0)
+        if pending:
+            logger.error("worker_shutdown_grace_expired pending_tasks=%s", len(pending))
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        if done:
+            await asyncio.gather(*done, return_exceptions=True)
     _worker_tasks.clear()
     _background_task = None
     _usdt_task = None
@@ -4898,11 +4915,7 @@ async def risk_dashboard_worker_health(
 @app.websocket("/ws/risk-telemetry")
 @app.websocket("/ws/equity")
 async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | None = Header(default=None)):
-    """Persistent WebSocket stream for privileged risk telemetry.
-
-    The Authorization header is validated before the socket is accepted so an
-    unauthenticated client cannot subscribe to live portfolio state.
-    """
+    """Authenticated risk telemetry with a per-user concurrent-connection cap."""
     authorization = authorization or websocket.headers.get("authorization")
     try:
         claims = await auth(None, authorization)
@@ -4910,9 +4923,41 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
     except Exception:
         await websocket.close(code=1008, reason="Authentication required")
         return
-    await websocket.accept()
+
+    # Derive identity only from validated server-side claims, never client query params.
+    user_id = str(
+        claims.get("sub") or claims.get("user_id") or claims.get("uid") or ""
+    ).strip() if isinstance(claims, dict) else ""
+    if not user_id:
+        await websocket.close(code=1008, reason="Authenticated identity missing")
+        return
+
+    connection_id = id(websocket)
+    async with _ws_connection_lock:
+        active = _ws_user_connections.setdefault(user_id, set())
+        if len(active) >= _WS_MAX_CONNECTIONS_PER_USER:
+            if not active:
+                _ws_user_connections.pop(user_id, None)
+            await websocket.close(code=1013, reason="Too many telemetry connections")
+            return
+        active.add(connection_id)
+
+    accepted = False
     try:
+        await websocket.accept()
+        accepted = True
+        last_auth_check = time.monotonic()
         while True:
+            # Revocation/role changes take effect on an established socket within 30s.
+            if time.monotonic() - last_auth_check >= 30.0:
+                try:
+                    claims = await auth(None, authorization)
+                    await require_role(claims, "RISK_OFFICER")
+                except Exception:
+                    await websocket.close(code=1008, reason="Authorization expired")
+                    return
+                last_auth_check = time.monotonic()
+
             async with SessionLocal() as db:
                 s = await db.get(AppState, 1)
                 equity = float(s.equity) if s and s.equity is not None else 0.0
@@ -4924,12 +4969,11 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 unrealized = float(s.unrealized_pnl) if s and s.unrealized_pnl is not None else 0.0
                 kill = bool(s.kill_switch) if s else True
                 worker_health = await _worker_health_snapshot(db)
-
                 rows = (await db.execute(select(StrategyOutcome.net_return_bps).order_by(StrategyOutcome.created_at.desc()).limit(100))).scalars().all()
                 returns = [r / 10000.0 for r in rows if r is not None]
                 if len(returns) >= 10:
                     mean_ret = sum(returns) / len(returns)
-                    variance = sum((r - mean_ret) ** 2 for r in returns) / (len(returns) or 1)
+                    variance = sum((r - mean_ret) ** 2 for r in returns) / len(returns)
                     vol = math.sqrt(variance)
                     sharpe = (mean_ret / vol * math.sqrt(8760)) if vol > 0 else 0.0
                     calmar = (mean_ret * 8760 / max(0.01, current_dd / 100.0)) if current_dd > 0 else 0.0
@@ -4938,10 +4982,7 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                     sortino = (mean_ret / downside_vol * math.sqrt(8760)) if downside_vol > 0 else 0.0
                     edge_decay_z = (mean_ret / (vol / math.sqrt(len(returns)))) if vol > 0 else 0.0
                 else:
-                    sharpe = 0.0
-                    calmar = 0.0
-                    sortino = 0.0
-                    edge_decay_z = 0.0
+                    sharpe = calmar = sortino = edge_decay_z = 0.0
 
             payload = {
                 "equity": round(equity, 2),
@@ -4979,10 +5020,20 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 pass
     except WebSocketDisconnect:
         pass
+    except asyncio.CancelledError:
+        raise
     except Exception:
         logger.exception("risk dashboard websocket failed")
         with contextlib.suppress(Exception):
             await websocket.close(code=1011)
+    finally:
+        async with _ws_connection_lock:
+            active = _ws_user_connections.get(user_id)
+            if active is not None:
+                active.discard(connection_id)
+                if not active:
+                    _ws_user_connections.pop(user_id, None)
+
 
 
 @app.get("/api/trades")
