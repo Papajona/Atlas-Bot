@@ -254,3 +254,8 @@ def test_staging_preflight_owner_compatibility_matches_runtime_guard():
     guard = (ROOT / "app" / "startup_guards.py").read_text(encoding="utf-8")
     assert "c.relrowsecurity AND NOT c.relforcerowsecurity" in workflow
     assert "c.relowner <> r.oid OR c.relforcerowsecurity" in guard
+
+
+def test_production_deploy_requires_staging_identity_preflight():
+    workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+    assert 'require_success "staging-identity-preflight.yml" "Supabase staging identity preflight"' in workflow
