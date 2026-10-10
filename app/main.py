@@ -5327,8 +5327,9 @@ async def mark_withdrawal_not_sent(
             if recover is None:
                 raise HTTPException(409, "Provider does not support recovery; use reconcile instead")
             result = await recover(f"withdrawal:{w.request_id}", currency=w.currency)
-            if result.provider_id:
-                raise HTTPException(409, "Provider payout found; use reconcile instead")
+            if not result or not str(getattr(result, "provider_id", "") or "").strip():
+                raise HTTPException(409, "Provider recovery did not definitively prove absence; withdrawal reserve remains held")
+            raise HTTPException(409, "Provider payout found; use reconcile instead")
         except PayoutNotFound:
             pass
         except PayoutUnknown as e:
