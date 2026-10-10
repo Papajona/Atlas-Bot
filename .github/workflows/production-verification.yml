@@ -99,8 +99,8 @@ jobs:
           if [ "$status" -eq 0 ]; then
             exit 0
           elif [ "$status" -eq 2 ]; then
-            echo "SKIP: provider credentials are not configured; this is not a provider verification pass"
-            exit 0
+            echo "BLOCKED: provider credentials are not configured; production verification cannot pass without provider checks"
+            exit 2
           else
             echo "BLOCKED: AI model/provider verification failed with exit code $status"
             exit "$status"
