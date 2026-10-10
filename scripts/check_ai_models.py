@@ -42,12 +42,23 @@ def main() -> int:
             print(f"[{'OK' if ok else 'FAIL'}] gemini {model} -> HTTP {code}")
     if settings.groq_api_key:
         code, body = _get("https://api.groq.com/openai/v1/models", {"Authorization": f"Bearer {settings.groq_api_key}"})
-        served = {m.get("id") for m in json.loads(body).get("data", [])} if code == 200 else set()
-        for model in sorted({settings.groq_model, settings.groq_strategy_model} - {""}):
+        if code != 200:
+            # Do not misreport authorization/network failures as a retired model ID.
+            # The caller must fix provider access before model availability can be assessed.
             checked += 1
-            ok = model in served
-            bad += 0 if ok else 1
-            print(f"[{'OK' if ok else 'FAIL'}] groq {model} -> {'served' if ok else f'not listed (HTTP {code})'}")
+            bad += 1
+            print(f"[FAIL] groq models endpoint -> HTTP {code}; cannot verify configured model IDs")
+        else:
+            try:
+                served = {m.get("id") for m in json.loads(body).get("data", [])}
+            except (ValueError, TypeError):
+                served = set()
+                code = 200
+            for model in sorted({settings.groq_model, settings.groq_strategy_model} - {""}):
+                checked += 1
+                ok = model in served
+                bad += 0 if ok else 1
+                print(f"[{'OK' if ok else 'FAIL'}] groq {model} -> {'served' if ok else 'not listed (HTTP 200)'}")
     if not checked:
         print("No provider keys set; nothing checked.")
         return 2
