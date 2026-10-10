@@ -22,6 +22,25 @@ set -euo pipefail
 : "${MODEL_STAGING_BUCKET:?Set MODEL_STAGING_BUCKET}"
 : "${BACKUP_RECOVERY_URL:?Set BACKUP_RECOVERY_URL (startup refuses to run in production without it)}"
 
+# The worker independently runs the TRON listener/sweeper. Keep its funding path
+# disabled by default too; paper mode alone is not a funding/custody boundary.
+USDT_TRON_ENABLED="${USDT_TRON_ENABLED:-false}"
+USDT_TRON_NETWORK="${USDT_TRON_NETWORK:-mainnet}"
+if [[ "$USDT_TRON_ENABLED" != "true" && "$USDT_TRON_ENABLED" != "false" ]]; then
+  echo "ERROR: USDT_TRON_ENABLED must be exactly true or false." >&2
+  exit 2
+fi
+if [[ "$USDT_TRON_ENABLED" == "true" ]]; then
+  if [[ "${ALLOW_TRON_FUNDING:-}" != "YES" ]]; then
+    echo "ERROR: TRON funding is disabled by default; set ALLOW_TRON_FUNDING=YES only after funding-path approval." >&2
+    exit 2
+  fi
+  if [[ "$USDT_TRON_NETWORK" == "mainnet" && "${ALLOW_MAINNET_TRON_FUNDING:-}" != "YES" ]]; then
+    echo "ERROR: mainnet TRON funding requires ALLOW_MAINNET_TRON_FUNDING=YES after the custody/withdrawal review." >&2
+    exit 2
+  fi
+fi
+
 if [[ ! "$IMAGE" =~ @sha256:[0-9a-f]{64}$ || ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ || "$IMAGE" != *@$IMAGE_DIGEST ]]; then
   echo "ERROR: worker IMAGE must be an immutable @sha256 digest matching IMAGE_DIGEST." >&2
   exit 2
@@ -57,7 +76,7 @@ gcloud run worker-pools deploy "$WORKER_POOL" \
   --memory 2Gi \
   --command python \
   --args=-m,app.worker \
-  --set-env-vars "ENVIRONMENT=production,PROCESS_ROLE=worker,RELEASE_SHA=${RELEASE_SHA},RELEASE_VERSION=${RELEASE_VERSION},IMAGE_DIGEST=${IMAGE_DIGEST},BACKUP_RECOVERY_URL=${BACKUP_RECOVERY_URL},PAPER_TRADING=true,LIVE_TRADING_ENABLED=false,BROKER_SANDBOX=true,DOCS_ENABLED=false,MODEL_DIR=/app/models,MODEL_STAGING_DIR=/app/model-staging,USDT_TRON_ENABLED=true,USDT_TRON_NETWORK=mainnet,USDT_TRONGRID_BASE_URL=https://api.trongrid.io,USDT_TRON_USDT_CONTRACT=TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t,USDT_TRON_POLL_SECONDS=60,USDT_TRON_MIN_CONFIRMATIONS=19,DISTRIBUTED_RATE_LIMIT_REQUIRED=true,EXTERNAL_SECURITY_AUDIT_ENABLED=true,EXTERNAL_SECURITY_AUDIT_REQUIRED=true,GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash},GEMINI_STRATEGY_MODEL=${GEMINI_STRATEGY_MODEL:-gemini-3.5-flash},GROQ_MODEL=${GROQ_MODEL:-openai/gpt-oss-20b},GROQ_STRATEGY_MODEL=${GROQ_STRATEGY_MODEL:-openai/gpt-oss-20b},GROQ_MAX_COMPLETION_TOKENS=4096" \
+  --set-env-vars "ENVIRONMENT=production,PROCESS_ROLE=worker,RELEASE_SHA=${RELEASE_SHA},RELEASE_VERSION=${RELEASE_VERSION},IMAGE_DIGEST=${IMAGE_DIGEST},BACKUP_RECOVERY_URL=${BACKUP_RECOVERY_URL},PAPER_TRADING=true,LIVE_TRADING_ENABLED=false,BROKER_SANDBOX=true,DOCS_ENABLED=false,MODEL_DIR=/app/models,MODEL_STAGING_DIR=/app/model-staging,USDT_TRON_ENABLED=${USDT_TRON_ENABLED},USDT_TRON_NETWORK=${USDT_TRON_NETWORK},USDT_TRON_SWEEP_ENABLED=false,USDT_TRONGRID_BASE_URL=https://api.trongrid.io,USDT_TRON_USDT_CONTRACT=TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t,USDT_TRON_POLL_SECONDS=60,USDT_TRON_MIN_CONFIRMATIONS=19,DISTRIBUTED_RATE_LIMIT_REQUIRED=true,EXTERNAL_SECURITY_AUDIT_ENABLED=true,EXTERNAL_SECURITY_AUDIT_REQUIRED=true,GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash},GEMINI_STRATEGY_MODEL=${GEMINI_STRATEGY_MODEL:-gemini-3.5-flash},GROQ_MODEL=${GROQ_MODEL:-openai/gpt-oss-20b},GROQ_STRATEGY_MODEL=${GROQ_STRATEGY_MODEL:-openai/gpt-oss-20b},GROQ_MAX_COMPLETION_TOKENS=4096" \
   --set-secrets "DATABASE_URL=$DATABASE_SECRET_REF,SECRET_KEY=$SECRET_KEY_REF,APP_ENCRYPTION_KEY=$SECRET_APP_ENCRYPTION_REF,REDIS_URL=$SECRET_REDIS_URL_REF,USDT_TRON_ACCOUNT_XPUB=$SECRET_TRON_XPUB_REF,USDT_TRONGRID_API_KEY=$SECRET_TRONGRID_REF,MODEL_SIGNING_PUBLIC_KEY=$SECRET_MODEL_SIGNING_PUBLIC_REF,MODEL_SIGNING_PRIVATE_KEY=$SECRET_MODEL_SIGNING_PRIVATE_REF,GEMINI_API_KEY=$SECRET_GEMINI_REF${GROQ_SECRET_ARG}" \
   --add-volume "mount-path=/app/models,type=cloud-storage,bucket=$MODEL_BUCKET,readonly=false,mount-options=uid=10001;gid=10001" \
   --add-volume "mount-path=/app/model-staging,type=cloud-storage,bucket=$MODEL_STAGING_BUCKET,readonly=false,mount-options=uid=10001;gid=10001"
