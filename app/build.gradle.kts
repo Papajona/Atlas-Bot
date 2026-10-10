@@ -18,6 +18,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     compileOptions {
@@ -55,6 +56,16 @@ android {
             }
         }
     }
+
+    val productionBackendUrl = providers.environmentVariable("ATLAS_PROD_BACKEND_URL").orNull?.trim()?.trimEnd('/')
+    val releaseTaskRequested = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
+    if (releaseTaskRequested) {
+        val parsedBackend = runCatching { java.net.URI(productionBackendUrl) }.getOrNull()
+        check(!productionBackendUrl.isNullOrBlank() && parsedBackend?.scheme == "https" && !parsedBackend.host.isNullOrBlank() && !parsedBackend.host.contains("-dev-") && !parsedBackend.host.contains("ais-dev")) {
+            "BLOCKED: ATLAS_PROD_BACKEND_URL must be set to the approved non-development HTTPS backend before a release build."
+        }
+    }
+    buildConfigField("String", "BACKEND_URL", "\"${productionBackendUrl ?: ""}\"")
 
     buildTypes {
         debug {
