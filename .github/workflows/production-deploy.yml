@@ -99,6 +99,9 @@ jobs:
           SECRET_GROQ_API_KEY_VERSION: ${{ secrets.SECRET_GROQ_API_KEY_VERSION }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           GEMINI_STRATEGY_MODEL: ${{ vars.GEMINI_STRATEGY_MODEL }}
+          RESEARCH_FEE_SOURCE: ${{ vars.RESEARCH_FEE_SOURCE }}
+          RESEARCH_FEE_EVIDENCE_ID: ${{ vars.RESEARCH_FEE_EVIDENCE_ID }}
+          RESEARCH_MIN_DEFLATED_SHARPE: ${{ vars.RESEARCH_MIN_DEFLATED_SHARPE }}
         run: bash deploy/cloud-run-deploy.sh
 
       - name: Verify deployed immutable identity
