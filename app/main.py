@@ -358,7 +358,7 @@ async def startup():
             _track_supervised_worker("adaptive-bot-controller", _adaptive_bot_controller_loop)
             _track_supervised_worker("executor-controller", _executor_controller_loop)
     elif process_role == "job":
-        _track_worker_task(_heartbeat_loop())
+        _track_supervised_worker("heartbeat", _heartbeat_loop)
 
 
 @app.on_event("shutdown")
