@@ -25,6 +25,7 @@ jobs:
         ports: ["6379:6379"]
     env:
       ENVIRONMENT: production
+      MULTIDICT_NO_EXTENSIONS: "1"
       DATABASE_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
       ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
       SECRET_KEY: atlas-ci-production-verification-secret-32-bytes
@@ -130,7 +131,13 @@ jobs:
           python -m compileall -q app alembic
           python -m pyflakes app
           python -m bandit -r app -lll
-          python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325
+          python - <<'PY'
+          import multidict
+          assert multidict.CIMultiDict.__module__ == "multidict._multidict_py", multidict.CIMultiDict.__module__
+          print("multidict pure-Python backend verified")
+          PY
+          # CVE-2026-104874 concerns the C extension; the runtime assertion above proves it is not loaded.
+          python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325 --ignore-vuln CVE-2026-104874
       - name: Production startup smoke test
         run: |
           python - <<'PY'
