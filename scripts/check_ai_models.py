@@ -28,7 +28,14 @@ def _request_json(url: str, headers: dict[str, str], payload: dict) -> tuple[int
             status = response.status
             raw = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        return exc.code, {}
+        # Preserve only parsed provider error metadata so the gate can explain
+        # authorization/model-access failures without logging credentials.
+        try:
+            raw_error = exc.read().decode("utf-8")
+            parsed_error = json.loads(raw_error)
+            return exc.code, parsed_error if isinstance(parsed_error, dict) else {}
+        except (json.JSONDecodeError, UnicodeDecodeError, Exception):
+            return exc.code, {}
     except Exception:
         return 0, {}
     try:
@@ -60,8 +67,23 @@ def _check_gemini(model: str) -> bool:
                 if isinstance(part, dict) and isinstance(part.get("text", ""), str)
             )
     ok = status == 200 and bool(text.strip())
-    print(f"[{'PASS' if ok else 'FAIL'}] Gemini {model}: " +
-          ("generation succeeded" if ok else f"generation failed (HTTP {status or 'network/error'})"))
+    if ok:
+        detail = "generation succeeded"
+    else:
+        detail = f"generation failed (HTTP {status or 'network/error'})"
+        error = body.get("error")
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            detail += "; provider_error=" + error["message"][:180]
+        prompt_feedback = body.get("promptFeedback")
+        if isinstance(prompt_feedback, dict) and prompt_feedback.get("blockReason"):
+            detail += "; prompt_block_reason=" + str(prompt_feedback["blockReason"])[:80]
+        if status == 200:
+            detail += "; candidates=" + str(len(candidates) if isinstance(candidates, list) else 0)
+            if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
+                finish = candidates[0].get("finishReason")
+                if finish:
+                    detail += "; finish_reason=" + str(finish)[:80]
+    print(f"[{'PASS' if ok else 'FAIL'}] Gemini {model}: {detail}")
     return ok
 
 
@@ -85,8 +107,21 @@ def _check_groq(model: str) -> bool:
     ) else None
     content = message.get("content") if isinstance(message, dict) else None
     ok = status == 200 and isinstance(content, str) and bool(content.strip())
-    print(f"[{'PASS' if ok else 'FAIL'}] Groq {model}: " +
-          ("chat completion succeeded" if ok else f"chat completion failed (HTTP {status or 'network/error'})"))
+    if ok:
+        detail = "chat completion succeeded"
+    else:
+        detail = f"chat completion failed (HTTP {status or 'network/error'})"
+        error = body.get("error")
+        if isinstance(error, dict):
+            # Provider error messages help distinguish access policy from model
+            # errors; never print the request headers or API key.
+            message = error.get("message")
+            error_code = error.get("code")
+            if isinstance(error_code, (str, int)):
+                detail += "; provider_code=" + str(error_code)[:80]
+            if isinstance(message, str):
+                detail += "; provider_error=" + message[:180]
+    print(f"[{'PASS' if ok else 'FAIL'}] Groq {model}: {detail}")
     return ok
 
 
