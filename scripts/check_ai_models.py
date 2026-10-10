@@ -53,7 +53,7 @@ def _check_gemini(model: str) -> bool:
         {"Content-Type": "application/json", "x-goog-api-key": settings.gemini_api_key},
         {
             "contents": [{"parts": [{"text": "Reply with OK."}]}],
-            "generationConfig": {"maxOutputTokens": 8, "temperature": 0},
+            "generationConfig": {"maxOutputTokens": 64, "temperature": 0},
         },
     )
     candidates = body.get("candidates")
@@ -114,13 +114,19 @@ def _check_groq(model: str) -> bool:
         error = body.get("error")
         if isinstance(error, dict):
             # Provider error messages help distinguish access policy from model
-            # errors; never print the request headers or API key.
-            message = error.get("message")
-            error_code = error.get("code")
+            # errors; never print request headers or API keys.
+            message = error.get("message") or error.get("detail") or error.get("type")
+            error_code = error.get("code") or error.get("type")
             if isinstance(error_code, (str, int)):
                 detail += "; provider_code=" + str(error_code)[:80]
             if isinstance(message, str):
                 detail += "; provider_error=" + message[:180]
+        elif isinstance(error, str):
+            detail += "; provider_error=" + error[:180]
+        elif isinstance(body.get("message"), str):
+            detail += "; provider_error=" + body["message"][:180]
+        if status == 403 and not any(k in detail for k in ("provider_code=", "provider_error=")):
+            detail += "; provider_error_details=unavailable_or_unrecognized_response"
     print(f"[{'PASS' if ok else 'FAIL'}] Groq {model}: {detail}")
     return ok
 
