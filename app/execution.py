@@ -1292,7 +1292,8 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 await db.commit()
             await _mark_order_command(command.id, status="UNKNOWN", token=lease_token, error=str(exc))
             await _release_live_execution_lease(lease_token)
-            await audit("LIVE_ORDER_UNKNOWN", {"trade_id": trade_id, "client_order_id": cid, "error": str(exc)})
+            unknown_event = "PRACTICE_ORDER_UNKNOWN" if mode == "FOREX_DEMO" else "LIVE_ORDER_UNKNOWN"
+            await audit(unknown_event, {"trade_id": trade_id, "client_order_id": cid, "mode": mode, "error": str(exc)})
             raise
 
         broker_id = str(order.get("id") or "")
@@ -1376,9 +1377,10 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             await audit("PROTECTIVE_STOP_MISSING", {"trade_id":trade_id,"broker_order_id":broker_id,"reason":protection_reason})
             return {"duplicate": False, "trade_id": trade_id, "mode": "LIVE", "status": "PROTECTION_MISSING",
                     "broker_order_id": broker_id, "client_order_id": cid, "price": fill_price, "filled": filled, "halted": True}
-        await audit("LIVE_ORDER_SUBMITTED", {"trade_id": trade_id, "broker_order_id": broker_id,
-                                               "client_order_id": cid, "status": status, "filled": filled})
-        return {"duplicate": False, "trade_id": trade_id, "mode": "LIVE", "status": status,
+        submitted_event = "PRACTICE_ORDER_SUBMITTED" if mode == "FOREX_DEMO" else "LIVE_ORDER_SUBMITTED"
+        await audit(submitted_event, {"trade_id": trade_id, "broker_order_id": broker_id,
+                                      "client_order_id": cid, "mode": mode, "status": status, "filled": filled})
+        return {"duplicate": False, "trade_id": trade_id, "mode": mode, "status": status,
                 "broker_order_id": broker_id, "client_order_id": cid, "price": fill_price, "filled": filled}
 
 
