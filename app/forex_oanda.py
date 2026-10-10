@@ -47,7 +47,9 @@ class OandaBroker:
     def _request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
         try:
             r = self.client.request(method, path, **kwargs)
-        except (httpx.TimeoutException, httpx.NetworkError) as e:
+        except httpx.TransportError as e:
+            # Any transport-layer failure may occur after OANDA accepted an order.
+            # Preserve an UNKNOWN outcome so callers reconcile by client order ID instead of retrying.
             raise OandaUnknown(str(e)) from e
         if r.status_code >= 400:
             try:
