@@ -5295,6 +5295,9 @@ async def mark_withdrawal_not_sent(
     """Release a reserved withdrawal only after dual control and provider recovery prove no payout exists."""
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
+    authenticated_operator = str(claims.get("sub") or claims.get("user_id") or "").strip()
+    if not authenticated_operator or not hmac.compare_digest(authenticated_operator, str(req.operator_id or "").strip()):
+        raise HTTPException(403, "Release operator identity must match the authenticated user")
     approver_auth(req.admin_id, x_approver_token, x_admin_token)
     if req.admin_id.strip().casefold() == req.operator_id.strip().casefold():
         raise HTTPException(403, "Approver and release operator must be different people")
@@ -5304,6 +5307,9 @@ async def mark_withdrawal_not_sent(
         w = (await db.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id).with_for_update())).scalar_one_or_none()
         if not w:
             raise HTTPException(404, "Withdrawal not found")
+        separation = release_separation_violation(req.operator_id, x_release_token, [w.first_approved_by, w.second_approved_by])
+        if separation:
+            raise HTTPException(409, separation)
         if w.status == "SUBMITTING":
             started = w.execution_started_at
             if started is not None and started.tzinfo is None:
