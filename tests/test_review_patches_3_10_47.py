@@ -43,6 +43,15 @@ def test_missing_contract_ret_is_review_not_settled():
     assert _classify([_log()], body={"txID": "ab" * 32})[0] == "REVIEW"
 
 
+def test_malformed_transaction_or_receipt_shape_is_review():
+    from app.tron_sweep import classify_solidified_sweep
+    assert classify_solidified_sweep(
+        tx_body=["not", "an", "object"], receipt={"id": "ab" * 32},
+        transaction_id="ab" * 32, source="TSource", treasury="TTreasury",
+        contract=CON_H, expected_raw_amount=1_000_000,
+    )[0] == "REVIEW"
+
+
 def test_missing_or_wrong_receipt_id_is_review():
     assert _classify([_log()], rid="")[0] == "REVIEW"
     assert _classify([_log()], rid="cd" * 32)[0] == "REVIEW"
@@ -142,3 +151,4 @@ def test_deploy_workflow_exports_digest_and_bootstraps_admin():
     assert "ADMIN_ROLE_ASSIGNMENTS" in workflow
     assert "ADMIN_ROLE_ASSIGNMENTS" in deploy
     assert "ADMIN_BOOTSTRAP_FOUND" in deploy
+    assert "administrator role assignment user IDs must be UUIDs" in deploy
