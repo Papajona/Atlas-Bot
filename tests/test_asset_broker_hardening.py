@@ -102,6 +102,8 @@ def test_oanda_practice_gate_fails_closed_for_customer_or_kill_switch(monkeypatc
     monkeypatch.setattr(settings, "oanda_api_token", "practice-token")
     with pytest.raises(LiveExecutionBlocked, match="Customer OANDA execution"):
         _run_practice_gate(_practice_gate_db(), customer_id=123)
+    with pytest.raises(LiveExecutionBlocked, match="requires the OANDA venue"):
+        _run_practice_gate(_practice_gate_db(), exchange="binance")
     with pytest.raises(LiveExecutionBlocked, match="kill switch"):
         _run_practice_gate(_practice_gate_db(kill_switch=True))
 
