@@ -8,6 +8,7 @@ must settle only the delta against what has already been charged.
 from __future__ import annotations
 
 from typing import Any
+import math
 
 EXACT, CONVERTED, ESTIMATED = "exact", "converted", "estimated"
 
@@ -50,6 +51,10 @@ def extract_order_fee_quote(order: dict[str, Any], symbol: str, fill_price: floa
         except (TypeError, ValueError):
             continue
         cur = str(entry.get("currency") or "").upper()
+        if not math.isfinite(cost):
+            note = "exchange returned a non-finite fee cost"
+            quality = ESTIMATED
+            continue
         if cost <= 0:
             continue
         if cur == quote or (not cur and quote):
@@ -61,7 +66,13 @@ def extract_order_fee_quote(order: dict[str, Any], symbol: str, fill_price: floa
             note = f"fee currency {cur or '?'} cannot be priced in {quote or '?'}"
             quality = ESTIMATED
     if quality == ESTIMATED or not entries:
-        est = filled * fill_price * (float(fallback_taker_bps) / 10_000.0)
+        bps = float(fallback_taker_bps)
+        if not math.isfinite(bps) or bps < 0:
+            bps = 0.0
+            note = (note + "; " if note else "") + "invalid fallback fee rate"
+        est = filled * fill_price * (bps / 10_000.0)
+        if not math.isfinite(est):
+            return 0.0, ESTIMATED, "fee estimate is non-finite; manual reconciliation required"
         if not entries:
             note = "exchange returned no fee data"
         return max(total, est), ESTIMATED, note
