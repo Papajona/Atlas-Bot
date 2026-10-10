@@ -77,3 +77,27 @@ def test_worker_health_and_local_security_audit_are_wired():
     assert "worker_health_status" in risk
     assert "scheduleReconnect" in manager
     assert "initiateConnection(wsUrl, token)" in manager
+
+
+
+def test_database_role_guard_fails_closed_for_rls_incompatible_role():
+    import pytest
+    from app.startup_guards import _require_rls_bypass_role
+
+    with pytest.raises(RuntimeError, match="not authorized to bypass row-level security"):
+        _require_rls_bypass_role("atlas_app", is_superuser=False, bypass_rls=False)
+
+
+def test_database_role_guard_accepts_superuser_or_bypassrls_role():
+    from app.startup_guards import _require_rls_bypass_role
+
+    _require_rls_bypass_role("postgres", is_superuser=True, bypass_rls=False)
+    _require_rls_bypass_role("atlas_backend", is_superuser=False, bypass_rls=True)
+
+
+def test_rls_role_compatibility_guard_runs_before_database_initialization():
+    src = (ROOT / "app" / "main.py").read_text()
+    migration_check = src.index("await assert_database_migrations_current()")
+    role_check = src.index("await assert_database_role_compatible_with_rls_lockdown()")
+    database_init = src.index("await init_db()", role_check)
+    assert migration_check < role_check < database_init
