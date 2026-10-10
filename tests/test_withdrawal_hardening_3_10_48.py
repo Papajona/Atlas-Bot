@@ -18,7 +18,7 @@ import app.main as main
 from app.config import settings
 from app.customer_funds import release_withdrawal as ledger_release_withdrawal
 from app.db import Base, CustomerLedgerAccount, Withdrawal
-from app.payout import CCXTPayoutProvider, PayoutNotFound, PayoutUnknown
+from app.payout import CCXTPayoutProvider, PayoutUnknown
 from app.withdrawal_ids import next_customer_withdrawal_request_id
 from test_withdrawal_not_sent_db import _call_endpoint
 
@@ -235,14 +235,16 @@ def test_ccxt_does_not_claim_idempotency_it_cannot_prove(monkeypatch):
     assert not isinstance(exc.value, PayoutNotFound), "no verified client id => absence must stay UNKNOWN"
 
 
-def test_ccxt_not_found_only_with_verified_client_id_param_and_windowed_lookup(monkeypatch):
+def test_ccxt_absence_stays_unknown_with_verified_client_id_and_windowed_lookup(monkeypatch):
     monkeypatch.setattr(settings, "payout_client_id_param", "withdrawOrderId")
     monkeypatch.setattr(settings, "payout_recovery_lookback_hours", 48)
     ex = _FakeExchange()
     p = _provider(ex)
     asyncio.run(p.send(currency="USDT", amount=1, destination="T", tag=None, network="TRON", idempotency_key="k2", metadata={}))
     assert ex.withdraw_params["withdrawOrderId"] == "k2"
-    with pytest.raises(PayoutNotFound):
+    # A configured client-id parameter enables positive correlation, but bounded CCXT history
+    # cannot prove absence; releasing a reserve on a missing row would be unsafe.
+    with pytest.raises(PayoutUnknown):
         asyncio.run(p.recover("k2", currency="USDT"))
     since = ex.fetch_args[1]
     assert since is not None and abs((datetime.now(timezone.utc).timestamp() * 1000 - 48 * 3600 * 1000) - since) < 60_000
