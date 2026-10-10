@@ -195,3 +195,31 @@ def test_production_deploy_requires_verified_signed_android_artifact_for_exact_c
     assert "sha256sum --check atlas-release.sha256" in deploy
     assert "EXPECTED_CERT_SHA256" in deploy
     assert "package=com.atlas.trading" in deploy
+
+
+def test_deployment_independently_verifies_downloaded_apk_not_only_metadata():
+    workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+    block_start = workflow.index("Download and independently verify signed Android artifact")
+    block_end = workflow.index("Authenticate to Google Cloud with GitHub OIDC", block_start)
+    block = workflow[block_start:block_end]
+    assert 'name -name apksigner' in block
+    assert 'name -name aapt' in block
+    assert 'verify --verbose --print-certs "$apk"' in block
+    assert 'dump badging "$apk"' in block
+    assert 'test "$actual_cert" = "$expected_cert"' in block
+    assert 'test "$package_name" = "com.atlas.trading"' in block
+    assert 'test "$metadata_package" = "$package_name"' in block
+    assert 'test "$metadata_cert" = "$actual_cert"' in block
+    assert 'test "$report_cert" = "$actual_cert"' in block
+    assert 'expected certificate fingerprint must be 64 hex characters' in block
+
+
+def test_deployment_selects_a_successful_signed_release_run_for_exact_sha():
+    workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+    block_start = workflow.index("Download and independently verify signed Android artifact")
+    block_end = workflow.index("Authenticate to Google Cloud with GitHub OIDC", block_start)
+    block = workflow[block_start:block_end]
+    assert '--commit "$GITHUB_SHA"' in block
+    assert 'select(.name=="android-release")' in block
+    assert 'if [ "$job_conclusion" = "success" ]' in block
+    assert '-ne 1' in block
