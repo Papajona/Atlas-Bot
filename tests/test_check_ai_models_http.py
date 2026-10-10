@@ -55,19 +55,35 @@ def test_request_json_posts_json_and_parses_object(monkeypatch):
     assert captured["timeout"] == 20
 
 
-def test_request_json_reports_http_status_without_exposing_body(monkeypatch):
+def test_request_json_preserves_sanitized_json_http_error(monkeypatch):
     def fake_urlopen(request, timeout):
         raise urllib.error.HTTPError(
-            request.full_url, 403, "Forbidden", hdrs=None, fp=None
+            request.full_url, 403, "Forbidden", hdrs=None,
+            fp=__import__("io").BytesIO(
+                b'{"error":{"message":"model access denied","type":"access_error","secret":"do-not-log"}}'
+            ),
         )
 
     monkeypatch.setattr(checker.urllib.request, "urlopen", fake_urlopen)
-    status, body = checker._request_json(
-        "https://example.invalid/inference", {}, {}
-    )
+    status, body = checker._request_json("https://example.invalid/inference", {}, {})
 
     assert status == 403
-    assert body == {}
+    assert body == {"error": {"message": "model access denied", "type": "access_error"}}
+    assert "secret" not in repr(body)
+
+
+def test_request_json_preserves_non_json_http_error_preview(monkeypatch):
+    def fake_urlopen(request, timeout):
+        raise urllib.error.HTTPError(
+            request.full_url, 403, "Forbidden", hdrs=None,
+            fp=__import__("io").BytesIO(b"gateway denied this request"),
+        )
+
+    monkeypatch.setattr(checker.urllib.request, "urlopen", fake_urlopen)
+    status, body = checker._request_json("https://example.invalid/inference", {}, {})
+
+    assert status == 403
+    assert body["response_preview"] == "gateway denied this request"
 
 
 @pytest.mark.parametrize("raw", ["not-json", "[]", ""])
