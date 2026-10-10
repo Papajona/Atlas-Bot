@@ -127,15 +127,13 @@ jobs:
           cp "$RUNNER_TEMP/atlas-signing-report.txt" "$RUNNER_TEMP/atlas-release-evidence/atlas-signing-report.txt"
           (cd "$RUNNER_TEMP/atlas-release-evidence" && sha256sum atlas-release.apk > atlas-release.sha256)
           cat > "$RUNNER_TEMP/atlas-release-evidence/atlas-release-metadata.txt" <<EOF
-          {
-            "commit": "$GITHUB_SHA",
-            "ref": "$GITHUB_REF",
-            "package": "com.atlas.trading",
-            "certificate_sha256": "$ACTUAL_CERT",
-            "apk": "atlas-release.apk",
-            "checksum": "atlas-release.sha256",
-            "signing_report": "atlas-signing-report.txt"
-          }
+          commit=$GITHUB_SHA
+          ref=$GITHUB_REF
+          package=com.atlas.trading
+          certificate_sha256=$ACTUAL_CERT
+          apk=atlas-release.apk
+          checksum=atlas-release.sha256
+          signing_report=atlas-signing-report.txt
           EOF
           echo "PASS: APK signature, expected certificate, package identity, and checksum evidence verified."
       - name: Upload complete signed release evidence
