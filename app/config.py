@@ -449,6 +449,17 @@ class Settings(BaseSettings):
             if str(self.customer_live_market_type).lower() != "spot":
                 raise ValueError("CUSTOMER_LIVE_MARKET_TYPE must be spot for customer live execution")
         if self.environment in {"staging", "production"}:
+            if self.live_trading_enabled or self.customer_live_trading_enabled:
+                required = {"DISCIPLINE_ENABLED": self.discipline_enabled, "DISCIPLINE_ENFORCE_RISK_PER_TRADE": self.discipline_enforce_risk_per_trade, "EDGE_DECAY_HALT_ENABLED": self.edge_decay_halt_enabled, "REQUIRE_PROTECTIVE_STOP_FOR_LIVE": self.require_protective_stop_for_live}
+                disabled = [name for name, enabled in required.items() if not enabled]
+                if disabled:
+                    raise ValueError("Live trading requires enabled risk controls: " + ", ".join(disabled))
+                if not (0 < self.risk_per_trade <= 0.02):
+                    raise ValueError("RISK_PER_TRADE must be > 0 and <= 0.02 for live trading")
+                if not (0 < self.max_drawdown < 1) or not (0 < self.daily_loss_limit < 1):
+                    raise ValueError("MAX_DRAWDOWN and DAILY_LOSS_LIMIT must be > 0 and < 1 for live trading")
+                if self.discipline_max_entries_per_day <= 0 or self.discipline_entry_cooldown_seconds <= 0:
+                    raise ValueError("Live trading requires positive entry and cooldown limits")
             if self.usdt_tron_enabled and not self.usdt_tron_account_xpub:
                 raise ValueError("USDT_TRON_ACCOUNT_XPUB is required when TRON deposits are enabled")
             if self.process_role == "api":
