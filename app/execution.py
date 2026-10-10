@@ -1097,7 +1097,13 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 qpos = select(Position).where(Position.customer_id == customer_id, Position.symbol == symbol, Position.quantity != 0).with_for_update()
                 positions_now = (await db.execute(qpos)).scalars().all()
                 signed_order = quantity if side == "buy" else -quantity
-                reducing = any((p.quantity > 0 > signed_order) or (p.quantity < 0 < signed_order) for p in positions_now)
+                # Only a fully capped opposing-position order is reduce-only.
+                # An order larger than that position flips into new exposure and must reserve cash.
+                opposing_qty = sum(
+                    abs(p.quantity) for p in positions_now
+                    if (p.quantity > 0 > signed_order) or (p.quantity < 0 < signed_order)
+                )
+                reducing = opposing_qty > 0 and quantity <= opposing_qty + 1e-9
                 if not reducing:
                     reserve_buffer = max(0.0, float(settings.max_slippage_bps or 0.0)) / 10_000.0
                     reserved_cash = float(quote * quantity * (1.0 + reserve_buffer))
