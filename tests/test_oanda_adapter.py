@@ -187,6 +187,7 @@ def test_oanda_server_error_on_order_submit_is_unknown_not_safe_to_retry(monkeyp
     from app.forex_oanda import OandaBroker, OandaConfig, OandaUnknown
 
     broker = OandaBroker(OandaConfig("acct", "token", True))
+    monkeypatch.setattr(broker, "validate_order_units", lambda instrument, units: units)
     request = httpx.Request("POST", "https://api-fxpractice.oanda.com/v3/accounts/acct/orders")
     response = httpx.Response(500, json={"errorMessage": "temporary server failure"}, request=request)
     monkeypatch.setattr(broker.client, "request", lambda *args, **kwargs: response)
