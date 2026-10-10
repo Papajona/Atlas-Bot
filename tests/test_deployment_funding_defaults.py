@@ -17,7 +17,7 @@ def _run_gate(overrides: dict[str, str] | None = None, *, remove: tuple[str, ...
     return subprocess.run(
         [
             "bash", "-c",
-            'source "$1"; atlas_configure_tron_funding; printf "%s|%s" "$USDT_TRON_ENABLED" "$USDT_TRON_NETWORK"',
+            'set -e; source "$1"; atlas_configure_tron_funding; printf "%s|%s" "$USDT_TRON_ENABLED" "$USDT_TRON_NETWORK"',
             "_", str(GATE),
         ],
         env=env,
