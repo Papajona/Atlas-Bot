@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import math
 import asyncio
 import json
 import os
@@ -265,7 +266,7 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
                     customer_id: int | None = None, reservation_key: str | None = None,
                     stop_loss_price: float | None = None, take_profit_price: float | None = None,
                     signal: dict | None = None):
-    if price <= 0 or quantity <= 0:
+    if not (math.isfinite(price) and math.isfinite(quantity)) or price <= 0 or quantity <= 0:
         raise RiskBlocked("Invalid price or quantity")
     async with SessionLocal() as db:
         platform = await db.execute(select(AppState).where(AppState.id == 1).with_for_update())
@@ -307,8 +308,9 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
                 # decide whether new cash needs to be reserved for this order, matching the
                 # existing behavior. account_reduce_only above is the stricter, magnitude-capped
                 # check used only to decide whether a HALTED account may still place this order.
-                reducing = any((p.quantity > 0 > signed) or (p.quantity < 0 < signed) for p in positions_for_symbol)
-                required_cash = 0.0 if reducing else price * quantity
+                # A buy always consumes cash (including a short-cover); a sell can use existing
+                # long inventory, but any quantity beyond that inventory is new exposure.
+                required_cash = price * (quantity if side == "buy" else max(0.0, quantity - opposing_qty))
                 if float(ledger.available) + 1e-9 < required_cash:
                     raise RiskBlocked("Order exceeds the customer's available funded USDT balance")
             today = _today_utc()
@@ -330,7 +332,12 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
             qpos = qpos.where(Position.customer_id == customer_id)
         existing_positions = (await db.execute(qpos)).scalars().all()
         signed = quantity if side == "buy" else -quantity
-        reducing = any((p.quantity > 0 > signed) or (p.quantity < 0 < signed) for p in existing_positions)
+        # A partially opposing order that exceeds the available position opens new exposure.
+        opposing_total = sum(
+            abs(p.quantity) for p in existing_positions
+            if (p.quantity > 0 > signed) or (p.quantity < 0 < signed)
+        )
+        reducing = opposing_total > 0 and quantity <= opposing_total + 1e-9
 
         if settings.discipline_enabled and not reducing:
             now = datetime.now(timezone.utc)
@@ -469,8 +476,8 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
                     raise RiskBlocked("Signal is stale")
                 if age < -60:
                     raise RiskBlocked("Signal timestamp is too far in the future")
-            except ValueError:
-                raise RiskBlocked("Invalid signal timestamp")
+            except (ValueError, TypeError):
+                raise RiskBlocked("Invalid signal timestamp (an explicit UTC offset is required)")
         await db.commit()
 
 
