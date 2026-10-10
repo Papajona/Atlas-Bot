@@ -51,3 +51,15 @@ def test_strategy_replay_is_disclosed_as_synthetic_not_a_real_backtest():
     source = (ROOT / "app/src/main/java/com/atlas/trading/ui/StrategyReplayEngine.kt").read_text()
     assert "SYNTHETIC SCENARIO SIMULATION" in source
     assert "not real exchange candles, verified historical backtests, or customer P&L" in source
+
+
+def test_production_template_keeps_live_money_paths_disabled():
+    source = (ROOT / ".env.production.example").read_text()
+    assert "PAPER_TRADING=true" in source
+    assert "LIVE_TRADING_ENABLED=false" in source
+    assert "CUSTOMER_LIVE_TRADING_ENABLED=false" in source
+    assert "BROKER_SANDBOX=true" in source
+    assert "PAYOUT_LIVE_ENABLED=false" in source
+    assert "DERIV_LIVE_ENABLED=false" in source
+    assert "USDT_TRON_ENABLED=false" in source
+    assert "Secret Manager" in source
