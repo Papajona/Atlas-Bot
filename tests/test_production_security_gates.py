@@ -82,18 +82,18 @@ def test_worker_health_and_local_security_audit_are_wired():
 
 def test_database_role_guard_fails_closed_for_rls_incompatible_role():
     import pytest
-    from app.startup_guards import _require_rls_bypass_role
+    from app.rls_role_policy import require_rls_bypass_role
 
     with pytest.raises(RuntimeError, match="not authorized to bypass row-level security"):
-        _require_rls_bypass_role("atlas_app", is_superuser=False, bypass_rls=False)
+        require_rls_bypass_role("atlas_app", is_superuser=False, bypass_rls=False)
 
 
 def test_database_role_guard_accepts_superuser_bypassrls_or_table_owner_role():
-    from app.startup_guards import _require_rls_bypass_role
+    from app.rls_role_policy import require_rls_bypass_role
 
-    _require_rls_bypass_role("postgres", is_superuser=True, bypass_rls=False)
-    _require_rls_bypass_role("atlas_backend", is_superuser=False, bypass_rls=True)
-    _require_rls_bypass_role(
+    require_rls_bypass_role("postgres", is_superuser=True, bypass_rls=False)
+    require_rls_bypass_role("atlas_backend", is_superuser=False, bypass_rls=True)
+    require_rls_bypass_role(
         "atlas_table_owner", is_superuser=False, bypass_rls=False, owns_all_rls_tables=True
     )
 
