@@ -1,4 +1,8 @@
+import pytest
+from pydantic import ValidationError
+
 from app.risk_governor import evaluate_trade
+from app.schemas import ExecuteRequest
 
 def test_live_requires_stop():
     d=evaluate_trade(side="buy",price=100,quantity=1,live=True,stop_loss_price=None,take_profit_price=None,signal={})
@@ -27,3 +31,31 @@ def test_live_execution_spread_is_blocked_above_configured_ceiling():
                        take_profit_price=110, signal={}, spread_bps=101, max_spread_bps=100)
     assert d.action == "BLOCK"
     assert "spread_guard" in d.reasons
+
+
+@pytest.mark.parametrize("field,reason", [
+    ("stop_loss_price", "invalid_stop_loss_price"),
+    ("take_profit_price", "invalid_take_profit_price"),
+])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_risk_governor_blocks_non_finite_protective_prices(field, reason, value):
+    values = {"stop_loss_price": 95.0, "take_profit_price": 110.0}
+    values[field] = value
+    decision = evaluate_trade(
+        side="buy", price=100.0, quantity=1.0, live=False,
+        stop_loss_price=values["stop_loss_price"],
+        take_profit_price=values["take_profit_price"], signal={},
+    )
+    assert decision.action == "BLOCK"
+    assert reason in decision.reasons
+
+
+@pytest.mark.parametrize("field", [
+    "quantity", "price", "score", "long_probability", "short_probability",
+    "flat_probability", "stop_loss_price", "take_profit_price",
+])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_execute_request_rejects_non_finite_float_fields(field, value):
+    payload = {"side": "buy", "quantity": 1.0, field: value}
+    with pytest.raises(ValidationError):
+        ExecuteRequest.model_validate(payload)
