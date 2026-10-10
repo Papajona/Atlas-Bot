@@ -4,6 +4,7 @@ import json
 import logging
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
+from .config import settings
 from .db import AppState, CustomerLedgerAccount, Incident, LedgerEntry, LedgerJournal, LedgerJournalLine, SessionLocal, Wallet, utcnow
 
 USDT = "USDT"
@@ -444,17 +445,26 @@ DEFICIT_ACCOUNT = "ASSET:RECEIVABLE:CUSTOMER_DEFICIT"
 
 async def _engage_kill_switch_for_deficit(db, *, customer_id: int, reference_id: str, shortfall: Decimal, source: str) -> None:
     """Stop new live risk when a post-trade deficit is booked; never omit actual losses."""
+    threshold = D(str(settings.customer_deficit_limit_usdt))
+    if not threshold.is_finite() or threshold <= 0:
+        state = await db.get(AppState, 1)
+        if state is not None:
+            state.kill_switch = True
+            state.live_enabled = False
+        raise RuntimeError("CUSTOMER_DEFICIT_LIMIT_USDT must be finite and > 0")
+    threshold_reached = shortfall >= threshold
     state = await db.get(AppState, 1)
-    if state is not None:
+    if threshold_reached and state is not None:
         state.kill_switch = True
         state.live_enabled = False
     await record_ledger_incident(
         db,
         key=f"CUSTOMER_DEFICIT_LIMIT:{customer_id}:{reference_id}",
-        summary="Customer deficit triggered the fail-closed live-trading guard",
+        summary="Customer deficit recorded; configured threshold controls automatic halt",
         detail={"customer_id": customer_id, "reference_id": reference_id,
                 "shortfall": str(shortfall), "source": source,
-                "action": "KILL_SWITCH_ENGAGED_NO_FURTHER_LIVE_RISK"},
+                "threshold_usdt": str(threshold), "threshold_reached": threshold_reached,
+                "action": "KILL_SWITCH_ENGAGED" if threshold_reached else "DEFICIT_RECORDED_BELOW_THRESHOLD"},
         customer_id=customer_id,
         severity="CRITICAL",
     )
