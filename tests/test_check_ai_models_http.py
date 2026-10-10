@@ -82,3 +82,25 @@ def test_request_json_rejects_invalid_or_non_object_json(monkeypatch, raw):
 
     assert status == 200
     assert body == {}
+
+
+@pytest.mark.parametrize("body", [
+    {"candidates": [None]},
+    {"candidates": [{"content": []}]},
+    {"candidates": [{"content": {"parts": [None, {"text": 123}]}}]},
+])
+def test_gemini_checker_fails_closed_on_malformed_payload(monkeypatch, body):
+    monkeypatch.setattr(checker, "_request_json", lambda *args, **kwargs: (200, body))
+    monkeypatch.setattr(checker.settings, "gemini_api_key", "test-key")
+    assert checker._check_gemini("test-model") is False
+
+
+@pytest.mark.parametrize("body", [
+    {"choices": [None]},
+    {"choices": [{"message": []}]},
+    {"choices": [{"message": {"content": {"text": "OK"}}}]},
+])
+def test_groq_checker_fails_closed_on_malformed_payload(monkeypatch, body):
+    monkeypatch.setattr(checker, "_request_json", lambda *args, **kwargs: (200, body))
+    monkeypatch.setattr(checker.settings, "groq_api_key", "test-key")
+    assert checker._check_groq("test-model") is False
