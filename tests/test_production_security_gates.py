@@ -194,7 +194,7 @@ def test_production_deploy_requires_verified_signed_android_artifact_for_exact_c
     assert "atlas-release-apk" in deploy
     assert "sha256sum --check atlas-release.sha256" in deploy
     assert "EXPECTED_CERT_SHA256" in deploy
-    assert "package=com.atlas.trading" in deploy
+    assert 'test "$package_name" = "com.atlas.trading"' in deploy
 
 
 def test_deployment_independently_verifies_downloaded_apk_not_only_metadata():
