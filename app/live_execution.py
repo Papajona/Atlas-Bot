@@ -35,6 +35,8 @@ async def assert_live_system_enabled(
         # authorized for a customer or by the live-trading flags.
         if not practice_demo:
             raise LiveExecutionBlocked("OANDA Forex/commodity execution is demo-only in AtlasRisk")
+        if normalized_exchange != "oanda":
+            raise LiveExecutionBlocked("Forex/commodity practice execution requires the OANDA venue")
         if customer_id is not None:
             raise LiveExecutionBlocked("Customer OANDA execution requires a separately verified customer practice-account flow")
         if state.kill_switch:
