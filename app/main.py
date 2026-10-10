@@ -431,7 +431,13 @@ async def shutdown():
             logger.error("worker_shutdown_grace_expired pending_tasks=%s", len(pending))
             for task in pending:
                 task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+            forced_done, forced_pending = await asyncio.wait(pending, timeout=1.0)
+            if forced_done:
+                await asyncio.gather(*forced_done, return_exceptions=True)
+            if forced_pending:
+                logger.critical(
+                    "worker_shutdown_tasks_unresponsive count=%s", len(forced_pending)
+                )
         if done:
             await asyncio.gather(*done, return_exceptions=True)
     _worker_tasks.clear()
