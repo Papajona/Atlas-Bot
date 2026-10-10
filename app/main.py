@@ -213,6 +213,13 @@ def _mark_worker_loop_success(name: str) -> None:
     state.pop("last_error_type", None)
 
 
+def _mark_worker_loop_failure(name: str, exc: Exception) -> None:
+    state = _worker_loop_health.setdefault(name, {"restart_count": 0})
+    state["status"] = "DEGRADED"
+    state["last_failure_at"] = datetime.now(timezone.utc).isoformat()
+    state["last_error_type"] = type(exc).__name__
+
+
 def _worker_loop_health_snapshot() -> dict:
     return {name: dict(state) for name, state in _worker_loop_health.items()}
 
@@ -772,6 +779,7 @@ async def _adaptive_bot_controller_loop():
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            _mark_worker_loop_failure("adaptive-controller", exc)
             await _safe_audit("ADAPTIVE_BOT_CONTROLLER_FAILED", {"error": str(exc)})
         await asyncio.sleep(poll)
 
@@ -1094,6 +1102,7 @@ async def _executor_controller_loop():
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            _mark_worker_loop_failure("executor-controller", exc)
             await _safe_audit("EXECUTOR_CONTROLLER_FAILED", {"error": str(exc)})
         await asyncio.sleep(max(5, int(settings.adaptive_bot_poll_seconds)))
 
@@ -1118,6 +1127,7 @@ async def _trade_learning_replay_loop():
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            _mark_worker_loop_failure("trade-learning-replay", exc)
             await _safe_audit("TRADE_LEARNING_REPLAY_FAILED", {"error": str(exc)})
         await asyncio.sleep(poll)
 
@@ -1156,6 +1166,7 @@ async def _daily_research_loop():
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            _mark_worker_loop_failure("daily-research", exc)
             await _safe_audit("RESEARCH_DAILY_FAILED", {"error": str(exc)})
 
 
@@ -1369,6 +1380,7 @@ async def _usdt_tron_monitor_loop():
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
+                        _mark_worker_loop_failure("usdt-tron", exc)
                         await _safe_audit("TRON_WALLET_SCAN_FAILED", {"wallet_id": wallet.id, "error": str(exc)})
                     finally:
                         await release_lock(lock_key)
@@ -1380,6 +1392,7 @@ async def _usdt_tron_monitor_loop():
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            _mark_worker_loop_failure("usdt-tron", exc)
             await _safe_audit("TRON_SCAN_CYCLE_FAILED", {"error": str(exc)})
         await asyncio.sleep(poll_seconds)
 
@@ -1548,8 +1561,12 @@ async def _heartbeat_loop():
                 if not row:
                     row = ServiceHeartbeat(instance_id=_instance_id, role=str(settings.process_role or "api"))
                     db.add(row)
-                row.status = "READY"
-                row.detail = "distributed-runtime"
+                unhealthy_loops = sorted(
+                    name for name, state in _worker_loop_health.items()
+                    if state.get("status") in {"DEGRADED", "RESTARTING"}
+                )
+                row.status = "DEGRADED" if unhealthy_loops else "READY"
+                row.detail = json.dumps({"runtime": "distributed-runtime", "unhealthy_worker_loops": unhealthy_loops})
                 row.updated_at = datetime.now(timezone.utc)
                 await db.commit()
         except Exception:
@@ -4599,10 +4616,12 @@ async def customer_withdrawals(authorization: str | None = Header(default=None))
 
 @app.get("/healthz")
 async def healthz():
+    worker_health = _worker_loop_health_snapshot()
+    degraded = any(state.get("status") in {"DEGRADED", "RESTARTING"} for state in worker_health.values())
     return {
-        "status": "ok",
+        "status": "degraded" if degraded else "ok",
         "release": {"version": settings.release_version or settings.app_version, "sha": settings.release_sha or None, "image_digest": settings.image_digest or None},
-        "worker_loops": _worker_loop_health_snapshot(),
+        "worker_loops": worker_health,
     }
 
 
