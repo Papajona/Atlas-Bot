@@ -8,7 +8,10 @@ plugins {
 
 val productionBackendUrl = providers.environmentVariable("ATLAS_PROD_BACKEND_URL").orNull?.trim()?.trimEnd('/')
 val approvedBackendHost = providers.environmentVariable("ATLAS_PROD_BACKEND_HOST").orNull?.trim()?.lowercase()
-val releaseTaskRequested = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
+val releaseStoreFile = providers.environmentVariable("ATLAS_RELEASE_STORE_FILE").orNull
+val releaseStorePassword = providers.environmentVariable("ATLAS_RELEASE_STORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("ATLAS_RELEASE_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("ATLAS_RELEASE_KEY_PASSWORD").orNull
 
 android {
     namespace = "com.atlas.trading"
@@ -38,10 +41,6 @@ android {
     }
 
     // Never sign a production artifact with the Android debug keystore.
-    val releaseStoreFile = providers.environmentVariable("ATLAS_RELEASE_STORE_FILE").orNull
-    val releaseStorePassword = providers.environmentVariable("ATLAS_RELEASE_STORE_PASSWORD").orNull
-    val releaseKeyAlias = providers.environmentVariable("ATLAS_RELEASE_KEY_ALIAS").orNull
-    val releaseKeyPassword = providers.environmentVariable("ATLAS_RELEASE_KEY_PASSWORD").orNull
 
     signingConfigs {
         create("releaseConfig") {
@@ -64,22 +63,6 @@ android {
         }
     }
 
-    if (releaseTaskRequested) {
-        val parsedBackend = runCatching { productionBackendUrl?.let { URI(it) } }.getOrNull()
-        val actualHost = parsedBackend?.host?.lowercase()
-        check(
-            !productionBackendUrl.isNullOrBlank() &&
-            parsedBackend?.scheme == "https" &&
-            !actualHost.isNullOrBlank() &&
-            !actualHost.contains("-dev-") &&
-            !actualHost.contains("ais-dev") &&
-            !approvedBackendHost.isNullOrBlank() &&
-            actualHost == approvedBackendHost
-        ) {
-            "BLOCKED: configure ATLAS_PROD_BACKEND_URL and the matching approved ATLAS_PROD_BACKEND_HOST in the production environment."
-        }
-    }
-
     buildTypes {
         debug {
             signingConfigs.findByName("debugConfig")?.let {
@@ -93,20 +76,36 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Evaluate the release-signing guard only when a release task is actually requested.
-            // This keeps CI/debug compilation independent of production keystore secrets while
-            // preserving a hard fail for every release build.
-            if (gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }) {
-                check(
-                    !releaseStoreFile.isNullOrBlank() &&
-                    !releaseStorePassword.isNullOrBlank() &&
-                    !releaseKeyAlias.isNullOrBlank() &&
-                    !releaseKeyPassword.isNullOrBlank()
-                ) {
-                    "Production release signing is not configured. Provide the ATLAS_RELEASE_* signing environment variables."
-                }
-            }
             signingConfig = signingConfigs.getByName("releaseConfig")
+        }
+    }
+}
+
+gradle.taskGraph.whenReady { graph ->
+    val releaseRequested = graph.allTasks.any { task ->
+        task.path.startsWith(":app:") && task.name.contains("Release", ignoreCase = true)
+    }
+    if (releaseRequested) {
+        val parsedBackend = runCatching { productionBackendUrl?.let { URI(it) } }.getOrNull()
+        val actualHost = parsedBackend?.host?.lowercase()
+        check(
+            !productionBackendUrl.isNullOrBlank() &&
+            parsedBackend?.scheme == "https" &&
+            !actualHost.isNullOrBlank() &&
+            !actualHost.contains("-dev-") &&
+            !actualHost.contains("ais-dev") &&
+            !approvedBackendHost.isNullOrBlank() &&
+            actualHost == approvedBackendHost
+        ) {
+            "BLOCKED: configure ATLAS_PROD_BACKEND_URL and the matching approved ATLAS_PROD_BACKEND_HOST in the production environment."
+        }
+        check(
+            !releaseStoreFile.isNullOrBlank() &&
+            !releaseStorePassword.isNullOrBlank() &&
+            !releaseKeyAlias.isNullOrBlank() &&
+            !releaseKeyPassword.isNullOrBlank()
+        ) {
+            "BLOCKED: production release signing requires all ATLAS_RELEASE_* signing environment variables."
         }
     }
 }
