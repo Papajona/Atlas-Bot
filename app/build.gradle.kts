@@ -1,14 +1,21 @@
+import java.net.URI
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val productionBackendUrl = providers.environmentVariable("ATLAS_PROD_BACKEND_URL").orNull?.trim()?.trimEnd('/')
+val approvedBackendHost = providers.environmentVariable("ATLAS_PROD_BACKEND_HOST").orNull?.trim()?.lowercase()
+val releaseTaskRequested = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
+
 android {
     namespace = "com.atlas.trading"
     compileSdk = 35
 
     defaultConfig {
+        buildConfigField("String", "BACKEND_URL", "\\"${productionBackendUrl ?: ""}\\"")
         applicationId = "com.atlas.trading"
         minSdk = 26
         targetSdk = 35
@@ -57,15 +64,21 @@ android {
         }
     }
 
-    val productionBackendUrl = providers.environmentVariable("ATLAS_PROD_BACKEND_URL").orNull?.trim()?.trimEnd('/')
-    val releaseTaskRequested = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
     if (releaseTaskRequested) {
-        val parsedBackend = runCatching { java.net.URI(productionBackendUrl) }.getOrNull()
-        check(!productionBackendUrl.isNullOrBlank() && parsedBackend?.scheme == "https" && !parsedBackend.host.isNullOrBlank() && !parsedBackend.host.contains("-dev-") && !parsedBackend.host.contains("ais-dev")) {
-            "BLOCKED: ATLAS_PROD_BACKEND_URL must be set to the approved non-development HTTPS backend before release signing."
+        val parsedBackend = runCatching { productionBackendUrl?.let { URI(it) } }.getOrNull()
+        val actualHost = parsedBackend?.host?.lowercase()
+        check(
+            !productionBackendUrl.isNullOrBlank() &&
+            parsedBackend?.scheme == "https" &&
+            !actualHost.isNullOrBlank() &&
+            !actualHost.contains("-dev-") &&
+            !actualHost.contains("ais-dev") &&
+            !approvedBackendHost.isNullOrBlank() &&
+            actualHost == approvedBackendHost
+        ) {
+            "BLOCKED: configure ATLAS_PROD_BACKEND_URL and the matching approved ATLAS_PROD_BACKEND_HOST in the production environment."
         }
     }
-    buildConfigField("String", "BACKEND_URL", "\"${productionBackendUrl ?: ""}\"")
 
     buildTypes {
         debug {
