@@ -88,11 +88,14 @@ def test_database_role_guard_fails_closed_for_rls_incompatible_role():
         _require_rls_bypass_role("atlas_app", is_superuser=False, bypass_rls=False)
 
 
-def test_database_role_guard_accepts_superuser_or_bypassrls_role():
+def test_database_role_guard_accepts_superuser_bypassrls_or_table_owner_role():
     from app.startup_guards import _require_rls_bypass_role
 
     _require_rls_bypass_role("postgres", is_superuser=True, bypass_rls=False)
     _require_rls_bypass_role("atlas_backend", is_superuser=False, bypass_rls=True)
+    _require_rls_bypass_role(
+        "atlas_table_owner", is_superuser=False, bypass_rls=False, owns_all_rls_tables=True
+    )
 
 
 def test_rls_role_compatibility_guard_runs_before_database_initialization():
