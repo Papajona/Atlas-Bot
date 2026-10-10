@@ -123,25 +123,25 @@ jobs:
             exit 1
           }
           mkdir -p "$RUNNER_TEMP/atlas-release-evidence"
-          cp "$APK" "$RUNNER_TEMP/atlas-release-evidence/atlas-production.apk"
-          cp "$RUNNER_TEMP/atlas-signing-report.txt" "$RUNNER_TEMP/atlas-release-evidence/signing-report.txt"
-          sha256sum "$RUNNER_TEMP/atlas-release-evidence/atlas-production.apk" > "$RUNNER_TEMP/atlas-release-evidence/atlas-production.apk.sha256"
-          cat > "$RUNNER_TEMP/atlas-release-evidence/release-metadata.json" <<EOF
+          cp "$APK" "$RUNNER_TEMP/atlas-release-evidence/atlas-release.apk"
+          cp "$RUNNER_TEMP/atlas-signing-report.txt" "$RUNNER_TEMP/atlas-release-evidence/atlas-signing-report.txt"
+          (cd "$RUNNER_TEMP/atlas-release-evidence" && sha256sum atlas-release.apk > atlas-release.sha256)
+          cat > "$RUNNER_TEMP/atlas-release-evidence/atlas-release-metadata.txt" <<EOF
           {
             "commit": "$GITHUB_SHA",
             "ref": "$GITHUB_REF",
             "package": "com.atlas.trading",
             "certificate_sha256": "$ACTUAL_CERT",
-            "apk": "atlas-production.apk",
-            "checksum": "atlas-production.apk.sha256",
-            "signing_report": "signing-report.txt"
+            "apk": "atlas-release.apk",
+            "checksum": "atlas-release.sha256",
+            "signing_report": "atlas-signing-report.txt"
           }
           EOF
           echo "PASS: APK signature, expected certificate, package identity, and checksum evidence verified."
       - name: Upload complete signed release evidence
         uses: actions/upload-artifact@v4
         with:
-          name: atlas-production-release-${{ github.sha }}
+          name: atlas-release-apk
           path: ${{ runner.temp }}/atlas-release-evidence/*
           if-no-files-found: error
           retention-days: 90
