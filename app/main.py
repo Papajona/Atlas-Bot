@@ -812,8 +812,17 @@ async def _run_persisted_adaptive_bot_cycle(
     # Customer forex/commodity paper orders cannot use the real customer ledger as a
     # simulation ledger. Fail before market data, model training, or AI safety calls.
     if req.asset in {"forex", "commodity"} and paper_mode:
+        reason = "Customer paper execution requires an isolated simulation ledger"
+        # Stop a legacy persisted bot rather than leaving it RUNNING and polling forever
+        # through a path that cannot place a customer-scoped paper order.
+        bot.status = "STOPPED"
+        bot.next_run_at = None
+        bot.last_decision = "NO_TRADE"
+        bot.last_stage = "customer_paper_execution_unavailable"
+        bot.last_error = reason
+        await db.commit()
         return {"decision": "NO_TRADE", "stage": "customer_paper_execution_unavailable",
-                "reason": "Customer paper execution requires an isolated simulation ledger"}
+                "reason": reason}
     if req.asset in {"forex", "commodity"}:
         try:
             df = await _fetch_customer_oanda_data(profile.id, req)
