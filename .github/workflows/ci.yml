@@ -39,8 +39,234 @@ jobs:
         run: until pg_isready -h 127.0.0.1 -p 5432 -U atlas -d atlas_test; do sleep 1; done
       - name: Compile source
         run: python -m compileall -q app alembic
-      - name: Apply migrations
-        run: python -m alembic upgrade head
+      - name: Create Supabase API roles for migration verification
+        run: |
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          CREATE ROLE anon NOLOGIN;
+          CREATE ROLE authenticated NOLOGIN;
+          -- Seed unsafe default ACLs as well as existing-object grants so migration 0049
+          -- proves it removes future table, sequence and function grants for its creator role.
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO anon, authenticated;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO anon, authenticated;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon, authenticated;
+          SQL
+      - name: Reproduce the connected database revision
+        run: python -m alembic upgrade 0047_strategy_outcome_lifecycle
+      - name: Verify production-revision schema contract
+        run: |
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          DO $production_0047_schema$
+          DECLARE
+              current_revision text;
+              missing_columns text;
+          BEGIN
+              SELECT version_num INTO current_revision FROM public.alembic_version;
+              IF current_revision IS DISTINCT FROM '0047_strategy_outcome_lifecycle' THEN
+                  RAISE EXCEPTION 'expected revision 0047_strategy_outcome_lifecycle, got %', current_revision;
+              END IF;
+
+              SELECT string_agg(format('%s.%s', required.table_name, required.column_name), ', ')
+                INTO missing_columns
+              FROM (VALUES
+                  ('app_state', 'live_enable_requested_by'),
+                  ('app_state', 'live_enable_approved_by'),
+                  ('trading_accounts', 'pilot_status'),
+                  ('tron_sweeps', 'custody_transfer_id'),
+                  ('subscriptions', 'ai_credits_used'),
+                  ('strategy_outcomes', 'lifecycle_status')
+              ) AS required(table_name, column_name)
+              LEFT JOIN information_schema.columns actual
+                ON actual.table_schema = 'public'
+               AND actual.table_name = required.table_name
+               AND actual.column_name = required.column_name
+              WHERE actual.column_name IS NULL;
+
+              IF missing_columns IS NOT NULL THEN
+                  RAISE EXCEPTION 'revision 0047 schema contract is missing columns: %', missing_columns;
+              END IF;
+          END
+          $production_0047_schema$;
+          SQL
+      - name: Seed and verify pre-lockdown API grants
+        run: |
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          GRANT USAGE, CREATE ON SCHEMA public TO anon, authenticated;
+          GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO anon, authenticated;
+          GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated;
+          DO $seed_public_api_grants$
+          DECLARE
+              api_role text;
+              function_signature text;
+          BEGIN
+              FOREACH api_role IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+                  IF NOT has_schema_privilege(api_role, 'public', 'CREATE') THEN
+                      RAISE EXCEPTION 'pre-lockdown fixture failed: % lacks CREATE on public schema', api_role;
+                  END IF;
+                  IF NOT EXISTS (
+                      SELECT 1
+                      FROM pg_class c
+                      JOIN pg_namespace n ON n.oid = c.relnamespace
+                      WHERE n.nspname = 'public'
+                        AND c.relkind IN ('r', 'p')
+                        AND has_table_privilege(api_role, c.oid, 'SELECT')
+                  ) THEN
+                      RAISE EXCEPTION 'pre-lockdown fixture failed: % has no table SELECT grant', api_role;
+                  END IF;
+              END LOOP;
+
+              FOREACH function_signature IN ARRAY ARRAY[
+                  'public.atlas_block_ledger_mutation()',
+                  'public.atlas_ledger_journal_deferred_check()',
+                  'public.atlas_validate_ledger_journal(integer)'
+              ] LOOP
+                  IF to_regprocedure(function_signature) IS NOT NULL THEN
+                      EXECUTE format(
+                          'GRANT EXECUTE ON FUNCTION %s TO anon, authenticated',
+                          function_signature
+                      );
+                      IF NOT has_function_privilege('anon', function_signature, 'EXECUTE')
+                         OR NOT has_function_privilege('authenticated', function_signature, 'EXECUTE') THEN
+                          RAISE EXCEPTION 'pre-lockdown fixture failed to grant EXECUTE on %', function_signature;
+                      END IF;
+                  END IF;
+              END LOOP;
+          END
+          $seed_public_api_grants$;
+          SQL
+      - name: Upgrade from production revision through merge and lockdown
+        run: python -m alembic upgrade 0049_public_schema_rls_lockdown
+      - name: Verify public-schema lockdown at runtime
+        run: |
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          DO $verify_public_schema_lockdown$
+          DECLARE
+              api_role text;
+          BEGIN
+              IF EXISTS (
+                  SELECT 1 FROM pg_class c
+                  JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+                    AND NOT c.relrowsecurity
+              ) THEN
+                  RAISE EXCEPTION 'RLS is disabled on one or more public tables';
+              END IF;
+
+              FOREACH api_role IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+                  IF has_schema_privilege(api_role, 'public', 'CREATE') THEN
+                      RAISE EXCEPTION 'role % retains CREATE on public schema', api_role;
+                  END IF;
+
+                  IF has_schema_privilege(api_role, 'public', 'USAGE') THEN
+                      RAISE EXCEPTION 'role % retains USAGE on public schema', api_role;
+                  END IF;
+
+                  IF EXISTS (
+                      SELECT 1 FROM pg_class c
+                      JOIN pg_namespace n ON n.oid = c.relnamespace
+                      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                        AND (
+                          has_table_privilege(api_role, c.oid, 'SELECT')
+                          OR has_table_privilege(api_role, c.oid, 'INSERT')
+                          OR has_table_privilege(api_role, c.oid, 'UPDATE')
+                          OR has_table_privilege(api_role, c.oid, 'DELETE')
+                          OR has_table_privilege(api_role, c.oid, 'TRUNCATE')
+                          OR has_table_privilege(api_role, c.oid, 'REFERENCES')
+                          OR has_table_privilege(api_role, c.oid, 'TRIGGER')
+                        )
+                  ) THEN
+                      RAISE EXCEPTION 'role % retains privileges on a public relation', api_role;
+                  END IF;
+
+                  IF EXISTS (
+                      SELECT 1 FROM pg_class c
+                      JOIN pg_namespace n ON n.oid = c.relnamespace
+                      WHERE n.nspname = 'public' AND c.relkind = 'S'
+                        AND (
+                          has_sequence_privilege(api_role, c.oid, 'USAGE')
+                          OR has_sequence_privilege(api_role, c.oid, 'SELECT')
+                          OR has_sequence_privilege(api_role, c.oid, 'UPDATE')
+                        )
+                  ) THEN
+                      RAISE EXCEPTION 'role % retains a public sequence privilege', api_role;
+                  END IF;
+
+                  IF has_function_privilege(api_role, 'public.atlas_block_ledger_mutation()', 'EXECUTE')
+                     OR has_function_privilege(api_role, 'public.atlas_ledger_journal_deferred_check()', 'EXECUTE')
+                     OR has_function_privilege(api_role, 'public.atlas_validate_ledger_journal(integer)', 'EXECUTE') THEN
+                      RAISE EXCEPTION 'role % retains EXECUTE on an internal ledger function', api_role;
+                  END IF;
+              END LOOP;
+
+              IF EXISTS (
+                  SELECT 1
+                  FROM pg_proc p
+                  JOIN pg_namespace n ON n.oid = p.pronamespace
+                  WHERE n.nspname = 'public'
+                    AND p.oid IN (
+                      to_regprocedure('public.atlas_block_ledger_mutation()'),
+                      to_regprocedure('public.atlas_ledger_journal_deferred_check()'),
+                      to_regprocedure('public.atlas_validate_ledger_journal(integer)')
+                    )
+                    AND NOT coalesce(p.proconfig @> ARRAY['search_path=pg_catalog, public'], false)
+              ) THEN
+                  RAISE EXCEPTION 'an internal ledger function does not have a fixed search_path';
+              END IF;
+          END
+          $verify_public_schema_lockdown$;
+
+          -- Prove future objects created by the migration role do not inherit API-role grants.
+          CREATE TABLE public.atlas_default_acl_probe (
+              id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY
+          );
+          CREATE FUNCTION public.atlas_default_acl_probe_fn() RETURNS integer
+          LANGUAGE sql AS $$ SELECT 1 $$;
+          DO $verify_default_acl$
+          DECLARE
+              probe_sequence text := pg_get_serial_sequence('public.atlas_default_acl_probe', 'id');
+          BEGIN
+              IF has_table_privilege('anon', 'public.atlas_default_acl_probe', 'SELECT')
+                 OR has_table_privilege('authenticated', 'public.atlas_default_acl_probe', 'SELECT')
+                 OR has_sequence_privilege('anon', probe_sequence, 'USAGE')
+                 OR has_sequence_privilege('authenticated', probe_sequence, 'USAGE')
+                 OR has_function_privilege('anon', 'public.atlas_default_acl_probe_fn()', 'EXECUTE')
+                 OR has_function_privilege('authenticated', 'public.atlas_default_acl_probe_fn()', 'EXECUTE') THEN
+                  RAISE EXCEPTION 'API roles inherited privileges on a newly created public object';
+              END IF;
+          END
+          $verify_default_acl$;
+          DROP FUNCTION public.atlas_default_acl_probe_fn();
+          DROP TABLE public.atlas_default_acl_probe;
+          -- Simulate a managed object-creator role with independent unsafe defaults.
+          CREATE ROLE supabase_admin NOLOGIN;
+          GRANT USAGE, CREATE ON SCHEMA public TO supabase_admin;
+          ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public
+            GRANT SELECT ON TABLES TO anon, authenticated;
+          ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public
+            GRANT USAGE, SELECT ON SEQUENCES TO anon, authenticated;
+          ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public
+            GRANT EXECUTE ON FUNCTIONS TO anon, authenticated;
+          SET ROLE supabase_admin;
+          CREATE TABLE public.atlas_managed_role_probe (id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY);
+          CREATE FUNCTION public.atlas_managed_role_probe_fn() RETURNS integer
+            LANGUAGE sql AS $$ SELECT 1 $$;
+          RESET ROLE;
+          DO $verify_managed_role_defaults$
+          BEGIN
+              IF NOT has_table_privilege('anon', 'public.atlas_managed_role_probe', 'SELECT')
+                 OR NOT has_table_privilege('authenticated', 'public.atlas_managed_role_probe', 'SELECT') THEN
+                  RAISE EXCEPTION 'managed-role fixture failed to model independent table grants';
+              END IF;
+              IF has_schema_privilege('anon', 'public', 'USAGE')
+                 OR has_schema_privilege('authenticated', 'public', 'USAGE') THEN
+                  RAISE EXCEPTION 'API roles can access public schema despite lockdown';
+              END IF;
+          END
+          $verify_managed_role_defaults$;
+          SET ROLE supabase_admin;
+          DROP FUNCTION public.atlas_managed_role_probe_fn();
+          DROP TABLE public.atlas_managed_role_probe;
+          RESET ROLE;
+          SQL
       - name: Verify migration graph and round-trip
         run: |
           python -m alembic current
@@ -48,6 +274,53 @@ jobs:
           test "$(printf '%s\n' "$heads" | grep -c '(head)')" -eq 1
           python -m alembic downgrade base
           python -m alembic upgrade head
+      - name: Controlled withdrawal recovery regressions
+        run: |
+          python -m pytest -q \
+            tests/test_withdrawal_hardening_3_10_48.py \
+            tests/test_withdrawal_not_sent_db.py \
+            tests/test_withdrawal_payout_error_guards.py \
+            tests/test_payout_failure_classification.py
+      - name: TRON transfer and reconciliation regressions
+        run: |
+          python -m pytest -q \
+            tests/test_tron_deposit_reconciliation_3_10_18.py \
+            tests/test_tron_sweep.py \
+            tests/test_tron_sweep_real_chain_shapes.py \
+            tests/test_tron_scan_efficiency_and_concurrency.py
+      - name: OANDA practice adapter and unknown-outcome regressions
+        run: |
+          python -m pytest -q \
+            tests/test_oanda_adapter.py \
+            tests/test_oanda_failure_modes.py
+      - name: OANDA practice connectivity (read-only, optional credentials)
+        if: ${{ vars.OANDA_PRACTICE_CHECK_ENABLED == 'true' }}
+        env:
+          OANDA_ACCOUNT_ID: ${{ secrets.OANDA_ACCOUNT_ID }}
+          OANDA_API_TOKEN: ${{ secrets.OANDA_API_TOKEN }}
+          OANDA_PRACTICE: "true"
+          FOREX_SYMBOL: EUR_USD
+        run: python scripts/oanda_demo_check.py
+      - name: Disposable PostgreSQL backup and restore smoke test
+        run: |
+          set -euo pipefail
+          PGPASSWORD=test_password pg_dump -Fc --no-owner --no-acl \
+            -h 127.0.0.1 -U atlas -d atlas_test -f /tmp/atlas-ci.dump
+          PGPASSWORD=test_password createdb -h 127.0.0.1 -U atlas atlas_restore
+          PGPASSWORD=test_password pg_restore --exit-on-error --no-owner --no-acl \
+            -h 127.0.0.1 -U atlas -d atlas_restore /tmp/atlas-ci.dump
+          restored_head="$(PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -At \
+            -h 127.0.0.1 -U atlas -d atlas_restore -c 'SELECT version_num FROM alembic_version')"
+          test "$restored_head" = "0049_public_schema_rls_lockdown"
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -At \
+            -h 127.0.0.1 -U atlas -d atlas_restore -c "
+              SELECT CASE WHEN count(*) FILTER (WHERE NOT relrowsecurity) = 0
+                          THEN 'RLS_OK' ELSE 'RLS_FAIL' END
+              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = 'public' AND c.relkind IN ('r','p')
+            " | grep -qx RLS_OK
+          PGPASSWORD=test_password dropdb -h 127.0.0.1 -U atlas atlas_restore
+          rm -f /tmp/atlas-ci.dump
       - name: Python lint (fatal static errors)
         run: |
           set +e

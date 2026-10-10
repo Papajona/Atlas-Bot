@@ -8,6 +8,7 @@ on:
       - "settings.gradle.kts"
       - "gradle.properties"
       - ".github/workflows/android-release.yml"
+  workflow_dispatch:
   push:
     tags:
       - "android-v*"
@@ -17,6 +18,7 @@ permissions:
 
 jobs:
   android-debug:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -31,39 +33,113 @@ jobs:
         run: gradle --no-daemon :app:assembleDebug
 
   android-release:
-    if: startsWith(github.ref, 'refs/tags/android-v')
+    if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/tags/android-v')
     runs-on: ubuntu-latest
     environment: production
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Require approved main commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/android-v* ]]; then
+            git fetch origin main
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+              echo "BLOCKED: release tag does not point to a commit reachable from main"
+              exit 1
+            }
+          else
+            test "$GITHUB_REF" = "refs/heads/main" || {
+              echo "BLOCKED: manual production signing is permitted only from main"
+              exit 1
+            }
+            test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          fi
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: "21"
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
         with:
           gradle-version: "8.9"
       - name: Restore release keystore
         env:
           KEYSTORE_B64: ${{ secrets.ATLAS_RELEASE_KEYSTORE_B64 }}
+        shell: bash
         run: |
+          set -euo pipefail
           test -n "$KEYSTORE_B64"
           printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/atlas-release.jks"
           test -s "$RUNNER_TEMP/atlas-release.jks"
+          chmod 600 "$RUNNER_TEMP/atlas-release.jks"
       - name: Build signed release APK
         env:
           ATLAS_RELEASE_STORE_FILE: ${{ runner.temp }}/atlas-release.jks
           ATLAS_RELEASE_STORE_PASSWORD: ${{ secrets.ATLAS_RELEASE_STORE_PASSWORD }}
           ATLAS_RELEASE_KEY_ALIAS: ${{ secrets.ATLAS_RELEASE_KEY_ALIAS }}
           ATLAS_RELEASE_KEY_PASSWORD: ${{ secrets.ATLAS_RELEASE_KEY_PASSWORD }}
+        shell: bash
         run: |
+          set -euo pipefail
           test -n "$ATLAS_RELEASE_STORE_PASSWORD"
           test -n "$ATLAS_RELEASE_KEY_ALIAS"
           test -n "$ATLAS_RELEASE_KEY_PASSWORD"
           gradle --no-daemon :app:assembleRelease
-      - name: Upload signed artifact
+      - name: Independently verify APK signature, certificate, and package
+        env:
+          EXPECTED_CERT_SHA256: ${{ secrets.ATLAS_RELEASE_CERT_SHA256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$EXPECTED_CERT_SHA256" || {
+            echo "BLOCKED: ATLAS_RELEASE_CERT_SHA256 production secret is required"
+            exit 1
+          }
+          APK="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -n "$APK" && test -s "$APK"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          test -x "$APKSIGNER" && test -x "$AAPT"
+          "$APKSIGNER" verify --verbose --print-certs "$APK" > "$RUNNER_TEMP/atlas-signing-report.txt" 2>&1
+          ACTUAL_CERT="$(sed -n 's/.*certificate SHA-256 digest: *//p' "$RUNNER_TEMP/atlas-signing-report.txt" | head -n 1 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          EXPECTED_CERT="$(printf '%s' "$EXPECTED_CERT_SHA256" | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          [[ "$ACTUAL_CERT" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "BLOCKED: apksigner did not report a valid SHA-256 certificate fingerprint"
+            exit 1
+          }
+          test "$ACTUAL_CERT" = "$EXPECTED_CERT" || {
+            echo "BLOCKED: APK certificate fingerprint does not match the approved production certificate"
+            exit 1
+          }
+          "$AAPT" dump badging "$APK" > "$RUNNER_TEMP/atlas-apk-badging.txt"
+          grep -q "^package: name='com.atlas.trading'" "$RUNNER_TEMP/atlas-apk-badging.txt" || {
+            echo "BLOCKED: APK package identity is not com.atlas.trading"
+            exit 1
+          }
+          mkdir -p "$RUNNER_TEMP/atlas-release-evidence"
+          cp "$APK" "$RUNNER_TEMP/atlas-release-evidence/atlas-release.apk"
+          cp "$RUNNER_TEMP/atlas-signing-report.txt" "$RUNNER_TEMP/atlas-release-evidence/atlas-signing-report.txt"
+          (cd "$RUNNER_TEMP/atlas-release-evidence" && sha256sum atlas-release.apk > atlas-release.sha256)
+          cat > "$RUNNER_TEMP/atlas-release-evidence/atlas-release-metadata.txt" <<EOF
+          commit=$GITHUB_SHA
+          ref=$GITHUB_REF
+          package=com.atlas.trading
+          certificate_sha256=$ACTUAL_CERT
+          apk=atlas-release.apk
+          checksum=atlas-release.sha256
+          signing_report=atlas-signing-report.txt
+          EOF
+          echo "PASS: APK signature, expected certificate, package identity, and checksum evidence verified."
+      - name: Upload complete signed release evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: atlas-release-apk
-          path: app/build/outputs/apk/release/*.apk
+          path: ${{ runner.temp }}/atlas-release-evidence/*
           if-no-files-found: error
+          retention-days: 90

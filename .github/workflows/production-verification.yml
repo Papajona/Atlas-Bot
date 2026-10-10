@@ -71,6 +71,16 @@ jobs:
           PY
       - name: Wait for PostgreSQL
         run: until pg_isready -h 127.0.0.1 -p 5432 -U atlas -d atlas_production_verify; do sleep 1; done
+      - name: Seed Supabase API roles for production lockdown verification
+        run: |
+          PGPASSWORD=verification_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_production_verify <<'SQL'
+          CREATE ROLE anon NOLOGIN;
+          CREATE ROLE authenticated NOLOGIN;
+          GRANT USAGE, CREATE ON SCHEMA public TO anon, authenticated;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO anon, authenticated;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO anon, authenticated;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon, authenticated;
+          SQL
       - name: Apply and verify migration head
         run: |
           python -m alembic upgrade head
@@ -79,7 +89,24 @@ jobs:
       - name: Repository secret scan
         run: python scripts/check_no_secrets.py
       - name: AI model/provider verification when credentials are supplied
-        run: python scripts/check_ai_models.py || test $? -eq 2
+        env:
+          PYTHONPATH: .
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          set +e
+          python scripts/check_ai_models.py
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          elif [ "$status" -eq 2 ]; then
+            echo "BLOCKED: provider credentials are not configured; production verification cannot pass without provider checks"
+            exit 2
+          else
+            echo "BLOCKED: AI model/provider verification failed with exit code $status"
+            exit "$status"
+          fi
       - name: Production-oriented static and security gates
         run: |
           python -m compileall -q app alembic

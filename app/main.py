@@ -45,7 +45,7 @@ from .withdrawal_security import destination_allowed, destination_fingerprint, p
 from .usdt_tron import derive_usdt_tron_address_from_xpub, validate_tron_account_xpub
 from .tron_sweep import build_sweep_intent, serialize_sweep_intent, SweepError, classify_solidified_sweep, USDT_SCALE
 from .custody_locations import create_custody_transfer, transition_custody_transfer
-from .customer_funds import get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, ledger_statement, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal
+from .customer_funds import record_ledger_incident, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, ledger_statement, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal
 from .distributed import allow_rate_limit, check_redis, acquire_lock, release_lock, refresh_lock
 from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
@@ -71,7 +71,7 @@ from .executor_engine import ExecutorConfig, ExecutorValidationError, build_exec
 from .admin_rbac import require_role, get_roles, upsert_role, ROLES
 from .transaction_policy import register_or_check_destination, verify_destination
 from .audit_chain import append_audit
-from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current
+from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current, assert_database_role_compatible_with_rls_lockdown
 
 def _stepup_token(uid: str, purpose: str = "withdrawal", destination_fingerprint: str = "", proposal_digest_value: str = "") -> tuple[str, str, int]:
     if not settings.secret_key:
@@ -349,6 +349,7 @@ async def startup():
         from .usdt_tron import require_tron_wallet_backend
         require_tron_wallet_backend()
     await assert_database_migrations_current()
+    await assert_database_role_compatible_with_rls_lockdown()
     await init_db()
     async with SessionLocal() as billing_db:
         await _ensure_billing_plans(billing_db)
@@ -1282,12 +1283,24 @@ async def _usdt_tron_monitor_loop():
                                 # records inside one tx cannot be distinguished safely. Do not invent an
                                 # ordinal (#1/#2) as a financial identity: API pagination/order can change.
                                 if prior_count > 0:
-                                    await _audit("TRON_DEPOSIT_IDENTITY_AMBIGUOUS", {
-                                        "wallet_id": wallet.id, "txid": txid,
-                                        "sender": sender, "recipient": wallet.deposit_address,
-                                        "raw_value": str(raw_value), "block_timestamp": block_ts,
-                                        "reason": "duplicate transfer signature without stable event index",
-                                    })
+                                    # The provider does not expose a stable event index, so do not invent
+                                    # a financial identity or credit this ambiguous transfer. Persist one
+                                    # operator-visible incident and do not reopen it on every cursor replay.
+                                    async with SessionLocal() as incident_db:
+                                        await record_ledger_incident(
+                                            incident_db,
+                                            key=f"TRON_DEPOSIT_IDENTITY_AMBIGUOUS:{wallet.id}:{txid}",
+                                            summary="Duplicate identical TRC-20 transfers in one transaction; extra transfer not credited",
+                                            detail={
+                                                "wallet_id": wallet.id, "txid": txid, "sender": sender,
+                                                "recipient": wallet.deposit_address, "raw_value": str(raw_value),
+                                                "block_timestamp": block_ts,
+                                                "reason": "duplicate transfer signature without stable event index",
+                                            },
+                                            customer_id=wallet.customer_id, severity="HIGH",
+                                            reopen_resolved=False,
+                                        )
+                                        await incident_db.commit()
                                     _defer(block_ts)
                                     seen_refs[transfer_key] = prior_count + 1
                                     continue
@@ -2392,7 +2405,12 @@ async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorizat
         sweep = (await db.execute(select(TronSweep).where(TronSweep.id == sweep_id).with_for_update())).scalar_one_or_none()
         if not sweep:
             raise HTTPException(404, "sweep not found")
+        terminal_sweep_states = {"SETTLED", "FAILED", "CANCELED", "CANCELLED"}
+        if str(sweep.status or "").upper() in terminal_sweep_states:
+            raise HTTPException(409, f"Sweep is {sweep.status}; terminal sweeps cannot be changed")
         if outcome == "TIMEOUT":
+            if sweep.transaction_id or sweep.status != "READY_FOR_SIGNER":
+                raise HTTPException(409, "Timeout can only be recorded before a transaction ID is known")
             sweep.status = "UNKNOWN"
             sweep.detail_json = json.dumps({**(json.loads(sweep.detail_json or "{}") or {}),
                                             "broadcast_outcome": "TIMEOUT",
@@ -2403,6 +2421,8 @@ async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorizat
             await db.commit()
             return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": ""}
         if outcome == "REJECTED":
+            if sweep.transaction_id or sweep.status != "READY_FOR_SIGNER":
+                raise HTTPException(409, "A rejection cannot override a prior timeout or known transaction; reconcile it first")
             sweep.status = "FAILED"
             sweep.detail_json = json.dumps({**(json.loads(sweep.detail_json or "{}") or {}),
                                             "broadcast_outcome": "REJECTED"}, separators=(",", ":"))
@@ -2413,6 +2433,10 @@ async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorizat
             return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": ""}
         if sweep.transaction_id and sweep.transaction_id != txid:
             raise HTTPException(409, "sweep already has a different transaction id")
+        if sweep.status == "SUBMITTED" and sweep.transaction_id == txid:
+            return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": sweep.transaction_id, "idempotent": True}
+        if sweep.status not in {"READY_FOR_SIGNER", "UNKNOWN", "SUBMITTED"}:
+            raise HTTPException(409, f"Sweep is {sweep.status}; broadcast result cannot be recorded")
         duplicate = (await db.execute(select(TronSweep).where(
             TronSweep.transaction_id == txid, TronSweep.id != sweep.id
         ).with_for_update())).scalar_one_or_none()
@@ -4491,7 +4515,7 @@ async def list_strategy_drafts(authorization: str | None = Header(default=None))
 
 
 @app.post("/api/customer/withdrawals")
-async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorization: str | None = Header(default=None), x_withdrawal_step_up: str | None = Header(default=None)):
+async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorization: str | None = Header(default=None), x_withdrawal_step_up: str | None = Header(default=None), idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
     if not settings.withdrawals_enabled:
         raise HTTPException(403, "Withdrawals are currently disabled")
     if req.network.upper() != "TRON" or not _tron_base58check_valid(req.destination):
@@ -4502,6 +4526,36 @@ async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorizatio
         raise HTTPException(409, "Minimum USDT withdrawal is 1.0 USDT")
     async with SessionLocal() as db:
         profile, _ = await get_customer(authorization, db, require_aal2=True)
+        idem_key = (idempotency_key or "").strip()
+        if idem_key and not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", idem_key):
+            raise HTTPException(400, "Idempotency-Key must be 1-128 characters of [A-Za-z0-9._:-]")
+        keyed_request_id = ""
+        if idem_key:
+            # Scope the key to the authenticated customer. Bind it to the complete immutable
+            # request payload so the same key cannot be reused to change amount or destination.
+            keyed_request_id = f"cust-wd-{profile.id}-idem-{hashlib.sha256(f'{profile.id}:{idem_key}'.encode()).hexdigest()[:32]}"
+            keyed_existing = (await db.execute(select(Withdrawal).where(
+                Withdrawal.customer_id == profile.id,
+                Withdrawal.request_id == keyed_request_id,
+            ).with_for_update())).scalar_one_or_none()
+            if keyed_existing:
+                same_payload = (
+                    Decimal(str(keyed_existing.amount)) == Decimal(str(req.amount))
+                    and keyed_existing.destination == req.destination.strip()
+                    and (keyed_existing.destination_tag or "") == (req.destination_tag or "")
+                    and keyed_existing.currency == "USDT"
+                    and keyed_existing.network == req.network.upper()
+                    and (keyed_existing.provider or settings.payout_provider) == settings.payout_provider
+                )
+                if not same_payload:
+                    raise HTTPException(409, "Idempotency-Key was already used for a different withdrawal payload")
+                return {
+                    "ok": True, "id": keyed_existing.id, "request_id": keyed_existing.request_id,
+                    "status": keyed_existing.status, "amount": keyed_existing.amount,
+                    "currency": keyed_existing.currency, "network": keyed_existing.network,
+                    "destination_masked": keyed_existing.destination_masked,
+                    "required_approvals": keyed_existing.required_approvals, "idempotent": True,
+                }
         requested_fp = destination_fingerprint(req.destination.strip(), "USDT", req.network.upper())
         requested_stepup_digest = proposal_digest(request_id="STEPUP", amount=req.amount, currency="USDT", destination=req.destination.strip(), tag=req.destination_tag or "", network=req.network.upper(), provider=settings.payout_provider)
         parsed_stepup = _parse_stepup_token(x_withdrawal_step_up, profile.auth_user_id, "withdrawal", requested_fp, requested_stepup_digest)
@@ -4541,16 +4595,21 @@ async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorizatio
         # rather than creating a second ledger reservation.
         request_id_seed = f"{profile.id}:{req.destination.strip()}:{req.amount}:{req.destination_tag or ''}:TRON:USDT:{settings.payout_provider}"
         base_request_id = f"cust-wd-{profile.id}-{hashlib.sha256(request_id_seed.encode()).hexdigest()[:24]}"
-        # A deterministic id alone makes every later identical withdrawal collide with the first one
-        # (unique request_id, and the ledger reserve key derives from it). Identical requests while one is
-        # still active stay idempotent; once none is active the next attempt gets a fresh "-rN" suffix.
-        prior = (await db.execute(select(Withdrawal).where(
-            Withdrawal.customer_id == profile.id,
-            Withdrawal.request_id.like(base_request_id + "%"),
-        ).order_by(Withdrawal.id))).scalars().all()
-        active_prior = [p for p in prior if p.status in {"PENDING", "PARTIALLY_APPROVED", "APPROVED", "SUBMITTING", "SUBMITTED", "UNKNOWN"}]
-        existing = active_prior[-1] if active_prior else None
-        request_id = next_customer_withdrawal_request_id(base_request_id, [p.request_id for p in prior])
+        if idem_key:
+            # The exact key-derived request id remains stable after completion too; replay returns
+            # the original result instead of accidentally creating another payout.
+            request_id = keyed_request_id
+            existing = None
+        else:
+            # Without a client key, keep active duplicate protection while allowing a genuinely new
+            # later withdrawal with the same payload to receive a fresh suffix.
+            prior = (await db.execute(select(Withdrawal).where(
+                Withdrawal.customer_id == profile.id,
+                Withdrawal.request_id.like(base_request_id + "%"),
+            ).order_by(Withdrawal.id))).scalars().all()
+            active_prior = [p for p in prior if p.status in {"PENDING", "PARTIALLY_APPROVED", "APPROVED", "SUBMITTING", "SUBMITTED", "UNKNOWN"}]
+            existing = active_prior[-1] if active_prior else None
+            request_id = next_customer_withdrawal_request_id(base_request_id, [p.request_id for p in prior])
         final_digest = proposal_digest(
             request_id=request_id, amount=req.amount, currency="USDT",
             destination=req.destination.strip(), tag=req.destination_tag or "",
