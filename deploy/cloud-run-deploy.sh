@@ -30,7 +30,10 @@ python - "${ADMIN_SUPABASE_USER_IDS}" "${ADMIN_ROLE_ASSIGNMENTS}" <<'PY'
 import sys
 from uuid import UUID
 
-allowlisted = {item.strip() for item in sys.argv[1].split(",") if item.strip()}
+try:
+    allowlisted = {str(UUID(item.strip())) for item in sys.argv[1].split(",") if item.strip()}
+except ValueError:
+    raise SystemExit("ERROR: ADMIN_SUPABASE_USER_IDS contains a non-UUID user ID")
 raw_assignments = [item.strip() for item in sys.argv[2].split(",") if item.strip()]
 if not allowlisted or not raw_assignments:
     raise SystemExit("ERROR: admin allow-list and role assignments must both be non-empty")
