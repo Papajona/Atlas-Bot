@@ -124,7 +124,8 @@ class CCXTPayoutProvider:
             rows = await self._call(self.exchange.fetch_withdrawals, currency, since_ms, 100)
         except Exception as e:
             raise PayoutUnknown(str(e)) from e
-        for tx in rows or []:
+        rows = list(rows or [])
+        for tx in rows:
             raw = tx or {}
             info = raw.get("info") or {}
             if idempotency_key in json.dumps(raw, sort_keys=True) or idempotency_key == str(info.get("clientOrderId") or info.get("idempotency_key") or info.get(settings.payout_client_id_param or "clientOrderId") or ""):
@@ -133,6 +134,9 @@ class CCXTPayoutProvider:
                     raw_status = str(raw.get("status") or "PENDING").upper()
                     mapped = {"OK":"COMPLETED","SUCCESS":"COMPLETED","DONE":"COMPLETED","FAILED":"FAILED","CANCELED":"FAILED","CANCELLED":"FAILED"}.get(raw_status, "PENDING")
                     return PayoutResult(self.name, provider_id, mapped, raw_status, raw)
+        if len(rows) >= 100:
+            # A full provider page may be truncated; do not interpret a missing id as proof of absence.
+            raise PayoutUnknown("Provider withdrawal history reached the 100-row limit; payout absence is not proven")
         if not settings.payout_client_id_param:
             # Without a verified exchange-side client id, absence from a bounded history window proves nothing.
             raise PayoutUnknown("Provider history has no match, but no verified client-id parameter is configured; absence is not proof the payout was not sent")
