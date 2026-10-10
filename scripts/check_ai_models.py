@@ -31,11 +31,32 @@ def _request_json(url: str, headers: dict[str, str], payload: dict) -> tuple[int
         # Preserve only parsed provider error metadata so the gate can explain
         # authorization/model-access failures without logging credentials.
         try:
-            raw_error = exc.read().decode("utf-8")
-            parsed_error = json.loads(raw_error)
-            return exc.code, parsed_error if isinstance(parsed_error, dict) else {}
-        except (json.JSONDecodeError, UnicodeDecodeError, Exception):
+            raw_error = exc.read(4096).decode("utf-8", errors="replace")
+        except Exception:
             return exc.code, {}
+        try:
+            parsed_error = json.loads(raw_error)
+            if isinstance(parsed_error, dict):
+                # Keep the standard provider error structure, but bound strings
+                # so CI logs cannot be flooded by an upstream response.
+                error = parsed_error.get("error")
+                if isinstance(error, dict):
+                    safe_error = {
+                        key: value[:240] if isinstance(value, str) else value
+                        for key, value in error.items()
+                        if key in {"message", "type", "code", "status", "detail"}
+                        and isinstance(value, (str, int, float, bool, type(None)))
+                    }
+                    return exc.code, {"error": safe_error}
+                message = parsed_error.get("message") or parsed_error.get("detail")
+                if isinstance(message, str):
+                    return exc.code, {"message": message[:240]}
+                return exc.code, {"response_preview": raw_error[:240]}
+        except json.JSONDecodeError:
+            pass
+        # Non-JSON responses commonly come from a proxy/gateway; retain only a
+        # short sanitized preview, never request headers or credentials.
+        return exc.code, {"response_preview": raw_error[:240]}
     except Exception:
         return 0, {}
     try:
