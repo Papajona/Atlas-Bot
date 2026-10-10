@@ -65,6 +65,70 @@ jobs:
           require_success "ci.yml" "Atlas CI"
           require_success "ledger-concurrency-check.yml" "PostgreSQL ledger concurrency"
 
+          # A green Android workflow is insufficient when its signing job was skipped.
+          # Require the successful signed-release job and the non-expired APK evidence
+          # artifact for this exact commit before touching production.
+          android_run="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow "android-release.yml" \
+            --commit "$GITHUB_SHA" \
+            --json databaseId,status,conclusion \
+            --jq '[.[] | select(.status=="completed" and .conclusion=="success")][0].databaseId // empty')"
+          if [ -z "$android_run" ]; then
+            echo "BLOCKED: Android signed release has not passed on exact commit $GITHUB_SHA"
+            exit 1
+          fi
+
+          android_job="$(gh run view "$android_run" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json jobs \
+            --jq '[.jobs[] | select(.name=="android-release")][0].conclusion // empty')"
+          if [ "$android_job" != "success" ]; then
+            echo "BLOCKED: Android release job did not succeed (it may have been skipped)"
+            exit 1
+          fi
+
+          artifact_count="$(gh api \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$android_run/artifacts" \
+            --jq '[.artifacts[] | select(.name=="atlas-release-apk" and .expired==false and .size_in_bytes>0)] | length')"
+          if [ "${artifact_count:-0}" -lt 1 ]; then
+            echo "BLOCKED: signed Android artifact is missing, expired, or empty"
+            exit 1
+          fi
+          echo "PASS: signed Android release and evidence artifact verified for $GITHUB_SHA"
+
+      - name: Download and verify signed Android artifact for this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_CERT_SHA256: ${{ vars.ATLAS_RELEASE_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          android_run="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow "android-release.yml" \
+            --commit "$GITHUB_SHA" \
+            --json databaseId,status,conclusion \
+            --jq '[.[] | select(.status=="completed" and .conclusion=="success")][0].databaseId // empty')"
+          test -n "$android_run"
+          android_job="$(gh run view "$android_run" --repo "$GITHUB_REPOSITORY" --json jobs \
+            --jq '[.jobs[] | select(.name=="android-release")][0].conclusion // empty')"
+          test "$android_job" = "success"
+          mkdir -p "$RUNNER_TEMP/atlas-android-release"
+          gh run download "$android_run" --repo "$GITHUB_REPOSITORY" \
+            --name atlas-release-apk --dir "$RUNNER_TEMP/atlas-android-release"
+          bundle="$RUNNER_TEMP/atlas-android-release"
+          test -s "$bundle/atlas-release.apk"
+          test -s "$bundle/atlas-release.sha256"
+          test -s "$bundle/atlas-release-metadata.txt"
+          test -s "$bundle/atlas-signing-report.txt"
+          (cd "$bundle" && sha256sum --check atlas-release.sha256)
+          grep -Fx 'package=com.atlas.trading' "$bundle/atlas-release-metadata.txt"
+          test -n "$EXPECTED_CERT_SHA256"
+          expected_cert="$(printf '%s' "$EXPECTED_CERT_SHA256" | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+          actual_cert="$(sed -n 's/^certificate_sha256=//p' "$bundle/atlas-release-metadata.txt" | head -n 1 | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+          test -n "$actual_cert"
+          test "$actual_cert" = "$expected_cert"
+          echo "PASS: exact-commit APK checksum, package identity, and expected signing certificate verified"
       - name: Authenticate to Google Cloud with GitHub OIDC
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
