@@ -91,6 +91,8 @@ jobs:
       - name: AI model/provider verification when credentials are supplied
         env:
           PYTHONPATH: .
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           set +e
           python scripts/check_ai_models.py
