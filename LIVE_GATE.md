@@ -19,3 +19,7 @@ Only after these checks should production flags be changed. Starting with sandbo
 
 ## 3.4 additional gate
 Production payout execution remains disabled until Redis-backed distributed controls, backup/recovery validation, staging/testnet payout reconciliation, and the 3.4 acceptance checklist have passed.
+
+## Funding is a separate gate
+
+Paper trading is not equivalent to a no-funds environment. The API and worker deployment scripts default the TRON funding listener off and disable sweeping. Keep it off in staging/paper exercises. Enabling TRON funding requires explicit operator approval; mainnet additionally requires a separate explicit confirmation. No deposit, sweep, or payout test should be run against mainnet as part of a paper-trading readiness check.
