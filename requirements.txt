@@ -29,7 +29,7 @@ websockets==15.0.1
 bip-utils==2.12.2
 
 
-# Keep multidict on the upstream fixed release for CVE-2026-104874; ccxt accepts this version.
-multidict==6.9.1
+# ccxt 4.5.85 pins multidict 6.7.1. CI verifies the pure-Python backend to avoid the vulnerable C extension.
+multidict==6.7.1
 
 defusedxml==0.7.1
