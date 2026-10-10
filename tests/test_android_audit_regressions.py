@@ -43,8 +43,9 @@ def test_release_build_requires_explicit_approved_https_backend_host():
     assert "ATLAS_PROD_BACKEND_HOST" in source
     assert 'parsedBackend?.scheme == "https"' in source
     assert "actualHost == approvedBackendHost" in source
-    assert "gradle.taskGraph.whenReady" in source
-    assert "graph.allTasks.any" in source
+    assert 'tasks.register("verifyProductionReleaseConfiguration")' in source
+    assert "tasks.configureEach" in source
+    assert "dependsOn(verifyProductionReleaseConfiguration)" in source
     assert "production release signing requires all ATLAS_RELEASE_* signing environment variables" in source
     assert "vars.ATLAS_PROD_BACKEND_URL" in workflow
     assert "vars.ATLAS_PROD_BACKEND_HOST" in workflow
