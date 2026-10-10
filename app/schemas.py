@@ -17,7 +17,7 @@ class MarketRequest(BaseModel):
 class TradingRequirementsRequest(BaseModel):
     venue: str = Field(pattern="^(binance|oanda|deriv)$")
     symbol: str = Field(min_length=2, max_length=80)
-    stop_loss_price: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    stop_loss_price: float | None = Field(default=None, gt=0)
 
 
 class CustomerBotStartRequest(MarketRequest):
@@ -32,7 +32,7 @@ class SmartTradeRequest(BaseModel):
     exchange: str = Field(default="bybit", min_length=2, max_length=50)
     side: str = Field(pattern="^(BUY|SELL)$")
     entry_price: float = Field(gt=0)
-    quantity: float = Field(gt=0, allow_inf_nan=False)
+    quantity: float = Field(gt=0)
     stop_loss_price: float = Field(gt=0)
     take_profit_1: float = Field(gt=0)
     take_profit_2: float = Field(default=0, ge=0)
@@ -88,7 +88,7 @@ class ExecutorCreateRequest(BaseModel):
     interval_seconds: int = Field(default=60, ge=1, le=86400)
     max_slippage_bps: float = Field(default=25, ge=0, le=500)
     stop_loss_price: float | None = Field(default=None, gt=0)
-    take_profit_price: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    take_profit_price: float | None = Field(default=None, gt=0)
     mode: str = Field(default="PAPER", pattern="^(PAPER|LIVE)$")
 
 
@@ -195,7 +195,7 @@ class TrainRequest(MarketRequest):
 
 class ExecuteRequest(MarketRequest):
     side: str = Field(pattern="^(buy|sell)$")
-    quantity: float = Field(gt=0)
+    quantity: float = Field(gt=0, allow_inf_nan=False)
     price: float = Field(default=0, ge=0, allow_inf_nan=False)
     score: float = Field(default=0.0, allow_inf_nan=False)
     long_probability: float = Field(default=0.0, allow_inf_nan=False)
@@ -204,8 +204,8 @@ class ExecuteRequest(MarketRequest):
     signal_timestamp: str | None = None
     request_id: str | None = Field(default=None, min_length=8, max_length=80)
     force_paper: bool = True
-    stop_loss_price: float | None = Field(default=None, gt=0)
-    take_profit_price: float | None = Field(default=None, gt=0)
+    stop_loss_price: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    take_profit_price: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     strategy: str = "manual-v1"
     demo_forex: bool = False
 
