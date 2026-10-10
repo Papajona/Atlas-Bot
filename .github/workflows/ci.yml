@@ -144,6 +144,14 @@ jobs:
           python -m pytest -q \
             tests/test_oanda_adapter.py \
             tests/test_oanda_failure_modes.py
+      - name: OANDA practice connectivity (read-only, optional credentials)
+        if: ${{ secrets.OANDA_ACCOUNT_ID != '' && secrets.OANDA_API_TOKEN != '' }}
+        env:
+          OANDA_ACCOUNT_ID: ${{ secrets.OANDA_ACCOUNT_ID }}
+          OANDA_API_TOKEN: ${{ secrets.OANDA_API_TOKEN }}
+          OANDA_PRACTICE: "true"
+          FOREX_SYMBOL: EUR_USD
+        run: python scripts/oanda_demo_check.py
       - name: Disposable PostgreSQL backup and restore smoke test
         run: |
           set -euo pipefail
