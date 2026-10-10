@@ -39,8 +39,85 @@ jobs:
         run: until pg_isready -h 127.0.0.1 -p 5432 -U atlas -d atlas_test; do sleep 1; done
       - name: Compile source
         run: python -m compileall -q app alembic
+      - name: Create Supabase API roles for migration verification
+        run: |
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          CREATE ROLE anon NOLOGIN;
+          CREATE ROLE authenticated NOLOGIN;
+          SQL
       - name: Apply migrations
         run: python -m alembic upgrade head
+      - name: Verify public-schema lockdown at runtime
+        run: |
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          DO $verify_public_schema_lockdown$
+          DECLARE
+              api_role text;
+          BEGIN
+              IF EXISTS (
+                  SELECT 1 FROM pg_class c
+                  JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+                    AND NOT c.relrowsecurity
+              ) THEN
+                  RAISE EXCEPTION 'RLS is disabled on one or more public tables';
+              END IF;
+
+              FOREACH api_role IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+                  IF EXISTS (
+                      SELECT 1 FROM pg_class c
+                      JOIN pg_namespace n ON n.oid = c.relnamespace
+                      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                        AND (
+                          has_table_privilege(api_role, c.oid, 'SELECT')
+                          OR has_table_privilege(api_role, c.oid, 'INSERT')
+                          OR has_table_privilege(api_role, c.oid, 'UPDATE')
+                          OR has_table_privilege(api_role, c.oid, 'DELETE')
+                          OR has_table_privilege(api_role, c.oid, 'TRUNCATE')
+                          OR has_table_privilege(api_role, c.oid, 'REFERENCES')
+                          OR has_table_privilege(api_role, c.oid, 'TRIGGER')
+                        )
+                  ) THEN
+                      RAISE EXCEPTION 'role % retains privileges on a public relation', api_role;
+                  END IF;
+
+                  IF EXISTS (
+                      SELECT 1 FROM pg_class c
+                      JOIN pg_namespace n ON n.oid = c.relnamespace
+                      WHERE n.nspname = 'public' AND c.relkind = 'S'
+                        AND (
+                          has_sequence_privilege(api_role, c.oid, 'USAGE')
+                          OR has_sequence_privilege(api_role, c.oid, 'SELECT')
+                          OR has_sequence_privilege(api_role, c.oid, 'UPDATE')
+                        )
+                  ) THEN
+                      RAISE EXCEPTION 'role % retains a public sequence privilege', api_role;
+                  END IF;
+
+                  IF has_function_privilege(api_role, 'public.atlas_block_ledger_mutation()', 'EXECUTE')
+                     OR has_function_privilege(api_role, 'public.atlas_ledger_journal_deferred_check()', 'EXECUTE')
+                     OR has_function_privilege(api_role, 'public.atlas_validate_ledger_journal(integer)', 'EXECUTE') THEN
+                      RAISE EXCEPTION 'role % retains EXECUTE on an internal ledger function', api_role;
+                  END IF;
+              END LOOP;
+
+              IF EXISTS (
+                  SELECT 1
+                  FROM pg_proc p
+                  JOIN pg_namespace n ON n.oid = p.pronamespace
+                  WHERE n.nspname = 'public'
+                    AND p.oid IN (
+                      to_regprocedure('public.atlas_block_ledger_mutation()'),
+                      to_regprocedure('public.atlas_ledger_journal_deferred_check()'),
+                      to_regprocedure('public.atlas_validate_ledger_journal(integer)')
+                    )
+                    AND NOT coalesce(p.proconfig @> ARRAY['search_path=pg_catalog, public'], false)
+              ) THEN
+                  RAISE EXCEPTION 'an internal ledger function does not have a fixed search_path';
+              END IF;
+          END
+          $verify_public_schema_lockdown$;
+          SQL
       - name: Verify migration graph and round-trip
         run: |
           python -m alembic current
