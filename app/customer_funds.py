@@ -23,12 +23,29 @@ def _q_up(value) -> Decimal:
     return D(str(value)).quantize(_SCALE, rounding=ROUND_UP)
 
 
-async def record_ledger_incident(db, *, key: str, summary: str, detail: dict, customer_id: int | None, severity: str = "CRITICAL") -> None:
-    """Write a CRITICAL incident in the caller's transaction (no second session, no lost update)."""
-    row = (await db.execute(select(Incident).where(Incident.incident_key == key))).scalar_one_or_none()
+async def record_ledger_incident(
+    db, *, key: str, summary: str, detail: dict, customer_id: int | None,
+    severity: str = "CRITICAL", reopen_resolved: bool = True,
+) -> None:
+    """Upsert an incident in the caller's transaction.
+
+    Reopening resolved incidents remains the default for existing callers. Polling
+    monitors that repeatedly observe the same historical ambiguity can set
+    reopen_resolved=False so an operator's resolution is not undone by replay.
+    """
+    row = (await db.execute(select(Incident).where(Incident.incident_key == key).with_for_update())).scalar_one_or_none()
     payload = json.dumps(detail, default=str)
     if row:
-        row.severity, row.status, row.summary, row.detail_json, row.updated_at = severity, "OPEN", summary[:500], payload, utcnow()
+        if not reopen_resolved and str(row.status).upper() in {"RESOLVED", "CLOSED"}:
+            return
+        row.severity = severity
+        row.status = "OPEN"
+        row.summary = summary[:500]
+        row.detail_json = payload
+        row.updated_at = utcnow()
+        if reopen_resolved:
+            row.resolved_at = None
+            row.resolved_by = ""
         return
     db.add(Incident(incident_key=key, severity=severity, status="OPEN", category="LEDGER_RECONCILIATION",
                     customer_id=customer_id, summary=summary[:500], detail_json=payload))
