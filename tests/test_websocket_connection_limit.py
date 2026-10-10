@@ -38,3 +38,16 @@ def test_websocket_reservation_cleanup_is_idempotent():
         assert user_id not in main_module._ws_user_connections
 
     asyncio.run(exercise())
+
+
+def test_websocket_route_uses_authenticated_identity_and_distributed_throttle():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text()
+    start = source.index('@app.websocket("/ws/risk-telemetry")')
+    block = source[start:source.index('@app.get("/api/trades")', start)]
+    assert 'claims.get("sub") or claims.get("user_id") or claims.get("uid")' in block
+    assert 'allow_rate_limit(' in block
+    assert '_reserve_ws_connection(user_id, connection_id)' in block
+    assert '_release_ws_connection(user_id, connection_id)' in block
+    assert 'await require_role(claims, "RISK_OFFICER")' in block
