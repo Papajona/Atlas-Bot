@@ -58,7 +58,10 @@ async def assert_database_role_compatible_with_rls_lockdown() -> None:
                 " WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')) AS public_table_count, "
                 "(SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace "
                 " WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND NOT c.relrowsecurity) "
-                " AS tables_without_rls, NOT EXISTS ("
+                " AS tables_without_rls, "
+                "(NOT has_schema_privilege('anon', 'public', 'USAGE') "
+                " AND NOT has_schema_privilege('authenticated', 'public', 'USAGE')) "
+                " AS api_schema_access_blocked, NOT EXISTS ("
                 "SELECT 1 FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace "
                 "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') "
                 "AND (NOT c.relrowsecurity OR c.relowner <> r.oid OR c.relforcerowsecurity)"
@@ -67,6 +70,11 @@ async def assert_database_role_compatible_with_rls_lockdown() -> None:
             row = result.mappings().one_or_none()
         if row is None:
             raise RuntimeError("Unable to identify the current PostgreSQL application role")
+        if not bool(row["api_schema_access_blocked"]):
+            raise RuntimeError(
+                "Public schema is still accessible to anon/authenticated; "
+                "the public-schema lockdown must revoke schema USAGE before Atlas starts."
+            )
         require_public_schema_rls_complete(
             int(row["public_table_count"]), int(row["tables_without_rls"])
         )
