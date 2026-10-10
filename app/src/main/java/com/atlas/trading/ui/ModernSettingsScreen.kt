@@ -26,7 +26,7 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun ModernSettingsScreen(
     userName: String = "Customer",
-    userEmail: String = "alice.henderson@atlas.trading",
+    userEmail: String = "Unavailable",
     onOpenOperatorConsole: () -> Unit = {},
     onOpenPortal: () -> Unit = {},
     modifier: Modifier = Modifier
