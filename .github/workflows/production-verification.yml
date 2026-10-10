@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:15-alpine
+        image: public.ecr.aws/docker/library/postgres:15-alpine
         env: {POSTGRES_DB: atlas_production_verify, POSTGRES_USER: atlas, POSTGRES_PASSWORD: verification_password}
         ports: ["5432:5432"]
         options: >-
@@ -48,8 +48,8 @@ jobs:
       RESEARCH_FEE_EVIDENCE_ID: "CI_VERIFICATION_FIXTURE"
       RESEARCH_MIN_DEFLATED_SHARPE: "0.95"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with: {python-version: "3.13"}
       - name: Install dependencies
         run: |
@@ -71,6 +71,16 @@ jobs:
           PY
       - name: Wait for PostgreSQL
         run: until pg_isready -h 127.0.0.1 -p 5432 -U atlas -d atlas_production_verify; do sleep 1; done
+      - name: Seed Supabase API roles for production lockdown verification
+        run: |
+          PGPASSWORD=verification_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_production_verify <<'SQL'
+          CREATE ROLE anon NOLOGIN;
+          CREATE ROLE authenticated NOLOGIN;
+          GRANT USAGE, CREATE ON SCHEMA public TO anon, authenticated;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO anon, authenticated;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO anon, authenticated;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon, authenticated;
+          SQL
       - name: Apply and verify migration head
         run: |
           python -m alembic upgrade head
@@ -79,7 +89,24 @@ jobs:
       - name: Repository secret scan
         run: python scripts/check_no_secrets.py
       - name: AI model/provider verification when credentials are supplied
-        run: python scripts/check_ai_models.py || test $? -eq 2
+        env:
+          PYTHONPATH: .
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          set +e
+          python scripts/check_ai_models.py
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          elif [ "$status" -eq 2 ]; then
+            echo "BLOCKED: provider credentials are not configured; production verification cannot pass without provider checks"
+            exit 2
+          else
+            echo "BLOCKED: AI model/provider verification failed with exit code $status"
+            exit "$status"
+          fi
       - name: Production-oriented static and security gates
         run: |
           python -m compileall -q app alembic

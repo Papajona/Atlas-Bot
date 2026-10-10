@@ -51,7 +51,8 @@ def test_mark_not_sent_requires_dual_control_and_unknown_status_and_evidence():
     fn = _fn("mark_withdrawal_not_sent")
     src = ast.unparse(fn)
     for needle in ("require_role(claims, 'TREASURY')", "approver_auth(", "verify_release_operator(",
-                   "w.status != 'UNKNOWN'", "w.provider_id", "ledger_release_withdrawal(", ":not-sent"):
+                   "w.status == 'SUBMITTING'", "w.status != 'UNKNOWN'", "w.provider_id", "ledger_release_withdrawal(",
+                   "_withdrawal_release_ref("):
         assert needle in src, needle
     assert "authorization" in [a.arg for a in fn.args.args]
     assert "recover(" in src and "use reconcile instead" in src
@@ -75,7 +76,10 @@ def test_immediate_provider_unknown_never_releases_reserve():
                    if isinstance(n, ast.ExceptHandler)
                    and ast.unparse(n.type) == "PayoutUnknown")
     assert "ledger_release_withdrawal" not in ast.unparse(unknown)
-    assert "w2.status = 'UNKNOWN'" in text
+    assert "_mark_withdrawal_unknown(" in ast.unparse(unknown)
+    helper = _fn("_mark_withdrawal_unknown")
+    assert "w.status = 'UNKNOWN'" in ast.unparse(helper)
+    assert "ledger_release_withdrawal" not in ast.unparse(helper)
 
 
 def test_withdrawal_provider_identifier_is_unique_and_recovery_is_durable():

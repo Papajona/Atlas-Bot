@@ -36,7 +36,9 @@ def test_verified_entitlement_paths_are_present():
 
 def test_operational_boundaries_are_documented():
     assert "staging E2E evidence" in TRUTH
-    assert "USDT/TRON payment work remains a separate change" in TRUTH
+    assert "Wallet funding and trading-customer ledger flows are separate from subscription monetization." in TRUTH
+    assert "this wording does not mean the existing customer USDT/TRON deposit and ledger code should be removed" in TRUTH
+    assert "The Deriv crypto-wallet payment path is not verified as implemented end to end" in TRUTH
     assert "Do not market these as exclusive" in TRUTH
     assert "Do not advertise" in MATRIX
 

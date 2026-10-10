@@ -4,7 +4,11 @@ Status: current-main release reference after PR #60.
 
 A benefit is advertisable only when the plan definition, customer description, server-side enforcement, implementation, regression coverage, and required staging E2E evidence agree.
 
-## Current plan configuration
+## Internal plan configuration (not a payment offer)
+
+Atlas does not include online payment or checkout in this release. The catalog prices below are legacy metadata only; they are not charged and must not be displayed as purchasable offers. Customer plan changes are operator-managed until a separate product decision approves a payment system.
+
+
 
 | Plan | Monthly | Annual | AI credits | Exchanges | Strategies | Live flag | Paper |
 |---|---:|---:|---:|---:|---:|---|---|
@@ -44,9 +48,9 @@ Do not market these as exclusive, fully delivered paid benefits until the entitl
 
 Basic safety controls, risk controls, authentication, auditability, and customer account visibility must remain independent of paid entitlements.
 
-## Billing
+## Payments
 
-Billing infrastructure exists, but real customer charging still requires staging verification of the selected payment provider, webhook lifecycle, idempotency, cancellation, renewal, and reconciliation. USDT/TRON payment work remains a separate change and is not assumed to be production-approved by the existence of code on an old branch.
+Online payments, payment-provider webhooks, checkout and recurring charges are out of scope and have been removed from the active application path. Do not configure payment-provider secrets or describe any plan as purchasable. Wallet funding and trading-customer ledger flows are separate from subscription monetization. USDT/TRON payment work remains a separate change for the subscription/payment scope; this wording does not mean the existing customer USDT/TRON deposit and ledger code should be removed. The Deriv crypto-wallet payment path is not verified as implemented end to end and must not be claimed as available until its detection, authentication, reconciliation, approval, and ledger-credit workflow is proven.
 
 ## Release wording
 

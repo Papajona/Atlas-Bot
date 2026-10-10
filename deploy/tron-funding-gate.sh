@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Production deployment guard: paper trading is not a custody/funding isolation boundary.
-# Funding defaults off and requires two explicit approvals to enable TRON mainnet funding.
+# Shared deployment guard: paper mode is not a funds/custody isolation boundary.
+# Sourcing this file does not change anything until atlas_configure_tron_funding is called.
 atlas_configure_tron_funding() {
   USDT_TRON_ENABLED="${USDT_TRON_ENABLED:-false}"
   USDT_TRON_NETWORK="${USDT_TRON_NETWORK:-mainnet}"
@@ -19,7 +19,7 @@ atlas_configure_tron_funding() {
       echo "ERROR: TRON funding is disabled by default; set ALLOW_TRON_FUNDING=YES only after funding-path approval." >&2
       return 2
     fi
-    if [[ "${ALLOW_MAINNET_TRON_FUNDING:-}" != "YES" ]]; then
+    if [[ "$USDT_TRON_NETWORK" == "mainnet" && "${ALLOW_MAINNET_TRON_FUNDING:-}" != "YES" ]]; then
       echo "ERROR: mainnet TRON funding requires ALLOW_MAINNET_TRON_FUNDING=YES after custody/withdrawal review." >&2
       return 2
     fi

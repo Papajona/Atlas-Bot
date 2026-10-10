@@ -160,3 +160,58 @@ def test_oanda_resolve_unknown_without_cursor_does_not_guess():
     b.find_order_by_client_id = lambda cid: None
     out = b.resolve_unknown_order("cid-missing")
     assert out is None
+
+
+def test_oanda_remote_protocol_failure_is_unknown_not_safe_to_retry(monkeypatch):
+    import httpx
+    import pytest
+    from app.forex_oanda import OandaUnknown
+
+    broker = OandaBroker(OandaConfig("acct", "token", True))
+
+    def fail_after_transport_drop(*args, **kwargs):
+        raise httpx.RemoteProtocolError("connection closed before response was received")
+
+    monkeypatch.setattr(broker.client, "request", fail_after_transport_drop)
+    try:
+        with pytest.raises(OandaUnknown, match="connection closed"):
+            broker._request("POST", "/v3/accounts/acct/orders")
+    finally:
+        broker.close()
+
+
+
+def test_oanda_server_error_on_order_submit_is_unknown_not_safe_to_retry(monkeypatch):
+    import httpx
+    import pytest
+    from app.forex_oanda import OandaBroker, OandaConfig, OandaUnknown
+
+    broker = OandaBroker(OandaConfig("acct", "token", True))
+    monkeypatch.setattr(broker, "validate_order_units", lambda instrument, units: units)
+    request = httpx.Request("POST", "https://api-fxpractice.oanda.com/v3/accounts/acct/orders")
+    response = httpx.Response(500, json={"errorMessage": "temporary server failure"}, request=request)
+    monkeypatch.setattr(broker.client, "request", lambda *args, **kwargs: response)
+    try:
+        with pytest.raises(OandaUnknown, match="HTTP 500"):
+            broker.market_order("EUR_USD", "buy", 1, "cid-500")
+    finally:
+        broker.close()
+
+
+def test_oanda_unknown_direct_lookup_is_not_hidden_by_history_fallback():
+    import pytest
+    from app.forex_oanda import OandaBroker, OandaConfig, OandaUnknown
+
+    broker = OandaBroker.__new__(OandaBroker)
+    broker.config = OandaConfig("acct", "token", True)
+    calls = []
+
+    def unavailable(method, path, **kwargs):
+        calls.append(path)
+        raise OandaUnknown("temporary lookup transport failure")
+
+    broker._request = unavailable
+    with pytest.raises(OandaUnknown, match="temporary lookup transport failure"):
+        broker.find_order_by_client_id("cid-unknown")
+    assert len(calls) == 1
+    assert calls[0].endswith("/orders/@cid-unknown")

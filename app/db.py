@@ -584,6 +584,7 @@ class Subscription(Base):
     cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    # Legacy schema column retained only for Alembic metadata parity. No active endpoint processes payment-provider events.
     stripe_last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Atomic per-subscription AI allowance meter. Usage resets when the billing period changes.
     ai_credits_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -796,6 +797,9 @@ class WebhookEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+# Legacy table retained for Alembic metadata parity until a reviewed migration
+# drops the table after the current security migration head is settled. There is
+# no active Stripe checkout/webhook endpoint or runtime consumer.
 class StripeWebhookEvent(Base):
     __tablename__ = "stripe_webhook_events"
     __table_args__ = (

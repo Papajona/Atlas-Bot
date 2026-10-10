@@ -66,7 +66,7 @@ def serialize_sweep_intent(intent: SweepIntent) -> dict[str, Any]:
         "status": intent.status,
     }
 
-TRANSFER_TOPIC = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a9df523b3ef"  # keccak256("Transfer(address,address,uint256)")
+TRANSFER_TOPIC = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"  # keccak256("Transfer(address,address,uint256)")
 
 
 def _hex_topic_to_tron_address(value: str) -> str | None:

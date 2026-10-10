@@ -16,7 +16,8 @@ from decimal import Decimal
 from contextvars import ContextVar
 from dataclasses import asdict
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from .withdrawal_ids import next_customer_withdrawal_request_id
 from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -24,7 +25,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, desc, or_, func
 from sqlalchemy.exc import IntegrityError
 from .config import settings
-from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, StripeWebhookEvent, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
+from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
 from .trading_core import train_model, predict_latest, ai_walk_forward_backtest
 from .adaptive_bot import AdaptiveModelPolicy, ensure_adaptive_model, adaptive_model_status
@@ -37,14 +38,14 @@ from .strategy_ai import generate_strategy_draft
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates, live_strategy_signals
 from .research_validation import oos_promotion_gate, monte_carlo_bootstrap
 from .daily_research import run_daily_research, latest_macro_context
-from .execution import execute_signal, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits
+from .execution import execute_signal, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits, customer_paper_execution_blocked
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
 from .payout import get_payout_provider, PayoutError, PayoutUnknown, PayoutNotFound
 from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, release_separation_violation, verify_release_operator
 from .usdt_tron import derive_usdt_tron_address_from_xpub, validate_tron_account_xpub
-from .tron_sweep import build_sweep_intent, serialize_sweep_intent, SweepError, classify_solidified_sweep
+from .tron_sweep import build_sweep_intent, serialize_sweep_intent, SweepError, classify_solidified_sweep, USDT_SCALE
 from .custody_locations import create_custody_transfer, transition_custody_transfer
-from .customer_funds import get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, ledger_statement, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal
+from .customer_funds import record_ledger_incident, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, ledger_statement, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal
 from .distributed import allow_rate_limit, check_redis, acquire_lock, release_lock, refresh_lock
 from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
@@ -70,7 +71,7 @@ from .executor_engine import ExecutorConfig, ExecutorValidationError, build_exec
 from .admin_rbac import require_role, get_roles, upsert_role, ROLES
 from .transaction_policy import register_or_check_destination, verify_destination
 from .audit_chain import append_audit
-from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current
+from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current, assert_database_role_compatible_with_rls_lockdown
 
 def _stepup_token(uid: str, purpose: str = "withdrawal", destination_fingerprint: str = "", proposal_digest_value: str = "") -> tuple[str, str, int]:
     if not settings.secret_key:
@@ -147,7 +148,6 @@ from .schemas import (
     WithdrawalReconcileRequest,
     WithdrawalNotSentRequest,
     ModelRollbackRequest,
-    PlanChangeRequest,
     ReferralCodeRequest,
     CostEventRequest,
     RevenueEventRequest,
@@ -177,6 +177,7 @@ _instance_id = os.getenv("K_REVISION", "local") + ":" + uuid.uuid4().hex[:12]
 _background_task: asyncio.Task | None = None
 _usdt_task: asyncio.Task | None = None
 _worker_tasks: set[asyncio.Task] = set()
+_worker_loop_health: dict[str, dict] = {}
 _audit_actor: ContextVar[str] = ContextVar("atlas_audit_actor", default="system")
 _expensive_paths = {"/api/train", "/api/backtest", "/api/strategy/backtest", "/api/customer/bot/start"}
 
@@ -204,6 +205,47 @@ async def api_rate_limit(request: Request, call_next):
         if not allowed_identity:
             return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429, headers={"Retry-After": "60"})
     return await call_next(request)
+
+
+def _mark_worker_loop_success(name: str) -> None:
+    state = _worker_loop_health.setdefault(name, {"restart_count": 0})
+    state["status"] = "RUNNING"
+    state["last_success_at"] = datetime.now(timezone.utc).isoformat()
+    state.pop("last_error_type", None)
+
+
+def _mark_worker_loop_failure(name: str, exc: Exception) -> None:
+    state = _worker_loop_health.setdefault(name, {"restart_count": 0})
+    state["status"] = "DEGRADED"
+    state["last_failure_at"] = datetime.now(timezone.utc).isoformat()
+    state["last_error_type"] = type(exc).__name__
+
+
+def _worker_loop_health_snapshot() -> dict:
+    return {name: dict(state) for name, state in _worker_loop_health.items()}
+
+
+async def _supervise_worker_loop(factory, name: str) -> None:
+    """Restart a failed long-running worker loop with capped exponential backoff."""
+    delay = 1.0
+    while True:
+        state = _worker_loop_health.setdefault(name, {"restart_count": 0})
+        state["status"] = "RUNNING"
+        state["last_started_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            await factory()
+            raise RuntimeError(f"worker loop {name} returned unexpectedly")
+        except asyncio.CancelledError:
+            state["status"] = "STOPPED"
+            raise
+        except Exception as exc:
+            state["status"] = "RESTARTING"
+            state["restart_count"] = int(state.get("restart_count", 0)) + 1
+            state["last_error_type"] = type(exc).__name__
+            state["last_failure_at"] = datetime.now(timezone.utc).isoformat()
+            logger.exception("worker_loop_failed; restarting name=%s backoff_seconds=%s", name, delay)
+            await asyncio.sleep(delay)
+            delay = min(60.0, delay * 2.0)
 
 
 def _track_worker_task(coro):
@@ -307,6 +349,7 @@ async def startup():
         from .usdt_tron import require_tron_wallet_backend
         require_tron_wallet_backend()
     await assert_database_migrations_current()
+    await assert_database_role_compatible_with_rls_lockdown()
     await init_db()
     async with SessionLocal() as billing_db:
         await _ensure_billing_plans(billing_db)
@@ -318,20 +361,22 @@ async def startup():
     # adaptive controllers and recovery loops belong to the worker pool.
     if process_role == "worker":
         if settings.background_reconciliation_enabled:
-            _background_task = _track_worker_task(_reconciliation_loop())
+            _background_task = _track_worker_task(_supervise_worker_loop(_reconciliation_loop, "reconciliation"))
         if settings.custody_reconciliation_enabled:
-            _track_worker_task(_custody_reconciliation_loop())
+            _track_worker_task(_supervise_worker_loop(_custody_reconciliation_loop, "custody-reconciliation"))
         if settings.usdt_tron_enabled and settings.usdt_trongrid_api_key:
-            _usdt_task = _track_worker_task(_usdt_tron_monitor_loop())
+            _usdt_task = _track_worker_task(_supervise_worker_loop(_usdt_tron_monitor_loop, "usdt-tron"))
         _track_worker_task(_heartbeat_loop())
         _track_worker_task(_continuous_risk_enforcement_loop())
         _track_worker_task(_withdrawal_recovery_loop())
         _track_worker_task(_customer_key_audit_loop())
         if settings.daily_research_enabled:
-            _track_worker_task(_daily_research_loop())
+            _track_worker_task(_supervise_worker_loop(_daily_research_loop, "daily-research"))
+        if settings.trade_learning_enabled:
+            _track_worker_task(_supervise_worker_loop(_trade_learning_replay_loop, "trade-learning-replay"))
         if settings.adaptive_bot_controller_enabled:
-            _track_worker_task(_adaptive_bot_controller_loop())
-            _track_worker_task(_executor_controller_loop())
+            _track_worker_task(_supervise_worker_loop(_adaptive_bot_controller_loop, "adaptive-controller"))
+            _track_worker_task(_supervise_worker_loop(_executor_controller_loop, "executor-controller"))
     elif process_role == "job":
         _track_worker_task(_heartbeat_loop())
 
@@ -663,6 +708,7 @@ async def _adaptive_bot_controller_loop():
             async with SessionLocal() as db:
                 bots = (await db.execute(select(AdaptiveTradingBot).where(AdaptiveTradingBot.status == "RUNNING", or_(AdaptiveTradingBot.next_run_at.is_(None), AdaptiveTradingBot.next_run_at <= now)).order_by(AdaptiveTradingBot.id).limit(25))).scalars().all()
                 work = [(b.id, b.customer_id, b.trading_account_id, b.asset, b.symbol, b.exchange, b.timeframe, b.days, b.risk_fraction, b.interval_seconds, b.mode) for b in bots]
+            _mark_worker_loop_success("adaptive-controller")
             for bot_id, customer_id, account_id, asset, symbol, exchange, timeframe, days, risk_fraction, interval_seconds, mode in work:
                 lock_key = f"adaptive-bot:{bot_id}"
                 if not await acquire_lock(lock_key, ttl_seconds=max(120, int(interval_seconds) + 120)):
@@ -735,7 +781,8 @@ async def _adaptive_bot_controller_loop():
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await _audit("ADAPTIVE_BOT_CONTROLLER_FAILED", {"error": str(exc)})
+            _mark_worker_loop_failure("adaptive-controller", exc)
+            await _safe_audit("ADAPTIVE_BOT_CONTROLLER_FAILED", {"error": str(exc)})
         await asyncio.sleep(poll)
 
 
@@ -784,6 +831,15 @@ async def _run_persisted_adaptive_bot_cycle(
         equity = max(0.0, float(account.equity))
         risk_fraction = float(bot.risk_fraction or settings.risk_per_trade)
         paper_mode = bool(settings.paper_trading or not settings.live_trading_enabled or not state.live_enabled or bot.mode != "LIVE")
+        if customer_paper_execution_blocked(profile.id if profile else bot.customer_id, paper_mode):
+            bot.status = "STOPPED"
+            bot.next_run_at = None
+            bot.last_error = "Customer paper execution requires an isolated simulation ledger"
+            bot.last_decision = "NO_TRADE"
+            bot.last_stage = "simulation_ledger_required"
+            await db.commit()
+            return {"decision": "NO_TRADE", "stage": "simulation_ledger_required",
+                    "reason": "Customer paper execution requires an isolated simulation ledger"}
     if req.asset in {"forex", "commodity"}:
         try:
             df = await _fetch_customer_oanda_data(profile.id, req)
@@ -952,6 +1008,7 @@ async def _executor_controller_loop():
                     ).order_by(TradeExecutor.id).limit(25)
                 )).scalars().all()
                 work = [r.id for r in rows]
+                _mark_worker_loop_success("executor-controller")
             for eid in work:
                 lock_key = f"executor:{eid}"
                 if not await acquire_lock(lock_key, ttl_seconds=180):
@@ -1047,7 +1104,8 @@ async def _executor_controller_loop():
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await _audit("EXECUTOR_CONTROLLER_FAILED", {"error": str(exc)})
+            _mark_worker_loop_failure("executor-controller", exc)
+            await _safe_audit("EXECUTOR_CONTROLLER_FAILED", {"error": str(exc)})
         await asyncio.sleep(max(5, int(settings.adaptive_bot_poll_seconds)))
 
 
@@ -1065,12 +1123,14 @@ async def _trade_learning_replay_loop():
                 limit=settings.trade_learning_max_episodes_per_cycle,
                 lookback_days=settings.trade_learning_lookback_days,
             )
+            _mark_worker_loop_success("trade-learning-replay")
             if result.get("processed") or result.get("failed") or result.get("skipped"):
                 await _audit("TRADE_LEARNING_REPLAY_CYCLE", result)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await _audit("TRADE_LEARNING_REPLAY_FAILED", {"error": str(exc)})
+            _mark_worker_loop_failure("trade-learning-replay", exc)
+            await _safe_audit("TRADE_LEARNING_REPLAY_FAILED", {"error": str(exc)})
         await asyncio.sleep(poll)
 
 
@@ -1087,6 +1147,7 @@ async def _daily_research_loop():
         await asyncio.sleep(max(5, (target - now).total_seconds()))
         try:
             result = await run_daily_research()
+            _mark_worker_loop_success("daily-research")
             status = result.get("status")
             payload = {
                 "status": status,
@@ -1107,7 +1168,8 @@ async def _daily_research_loop():
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await _audit("RESEARCH_DAILY_FAILED", {"error": str(exc)})
+            _mark_worker_loop_failure("daily-research", exc)
+            await _safe_audit("RESEARCH_DAILY_FAILED", {"error": str(exc)})
 
 
 
@@ -1144,6 +1206,7 @@ async def _usdt_tron_monitor_loop():
                 wallets = (await db.execute(select(Wallet).where(
                     Wallet.currency == "USDT", Wallet.network == "TRON", Wallet.status == "ACTIVE"))).scalars().all()
             wallets = [w for w in wallets if w.deposit_address]
+            _mark_worker_loop_success("usdt-tron")
             headers = {"accept": "application/json", "TRON-PRO-API-KEY": settings.usdt_trongrid_api_key}
             gate = _RateGate(settings.usdt_tron_max_qps)
             async def _pace(_request):
@@ -1220,12 +1283,24 @@ async def _usdt_tron_monitor_loop():
                                 # records inside one tx cannot be distinguished safely. Do not invent an
                                 # ordinal (#1/#2) as a financial identity: API pagination/order can change.
                                 if prior_count > 0:
-                                    await _audit("TRON_DEPOSIT_IDENTITY_AMBIGUOUS", {
-                                        "wallet_id": wallet.id, "txid": txid,
-                                        "sender": sender, "recipient": wallet.deposit_address,
-                                        "raw_value": str(raw_value), "block_timestamp": block_ts,
-                                        "reason": "duplicate transfer signature without stable event index",
-                                    })
+                                    # The provider does not expose a stable event index, so do not invent
+                                    # a financial identity or credit this ambiguous transfer. Persist one
+                                    # operator-visible incident and do not reopen it on every cursor replay.
+                                    async with SessionLocal() as incident_db:
+                                        await record_ledger_incident(
+                                            incident_db,
+                                            key=f"TRON_DEPOSIT_IDENTITY_AMBIGUOUS:{wallet.id}:{txid}",
+                                            summary="Duplicate identical TRC-20 transfers in one transaction; extra transfer not credited",
+                                            detail={
+                                                "wallet_id": wallet.id, "txid": txid, "sender": sender,
+                                                "recipient": wallet.deposit_address, "raw_value": str(raw_value),
+                                                "block_timestamp": block_ts,
+                                                "reason": "duplicate transfer signature without stable event index",
+                                            },
+                                            customer_id=wallet.customer_id, severity="HIGH",
+                                            reopen_resolved=False,
+                                        )
+                                        await incident_db.commit()
                                     _defer(block_ts)
                                     seen_refs[transfer_key] = prior_count + 1
                                     continue
@@ -1319,7 +1394,8 @@ async def _usdt_tron_monitor_loop():
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
-                        await _audit("TRON_WALLET_SCAN_FAILED", {"wallet_id": wallet.id, "error": str(exc)})
+                        _mark_worker_loop_failure("usdt-tron", exc)
+                        await _safe_audit("TRON_WALLET_SCAN_FAILED", {"wallet_id": wallet.id, "error": str(exc)})
                     finally:
                         await release_lock(lock_key)
 
@@ -1330,7 +1406,8 @@ async def _usdt_tron_monitor_loop():
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await _audit("TRON_SCAN_CYCLE_FAILED", {"error": str(exc)})
+            _mark_worker_loop_failure("usdt-tron", exc)
+            await _safe_audit("TRON_SCAN_CYCLE_FAILED", {"error": str(exc)})
         await asyncio.sleep(poll_seconds)
 
 
@@ -1341,6 +1418,7 @@ async def _reconciliation_loop():
         should_oanda = bool(settings.oanda_account_id and settings.oanda_api_token and
                            settings.oanda_practice and settings.forex_demo_enabled)
         if not (should_crypto or should_oanda):
+            _mark_worker_loop_success("reconciliation")
             continue
         if should_crypto:
             try:
@@ -1370,6 +1448,7 @@ async def _reconciliation_loop():
             customer_exchanges = [str(x) for x in customer_exchanges if str(x).strip().lower() == "binance"]
             if customer_exchanges:
                 await reconcile_customer_live_orders(customer_exchanges)
+            _mark_worker_loop_success("reconciliation")
         except Exception:
             logger.exception("reconciliation_loop: customer live reconciliation failed")
 
@@ -1496,8 +1575,12 @@ async def _heartbeat_loop():
                 if not row:
                     row = ServiceHeartbeat(instance_id=_instance_id, role=str(settings.process_role or "api"))
                     db.add(row)
-                row.status = "READY"
-                row.detail = "distributed-runtime"
+                unhealthy_loops = sorted(
+                    name for name, state in _worker_loop_health.items()
+                    if state.get("status") in {"DEGRADED", "RESTARTING"}
+                )
+                row.status = "DEGRADED" if unhealthy_loops else "READY"
+                row.detail = json.dumps({"runtime": "distributed-runtime", "unhealthy_worker_loops": unhealthy_loops})
                 row.updated_at = datetime.now(timezone.utc)
                 await db.commit()
         except Exception:
@@ -1652,6 +1735,7 @@ async def _supabase_user(access_token: str) -> dict:
 
 _customer_jwks_cache: dict = {"expires": 0.0, "keys": {}}
 _jwks_refresh_lock = asyncio.Lock()
+_JWKS_FORCE_REFRESH_COOLDOWN_SECONDS = 30.0  # forged/unknown kid values must not cause an upstream JWKS fetch per request
 
 
 async def _load_supabase_jwks(force: bool = False) -> dict:
@@ -1659,6 +1743,8 @@ async def _load_supabase_jwks(force: bool = False) -> dict:
     async with _jwks_refresh_lock:
         now = time.time()
         if not force and now < _customer_jwks_cache["expires"]:
+            return _customer_jwks_cache["keys"]
+        if force and _customer_jwks_cache["keys"] and now - float(_customer_jwks_cache.get("fetched_at", 0.0)) < _JWKS_FORCE_REFRESH_COOLDOWN_SECONDS:
             return _customer_jwks_cache["keys"]
         import httpx
         jwks_url = settings.supabase_jwks_url or settings.supabase_url.rstrip("/") + "/auth/v1/.well-known/jwks.json"
@@ -1673,7 +1759,7 @@ async def _load_supabase_jwks(force: bool = False) -> dict:
         except Exception as exc:
             logger.warning("supabase_jwks_refresh_failed: %s", type(exc).__name__)
             raise HTTPException(503, "Authentication service temporarily unavailable") from exc
-        _customer_jwks_cache = {"expires": now + 600, "keys": keys}
+        _customer_jwks_cache = {"expires": now + 600, "keys": keys, "fetched_at": now}
         return keys
 
 
@@ -1701,7 +1787,8 @@ async def _supabase_claims(access_token: str, require_aal2: bool = False) -> dic
         if jwk_alg and jwk_alg != token_alg:
             raise HTTPException(401, "Invalid authentication token")
         key = jwt.PyJWK(jwk).key
-        claims = jwt.decode(token, key=key, algorithms=[token_alg], audience=settings.supabase_auth_audience, issuer=settings.supabase_url.rstrip("/") + "/auth/v1")
+        claims = jwt.decode(token, key=key, algorithms=[token_alg], audience=settings.supabase_auth_audience, issuer=settings.supabase_url.rstrip("/") + "/auth/v1",
+                            options={"require": ["exp", "sub"]})
         if not claims.get("sub"):
             raise HTTPException(401, "Invalid authentication token")
         if require_aal2 and claims.get("aal", "aal1") != "aal2":
@@ -2170,25 +2257,6 @@ async def _subscription_entitlements(db, customer_id: int):
 
 
 
-async def _stripe_checkout(plan: str, interval: str, customer_email: str, customer_id: int, referral_discount: bool = False):
-    if not settings.stripe_enabled or not settings.stripe_secret_key:
-        raise HTTPException(503, "Stripe billing is not configured")
-    price_map = {("starter","monthly"): settings.stripe_price_starter_monthly, ("pro","monthly"): settings.stripe_price_pro_monthly, ("elite","monthly"): settings.stripe_price_elite_monthly, ("starter","annual"): settings.stripe_price_starter_annual, ("pro","annual"): settings.stripe_price_pro_annual, ("elite","annual"): settings.stripe_price_elite_annual}
-    price_id = price_map.get((plan, interval), "")
-    if not price_id:
-        raise HTTPException(503, "Stripe price is not configured for this plan")
-    import httpx
-    headers={"Authorization": f"Bearer {settings.stripe_secret_key}"}
-    data={"mode":"subscription","line_items[0][price]":price_id,"line_items[0][quantity]":"1","customer_email":customer_email,"client_reference_id":str(customer_id),"metadata[atlas_customer_id]":str(customer_id),"metadata[atlas_plan]":plan,"metadata[atlas_interval]":interval,"success_url":"/billing/success","cancel_url":"/billing/cancel"}
-    if referral_discount and settings.stripe_referral_coupon_id:
-        data["discounts[0][coupon]"] = settings.stripe_referral_coupon_id
-    async with httpx.AsyncClient(timeout=20) as client:
-        r=await client.post("https://api.stripe.com/v1/checkout/sessions",headers=headers,data=data)
-    if r.status_code >= 400:
-        raise HTTPException(502, "Payment provider could not create checkout session")
-    return r.json()
-
-
 @app.get("/", response_class=HTMLResponse)
 async def customer_portal(request: Request):
     return templates.TemplateResponse(request, "customer.html", {"settings": settings})
@@ -2279,16 +2347,28 @@ async def admin_prepare_tron_sweep(req: dict, authorization: str | None = Header
             if float(amount) < settings.usdt_tron_sweep_min_amount:
                 raise HTTPException(400, "sweep amount is below configured minimum")
             # Sweeping only moves on-chain custody; it must not alter the customer liability ledger.
-            intent = build_sweep_intent(wallet_id=wallet.id, source_address=wallet.deposit_address, amount_usdt=amount)
-            existing = (await db.execute(select(TronSweep).where(TronSweep.idempotency_key == intent.idempotency_key).with_for_update())).scalar_one_or_none()
-            if existing:
-                return {"status": existing.status, "sweep_id": existing.id, "idempotency_key": existing.idempotency_key}
+            base_intent = build_sweep_intent(wallet_id=wallet.id, source_address=wallet.deposit_address, amount_usdt=amount)
             active = (await db.execute(select(TronSweep).where(
                 TronSweep.wallet_id == wallet.id,
                 TronSweep.status.in_({"READY_FOR_SIGNER", "SUBMITTED", "REVIEW", "UNKNOWN"})
             ).with_for_update())).scalars().first()
             if active:
+                if active.amount_raw == base_intent.raw_amount and active.treasury_address == base_intent.treasury_address:
+                    # Retry of the sweep that is already in flight: return it (with its intent) instead of failing.
+                    same = build_sweep_intent(wallet_id=wallet.id, source_address=active.source_address,
+                                              amount_usdt=Decimal(active.amount_raw) / USDT_SCALE,
+                                              treasury_address=active.treasury_address, idempotency_key=active.idempotency_key)
+                    return {"status": active.status, "sweep_id": active.id, "idempotency_key": active.idempotency_key,
+                            "custody_transfer_id": active.custody_transfer_id, "intent": serialize_sweep_intent(same)}
                 raise HTTPException(409, "an in-flight sweep already exists for this deposit wallet")
+            # The default key is a hash of (wallet, addresses, amount): without a sequence a later sweep of the same amount
+            # would collide with an earlier, finished sweep and silently return it instead of preparing a new one.
+            prior_sweeps = (await db.execute(select(func.count()).select_from(TronSweep).where(TronSweep.wallet_id == wallet.id))).scalar_one()
+            intent_key = base_intent.idempotency_key if not prior_sweeps else hashlib.sha256(f"{base_intent.idempotency_key}:seq{int(prior_sweeps)}".encode()).hexdigest()
+            intent = build_sweep_intent(wallet_id=wallet.id, source_address=wallet.deposit_address, amount_usdt=amount, idempotency_key=intent_key)
+            existing = (await db.execute(select(TronSweep).where(TronSweep.idempotency_key == intent.idempotency_key).with_for_update())).scalar_one_or_none()
+            if existing:
+                return {"status": existing.status, "sweep_id": existing.id, "idempotency_key": existing.idempotency_key}
             transfer = await create_custody_transfer(
                 db, customer_id=wallet.customer_id, currency="USDT",
                 amount=amount, source_location=f"TRON:WALLET:{wallet.id}",
@@ -2325,7 +2405,12 @@ async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorizat
         sweep = (await db.execute(select(TronSweep).where(TronSweep.id == sweep_id).with_for_update())).scalar_one_or_none()
         if not sweep:
             raise HTTPException(404, "sweep not found")
+        terminal_sweep_states = {"SETTLED", "FAILED", "CANCELED", "CANCELLED"}
+        if str(sweep.status or "").upper() in terminal_sweep_states:
+            raise HTTPException(409, f"Sweep is {sweep.status}; terminal sweeps cannot be changed")
         if outcome == "TIMEOUT":
+            if sweep.transaction_id or sweep.status != "READY_FOR_SIGNER":
+                raise HTTPException(409, "Timeout can only be recorded before a transaction ID is known")
             sweep.status = "UNKNOWN"
             sweep.detail_json = json.dumps({**(json.loads(sweep.detail_json or "{}") or {}),
                                             "broadcast_outcome": "TIMEOUT",
@@ -2336,6 +2421,8 @@ async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorizat
             await db.commit()
             return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": ""}
         if outcome == "REJECTED":
+            if sweep.transaction_id or sweep.status != "READY_FOR_SIGNER":
+                raise HTTPException(409, "A rejection cannot override a prior timeout or known transaction; reconcile it first")
             sweep.status = "FAILED"
             sweep.detail_json = json.dumps({**(json.loads(sweep.detail_json or "{}") or {}),
                                             "broadcast_outcome": "REJECTED"}, separators=(",", ":"))
@@ -2346,6 +2433,10 @@ async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorizat
             return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": ""}
         if sweep.transaction_id and sweep.transaction_id != txid:
             raise HTTPException(409, "sweep already has a different transaction id")
+        if sweep.status == "SUBMITTED" and sweep.transaction_id == txid:
+            return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": sweep.transaction_id, "idempotent": True}
+        if sweep.status not in {"READY_FOR_SIGNER", "UNKNOWN", "SUBMITTED"}:
+            raise HTTPException(409, f"Sweep is {sweep.status}; broadcast result cannot be recorded")
         duplicate = (await db.execute(select(TronSweep).where(
             TronSweep.transaction_id == txid, TronSweep.id != sweep.id
         ).with_for_update())).scalar_one_or_none()
@@ -2814,19 +2905,6 @@ async def customer_billing(authorization: str | None = Header(default=None)):
         return {"plan": {"code": sub.plan_code if sub else "free", **plan}, "subscription": {"status": sub.status if sub else "active", "interval": sub.billing_interval if sub else "monthly", "period_end": sub.current_period_end.isoformat() if sub else None, "cancel_at_period_end": bool(sub.cancel_at_period_end) if sub else False}, "referral": {"code": code.code if code else None, "referred_count": len(referrals), "pending_commissions": float(commissions or 0)}}
 
 
-@app.post("/api/customer/billing/checkout")
-async def customer_billing_checkout(req: PlanChangeRequest, authorization: str | None = Header(default=None)):
-    if req.plan == "free":
-        raise HTTPException(409, "Free plan does not require checkout")
-    async with SessionLocal() as db:
-        profile, _ = await get_customer(authorization, db, require_aal2=False)
-        if not settings.stripe_enabled:
-            return {"provider":"stripe", "configured":False, "plan":req.plan, "interval":req.interval, "amount":_plan_price(req.plan, req.interval), "message":"Stripe is not configured. Set Stripe price IDs and secret in Secret Manager before accepting payments."}
-        referral = (await db.execute(select(Referral).where(Referral.referred_customer_id == profile.id))).scalar_one_or_none()
-        session = await _stripe_checkout(req.plan, req.interval, profile.email, profile.id, referral_discount=bool(referral and settings.stripe_referral_coupon_id))
-        return {"provider":"stripe", "configured":True, "checkout_url":session.get("url"), "session_id":session.get("id"), "plan":req.plan, "interval":req.interval}
-
-
 @app.post("/api/customer/referral/code")
 async def customer_referral_code(authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
@@ -2898,123 +2976,6 @@ async def admin_billing_margin(months: int = 1, authorization: str | None = Head
         margin=(contribution/revenue*100) if revenue else 0.0
         active=int((await db.execute(select(func.count(Subscription.id)).where(Subscription.status.in_(["trialing","active","past_due"]),Subscription.plan_code!="free"))).scalar_one() or 0)
         return {"period_days":31*months,"gross_subscription_revenue":revenue,"operating_costs":costs,"referral_commissions":commissions,"contribution_profit":contribution,"contribution_margin_pct":margin,"active_paying_customers":active}
-
-
-@app.post("/api/billing/stripe/webhook")
-async def stripe_webhook(request: Request):
-    raw = await request.body()
-    if not settings.stripe_enabled or not settings.stripe_webhook_secret:
-        raise HTTPException(503, "Stripe webhook is not configured")
-    signature = request.headers.get("stripe-signature", "")
-    import time as _time, hmac as _hmac
-    parts = {}
-    for item in signature.split(','):
-        if '=' in item:
-            k, v = item.split('=', 1)
-            parts.setdefault(k, []).append(v)
-    timestamp = (parts.get('t') or ['0'])[0]
-    try:
-        ts = int(timestamp)
-    except ValueError:
-        raise HTTPException(400, "Invalid webhook signature")
-    if abs(int(_time.time()) - ts) > 300:
-        raise HTTPException(400, "Expired webhook signature")
-    signed = f"{timestamp}.{raw.decode('utf-8')}".encode()
-    expected = _hmac.new(settings.stripe_webhook_secret.encode(), signed, hashlib.sha256).hexdigest()
-    if not any(_hmac.compare_digest(expected, v) for v in parts.get('v1', [])):
-        raise HTTPException(400, "Invalid webhook signature")
-    payload = json.loads(raw.decode('utf-8'))
-    event_id = str(payload.get('id') or '').strip()
-    event_type = str(payload.get('type') or '')
-    obj = ((payload.get('data') or {}).get('object') or {})
-    if not event_id:
-        raise HTTPException(400, "Stripe event id is required")
-    metadata = obj.get('metadata') or {}
-    event_created = payload.get('created')
-    stripe_created_at = datetime.fromtimestamp(int(event_created), tz=timezone.utc) if event_created else None
-    customer_id = int(metadata.get('atlas_customer_id') or obj.get('client_reference_id') or 0)
-
-    async with SessionLocal() as db:
-        try:
-            async with db.begin_nested():
-                existing_event = (await db.execute(select(StripeWebhookEvent).where(StripeWebhookEvent.event_id == event_id))).scalar_one_or_none()
-                if existing_event:
-                    return {"received": True, "duplicate": True}
-                db.add(StripeWebhookEvent(event_id=event_id, event_type=event_type, stripe_created_at=stripe_created_at,
-                                          payload_json=json.dumps(payload, separators=(",", ":")), status="RECEIVED"))
-                await db.flush()
-        except IntegrityError:
-            return {"received": True, "duplicate": True}
-
-        if event_type in ('checkout.session.completed', 'customer.subscription.created', 'customer.subscription.updated') and customer_id:
-            plan = metadata.get('atlas_plan') or 'free'
-            interval = metadata.get('atlas_interval') or 'monthly'
-            sub_id = str(obj.get('subscription') or obj.get('id') or '')
-            sub = None
-            if sub_id:
-                sub = (await db.execute(select(Subscription).where(Subscription.provider_subscription_id == sub_id).with_for_update())).scalar_one_or_none()
-            if sub is None:
-                sub = (await db.execute(select(Subscription).where(Subscription.customer_id == customer_id, Subscription.status.in_(["trialing", "active", "past_due"])).with_for_update())).scalars().first()
-            if sub and stripe_created_at and sub.stripe_last_event_at and stripe_created_at < sub.stripe_last_event_at:
-                ev = (await db.execute(select(StripeWebhookEvent).where(StripeWebhookEvent.event_id == event_id))).scalar_one()
-                ev.status = 'STALE'
-                await db.commit()
-                return {"received": True, "stale": True}
-            now = datetime.now(timezone.utc)
-            if not sub:
-                sub = Subscription(customer_id=customer_id, plan_code=plan, billing_interval=interval, status='active', provider='stripe',
-                                   provider_customer_id=str(obj.get('customer') or ''), provider_subscription_id=sub_id,
-                                   current_period_start=now, current_period_end=now, stripe_last_event_at=stripe_created_at)
-            else:
-                sub.plan_code = plan
-                sub.billing_interval = interval
-                sub.status = 'active'
-                sub.provider = 'stripe'
-                if sub_id and event_type != 'checkout.session.completed':
-                    sub.provider_subscription_id = sub_id
-                sub.provider_customer_id = str(obj.get('customer') or sub.provider_customer_id)
-                if stripe_created_at:
-                    sub.stripe_last_event_at = stripe_created_at
-            db.add(sub)
-
-        elif event_type == 'customer.subscription.deleted':
-            sub_id = str(obj.get('id') or '')
-            sub = (await db.execute(select(Subscription).where(Subscription.provider_subscription_id == sub_id).with_for_update())).scalar_one_or_none()
-            if sub and stripe_created_at and sub.stripe_last_event_at and stripe_created_at < sub.stripe_last_event_at:
-                ev = (await db.execute(select(StripeWebhookEvent).where(StripeWebhookEvent.event_id == event_id))).scalar_one()
-                ev.status = 'STALE'
-                await db.commit()
-                return {"received": True, "stale": True}
-            if sub:
-                sub.status = 'canceled'
-                sub.cancel_at_period_end = False
-                sub.stripe_last_event_at = stripe_created_at or sub.stripe_last_event_at
-
-        elif event_type == 'invoice.paid':
-            amount = float(obj.get('amount_paid') or 0) / 100.0
-            currency = str(obj.get('currency') or 'usd').upper()
-            ref = str(obj.get('id') or '')
-            if ref and not (await db.execute(select(RevenueLedger).where(RevenueLedger.provider == 'stripe', RevenueLedger.provider_reference == ref))).scalar_one_or_none():
-                sub_id = str(obj.get('subscription') or '')
-                sub = (await db.execute(select(Subscription).where(Subscription.provider_subscription_id == sub_id))).scalar_one_or_none()
-                if sub:
-                    db.add(RevenueLedger(customer_id=sub.customer_id, subscription_id=sub.id, provider='stripe', provider_reference=ref, gross_amount=amount, net_amount=amount, currency=currency))
-                    referral = (await db.execute(select(Referral).where(Referral.referred_customer_id == sub.customer_id))).scalar_one_or_none()
-                    if referral and amount > 0:
-                        referral.status = 'QUALIFIED'
-                        referral.qualified_at = referral.qualified_at or datetime.now(timezone.utc)
-                        exists = (await db.execute(select(ReferralCommission).where(ReferralCommission.subscription_id == sub.id, ReferralCommission.referral_id == referral.id, ReferralCommission.provider_reference == ref))).scalar_one_or_none()
-                        if not exists:
-                            from datetime import timedelta
-                            commission = quantize_money(amount * (settings.billing_referral_commission_pct / 100.0))
-                            db.add(ReferralCommission(referral_id=referral.id, referral_customer_id=referral.referrer_customer_id,
-                                referred_customer_id=sub.customer_id, subscription_id=sub.id, gross_revenue=amount,
-                                commission_pct=settings.billing_referral_commission_pct, commission_amount=commission, status='ELIGIBLE',
-                                provider_reference=ref, eligible_at=datetime.now(timezone.utc) + timedelta(days=settings.billing_referral_payout_delay_days)))
-        ev = (await db.execute(select(StripeWebhookEvent).where(StripeWebhookEvent.event_id == event_id))).scalar_one()
-        ev.status = 'PROCESSED'
-        await db.commit()
-    return {"received": True}
 
 
 @app.get("/api/customer/me")
@@ -3489,6 +3450,17 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
         state = await db.get(AppState, 1)
         if not state or state.kill_switch:
             raise HTTPException(409, "Trading is halted by the platform risk state")
+        paper_mode = bool(
+            settings.paper_trading
+            or not settings.live_trading_enabled
+            or not state.live_enabled
+            or req.asset in {"forex", "commodity"}
+        )
+        if customer_paper_execution_blocked(profile.id, paper_mode):
+            raise HTTPException(
+                409,
+                "Customer bot execution is unavailable until an isolated simulation ledger exists; no analysis or AI review was run.",
+            )
         candidate = None
         if req.strategy_candidate_id is not None:
             candidate = (await db.execute(select(StrategyCandidate).where(StrategyCandidate.id == req.strategy_candidate_id, StrategyCandidate.customer_id == profile.id))).scalar_one_or_none()
@@ -3497,12 +3469,6 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             if candidate.asset != req.asset or candidate.symbol != req.symbol or candidate.exchange != req.exchange or candidate.timeframe != req.timeframe:
                 raise HTTPException(409, "Strategy candidate does not match the selected market configuration")
         account = await _get_or_create_customer_trading_account(db, profile)
-        paper_mode = bool(
-            settings.paper_trading
-            or not settings.live_trading_enabled
-            or not state.live_enabled
-            or req.asset in {"forex", "commodity"}
-        )
         if not paper_mode:
             try:
                 await assert_live_system_enabled(
@@ -4549,7 +4515,7 @@ async def list_strategy_drafts(authorization: str | None = Header(default=None))
 
 
 @app.post("/api/customer/withdrawals")
-async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorization: str | None = Header(default=None), x_withdrawal_step_up: str | None = Header(default=None)):
+async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorization: str | None = Header(default=None), x_withdrawal_step_up: str | None = Header(default=None), idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
     if not settings.withdrawals_enabled:
         raise HTTPException(403, "Withdrawals are currently disabled")
     if req.network.upper() != "TRON" or not _tron_base58check_valid(req.destination):
@@ -4560,6 +4526,36 @@ async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorizatio
         raise HTTPException(409, "Minimum USDT withdrawal is 1.0 USDT")
     async with SessionLocal() as db:
         profile, _ = await get_customer(authorization, db, require_aal2=True)
+        idem_key = (idempotency_key or "").strip()
+        if idem_key and not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", idem_key):
+            raise HTTPException(400, "Idempotency-Key must be 1-128 characters of [A-Za-z0-9._:-]")
+        keyed_request_id = ""
+        if idem_key:
+            # Scope the key to the authenticated customer. Bind it to the complete immutable
+            # request payload so the same key cannot be reused to change amount or destination.
+            keyed_request_id = f"cust-wd-{profile.id}-idem-{hashlib.sha256(f'{profile.id}:{idem_key}'.encode()).hexdigest()[:32]}"
+            keyed_existing = (await db.execute(select(Withdrawal).where(
+                Withdrawal.customer_id == profile.id,
+                Withdrawal.request_id == keyed_request_id,
+            ).with_for_update())).scalar_one_or_none()
+            if keyed_existing:
+                same_payload = (
+                    Decimal(str(keyed_existing.amount)) == Decimal(str(req.amount))
+                    and keyed_existing.destination == req.destination.strip()
+                    and (keyed_existing.destination_tag or "") == (req.destination_tag or "")
+                    and keyed_existing.currency == "USDT"
+                    and keyed_existing.network == req.network.upper()
+                    and (keyed_existing.provider or settings.payout_provider) == settings.payout_provider
+                )
+                if not same_payload:
+                    raise HTTPException(409, "Idempotency-Key was already used for a different withdrawal payload")
+                return {
+                    "ok": True, "id": keyed_existing.id, "request_id": keyed_existing.request_id,
+                    "status": keyed_existing.status, "amount": keyed_existing.amount,
+                    "currency": keyed_existing.currency, "network": keyed_existing.network,
+                    "destination_masked": keyed_existing.destination_masked,
+                    "required_approvals": keyed_existing.required_approvals, "idempotent": True,
+                }
         requested_fp = destination_fingerprint(req.destination.strip(), "USDT", req.network.upper())
         requested_stepup_digest = proposal_digest(request_id="STEPUP", amount=req.amount, currency="USDT", destination=req.destination.strip(), tag=req.destination_tag or "", network=req.network.upper(), provider=settings.payout_provider)
         parsed_stepup = _parse_stepup_token(x_withdrawal_step_up, profile.auth_user_id, "withdrawal", requested_fp, requested_stepup_digest)
@@ -4598,17 +4594,27 @@ async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorizatio
         # Retries of the same customer request must resolve to the existing active withdrawal
         # rather than creating a second ledger reservation.
         request_id_seed = f"{profile.id}:{req.destination.strip()}:{req.amount}:{req.destination_tag or ''}:TRON:USDT:{settings.payout_provider}"
-        request_id = f"cust-wd-{profile.id}-{hashlib.sha256(request_id_seed.encode()).hexdigest()[:24]}"
+        base_request_id = f"cust-wd-{profile.id}-{hashlib.sha256(request_id_seed.encode()).hexdigest()[:24]}"
+        if idem_key:
+            # The exact key-derived request id remains stable after completion too; replay returns
+            # the original result instead of accidentally creating another payout.
+            request_id = keyed_request_id
+            existing = None
+        else:
+            # Without a client key, keep active duplicate protection while allowing a genuinely new
+            # later withdrawal with the same payload to receive a fresh suffix.
+            prior = (await db.execute(select(Withdrawal).where(
+                Withdrawal.customer_id == profile.id,
+                Withdrawal.request_id.like(base_request_id + "%"),
+            ).order_by(Withdrawal.id))).scalars().all()
+            active_prior = [p for p in prior if p.status in {"PENDING", "PARTIALLY_APPROVED", "APPROVED", "SUBMITTING", "SUBMITTED", "UNKNOWN"}]
+            existing = active_prior[-1] if active_prior else None
+            request_id = next_customer_withdrawal_request_id(base_request_id, [p.request_id for p in prior])
         final_digest = proposal_digest(
             request_id=request_id, amount=req.amount, currency="USDT",
             destination=req.destination.strip(), tag=req.destination_tag or "",
             network="TRON", provider=settings.payout_provider,
         )
-        existing = (await db.execute(select(Withdrawal).where(
-            Withdrawal.customer_id == profile.id,
-            Withdrawal.proposal_digest == final_digest,
-            Withdrawal.status.in_(["PENDING", "PARTIALLY_APPROVED", "APPROVED", "SUBMITTING", "SUBMITTED", "UNKNOWN"])
-        ).order_by(desc(Withdrawal.id)).limit(1))).scalar_one_or_none()
         if existing:
             return {
                 "ok": True, "id": existing.id, "request_id": existing.request_id,
@@ -4667,7 +4673,13 @@ async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorizatio
             trading_account.cash_equity = ledger_balance["available"] + ledger_balance["trading_reserved"]
             trading_account.equity = max(0.0, trading_account.cash_equity + trading_account.realized_pnl + trading_account.unrealized_pnl)
         db.add(w)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Two identical requests raced to the same request_id. The loser rolls back its reserve,
+            # trading-account debit and step-up consumption; the customer can retry safely.
+            await db.rollback()
+            raise HTTPException(409, "An identical withdrawal request is already being processed; retry shortly")
         await db.refresh(w)
     await _audit("CUSTOMER_WITHDRAWAL_REQUESTED", {"id": w.id, "customer_id": profile.id, "amount": req.amount, "currency": "USDT", "network": "TRON"})
     return {"ok": True, "id": w.id, "request_id": w.request_id, "status": w.status,
@@ -4691,7 +4703,13 @@ async def customer_withdrawals(authorization: str | None = Header(default=None))
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "ok", "release": {"version": settings.release_version or settings.app_version, "sha": settings.release_sha or None, "image_digest": settings.image_digest or None}}
+    worker_health = _worker_loop_health_snapshot()
+    degraded = any(state.get("status") in {"DEGRADED", "RESTARTING"} for state in worker_health.values())
+    return {
+        "status": "degraded" if degraded else "ok",
+        "release": {"version": settings.release_version or settings.app_version, "sha": settings.release_sha or None, "image_digest": settings.image_digest or None},
+        "worker_loops": worker_health,
+    }
 
 
 @app.get("/readyz")
@@ -5105,6 +5123,28 @@ async def approve_withdrawal(withdrawal_id: int, req: WithdrawalDecision, x_admi
     return {"ok": True, **result, "execution_required": result["status"] == "APPROVED", "message": "Final approval recorded; a release operator must execute the payout." if result["status"] == "APPROVED" else "Second approval required."}
 
 
+def _withdrawal_release_ref(request_id: str) -> str:
+    """Single canonical ledger reference for every path that frees a withdrawal reserve.
+
+    Separate per-path references let two racing paths each pass the ledger idempotency
+    check and free the customer's reserve twice.
+    """
+    return f"{request_id}:release"
+
+
+async def _mark_withdrawal_unknown(withdrawal_id: int, provider_name: str, detail: str, provider_id: str = "") -> None:
+    async with SessionLocal() as db:
+        w = (await db.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id).with_for_update())).scalar_one_or_none()
+        if w is None or w.status not in {"SUBMITTING", "UNKNOWN"}:
+            return
+        w.status = "UNKNOWN"
+        w.provider = provider_name
+        if provider_id and not w.provider_id:
+            w.provider_id = provider_id
+        w.provider_error = str(detail)[:1000]
+        await db.commit()
+
+
 @app.post("/api/admin/withdrawals/{withdrawal_id}/release")
 async def release_withdrawal(withdrawal_id: int, req: WithdrawalExecuteRequest, x_admin_token: str | None = Header(default=None), x_release_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     """Execute an approved withdrawal through a separately authenticated release operator."""
@@ -5157,44 +5197,66 @@ async def release_withdrawal(withdrawal_id: int, req: WithdrawalExecuteRequest, 
                                          idempotency_key=idempotency_key,
                                          metadata={"withdrawal_id": w.id, "account_ref": w.account_ref})
         except PayoutUnknown as e:
-            async with SessionLocal() as db2:
-                w2 = await db2.get(Withdrawal, withdrawal_id)
-                w2.status = "UNKNOWN"
-                w2.provider = provider_name
-                w2.provider_error = str(e)[:1000]
-                await db2.commit()
+            await _mark_withdrawal_unknown(withdrawal_id, provider_name, str(e))
             await _audit("WITHDRAWAL_UNKNOWN", {"id": withdrawal_id, "provider": provider_name, "error": str(e)})
             raise HTTPException(502, "Provider outcome is unknown; reconcile before retrying")
         except PayoutError as e:
             async with SessionLocal() as db2:
-                w2 = await db2.get(Withdrawal, withdrawal_id)
+                w2 = (await db2.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id).with_for_update())).scalar_one()
+                if w2.status != "SUBMITTING":
+                    # Another operator path (reconcile) already resolved this withdrawal; never release twice.
+                    raise HTTPException(409, f"Withdrawal is {w2.status}; release outcome was already resolved elsewhere")
                 w2.status = "FAILED"
                 w2.provider = provider_name
                 w2.provider_error = str(e)[:1000]
-                await ledger_release_withdrawal(db2, w2.customer_id, w2.amount, reference_id=w2.request_id + ":failed")
+                await ledger_release_withdrawal(db2, w2.customer_id, w2.amount, reference_id=_withdrawal_release_ref(w2.request_id))
                 await sync_wallet_from_ledger(db2, w2.customer_id, "USDT")
                 await db2.commit()
             await _audit("WITHDRAWAL_FAILED", {"id": withdrawal_id, "provider": provider_name, "error": str(e)})
             raise _safe_http_error(502, e, "Upstream provider request failed") from e
-        async with SessionLocal() as db3:
-            w3 = (await db3.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id).with_for_update())).scalar_one()
-            if result.status == "COMPLETED":
-                w3.status = "RELEASED"
-            elif result.status == "FAILED":
-                w3.status = "FAILED"
-            else:
-                w3.status = "SUBMITTED"
-            w3.provider = result.provider
-            w3.provider_id = result.provider_id
-            w3.provider_status = result.raw_status or result.status
-            w3.provider_error = ""
-            if result.status == "COMPLETED":
-                await settle_withdrawal(db3, w3.customer_id, w3.amount, reference_id=w3.request_id)
-                await sync_wallet_from_ledger(db3, w3.customer_id, "USDT")
-            elif result.status == "FAILED":
-                await ledger_release_withdrawal(db3, w3.customer_id, w3.amount, reference_id=w3.request_id + ":failed")
-                await sync_wallet_from_ledger(db3, w3.customer_id, "USDT")
-            await db3.commit()
+        except asyncio.CancelledError:
+            # Client disconnect/shutdown mid-send: the payout may exist. Record UNKNOWN, never leave SUBMITTING.
+            await asyncio.shield(_mark_withdrawal_unknown(withdrawal_id, provider_name, "request cancelled during provider send"))
+            raise
+        except Exception as e:
+            await _mark_withdrawal_unknown(withdrawal_id, provider_name, f"unclassified provider exception: {type(e).__name__}")
+            await _audit("WITHDRAWAL_UNKNOWN", {"id": withdrawal_id, "provider": provider_name, "error": type(e).__name__})
+            raise _safe_http_error(502, e, "Provider outcome is unknown; reconcile before retrying") from e
+        try:
+            async with SessionLocal() as db3:
+                w3 = (await db3.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id).with_for_update())).scalar_one()
+                if w3.status not in {"SUBMITTING", "UNKNOWN", "SUBMITTED"}:
+                    # Reconcile already settled/released this withdrawal while the send was in flight.
+                    await _audit("WITHDRAWAL_RELEASE_RACE_SKIPPED", {"id": withdrawal_id, "status": w3.status, "provider_status": result.status})
+                    return {"ok": True, "id": withdrawal_id, "status": w3.status, "provider": result.provider,
+                            "provider_id": result.provider_id, "reconcile_required": settings.payout_require_reconciliation}
+                if result.status == "COMPLETED":
+                    w3.status = "RELEASED"
+                elif result.status == "FAILED":
+                    w3.status = "FAILED"
+                else:
+                    w3.status = "SUBMITTED"
+                w3.provider = result.provider
+                w3.provider_id = result.provider_id
+                w3.provider_status = result.raw_status or result.status
+                w3.provider_error = ""
+                if result.status == "COMPLETED":
+                    await settle_withdrawal(db3, w3.customer_id, w3.amount, reference_id=w3.request_id)
+                    await sync_wallet_from_ledger(db3, w3.customer_id, "USDT")
+                elif result.status == "FAILED":
+                    await ledger_release_withdrawal(db3, w3.customer_id, w3.amount, reference_id=_withdrawal_release_ref(w3.request_id))
+                    await sync_wallet_from_ledger(db3, w3.customer_id, "USDT")
+                await db3.commit()
+        except HTTPException:
+            raise
+        except Exception as e:
+            # The payout was already sent. Persist the provider id and force reconciliation instead of
+            # leaving SUBMITTING with the only record of the payout in process memory.
+            try:
+                await _mark_withdrawal_unknown(withdrawal_id, provider_name, f"post-send persistence failed: {type(e).__name__}", provider_id=result.provider_id)
+            except Exception:
+                logger.critical("withdrawal_post_send_state_lost id=%s provider_id=%s", withdrawal_id, result.provider_id, exc_info=True)
+            raise _safe_http_error(502, e, "Payout was sent but local settlement failed; reconcile required") from e
         await _audit("WITHDRAWAL_RELEASED", {"id": withdrawal_id, "provider": result.provider,
                                                "provider_id": result.provider_id, "status": result.status})
         return {"ok": True, "id": withdrawal_id, "status": result.status,
@@ -5273,7 +5335,7 @@ async def reconcile_withdrawal(withdrawal_id: int, req: WithdrawalReconcileReque
             await settle_withdrawal(db, w.customer_id, w.amount, reference_id=w.request_id)
             await sync_wallet_from_ledger(db, w.customer_id, "USDT")
         elif result.status == "FAILED":
-            await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=w.request_id + ":reconcile-failed")
+            await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=_withdrawal_release_ref(w.request_id))
             await sync_wallet_from_ledger(db, w.customer_id, "USDT")
         await db.commit()
     await _audit("WITHDRAWAL_RECONCILED", {"id": withdrawal_id, "provider_id": w.provider_id, "status": w.status, "operator_id": req.operator_id})
@@ -5292,6 +5354,9 @@ async def mark_withdrawal_not_sent(
     """Release a reserved withdrawal only after dual control and provider recovery prove no payout exists."""
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
+    authenticated_operator = str(claims.get("sub") or claims.get("user_id") or "").strip()
+    if not authenticated_operator or not hmac.compare_digest(authenticated_operator, str(req.operator_id or "").strip()):
+        raise HTTPException(403, "Release operator identity must match the authenticated user")
     approver_auth(req.admin_id, x_approver_token, x_admin_token)
     if req.admin_id.strip().casefold() == req.operator_id.strip().casefold():
         raise HTTPException(403, "Approver and release operator must be different people")
@@ -5301,8 +5366,18 @@ async def mark_withdrawal_not_sent(
         w = (await db.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id).with_for_update())).scalar_one_or_none()
         if not w:
             raise HTTPException(404, "Withdrawal not found")
-        if w.status != "UNKNOWN":
-            raise HTTPException(409, f"Withdrawal is {w.status}; only UNKNOWN withdrawals can be marked not sent")
+        separation = release_separation_violation(req.operator_id, x_release_token, [w.first_approved_by, w.second_approved_by])
+        if separation:
+            raise HTTPException(409, separation)
+        if w.status == "SUBMITTING":
+            started = w.execution_started_at
+            if started is not None and started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            stale_after = timedelta(minutes=max(1, int(settings.withdrawal_stale_submitting_minutes)))
+            if started is None or datetime.now(timezone.utc) - started < stale_after:
+                raise HTTPException(409, "Withdrawal is SUBMITTING and not yet stale; a send may still be in flight")
+        elif w.status != "UNKNOWN":
+            raise HTTPException(409, f"Withdrawal is {w.status}; only UNKNOWN or stale SUBMITTING withdrawals can be marked not sent")
         if w.provider_id:
             raise HTTPException(409, "Provider transaction ID exists; use reconcile instead")
         provider = get_payout_provider(w.provider or settings.payout_provider)
@@ -5311,8 +5386,9 @@ async def mark_withdrawal_not_sent(
             if recover is None:
                 raise HTTPException(409, "Provider does not support recovery; use reconcile instead")
             result = await recover(f"withdrawal:{w.request_id}", currency=w.currency)
-            if result.provider_id:
-                raise HTTPException(409, "Provider payout found; use reconcile instead")
+            if not result or not str(getattr(result, "provider_id", "") or "").strip():
+                raise HTTPException(409, "Provider recovery did not definitively prove absence; withdrawal reserve remains held")
+            raise HTTPException(409, "Provider payout found; use reconcile instead")
         except PayoutNotFound:
             pass
         except PayoutUnknown as e:
@@ -5323,7 +5399,7 @@ async def mark_withdrawal_not_sent(
         w.provider_status = "NOT_SENT"
         w.provider_error = req.evidence.strip()[:1000]
         w.reconciled_at = datetime.now(timezone.utc)
-        await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=w.request_id + ":not-sent")
+        await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=_withdrawal_release_ref(w.request_id))
         await sync_wallet_from_ledger(db, w.customer_id, "USDT")
         await db.commit()
         result = {"id": w.id, "request_id": w.request_id, "status": w.status, "provider_status": w.provider_status}
@@ -5347,7 +5423,7 @@ async def reject_withdrawal(withdrawal_id: int, req: WithdrawalDecision, x_admin
         if w.status not in {"PENDING", "PARTIALLY_APPROVED", "APPROVED"}:
             raise HTTPException(409, f"Withdrawal is {w.status} and cannot be rejected")
         w.status = "REJECTED"
-        await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=w.request_id + ":rejected")
+        await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=_withdrawal_release_ref(w.request_id))
         await sync_wallet_from_ledger(db, w.customer_id, "USDT")
         w.rejected_by = req.admin_id
         w.rejected_at = datetime.now(timezone.utc)
@@ -5956,6 +6032,14 @@ async def manage_customer_pilot(
         return {"ok": True, "customer_id": customer_id, "status": "SUSPENDED"}
 
 
+def _live_request_expired(requested_at, now) -> bool:
+    if requested_at is None:
+        return True
+    if requested_at.tzinfo is None:
+        requested_at = requested_at.replace(tzinfo=timezone.utc)
+    return now - requested_at > timedelta(minutes=max(1, int(settings.live_enable_request_ttl_minutes)))
+
+
 @app.post("/api/live/enable")
 async def enable_live(body: LiveEnableRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
@@ -5995,6 +6079,8 @@ async def enable_live(body: LiveEnableRequest, x_admin_token: str | None = Heade
             raise HTTPException(409, "No pending live-trading enablement request exists")
         if s.live_enable_requested_by == actor_id:
             raise HTTPException(409, "A different RISK_OFFICER must approve the live-trading request")
+        if _live_request_expired(s.live_enable_requested_at, now):
+            raise HTTPException(409, "The live-trading enablement request has expired; submit a new REQUEST")
 
     if settings.require_single_worker_for_live and int(os.getenv("WEB_CONCURRENCY", "1")) != 1:
         raise HTTPException(409, "Live trading requires exactly one active execution worker")
@@ -6018,6 +6104,8 @@ async def enable_live(body: LiveEnableRequest, x_admin_token: str | None = Heade
             raise HTTPException(409, "Risk state changed; live trading was not enabled")
         if s.live_enable_requested_by == actor_id or not s.live_enable_requested_by:
             raise HTTPException(409, "A distinct RISK_OFFICER approval is required")
+        if _live_request_expired(s.live_enable_requested_at, now):
+            raise HTTPException(409, "The live-trading enablement request expired during broker preflight; submit a new REQUEST")
         s.live_enable_approved_by = actor_id
         s.live_enable_approved_at = now
         s.live_enabled = True
@@ -6123,6 +6211,14 @@ async def _audit(event: str, detail: dict, actor_id: str | None = None):
     # A sink outage must not turn a completed money movement into an ambiguous 5xx response
     # that could trigger client retries. Critical sink failures are visible in service logs.
     emit_security_audit(event=event, actor_id=actor, detail=safe_detail, event_hash=row.event_hash)
+
+
+async def _safe_audit(event: str, detail: dict, actor_id: str | None = None) -> None:
+    """Best-effort error-path audit that never kills the worker handling the original failure."""
+    try:
+        await _audit(event, detail, actor_id=actor_id)
+    except Exception:
+        logger.exception("worker_error_audit_failed event=%s", event)
 
 
 def json_loads(v):

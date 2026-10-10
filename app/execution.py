@@ -33,6 +33,11 @@ from .distributed import acquire_lock, release_lock
 TERMINAL_STATUSES = {"FILLED", "CANCELED", "REJECTED", "FAILED", "SIMULATED"}
 
 
+def customer_paper_execution_blocked(customer_id: int | None, force_paper: bool) -> bool:
+    """Return whether this request would route customer funds through the unsupported paper ledger."""
+    return customer_id is not None and bool(force_paper)
+
+
 
 async def audit(event: str, detail: dict, actor_id: str = "system") -> None:
     """Best-effort audit write in its own session; must never break order handling."""
@@ -307,7 +312,9 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
                 # decide whether new cash needs to be reserved for this order, matching the
                 # existing behavior. account_reduce_only above is the stricter, magnitude-capped
                 # check used only to decide whether a HALTED account may still place this order.
-                reducing = any((p.quantity > 0 > signed) or (p.quantity < 0 < signed) for p in positions_for_symbol)
+                # An order larger than the opposing position flips into new exposure, so it is NOT exempt
+                # from the cash requirement (same strict test as account_reduce_only above).
+                reducing = account_reduce_only
                 required_cash = 0.0 if reducing else price * quantity
                 if float(ledger.available) + 1e-9 < required_cash:
                     raise RiskBlocked("Order exceeds the customer's available funded USDT balance")
@@ -330,7 +337,10 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
             qpos = qpos.where(Position.customer_id == customer_id)
         existing_positions = (await db.execute(qpos)).scalars().all()
         signed = quantity if side == "buy" else -quantity
-        reducing = any((p.quantity > 0 > signed) or (p.quantity < 0 < signed) for p in existing_positions)
+        # Magnitude-capped: only an order no larger than the opposing position is a pure reduce. A larger order
+        # flips into new exposure and must pass every new-entry control (limits, breakers, protective stop).
+        opposing_total = sum(abs(p.quantity) for p in existing_positions if (p.quantity > 0 > signed) or (p.quantity < 0 < signed))
+        reducing = opposing_total > 0 and quantity <= opposing_total + 1e-9
 
         if settings.discipline_enabled and not reducing:
             now = datetime.now(timezone.utc)
@@ -948,7 +958,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             if asset in {"forex", "commodity"} and not forex_demo and not force_paper:
                 raise RiskBlocked("OANDA is demo/backtesting-only in AtlasRisk; live Forex/commodity execution is disabled")
             live = crypto_live or forex_demo
-            if customer_id is not None and force_paper:
+            if customer_paper_execution_blocked(customer_id, force_paper or not live):
                 raise RiskBlocked("Customer paper execution requires an isolated simulation ledger")
             if live and customer_id is not None:
                 mixed_positions = (await db.execute(
@@ -982,7 +992,20 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             # Customer live trading requires a verified isolated exchange/subaccount adapter.
             # Customer crypto execution must resolve only the customer's verified venue mapping.
             # Never fall back to platform-wide exchange credentials for a customer order.
-            if customer_id is not None and asset != "forex":
+            if customer_id is not None and asset in {"forex", "commodity"}:
+                # Never fall back to platform OANDA credentials for a customer order.
+                # Customer Forex/commodity execution needs its own verified account mapping.
+                raise RiskBlocked("Customer Forex/commodity execution requires a verified customer-specific OANDA account")
+            elif asset in {"forex", "commodity"}:
+                if not forex_demo:
+                    raise RiskBlocked("OANDA live execution is disabled; use the demo/backtesting path")
+                if not settings.oanda_account_id or not settings.oanda_api_token or not settings.oanda_practice:
+                    raise RiskBlocked("OANDA practice credentials are not configured")
+                broker = OandaBroker(OandaConfig(
+                    settings.oanda_account_id, settings.oanda_api_token, True,
+                    settings.oanda_timeout_seconds,
+                ))
+            elif customer_id is not None:
                 if exchange.lower() != "binance":
                     raise RiskBlocked("Customer live crypto trading requires a verified isolated exchange/subaccount adapter")
                 async with SessionLocal() as credential_db:
@@ -1000,10 +1023,6 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     )
                 except CustomerBinanceExecutionError as exc:
                     raise RiskBlocked(str(exc)) from exc
-            elif asset in {"forex", "commodity"}:
-                # Defensive assertion: forex/commodity reaches the broker only through the
-                # explicit demo path above. OANDA has no live execution authority in AtlasRisk.
-                raise RiskBlocked("OANDA live execution is disabled; use the demo/backtesting path")
             else:
                 broker = Broker.get(BrokerConfig(
                     exchange_id=exchange, api_key=settings.exchange_api_key,
@@ -1078,7 +1097,13 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 qpos = select(Position).where(Position.customer_id == customer_id, Position.symbol == symbol, Position.quantity != 0).with_for_update()
                 positions_now = (await db.execute(qpos)).scalars().all()
                 signed_order = quantity if side == "buy" else -quantity
-                reducing = any((p.quantity > 0 > signed_order) or (p.quantity < 0 < signed_order) for p in positions_now)
+                # Only a fully capped opposing-position order is reduce-only.
+                # An order larger than that position flips into new exposure and must reserve cash.
+                opposing_qty = sum(
+                    abs(p.quantity) for p in positions_now
+                    if (p.quantity > 0 > signed_order) or (p.quantity < 0 < signed_order)
+                )
+                reducing = opposing_qty > 0 and quantity <= opposing_qty + 1e-9
                 if not reducing:
                     reserve_buffer = max(0.0, float(settings.max_slippage_bps or 0.0)) / 10_000.0
                     reserved_cash = float(quote * quantity * (1.0 + reserve_buffer))
@@ -1195,15 +1220,16 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     qpos = select(Position).where(Position.customer_id == customer_id, Position.symbol == symbol, Position.quantity != 0)
                     positions = (await gate_db.execute(qpos)).scalars().all()
                     signed = amount if side == "buy" else -amount
-                    reduce_only = any((p.quantity > 0 > signed) or (p.quantity < 0 < signed) for p in positions)
-                    # Exchange-level reduceOnly is stricter than the gate flag above: spot venues reject the parameter, and an
-                    # order larger than the open position would be a flip, which reduceOnly would reject or clip.
                     opposing_qty = sum(abs(float(p.quantity)) for p in positions if (p.quantity > 0 > signed) or (p.quantity < 0 < signed))
-                    exchange_reduce_only = bool(opposing_qty > 0 and amount <= opposing_qty + 1e-9)
-                    await assert_live_system_enabled(gate_db, asset=asset, customer_id=customer_id, exchange=exchange, side=side, quantity=amount, reduce_only=reduce_only)
+                    # Magnitude-capped: an order larger than the open position is a flip (new exposure), so it must not
+                    # be waved through the live gate as "reduce only" (e.g. for a HALTED account).
+                    reduce_only = bool(opposing_qty > 0 and amount <= opposing_qty + 1e-9)
+                    # Spot venues reject the exchange-level reduceOnly parameter; it is only sent on derivatives markets.
+                    exchange_reduce_only = reduce_only
+                    await assert_live_system_enabled(gate_db, asset=asset, customer_id=customer_id, exchange=exchange, side=side, quantity=amount, reduce_only=reduce_only, practice_demo=(mode == "FOREX_DEMO"))
             else:
                 async with SessionLocal() as gate_db:
-                    await assert_live_system_enabled(gate_db, asset=asset, customer_id=None, exchange=exchange, side=side, quantity=amount)
+                    await assert_live_system_enabled(gate_db, asset=asset, customer_id=None, exchange=exchange, side=side, quantity=amount, practice_demo=(mode == "FOREX_DEMO"))
             _, lease_token = await _acquire_live_execution_lease(ttl_seconds=max(15, int(settings.exchange_timeout_ms / 1000) + 10))
             await _verify_live_lease(lease_token)
             submission_lock_acquired = await acquire_lock(
@@ -1226,6 +1252,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                         side=side,
                         quantity=amount,
                         reduce_only=reduce_only,
+                        practice_demo=(mode == "FOREX_DEMO"),
                     )
                 await _verify_live_lease(lease_token)
                 await _mark_order_command(command.id, status="SUBMITTING", token=lease_token, attempts_increment=True)
@@ -1265,7 +1292,11 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 await db.commit()
             await _mark_order_command(command.id, status="UNKNOWN", token=lease_token, error=str(exc))
             await _release_live_execution_lease(lease_token)
-            await audit("LIVE_ORDER_UNKNOWN", {"trade_id": trade_id, "client_order_id": cid, "error": str(exc)})
+            unknown_detail = {"trade_id": trade_id, "client_order_id": cid, "mode": mode, "error": str(exc)}
+            if mode == "FOREX_DEMO":
+                await audit("PRACTICE_ORDER_UNKNOWN", unknown_detail)
+            else:
+                await audit("LIVE_ORDER_UNKNOWN", unknown_detail)
             raise
 
         broker_id = str(order.get("id") or "")
@@ -1349,9 +1380,13 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             await audit("PROTECTIVE_STOP_MISSING", {"trade_id":trade_id,"broker_order_id":broker_id,"reason":protection_reason})
             return {"duplicate": False, "trade_id": trade_id, "mode": "LIVE", "status": "PROTECTION_MISSING",
                     "broker_order_id": broker_id, "client_order_id": cid, "price": fill_price, "filled": filled, "halted": True}
-        await audit("LIVE_ORDER_SUBMITTED", {"trade_id": trade_id, "broker_order_id": broker_id,
-                                               "client_order_id": cid, "status": status, "filled": filled})
-        return {"duplicate": False, "trade_id": trade_id, "mode": "LIVE", "status": status,
+        submitted_detail = {"trade_id": trade_id, "broker_order_id": broker_id,
+                            "client_order_id": cid, "mode": mode, "status": status, "filled": filled}
+        if mode == "FOREX_DEMO":
+            await audit("PRACTICE_ORDER_SUBMITTED", submitted_detail)
+        else:
+            await audit("LIVE_ORDER_SUBMITTED", submitted_detail)
+        return {"duplicate": False, "trade_id": trade_id, "mode": mode, "status": status,
                 "broker_order_id": broker_id, "client_order_id": cid, "price": fill_price, "filled": filled}
 
 

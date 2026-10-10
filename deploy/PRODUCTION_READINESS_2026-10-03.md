@@ -62,6 +62,10 @@ The repository contains a Binance user-stream implementation and unit tests for 
 
 The deployment documentation requires an external HTTPS load balancer plus Cloud Armor and restricted Cloud Run ingress. Source/configuration requirements are not operational evidence. The production gate therefore remains open until the actual Google Cloud resources and traffic path are verified.
 
+## TRON funding-path fact-check
+
+`PAPER_TRADING=true` and `LIVE_TRADING_ENABLED=false` do not disable the separate TRON deposit/custody path. The API and worker deployment scripts now default `USDT_TRON_ENABLED=false` and explicitly disable sweeping. Enabling TRON funding requires `ALLOW_TRON_FUNDING=YES`; mainnet additionally requires `ALLOW_MAINNET_TRON_FUNDING=YES`. Do not set these approvals for a paper/staging pilot. This source-level gate does not certify custody, treasury ownership, withdrawal reconciliation, or production funding safety.
+
 ## Backup fact-check
 
 A required backup/recovery configuration is present in the deployment hardening, but configuration is not a restore drill. Production remains NO-GO until a restore is performed and recorded.

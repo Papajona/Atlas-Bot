@@ -24,7 +24,7 @@ jobs:
     environment: production
     steps:
       - name: Checkout exact requested main commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
@@ -64,16 +64,117 @@ jobs:
 
           require_success "ci.yml" "Atlas CI"
           require_success "ledger-concurrency-check.yml" "PostgreSQL ledger concurrency"
+          require_success "production-verification.yml" "Production Verification Gate"
+          require_success "staging-identity-preflight.yml" "Supabase staging identity preflight"
+          require_success "android-release.yml" "Protected signed Android release"
 
+          # A green Android workflow is insufficient when its signing job was skipped.
+          # Require the successful signed-release job and the non-expired APK evidence
+          # artifact for this exact commit before touching production.
+          android_run=""
+          while IFS= read -r candidate; do
+            [ -n "$candidate" ] || continue
+            job_conclusion="$(gh run view "$candidate" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json jobs \
+              --jq '[.jobs[] | select(.name=="android-release")][0].conclusion // empty')"
+            if [ "$job_conclusion" = "success" ]; then
+              android_run="$candidate"
+              break
+            fi
+          done < <(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow "android-release.yml" \
+            --commit "$GITHUB_SHA" \
+            --json databaseId,status,conclusion \
+            --jq '.[] | select(.status=="completed" and .conclusion=="success") | .databaseId')
+
+          if [ -z "$android_run" ]; then
+            echo "BLOCKED: no successful signed Android release job exists for exact commit $GITHUB_SHA"
+            exit 1
+          fi
+
+          artifact_count="$(gh api \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$android_run/artifacts" \
+            --jq '[.artifacts[] | select(.name=="atlas-release-apk" and .expired==false and .size_in_bytes>0)] | length')"
+          if [ "${artifact_count:-0}" -lt 1 ]; then
+            echo "BLOCKED: signed Android artifact is missing, expired, or empty"
+            exit 1
+          fi
+          echo "PASS: signed Android release and evidence artifact verified for $GITHUB_SHA"
+
+      - name: Download and independently verify signed Android artifact for this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_CERT_SHA256: ${{ secrets.ATLAS_RELEASE_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          # Select only a successful run whose signing job succeeded. A newer successful
+          # debug-only run must not mask an older valid signed-release run.
+          android_run=""
+          while IFS= read -r candidate; do
+            [ -n "$candidate" ] || continue
+            job_conclusion="$(gh run view "$candidate" --repo "$GITHUB_REPOSITORY" --json jobs --jq '[.jobs[] | select(.name=="android-release")][0].conclusion // empty')"
+            if [ "$job_conclusion" = "success" ]; then
+              android_run="$candidate"
+              break
+            fi
+          done < <(gh run list --repo "$GITHUB_REPOSITORY" --workflow "android-release.yml" --commit "$GITHUB_SHA" --status success --json databaseId --jq '.[].databaseId')
+          if [ -z "$android_run" ]; then
+            echo "BLOCKED: no successful signed Android release job exists for exact commit $GITHUB_SHA"
+            exit 1
+          fi
+
+          artifact_count="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$android_run/artifacts" --jq '[.artifacts[] | select(.name=="atlas-release-apk" and .expired==false and .size_in_bytes>0)] | length')"
+          if [ "${artifact_count:-0}" -ne 1 ]; then
+            echo "BLOCKED: expected exactly one non-expired, non-empty atlas-release-apk artifact"
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/atlas-android-release"
+          gh run download "$android_run" --repo "$GITHUB_REPOSITORY" --name atlas-release-apk --dir "$RUNNER_TEMP/atlas-android-release"
+          bundle="$RUNNER_TEMP/atlas-android-release"
+          apk="$bundle/atlas-release.apk"
+          test -s "$apk"
+          test -s "$bundle/atlas-release.sha256"
+          test -s "$bundle/atlas-release-metadata.txt"
+          test -s "$bundle/atlas-signing-report.txt"
+          (cd "$bundle" && sha256sum --check atlas-release.sha256)
+
+          # Verify the downloaded APK bytes directly; metadata/report files are not
+          # accepted as substitutes for inspecting the APK itself.
+          test -n "$EXPECTED_CERT_SHA256"
+          expected_cert="$(printf '%s' "$EXPECTED_CERT_SHA256" | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+          [[ "$expected_cert" =~ ^[0-9a-f]{64}$ ]] || { echo "BLOCKED: expected certificate fingerprint must be 64 hex characters"; exit 1; }
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          aapt="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          test -x "$apksigner"
+          test -x "$aapt"
+
+          "$apksigner" verify --verbose --print-certs "$apk" | tee "$RUNNER_TEMP/atlas-downloaded-apk-signing-report.txt"
+          actual_cert="$(sed -n 's/.*certificate SHA-256 digest: //p' "$RUNNER_TEMP/atlas-downloaded-apk-signing-report.txt" | head -n 1 | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+          test -n "$actual_cert"
+          test "$actual_cert" = "$expected_cert"
+
+          package_name="$("$aapt" dump badging "$apk" | sed -n "s/^package: name='\\([^']*\\)'.*/\\1/p" | head -n 1)"
+          test "$package_name" = "com.atlas.trading"
+
+          metadata_package="$(sed -n 's/^package=//p' "$bundle/atlas-release-metadata.txt")"
+          metadata_cert="$(sed -n 's/^certificate_sha256=//p' "$bundle/atlas-release-metadata.txt" | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+          test "$metadata_package" = "$package_name"
+          test "$metadata_cert" = "$actual_cert"
+
+          report_cert="$(sed -n 's/.*certificate SHA-256 digest: //p' "$bundle/atlas-signing-report.txt" | head -n 1 | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+          test "$report_cert" = "$actual_cert"
+          echo "PASS: exact-commit APK checksum, APK signature, actual package identity, metadata, and expected certificate all agree"
       - name: Authenticate to Google Cloud with GitHub OIDC
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
-
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
       - name: Deploy immutable API release
         env:
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
@@ -90,6 +191,7 @@ jobs:
           SECRET_REDIS_URL_VERSION: ${{ secrets.SECRET_REDIS_URL_VERSION }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           ADMIN_SUPABASE_USER_IDS: ${{ secrets.ADMIN_SUPABASE_USER_IDS }}
+          ADMIN_ROLE_ASSIGNMENTS: ${{ secrets.ADMIN_ROLE_ASSIGNMENTS }}
           BACKUP_RECOVERY_URL: ${{ secrets.BACKUP_RECOVERY_URL }}
           SECRET_TRONGRID_VERSION: ${{ secrets.SECRET_TRONGRID_VERSION }}
           SECRET_MODEL_SIGNING_PUBLIC_VERSION: ${{ secrets.SECRET_MODEL_SIGNING_PUBLIC_VERSION }}
@@ -100,6 +202,9 @@ jobs:
           SECRET_GROQ_API_KEY_VERSION: ${{ secrets.SECRET_GROQ_API_KEY_VERSION }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           GEMINI_STRATEGY_MODEL: ${{ vars.GEMINI_STRATEGY_MODEL }}
+          RESEARCH_FEE_SOURCE: ${{ vars.RESEARCH_FEE_SOURCE }}
+          RESEARCH_FEE_EVIDENCE_ID: ${{ vars.RESEARCH_FEE_EVIDENCE_ID }}
+          RESEARCH_MIN_DEFLATED_SHARPE: ${{ vars.RESEARCH_MIN_DEFLATED_SHARPE }}
         run: bash deploy/cloud-run-deploy.sh
 
       - name: Verify deployed immutable identity
