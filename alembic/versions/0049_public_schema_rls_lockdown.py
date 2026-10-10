@@ -27,6 +27,9 @@ def upgrade():
             role_name text;
         BEGIN
             EXECUTE 'REVOKE CREATE ON SCHEMA public FROM PUBLIC';
+            -- Direct PostgREST access to public is not the application path.
+            -- Schema USAGE blocks API roles even if another role grants object privileges.
+            EXECUTE 'REVOKE USAGE ON SCHEMA public FROM PUBLIC';
             EXECUTE 'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC';
             EXECUTE 'REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC';
             EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC';
@@ -35,6 +38,7 @@ def upgrade():
             FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
                 IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
                     EXECUTE format('REVOKE CREATE ON SCHEMA public FROM %I', role_name);
+                    EXECUTE format('REVOKE USAGE ON SCHEMA public FROM %I', role_name);
                     EXECUTE format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM %I', role_name);
                     EXECUTE format('REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM %I', role_name);
                     EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM %I', role_name);
@@ -53,51 +57,10 @@ def upgrade():
         """
     )
 
-    # Do not claim the lockdown is complete if another role can create public
-    # objects with unsafe default ACLs. ALTER DEFAULT PRIVILEGES is role-scoped:
-    # this migration cannot rewrite another role's defaults unless the migration
-    # role is a member of that role. Fail closed and require an authorized owner
-    # to remediate the external role before retrying the migration.
-    op.execute(
-        """
-        DO $atlas_external_default_acl$
-        DECLARE
-            unsafe_creator text;
-            unsafe_acl text;
-        BEGIN
-            SELECT pg_get_userbyid(d.defaclrole),
-                   string_agg(DISTINCT
-                       format('%s:%s', d.defaclobjtype, acl.privilege_type),
-                       ', ' ORDER BY format('%s:%s', d.defaclobjtype, acl.privilege_type))
-              INTO unsafe_creator, unsafe_acl
-            FROM pg_default_acl d
-            CROSS JOIN LATERAL aclexplode(d.defaclacl) AS acl
-            LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
-            WHERE d.defaclnamespace IN (0, 'public'::regnamespace)
-              AND (
-                  d.defaclrole <> (SELECT oid FROM pg_roles WHERE rolname = current_user)
-                  OR d.defaclnamespace = 0
-              )
-              AND (acl.grantee = 0 OR grantee.rolname IN ('anon', 'authenticated'))
-              AND (
-                  (d.defaclobjtype = 'r' AND acl.privilege_type IN
-                      ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'))
-                  OR (d.defaclobjtype = 'S' AND acl.privilege_type IN ('USAGE', 'SELECT', 'UPDATE'))
-                  OR (d.defaclobjtype = 'f' AND acl.privilege_type = 'EXECUTE')
-              )
-            GROUP BY d.defaclrole
-            ORDER BY pg_get_userbyid(d.defaclrole)
-            LIMIT 1;
-
-            IF unsafe_creator IS NOT NULL THEN
-                RAISE EXCEPTION
-                    'public schema lockdown blocked: role % has unsafe default privileges (%) for PUBLIC/anon/authenticated; remediate defaults as that role or an authorized member, then retry',
-                    unsafe_creator, unsafe_acl;
-            END IF;
-        END
-        $atlas_external_default_acl$;
-        """
-    )
+    # Default privileges are role-scoped. Supabase's managed supabase_admin role
+    # has independent defaults the application migration role cannot change.
+    # Schema-level USAGE revokes above are the enforcement boundary for API roles;
+    # CI verifies this remains true even when newly created objects have grants.
 
     # Pin search_path for the ledger functions flagged by the security advisor.
     op.execute(
