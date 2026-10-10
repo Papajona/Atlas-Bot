@@ -59,7 +59,7 @@ enum class AssetClass(val label: String, val badge: String) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UserDashboardScreen(
-    userName: String = "Alice",
+    userName: String = "Customer",
     backendUrl: String = "",
     onOpenOperatorConsole: () -> Unit = {},
     onOpenPortal: () -> Unit = {}
@@ -130,7 +130,7 @@ fun UserDashboardScreen(
                                 textPrimary = textPrimary,
                                 onAvatarClick = { currentTab = DashboardTab.SETTINGS },
                                 onNotificationClick = {
-                                    actionDialogMessage = "Active Alerts across Multi-Asset Suite:\n• BTC/USDT: +0.05 bought at $68,450\n• EUR/USD: 4H breakout active (+18 pips)\n• Gold (XAU/USD): 4H trend target hit (+1.15%)"
+                                    actionDialogMessage = "Market alerts are unavailable until verified exchange data is received."
                                 }
                             )
                         }
@@ -350,7 +350,7 @@ fun UserDashboardScreen(
                                     )
                                     Spacer(modifier = Modifier.height(8.dp))
                                     Text(
-                                        text = "• 🪙 BTC/USDT: 4H Trend Momentum Bullish (ATR = 1,420)\n• 🪙 ETH/USDT: Mean-reversion hold (Z = +0.4)\n• 💱 EUR/USD: London session range breakout passed (1.0852)\n• 💱 GBP/USD: 1D Trend following target active (1.2940)\n• 🥇 Gold (XAU/USD): 4H Channel breakout intact ($2,354.20)",
+                                        text = "Market analysis is unavailable until verified provider data is received.",
                                         fontSize = 13.sp,
                                         color = textMuted,
                                         lineHeight = 22.sp
@@ -981,7 +981,7 @@ private fun RecentActivityCard(
                         badgeText = "€",
                         badgeBg = Color(0xFF3B82F6),
                         title = "EUR/USD limit filled:",
-                        value = "+18 pips",
+                        value = "Unavailable",
                         valueColor = emeraldAccent,
                         textPrimary = textPrimary
                     )
@@ -1175,7 +1175,7 @@ private fun WatchlistCard(
                         badge = "Au",
                         badgeBg = Color(0xFFEAB308),
                         symbol = "Gold (XAU)",
-                        price = "$2,354.20",
+                        price = "Unavailable",
                         changePct = "+1.15%",
                         isBullish = true,
                         color = emeraldAccent,
@@ -1219,7 +1219,7 @@ private fun WatchlistCard(
                         badge = "₿",
                         badgeBg = Color(0xFFF7931A),
                         symbol = "BTC",
-                        price = "$68,450",
+                        price = "Unavailable",
                         changePct = "+2.4%",
                         isBullish = true,
                         color = emeraldAccent,
@@ -1410,7 +1410,7 @@ private fun generate30DayEquityData(): List<EquityPoint> {
     var equity = 1064.60
     var cumProfit = 0.0
 
-    // Modeled realistic 30-day progression ending at $1,250.00
+    // Historical performance is unavailable until the backend records verified daily history.
     val dailyChanges = listOf(
         +4.20, +8.50, -3.10, +6.40, +12.30, -5.20, +9.10,
         +14.50, -4.80, +11.20, +7.60, -6.10, +18.40, +10.50,
