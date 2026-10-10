@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.fernet import Fernet
@@ -259,3 +260,19 @@ def test_live_enable_request_expires(monkeypatch):
     assert main._live_request_expired(now - timedelta(minutes=5), now) is False
     assert main._live_request_expired(now - timedelta(minutes=16), now) is True
     assert main._live_request_expired((now - timedelta(minutes=5)).replace(tzinfo=None), now) is False  # naive DB value
+
+
+def test_provider_recovery_full_history_page_is_not_proof_of_absence(monkeypatch):
+    """A full 100-row CCXT history page may be truncated; never release funds on that basis."""
+    monkeypatch.setattr(settings, "payout_client_id_param", "clientOrderId")
+    monkeypatch.setattr(settings, "payout_recovery_lookback_hours", 72)
+    provider = CCXTPayoutProvider.__new__(CCXTPayoutProvider)
+    provider.exchange = SimpleNamespace(
+        has={"fetchWithdrawals": True},
+        fetch_withdrawals=lambda currency, since, limit: [
+            {"id": f"provider-{i}", "info": {"clientOrderId": f"other-{i}"}}
+            for i in range(100)
+        ],
+    )
+    with pytest.raises(PayoutUnknown, match="100-row limit"):
+        asyncio.run(provider.recover("withdrawal:missing", currency="USDT"))
