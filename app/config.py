@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     funding_webhook_secret: str = ""
     funding_webhook_max_skew_seconds: int = 300
 
+    customer_deficit_limit_usdt: float = 100.0  # USDT; automatic global halt threshold
+
     # Real USDT funding (TRON / TRC-20). Production API receives only a public
     # account-level extended public key (xpub) for new deposit-address derivation.
     # Private seeds never belong in the API runtime.
@@ -489,6 +491,8 @@ class Settings(BaseSettings):
                     "RESEARCH_MIN_DEFLATED_SHARPE must be >= 0.95 in production "
                     "when adaptive AI promotion is enabled"
                 )
+        if not (0 < self.customer_deficit_limit_usdt < float("inf")):
+            raise ValueError("CUSTOMER_DEFICIT_LIMIT_USDT must be finite and > 0")
         if self.max_consecutive_losses < 0:
             raise ValueError("MAX_CONSECUTIVE_LOSSES must be >= 0")
         if self.max_order_latency_ms_p95 < 0:
