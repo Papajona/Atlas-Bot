@@ -1220,10 +1220,10 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     reduce_only = bool(opposing_qty > 0 and amount <= opposing_qty + 1e-9)
                     # Spot venues reject the exchange-level reduceOnly parameter; it is only sent on derivatives markets.
                     exchange_reduce_only = reduce_only
-                    await assert_live_system_enabled(gate_db, asset=asset, customer_id=customer_id, exchange=exchange, side=side, quantity=amount, reduce_only=reduce_only)
+                    await assert_live_system_enabled(gate_db, asset=asset, customer_id=customer_id, exchange=exchange, side=side, quantity=amount, reduce_only=reduce_only, practice_demo=(mode == "FOREX_DEMO"))
             else:
                 async with SessionLocal() as gate_db:
-                    await assert_live_system_enabled(gate_db, asset=asset, customer_id=None, exchange=exchange, side=side, quantity=amount)
+                    await assert_live_system_enabled(gate_db, asset=asset, customer_id=None, exchange=exchange, side=side, quantity=amount, practice_demo=(mode == "FOREX_DEMO"))
             _, lease_token = await _acquire_live_execution_lease(ttl_seconds=max(15, int(settings.exchange_timeout_ms / 1000) + 10))
             await _verify_live_lease(lease_token)
             submission_lock_acquired = await acquire_lock(
@@ -1246,6 +1246,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                         side=side,
                         quantity=amount,
                         reduce_only=reduce_only,
+                        practice_demo=(mode == "FOREX_DEMO"),
                     )
                 await _verify_live_lease(lease_token)
                 await _mark_order_command(command.id, status="SUBMITTING", token=lease_token, attempts_increment=True)
