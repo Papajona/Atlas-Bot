@@ -32,3 +32,46 @@ def test_grid_start_is_fail_closed_until_execution_controller_exists():
     )[0]
     assert 'if req.action == "START":' in route
     assert 'raise HTTPException(409, "Grid execution controller is not enabled; this configuration is paper-only")' in route
+
+
+def test_grid_start_endpoint_returns_conflict_without_execution_controller(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    import app.main as main_module
+
+    class FakeResult:
+        def scalar_one_or_none(self):
+            return SimpleNamespace(id=7, customer_id=11, status="STOPPED", mode="PAPER")
+
+    class FakeDB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def execute(self, _statement):
+            return FakeResult()
+
+    async def fake_get_customer(*_args, **_kwargs):
+        return SimpleNamespace(id=11), {}
+
+    async def fake_require_feature(*_args, **_kwargs):
+        return None
+
+    async def exercise():
+        monkeypatch.setattr(main_module, "SessionLocal", lambda: FakeDB())
+        monkeypatch.setattr(main_module, "get_customer", fake_get_customer)
+        monkeypatch.setattr(main_module, "_require_feature", fake_require_feature)
+        try:
+            await main_module.grid_bot_action(
+                7, main_module.BotActionRequest(action="START"), authorization="Bearer test"
+            )
+        except HTTPException as exc:
+            assert exc.status_code == 409
+            assert "paper-only" in str(exc.detail)
+        else:
+            raise AssertionError("grid START must fail closed without an execution controller")
+
+    asyncio.run(exercise())
