@@ -1,68 +1,114 @@
 #!/usr/bin/env python3
-"""Fail fast when a configured LLM model id has been retired by its provider (run in CI nightly and before every deploy).
+"""Verify configured AI providers with minimal real inference requests.
 
-Gemini: GET /v1beta/models/<id>   Groq: GET /openai/v1/models   (needs GEMINI_API_KEY / GROQ_API_KEY; skips a provider whose key is unset).
-Exit 0 = every configured id is served, 1 = at least one id is missing/unreachable, 2 = nothing could be checked.
+Both Gemini and Groq must be configured and each configured model must return
+usable generated text. Exit 0 = all requests succeeded, 1 = request failed,
+2 = required credentials/configuration missing. Never prints keys or response bodies.
 """
 import json
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
-# When Python executes a file as "python scripts/check_ai_models.py", sys.path[0]
-# is the scripts directory, not necessarily the repository root. Bootstrap the
-# project root before importing the application package so CI and local invocations
-# behave consistently regardless of the caller's working directory.
-_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPOSITORY_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPOSITORY_ROOT))
+# Direct execution puts scripts/, not the repository root, at sys.path[0].
+_REPOSITORY_ROOT = str(Path(__file__).resolve().parents[1])
+if _REPOSITORY_ROOT not in sys.path:
+    sys.path.insert(0, _REPOSITORY_ROOT)
 
 from app.config import settings
 
 
-def _get(url: str, headers: dict) -> tuple[int, str]:
+def _request_json(url: str, headers: dict[str, str], payload: dict) -> tuple[int, dict]:
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as r:
-            return r.status, r.read().decode()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()[:200]
-    except Exception as e:  # network failure is a FAIL, not a pass
-        return 0, repr(e)
+        with urllib.request.urlopen(request, timeout=20) as response:
+            status = response.status
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        return exc.code, {}
+    except Exception:
+        return 0, {}
+    try:
+        parsed = json.loads(raw)
+        return status, parsed if isinstance(parsed, dict) else {}
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return status, {}
+
+
+def _check_gemini(model: str) -> bool:
+    encoded_model = urllib.parse.quote(model, safe="-_.")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{encoded_model}:generateContent"
+    status, body = _request_json(
+        url,
+        {"Content-Type": "application/json", "x-goog-api-key": settings.gemini_api_key},
+        {
+            "contents": [{"parts": [{"text": "Reply with OK."}]}],
+            "generationConfig": {"maxOutputTokens": 8, "temperature": 0},
+        },
+    )
+    candidates = body.get("candidates") or []
+    text = ""
+    if candidates:
+        parts = (candidates[0].get("content") or {}).get("parts") or []
+        text = "".join(str(part.get("text") or "") for part in parts)
+    ok = status == 200 and bool(text.strip())
+    print(f"[{'PASS' if ok else 'FAIL'}] Gemini {model}: " +
+          ("generation succeeded" if ok else f"generation failed (HTTP {status or 'network/error'})"))
+    return ok
+
+
+def _check_groq(model: str) -> bool:
+    status, body = _request_json(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {settings.groq_api_key}",
+        },
+        {
+            "model": model,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "max_tokens": 8,
+            "temperature": 0,
+        },
+    )
+    choices = body.get("choices") or []
+    message = choices[0].get("message") if choices else None
+    ok = status == 200 and isinstance(message, dict) and bool(str(message.get("content") or "").strip())
+    print(f"[{'PASS' if ok else 'FAIL'}] Groq {model}: " +
+          ("chat completion succeeded" if ok else f"chat completion failed (HTTP {status or 'network/error'})"))
+    return ok
 
 
 def main() -> int:
-    checked, bad = 0, 0
-    if settings.gemini_api_key:
-        for model in sorted({settings.gemini_model, settings.gemini_strategy_model} - {""}):
-            code, body = _get(f"https://generativelanguage.googleapis.com/v1beta/models/{model}", {"x-goog-api-key": settings.gemini_api_key})
-            checked += 1
-            ok = code == 200
-            bad += 0 if ok else 1
-            print(f"[{'OK' if ok else 'FAIL'}] gemini {model} -> HTTP {code}")
-    if settings.groq_api_key:
-        code, body = _get("https://api.groq.com/openai/v1/models", {"Authorization": f"Bearer {settings.groq_api_key}"})
-        if code != 200:
-            # Do not misreport authorization/network failures as a retired model ID.
-            # The caller must fix provider access before model availability can be assessed.
-            checked += 1
-            bad += 1
-            print(f"[FAIL] groq models endpoint -> HTTP {code}; cannot verify configured model IDs")
-        else:
-            try:
-                served = {m.get("id") for m in json.loads(body).get("data", [])}
-            except (ValueError, TypeError):
-                served = set()
-                code = 200
-            for model in sorted({settings.groq_model, settings.groq_strategy_model} - {""}):
-                checked += 1
-                ok = model in served
-                bad += 0 if ok else 1
-                print(f"[{'OK' if ok else 'FAIL'}] groq {model} -> {'served' if ok else 'not listed (HTTP 200)'}")
-    if not checked:
-        print("No provider keys set; nothing checked.")
+    missing = []
+    if not settings.gemini_api_key:
+        missing.append("GEMINI_API_KEY")
+    if not settings.groq_api_key:
+        missing.append("GROQ_API_KEY")
+    if missing:
+        print("AI provider verification: NOT VERIFIED (missing " + ", ".join(missing) + ").")
         return 2
-    return 1 if bad else 0
+
+    models = (
+        ("Gemini", sorted({settings.gemini_model, settings.gemini_strategy_model} - {""}), _check_gemini),
+        ("Groq", sorted({settings.groq_model, settings.groq_strategy_model} - {""}), _check_groq),
+    )
+    checked = 0
+    failures = 0
+    for provider, provider_models, checker in models:
+        if not provider_models:
+            print(f"AI provider verification: NOT VERIFIED ({provider} has no configured model).")
+            return 2
+        for model in provider_models:
+            checked += 1
+            failures += not checker(model)
+    if not checked:
+        print("AI provider verification: NOT VERIFIED (no model checks were configured).")
+        return 2
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
