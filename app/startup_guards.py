@@ -7,7 +7,7 @@ from sqlalchemy import text
 
 from .config import settings
 from .db import engine
-from .rls_role_policy import require_rls_bypass_role
+from .rls_role_policy import require_public_schema_rls_complete, require_rls_bypass_role
 
 def assert_multidict_safe_backend() -> None:
     """Refuse production/staging startup unless multidict uses the safe Python backend."""
@@ -53,15 +53,23 @@ async def assert_database_role_compatible_with_rls_lockdown() -> None:
         async with engine.connect() as conn:
             result = await conn.execute(text(
                 "SELECT current_user AS role_name, r.rolsuper AS is_superuser, "
-                "r.rolbypassrls AS bypass_rls, NOT EXISTS ("
+                "r.rolbypassrls AS bypass_rls, "
+                "(SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace "
+                " WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')) AS public_table_count, "
+                "(SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace "
+                " WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND NOT c.relrowsecurity) "
+                " AS tables_without_rls, NOT EXISTS ("
                 "SELECT 1 FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace "
                 "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') "
-                "AND c.relrowsecurity AND (c.relowner <> r.oid OR c.relforcerowsecurity)"
+                "AND (NOT c.relrowsecurity OR c.relowner <> r.oid OR c.relforcerowsecurity)"
                 ") AS owns_all_rls_tables FROM pg_roles AS r WHERE r.rolname = current_user"
             ))
             row = result.mappings().one_or_none()
         if row is None:
             raise RuntimeError("Unable to identify the current PostgreSQL application role")
+        require_public_schema_rls_complete(
+            int(row["public_table_count"]), int(row["tables_without_rls"])
+        )
         require_rls_bypass_role(
             str(row["role_name"]), bool(row["is_superuser"]), bool(row["bypass_rls"]),
             bool(row["owns_all_rls_tables"])
