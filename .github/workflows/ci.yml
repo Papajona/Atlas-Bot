@@ -360,6 +360,7 @@ jobs:
       - name: Shell syntax
         run: |
           bash -n deploy/cloud-run-deploy.sh
+          bash -n deploy/tron-funding-gate.sh
           bash -n deploy/cloud-run-worker-deploy.sh
           bash -n deploy/cloud-run-migration-job.sh
           bash -n deploy/verify-live-money-runtime.sh
