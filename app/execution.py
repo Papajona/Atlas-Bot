@@ -474,7 +474,10 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
         if live:
             try:
                 ts = datetime.fromisoformat(signal_timestamp.replace("Z", "+00:00"))
-                age = (datetime.now(timezone.utc) - ts).total_seconds()
+                # Treat naive signal timestamps as UTC explicitly; keep failures in RiskBlocked.
+                if ts.tzinfo is None or ts.utcoffset() is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds()
                 if age > settings.max_signal_age_seconds:
                     raise RiskBlocked("Signal is stale")
                 if age < -60:
