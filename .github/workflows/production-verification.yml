@@ -1,6 +1,8 @@
 name: Production Verification Gate
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
   schedule:
@@ -42,6 +44,9 @@ jobs:
       USDT_TRON_ENABLED: "false"
       PAPER_TRADING: "true"
       LIVE_TRADING_ENABLED: "false"
+      CUSTOMER_LIVE_TRADING_ENABLED: "false"
+      PAYOUT_LIVE_ENABLED: "false"
+      DERIV_LIVE_ENABLED: "false"
       BROKER_SANDBOX: "true"
       BACKGROUND_RECONCILIATION_ENABLED: "false"
       ADMIN_TOKEN: production-verification-only
@@ -60,9 +65,20 @@ jobs:
       - name: Validate production settings and release identity
         run: |
           python - <<'PY'
+          import os
           import re
           from app.config import settings
           assert settings.environment == "production"
+          assert os.environ.get("PAPER_TRADING", "").lower() == "true"
+          assert os.environ.get("BROKER_SANDBOX", "").lower() == "true"
+          for flag in (
+              "LIVE_TRADING_ENABLED",
+              "CUSTOMER_LIVE_TRADING_ENABLED",
+              "PAYOUT_LIVE_ENABLED",
+              "DERIV_LIVE_ENABLED",
+              "USDT_TRON_ENABLED",
+          ):
+              assert os.environ.get(flag, "").lower() == "false", f"{flag} must remain disabled"
           assert not settings.database_url.lower().startswith("sqlite")
           assert re.fullmatch(r"[0-9a-f]{40}", settings.release_sha)
           assert settings.release_version == settings.app_version == "3.10.47"
