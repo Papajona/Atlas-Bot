@@ -18,7 +18,7 @@ import app.main as main
 from app.config import settings
 from app.customer_funds import release_withdrawal as ledger_release_withdrawal
 from app.db import Base, CustomerLedgerAccount, Withdrawal
-from app.payout import CCXTPayoutProvider, PayoutUnknown
+from app.payout import CCXTPayoutProvider, PayoutNotFound, PayoutUnknown
 from app.withdrawal_ids import next_customer_withdrawal_request_id
 from test_withdrawal_not_sent_db import _call_endpoint
 
