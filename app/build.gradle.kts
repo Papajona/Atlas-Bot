@@ -1,14 +1,24 @@
+import java.net.URI
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val productionBackendUrl = providers.environmentVariable("ATLAS_PROD_BACKEND_URL").orNull?.trim()?.trimEnd('/')
+val approvedBackendHost = providers.environmentVariable("ATLAS_PROD_BACKEND_HOST").orNull?.trim()?.lowercase()
+val releaseStoreFile = providers.environmentVariable("ATLAS_RELEASE_STORE_FILE").orNull
+val releaseStorePassword = providers.environmentVariable("ATLAS_RELEASE_STORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("ATLAS_RELEASE_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("ATLAS_RELEASE_KEY_PASSWORD").orNull
+
 android {
     namespace = "com.atlas.trading"
     compileSdk = 35
 
     defaultConfig {
+        buildConfigField("String", "BACKEND_URL", "\"${productionBackendUrl ?: ""}\"")
         applicationId = "com.atlas.trading"
         minSdk = 26
         targetSdk = 35
@@ -18,6 +28,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     compileOptions {
@@ -30,10 +41,6 @@ android {
     }
 
     // Never sign a production artifact with the Android debug keystore.
-    val releaseStoreFile = providers.environmentVariable("ATLAS_RELEASE_STORE_FILE").orNull
-    val releaseStorePassword = providers.environmentVariable("ATLAS_RELEASE_STORE_PASSWORD").orNull
-    val releaseKeyAlias = providers.environmentVariable("ATLAS_RELEASE_KEY_ALIAS").orNull
-    val releaseKeyPassword = providers.environmentVariable("ATLAS_RELEASE_KEY_PASSWORD").orNull
 
     signingConfigs {
         create("releaseConfig") {
@@ -69,21 +76,44 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Evaluate the release-signing guard only when a release task is actually requested.
-            // This keeps CI/debug compilation independent of production keystore secrets while
-            // preserving a hard fail for every release build.
-            if (gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }) {
-                check(
-                    !releaseStoreFile.isNullOrBlank() &&
-                    !releaseStorePassword.isNullOrBlank() &&
-                    !releaseKeyAlias.isNullOrBlank() &&
-                    !releaseKeyPassword.isNullOrBlank()
-                ) {
-                    "Production release signing is not configured. Provide the ATLAS_RELEASE_* signing environment variables."
-                }
-            }
             signingConfig = signingConfigs.getByName("releaseConfig")
         }
+    }
+}
+
+val verifyProductionReleaseConfiguration = tasks.register("verifyProductionReleaseConfiguration") {
+    doLast {
+        val parsedBackend = runCatching { productionBackendUrl?.let { URI(it) } }.getOrNull()
+        val actualHost = parsedBackend?.host?.lowercase()
+        check(
+            !productionBackendUrl.isNullOrBlank() &&
+            parsedBackend?.scheme == "https" &&
+            !actualHost.isNullOrBlank() &&
+            !actualHost.contains("-dev-") &&
+            !actualHost.contains("ais-dev") &&
+            !approvedBackendHost.isNullOrBlank() &&
+            actualHost == approvedBackendHost
+        ) {
+            "BLOCKED: configure ATLAS_PROD_BACKEND_URL and the matching approved ATLAS_PROD_BACKEND_HOST in the production environment."
+        }
+        check(
+            !releaseStoreFile.isNullOrBlank() &&
+            !releaseStorePassword.isNullOrBlank() &&
+            !releaseKeyAlias.isNullOrBlank() &&
+            !releaseKeyPassword.isNullOrBlank()
+        ) {
+            "BLOCKED: production release signing requires all ATLAS_RELEASE_* signing environment variables."
+        }
+    }
+}
+
+tasks.configureEach {
+    if (
+        path.startsWith(":app:") &&
+        name.contains("Release", ignoreCase = true) &&
+        name != "verifyProductionReleaseConfiguration"
+    ) {
+        dependsOn(verifyProductionReleaseConfiguration)
     }
 }
 
@@ -98,7 +128,7 @@ dependencies {
     implementation("androidx.compose.material3:material3:1.3.1")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
-    implementation("androidx.biometric:biometric:1.2.0-alpha05")
+    implementation("androidx.biometric:biometric:1.1.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

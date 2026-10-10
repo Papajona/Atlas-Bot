@@ -25,8 +25,8 @@ import androidx.compose.ui.unit.sp
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModernSettingsScreen(
-    userName: String = "Alice Henderson",
-    userEmail: String = "alice.henderson@atlas.trading",
+    userName: String = "Customer",
+    userEmail: String = "Unavailable",
     onOpenOperatorConsole: () -> Unit = {},
     onOpenPortal: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -574,7 +574,7 @@ fun ModernSettingsScreen(
                     badge = "v3.10.47",
                     badgeBg = Color(0xFFF1F5F9),
                     badgeText = Color(0xFF475569),
-                    subtitle = "Production release with zero mock data",
+                    subtitle = "Data-source status is shown when verified backend data is available",
                     onClick = {
                         activeDialogTitle = "Atlas Trading System"
                         activeDialogContent = "Version: 3.10.47 (Build 1047)\nArchitecture: Jetpack Compose + Cloud Run FastAPI + PostgreSQL\nCompliance: Google Play Developer Program Compliant"
