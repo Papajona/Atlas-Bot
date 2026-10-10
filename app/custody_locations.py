@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from .config import settings
 from .db import CustodyAssetObservation, CustodyTransfer, utcnow
@@ -126,6 +126,51 @@ async def transition_custody_transfer(db, transfer_id: int, *, status: str,
     row.status = target
     row.updated_at = now
     return row
+
+
+async def flag_stale_custody_transfers(db, *, timeout_hours: int = 24, now: datetime | None = None) -> int:
+    """Move expired REQUESTED/SUBMITTED transfers to reconciliation, never to FAILED.
+
+    A timeout is not proof that an external transfer failed. This function only raises
+    an operational reconciliation flag; it does not release reserves or move money.
+    Caller owns the transaction and must commit the changes.
+    """
+    if isinstance(timeout_hours, bool) or int(timeout_hours) < 1:
+        raise ValueError("timeout_hours must be a positive integer")
+    current = now or utcnow()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    cutoff = current - timedelta(hours=int(timeout_hours))
+    stmt = (
+        select(CustodyTransfer)
+        .where(
+            or_(
+                and_(CustodyTransfer.status == "REQUESTED", CustodyTransfer.requested_at <= cutoff),
+                and_(CustodyTransfer.status == "SUBMITTED", CustodyTransfer.submitted_at.is_not(None),
+                     CustodyTransfer.submitted_at <= cutoff),
+            )
+        )
+        .with_for_update()
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    for row in rows:
+        try:
+            detail = json.loads(row.detail_json or "{}")
+            if not isinstance(detail, dict):
+                detail = {"previous_detail": detail}
+        except (TypeError, ValueError):
+            detail = {"previous_detail_unparsed": True}
+        detail["timeout_review"] = {
+            "flagged_at": current.isoformat(),
+            "timeout_hours": int(timeout_hours),
+            "previous_status": row.status,
+            "action": "RECONCILIATION_REQUIRED_NO_AUTOMATIC_RELEASE",
+        }
+        row.detail_json = json.dumps(detail, default=str, separators=(",", ":"))
+        row.status = "RECONCILIATION_REQUIRED"
+        row.updated_at = current
+    return len(rows)
+
 
 async def fresh_external_assets(db, *, currency: str = "USDT", provider: str = "binance") -> dict:
     """Only fresh observations count; in-flight transfers never count as assets."""
