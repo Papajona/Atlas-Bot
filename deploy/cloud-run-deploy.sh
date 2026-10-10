@@ -24,25 +24,9 @@ set -euo pipefail
 : "${SECRET_GEMINI_API_KEY_VERSION:?Set SECRET_GEMINI_API_KEY_VERSION}"
 SECRET_GROQ_API_KEY_VERSION="${SECRET_GROQ_API_KEY_VERSION:-}"
 
-# Paper trading does not disable the separate TRON deposit/custody path. Keep it off
-# by default; enabling any TRON funding requires explicit operator confirmation, and
-# mainnet additionally requires a second explicit confirmation.
-USDT_TRON_ENABLED="${USDT_TRON_ENABLED:-false}"
-USDT_TRON_NETWORK="${USDT_TRON_NETWORK:-mainnet}"
-if [[ "$USDT_TRON_ENABLED" != "true" && "$USDT_TRON_ENABLED" != "false" ]]; then
-  echo "ERROR: USDT_TRON_ENABLED must be exactly true or false." >&2
-  exit 2
-fi
-if [[ "$USDT_TRON_ENABLED" == "true" ]]; then
-  if [[ "${ALLOW_TRON_FUNDING:-}" != "YES" ]]; then
-    echo "ERROR: TRON funding is disabled by default; set ALLOW_TRON_FUNDING=YES only after funding-path approval." >&2
-    exit 2
-  fi
-  if [[ "$USDT_TRON_NETWORK" == "mainnet" && "${ALLOW_MAINNET_TRON_FUNDING:-}" != "YES" ]]; then
-    echo "ERROR: mainnet TRON funding requires ALLOW_MAINNET_TRON_FUNDING=YES after the custody/withdrawal review." >&2
-    exit 2
-  fi
-fi
+# Paper mode does not disable TRON custody; use the shared fail-closed gate.
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/tron-funding-gate.sh"
+atlas_configure_tron_funding
 
 # Always starts with a comma: it is appended directly after the last fixed secret in --set-secrets.
 AI_SECRET_ARGS=",GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}"
