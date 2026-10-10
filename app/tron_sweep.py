@@ -162,6 +162,8 @@ def classify_solidified_sweep(*, tx_body: dict[str, Any], receipt: dict[str, Any
     """Classify a sweep only from solidified transaction body + receipt evidence."""
     if not tx_body or not receipt:
         return "UNKNOWN", {"reason": "solidified transaction/receipt not yet available"}
+    if not isinstance(tx_body, dict) or not isinstance(receipt, dict):
+        return "REVIEW", {"reason": "solidified transaction or receipt has an invalid shape"}
     if str(tx_body.get("txID") or tx_body.get("txid") or "").lower() != transaction_id.lower():
         return "REVIEW", {"reason": "transaction id mismatch"}
     ret_list = tx_body.get("ret")
