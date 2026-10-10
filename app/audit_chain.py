@@ -5,9 +5,19 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from .db import AuditChainState, AuditLog, SessionLocal
+from .distributed import allow_rate_limit
 
 
 async def append_audit(db, *, event: str, detail: dict, actor_id: str = "") -> AuditLog:
+    # Bound abusive event volume per actor using the shared Redis limiter when configured.
+    # Never drop security/accounting events: annotate limited events and still append them.
+    allowed, remaining = await allow_rate_limit(
+        f"audit_chain:{actor_id or 'system'}", limit=100, window_seconds=60
+    )
+    audit_detail = dict(detail or {})
+    if not allowed:
+        audit_detail["audit_chain_rate_limited"] = True
+        audit_detail["audit_chain_rate_limit"] = {"limit": 100, "window_seconds": 60}
     # Lock before reading so PostgreSQL writers always hash from the committed predecessor.
     # populate_existing is required when this session already holds a stale identity-map object.
     locked = (
@@ -33,7 +43,7 @@ async def append_audit(db, *, event: str, detail: dict, actor_id: str = "") -> A
     payload = json.dumps(
         {
             "event": event,
-            "detail": detail,
+            "detail": audit_detail,
             "actor_id": actor_id,
             "created_at": created.isoformat(),
             "previous_hash": previous,
@@ -45,7 +55,7 @@ async def append_audit(db, *, event: str, detail: dict, actor_id: str = "") -> A
     event_hash = hashlib.sha256(payload.encode()).hexdigest()
     row = AuditLog(
         event=event,
-        detail=json.dumps(detail, default=str),
+        detail=json.dumps(audit_detail, default=str),
         actor_id=actor_id,
         previous_hash=previous,
         event_hash=event_hash,
