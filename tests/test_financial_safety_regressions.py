@@ -108,3 +108,63 @@ def test_funding_webhook_requires_fresh_timestamp_bound_signature():
     assert "x_funding_timestamp" in source
     assert "funding_webhook_max_skew_seconds" in _source("app/config.py")
     assert 'signed = str(timestamp).strip().encode() + b"." + raw_body' in source
+
+
+def test_customer_forex_start_fails_before_bot_creation_or_model_calls(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    import pytest
+    from fastapi import HTTPException
+    import app.main as main
+    from app.config import settings
+
+    calls = []
+    profile = SimpleNamespace(id=7)
+    state = SimpleNamespace(kill_switch=False, live_enabled=False)
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def get(self, model, _ident):
+            if model is main.AppState:
+                return state
+            raise AssertionError(f"unexpected database lookup: {model}")
+
+        async def commit(self):
+            calls.append("commit")
+
+    async def get_customer(*_args, **_kwargs):
+        return profile, {}
+
+    async def entitlements(*_args, **_kwargs):
+        return {"live": True}, None
+
+    async def forbidden_downstream(*_args, **_kwargs):
+        calls.append("downstream")
+        raise AssertionError("unsupported forex bot must fail before account creation or model calls")
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(main, "get_customer", get_customer)
+    monkeypatch.setattr(main, "_subscription_entitlements", entitlements)
+    monkeypatch.setattr(main, "_assert_established_noncrypto", lambda _req: None)
+    monkeypatch.setattr(main, "_get_or_create_customer_trading_account", forbidden_downstream)
+    monkeypatch.setattr(main, "_fetch_customer_oanda_data", forbidden_downstream)
+    monkeypatch.setattr(main, "dual_ai_trade_safety_review", forbidden_downstream)
+    monkeypatch.setattr(settings, "strategy_engine_enabled", True)
+    monkeypatch.setattr(settings, "paper_trading", True)
+    monkeypatch.setattr(settings, "live_trading_enabled", False)
+
+    req = SimpleNamespace(
+        asset="forex", symbol="EUR/USD", exchange="oanda", timeframe="1h",
+        days=30, risk_fraction=0.01, autonomous=True, interval_seconds=300,
+        strategy_candidate_id=None,
+    )
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(main.customer_start_bot(req, authorization="Bearer test-token"))
+
+    assert exc.value.status_code == 409
+    assert calls == []
