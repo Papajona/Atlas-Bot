@@ -56,6 +56,13 @@ class OandaBroker:
                 body = r.json()
             except Exception:
                 body = {"error": r.text[:500]}
+            # A server-side error or timeout response to a state-changing request may arrive after
+            # OANDA accepted the order/cancel. Keep the outcome UNKNOWN so the caller reconciles by
+            # client order ID instead of treating the request as safely failed and retrying it.
+            if method.upper() in {"POST", "PUT", "PATCH", "DELETE"} and (
+                r.status_code == 408 or r.status_code == 429 or r.status_code >= 500
+            ):
+                raise OandaUnknown(f"OANDA HTTP {r.status_code} on state-changing request: {body}")
             raise OandaError(f"OANDA HTTP {r.status_code}: {body}")
         return r.json()
 
@@ -254,7 +261,12 @@ class OandaBroker:
             order = data.get("order") or {}
             if order:
                 return self.order(str(order.get("id") or ""))
+        except OandaUnknown:
+            # A failed direct lookup is not evidence that the order does not exist. Propagate the
+            # uncertainty instead of hiding it behind a bounded history fallback.
+            raise
         except OandaError:
+            # A definite lookup rejection may use the read-only history fallback below.
             pass
         data = self._request("GET", f"/v3/accounts/{self.config.account_id}/orders",
                              params={"count": min(max(count, 1), 500)})
