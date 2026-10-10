@@ -91,38 +91,47 @@ jobs:
           print("PASS: database URI hostname matches configured staging Supabase project; credentials were not printed")
           PY
 
-          # libpq reads the URI from a mode-0600 file; no password/URI is placed in logs or command arguments.
-          export PGPASSFILE="$RUNNER_TEMP/atlas-empty-pgpass"
-          : > "$PGPASSFILE"
-          chmod 600 "$PGPASSFILE"
-          export DATABASE_URL="$(cat "$RUNNER_TEMP/atlas-staging-db-url")"
-          export PGOPTIONS="-c default_transaction_read_only=on -c statement_timeout=10000"
           python - <<'PY'
           import os, subprocess, sys
+          from pathlib import Path
           from urllib.parse import urlparse
-          uri = os.environ["DATABASE_URL"]
+          uri = Path(os.environ["RUNNER_TEMP"], "atlas-staging-db-url").read_text().strip()
+          parsed = urlparse(uri)
           expected_role = os.environ["EXPECTED_RUNTIME_DB_ROLE"]
+          # Put parsed credentials only in the child environment, never argv or logs.
+          env = {k:v for k,v in os.environ.items() if k not in {"DATABASE_URL","PGPASSWORD","PGHOST","PGPORT","PGUSER","PGDATABASE"}}
+          env.update({
+              "PGHOST": parsed.hostname or "",
+              "PGPORT": str(parsed.port or 5432),
+              "PGUSER": parsed.username or "",
+              "PGPASSWORD": parsed.password or "",
+              "PGDATABASE": parsed.path.lstrip("/") or "",
+              "PGSSLMODE": "require",
+              "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=10000",
+          })
           query = """
           SELECT current_database(), current_user, session_user,
                  (SELECT string_agg(version_num, ',' ORDER BY version_num) FROM public.alembic_version),
                  (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
                    WHERE n.nspname='public' AND c.relkind IN ('r','p')),
                  (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relrowsecurity);
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relrowsecurity),
+                 COALESCE((SELECT rolbypassrls OR rolsuper FROM pg_roles WHERE rolname=current_user), false),
+                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner)=current_user);
           """
           p = subprocess.run(
-              ["psql", uri, "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", query],
-              check=False, capture_output=True, text=True,
-              env={**os.environ, "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=10000"},
+              ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", query],
+              check=False, capture_output=True, text=True, env=env,
           )
           if p.returncode:
               print("BLOCKED: read-only database identity query failed; database output withheld")
               sys.exit(1)
           fields = p.stdout.strip().split("|")
-          if len(fields) != 6:
+          if len(fields) != 8:
               raise SystemExit("BLOCKED: unexpected identity query output")
-          db, role, login_role, revision, table_count, unprotected_count = fields
-          print(f"Observed database={db}, current_role={role}, login_role={login_role}, revision={revision or 'missing'}, public_tables={table_count}, tables_without_rls={unprotected_count}")
+          db, role, login_role, revision, table_count, unprotected_count, bypass_rls, owned_count = fields
+          print(f"Observed database={db}, current_role={role}, login_role={login_role}, revision={revision or 'missing'}, public_tables={table_count}, tables_without_rls={unprotected_count}, role_bypasses_rls={bypass_rls}, owned_public_tables={owned_count}")
           if db != "postgres":
               raise SystemExit("BLOCKED: unexpected staging database name")
           if role != expected_role:
@@ -131,9 +140,10 @@ jobs:
               raise SystemExit("BLOCKED: Alembic revision is missing or ambiguous")
           if int(table_count) == 0:
               raise SystemExit("BLOCKED: public schema table inventory is empty")
-          # Preflight is intentionally read-only; RLS rollout requires separate reviewed staging migration tests.
           if int(unprotected_count) > 0:
               raise SystemExit("BLOCKED: staging database still has public tables without RLS; do not deploy or run migration automatically")
+          if bypass_rls.lower() != "true" and int(owned_count) != int(table_count):
+              raise SystemExit("BLOCKED: runtime role neither bypasses RLS nor owns every public table; application access may fail after lockdown")
           print("PASS: staging identity and current RLS posture verified; no migration or write was executed")
           PY
-          rm -f "$RUNNER_TEMP/atlas-staging-db-url" "$PGPASSFILE"
+          rm -f "$RUNNER_TEMP/atlas-staging-db-url"

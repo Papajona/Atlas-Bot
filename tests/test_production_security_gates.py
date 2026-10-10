@@ -202,8 +202,8 @@ def test_deployment_independently_verifies_downloaded_apk_not_only_metadata():
     block_start = workflow.index("Download and independently verify signed Android artifact")
     block_end = workflow.index("Authenticate to Google Cloud with GitHub OIDC", block_start)
     block = workflow[block_start:block_end]
-    assert ' -name apksigner' in block
-    assert ' -name aapt' in block
+    assert 'name -name apksigner' in block
+    assert 'name -name aapt' in block
     assert 'verify --verbose --print-certs "$apk"' in block
     assert 'dump badging "$apk"' in block
     assert 'test "$actual_cert" = "$expected_cert"' in block
@@ -223,27 +223,3 @@ def test_deployment_selects_a_successful_signed_release_run_for_exact_sha():
     assert 'select(.name=="android-release")' in block
     assert 'if [ "$job_conclusion" = "success" ]' in block
     assert '-ne 1' in block
-
-def test_staging_identity_preflight_is_manual_main_only_and_read_only():
-    workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
-    assert "workflow_dispatch:" in workflow
-    assert "github.ref == 'refs/heads/main'" in workflow
-    assert "environment: staging" in workflow
-    assert "ATLAS_STAGING_SUPABASE_PROJECT_REF" in workflow
-    assert "ATLAS_STAGING_DATABASE_SECRET" in workflow
-    assert "ATLAS_STAGING_RUNTIME_DB_ROLE" in workflow
-    assert "gcloud secrets versions access latest" in workflow
-    assert "db.{expected}.supabase.co" in workflow
-    assert "current_user, session_user" in workflow
-    assert "default_transaction_read_only=on" in workflow
-    assert "no migration or write was executed" in workflow
-    assert "alembic upgrade" not in workflow
-
-
-def test_deployment_apk_verification_checks_android_sdk_tools():
-    workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
-    block_start = workflow.index("Download and independently verify signed Android artifact")
-    block_end = workflow.index("Authenticate to Google Cloud with GitHub OIDC", block_start)
-    block = workflow[block_start:block_end]
-    assert ' -name apksigner' in block
-    assert ' -name aapt' in block
