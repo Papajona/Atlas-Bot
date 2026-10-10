@@ -15,7 +15,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        buildConfigField("String", "BACKEND_URL", "\\"${productionBackendUrl ?: ""}\\"")
+        buildConfigField("String", "BACKEND_URL", "\"${productionBackendUrl ?: ""}\"")
         applicationId = "com.atlas.trading"
         minSdk = 26
         targetSdk = 35
