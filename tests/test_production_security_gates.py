@@ -247,3 +247,10 @@ def test_staging_identity_preflight_does_not_confuse_identity_with_migration_rea
     assert "expected before migration 0049" in workflow
     assert "no migration or write was executed" in workflow
     assert "alembic upgrade" not in workflow
+
+
+def test_staging_preflight_owner_compatibility_matches_runtime_guard():
+    workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
+    guard = (ROOT / "app" / "startup_guards.py").read_text(encoding="utf-8")
+    assert "c.relrowsecurity AND NOT c.relforcerowsecurity" in workflow
+    assert "c.relowner <> r.oid OR c.relforcerowsecurity" in guard

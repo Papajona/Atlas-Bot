@@ -118,7 +118,7 @@ jobs:
                    WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relrowsecurity),
                  COALESCE((SELECT rolbypassrls OR rolsuper FROM pg_roles WHERE rolname=current_user), false),
                  (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner)=current_user);
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner)=current_user AND c.relrowsecurity AND NOT c.relforcerowsecurity);
           """
           p = subprocess.run(
               ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", query],
@@ -131,7 +131,7 @@ jobs:
           if len(fields) != 8:
               raise SystemExit("BLOCKED: unexpected identity query output")
           db, role, login_role, revision, table_count, unprotected_count, bypass_rls, owned_count = fields
-          print(f"Observed database={db}, current_role={role}, login_role={login_role}, revision={revision or 'missing'}, public_tables={table_count}, tables_without_rls={unprotected_count}, role_bypasses_rls={bypass_rls}, owned_public_tables={owned_count}")
+          print(f"Observed database={db}, current_role={role}, login_role={login_role}, revision={revision or 'missing'}, public_tables={table_count}, tables_without_rls={unprotected_count}, role_bypasses_rls={bypass_rls}, rls_bypass_compatible_owned_tables={owned_count}")
           if db != "postgres":
               raise SystemExit("BLOCKED: unexpected staging database name")
           if role != expected_role:
