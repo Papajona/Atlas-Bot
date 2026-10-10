@@ -32,6 +32,14 @@ for _assignment in "${_ADMIN_ROLE_ITEMS[@]}"; do
     echo "ERROR: invalid ADMIN_ROLE_ASSIGNMENTS entry; expected UUID:ROLE." >&2
     exit 2
   fi
+  if [[ ! "${_uid}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    echo "ERROR: administrator role assignment user IDs must be UUIDs." >&2
+    exit 2
+  fi
+  case "${_role^^}" in
+    READ_ONLY|OPERATIONS|RISK_OFFICER|TREASURY|COMPLIANCE|FINANCE|ADMINISTRATOR) ;;
+    *) echo "ERROR: invalid administrator role in ADMIN_ROLE_ASSIGNMENTS." >&2; exit 2 ;;
+  esac
   if [[ "${_role^^}" == "ADMINISTRATOR" ]]; then
     for _allowed_uid in "${_ADMIN_ALLOWLIST[@]}"; do
       _allowed_uid="${_allowed_uid//[[:space:]]/}"
