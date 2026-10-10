@@ -37,7 +37,7 @@ def test_live_execution_spread_is_blocked_above_configured_ceiling():
     ("stop_loss_price", "invalid_stop_loss_price"),
     ("take_profit_price", "invalid_take_profit_price"),
 ])
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), 0.0, -1.0])
 def test_risk_governor_blocks_non_finite_protective_prices(field, reason, value):
     values = {"stop_loss_price": 95.0, "take_profit_price": 110.0}
     values[field] = value
