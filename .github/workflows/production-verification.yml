@@ -108,6 +108,10 @@ jobs:
       - name: Repository secret scan
         run: python scripts/check_no_secrets.py
       - name: AI model/provider verification when credentials are supplied
+        id: ai_provider_verification
+        # Keep running independent security/startup/regression gates after a provider outage.
+        # The final gate below still fails the workflow unless provider verification passes.
+        continue-on-error: true
         env:
           PYTHONPATH: .
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -159,3 +163,13 @@ jobs:
           ATLAS_POSTGRES_URL: ""
           REDIS_URL: ""
         run: python -m pytest -q
+      - name: Enforce provider verification result
+        if: always()
+        env:
+          PROVIDER_VERIFICATION_OUTCOME: ${{ steps.ai_provider_verification.outcome }}
+        run: |
+          if [ "$PROVIDER_VERIFICATION_OUTCOME" != "success" ]; then
+            echo "BLOCKED: production gate requires successful live AI provider verification."
+            exit 1
+          fi
+          echo "AI provider verification passed."
