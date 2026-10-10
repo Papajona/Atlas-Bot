@@ -286,7 +286,7 @@ def test_provider_recovery_short_history_page_does_not_prove_payout_absence(monk
     provider.exchange = SimpleNamespace(
         has={"fetchWithdrawals": True},
         fetch_withdrawals=lambda currency, since, limit: [
-            {"id": "provider-1", "info": {"clientOrderId": "other-1"}},
+            {"id": "provider-1", "info": {"clientOrderId": "other-1", "memo": "audit note mentions withdrawal:missing but is not its client ID"}},
             {"id": "provider-2", "info": {"clientOrderId": "other-2"}},
         ],
     )
