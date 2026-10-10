@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
+import android.view.WindowManager
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -38,10 +39,11 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
 
         cleanLegacyCache()
 
-        val backendUrl = getString(R.string.backend_url).trimEnd('/')
+        val backendUrl = BuildConfig.BACKEND_URL.trimEnd('/')
 
         setContent {
             var themeMode by remember { mutableStateOf(ThemePreferences.getThemeMode(this@MainActivity)) }
@@ -79,7 +81,7 @@ class MainActivity : AppCompatActivity() {
 
                 if (!showOperatorConsole) {
                     UserDashboardScreen(
-                        userName = "Alice",
+                        userName = "Customer",
                         backendUrl = backendUrl,
                         onOpenOperatorConsole = { showOperatorConsole = true },
                         onOpenPortal = { openPortal() }
@@ -204,7 +206,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun openPortal() {
         val backendUrl = getString(R.string.backend_url).trimEnd('/')
-        val trustedHost = getString(R.string.trusted_web_host).trim().lowercase()
+        val trustedHost = Uri.parse(BuildConfig.BACKEND_URL).host.orEmpty().lowercase()
 
         val targetUri = Uri.parse(backendUrl)
         val host = targetUri.host.orEmpty().lowercase()
