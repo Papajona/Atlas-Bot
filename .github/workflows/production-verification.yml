@@ -150,4 +150,12 @@ jobs:
           print("production startup/shutdown validation passed")
           PY
       - name: Full regression suite in safe mode
+        # Production startup was validated in the previous step. Run application
+        # regression tests in the same isolated SQLite/no-Redis mode as Atlas CI;
+        # PostgreSQL concurrency is exercised by its dedicated required workflow.
+        env:
+          ENVIRONMENT: development
+          DATABASE_URL: sqlite+aiosqlite:///./test_trading.db
+          ATLAS_POSTGRES_URL: ""
+          REDIS_URL: ""
         run: python -m pytest -q
