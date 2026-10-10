@@ -120,3 +120,13 @@ def test_customer_withdrawal_retry_is_idempotent_before_reservation():
     assert '"idempotent": True' in block
     assert block.index("existing =") < block.index("stepup.used_at =")
     assert block.index("existing =") < block.index("reserve_withdrawal(")
+
+
+def test_mark_not_sent_binds_authenticated_operator_and_enforces_separation():
+    main = Path("app/main.py").read_text()
+    start = main.index('@app.post("/api/admin/withdrawals/{withdrawal_id}/mark-not-sent")')
+    end = main.index('@app.post("/api/admin/withdrawals/{withdrawal_id}/reject")', start)
+    block = main[start:end]
+    assert 'authenticated_operator = str(claims.get("sub") or claims.get("user_id") or "").strip()' in block
+    assert 'hmac.compare_digest(authenticated_operator, str(req.operator_id or "").strip())' in block
+    assert "release_separation_violation(req.operator_id, x_release_token, [w.first_approved_by, w.second_approved_by])" in block
