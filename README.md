@@ -1,5 +1,5 @@
 
-## Current release: 3.10.47
+## Current release candidate: 3.10.48
 
 This release is a production-safety hardening candidate. Live trading and live payouts remain fail-closed until the external runtime verification gates are completed.
 # Atlas Trading — customer USDT trading platform
