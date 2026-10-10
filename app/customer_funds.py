@@ -281,7 +281,7 @@ async def reserve_trading(db, customer_id: int, amount: float, *, reference_id: 
 
 async def release_trading(db, customer_id: int, amount: float, *, reference_id: str) -> CustomerLedgerAccount:
     amount_d = _q(amount)
-    ledger = await get_or_create_ledger(db, customer_id, USDT)
+    await get_or_create_ledger(db, customer_id, USDT)
     idem = f"release:{reference_id}:{customer_id}"
     fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
         CustomerLedgerAccount.customer_id == customer_id,
@@ -346,7 +346,7 @@ async def release_withdrawal(db, customer_id: int, amount: float, *, reference_i
     amount_d = _q(amount)
     if amount_d <= 0:
         raise ValueError("withdrawal release amount must be positive")
-    ledger = await get_or_create_ledger(db, customer_id, USDT)
+    await get_or_create_ledger(db, customer_id, USDT)
     idem = f"withdrawal-release:{reference_id}"
     fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
         CustomerLedgerAccount.customer_id == customer_id,
@@ -452,7 +452,7 @@ async def settle_realized_pnl(db, *, customer_id: int, amount: float, reference_
     pnl = _q(amount)
     if pnl == 0:
         return
-    ledger = await get_or_create_ledger(db, customer_id, USDT)
+    await get_or_create_ledger(db, customer_id, USDT)
     idem = f"settlement:{reference_id}"
     if (await db.execute(select(LedgerJournal).where(
         LedgerJournal.idempotency_key == idem
@@ -508,7 +508,7 @@ async def settle_trading_fee(db, *, customer_id: int, fee: float, reference_id: 
     fee_d = _q(fee)
     if fee_d <= 0:
         return
-    ledger = await get_or_create_ledger(db, customer_id, USDT)
+    await get_or_create_ledger(db, customer_id, USDT)
     idem = f"fee:{reference_id}"
     if (await db.execute(select(LedgerJournal).where(
         LedgerJournal.idempotency_key == idem
