@@ -182,3 +182,16 @@ def test_production_deploy_requires_an_explicit_valid_administrator_bootstrap():
     assert "every bootstrap role assignment must be present in ADMIN_SUPABASE_USER_IDS" in deploy
     assert "@ADMIN_ROLE_ASSIGNMENTS=${ADMIN_ROLE_ASSIGNMENTS}" in deploy
     assert "ADMIN_ROLE_ASSIGNMENTS: ${{ secrets.ADMIN_ROLE_ASSIGNMENTS }}" in workflow
+
+def test_production_deploy_requires_verified_signed_android_artifact_for_exact_commit():
+    android = (ROOT / ".github" / "workflows" / "android-release.yml").read_text(encoding="utf-8")
+    deploy = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+    assert "workflow_dispatch:" in android
+    assert "github.ref == 'refs/heads/main'" in android
+    assert "ATLAS_RELEASE_CERT_SHA256" in android
+    assert "atlas-release-bundle" in android
+    assert 'select(.name=="android-release")' in deploy
+    assert "atlas-release-apk" in deploy
+    assert "sha256sum --check atlas-release.sha256" in deploy
+    assert "EXPECTED_CERT_SHA256" in deploy
+    assert "package=com.atlas.trading" in deploy
