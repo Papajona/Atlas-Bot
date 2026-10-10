@@ -45,8 +45,56 @@ jobs:
           CREATE ROLE anon NOLOGIN;
           CREATE ROLE authenticated NOLOGIN;
           SQL
-      - name: Apply migrations
-        run: python -m alembic upgrade head
+      - name: Apply migrations through pre-lockdown revision
+        run: python -m alembic upgrade 0048_merge_subscription_and_application_heads
+      - name: Seed and verify pre-lockdown API grants
+        run: |
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          GRANT USAGE, CREATE ON SCHEMA public TO anon, authenticated;
+          GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO anon, authenticated;
+          GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated;
+          DO $seed_public_api_grants$
+          DECLARE
+              api_role text;
+              function_signature text;
+          BEGIN
+              FOREACH api_role IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+                  IF NOT has_schema_privilege(api_role, 'public', 'CREATE') THEN
+                      RAISE EXCEPTION 'pre-lockdown fixture failed: % lacks CREATE on public schema', api_role;
+                  END IF;
+                  IF NOT EXISTS (
+                      SELECT 1
+                      FROM pg_class c
+                      JOIN pg_namespace n ON n.oid = c.relnamespace
+                      WHERE n.nspname = 'public'
+                        AND c.relkind IN ('r', 'p')
+                        AND has_table_privilege(api_role, c.oid, 'SELECT')
+                  ) THEN
+                      RAISE EXCEPTION 'pre-lockdown fixture failed: % has no table SELECT grant', api_role;
+                  END IF;
+              END LOOP;
+
+              FOREACH function_signature IN ARRAY ARRAY[
+                  'public.atlas_block_ledger_mutation()',
+                  'public.atlas_ledger_journal_deferred_check()',
+                  'public.atlas_validate_ledger_journal(integer)'
+              ] LOOP
+                  IF to_regprocedure(function_signature) IS NOT NULL THEN
+                      EXECUTE format(
+                          'GRANT EXECUTE ON FUNCTION %s TO anon, authenticated',
+                          function_signature
+                      );
+                      IF NOT has_function_privilege('anon', function_signature, 'EXECUTE')
+                         OR NOT has_function_privilege('authenticated', function_signature, 'EXECUTE') THEN
+                          RAISE EXCEPTION 'pre-lockdown fixture failed to grant EXECUTE on %', function_signature;
+                      END IF;
+                  END IF;
+              END LOOP;
+          END
+          $seed_public_api_grants$;
+          SQL
+      - name: Apply public-schema lockdown
+        run: python -m alembic upgrade 0049_public_schema_rls_lockdown
       - name: Verify public-schema lockdown at runtime
         run: |
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
@@ -64,6 +112,10 @@ jobs:
               END IF;
 
               FOREACH api_role IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+                  IF has_schema_privilege(api_role, 'public', 'CREATE') THEN
+                      RAISE EXCEPTION 'role % retains CREATE on public schema', api_role;
+                  END IF;
+
                   IF EXISTS (
                       SELECT 1 FROM pg_class c
                       JOIN pg_namespace n ON n.oid = c.relnamespace
