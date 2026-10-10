@@ -18,7 +18,7 @@ def test_risk_per_trade_limit_blocks_oversized_stop_risk():
     assert d.action=="BLOCK" and "risk_per_trade_limit" in d.reasons
 
 def test_risk_per_trade_limit_allows_sized_position():
-    d=evaluate_trade(side="buy",price=100,quantity=0.5,live=True,stop_loss_price=90,take_profit_price=120,signal={},equity=1000,risk_per_trade=0.005,risk_tolerance=0.10)
+    d=evaluate_trade(side="buy",price=100,quantity=0.5,live=True,stop_loss_price=90,take_profit_price=120,signal={"data_quality": {"valid": True}},equity=1000,risk_per_trade=0.005,risk_tolerance=0.10)
     assert d.action=="ALLOW"
 
 
