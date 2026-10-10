@@ -49,11 +49,16 @@ def _check_gemini(model: str) -> bool:
             "generationConfig": {"maxOutputTokens": 8, "temperature": 0},
         },
     )
-    candidates = body.get("candidates") or []
+    candidates = body.get("candidates")
     text = ""
-    if candidates:
-        parts = (candidates[0].get("content") or {}).get("parts") or []
-        text = "".join(str(part.get("text") or "") for part in parts)
+    if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
+        content = candidates[0].get("content")
+        parts = content.get("parts") if isinstance(content, dict) else []
+        if isinstance(parts, list):
+            text = "".join(
+                part.get("text", "") for part in parts
+                if isinstance(part, dict) and isinstance(part.get("text", ""), str)
+            )
     ok = status == 200 and bool(text.strip())
     print(f"[{'PASS' if ok else 'FAIL'}] Gemini {model}: " +
           ("generation succeeded" if ok else f"generation failed (HTTP {status or 'network/error'})"))
@@ -74,9 +79,12 @@ def _check_groq(model: str) -> bool:
             "temperature": 0,
         },
     )
-    choices = body.get("choices") or []
-    message = choices[0].get("message") if choices else None
-    ok = status == 200 and isinstance(message, dict) and bool(str(message.get("content") or "").strip())
+    choices = body.get("choices")
+    message = choices[0].get("message") if (
+        isinstance(choices, list) and choices and isinstance(choices[0], dict)
+    ) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    ok = status == 200 and isinstance(content, str) and bool(content.strip())
     print(f"[{'PASS' if ok else 'FAIL'}] Groq {model}: " +
           ("chat completion succeeded" if ok else f"chat completion failed (HTTP {status or 'network/error'})"))
     return ok
