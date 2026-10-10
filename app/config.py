@@ -97,6 +97,7 @@ class Settings(BaseSettings):
     # Pilot funding control: blockchain-confirmed deposits remain pending until an authorized admin approves them.
     funding_manual_review_required: bool = True
     live_confirmation_text: str = "ENABLE_LIVE_TRADING"
+    live_enable_request_ttl_minutes: int = 15
     require_single_worker_for_live: bool = True
     # Daily autonomous market intelligence + research cycle.
     daily_research_enabled: bool = True
@@ -176,6 +177,14 @@ class Settings(BaseSettings):
     # Withdrawal approval/execution controls. Fund release is fail-closed unless explicitly configured.
     withdrawals_enabled: bool = True
     withdrawal_dual_approval: bool = True
+    # A payout left in SUBMITTING longer than this with no provider id may be resolved via mark-not-sent
+    # (still dual-control + provider recovery). Shorter windows risk racing an in-flight send.
+    withdrawal_stale_submitting_minutes: int = 15
+    # Name of the exchange-native client/withdraw-order-id parameter, verified on that exchange's testnet
+    # (e.g. set only after confirming the exchange stores and returns it). Empty = recovery can never
+    # prove a payout was NOT sent, so mark-not-sent is refused for the ccxt provider.
+    payout_client_id_param: str = ""
+    payout_recovery_lookback_hours: int = 72
     withdrawal_max_amount: float = 5000.0
     withdrawal_high_risk_threshold: float = 0.75
     # Comma-separated id:token pairs, e.g. "finance-01:secret,finance-02:secret".

@@ -312,7 +312,9 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
                 # decide whether new cash needs to be reserved for this order, matching the
                 # existing behavior. account_reduce_only above is the stricter, magnitude-capped
                 # check used only to decide whether a HALTED account may still place this order.
-                reducing = any((p.quantity > 0 > signed) or (p.quantity < 0 < signed) for p in positions_for_symbol)
+                # An order larger than the opposing position flips into new exposure, so it is NOT exempt
+                # from the cash requirement (same strict test as account_reduce_only above).
+                reducing = account_reduce_only
                 required_cash = 0.0 if reducing else price * quantity
                 if float(ledger.available) + 1e-9 < required_cash:
                     raise RiskBlocked("Order exceeds the customer's available funded USDT balance")
@@ -335,7 +337,10 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
             qpos = qpos.where(Position.customer_id == customer_id)
         existing_positions = (await db.execute(qpos)).scalars().all()
         signed = quantity if side == "buy" else -quantity
-        reducing = any((p.quantity > 0 > signed) or (p.quantity < 0 < signed) for p in existing_positions)
+        # Magnitude-capped: only an order no larger than the opposing position is a pure reduce. A larger order
+        # flips into new exposure and must pass every new-entry control (limits, breakers, protective stop).
+        opposing_total = sum(abs(p.quantity) for p in existing_positions if (p.quantity > 0 > signed) or (p.quantity < 0 < signed))
+        reducing = opposing_total > 0 and quantity <= opposing_total + 1e-9
 
         if settings.discipline_enabled and not reducing:
             now = datetime.now(timezone.utc)
@@ -1209,11 +1214,12 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     qpos = select(Position).where(Position.customer_id == customer_id, Position.symbol == symbol, Position.quantity != 0)
                     positions = (await gate_db.execute(qpos)).scalars().all()
                     signed = amount if side == "buy" else -amount
-                    reduce_only = any((p.quantity > 0 > signed) or (p.quantity < 0 < signed) for p in positions)
-                    # Exchange-level reduceOnly is stricter than the gate flag above: spot venues reject the parameter, and an
-                    # order larger than the open position would be a flip, which reduceOnly would reject or clip.
                     opposing_qty = sum(abs(float(p.quantity)) for p in positions if (p.quantity > 0 > signed) or (p.quantity < 0 < signed))
-                    exchange_reduce_only = bool(opposing_qty > 0 and amount <= opposing_qty + 1e-9)
+                    # Magnitude-capped: an order larger than the open position is a flip (new exposure), so it must not
+                    # be waved through the live gate as "reduce only" (e.g. for a HALTED account).
+                    reduce_only = bool(opposing_qty > 0 and amount <= opposing_qty + 1e-9)
+                    # Spot venues reject the exchange-level reduceOnly parameter; it is only sent on derivatives markets.
+                    exchange_reduce_only = reduce_only
                     await assert_live_system_enabled(gate_db, asset=asset, customer_id=customer_id, exchange=exchange, side=side, quantity=amount, reduce_only=reduce_only)
             else:
                 async with SessionLocal() as gate_db:

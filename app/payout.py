@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import time
 import hashlib
 import hmac
 import json
@@ -85,10 +86,15 @@ class CCXTPayoutProvider:
     async def send(self, *, currency, amount, destination, tag, network, idempotency_key, metadata):
         if not self.exchange.has.get("withdraw"):
             raise PayoutError(f"{self.exchange.id} does not advertise withdrawal support")
-        params = {"clientOrderId": idempotency_key}
+        params = {}
+        # Only send a client id under the exchange-native parameter name an operator has verified on
+        # that exchange's testnet. An unverified name is ignored or rejected by the exchange, which
+        # would make idempotency and history recovery look safe when they are not.
+        if settings.payout_client_id_param:
+            params[settings.payout_client_id_param] = idempotency_key
         if network:
             params["network"] = network
-        # Some exchanges reject unsupported clientOrderId; callers must reconcile on UNKNOWN.
+        # Callers must reconcile on UNKNOWN.
         try:
             tx = await self._call(self.exchange.withdraw, currency, amount, destination, tag, params)
         except Exception as e:
@@ -114,18 +120,22 @@ class CCXTPayoutProvider:
         if not self.exchange.has.get("fetchWithdrawals"):
             raise PayoutError(f"{self.exchange.id} does not support withdrawal history lookup")
         try:
-            rows = await self._call(self.exchange.fetch_withdrawals, currency, None, 100)
+            since_ms = int((time.time() - max(1, int(settings.payout_recovery_lookback_hours)) * 3600) * 1000)
+            rows = await self._call(self.exchange.fetch_withdrawals, currency, since_ms, 100)
         except Exception as e:
             raise PayoutUnknown(str(e)) from e
         for tx in rows or []:
             raw = tx or {}
             info = raw.get("info") or {}
-            if idempotency_key in json.dumps(raw, sort_keys=True) or idempotency_key == str(info.get("clientOrderId") or info.get("idempotency_key") or ""):
+            if idempotency_key in json.dumps(raw, sort_keys=True) or idempotency_key == str(info.get("clientOrderId") or info.get("idempotency_key") or info.get(settings.payout_client_id_param or "clientOrderId") or ""):
                 provider_id = str(raw.get("id") or raw.get("txid") or "")
                 if provider_id:
                     raw_status = str(raw.get("status") or "PENDING").upper()
                     mapped = {"OK":"COMPLETED","SUCCESS":"COMPLETED","DONE":"COMPLETED","FAILED":"FAILED","CANCELED":"FAILED","CANCELLED":"FAILED"}.get(raw_status, "PENDING")
                     return PayoutResult(self.name, provider_id, mapped, raw_status, raw)
+        if not settings.payout_client_id_param:
+            # Without a verified exchange-side client id, absence from a bounded history window proves nothing.
+            raise PayoutUnknown("Provider history has no match, but no verified client-id parameter is configured; absence is not proof the payout was not sent")
         raise PayoutNotFound("No matching withdrawal was found in provider history")
 
 
