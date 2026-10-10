@@ -128,7 +128,21 @@ class CCXTPayoutProvider:
         for tx in rows:
             raw = tx or {}
             info = raw.get("info") or {}
-            if idempotency_key in json.dumps(raw, sort_keys=True) or idempotency_key == str(info.get("clientOrderId") or info.get("idempotency_key") or info.get(settings.payout_client_id_param or "clientOrderId") or ""):
+            # Match only exact client-id fields. Searching serialized transaction JSON for a substring
+            # can falsely associate an unrelated withdrawal whose memo/metadata merely contains this key.
+            candidate_ids = (
+                raw.get("clientOrderId"),
+                raw.get("clientOrderID"),
+                raw.get("client_id"),
+                raw.get("idempotency_key"),
+                raw.get(settings.payout_client_id_param) if settings.payout_client_id_param else None,
+                info.get("clientOrderId"),
+                info.get("clientOrderID"),
+                info.get("client_id"),
+                info.get("idempotency_key"),
+                info.get(settings.payout_client_id_param) if settings.payout_client_id_param else None,
+            )
+            if any(value is not None and str(value) == idempotency_key for value in candidate_ids):
                 provider_id = str(raw.get("id") or raw.get("txid") or "")
                 if provider_id:
                     raw_status = str(raw.get("status") or "PENDING").upper()
