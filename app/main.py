@@ -4957,6 +4957,19 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
         await websocket.close(code=1008, reason="Authenticated identity missing")
         return
 
+    # Distributed per-user handshake throttle complements the per-process active cap.
+    try:
+        allowed, _ = await allow_rate_limit(
+            f"ws-risk:user:{user_id}", _WS_MAX_CONNECTIONS_PER_USER, 60
+        )
+    except Exception:
+        logger.exception("risk websocket rate-limit check failed")
+        await websocket.close(code=1013, reason="Telemetry connection limit unavailable")
+        return
+    if not allowed:
+        await websocket.close(code=1013, reason="Telemetry connection rate limit exceeded")
+        return
+
     connection_id = id(websocket)
     if not await _reserve_ws_connection(user_id, connection_id):
         await websocket.close(code=1013, reason="Too many telemetry connections")
