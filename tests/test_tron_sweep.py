@@ -28,10 +28,12 @@ def test_sweep_rejects_source_treasury_same():
         return
     assert False
 
-from app.tron_sweep import classify_solidified_sweep
+from app.tron_sweep import classify_solidified_sweep, TRANSFER_TOPIC
 
 
 def test_solidified_sweep_success_with_transfer_event():
+    # Ethereum/TRON TRC-20 Transfer(address,address,uint256) topic (Keccak-256).
+    assert TRANSFER_TOPIC == "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
     import pytest
     pytest.importorskip("bip_utils")
     source = 'TSource'
@@ -50,7 +52,7 @@ def test_solidified_sweep_success_with_transfer_event():
             n=n*58+alphabet.index(ch)
         raw=(n.to_bytes(25,'big'))[:-4]
         return ('00'*12 + raw[1:].hex()).rjust(64,'0')
-    receipt = {'id':'a'*64,'result':'SUCCESS','receipt':{'result':'SUCCESS'},'log':[{'address':'41'+'00'*20,'topics':['ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a9df523b3ef',addr_topic(source),addr_topic(treasury)],'data':hex(1000000)[2:].rjust(64,'0')}]}
+    receipt = {'id':'a'*64,'result':'SUCCESS','receipt':{'result':'SUCCESS'},'log':[{'address':'41'+'00'*20,'topics':['ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',addr_topic(source),addr_topic(treasury)],'data':hex(1000000)[2:].rjust(64,'0')}]}
     # Contract address must match the event; use the configured USDT contract.
     receipt['log'][0]['address']='41'+'11'*20
     tx={'txID':'a'*64,'ret':[{'contractRet':'SUCCESS'}]}
