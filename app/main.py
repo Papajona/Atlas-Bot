@@ -1650,7 +1650,8 @@ async def _supabase_user(access_token: str) -> dict:
     return user
 
 
-_customer_jwks_cache: dict = {"expires": 0.0, "keys": {}}
+_customer_jwks_cache: dict = {"expires": 0.0, "keys": {}, "last_fetch": 0.0}
+_JWKS_FORCED_REFRESH_MIN_INTERVAL = 30.0
 _jwks_refresh_lock = asyncio.Lock()
 
 
@@ -1658,22 +1659,42 @@ async def _load_supabase_jwks(force: bool = False) -> dict:
     global _customer_jwks_cache
     async with _jwks_refresh_lock:
         now = time.time()
+        cached_keys = _customer_jwks_cache["keys"]
         if not force and now < _customer_jwks_cache["expires"]:
-            return _customer_jwks_cache["keys"]
+            if cached_keys:
+                return cached_keys
+            raise HTTPException(503, "Authentication service temporarily unavailable")
+        last_fetch = float(_customer_jwks_cache.get("last_fetch", 0.0))
+        if now - last_fetch < _JWKS_FORCED_REFRESH_MIN_INTERVAL:
+            # Unknown key IDs and repeated failures must not trigger an outbound request per request.
+            if cached_keys:
+                return cached_keys
+            raise HTTPException(503, "Authentication service temporarily unavailable")
+
         import httpx
         jwks_url = settings.supabase_jwks_url or settings.supabase_url.rstrip("/") + "/auth/v1/.well-known/jwks.json"
+        # Record attempts before I/O so an initial outage is throttled too.
+        _customer_jwks_cache = {**_customer_jwks_cache, "last_fetch": now}
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 r = await client.get(jwks_url)
                 r.raise_for_status()
                 data = r.json()
-                keys = {k["kid"]: k for k in data.get("keys", []) if k.get("kid")}
+                keys = {k["kid"]: k for k in data.get("keys", []) if isinstance(k, dict) and k.get("kid")}
                 if not keys:
                     raise ValueError("Supabase JWKS returned no usable keys")
         except Exception as exc:
             logger.warning("supabase_jwks_refresh_failed: %s", type(exc).__name__)
+            _customer_jwks_cache = {
+                "expires": now + 30,
+                "keys": cached_keys,
+                "last_fetch": now,
+            }
+            if cached_keys:
+                # Retain the last good key set only for a short, bounded outage window.
+                return cached_keys
             raise HTTPException(503, "Authentication service temporarily unavailable") from exc
-        _customer_jwks_cache = {"expires": now + 600, "keys": keys}
+        _customer_jwks_cache = {"expires": now + 600, "keys": keys, "last_fetch": now}
         return keys
 
 
@@ -1701,9 +1722,18 @@ async def _supabase_claims(access_token: str, require_aal2: bool = False) -> dic
         if jwk_alg and jwk_alg != token_alg:
             raise HTTPException(401, "Invalid authentication token")
         key = jwt.PyJWK(jwk).key
-        claims = jwt.decode(token, key=key, algorithms=[token_alg], audience=settings.supabase_auth_audience, issuer=settings.supabase_url.rstrip("/") + "/auth/v1")
+        claims = jwt.decode(
+            token,
+            key=key,
+            algorithms=[token_alg],
+            audience=settings.supabase_auth_audience,
+            issuer=settings.supabase_url.rstrip("/") + "/auth/v1",
+            options={"require": ["exp", "iat", "sub"]},
+        )
         if not claims.get("sub"):
             raise HTTPException(401, "Invalid authentication token")
+        if claims.get("is_anonymous") is True or str(claims.get("is_anonymous", "")).lower() == "true":
+            raise HTTPException(401, "Anonymous sessions are not accepted")
         if require_aal2 and claims.get("aal", "aal1") != "aal2":
             raise HTTPException(403, "Google Authenticator verification required")
         return claims
@@ -1764,15 +1794,15 @@ def _bearer_token(authorization: str | None) -> str:
 async def admin_claims(authorization: str | None, require_aal2: bool = True) -> dict:
     token = _bearer_token(authorization)
     claims = await _supabase_claims(token, require_aal2=False)
-    allowed = {x.strip() for x in (settings.admin_supabase_user_ids or "").split(",") if x.strip()}
     uid = str(claims.get("sub") or "")
-    if uid not in allowed:
-        try:
-            assigned = await get_roles(uid)
-        except Exception as exc:
-            raise HTTPException(503, "Administrator role store is unavailable") from exc
-        if not assigned:
-            raise HTTPException(403, "Administrator account is not authorized")
+    # The role store is authoritative: even an inactive DB assignment overrides the
+    # environment bootstrap allow-list, so demoted users cannot regain access via env.
+    try:
+        assigned = await get_roles(uid)
+    except Exception as exc:
+        raise HTTPException(503, "Administrator role store is unavailable") from exc
+    if not assigned:
+        raise HTTPException(403, "Administrator account is not authorized")
     if require_aal2 and settings.admin_totp_required and claims.get("aal", "aal1") != "aal2":
         raise HTTPException(403, "Google Authenticator verification required for administrator access")
     _audit_actor.set(str(claims.get("sub") or "admin"))
@@ -2210,8 +2240,11 @@ async def admin_auth_login(req: AdminLoginRequest):
     if not access_token:
         raise HTTPException(401, "Administrator login failed")
     claims = await _supabase_claims(access_token, require_aal2=False)
-    allowed = {x.strip() for x in (settings.admin_supabase_user_ids or "").split(",") if x.strip()}
-    if not allowed or claims["sub"] not in allowed:
+    try:
+        login_roles = await get_roles(str(claims.get("sub") or ""))
+    except Exception as exc:
+        raise HTTPException(503, "Administrator role store is unavailable") from exc
+    if not login_roles:
         raise HTTPException(403, "Administrator account is not authorized")
     user = await _supabase_user(access_token)
     factors = user.get("factors") or []
@@ -2267,8 +2300,20 @@ async def admin_prepare_tron_sweep(req: dict, authorization: str | None = Header
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
     try:
-        wallet_id = int(req.get("wallet_id"))
-        amount = req.get("amount_usdt")
+        try:
+            wallet_id_value = Decimal(str(req.get("wallet_id")))
+            amount = Decimal(str(req.get("amount_usdt")))
+        except (TypeError, ValueError, ArithmeticError):
+            raise HTTPException(400, "wallet_id and a numeric amount_usdt are required")
+        if (not wallet_id_value.is_finite() or wallet_id_value <= 0
+                or wallet_id_value != wallet_id_value.to_integral_value()):
+            raise HTTPException(400, "wallet_id must be a positive integer")
+        wallet_id = int(wallet_id_value)
+        if not amount.is_finite():
+            raise HTTPException(400, "amount_usdt must be finite")
+        request_ref = str(req.get("request_id") or "").strip()
+        if request_ref and not re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", request_ref):
+            raise HTTPException(400, "request_id must be 1-64 characters of [A-Za-z0-9._:-]")
         async with SessionLocal() as db:
             wallet = (await db.execute(select(Wallet).where(
                 Wallet.id == wallet_id, Wallet.currency == "USDT", Wallet.network == "TRON",
@@ -2276,10 +2321,22 @@ async def admin_prepare_tron_sweep(req: dict, authorization: str | None = Header
             if not wallet or not wallet.deposit_address:
                 raise HTTPException(404, "active TRON USDT wallet not found")
             balance = await customer_balance(db, wallet.customer_id, "USDT")
-            if float(amount) < settings.usdt_tron_sweep_min_amount:
+            if amount < Decimal(str(settings.usdt_tron_sweep_min_amount)):
                 raise HTTPException(400, "sweep amount is below configured minimum")
+            # The wallet row lock serializes per-wallet sequence allocation when no retry-stable request_id is supplied.
+            if request_ref:
+                key_nonce: str | int = request_ref
+            else:
+                key_nonce = (await db.execute(
+                    select(func.count()).select_from(TronSweep).where(TronSweep.wallet_id == wallet.id)
+                )).scalar_one()
             # Sweeping only moves on-chain custody; it must not alter the customer liability ledger.
-            intent = build_sweep_intent(wallet_id=wallet.id, source_address=wallet.deposit_address, amount_usdt=amount)
+            intent = build_sweep_intent(
+                wallet_id=wallet.id,
+                source_address=wallet.deposit_address,
+                amount_usdt=amount,
+                nonce=key_nonce,
+            )
             existing = (await db.execute(select(TronSweep).where(TronSweep.idempotency_key == intent.idempotency_key).with_for_update())).scalar_one_or_none()
             if existing:
                 return {"status": existing.status, "sweep_id": existing.id, "idempotency_key": existing.idempotency_key}
@@ -2291,7 +2348,7 @@ async def admin_prepare_tron_sweep(req: dict, authorization: str | None = Header
                 raise HTTPException(409, "an in-flight sweep already exists for this deposit wallet")
             transfer = await create_custody_transfer(
                 db, customer_id=wallet.customer_id, currency="USDT",
-                amount=amount, source_location=f"TRON:WALLET:{wallet.id}",
+                amount=intent.amount_usdt, source_location=f"TRON:WALLET:{wallet.id}",
                 destination_location=f"TRON:TREASURY:{intent.treasury_address}",
                 idempotency_key=f"tron-sweep-transfer:{intent.idempotency_key}",
             )
@@ -2319,12 +2376,19 @@ async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorizat
     outcome = str(req.get("outcome") or "").strip().upper()
     if outcome not in {"", "TIMEOUT", "REJECTED"}:
         raise HTTPException(400, "unsupported broadcast outcome")
-    if not txid and not outcome:
-        raise HTTPException(400, "transaction_id or broadcast outcome is required")
+    if bool(txid) == bool(outcome):
+        raise HTTPException(400, "provide either transaction_id or a broadcast outcome, not both")
+    if txid and not re.fullmatch(r"[0-9a-fA-F]{64}", txid):
+        raise HTTPException(400, "transaction_id must be a 64-character hex TRON transaction id")
     async with SessionLocal() as db:
         sweep = (await db.execute(select(TronSweep).where(TronSweep.id == sweep_id).with_for_update())).scalar_one_or_none()
         if not sweep:
             raise HTTPException(404, "sweep not found")
+        if sweep.status in {"SETTLED", "FAILED"}:
+            raise HTTPException(409, "sweep is already in a terminal state")
+        if outcome and sweep.transaction_id:
+            # Once a txid is recorded it may be on-chain; only reconciliation can resolve it.
+            raise HTTPException(409, "a broadcast transaction id is already recorded; reconcile against the chain instead")
         if outcome == "TIMEOUT":
             sweep.status = "UNKNOWN"
             sweep.detail_json = json.dumps({**(json.loads(sweep.detail_json or "{}") or {}),
