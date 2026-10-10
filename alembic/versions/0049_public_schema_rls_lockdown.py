@@ -43,6 +43,10 @@ def upgrade():
                 END IF;
             END LOOP;
 
+            -- PostgreSQL grants EXECUTE on new functions to PUBLIC globally by default.
+            -- A per-schema REVOKE cannot cancel that global default grant, so revoke
+            -- it globally for the role executing this migration as well.
+            EXECUTE 'ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC';
             EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC';
         END
         $atlas_grants$;
