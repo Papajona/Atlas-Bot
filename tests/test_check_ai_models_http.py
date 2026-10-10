@@ -140,7 +140,7 @@ def test_groq_checker_uses_documented_chat_completions_and_parses_text(monkeypat
     assert calls[1][0] == "https://api.groq.com/openai/v1/chat/completions"
     assert calls[1][1]["model"] == "test-model"
     assert calls[1][1]["messages"] == [{"role": "user", "content": "Reply with OK."}]
-    assert calls[1][1]["max_completion_tokens"] == 16
+    assert calls[1][1]["max_completion_tokens"] == 1024
     assert "Chat Completions inference succeeded" in capsys.readouterr().out
 
 
