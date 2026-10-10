@@ -232,7 +232,7 @@ def test_ccxt_does_not_claim_idempotency_it_cannot_prove(monkeypatch):
     assert "clientOrderId" not in ex.withdraw_params and "k1" not in ex.withdraw_params.values()
     with pytest.raises(PayoutUnknown) as exc:
         asyncio.run(p.recover("k1", currency="USDT"))
-    assert not isinstance(exc.value, PayoutNotFound), "no verified client id => absence must stay UNKNOWN"
+    assert type(exc.value) is PayoutUnknown, "bounded history absence must stay UNKNOWN, not definitive not-found"
 
 
 def test_ccxt_absence_stays_unknown_with_verified_client_id_and_windowed_lookup(monkeypatch):
