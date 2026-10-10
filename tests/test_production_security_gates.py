@@ -95,6 +95,7 @@ def test_tron_funding_gate_defaults_off_and_requires_both_explicit_approvals():
 
     gate = ROOT / "deploy" / "tron-funding-gate.sh"
     command = (
+        'set -e; '
         f'source "{gate}"; '
         'atlas_configure_tron_funding; '
         'printf "%s|%s" "$USDT_TRON_ENABLED" "$USDT_TRON_NETWORK"'
