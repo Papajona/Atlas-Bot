@@ -33,6 +33,11 @@ from .distributed import acquire_lock, release_lock
 TERMINAL_STATUSES = {"FILLED", "CANCELED", "REJECTED", "FAILED", "SIMULATED"}
 
 
+def customer_paper_execution_blocked(customer_id: int | None, force_paper: bool) -> bool:
+    """Return whether this request would route customer funds through the unsupported paper ledger."""
+    return customer_id is not None and bool(force_paper)
+
+
 
 async def audit(event: str, detail: dict, actor_id: str = "system") -> None:
     """Best-effort audit write in its own session; must never break order handling."""
@@ -948,7 +953,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             if asset in {"forex", "commodity"} and not forex_demo and not force_paper:
                 raise RiskBlocked("OANDA is demo/backtesting-only in AtlasRisk; live Forex/commodity execution is disabled")
             live = crypto_live or forex_demo
-            if customer_id is not None and force_paper:
+            if customer_paper_execution_blocked(customer_id, force_paper):
                 raise RiskBlocked("Customer paper execution requires an isolated simulation ledger")
             if live and customer_id is not None:
                 mixed_positions = (await db.execute(
@@ -982,7 +987,20 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             # Customer live trading requires a verified isolated exchange/subaccount adapter.
             # Customer crypto execution must resolve only the customer's verified venue mapping.
             # Never fall back to platform-wide exchange credentials for a customer order.
-            if customer_id is not None and asset != "forex":
+            if customer_id is not None and asset in {"forex", "commodity"}:
+                # Never fall back to platform OANDA credentials for a customer order.
+                # Customer Forex/commodity execution needs its own verified account mapping.
+                raise RiskBlocked("Customer Forex/commodity execution requires a verified customer-specific OANDA account")
+            elif asset in {"forex", "commodity"}:
+                if not forex_demo:
+                    raise RiskBlocked("OANDA live execution is disabled; use the demo/backtesting path")
+                if not settings.oanda_account_id or not settings.oanda_api_token or not settings.oanda_practice:
+                    raise RiskBlocked("OANDA practice credentials are not configured")
+                broker = OandaBroker(OandaConfig(
+                    settings.oanda_account_id, settings.oanda_api_token, True,
+                    settings.oanda_timeout_seconds,
+                ))
+            elif customer_id is not None:
                 if exchange.lower() != "binance":
                     raise RiskBlocked("Customer live crypto trading requires a verified isolated exchange/subaccount adapter")
                 async with SessionLocal() as credential_db:
@@ -1000,10 +1018,6 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     )
                 except CustomerBinanceExecutionError as exc:
                     raise RiskBlocked(str(exc)) from exc
-            elif asset in {"forex", "commodity"}:
-                # Defensive assertion: forex/commodity reaches the broker only through the
-                # explicit demo path above. OANDA has no live execution authority in AtlasRisk.
-                raise RiskBlocked("OANDA live execution is disabled; use the demo/backtesting path")
             else:
                 broker = Broker.get(BrokerConfig(
                     exchange_id=exchange, api_key=settings.exchange_api_key,

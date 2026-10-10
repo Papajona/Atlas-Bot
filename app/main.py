@@ -37,7 +37,7 @@ from .strategy_ai import generate_strategy_draft
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates, live_strategy_signals
 from .research_validation import oos_promotion_gate, monte_carlo_bootstrap
 from .daily_research import run_daily_research, latest_macro_context
-from .execution import execute_signal, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits
+from .execution import execute_signal, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits, customer_paper_execution_blocked
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
 from .payout import get_payout_provider, PayoutError, PayoutUnknown, PayoutNotFound
 from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, release_separation_violation, verify_release_operator
@@ -176,6 +176,7 @@ _instance_id = os.getenv("K_REVISION", "local") + ":" + uuid.uuid4().hex[:12]
 _background_task: asyncio.Task | None = None
 _usdt_task: asyncio.Task | None = None
 _worker_tasks: set[asyncio.Task] = set()
+_worker_loop_health: dict[str, dict] = {}
 _audit_actor: ContextVar[str] = ContextVar("atlas_audit_actor", default="system")
 _expensive_paths = {"/api/train", "/api/backtest", "/api/strategy/backtest", "/api/customer/bot/start"}
 
@@ -203,6 +204,47 @@ async def api_rate_limit(request: Request, call_next):
         if not allowed_identity:
             return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429, headers={"Retry-After": "60"})
     return await call_next(request)
+
+
+def _mark_worker_loop_success(name: str) -> None:
+    state = _worker_loop_health.setdefault(name, {"restart_count": 0})
+    state["status"] = "RUNNING"
+    state["last_success_at"] = datetime.now(timezone.utc).isoformat()
+    state.pop("last_error_type", None)
+
+
+def _mark_worker_loop_failure(name: str, exc: Exception) -> None:
+    state = _worker_loop_health.setdefault(name, {"restart_count": 0})
+    state["status"] = "DEGRADED"
+    state["last_failure_at"] = datetime.now(timezone.utc).isoformat()
+    state["last_error_type"] = type(exc).__name__
+
+
+def _worker_loop_health_snapshot() -> dict:
+    return {name: dict(state) for name, state in _worker_loop_health.items()}
+
+
+async def _supervise_worker_loop(factory, name: str) -> None:
+    """Restart a failed long-running worker loop with capped exponential backoff."""
+    delay = 1.0
+    while True:
+        state = _worker_loop_health.setdefault(name, {"restart_count": 0})
+        state["status"] = "RUNNING"
+        state["last_started_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            await factory()
+            raise RuntimeError(f"worker loop {name} returned unexpectedly")
+        except asyncio.CancelledError:
+            state["status"] = "STOPPED"
+            raise
+        except Exception as exc:
+            state["status"] = "RESTARTING"
+            state["restart_count"] = int(state.get("restart_count", 0)) + 1
+            state["last_error_type"] = type(exc).__name__
+            state["last_failure_at"] = datetime.now(timezone.utc).isoformat()
+            logger.exception("worker_loop_failed; restarting name=%s backoff_seconds=%s", name, delay)
+            await asyncio.sleep(delay)
+            delay = min(60.0, delay * 2.0)
 
 
 def _track_worker_task(coro):
@@ -317,20 +359,22 @@ async def startup():
     # adaptive controllers and recovery loops belong to the worker pool.
     if process_role == "worker":
         if settings.background_reconciliation_enabled:
-            _background_task = _track_worker_task(_reconciliation_loop())
+            _background_task = _track_worker_task(_supervise_worker_loop(_reconciliation_loop, "reconciliation"))
         if settings.custody_reconciliation_enabled:
-            _track_worker_task(_custody_reconciliation_loop())
+            _track_worker_task(_supervise_worker_loop(_custody_reconciliation_loop, "custody-reconciliation"))
         if settings.usdt_tron_enabled and settings.usdt_trongrid_api_key:
-            _usdt_task = _track_worker_task(_usdt_tron_monitor_loop())
+            _usdt_task = _track_worker_task(_supervise_worker_loop(_usdt_tron_monitor_loop, "usdt-tron"))
         _track_worker_task(_heartbeat_loop())
         _track_worker_task(_continuous_risk_enforcement_loop())
         _track_worker_task(_withdrawal_recovery_loop())
         _track_worker_task(_customer_key_audit_loop())
         if settings.daily_research_enabled:
-            _track_worker_task(_daily_research_loop())
+            _track_worker_task(_supervise_worker_loop(_daily_research_loop, "daily-research"))
+        if settings.trade_learning_enabled:
+            _track_worker_task(_supervise_worker_loop(_trade_learning_replay_loop, "trade-learning-replay"))
         if settings.adaptive_bot_controller_enabled:
-            _track_worker_task(_adaptive_bot_controller_loop())
-            _track_worker_task(_executor_controller_loop())
+            _track_worker_task(_supervise_worker_loop(_adaptive_bot_controller_loop, "adaptive-controller"))
+            _track_worker_task(_supervise_worker_loop(_executor_controller_loop, "executor-controller"))
     elif process_role == "job":
         _track_worker_task(_heartbeat_loop())
 
@@ -662,6 +706,7 @@ async def _adaptive_bot_controller_loop():
             async with SessionLocal() as db:
                 bots = (await db.execute(select(AdaptiveTradingBot).where(AdaptiveTradingBot.status == "RUNNING", or_(AdaptiveTradingBot.next_run_at.is_(None), AdaptiveTradingBot.next_run_at <= now)).order_by(AdaptiveTradingBot.id).limit(25))).scalars().all()
                 work = [(b.id, b.customer_id, b.trading_account_id, b.asset, b.symbol, b.exchange, b.timeframe, b.days, b.risk_fraction, b.interval_seconds, b.mode) for b in bots]
+            _mark_worker_loop_success("adaptive-controller")
             for bot_id, customer_id, account_id, asset, symbol, exchange, timeframe, days, risk_fraction, interval_seconds, mode in work:
                 lock_key = f"adaptive-bot:{bot_id}"
                 if not await acquire_lock(lock_key, ttl_seconds=max(120, int(interval_seconds) + 120)):
@@ -734,7 +779,8 @@ async def _adaptive_bot_controller_loop():
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await _audit("ADAPTIVE_BOT_CONTROLLER_FAILED", {"error": str(exc)})
+            _mark_worker_loop_failure("adaptive-controller", exc)
+            await _safe_audit("ADAPTIVE_BOT_CONTROLLER_FAILED", {"error": str(exc)})
         await asyncio.sleep(poll)
 
 
@@ -783,6 +829,15 @@ async def _run_persisted_adaptive_bot_cycle(
         equity = max(0.0, float(account.equity))
         risk_fraction = float(bot.risk_fraction or settings.risk_per_trade)
         paper_mode = bool(settings.paper_trading or not settings.live_trading_enabled or not state.live_enabled or bot.mode != "LIVE")
+        if customer_paper_execution_blocked(profile.id if profile else bot.customer_id, paper_mode):
+            bot.status = "STOPPED"
+            bot.next_run_at = None
+            bot.last_error = "Customer paper execution requires an isolated simulation ledger"
+            bot.last_decision = "NO_TRADE"
+            bot.last_stage = "simulation_ledger_required"
+            await db.commit()
+            return {"decision": "NO_TRADE", "stage": "simulation_ledger_required",
+                    "reason": "Customer paper execution requires an isolated simulation ledger"}
     if req.asset in {"forex", "commodity"}:
         try:
             df = await _fetch_customer_oanda_data(profile.id, req)
@@ -951,6 +1006,7 @@ async def _executor_controller_loop():
                     ).order_by(TradeExecutor.id).limit(25)
                 )).scalars().all()
                 work = [r.id for r in rows]
+                _mark_worker_loop_success("executor-controller")
             for eid in work:
                 lock_key = f"executor:{eid}"
                 if not await acquire_lock(lock_key, ttl_seconds=180):
@@ -1046,7 +1102,8 @@ async def _executor_controller_loop():
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await _audit("EXECUTOR_CONTROLLER_FAILED", {"error": str(exc)})
+            _mark_worker_loop_failure("executor-controller", exc)
+            await _safe_audit("EXECUTOR_CONTROLLER_FAILED", {"error": str(exc)})
         await asyncio.sleep(max(5, int(settings.adaptive_bot_poll_seconds)))
 
 
@@ -1064,12 +1121,14 @@ async def _trade_learning_replay_loop():
                 limit=settings.trade_learning_max_episodes_per_cycle,
                 lookback_days=settings.trade_learning_lookback_days,
             )
+            _mark_worker_loop_success("trade-learning-replay")
             if result.get("processed") or result.get("failed") or result.get("skipped"):
                 await _audit("TRADE_LEARNING_REPLAY_CYCLE", result)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await _audit("TRADE_LEARNING_REPLAY_FAILED", {"error": str(exc)})
+            _mark_worker_loop_failure("trade-learning-replay", exc)
+            await _safe_audit("TRADE_LEARNING_REPLAY_FAILED", {"error": str(exc)})
         await asyncio.sleep(poll)
 
 
@@ -1086,6 +1145,7 @@ async def _daily_research_loop():
         await asyncio.sleep(max(5, (target - now).total_seconds()))
         try:
             result = await run_daily_research()
+            _mark_worker_loop_success("daily-research")
             status = result.get("status")
             payload = {
                 "status": status,
@@ -1106,7 +1166,8 @@ async def _daily_research_loop():
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await _audit("RESEARCH_DAILY_FAILED", {"error": str(exc)})
+            _mark_worker_loop_failure("daily-research", exc)
+            await _safe_audit("RESEARCH_DAILY_FAILED", {"error": str(exc)})
 
 
 
@@ -1143,6 +1204,7 @@ async def _usdt_tron_monitor_loop():
                 wallets = (await db.execute(select(Wallet).where(
                     Wallet.currency == "USDT", Wallet.network == "TRON", Wallet.status == "ACTIVE"))).scalars().all()
             wallets = [w for w in wallets if w.deposit_address]
+            _mark_worker_loop_success("usdt-tron")
             headers = {"accept": "application/json", "TRON-PRO-API-KEY": settings.usdt_trongrid_api_key}
             gate = _RateGate(settings.usdt_tron_max_qps)
             async def _pace(_request):
@@ -1318,7 +1380,8 @@ async def _usdt_tron_monitor_loop():
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
-                        await _audit("TRON_WALLET_SCAN_FAILED", {"wallet_id": wallet.id, "error": str(exc)})
+                        _mark_worker_loop_failure("usdt-tron", exc)
+                        await _safe_audit("TRON_WALLET_SCAN_FAILED", {"wallet_id": wallet.id, "error": str(exc)})
                     finally:
                         await release_lock(lock_key)
 
@@ -1329,7 +1392,8 @@ async def _usdt_tron_monitor_loop():
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await _audit("TRON_SCAN_CYCLE_FAILED", {"error": str(exc)})
+            _mark_worker_loop_failure("usdt-tron", exc)
+            await _safe_audit("TRON_SCAN_CYCLE_FAILED", {"error": str(exc)})
         await asyncio.sleep(poll_seconds)
 
 
@@ -1340,6 +1404,7 @@ async def _reconciliation_loop():
         should_oanda = bool(settings.oanda_account_id and settings.oanda_api_token and
                            settings.oanda_practice and settings.forex_demo_enabled)
         if not (should_crypto or should_oanda):
+            _mark_worker_loop_success("reconciliation")
             continue
         if should_crypto:
             try:
@@ -1369,6 +1434,7 @@ async def _reconciliation_loop():
             customer_exchanges = [str(x) for x in customer_exchanges if str(x).strip().lower() == "binance"]
             if customer_exchanges:
                 await reconcile_customer_live_orders(customer_exchanges)
+            _mark_worker_loop_success("reconciliation")
         except Exception:
             logger.exception("reconciliation_loop: customer live reconciliation failed")
 
@@ -1495,8 +1561,12 @@ async def _heartbeat_loop():
                 if not row:
                     row = ServiceHeartbeat(instance_id=_instance_id, role=str(settings.process_role or "api"))
                     db.add(row)
-                row.status = "READY"
-                row.detail = "distributed-runtime"
+                unhealthy_loops = sorted(
+                    name for name, state in _worker_loop_health.items()
+                    if state.get("status") in {"DEGRADED", "RESTARTING"}
+                )
+                row.status = "DEGRADED" if unhealthy_loops else "READY"
+                row.detail = json.dumps({"runtime": "distributed-runtime", "unhealthy_worker_loops": unhealthy_loops})
                 row.updated_at = datetime.now(timezone.utc)
                 await db.commit()
         except Exception:
@@ -3339,6 +3409,17 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
         state = await db.get(AppState, 1)
         if not state or state.kill_switch:
             raise HTTPException(409, "Trading is halted by the platform risk state")
+        paper_mode = bool(
+            settings.paper_trading
+            or not settings.live_trading_enabled
+            or not state.live_enabled
+            or req.asset in {"forex", "commodity"}
+        )
+        if customer_paper_execution_blocked(profile.id, paper_mode):
+            raise HTTPException(
+                409,
+                "Customer bot execution is unavailable until an isolated simulation ledger exists; no analysis or AI review was run.",
+            )
         candidate = None
         if req.strategy_candidate_id is not None:
             candidate = (await db.execute(select(StrategyCandidate).where(StrategyCandidate.id == req.strategy_candidate_id, StrategyCandidate.customer_id == profile.id))).scalar_one_or_none()
@@ -3347,12 +3428,6 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             if candidate.asset != req.asset or candidate.symbol != req.symbol or candidate.exchange != req.exchange or candidate.timeframe != req.timeframe:
                 raise HTTPException(409, "Strategy candidate does not match the selected market configuration")
         account = await _get_or_create_customer_trading_account(db, profile)
-        paper_mode = bool(
-            settings.paper_trading
-            or not settings.live_trading_enabled
-            or not state.live_enabled
-            or req.asset in {"forex", "commodity"}
-        )
         if not paper_mode:
             try:
                 await assert_live_system_enabled(
@@ -4541,7 +4616,13 @@ async def customer_withdrawals(authorization: str | None = Header(default=None))
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "ok", "release": {"version": settings.release_version or settings.app_version, "sha": settings.release_sha or None, "image_digest": settings.image_digest or None}}
+    worker_health = _worker_loop_health_snapshot()
+    degraded = any(state.get("status") in {"DEGRADED", "RESTARTING"} for state in worker_health.values())
+    return {
+        "status": "degraded" if degraded else "ok",
+        "release": {"version": settings.release_version or settings.app_version, "sha": settings.release_sha or None, "image_digest": settings.image_digest or None},
+        "worker_loops": worker_health,
+    }
 
 
 @app.get("/readyz")
@@ -5973,6 +6054,14 @@ async def _audit(event: str, detail: dict, actor_id: str | None = None):
     # A sink outage must not turn a completed money movement into an ambiguous 5xx response
     # that could trigger client retries. Critical sink failures are visible in service logs.
     emit_security_audit(event=event, actor_id=actor, detail=safe_detail, event_hash=row.event_hash)
+
+
+async def _safe_audit(event: str, detail: dict, actor_id: str | None = None) -> None:
+    """Best-effort error-path audit that never kills the worker handling the original failure."""
+    try:
+        await _audit(event, detail, actor_id=actor_id)
+    except Exception:
+        logger.exception("worker_error_audit_failed event=%s", event)
 
 
 def json_loads(v):
