@@ -21,4 +21,4 @@ def test_continuous_risk_enforcement_runs_in_worker():
     assert "state.live_enabled = False" in main
     assert 'state.mode = "HALTED"' in main
     assert "await emergency_stop()" in main
-    assert "_track_worker_task(_continuous_risk_enforcement_loop())" in main
+    assert '_track_supervised_worker(_continuous_risk_enforcement_loop, "continuous-risk-enforcement")' in main
