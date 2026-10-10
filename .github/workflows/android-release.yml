@@ -61,9 +61,34 @@ jobs:
           test -n "$ATLAS_RELEASE_KEY_ALIAS"
           test -n "$ATLAS_RELEASE_KEY_PASSWORD"
           gradle --no-daemon :app:assembleRelease
-      - name: Upload signed artifact
+      - name: Verify signed APK identity, signer certificate and checksum
+        env:
+          EXPECTED_CERT_SHA256: ${{ vars.ATLAS_RELEASE_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          apk="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' ! -name '*androidTest*' | head -n 1)"
+          test -n "$apk"
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          aapt="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          test -x "$apksigner"
+          test -x "$aapt"
+          test -n "$EXPECTED_CERT_SHA256"
+          "$apksigner" verify --verbose --print-certs "$apk" | tee "$RUNNER_TEMP/atlas-signing-report.txt"
+          actual_cert="$(sed -n 's/.*certificate SHA-256 digest: //p' "$RUNNER_TEMP/atlas-signing-report.txt" | head -n 1 | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+          expected_cert="$(printf '%s' "$EXPECTED_CERT_SHA256" | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+          test -n "$actual_cert"
+          test "$actual_cert" = "$expected_cert"
+          package_name="$("$aapt" dump badging "$apk" | sed -n "s/^package: name='\\([^']*\\)'.*/\\1/p" | head -n 1)"
+          test "$package_name" = "com.atlas.trading"
+          printf 'package=%s\\ncertificate_sha256=%s\\n' "$package_name" "$actual_cert" > "$RUNNER_TEMP/atlas-release-metadata.txt"
+          sha256sum "$apk" | tee "$RUNNER_TEMP/atlas-release.sha256"
+      - name: Upload signed artifact and verification evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: atlas-release-apk
-          path: app/build/outputs/apk/release/*.apk
+          path: |
+            app/build/outputs/apk/release/*.apk
+            ${{ runner.temp }}/atlas-release.sha256
+            ${{ runner.temp }}/atlas-release-metadata.txt
+            ${{ runner.temp }}/atlas-signing-report.txt
           if-no-files-found: error
