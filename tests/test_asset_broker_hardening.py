@@ -124,3 +124,10 @@ def test_oanda_practice_gate_requires_explicit_practice_state_and_credentials(mo
     monkeypatch.setattr(settings, "forex_live_enabled", True)
     with pytest.raises(LiveExecutionBlocked, match="live OANDA must remain disabled"):
         _run_practice_gate(_practice_gate_db())
+
+
+def test_oanda_practice_outcomes_are_not_reported_as_real_money_live():
+    source = Path("app/execution.py").read_text(encoding="utf-8")
+    assert 'submitted_event = "PRACTICE_ORDER_SUBMITTED" if mode == "FOREX_DEMO" else "LIVE_ORDER_SUBMITTED"' in source
+    assert 'unknown_event = "PRACTICE_ORDER_UNKNOWN" if mode == "FOREX_DEMO" else "LIVE_ORDER_UNKNOWN"' in source
+    assert 'return {"duplicate": False, "trade_id": trade_id, "mode": mode, "status": status,' in source
