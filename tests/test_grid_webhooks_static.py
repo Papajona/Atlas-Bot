@@ -23,3 +23,12 @@ def test_migration_revision():
     text=(ROOT/'alembic'/'versions'/'0015_grid_webhooks_connectors.py').read_text()
     assert '0015_grid_webhooks_connectors' in text
     assert '0014_trading_product_features' in text
+
+
+def test_grid_start_is_fail_closed_until_execution_controller_exists():
+    source = (ROOT / "app" / "main.py").read_text()
+    route = source.split('@app.post("/api/customer/grid-bots/{bot_id}/action")', 1)[1].split(
+        '@app.post("/api/customer/broker/deriv/connect")', 1
+    )[0]
+    assert 'if req.action == "START":' in route
+    assert 'raise HTTPException(409, "Grid execution controller is not enabled; this configuration is paper-only")' in route
