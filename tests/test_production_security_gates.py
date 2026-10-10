@@ -77,3 +77,69 @@ def test_worker_health_and_local_security_audit_are_wired():
     assert "worker_health_status" in risk
     assert "scheduleReconnect" in manager
     assert "initiateConnection(wsUrl, token)" in manager
+
+
+def test_production_deploy_defaults_tron_funding_and_sweep_off():
+    deploy = (ROOT / "deploy" / "cloud-run-deploy.sh").read_text(encoding="utf-8")
+    assert 'source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/tron-funding-gate.sh"' in deploy
+    assert "atlas_configure_tron_funding" in deploy
+    assert "@USDT_TRON_ENABLED=${USDT_TRON_ENABLED}" in deploy
+    assert "@USDT_TRON_NETWORK=${USDT_TRON_NETWORK}" in deploy
+    assert "@USDT_TRON_SWEEP_ENABLED=false" in deploy
+    assert "@USDT_TRON_ENABLED=true" not in deploy
+
+
+def test_tron_funding_gate_defaults_off_and_requires_both_explicit_approvals():
+    import os
+    import subprocess
+
+    gate = ROOT / "deploy" / "tron-funding-gate.sh"
+    command = (
+        'set -e; '
+        f'source "{gate}"; '
+        'atlas_configure_tron_funding; '
+        'printf "%s|%s" "$USDT_TRON_ENABLED" "$USDT_TRON_NETWORK"'
+    )
+    base_env = os.environ.copy()
+    for name in (
+        "USDT_TRON_ENABLED",
+        "USDT_TRON_NETWORK",
+        "ALLOW_TRON_FUNDING",
+        "ALLOW_MAINNET_TRON_FUNDING",
+    ):
+        base_env.pop(name, None)
+
+    default = subprocess.run(
+        ["bash", "-c", command], env=base_env, capture_output=True, text=True, check=False
+    )
+    assert default.returncode == 0, default.stderr
+    assert default.stdout == "false|mainnet"
+
+    enabled_without_approval = base_env | {"USDT_TRON_ENABLED": "true"}
+    blocked = subprocess.run(
+        ["bash", "-c", command],
+        env=enabled_without_approval,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert blocked.returncode != 0
+    assert "TRON funding is disabled by default" in blocked.stderr
+
+    enabled_with_one_approval = enabled_without_approval | {"ALLOW_TRON_FUNDING": "YES"}
+    blocked_mainnet = subprocess.run(
+        ["bash", "-c", command],
+        env=enabled_with_one_approval,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert blocked_mainnet.returncode != 0
+    assert "mainnet TRON funding requires" in blocked_mainnet.stderr
+
+    fully_approved = enabled_with_one_approval | {"ALLOW_MAINNET_TRON_FUNDING": "YES"}
+    allowed = subprocess.run(
+        ["bash", "-c", command], env=fully_approved, capture_output=True, text=True, check=False
+    )
+    assert allowed.returncode == 0, allowed.stderr
+    assert allowed.stdout == "true|mainnet"
