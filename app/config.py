@@ -213,6 +213,9 @@ class Settings(BaseSettings):
     max_position_notional_usd: float = 10_000.0
     max_total_exposure_usd: float = 20_000.0
     max_open_positions: int = 3
+    # Correlated-exposure cap: positions in the same group count as one bet (e.g. BTC/ETH/SOL). Disabled when the cap is 0.
+    correlated_symbol_groups: str = ""            # "BTC/USDT,ETH/USDT,SOL/USDT;XAU/USD,XAG/USD"
+    max_correlated_group_exposure_usd: float = 0.0
     max_slippage_bps: float = 30.0
     max_spread_bps: float = 100.0
     # Edge-decay halt: block NEW entries when the last N closed-trade net returns are significantly below zero.
