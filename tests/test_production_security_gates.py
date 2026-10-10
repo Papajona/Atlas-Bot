@@ -267,3 +267,13 @@ def test_production_verification_blocks_missing_provider_credentials():
     workflow = (ROOT / ".github" / "workflows" / "production-verification.yml").read_text(encoding="utf-8")
     assert "BLOCKED: provider credentials are not configured" in workflow
     assert "this is not a provider verification pass" not in workflow
+
+
+def test_production_verification_passes_provider_secrets_to_checker():
+    workflow = (ROOT / ".github" / "workflows" / "production-verification.yml").read_text(encoding="utf-8")
+    block_start = workflow.index("AI model/provider verification when credentials are supplied")
+    block_end = workflow.index("Production-oriented static and security gates", block_start)
+    block = workflow[block_start:block_end]
+    assert "GEMINI_API_KEY: \${{ secrets.GEMINI_API_KEY }}" in block
+    assert "GROQ_API_KEY: \${{ secrets.GROQ_API_KEY }}" in block
+    assert "BLOCKED: provider credentials are not configured" in block
