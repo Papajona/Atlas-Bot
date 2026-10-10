@@ -259,6 +259,31 @@ def _track_worker_task(coro):
     return task
 
 
+async def _reserve_ws_connection(user_id: str, connection_id: int) -> bool:
+    """Atomically reserve one of a user's per-process telemetry connection slots."""
+    async with _ws_connection_lock:
+        active = _ws_user_connections.get(user_id)
+        if active is None:
+            active = set()
+            _ws_user_connections[user_id] = active
+        if len(active) >= _WS_MAX_CONNECTIONS_PER_USER:
+            if not active:
+                _ws_user_connections.pop(user_id, None)
+            return False
+        active.add(connection_id)
+        return True
+
+
+async def _release_ws_connection(user_id: str, connection_id: int) -> None:
+    """Release a telemetry reservation and delete empty user buckets."""
+    async with _ws_connection_lock:
+        active = _ws_user_connections.get(user_id)
+        if active is not None:
+            active.discard(connection_id)
+            if not active:
+                _ws_user_connections.pop(user_id, None)
+
+
 def _trusted_client_ip(request: Request) -> str:
     """Resolve client IP only from a trusted reverse-proxy chain.
 
@@ -4933,19 +4958,12 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
         return
 
     connection_id = id(websocket)
-    async with _ws_connection_lock:
-        active = _ws_user_connections.setdefault(user_id, set())
-        if len(active) >= _WS_MAX_CONNECTIONS_PER_USER:
-            if not active:
-                _ws_user_connections.pop(user_id, None)
-            await websocket.close(code=1013, reason="Too many telemetry connections")
-            return
-        active.add(connection_id)
+    if not await _reserve_ws_connection(user_id, connection_id):
+        await websocket.close(code=1013, reason="Too many telemetry connections")
+        return
 
-    accepted = False
     try:
         await websocket.accept()
-        accepted = True
         last_auth_check = time.monotonic()
         while True:
             # Revocation/role changes take effect on an established socket within 30s.
@@ -5027,12 +5045,7 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
         with contextlib.suppress(Exception):
             await websocket.close(code=1011)
     finally:
-        async with _ws_connection_lock:
-            active = _ws_user_connections.get(user_id)
-            if active is not None:
-                active.discard(connection_id)
-                if not active:
-                    _ws_user_connections.pop(user_id, None)
+        await _release_ws_connection(user_id, connection_id)
 
 
 
