@@ -46,7 +46,8 @@ def test_key_policy_accepts_least_privilege_and_flags_every_escalation():
 
 def test_audit_loop_and_edge_decay_and_trial_counter_are_wired():
     main = (ROOT / "app" / "main.py").read_text()
-    assert "_track_worker_task(_customer_key_audit_loop())" in main
+    assert '_track_worker_task(lambda: _customer_key_audit_loop(), name="customer_key_audit")' in main
+    assert "async def _supervise_worker(name, factory" in main
     ex = (ROOT / "app" / "execution.py").read_text()
     assert "edge_decay_check(realized" in ex and "Edge-decay halt" in ex and "not reducing" in ex
     dr = (ROOT / "app" / "daily_research.py").read_text()
