@@ -48,6 +48,9 @@ def test_customer_forex_bot_cycle_fails_before_any_ai_call_without_simulation_le
                 "AppState": state,
             }.get(model.__name__)
 
+        async def commit(self):
+            return None
+
     monkeypatch.setattr(main, "SessionLocal", lambda: FakeDB())
     monkeypatch.setattr(main.settings, "paper_trading", True)
     monkeypatch.setattr(main.settings, "live_trading_enabled", False)
@@ -75,6 +78,8 @@ def test_customer_forex_bot_cycle_fails_before_any_ai_call_without_simulation_le
 
     assert result["decision"] == "NO_TRADE"
     assert result["stage"] == "customer_paper_execution_unavailable"
+    assert bot.status == "STOPPED"
+    assert bot.next_run_at is None
     assert ai_calls == []
 
 
