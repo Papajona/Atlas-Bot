@@ -17,10 +17,15 @@ def evaluate_trade(*, side: str, price: float, quantity: float, live: bool,
     reasons=[]
     if side not in {"buy","sell"}: reasons.append("invalid_side")
     if not math.isfinite(price) or price <= 0 or not math.isfinite(quantity) or quantity <= 0: reasons.append("invalid_market_or_quantity")
-    if live and not stop_loss_price: reasons.append("live_protective_stop_missing")
-    if live and stop_loss_price is not None:
+    if stop_loss_price is not None and not math.isfinite(stop_loss_price):
+        reasons.append("invalid_stop_loss_price")
+    elif live and stop_loss_price is None:
+        reasons.append("live_protective_stop_missing")
+    elif stop_loss_price is not None:
         if (side=="buy" and stop_loss_price>=price) or (side=="sell" and stop_loss_price<=price): reasons.append("protective_stop_wrong_side")
-    if take_profit_price is not None:
+    if take_profit_price is not None and not math.isfinite(take_profit_price):
+        reasons.append("invalid_take_profit_price")
+    elif take_profit_price is not None:
         if (side=="buy" and take_profit_price<=price) or (side=="sell" and take_profit_price>=price): reasons.append("take_profit_wrong_side")
     # Position size must be derived from the distance to the protective stop, not
     # from notional alone. This is the core discipline rule for risk-per-trade sizing.
