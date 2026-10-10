@@ -75,7 +75,7 @@ jobs:
           python - <<'PY'
           import os
           from pathlib import Path
-          from urllib.parse import urlparse
+          from urllib.parse import unquote, urlparse
           path = Path(os.environ["RUNNER_TEMP"]) / "atlas-staging-db-url"
           uri = path.read_text().strip()
           parsed = urlparse(uri)
@@ -103,8 +103,8 @@ jobs:
           env.update({
               "PGHOST": parsed.hostname or "",
               "PGPORT": str(parsed.port or 5432),
-              "PGUSER": parsed.username or "",
-              "PGPASSWORD": parsed.password or "",
+              "PGUSER": unquote(parsed.username or ""),
+              "PGPASSWORD": unquote(parsed.password or ""),
               "PGDATABASE": parsed.path.lstrip("/") or "",
               "PGSSLMODE": "require",
               "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=10000",
