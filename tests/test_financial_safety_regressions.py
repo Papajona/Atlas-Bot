@@ -8,12 +8,69 @@ def _source(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_customer_paper_execution_fails_closed_before_real_ledger_use():
-    source = _source("app/execution.py")
-    assert 'if customer_id is not None and force_paper:' in source
-    assert "Customer paper execution requires an isolated simulation ledger" in source
-    assert 'and mode == "LIVE"' in source
-    assert 'str(trade.mode or "").upper() == "LIVE"' in source
+def test_customer_forex_bot_cycle_stops_before_data_or_ai_without_simulation_ledger(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    import app.main as main
+    from app.config import settings
+
+    bot = SimpleNamespace(
+        id=1, status="RUNNING", customer_id=7, trading_account_id=3,
+        mode="PAPER", risk_fraction=0.01, next_run_at=None, last_error="",
+    )
+    profile = SimpleNamespace(id=7, status="ACTIVE")
+    account = SimpleNamespace(id=3, status="ACTIVE", equity=1000.0)
+    state = SimpleNamespace(kill_switch=False, live_enabled=True)
+
+    class Result:
+        def scalar_one_or_none(self):
+            return bot
+
+    class FakeDB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def execute(self, *args, **kwargs):
+            return Result()
+
+        async def get(self, model, key):
+            return {
+                main.CustomerProfile: profile,
+                main.TradingAccount: account,
+                main.AppState: state,
+            }.get(model)
+
+        async def commit(self):
+            return None
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: FakeDB())
+    monkeypatch.setattr(settings, "paper_trading", True)
+    calls = {"market_data": 0, "ai": 0}
+
+    async def unexpected_market_data(*args, **kwargs):
+        calls["market_data"] += 1
+        raise AssertionError("market data must not be fetched before the paper-ledger gate")
+
+    async def unexpected_ai(*args, **kwargs):
+        calls["ai"] += 1
+        raise AssertionError("AI must not be called before the paper-ledger gate")
+
+    monkeypatch.setattr(main, "_fetch_customer_oanda_data", unexpected_market_data)
+    monkeypatch.setattr(main, "_ensure_adaptive_model_locked", unexpected_ai)
+
+    result = asyncio.run(main._run_persisted_adaptive_bot_cycle(
+        1,
+        SimpleNamespace(asset="forex", symbol="EUR/USD", exchange="oanda", timeframe="1h"),
+    ))
+
+    assert result["decision"] == "NO_TRADE"
+    assert result["stage"] == "paper_simulation_ledger_gate"
+    assert bot.status == "STOPPED"
+    assert calls == {"market_data": 0, "ai": 0}
 
 
 def test_live_customer_equity_is_recomputed_from_ledger_and_open_positions():
@@ -58,3 +115,41 @@ def test_funding_webhook_requires_fresh_timestamp_bound_signature():
     assert "x_funding_timestamp" in source
     assert "funding_webhook_max_skew_seconds" in _source("app/config.py")
     assert 'signed = str(timestamp).strip().encode() + b"." + raw_body' in source
+
+
+def test_supervisor_restarts_worker_when_audit_raises(monkeypatch):
+    import asyncio
+
+    import app.main as main
+
+    async def failing_audit(*args, **kwargs):
+        raise RuntimeError("simulated database outage during audit")
+
+    monkeypatch.setattr(main, "_audit", failing_audit)
+
+    async def run():
+        attempts = 0
+        restarted = asyncio.Event()
+
+        async def worker():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                await main._audit("WORKER_FAILURE", {"test": True})
+            restarted.set()
+            await asyncio.Future()
+
+        task = asyncio.create_task(main._supervise_worker(
+            worker, "audit-failure-test", restart_delay=0.001, max_restart_delay=0.005
+        ))
+        try:
+            await asyncio.wait_for(restarted.wait(), timeout=0.25)
+            assert attempts == 2
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    asyncio.run(run())

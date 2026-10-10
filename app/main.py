@@ -213,6 +213,31 @@ def _track_worker_task(coro):
     return task
 
 
+async def _supervise_worker(worker_factory, worker_name: str, *, restart_delay: float = 1.0, max_restart_delay: float = 60.0):
+    """Restart a long-running worker if an exception (including an audit failure) kills its loop."""
+    delay = max(0.01, float(restart_delay))
+    ceiling = max(delay, float(max_restart_delay))
+    while True:
+        try:
+            await worker_factory()
+            logging.getLogger(__name__).error(
+                "worker_loop_exited_unexpectedly worker=%s", worker_name
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "worker_loop_crashed_restart_scheduled worker=%s delay_seconds=%s",
+                worker_name, delay,
+            )
+        await asyncio.sleep(delay)
+        delay = min(delay * 2.0, ceiling)
+
+
+def _track_supervised_worker(worker_factory, worker_name: str):
+    return _track_worker_task(_supervise_worker(worker_factory, worker_name))
+
+
 def _trusted_client_ip(request: Request) -> str:
     """Resolve client IP only from a trusted reverse-proxy chain.
 
@@ -318,22 +343,24 @@ async def startup():
     # adaptive controllers and recovery loops belong to the worker pool.
     if process_role == "worker":
         if settings.background_reconciliation_enabled:
-            _background_task = _track_worker_task(_reconciliation_loop())
+            _background_task = _track_supervised_worker(_reconciliation_loop, "reconciliation")
         if settings.custody_reconciliation_enabled:
-            _track_worker_task(_custody_reconciliation_loop())
+            _track_supervised_worker(_custody_reconciliation_loop, "custody-reconciliation")
         if settings.usdt_tron_enabled and settings.usdt_trongrid_api_key:
-            _usdt_task = _track_worker_task(_usdt_tron_monitor_loop())
-        _track_worker_task(_heartbeat_loop())
-        _track_worker_task(_continuous_risk_enforcement_loop())
-        _track_worker_task(_withdrawal_recovery_loop())
-        _track_worker_task(_customer_key_audit_loop())
+            _usdt_task = _track_supervised_worker(_usdt_tron_monitor_loop, "usdt-tron-monitor")
+        _track_supervised_worker(_heartbeat_loop, "heartbeat")
+        _track_supervised_worker(_continuous_risk_enforcement_loop, "continuous-risk-enforcement")
+        _track_supervised_worker(_withdrawal_recovery_loop, "withdrawal-recovery")
+        _track_supervised_worker(_customer_key_audit_loop, "customer-key-audit")
         if settings.daily_research_enabled:
-            _track_worker_task(_daily_research_loop())
+            _track_supervised_worker(_daily_research_loop, "daily-research")
+        if settings.trade_learning_enabled:
+            _track_supervised_worker(_trade_learning_replay_loop, "trade-learning-replay")
         if settings.adaptive_bot_controller_enabled:
-            _track_worker_task(_adaptive_bot_controller_loop())
-            _track_worker_task(_executor_controller_loop())
+            _track_supervised_worker(_adaptive_bot_controller_loop, "adaptive-bot-controller")
+            _track_supervised_worker(_executor_controller_loop, "executor-controller")
     elif process_role == "job":
-        _track_worker_task(_heartbeat_loop())
+        _track_supervised_worker(_heartbeat_loop, "heartbeat")
 
 
 @app.on_event("shutdown")
@@ -783,7 +810,13 @@ async def _run_persisted_adaptive_bot_cycle(
             return {"decision": "NO_TRADE", "stage": "risk_state"}
         equity = max(0.0, float(account.equity))
         risk_fraction = float(bot.risk_fraction or settings.risk_per_trade)
-        paper_mode = bool(settings.paper_trading or not settings.live_trading_enabled or not state.live_enabled or bot.mode != "LIVE")
+        paper_mode = bool(settings.paper_trading or not settings.live_trading_enabled or not state.live_enabled or bot.mode != "LIVE" or req.asset in {"forex", "commodity"})
+        if paper_mode:
+            bot.status = "STOPPED"
+            bot.next_run_at = None
+            bot.last_error = "Customer paper execution requires an isolated simulation ledger"
+            await db.commit()
+            return {"decision": "NO_TRADE", "stage": "paper_simulation_ledger_gate", "reason": bot.last_error}
     if req.asset in {"forex", "commodity"}:
         try:
             df = await _fetch_customer_oanda_data(profile.id, req)
@@ -3496,13 +3529,15 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 raise HTTPException(409, "Strategy candidate must pass validation and explicit live approval before autonomous deployment")
             if candidate.asset != req.asset or candidate.symbol != req.symbol or candidate.exchange != req.exchange or candidate.timeframe != req.timeframe:
                 raise HTTPException(409, "Strategy candidate does not match the selected market configuration")
-        account = await _get_or_create_customer_trading_account(db, profile)
         paper_mode = bool(
             settings.paper_trading
             or not settings.live_trading_enabled
             or not state.live_enabled
             or req.asset in {"forex", "commodity"}
         )
+        if paper_mode:
+            raise HTTPException(409, "Customer paper execution requires an isolated simulation ledger")
+        account = await _get_or_create_customer_trading_account(db, profile)
         if not paper_mode:
             try:
                 await assert_live_system_enabled(

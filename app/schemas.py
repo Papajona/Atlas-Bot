@@ -195,17 +195,17 @@ class TrainRequest(MarketRequest):
 
 class ExecuteRequest(MarketRequest):
     side: str = Field(pattern="^(buy|sell)$")
-    quantity: float = Field(gt=0)
-    price: float = Field(default=0, ge=0)
-    score: float = 0.0
-    long_probability: float = 0.0
-    short_probability: float = 0.0
-    flat_probability: float = 0.0
+    quantity: float = Field(gt=0, allow_inf_nan=False)
+    price: float = Field(default=0, ge=0, allow_inf_nan=False)
+    score: float = Field(default=0.0, allow_inf_nan=False)
+    long_probability: float = Field(default=0.0, allow_inf_nan=False)
+    short_probability: float = Field(default=0.0, allow_inf_nan=False)
+    flat_probability: float = Field(default=0.0, allow_inf_nan=False)
     signal_timestamp: str | None = None
     request_id: str | None = Field(default=None, min_length=8, max_length=80)
     force_paper: bool = True
-    stop_loss_price: float | None = Field(default=None, gt=0)
-    take_profit_price: float | None = Field(default=None, gt=0)
+    stop_loss_price: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    take_profit_price: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     strategy: str = "manual-v1"
     demo_forex: bool = False
 
