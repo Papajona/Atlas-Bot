@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from .config import settings
 from .db import engine
+from .rls_role_policy import require_rls_bypass_role
 
 def assert_multidict_safe_backend() -> None:
     """Refuse production/staging startup unless multidict uses the safe Python backend."""
@@ -44,18 +45,6 @@ async def assert_database_migrations_current() -> None:
     except Exception as exc:
         raise RuntimeError(f"Unable to verify Alembic migration state: {exc}") from exc
 
-def _require_rls_bypass_role(
-    role_name: str, is_superuser: bool, bypass_rls: bool, owns_all_rls_tables: bool = False
-) -> None:
-    """Reject app DB roles that would be blocked by migration 0049's RLS lockdown."""
-    if not (is_superuser or bypass_rls or owns_all_rls_tables):
-        raise RuntimeError(
-            "Database role is not authorized to bypass row-level security: "
-            f"role={role_name!r}. Migration 0049 enables RLS on public tables; "
-            "configure DATABASE_URL with the approved trusted server-side PostgreSQL role."
-        )
-
-
 async def assert_database_role_compatible_with_rls_lockdown() -> None:
     """Fail closed in staging/production unless the app DB role can operate behind RLS."""
     if str(settings.environment).lower() not in {"production", "staging"}:
@@ -73,7 +62,7 @@ async def assert_database_role_compatible_with_rls_lockdown() -> None:
             row = result.mappings().one_or_none()
         if row is None:
             raise RuntimeError("Unable to identify the current PostgreSQL application role")
-        _require_rls_bypass_role(
+        require_rls_bypass_role(
             str(row["role_name"]), bool(row["is_superuser"]), bool(row["bypass_rls"]),
             bool(row["owns_all_rls_tables"])
         )
