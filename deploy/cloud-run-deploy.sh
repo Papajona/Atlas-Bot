@@ -15,7 +15,45 @@ set -euo pipefail
 : "${SECRET_REDIS_URL_VERSION:?Set SECRET_REDIS_URL_VERSION}"
 : "${SUPABASE_URL:?Set SUPABASE_URL}"
 : "${ADMIN_SUPABASE_USER_IDS:?Set ADMIN_SUPABASE_USER_IDS}"
+: "${ADMIN_ROLE_ASSIGNMENTS:?Set ADMIN_ROLE_ASSIGNMENTS with at least one allow-listed UUID:ADMINISTRATOR bootstrap assignment}"
 : "${BACKUP_RECOVERY_URL:?Set BACKUP_RECOVERY_URL}"
+
+# A clean deploy must not leave the role-management API without an active bootstrap administrator.
+# Require an ADMINISTRATOR assignment whose UUID is also in the environment bootstrap allow-list.
+ADMIN_BOOTSTRAP_FOUND=false
+IFS=',' read -r -a _ADMIN_ALLOWLIST <<< "${ADMIN_SUPABASE_USER_IDS}"
+IFS=',' read -r -a _ADMIN_ROLE_ITEMS <<< "${ADMIN_ROLE_ASSIGNMENTS}"
+for _assignment in "${_ADMIN_ROLE_ITEMS[@]}"; do
+  _uid="${_assignment%%:*}"
+  _role="${_assignment#*:}"
+  _uid="${_uid//[[:space:]]/}"
+  _role="${_role//[[:space:]]/}"
+  if [[ "${_assignment}" != *:* || -z "${_uid}" || "${_uid}" == "${_role}" ]]; then
+    echo "ERROR: invalid ADMIN_ROLE_ASSIGNMENTS entry; expected UUID:ROLE." >&2
+    exit 2
+  fi
+  if [[ ! "${_uid}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    echo "ERROR: administrator role assignment user IDs must be UUIDs." >&2
+    exit 2
+  fi
+  case "${_role^^}" in
+    READ_ONLY|OPERATIONS|RISK_OFFICER|TREASURY|COMPLIANCE|FINANCE|ADMINISTRATOR) ;;
+    *) echo "ERROR: invalid administrator role in ADMIN_ROLE_ASSIGNMENTS." >&2; exit 2 ;;
+  esac
+  if [[ "${_role^^}" == "ADMINISTRATOR" ]]; then
+    for _allowed_uid in "${_ADMIN_ALLOWLIST[@]}"; do
+      _allowed_uid="${_allowed_uid//[[:space:]]/}"
+      if [[ "${_uid}" == "${_allowed_uid}" ]]; then
+        ADMIN_BOOTSTRAP_FOUND=true
+        break
+      fi
+    done
+  fi
+done
+if [[ "${ADMIN_BOOTSTRAP_FOUND}" != "true" ]]; then
+  echo "ERROR: ADMIN_ROLE_ASSIGNMENTS must include an ADMINISTRATOR whose UUID is also in ADMIN_SUPABASE_USER_IDS." >&2
+  exit 2
+fi
 : "${SECRET_TRONGRID_VERSION:?Set SECRET_TRONGRID_VERSION, e.g. 2}"
 : "${SECRET_MODEL_SIGNING_PUBLIC_VERSION:?Set SECRET_MODEL_SIGNING_PUBLIC_VERSION}"
 : "${SECRET_SUPABASE_ANON_KEY_VERSION:?Set SECRET_SUPABASE_ANON_KEY_VERSION}"
@@ -53,7 +91,7 @@ if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
 fi
 IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AR_REPOSITORY}/${CLOUD_RUN_SERVICE}@${IMAGE_DIGEST}"
 
-ENV_VARS="^@^ENVIRONMENT=production@RELEASE_SHA=${GIT_SHA}@RELEASE_VERSION=${RELEASE_VERSION}@IMAGE_DIGEST=${IMAGE_DIGEST}@PAPER_TRADING=true@LIVE_TRADING_ENABLED=false@BROKER_SANDBOX=true@DOCS_ENABLED=false@METRICS_REQUIRE_ADMIN=true@BACKGROUND_RECONCILIATION_ENABLED=false@PROCESS_ROLE=api@MODEL_DIR=/app/models@USDT_TRON_ENABLED=true@USDT_TRON_NETWORK=mainnet@USDT_TRONGRID_BASE_URL=https://api.trongrid.io@USDT_TRON_USDT_CONTRACT=TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t@USDT_TRON_POLL_SECONDS=60@USDT_TRON_MIN_CONFIRMATIONS=19@FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS}@SUPABASE_URL=${SUPABASE_URL}@ADMIN_SUPABASE_USER_IDS=${ADMIN_SUPABASE_USER_IDS}@BACKUP_RECOVERY_URL=${BACKUP_RECOVERY_URL}@ADMIN_TOTP_REQUIRED=true@DISTRIBUTED_RATE_LIMIT_REQUIRED=true@REQUIRE_BACKUP_RECOVERY_CONFIG=true@GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}@GEMINI_STRATEGY_MODEL=${GEMINI_STRATEGY_MODEL:-gemini-3.5-flash}@GROQ_MODEL=openai/gpt-oss-20b@GROQ_STRATEGY_MODEL=openai/gpt-oss-20b@GROQ_MAX_COMPLETION_TOKENS=4096"
+ENV_VARS="^@^ENVIRONMENT=production@RELEASE_SHA=${GIT_SHA}@RELEASE_VERSION=${RELEASE_VERSION}@IMAGE_DIGEST=${IMAGE_DIGEST}@PAPER_TRADING=true@LIVE_TRADING_ENABLED=false@BROKER_SANDBOX=true@DOCS_ENABLED=false@METRICS_REQUIRE_ADMIN=true@BACKGROUND_RECONCILIATION_ENABLED=false@PROCESS_ROLE=api@MODEL_DIR=/app/models@USDT_TRON_ENABLED=true@USDT_TRON_NETWORK=mainnet@USDT_TRONGRID_BASE_URL=https://api.trongrid.io@USDT_TRON_USDT_CONTRACT=TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t@USDT_TRON_POLL_SECONDS=60@USDT_TRON_MIN_CONFIRMATIONS=19@FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS}@SUPABASE_URL=${SUPABASE_URL}@ADMIN_SUPABASE_USER_IDS=${ADMIN_SUPABASE_USER_IDS}@ADMIN_ROLE_ASSIGNMENTS=${ADMIN_ROLE_ASSIGNMENTS}@BACKUP_RECOVERY_URL=${BACKUP_RECOVERY_URL}@ADMIN_TOTP_REQUIRED=true@DISTRIBUTED_RATE_LIMIT_REQUIRED=true@REQUIRE_BACKUP_RECOVERY_CONFIG=true@GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}@GEMINI_STRATEGY_MODEL=${GEMINI_STRATEGY_MODEL:-gemini-3.5-flash}@GROQ_MODEL=openai/gpt-oss-20b@GROQ_STRATEGY_MODEL=openai/gpt-oss-20b@GROQ_MAX_COMPLETION_TOKENS=4096"
 
 gcloud run deploy "$CLOUD_RUN_SERVICE" \
   --image "$IMAGE" \

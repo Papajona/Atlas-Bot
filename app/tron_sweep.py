@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .config import settings
@@ -28,25 +28,37 @@ class SweepIntent:
 
 
 def usdt_to_raw(amount: Decimal | str | float) -> int:
-    value = Decimal(str(amount))
-    if value <= 0:
-        raise SweepError("sweep amount must be positive")
-    raw = value * USDT_SCALE
-    if raw != raw.to_integral_value():
-        raise SweepError("USDT amount must have at most 6 decimal places")
-    return int(raw)
+    try:
+        value = Decimal(str(amount))
+        if not value.is_finite():
+            raise SweepError("sweep amount must be finite")
+        if value <= 0:
+            raise SweepError("sweep amount must be positive")
+        raw = value * USDT_SCALE
+        if raw != raw.to_integral_value():
+            raise SweepError("USDT amount must have at most 6 decimal places")
+        return int(raw)
+    except SweepError:
+        raise
+    except (InvalidOperation, ValueError, TypeError, ArithmeticError) as exc:
+        raise SweepError("sweep amount is not a valid finite number") from exc
 
 
 def build_sweep_intent(*, wallet_id: int, source_address: str, amount_usdt: Decimal | str | float,
-                       treasury_address: str | None = None, idempotency_key: str | None = None) -> SweepIntent:
+                       treasury_address: str | None = None, idempotency_key: str | None = None,
+                       nonce: str | int | None = None) -> SweepIntent:
+    """Build a sweep intent. Callers repeating a sweep should pass a retry-stable request ID
+    or a serialized per-wallet sequence as nonce.
+    """
     treasury = treasury_address or settings.usdt_tron_treasury_address
     if not source_address or not treasury:
         raise SweepError("source and treasury addresses are required")
     if source_address == treasury:
         raise SweepError("source address cannot equal treasury address")
     raw = usdt_to_raw(amount_usdt)
+    nonce_part = f":{nonce}" if nonce not in (None, "") else ""
     key = idempotency_key or hashlib.sha256(
-        f"tron-sweep:{wallet_id}:{source_address}:{treasury}:{raw}:{settings.usdt_tron_usdt_contract}".encode()
+        f"tron-sweep:{wallet_id}:{source_address}:{treasury}:{raw}:{settings.usdt_tron_usdt_contract}{nonce_part}".encode()
     ).hexdigest()
     return SweepIntent(wallet_id=wallet_id, source_address=source_address, treasury_address=treasury,
                        amount_usdt=Decimal(raw) / USDT_SCALE, raw_amount=raw,
@@ -73,7 +85,12 @@ def _hex_topic_to_tron_address(value: str) -> str | None:
     raw = (value or "").lower().removeprefix("0x")
     if len(raw) != 64:
         return None
-    payload = bytes.fromhex(raw)
+    try:
+        payload = bytes.fromhex(raw)
+    except ValueError:
+        return None
+    if any(payload[:12]):
+        return None
     try:
         from bip_utils import Base58Encoder
     except ImportError as exc:
@@ -105,22 +122,38 @@ def _address_to_hex20(value: str) -> str | None:
         return decoded[1:].hex() if len(decoded) == 21 and decoded[0] == 0x41 else None
     return None
 
-def extract_trc20_transfer(receipt: dict[str, Any], contract: str, source: str, destination: str) -> int | None:
-    """Return the raw USDT amount for a matching solidified Transfer event, else None."""
+def extract_trc20_transfers(receipt: dict[str, Any], contract: str, source: str, destination: str) -> list[int]:
+    """Return every matching Transfer amount emitted by the configured token contract."""
+    found: list[int] = []
+    wanted_contract = _address_to_hex20(contract)
+    if wanted_contract is None:
+        return found
     for log in receipt.get("log", []) or receipt.get("logs", []) or []:
+        if not isinstance(log, dict):
+            continue
         topics = [str(x) for x in (log.get("topics") or [])]
         if len(topics) < 3 or topics[0].lower().removeprefix("0x") != TRANSFER_TOPIC:
             continue
-        wanted_contract = _address_to_hex20(contract)
-        if wanted_contract is None or _address_to_hex20(str(log.get("address") or "")) != wanted_contract:
+        if _address_to_hex20(str(log.get("address") or "")) != wanted_contract:
             continue
         from_addr = _hex_topic_to_tron_address(topics[1])
         to_addr = _hex_topic_to_tron_address(topics[2])
         data = str(log.get("data") or "").removeprefix("0x")
-        if from_addr != source or to_addr != destination or len(data) != 64:
+        if (from_addr is None or to_addr is None or from_addr != source
+                or to_addr != destination or len(data) != 64
+                or any(ch not in "0123456789abcdefABCDEF" for ch in data)):
             continue
-        return int(data, 16)
-    return None
+        try:
+            found.append(int(data, 16))
+        except ValueError:
+            continue
+    return found
+
+
+def extract_trc20_transfer(receipt: dict[str, Any], contract: str, source: str, destination: str) -> int | None:
+    """Return a single matching Transfer amount, or None if absent/ambiguous."""
+    found = extract_trc20_transfers(receipt, contract, source, destination)
+    return found[0] if len(found) == 1 else None
 
 
 def classify_solidified_sweep(*, tx_body: dict[str, Any], receipt: dict[str, Any],
@@ -129,21 +162,31 @@ def classify_solidified_sweep(*, tx_body: dict[str, Any], receipt: dict[str, Any
     """Classify a sweep only from solidified transaction body + receipt evidence."""
     if not tx_body or not receipt:
         return "UNKNOWN", {"reason": "solidified transaction/receipt not yet available"}
+    if not isinstance(tx_body, dict) or not isinstance(receipt, dict):
+        return "REVIEW", {"reason": "solidified transaction or receipt has an invalid shape"}
     if str(tx_body.get("txID") or tx_body.get("txid") or "").lower() != transaction_id.lower():
         return "REVIEW", {"reason": "transaction id mismatch"}
-    ret = (tx_body.get("ret") or [{}])[0]
-    if str(ret.get("contractRet") or "").upper() not in {"", "SUCCESS"}:
-        return "FAILED", {"reason": f"contractRet={ret.get('contractRet')}"}
-    if str(receipt.get("id") or "").lower() not in {"", transaction_id.lower()}:
-        return "REVIEW", {"reason": "receipt id mismatch"}
+    ret_list = tx_body.get("ret")
+    ret = ret_list[0] if isinstance(ret_list, list) and ret_list and isinstance(ret_list[0], dict) else {}
+    contract_ret = str(ret.get("contractRet") or "").upper()
+    if not contract_ret:
+        return "REVIEW", {"reason": "contractRet missing from solidified transaction"}
+    if contract_ret != "SUCCESS":
+        return "FAILED", {"reason": f"contractRet={contract_ret}"}
+    if str(receipt.get("id") or "").lower() != transaction_id.lower():
+        return "REVIEW", {"reason": "receipt id mismatch or missing"}
     if str(receipt.get("result") or "").upper() == "FAILED":
         return "FAILED", {"reason": "solidified receipt result=FAILED"}
     receipt_result = str((receipt.get("receipt") or {}).get("result") or "").upper()
     if receipt_result != "SUCCESS":
         return "REVIEW", {"reason": f"solidified receipt result={receipt_result or 'missing'}"}
-    observed = extract_trc20_transfer(receipt, contract, source, treasury)
-    if observed is None:
+    matches = extract_trc20_transfers(receipt, contract, source, treasury)
+    if not matches:
         return "REVIEW", {"reason": "matching TRC-20 Transfer event not found"}
+    if len(matches) > 1:
+        return "REVIEW", {"reason": "multiple matching TRC-20 Transfer events", "observed_raw_all": matches,
+                           "expected_raw": expected_raw_amount}
+    observed = matches[0]
     if observed != expected_raw_amount:
         return "REVIEW", {"reason": "transfer amount mismatch", "observed_raw": observed,
                            "expected_raw": expected_raw_amount}
