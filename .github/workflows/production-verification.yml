@@ -89,7 +89,22 @@ jobs:
       - name: Repository secret scan
         run: python scripts/check_no_secrets.py
       - name: AI model/provider verification when credentials are supplied
-        run: python scripts/check_ai_models.py || test $? -eq 2
+        env:
+          PYTHONPATH: .
+        run: |
+          set +e
+          python scripts/check_ai_models.py
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          elif [ "$status" -eq 2 ]; then
+            echo "SKIP: provider credentials are not configured; this is not a provider verification pass"
+            exit 0
+          else
+            echo "BLOCKED: AI model/provider verification failed with exit code $status"
+            exit "$status"
+          fi
       - name: Production-oriented static and security gates
         run: |
           python -m compileall -q app alembic
