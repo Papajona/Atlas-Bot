@@ -10,8 +10,8 @@ connection-role assumption must be verified in staging before rollout.
 """
 from alembic import op
 
-revision = "0048_public_schema_rls_lockdown"
-down_revision = "0047_strategy_outcome_lifecycle"
+revision = "0049_public_schema_rls_lockdown"
+down_revision = "0048_merge_subscription_and_application_heads"
 branch_labels = None
 depends_on = None
 
