@@ -44,9 +44,11 @@ async def assert_database_migrations_current() -> None:
     except Exception as exc:
         raise RuntimeError(f"Unable to verify Alembic migration state: {exc}") from exc
 
-def _require_rls_bypass_role(role_name: str, is_superuser: bool, bypass_rls: bool) -> None:
+def _require_rls_bypass_role(
+    role_name: str, is_superuser: bool, bypass_rls: bool, owns_all_rls_tables: bool = False
+) -> None:
     """Reject app DB roles that would be blocked by migration 0049's RLS lockdown."""
-    if not (is_superuser or bypass_rls):
+    if not (is_superuser or bypass_rls or owns_all_rls_tables):
         raise RuntimeError(
             "Database role is not authorized to bypass row-level security: "
             f"role={role_name!r}. Migration 0049 enables RLS on public tables; "
@@ -62,14 +64,18 @@ async def assert_database_role_compatible_with_rls_lockdown() -> None:
         async with engine.connect() as conn:
             result = await conn.execute(text(
                 "SELECT current_user AS role_name, r.rolsuper AS is_superuser, "
-                "r.rolbypassrls AS bypass_rls FROM pg_roles AS r "
-                "WHERE r.rolname = current_user"
+                "r.rolbypassrls AS bypass_rls, NOT EXISTS ("
+                "SELECT 1 FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') "
+                "AND c.relrowsecurity AND (c.relowner <> r.oid OR c.relforcerowsecurity)"
+                ") AS owns_all_rls_tables FROM pg_roles AS r WHERE r.rolname = current_user"
             ))
             row = result.mappings().one_or_none()
         if row is None:
             raise RuntimeError("Unable to identify the current PostgreSQL application role")
         _require_rls_bypass_role(
-            str(row["role_name"]), bool(row["is_superuser"]), bool(row["bypass_rls"])
+            str(row["role_name"]), bool(row["is_superuser"]), bool(row["bypass_rls"]),
+            bool(row["owns_all_rls_tables"])
         )
     except RuntimeError:
         raise
