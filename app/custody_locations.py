@@ -60,13 +60,13 @@ async def record_custody_observation(db, *, location: str, provider: str, curren
     )).scalar_one_or_none()
     if row is None:
         row = CustodyAssetObservation(location=location, provider=provider, customer_id=customer_id,
-                                      currency=currency, balance=float(amount), status="ACTIVE",
+                                      currency=currency, balance=amount, status="ACTIVE",
                                       source_reference=source_reference, observed_at=observed)
         db.add(row)
     else:
         row.provider = provider
         row.customer_id = customer_id
-        row.balance = float(amount)
+        row.balance = amount
         row.status = "ACTIVE"
         row.source_reference = source_reference
         row.observed_at = observed
@@ -94,7 +94,7 @@ async def create_custody_transfer(db, *, customer_id: int | None, currency: str,
             raise ValueError("custody transfer idempotency conflict")
         return existing
     row = CustodyTransfer(customer_id=customer_id, currency=str(currency).upper(),
-                          amount=float(amount_d), source_location=source_location,
+                          amount=amount_d, source_location=source_location,
                           destination_location=destination_location, status="REQUESTED",
                           idempotency_key=key)
     db.add(row)
