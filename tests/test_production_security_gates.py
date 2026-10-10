@@ -241,10 +241,10 @@ def test_staging_identity_preflight_is_manual_main_only_and_read_only():
     assert "alembic upgrade" not in workflow
 
 
-def test_staging_identity_preflight_does_not_confuse_identity_with_migration_readiness():
+def test_staging_identity_preflight_fails_closed_on_migration_blockers():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
-    assert "IDENTITY PASS; MIGRATION BLOCKED" in workflow
-    assert "expected before migration 0049" in workflow
+    assert 'raise SystemExit("BLOCKED: runtime role neither bypasses RLS' in workflow
+    assert 'raise SystemExit("BLOCKED: public tables without RLS remain' in workflow
     assert "no migration or write was executed" in workflow
     assert "alembic upgrade" not in workflow
 
