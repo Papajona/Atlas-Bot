@@ -319,3 +319,11 @@ def test_naive_live_signal_timestamp_is_rejected_without_timezone_guessing():
     block = source.split("if live and not signal_timestamp:", 1)[1].split("await db.commit()", 1)[0]
     assert 'raise RiskBlocked("Signal timestamp must include a timezone")' in block
     assert "ts = ts.replace(tzinfo=timezone.utc)" not in block
+
+
+
+def test_deficit_threshold_rejects_nonpositive_and_nonfinite_values():
+    from app.config import Settings
+    for value in (0, -1, float("inf"), float("nan")):
+        with pytest.raises((ValueError, Exception)):
+            Settings(environment="staging", customer_deficit_limit_usdt=value)
