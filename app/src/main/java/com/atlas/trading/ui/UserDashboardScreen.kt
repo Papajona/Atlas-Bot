@@ -28,6 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.util.Locale
+import com.atlas.trading.network.CustomerDataClient
 import kotlin.math.max
 import kotlin.math.min
 
@@ -61,6 +62,7 @@ enum class AssetClass(val label: String, val badge: String) {
 fun UserDashboardScreen(
     userName: String = "Alice",
     backendUrl: String = "",
+    customerAccessToken: String? = null,
     onOpenOperatorConsole: () -> Unit = {},
     onOpenPortal: () -> Unit = {}
 ) {
@@ -68,6 +70,16 @@ fun UserDashboardScreen(
     var selectedAssetClass by remember { mutableStateOf(AssetClass.ALL) }
     var selectedTimeframeDays by remember { mutableIntStateOf(30) } // 7 or 30 days
     var actionDialogMessage by remember { mutableStateOf<String?>(null) }
+    var customerSnapshot by remember { mutableStateOf<CustomerDataClient.Snapshot?>(null) }
+
+    LaunchedEffect(backendUrl, customerAccessToken) {
+        val token = customerAccessToken?.takeIf { it.isNotBlank() }
+        customerSnapshot = if (token == null || backendUrl.isBlank()) {
+            null
+        } else {
+            runCatching { CustomerDataClient(backendUrl).loadSnapshot(token) }.getOrNull()
+        }
+    }
 
     // Do not fabricate account history. The authenticated customer API must supply it.
     val equityHistory = remember { emptyList<EquityPoint>() }
@@ -123,7 +135,7 @@ fun UserDashboardScreen(
                         item {
                             Spacer(modifier = Modifier.height(4.dp))
                             DashboardHeader(
-                                userName = userName,
+                                userName = customerSnapshot?.profile?.displayName ?: userName,
                                 brandTeal = brandTeal,
                                 textPrimary = textPrimary,
                                 onAvatarClick = { currentTab = DashboardTab.SETTINGS },
@@ -147,8 +159,8 @@ fun UserDashboardScreen(
                         // Three summary metric cards side by side
                         item {
                             SummaryKpiRow(
-                                totalBalance = null,
-                                activeTrades = null,
+                                totalBalance = customerSnapshot?.portfolio?.equity,
+                                activeTrades = customerSnapshot?.portfolio?.openPositions,
                                 profit24hPct = null,
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
@@ -178,6 +190,7 @@ fun UserDashboardScreen(
                         item {
                             RecentActivityCard(
                                 selectedAssetClass = selectedAssetClass,
+                                marketQuotes = customerSnapshot?.marketQuotes.orEmpty(),
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
                                 textPrimary = textPrimary,
@@ -343,7 +356,9 @@ fun UserDashboardScreen(
                                     )
                                     Spacer(modifier = Modifier.height(8.dp))
                                     Text(
-                                        text = "Live market prices and signals are unavailable in this session. Sign in to an authorized customer account and connect a verified market feed to view current data.",
+                                        text = customerSnapshot?.marketQuotes?.takeIf { it.isNotEmpty() }?.joinToString("\n") {
+                                    "${it.symbol}: ${it.price} • ${it.signal}"
+                                } ?: "Live market data unavailable. Sign in to an authorized customer account and ensure the market-scanner entitlement and provider are available.",
                                         fontSize = 13.sp,
                                         color = textMuted,
                                         lineHeight = 22.sp
@@ -357,8 +372,8 @@ fun UserDashboardScreen(
 
                 DashboardTab.SETTINGS -> {
                     ModernSettingsScreen(
-                        userName = userName,
-                        userEmail = "Unavailable until account sign-in",
+                        userName = customerSnapshot?.profile?.displayName ?: userName,
+                        userEmail = customerSnapshot?.profile?.email ?: "Unavailable until account sign-in",
                         onOpenOperatorConsole = onOpenOperatorConsole,
                         onOpenPortal = onOpenPortal,
                         modifier = Modifier.padding(innerPadding)
@@ -560,7 +575,7 @@ private fun SummaryKpiRow(
             border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(cardBorder))
         ) {
             Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-                Text(text = "Active Trades", fontSize = 11.sp, color = textMuted, maxLines = 1)
+                Text(text = "Open Positions", fontSize = 11.sp, color = textMuted, maxLines = 1)
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
                     text = activeTrades?.toString() ?: "Unavailable",
@@ -986,6 +1001,7 @@ private fun QuickActionsRow(
 @Composable
 private fun WatchlistCard(
     selectedAssetClass: AssetClass = AssetClass.ALL,
+    marketQuotes: List<CustomerDataClient.MarketQuote> = emptyList(),
     cardSurface: Color,
     cardBorder: Color,
     textPrimary: Color,
@@ -1007,11 +1023,22 @@ private fun WatchlistCard(
                 color = textPrimary
             )
             Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                "Live prices unavailable — no authenticated market-scanner response is loaded. No placeholder prices are shown.",
-                fontSize = 12.sp,
-                color = textMuted
-            )
+            if (marketQuotes.isEmpty()) {
+                Text(
+                    "Live prices unavailable — sign in to an authorized customer account and confirm market-scanner access. No placeholder prices are shown.",
+                    fontSize = 12.sp,
+                    color = textMuted
+                )
+            } else {
+                marketQuotes.forEach { quote ->
+                    Text(
+                        "${quote.symbol}  ${quote.price}  •  ${quote.signal}",
+                        fontSize = 13.sp,
+                        color = textPrimary,
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                }
+            }
         }
     }
 }
