@@ -76,6 +76,8 @@ fun UserDashboardScreen(
     var customerSnapshot by remember { mutableStateOf<CustomerDataClient.Snapshot?>(null) }
     var customerSignInError by remember { mutableStateOf<String?>(null) }
     var customerSignInBusy by remember { mutableStateOf(false) }
+    var customerMfaChallenge by remember { mutableStateOf<CustomerAuthClient.MfaChallenge?>(null) }
+    var pendingCustomerSession by remember { mutableStateOf<CustomerAuthClient.Session?>(null) }
     val customerAuthScope = rememberCoroutineScope()
 
     LaunchedEffect(backendUrl, activeCustomerToken) {
@@ -156,15 +158,45 @@ fun UserDashboardScreen(
                                 CustomerSignInCard(
                                     busy = customerSignInBusy,
                                     error = customerSignInError,
+                                    requiresAuthenticator = customerMfaChallenge != null,
                                     onSignIn = { email, password ->
                                         customerAuthScope.launch {
                                             customerSignInBusy = true
                                             customerSignInError = null
                                             try {
-                                                val session = CustomerAuthClient(backendUrl).login(email, password)
-                                                activeCustomerToken = session.accessToken
+                                                val auth = CustomerAuthClient(backendUrl)
+                                                val session = auth.login(email, password)
+                                                val status = auth.mfaStatus(session.accessToken)
+                                                if (!status.enabled || status.factorIds.isEmpty()) {
+                                                    throw IllegalStateException("Google Authenticator setup is required before customer sign-in can complete")
+                                                }
+                                                val challenge = auth.challenge(session.accessToken, status.factorIds.first())
+                                                pendingCustomerSession = session
+                                                customerMfaChallenge = challenge
                                             } catch (error: Exception) {
+                                                pendingCustomerSession = null
+                                                customerMfaChallenge = null
                                                 customerSignInError = error.message ?: "Customer sign-in failed"
+                                            } finally {
+                                                customerSignInBusy = false
+                                            }
+                                        }
+                                    },
+                                    onVerifyAuthenticator = { code ->
+                                        customerAuthScope.launch {
+                                            customerSignInBusy = true
+                                            customerSignInError = null
+                                            try {
+                                                val session = pendingCustomerSession
+                                                    ?: throw IllegalStateException("Sign in again to request an authenticator challenge")
+                                                val challenge = customerMfaChallenge
+                                                    ?: throw IllegalStateException("Authenticator challenge expired; sign in again")
+                                                val verified = CustomerAuthClient(backendUrl).verify(session.accessToken, challenge, code)
+                                                activeCustomerToken = verified.accessToken
+                                                pendingCustomerSession = null
+                                                customerMfaChallenge = null
+                                            } catch (error: Exception) {
+                                                customerSignInError = error.message ?: "Authenticator verification failed"
                                             } finally {
                                                 customerSignInBusy = false
                                             }
@@ -444,10 +476,13 @@ fun UserDashboardScreen(
 private fun CustomerSignInCard(
     busy: Boolean,
     error: String?,
-    onSignIn: (String, String) -> Unit
+    requiresAuthenticator: Boolean,
+    onSignIn: (String, String) -> Unit,
+    onVerifyAuthenticator: (String) -> Unit
 ) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var authenticatorCode by remember { mutableStateOf("") }
     val theme = com.atlas.trading.ui.theme.LocalAtlasColors.current
 
     Card(
@@ -474,28 +509,43 @@ private fun CustomerSignInCard(
                 singleLine = true,
                 enabled = !busy
             )
-            OutlinedTextField(
-                value = password,
-                onValueChange = { password = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Password") },
-                visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
-                singleLine = true,
-                enabled = !busy
-            )
+            if (!requiresAuthenticator) {
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Password") },
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    singleLine = true,
+                    enabled = !busy
+                )
+            } else {
+                Text("Enter the 6-digit code from your authenticator app.", fontSize = 12.sp, color = theme.textMuted)
+                OutlinedTextField(
+                    value = authenticatorCode,
+                    onValueChange = { authenticatorCode = it.filter(Char::isDigit).take(6) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Authenticator code") },
+                    singleLine = true,
+                    enabled = !busy
+                )
+            }
             if (!error.isNullOrBlank()) {
                 Text(error, color = theme.redDanger, fontSize = 12.sp)
             }
             Button(
-                onClick = { onSignIn(email, password) },
-                enabled = !busy && email.isNotBlank() && password.isNotBlank(),
+                onClick = {
+                    if (requiresAuthenticator) onVerifyAuthenticator(authenticatorCode)
+                    else onSignIn(email, password)
+                },
+                enabled = !busy && if (requiresAuthenticator) authenticatorCode.length == 6 else email.isNotBlank() && password.isNotBlank(),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 if (busy) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                     Spacer(modifier = Modifier.width(8.dp))
                 }
-                Text(if (busy) "Signing in…" else "Sign in securely")
+                Text(when { busy -> "Verifying…"; requiresAuthenticator -> "Verify authenticator"; else -> "Sign in securely" })
             }
         }
     }
