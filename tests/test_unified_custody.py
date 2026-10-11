@@ -197,7 +197,7 @@ def test_provider_backed_binance_refresh_preserves_exact_decimal_before_persiste
 
     async def capture_record(db, **kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(**kwargs, balance=kwargs["balance"])
+        return SimpleNamespace(**kwargs)
 
     monkeypatch.setattr(custody, "record_custody_observation", capture_record)
 
