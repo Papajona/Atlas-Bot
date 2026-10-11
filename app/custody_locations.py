@@ -282,10 +282,19 @@ async def refresh_binance_custody_observation(
     balance_response = await asyncio.to_thread(broker.fetch_balance)
     if not isinstance(balance_response, dict):
         raise RuntimeError("Binance returned an invalid balance response")
-    total = balance_response.get("total")
-    if not isinstance(total, dict) or "USDT" not in total:
-        raise RuntimeError("Binance response did not include a total USDT balance")
-    amount = _amount(total["USDT"])
+    # CCXT's normalized "total" values may be binary floats. For exact
+    # accounting, use Binance's raw decimal-string free/locked fields instead.
+    info = balance_response.get("info")
+    raw_balances = info.get("balances") if isinstance(info, dict) else None
+    raw_usdt = next(
+        (item for item in raw_balances if isinstance(item, dict) and item.get("asset") == "USDT"),
+        None,
+    ) if isinstance(raw_balances, list) else None
+    if raw_usdt is None or "free" not in raw_usdt or "locked" not in raw_usdt:
+        raise RuntimeError("Binance response lacks raw USDT free/locked decimal strings")
+    if not isinstance(raw_usdt["free"], str) or not isinstance(raw_usdt["locked"], str):
+        raise RuntimeError("Binance raw USDT balances must be decimal strings")
+    amount = _amount(D(raw_usdt["free"]) + D(raw_usdt["locked"]))
     timestamp = observed_at or utcnow()
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
         raise ValueError("observation timestamp must be timezone-aware")
