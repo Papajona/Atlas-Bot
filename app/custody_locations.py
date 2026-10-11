@@ -225,6 +225,9 @@ async def custody_gate(db, *, customer_liabilities, currency: str = "USDT") -> d
         return {"status": "UNKNOWN", "customer_liabilities": liabilities,
                 "exchange_assets": None, "reason": "BINANCE_PROVIDER_REFRESH_FAILED",
                 "error_type": type(exc).__name__}
+    if refreshed == 0:
+        return {"status": "UNKNOWN", "customer_liabilities": liabilities,
+                "exchange_assets": None, "reason": "NO_VERIFIED_BINANCE_ACCOUNTS"}
     report = await fresh_external_assets(db, currency=currency)
     report["provider_accounts_refreshed"] = refreshed
     if not report["fresh_observation_available"]:
