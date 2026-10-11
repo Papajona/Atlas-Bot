@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     funding_webhook_secret: str = ""
     funding_webhook_max_skew_seconds: int = 300
 
-    customer_deficit_limit_usdt: float = 100.0  # USDT; automatic global halt threshold
+    customer_deficit_limit_usdt: float = 100.0  # USDT; threshold marker for deficit escalation (any deficit halts live trading)
 
     # Real USDT funding (TRON / TRC-20). Production API receives only a public
     # account-level extended public key (xpub) for new deposit-address derivation.
