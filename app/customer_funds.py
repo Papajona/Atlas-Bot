@@ -452,9 +452,12 @@ async def _engage_kill_switch_for_deficit(db, *, customer_id: int, reference_id:
             state.kill_switch = True
             state.live_enabled = False
         raise RuntimeError("CUSTOMER_DEFICIT_LIMIT_USDT must be finite and > 0")
+    # Any realized customer deficit is unsafe: engage the live kill switch for
+    # every positive shortfall. The configured threshold is recorded for severity/
+    # escalation telemetry, never used to permit continued live trading in deficit.
     threshold_reached = shortfall >= threshold
     state = await db.get(AppState, 1)
-    if threshold_reached and state is not None:
+    if shortfall > 0 and state is not None:
         state.kill_switch = True
         state.live_enabled = False
     await record_ledger_incident(
