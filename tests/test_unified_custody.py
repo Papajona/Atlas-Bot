@@ -250,11 +250,31 @@ def test_custody_decimal_schema_matches_existing_migration():
     assert 'sa.Column("amount", sa.Numeric(38, 18)' in migration
 
 
-def test_emergency_kill_route_is_exempt_from_redis_rate_limiter():
-    from pathlib import Path
-    source = (Path(__file__).parents[1] / "app" / "main.py").read_text()
-    middleware = source.split("async def api_rate_limit", 1)[1].split("@app.middleware", 1)[0]
-    assert '"/api/risk/kill"' in middleware
+def test_emergency_kill_bypasses_rate_limiter_when_redis_is_down(monkeypatch):
+    from starlette.requests import Request
+    from starlette.responses import Response
+    import app.main as main
+
+    async def redis_failure(*args, **kwargs):
+        raise ConnectionError("Redis unavailable")
+
+    monkeypatch.setattr(main, "allow_rate_limit", redis_failure)
+    called = {"next": False}
+
+    async def call_next(request):
+        called["next"] = True
+        return Response("reached emergency endpoint", status_code=200)
+
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": "POST", "scheme": "http", "path": "/api/risk/kill",
+        "raw_path": b"/api/risk/kill", "query_string": b"",
+        "headers": [], "client": ("127.0.0.1", 12345), "server": ("test", 80),
+        "root_path": "",
+    }
+    response = asyncio.run(main.api_rate_limit(Request(scope), call_next))
+    assert response.status_code == 200
+    assert called["next"] is True
 
 
 
