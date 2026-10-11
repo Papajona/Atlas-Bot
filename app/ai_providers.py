@@ -135,10 +135,10 @@ def _prompt(research: dict[str, Any], intelligence: dict[str, Any]) -> str:
 
 
 async def dual_ai_research_review(research: dict[str, Any], intelligence: dict[str, Any]) -> dict[str, Any]:
-    """Run Gemini and Groq independently and return both auditable outputs.
+    """Run configured research providers independently and return auditable outputs.
 
-    Gemini is the primary research/deeper-analysis provider; Groq is the fast
-    secondary analysis provider. Neither output has authority to execute orders.
+    Gemini and Groq remain the established providers; Cerebras is an optional third
+    research opinion. None of these outputs has authority to execute orders.
     """
     prompt = _prompt(research, intelligence)
     calls = [("gemini", _gemini_json(prompt)), ("groq", _groq_json(prompt))]
@@ -161,10 +161,11 @@ async def dual_ai_research_review(research: dict[str, Any], intelligence: dict[s
 
 
 async def dual_ai_trade_safety_review(trade_packet: dict[str, Any]) -> dict[str, Any]:
-    """Independent Gemini/Groq safety veto for a deterministic trade plan.
+    """Dual-provider safety veto for a deterministic trade plan.
 
-    Providers may only approve/reject the supplied plan. They cannot change entry,
-    stop, target, size, or execution mode. Missing/failed providers are unsafe.
+    Gemini is preferred for the primary opinion; Cerebras may replace it if Gemini
+    fails. Groq must independently approve. Providers cannot change trade parameters,
+    and any missing or failed required opinion is unsafe.
     """
     prompt = (
         "Review this proposed Atlas trade plan for safety only. Return JSON with keys "
@@ -184,10 +185,12 @@ async def dual_ai_trade_safety_review(trade_packet: dict[str, Any]) -> dict[str,
     primary_result, groq_result = await asyncio.gather(
         primary_call, _groq_json(prompt), return_exceptions=True
     )
+    fallback_used = False
     if isinstance(primary_result, Exception) and primary_name == "gemini" and settings.cerebras_api_key:
         try:
             primary_result = await _cerebras_json(prompt)
             primary_name = "cerebras"
+            fallback_used = True
         except Exception as exc:
             primary_result = exc
     providers: dict[str, Any] = {}
@@ -209,5 +212,6 @@ async def dual_ai_trade_safety_review(trade_packet: dict[str, Any]) -> dict[str,
         "configured": configured,
         "providers": providers,
         "errors": errors,
+        "fallbacks": {"gemini": "cerebras"} if fallback_used else {},
         "execution_authority": False,
     }
