@@ -69,10 +69,8 @@ fun UserDashboardScreen(
     var selectedTimeframeDays by remember { mutableIntStateOf(30) } // 7 or 30 days
     var actionDialogMessage by remember { mutableStateOf<String?>(null) }
 
-    // Generate 30-day realistic historical equity curve
-    val equityHistory = remember {
-        generate30DayEquityData()
-    }
+    // Do not fabricate account history. The authenticated customer API must supply it.
+    val equityHistory = remember { emptyList<EquityPoint>() }
 
     val displayPoints = remember(selectedTimeframeDays, equityHistory) {
         if (selectedTimeframeDays == 7) {
@@ -130,7 +128,7 @@ fun UserDashboardScreen(
                                 textPrimary = textPrimary,
                                 onAvatarClick = { currentTab = DashboardTab.SETTINGS },
                                 onNotificationClick = {
-                                    actionDialogMessage = "Active Alerts across Multi-Asset Suite:\n• BTC/USDT: +0.05 bought at $68,450\n• EUR/USD: 4H breakout active (+18 pips)\n• Gold (XAU/USD): 4H trend target hit (+1.15%)"
+                                    actionDialogMessage = "Verified alerts are unavailable until an authenticated account and live alert feed are connected."
                                 }
                             )
                         }
@@ -149,14 +147,9 @@ fun UserDashboardScreen(
                         // Three summary metric cards side by side
                         item {
                             SummaryKpiRow(
-                                totalBalance = 1250.00,
-                                activeTrades = when (selectedAssetClass) {
-                                    AssetClass.ALL -> 5
-                                    AssetClass.CRYPTO -> 2
-                                    AssetClass.FOREX -> 2
-                                    AssetClass.COMMODITIES -> 1
-                                },
-                                profit24hPct = 3.5,
+                                totalBalance = null,
+                                activeTrades = null,
+                                profit24hPct = null,
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
                                 textPrimary = textPrimary,
@@ -350,7 +343,7 @@ fun UserDashboardScreen(
                                     )
                                     Spacer(modifier = Modifier.height(8.dp))
                                     Text(
-                                        text = "• 🪙 BTC/USDT: 4H Trend Momentum Bullish (ATR = 1,420)\n• 🪙 ETH/USDT: Mean-reversion hold (Z = +0.4)\n• 💱 EUR/USD: London session range breakout passed (1.0852)\n• 💱 GBP/USD: 1D Trend following target active (1.2940)\n• 🥇 Gold (XAU/USD): 4H Channel breakout intact ($2,354.20)",
+                                        text = "Live market prices and signals are unavailable in this session. Sign in to an authorized customer account and connect a verified market feed to view current data.",
                                         fontSize = 13.sp,
                                         color = textMuted,
                                         lineHeight = 22.sp
@@ -364,8 +357,8 @@ fun UserDashboardScreen(
 
                 DashboardTab.SETTINGS -> {
                     ModernSettingsScreen(
-                        userName = "$userName Henderson",
-                        userEmail = "${userName.lowercase(Locale.US)}.henderson@atlas.trading",
+                        userName = userName,
+                        userEmail = "Unavailable until account sign-in",
                         onOpenOperatorConsole = onOpenOperatorConsole,
                         onOpenPortal = onOpenPortal,
                         modifier = Modifier.padding(innerPadding)
@@ -525,9 +518,9 @@ private fun AssetClassSelectorRow(
 
 @Composable
 private fun SummaryKpiRow(
-    totalBalance: Double,
-    activeTrades: Int,
-    profit24hPct: Double,
+    totalBalance: Double?,
+    activeTrades: Int?,
+    profit24hPct: Double?,
     cardSurface: Color,
     cardBorder: Color,
     textPrimary: Color,
@@ -550,7 +543,7 @@ private fun SummaryKpiRow(
                 Text(text = "Total Balance", fontSize = 11.sp, color = textMuted, maxLines = 1)
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
-                    text = "$${String.format(Locale.US, "%,.2f", totalBalance)}",
+                    text = totalBalance?.let { "${String.format(Locale.US, "%,.2f", it)}" } ?: "Unavailable",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     color = textPrimary,
@@ -570,7 +563,7 @@ private fun SummaryKpiRow(
                 Text(text = "Active Trades", fontSize = 11.sp, color = textMuted, maxLines = 1)
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
-                    text = "$activeTrades",
+                    text = activeTrades?.toString() ?: "Unavailable",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     color = textPrimary
@@ -595,7 +588,7 @@ private fun SummaryKpiRow(
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
-                        text = "+${String.format(Locale.US, "%.1f", profit24hPct)}%",
+                        text = profit24hPct?.let { "${String.format(Locale.US, "%.1f", it)}%" } ?: "Unavailable",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
                         color = emeraldBadgeText
@@ -877,7 +870,6 @@ private fun RecentActivityCard(
     emeraldAccent: Color,
     redDanger: Color
 ) {
-    val theme = com.atlas.trading.ui.theme.LocalAtlasColors.current
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = cardSurface),
@@ -885,108 +877,13 @@ private fun RecentActivityCard(
         border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(cardBorder))
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Recent Activity",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = textPrimary
-                )
-                Text(
-                    text = selectedAssetClass.label,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = textMuted
-                )
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            when (selectedAssetClass) {
-                AssetClass.FOREX -> {
-                    // EUR/USD activity
-                    ActivityRow(
-                        badgeText = "€",
-                        badgeBg = Color(0xFF3B82F6),
-                        title = "EUR/USD bought:",
-                        value = "+25 pips",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    HorizontalDivider(color = theme.divider, thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(10.dp))
-                    // GBP/USD activity
-                    ActivityRow(
-                        badgeText = "£",
-                        badgeBg = Color(0xFF8B5CF6),
-                        title = "GBP/USD sold:",
-                        value = "+40 pips",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                }
-                AssetClass.COMMODITIES -> {
-                    // Gold activity
-                    ActivityRow(
-                        badgeText = "Au",
-                        badgeBg = Color(0xFFEAB308),
-                        title = "Gold (XAU) bought:",
-                        value = "+0.4 oz (TP)",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    HorizontalDivider(color = theme.divider, thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(10.dp))
-                    // Crude Oil activity
-                    ActivityRow(
-                        badgeText = "🛢",
-                        badgeBg = Color(0xFF475569),
-                        title = "Crude Oil (WTI) sold:",
-                        value = "+$1.20/bbl",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                }
-                else -> {
-                    // Crypto & Multi-Asset default
-                    ActivityRow(
-                        badgeText = "₿",
-                        badgeBg = Color(0xFFF7931A),
-                        title = "BTC bought:",
-                        value = "+0.05",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    HorizontalDivider(color = theme.divider, thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(10.dp))
-                    ActivityRow(
-                        badgeText = "Ξ",
-                        badgeBg = Color(0xFF627EEA),
-                        title = "ETH sold:",
-                        value = "-0.1",
-                        valueColor = redDanger,
-                        textPrimary = textPrimary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    HorizontalDivider(color = theme.divider, thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(10.dp))
-                    ActivityRow(
-                        badgeText = "€",
-                        badgeBg = Color(0xFF3B82F6),
-                        title = "EUR/USD limit filled:",
-                        value = "+18 pips",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                }
-            }
+            Text("Recent Activity", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = textPrimary)
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "Unavailable — recent trades require an authenticated customer account and verified trade history.",
+                fontSize = 12.sp,
+                color = textMuted
+            )
         }
     }
 }
@@ -1103,175 +1000,18 @@ private fun WatchlistCard(
         border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(cardBorder))
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Watchlist (${selectedAssetClass.label})",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = textPrimary
-                )
-                Text(
-                    text = "Live Scanner",
-                    fontSize = 11.sp,
-                    color = emeraldAccent,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            when (selectedAssetClass) {
-                AssetClass.FOREX -> {
-                    // EUR/USD
-                    WatchlistItemRow(
-                        badge = "€",
-                        badgeBg = Color(0xFF3B82F6),
-                        symbol = "EUR/USD",
-                        price = "1.0852",
-                        changePct = "+0.35%",
-                        isBullish = true,
-                        color = emeraldAccent,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    // GBP/USD
-                    WatchlistItemRow(
-                        badge = "£",
-                        badgeBg = Color(0xFF8B5CF6),
-                        symbol = "GBP/USD",
-                        price = "1.2940",
-                        changePct = "-0.22%",
-                        isBullish = false,
-                        color = redDanger,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    // USD/JPY
-                    WatchlistItemRow(
-                        badge = "¥",
-                        badgeBg = Color(0xFFEC4899),
-                        symbol = "USD/JPY",
-                        price = "154.20",
-                        changePct = "+0.48%",
-                        isBullish = true,
-                        color = emeraldAccent,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                }
-                AssetClass.COMMODITIES -> {
-                    // Gold
-                    WatchlistItemRow(
-                        badge = "Au",
-                        badgeBg = Color(0xFFEAB308),
-                        symbol = "Gold (XAU)",
-                        price = "$2,354.20",
-                        changePct = "+1.15%",
-                        isBullish = true,
-                        color = emeraldAccent,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    // Silver
-                    WatchlistItemRow(
-                        badge = "Ag",
-                        badgeBg = Color(0xFF94A3B8),
-                        symbol = "Silver (XAG)",
-                        price = "$28.45",
-                        changePct = "+0.82%",
-                        isBullish = true,
-                        color = emeraldAccent,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    // Crude Oil
-                    WatchlistItemRow(
-                        badge = "🛢",
-                        badgeBg = Color(0xFF475569),
-                        symbol = "Crude (WTI)",
-                        price = "$78.60",
-                        changePct = "-0.90%",
-                        isBullish = false,
-                        color = redDanger,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                }
-                else -> {
-                    // Crypto or ALL
-                    WatchlistItemRow(
-                        badge = "₿",
-                        badgeBg = Color(0xFFF7931A),
-                        symbol = "BTC",
-                        price = "$68,450",
-                        changePct = "+2.4%",
-                        isBullish = true,
-                        color = emeraldAccent,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    WatchlistItemRow(
-                        badge = "Ξ",
-                        badgeBg = Color(0xFF627EEA),
-                        symbol = "ETH",
-                        price = "$3,480",
-                        changePct = "-1.1%",
-                        isBullish = false,
-                        color = redDanger,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    if (selectedAssetClass == AssetClass.ALL) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        WatchlistItemRow(
-                            badge = "€",
-                            badgeBg = Color(0xFF3B82F6),
-                            symbol = "EUR/USD",
-                            price = "1.0852",
-                            changePct = "+0.35%",
-                            isBullish = true,
-                            color = emeraldAccent,
-                            textPrimary = textPrimary,
-                            textMuted = textMuted
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        WatchlistItemRow(
-                            badge = "Au",
-                            badgeBg = Color(0xFFEAB308),
-                            symbol = "Gold (XAU)",
-                            price = "$2,354.20",
-                            changePct = "+1.15%",
-                            isBullish = true,
-                            color = emeraldAccent,
-                            textPrimary = textPrimary,
-                            textMuted = textMuted
-                        )
-                    }
-                }
-            }
+            Text(
+                "Watchlist (${selectedAssetClass.label})",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = textPrimary
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "Live prices unavailable — no authenticated market-scanner response is loaded. No placeholder prices are shown.",
+                fontSize = 12.sp,
+                color = textMuted
+            )
         }
     }
 }
@@ -1405,34 +1145,5 @@ private fun DashboardBottomNavigation(
 /**
  * Generates realistic 30-day daily historical equity progression with positive trend.
  */
-private fun generate30DayEquityData(): List<EquityPoint> {
-    val result = mutableListOf<EquityPoint>()
-    var equity = 1064.60
-    var cumProfit = 0.0
-
-    // Modeled realistic 30-day progression ending at $1,250.00
-    val dailyChanges = listOf(
-        +4.20, +8.50, -3.10, +6.40, +12.30, -5.20, +9.10,
-        +14.50, -4.80, +11.20, +7.60, -6.10, +18.40, +10.50,
-        -7.20, +15.30, +8.90, -4.50, +13.20, +16.80, -8.10,
-        +12.40, +9.50, -3.80, +14.60, +17.20, -5.40, +12.80,
-        +10.60, +9.50
-    )
-
-    for (day in 1..30) {
-        val change = dailyChanges[day - 1]
-        equity += change
-        cumProfit += change
-        val dateLabel = "Day $day"
-        result.add(
-            EquityPoint(
-                day = day,
-                dateLabel = dateLabel,
-                equity = Math.round(equity * 100.0) / 100.0,
-                dailyPnl = change,
-                cumProfit = Math.round(cumProfit * 100.0) / 100.0
-            )
-        )
-    }
-    return result
+private fun generate30DayEquityData(): List<EquityPoint> = emptyList()
 }
