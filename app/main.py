@@ -6421,7 +6421,9 @@ async def admin_release_diagnostics(
 ):
     """Analyze redacted Android release logs; never modifies source or changes release gates."""
     claims = await admin_claims(authorization, require_aal2=True)
-    await require_role(claims, "OPERATIONS")
+    if claims.get("auth_method") == "legacy_admin_token":
+        raise HTTPException(403, "Supabase administrator sign-in with MFA is required")
+    await require_role(claims, "OPERATIONS", "RISK_OFFICER", "TREASURY", "COMPLIANCE", "FINANCE", "ADMINISTRATOR")
     actor_id = str(claims.get("sub") or "")
     run_id = uuid.uuid4().hex
     outcome = "failed"
