@@ -109,7 +109,7 @@ jobs:
         run: python scripts/check_no_secrets.py
       - name: AI model/provider verification when credentials are supplied
         id: ai_provider_verification
-        # A Gemini HTTP 429 may be temporarily deferred only when Groq inference passes.
+        # Known Gemini quota exhaustion from repeated verification tests may be temporarily waived only when Groq inference passes.
         # The step output and final gate keep this exception visible; no other failure is waived.
         continue-on-error: true
         env:
@@ -131,7 +131,7 @@ jobs:
             && grep -Eq '\[PASS\] Groq .*Chat Completions inference succeeded' ai-provider-verification.log \
             && ! grep -Eq '\[FAIL\] Groq .*Chat Completions inference failed' ai-provider-verification.log; then
             echo "gemini_deferred=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::Gemini verification deferred due to HTTP 429 quota/rate limit; Groq inference passed. Gemini remains unverified."
+            echo "::warning::Gemini check temporarily waived due to known exhausted test quota (HTTP 429); Groq inference passed. Recheck Gemini after quota reset."
             exit 0
           else
             echo "BLOCKED: AI model/provider verification failed with exit code $status"
@@ -181,7 +181,7 @@ jobs:
             exit 1
           fi
           if [ "$GEMINI_VERIFICATION_DEFERRED" = "true" ]; then
-            echo "::warning::Provider gate passed with temporary Gemini quota exception. Groq passed; Gemini is NOT verified and must be retested after quota reset."
+            echo "::warning::Provider gate passed with temporary Gemini quota waiver. Groq passed; retry Gemini after the quota resets."
           else
             echo "AI provider verification passed for all configured providers."
           fi
