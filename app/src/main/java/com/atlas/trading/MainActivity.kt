@@ -79,7 +79,7 @@ class MainActivity : AppCompatActivity() {
 
                 if (!showOperatorConsole) {
                     UserDashboardScreen(
-                        userName = "Alice",
+                        userName = "Account",
                         backendUrl = backendUrl,
                         onOpenOperatorConsole = { showOperatorConsole = true },
                         onOpenPortal = { openPortal() }
