@@ -236,9 +236,21 @@ async def refresh_binance_custody_observation(
     if not str(getattr(account, "api_key", "") or "").strip() or not str(getattr(account, "secret_ref", "") or "").strip():
         raise ValueError("customer Binance read credentials are incomplete")
     if broker_factory is None:
-        from .customer_binance_execution import build_customer_binance_broker
-        broker_factory = build_customer_binance_broker
-    broker = broker_factory(account, secret_fetcher=secret_fetcher, sandbox=False)
+        # Custody reconciliation needs read access only; do not reuse the trading
+        # broker factory, which requires trade permission and is broader than needed.
+        from .broker import Broker, BrokerConfig
+        from .customer_binance_execution import resolve_secret
+        secret = resolve_secret(str(account.secret_ref), fetcher=secret_fetcher)
+        broker = Broker.get(BrokerConfig(
+            exchange_id="binance",
+            api_key=str(account.api_key).strip(),
+            api_secret=secret,
+            sandbox=False,
+            market_type="spot",
+            timeout_ms=10_000,
+        ))
+    else:
+        broker = broker_factory(account, secret_fetcher=secret_fetcher, sandbox=False)
     # CCXT is synchronous. Keep network I/O off the async event loop.
     import asyncio
     balance_response = await asyncio.to_thread(broker.fetch_balance)
