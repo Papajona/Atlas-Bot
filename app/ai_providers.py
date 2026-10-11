@@ -177,11 +177,12 @@ async def dual_ai_trade_safety_review(trade_packet: dict[str, Any]) -> dict[str,
     )
     # Preserve the two-provider safety requirement: Gemini is preferred, Cerebras
     # may substitute only when Gemini is unavailable, and Groq must independently pass.
-    primary_name = "gemini"
-    primary_call = _gemini_json(prompt)
     if not settings.gemini_api_key and settings.cerebras_api_key:
         primary_name = "cerebras"
         primary_call = _cerebras_json(prompt)
+    else:
+        primary_name = "gemini"
+        primary_call = _gemini_json(prompt)
     primary_result, groq_result = await asyncio.gather(
         primary_call, _groq_json(prompt), return_exceptions=True
     )
