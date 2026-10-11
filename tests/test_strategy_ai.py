@@ -82,6 +82,12 @@ def test_strategy_deployment_wires_real_ai_secrets():
     assert "atlas-gemini-api-key" in deploy
     assert "GEMINI_API_KEY" in bootstrap
     assert "atlas-gemini-api-key" in bootstrap
+    assert "CEREBRAS_API_KEY" in bootstrap
+    assert "atlas-cerebras-api-key" in bootstrap
+    assert "SECRET_CEREBRAS_API_KEY_VERSION" in deploy
+    assert "CEREBRAS_API_KEY=atlas-cerebras-api-key" in deploy
+    assert "CEREBRAS_MODEL=${CEREBRAS_MODEL:-" in deploy
+    assert "SECRET_CEREBRAS_REF" in (ROOT / "deploy" / "cloud-run-worker-deploy.sh").read_text()
     assert "GEMINI_STRATEGY_MODEL=${GEMINI_STRATEGY_MODEL:-" in deploy  # model id is operator-configurable; default must not be a retired model
     assert "gemini-2.5" not in deploy
 
