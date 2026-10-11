@@ -463,11 +463,11 @@ async def _engage_kill_switch_for_deficit(db, *, customer_id: int, reference_id:
     await record_ledger_incident(
         db,
         key=f"CUSTOMER_DEFICIT_LIMIT:{customer_id}:{reference_id}",
-        summary="Customer deficit recorded; configured threshold controls automatic halt",
+        summary="Customer deficit recorded; live trading halted for any positive shortfall",
         detail={"customer_id": customer_id, "reference_id": reference_id,
                 "shortfall": str(shortfall), "source": source,
                 "threshold_usdt": str(threshold), "threshold_reached": threshold_reached,
-                "action": "KILL_SWITCH_ENGAGED" if threshold_reached else "DEFICIT_RECORDED_BELOW_THRESHOLD"},
+                "action": "KILL_SWITCH_ENGAGED_FOR_ANY_POSITIVE_DEFICIT"},
         customer_id=customer_id,
         severity="CRITICAL",
     )
