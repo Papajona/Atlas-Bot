@@ -95,6 +95,7 @@ fun RiskDashboardScreen(
     var isSimulatingStress by remember { mutableStateOf(false) }
     var isRefreshing by remember { mutableStateOf(false) }
     var showAuditDialog by remember { mutableStateOf(false) }
+    var showReleaseAdvisor by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
     // Real-Time WebSocket stream updates: replaces periodic HTTP polling to minimize latency and server load
@@ -191,6 +192,18 @@ fun RiskDashboardScreen(
                         }
                     },
                     actions = {
+                        if (!accessToken.isNullOrBlank()) {
+                            TextButton(
+                                onClick = { showReleaseAdvisor = !showReleaseAdvisor },
+                                modifier = Modifier.testTag("btn_release_advisor_tab")
+                            ) {
+                                Text(
+                                    if (showReleaseAdvisor) "Risk dashboard" else "Release advisor",
+                                    color = accentCyan,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
                         IconButton(
                             onClick = {
                                 coroutineScope.launch {
@@ -222,6 +235,14 @@ fun RiskDashboardScreen(
                 )
             }
         ) { padding ->
+            if (showReleaseAdvisor && !accessToken.isNullOrBlank()) {
+                ReleaseAdvisorScreen(
+                    backendUrl = backendUrl,
+                    accessToken = accessToken,
+                    onBack = { showReleaseAdvisor = false },
+                    modifier = Modifier.padding(padding)
+                )
+            } else {
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
@@ -321,6 +342,7 @@ fun RiskDashboardScreen(
                     FiduciaryDisclosureCard(cardSurface = cardSurface, cardBorder = cardBorder, textMuted = textMuted)
                     Spacer(modifier = Modifier.height(24.dp))
                 }
+            }
             }
         }
     }
