@@ -1,4 +1,5 @@
 from __future__ import annotations
+import httpx
 import logging
 import contextlib
 from pathlib import Path
