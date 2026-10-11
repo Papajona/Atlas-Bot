@@ -15,6 +15,7 @@ def test_strategy_ai_requires_real_provider(monkeypatch):
     import app.strategy_ai as sai
     monkeypatch.setattr(sai.settings, "gemini_api_key", "")
     monkeypatch.setattr(sai.settings, "groq_api_key", "")
+    monkeypatch.setattr(sai.settings, "cerebras_api_key", "")
     with pytest.raises(sai.AIProviderError, match="No AI strategy provider"):
         asyncio.run(sai.generate_strategy_draft(prompt="Build a trend strategy for BTC using 1h confirmation", name="Test"))
 
@@ -23,6 +24,7 @@ def test_strategy_ai_validates_and_caps_risk(monkeypatch):
     import app.strategy_ai as sai
     monkeypatch.setattr(sai.settings, "gemini_api_key", "configured")
     monkeypatch.setattr(sai.settings, "groq_api_key", "")
+    monkeypatch.setattr(sai.settings, "cerebras_api_key", "")
     monkeypatch.setattr(sai.settings, "risk_per_trade", 0.005)
 
     async def fake(prompt, **kwargs):
