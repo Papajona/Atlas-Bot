@@ -29,6 +29,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.util.Locale
 import com.atlas.trading.network.CustomerDataClient
+import com.atlas.trading.auth.CustomerAuthClient
+import kotlinx.coroutines.launch
 import kotlin.math.max
 import kotlin.math.min
 
@@ -60,7 +62,7 @@ enum class AssetClass(val label: String, val badge: String) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UserDashboardScreen(
-    userName: String = "Alice",
+    userName: String = "Account",
     backendUrl: String = "",
     customerAccessToken: String? = null,
     onOpenOperatorConsole: () -> Unit = {},
@@ -70,10 +72,14 @@ fun UserDashboardScreen(
     var selectedAssetClass by remember { mutableStateOf(AssetClass.ALL) }
     var selectedTimeframeDays by remember { mutableIntStateOf(30) } // 7 or 30 days
     var actionDialogMessage by remember { mutableStateOf<String?>(null) }
+    var activeCustomerToken by remember { mutableStateOf(customerAccessToken) }
     var customerSnapshot by remember { mutableStateOf<CustomerDataClient.Snapshot?>(null) }
+    var customerSignInError by remember { mutableStateOf<String?>(null) }
+    var customerSignInBusy by remember { mutableStateOf(false) }
+    val customerAuthScope = rememberCoroutineScope()
 
-    LaunchedEffect(backendUrl, customerAccessToken) {
-        val token = customerAccessToken?.takeIf { it.isNotBlank() }
+    LaunchedEffect(backendUrl, activeCustomerToken) {
+        val token = activeCustomerToken?.takeIf { it.isNotBlank() }
         customerSnapshot = if (token == null || backendUrl.isBlank()) {
             null
         } else {
@@ -143,6 +149,37 @@ fun UserDashboardScreen(
                                     actionDialogMessage = "Verified alerts are unavailable until an authenticated account and live alert feed are connected."
                                 }
                             )
+                        }
+
+                        item {
+                            if (activeCustomerToken.isNullOrBlank()) {
+                                CustomerSignInCard(
+                                    busy = customerSignInBusy,
+                                    error = customerSignInError,
+                                    onSignIn = { email, password ->
+                                        customerAuthScope.launch {
+                                            customerSignInBusy = true
+                                            customerSignInError = null
+                                            try {
+                                                val session = CustomerAuthClient(backendUrl).login(email, password)
+                                                activeCustomerToken = session.accessToken
+                                            } catch (error: Exception) {
+                                                customerSignInError = error.message ?: "Customer sign-in failed"
+                                            } finally {
+                                                customerSignInBusy = false
+                                            }
+                                        }
+                                    }
+                                )
+                            } else {
+                                TextButton(onClick = {
+                                    activeCustomerToken = null
+                                    customerSnapshot = null
+                                    customerSignInError = null
+                                }) {
+                                    Text("Sign out customer")
+                                }
+                            }
                         }
 
                         // Asset Class Switcher (Crypto, Forex, Commodities)
@@ -221,6 +258,7 @@ fun UserDashboardScreen(
                         item {
                             WatchlistCard(
                                 selectedAssetClass = selectedAssetClass,
+                                marketQuotes = customerSnapshot?.marketQuotes.orEmpty(),
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
                                 textPrimary = textPrimary,
@@ -399,6 +437,67 @@ fun UserDashboardScreen(
             },
             containerColor = cardSurface
         )
+    }
+}
+
+@Composable
+private fun CustomerSignInCard(
+    busy: Boolean,
+    error: String?,
+    onSignIn: (String, String) -> Unit
+) {
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    val theme = com.atlas.trading.ui.theme.LocalAtlasColors.current
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = theme.cardSurface),
+        shape = RoundedCornerShape(18.dp),
+        border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(theme.cardBorder))
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text("Sign in to your customer account", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = theme.textPrimary)
+            Text(
+                "Account balances and market-scanner data are hidden until the backend authenticates your customer session.",
+                fontSize = 12.sp,
+                color = theme.textMuted
+            )
+            OutlinedTextField(
+                value = email,
+                onValueChange = { email = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Email") },
+                singleLine = true,
+                enabled = !busy
+            )
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Password") },
+                visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                singleLine = true,
+                enabled = !busy
+            )
+            if (!error.isNullOrBlank()) {
+                Text(error, color = theme.redDanger, fontSize = 12.sp)
+            }
+            Button(
+                onClick = { onSignIn(email, password) },
+                enabled = !busy && email.isNotBlank() && password.isNotBlank(),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                if (busy) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Text(if (busy) "Signing in…" else "Sign in securely")
+            }
+        }
     }
 }
 
@@ -715,6 +814,14 @@ private fun PortfolioPerformanceCard(
                         color = textMuted
                     )
                 }
+            }
+
+            if (activePoint == null) {
+                Text(
+                    "Historical account performance unavailable — no verified customer history has been loaded.",
+                    fontSize = 12.sp,
+                    color = textMuted
+                )
             }
 
             Spacer(modifier = Modifier.height(12.dp))
