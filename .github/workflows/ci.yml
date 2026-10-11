@@ -355,7 +355,9 @@ jobs:
       - name: Full pytest suite (SQLite app tests plus configured PostgreSQL integrations)
         env:
           DATABASE_URL: sqlite+aiosqlite:///./test_trading.db
-        run: python -m pytest -q -rs
+        run: |
+          python -m pytest -q -rs --junitxml=full-suite.xml
+          python scripts/assert_no_skips.py full-suite.xml
       - name: Run all PostgreSQL-marked integration tests (mandatory, no skips)
         env:
           DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
