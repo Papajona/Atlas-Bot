@@ -86,7 +86,7 @@ def test_enabled_custody_gate_fails_closed_without_fresh_observation(monkeypatch
         async with sessions() as db:
             report = await custody_gate(db, customer_liabilities=100)
             assert report["status"] == "UNKNOWN"
-            assert report["reason"] == "NO_FRESH_EXTERNAL_CUSTODY_OBSERVATION"
+            assert report["reason"] == "NO_VERIFIED_BINANCE_ACCOUNTS"
     asyncio.run(with_database(check))
 
 
@@ -185,7 +185,7 @@ def test_provider_backed_binance_refresh_records_exact_decimal_balance():
 
     class FakeBroker:
         def fetch_balance(self):
-            return {"total": {"USDT": "123456789.12345678"}}
+            return {"total": {"USDT": 123456789.12345678}, "info": {"balances": [{"asset": "USDT", "free": "123456789.12345678", "locked": "0.00000000"}]}}
 
     def fake_factory(account, **kwargs):
         assert kwargs["sandbox"] is False
