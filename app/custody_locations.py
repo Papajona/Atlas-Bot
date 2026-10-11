@@ -12,7 +12,7 @@ from decimal import Decimal
 from sqlalchemy import and_, or_, select
 
 from .config import settings
-from .db import CustodyAssetObservation, CustodyTransfer, utcnow
+from .db import CustodyAssetObservation, CustodyTransfer, CustomerBinanceAccount, utcnow
 
 D = Decimal
 
@@ -197,13 +197,36 @@ async def fresh_external_assets(db, *, currency: str = "USDT", provider: str = "
         "fresh_observation_available": bool(rows),
     }
 
+async def refresh_verified_binance_custody_observations(db) -> int:
+    """Refresh every verified customer account directly from Binance; fail on any provider error.
+
+    The caller must not treat a partial refresh as a complete solvency snapshot. This
+    function leaves transaction ownership with its caller.
+    """
+    accounts = (await db.execute(
+        select(CustomerBinanceAccount).where(CustomerBinanceAccount.status == "VERIFIED")
+    )).scalars().all()
+    for account in accounts:
+        await refresh_binance_custody_observation(db, account)
+    return len(accounts)
+
+
 async def custody_gate(db, *, customer_liabilities, currency: str = "USDT") -> dict:
     """Exchange-custody solvency decision. UNKNOWN never unlocks live execution."""
     liabilities = _amount(customer_liabilities)
     if not settings.binance_custody_reconciliation_enabled:
         return {"status": "DISABLED", "customer_liabilities": liabilities,
                 "exchange_assets": None, "reason": "BINANCE_CUSTODY_RECONCILIATION_DISABLED"}
+    try:
+        # Provider failure must not leave a partial refresh eligible for solvency.
+        async with db.begin_nested():
+            refreshed = await refresh_verified_binance_custody_observations(db)
+    except Exception as exc:
+        return {"status": "UNKNOWN", "customer_liabilities": liabilities,
+                "exchange_assets": None, "reason": "BINANCE_PROVIDER_REFRESH_FAILED",
+                "error_type": type(exc).__name__}
     report = await fresh_external_assets(db, currency=currency)
+    report["provider_accounts_refreshed"] = refreshed
     if not report["fresh_observation_available"]:
         return {"status": "UNKNOWN", "customer_liabilities": liabilities, "exchange_assets": None,
                 "reason": "NO_FRESH_EXTERNAL_CUSTODY_OBSERVATION", **report}
