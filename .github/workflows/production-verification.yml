@@ -116,6 +116,7 @@ jobs:
           PYTHONPATH: .
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
         run: |
           set +e
           python -m scripts.check_ai_models 2>&1 | tee ai-provider-verification.log
@@ -129,7 +130,8 @@ jobs:
             exit 2
           elif grep -Eq '\[FAIL\] Gemini .*generation failed \(HTTP 429\)' ai-provider-verification.log \
             && grep -Eq '\[PASS\] Groq .*Chat Completions inference succeeded' ai-provider-verification.log \
-            && ! grep -Eq '\[FAIL\] Groq .*Chat Completions inference failed' ai-provider-verification.log; then
+            && ! grep -Eq '\[FAIL\] Groq .*Chat Completions inference failed' ai-provider-verification.log \
+            && ! grep -Eq '\[FAIL\] Cerebras .*Chat Completions inference failed' ai-provider-verification.log; then
             echo "gemini_deferred=true" >> "$GITHUB_OUTPUT"
             echo "::warning::Gemini check temporarily waived due to known exhausted test quota (HTTP 429); Groq inference passed. Recheck Gemini after quota reset."
             exit 0
