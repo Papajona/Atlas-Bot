@@ -75,6 +75,33 @@ def test_trade_safety_review_flags_unconfigured_distinctly_from_vetoed(monkeypat
     assert out2["safe"] is False
     assert out2["configured"] is True
 
+def test_cerebras_can_be_primary_when_gemini_is_not_configured(monkeypatch):
+    import app.ai_providers as ap
+
+    monkeypatch.setattr(ap.settings, "gemini_api_key", "")
+    monkeypatch.setattr(ap.settings, "groq_api_key", "configured-groq")
+    monkeypatch.setattr(ap.settings, "cerebras_api_key", "configured-cerebras")
+
+    async def safe_cerebras(prompt):
+        return {"safe": True, "provider": "cerebras"}
+
+    async def safe_groq(prompt):
+        return {"safe": True, "provider": "groq"}
+
+    async def unexpected_gemini(prompt):
+        raise AssertionError("Gemini must not be called when its key is absent")
+
+    monkeypatch.setattr(ap, "_gemini_json", unexpected_gemini)
+    monkeypatch.setattr(ap, "_cerebras_json", safe_cerebras)
+    monkeypatch.setattr(ap, "_groq_json", safe_groq)
+    out = asyncio.run(ap.dual_ai_trade_safety_review({"symbol": "BTCUSDT"}))
+    assert out["safe"] is True
+    assert out["configured"] is True
+    assert set(out["providers"]) == {"cerebras", "groq"}
+    assert out["fallbacks"] == {}
+    assert out["execution_authority"] is False
+
+
 def test_cerebras_can_substitute_for_exhausted_gemini_but_groq_remains_required(monkeypatch):
     import app.ai_providers as ap
 
