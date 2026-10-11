@@ -698,14 +698,14 @@ private fun SummaryKpiRow(
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .background(emeraldBadgeBg)
+                        .background(if (profit24hPct != null) emeraldBadgeBg else cardBorder)
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
                         text = profit24hPct?.let { "${String.format(Locale.US, "%.1f", it)}%" } ?: "Unavailable",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
-                        color = emeraldBadgeText
+                        color = if (profit24hPct != null) emeraldBadgeText else textMuted
                     )
                 }
             }
