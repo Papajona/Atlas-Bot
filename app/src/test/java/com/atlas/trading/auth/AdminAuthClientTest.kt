@@ -4,6 +4,9 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.fail
 import org.junit.Test
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import org.json.JSONObject
 
 class AdminAuthClientTest {
     @Test
@@ -38,4 +41,27 @@ class AdminAuthClientTest {
             assertEquals("Authenticator code must contain 6 digits", expected.message)
         }
     }
+    @Test
+    fun adminSignInUsesBackendAndReturnsOnlyServerIssuedSession() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"access_token":"admin-server-token","mfa_required":false}"""
+        ))
+        server.start()
+        try {
+            val client = AdminAuthClient(server.url("/").toString())
+            val result = client.login(" operator@example.test ", "operator-password")
+            assertEquals("admin-server-token", result.accessToken)
+            assertEquals(null, result.challenge)
+            val request = server.takeRequest()
+            assertEquals("/api/admin/auth/login", request.path)
+            assertEquals("POST", request.method)
+            val body = JSONObject(request.body.readUtf8())
+            assertEquals("operator@example.test", body.getString("email"))
+            assertEquals("operator-password", body.getString("password"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
 }
