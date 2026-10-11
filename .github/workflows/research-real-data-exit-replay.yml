@@ -1,0 +1,99 @@
+name: Research Real-Data Exit Replay
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "app/strategy_exits.py"
+      - "app/strategy_engine.py"
+      - "app/data.py"
+      - "app/research_validation.py"
+      - "tests/test_strategy_exits.py"
+
+jobs:
+  real-data-exit-replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install research dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Replay 365 days of Bybit BTC perpetual data
+        env:
+          PYTHONPATH: .
+        run: |
+          python - <<'PY'
+          import json
+          import hashlib
+          import ccxt
+          import pandas as pd
+          from app.data import fetch_crypto
+          from app.strategy_engine import StrategyConfig, strategy_backtest
+          from app.strategy_exits import stop_policy_study
+
+          symbol = "BTC/USDT:USDT"
+          exchange = "bybit"
+          timeframe = "1h"
+          days = 365
+
+          df = fetch_crypto(symbol=symbol, exchange=exchange, timeframe=timeframe, days=days, closed_only=True)
+          if len(df) < 8000:
+              raise SystemExit(f"FAIL: expected at least 8000 hourly bars, got {len(df)}")
+          if df.index.tz is None or str(df.index.tz) != "UTC":
+              raise SystemExit(f"FAIL: unexpected timezone {df.index.tz}")
+          if df.index.has_duplicates or not df.index.is_monotonic_increasing:
+              raise SystemExit("FAIL: duplicate or unsorted timestamps")
+          if not (df["high"] >= df[["open","close"]].max(axis=1)).all():
+              raise SystemExit("FAIL: invalid highs")
+          if not (df["low"] <= df[["open","close"]].min(axis=1)).all():
+              raise SystemExit("FAIL: invalid lows")
+
+          m = ccxt.bybit({"enableRateLimit": True}).market(symbol) if False else None
+          prov = {
+              "bars": len(df),
+              "first": df.index[0].isoformat(),
+              "last": df.index[-1].isoformat(),
+              "sha256": hashlib.sha256(pd.util.hash_pandas_object(df, index=True).values.tobytes()).hexdigest(),
+          }
+
+          cfg = StrategyConfig()
+          baseline = strategy_backtest(df, cfg)
+          study = stop_policy_study(
+              df, cfg, asset="crypto", signal="ensemble",
+              stop_grid=(1.5, 2.0, 2.5, 3.0, 4.0),
+              take_profit_grid=(None, 4.0),
+              max_hold_grid=(None,),
+              taker_bps=5.5, slippage_bps=2.0,
+          )
+
+          result = {
+              "data": prov,
+              "atlas_baseline": {
+                  "total_return": baseline["total_return"],
+                  "max_drawdown": baseline["max_drawdown"],
+                  "sharpe": baseline["sharpe"],
+                  "trades": baseline["trades"],
+              },
+              "exit_study": {
+                  "best": study["best"],
+                  "best_is_baseline": study["best_is_baseline"],
+                  "deflated_sharpe": study["deflated_sharpe"],
+                  "variants": study["variants"],
+                  "cumulative_trials": study["cumulative_trials"],
+              },
+              "decision": "NOT_CERTIFIED",
+          }
+          print(json.dumps(result, indent=2, default=str))
+          with open("exit-replay-result.json", "w") as f:
+              json.dump(result, f, indent=2, default=str)
+          PY
+      - name: Upload replay evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-data-exit-replay
+          path: exit-replay-result.json

@@ -213,7 +213,7 @@ def next_open_returns(df: pd.DataFrame) -> pd.Series:
     return (
         df["open"].shift(-1).div(df["open"])
         .replace([np.inf, -np.inf], np.nan)
-        .fillna(0.0)
+        .fillna(1.0)
     )
 
 
