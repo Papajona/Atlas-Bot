@@ -95,8 +95,10 @@ def test_withdrawal_settlement_shortfall_opens_critical_incident():
         async with sessions() as db:
             ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
             assert ledger.withdrawal_reserved == Decimal("0")
-            inc = (await db.execute(select(Incident))).scalar_one()
-            assert inc.severity == "CRITICAL" and inc.incident_key == "WITHDRAWAL_RESERVE_SHORTFALL:w:1"
+            inc = (await db.execute(
+                select(Incident).where(Incident.incident_key == "WITHDRAWAL_RESERVE_SHORTFALL:w:1")
+            )).scalar_one()
+            assert inc.severity == "CRITICAL"
             assert "6" in inc.detail_json  # shortfall recorded
     asyncio.run(with_database(check))
 

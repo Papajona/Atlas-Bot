@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .config import settings
-from .ai_providers import AIProviderError, _gemini_json, _groq_json
+from .ai_providers import AIProviderError, _cerebras_json, _gemini_json, _groq_json
 from .strategy_evidence import evidence_for
 
 
@@ -116,6 +116,10 @@ async def _generate_with_provider(provider: str, prompt: str) -> dict[str, Any]:
             system_instruction=SYSTEM_PROMPT,
             model=settings.gemini_strategy_model or settings.gemini_model,
         )
+    if provider == "cerebras":
+        return await _cerebras_json(
+            prompt, system_instruction=SYSTEM_PROMPT, model=settings.cerebras_model
+        )
     return await _groq_json(
         prompt,
         system_instruction=SYSTEM_PROMPT,
@@ -151,13 +155,17 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
     No deterministic keyword parser is used as a fallback because that would silently
     reintroduce the capability mismatch this endpoint is designed to remove.
     """
-    if not settings.gemini_api_key and not settings.groq_api_key:
+    if not settings.gemini_api_key and not settings.groq_api_key and not settings.cerebras_api_key:
         raise AIProviderError("No AI strategy provider is configured")
 
     provider_errors: dict[str, str] = {}
-    provider_order = ["gemini", "groq"] if settings.gemini_api_key else ["groq"]
-    if settings.gemini_api_key and settings.groq_api_key:
-        provider_order = ["gemini", "groq"]
+    provider_order = []
+    if settings.gemini_api_key:
+        provider_order.append("gemini")
+    if settings.groq_api_key:
+        provider_order.append("groq")
+    if settings.cerebras_api_key:
+        provider_order.append("cerebras")
 
     raw: dict[str, Any] | None = None
     provider_used = ""
@@ -186,7 +194,11 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
         "evidence": evidence_for(family_key),
         "ai": {
             "provider": provider_used,
-            "model": settings.gemini_strategy_model if provider_used == "gemini" else settings.groq_strategy_model,
+            "model": (
+                settings.gemini_strategy_model if provider_used == "gemini"
+                else settings.groq_strategy_model if provider_used == "groq"
+                else settings.cerebras_model
+            ),
             "fallback_used": provider_used != "gemini",
             "provider_errors": provider_errors,
             "execution_authority": False,

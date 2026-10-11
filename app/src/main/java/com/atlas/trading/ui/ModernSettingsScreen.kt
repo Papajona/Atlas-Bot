@@ -25,8 +25,8 @@ import androidx.compose.ui.unit.sp
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModernSettingsScreen(
-    userName: String = "Alice Henderson",
-    userEmail: String = "alice.henderson@atlas.trading",
+    userName: String = "Account",
+    userEmail: String = "Unavailable until account sign-in",
     onOpenOperatorConsole: () -> Unit = {},
     onOpenPortal: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -135,7 +135,7 @@ fun ModernSettingsScreen(
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = "AH",
+                                text = userName.trim().split(Regex("\\s+")).filter { it.isNotBlank() }.take(2).mapNotNull { it.firstOrNull()?.uppercaseChar() }.joinToString("").ifBlank { "A" },
                                 fontSize = 18.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = Color(0xFF0284C7)
@@ -160,7 +160,7 @@ fun ModernSettingsScreen(
                                         .padding(horizontal = 6.dp, vertical = 2.dp)
                                 ) {
                                     Text(
-                                        text = "VERIFIED PRO",
+                                        text = "ACCOUNT",
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = emeraldBadgeText
@@ -192,7 +192,7 @@ fun ModernSettingsScreen(
 
                         Column(horizontalAlignment = Alignment.End) {
                             Text(text = "Trader ID", fontSize = 11.sp, color = textMuted)
-                            Text(text = "#AT-8824-LIVE", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = brandTeal)
+                            Text(text = "Unavailable", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = brandTeal)
                         }
                     }
                 }
@@ -574,7 +574,7 @@ fun ModernSettingsScreen(
                     badge = "v3.10.47",
                     badgeBg = Color(0xFFF1F5F9),
                     badgeText = Color(0xFF475569),
-                    subtitle = "Production release with zero mock data",
+                    subtitle = "Release analysis is available to authorized administrators; this screen does not change release status.",
                     onClick = {
                         activeDialogTitle = "Atlas Trading System"
                         activeDialogContent = "Version: 3.10.47 (Build 1047)\nArchitecture: Jetpack Compose + Cloud Run FastAPI + PostgreSQL\nCompliance: Google Play Developer Program Compliant"

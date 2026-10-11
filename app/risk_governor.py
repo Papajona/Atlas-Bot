@@ -17,11 +17,14 @@ def evaluate_trade(*, side: str, price: float, quantity: float, live: bool,
     reasons=[]
     if side not in {"buy","sell"}: reasons.append("invalid_side")
     if not math.isfinite(price) or price <= 0 or not math.isfinite(quantity) or quantity <= 0: reasons.append("invalid_market_or_quantity")
-    if stop_loss_price is not None and not math.isfinite(stop_loss_price):
+    if stop_loss_price is not None and (not math.isfinite(stop_loss_price) or stop_loss_price <= 0):
         reasons.append("invalid_stop_loss")
     if take_profit_price is not None and not math.isfinite(take_profit_price):
         reasons.append("invalid_take_profit")
     if live and not stop_loss_price: reasons.append("live_protective_stop_missing")
+    if live and (equity is None or risk_per_trade is None): reasons.append("live_risk_sizing_inputs_missing")
+    if live and equity is not None and (not math.isfinite(equity) or equity <= 0): reasons.append("invalid_equity")
+    if live and risk_per_trade is not None and (not math.isfinite(risk_per_trade) or risk_per_trade <= 0 or risk_per_trade > 0.02): reasons.append("invalid_risk_per_trade")
     if live and stop_loss_price is not None:
         if (side=="buy" and stop_loss_price>=price) or (side=="sell" and stop_loss_price<=price): reasons.append("protective_stop_wrong_side")
     if take_profit_price is not None:
@@ -35,6 +38,7 @@ def evaluate_trade(*, side: str, price: float, quantity: float, live: bool,
             reasons.append("risk_per_trade_limit")
     if spread_bps is not None and (not math.isfinite(spread_bps) or spread_bps < 0 or spread_bps > max_spread_bps): reasons.append("spread_guard")
     data_quality=(signal.get("data_quality") or {}) if isinstance(signal,dict) else {}
+    if live and not data_quality: reasons.append("market_data_quality_missing")
     if data_quality.get("valid") is False: reasons.append("market_data_quality")
     if reasons: return RiskGovernorDecision("BLOCK",tuple(reasons),False)
     return RiskGovernorDecision("ALLOW",tuple(),False)

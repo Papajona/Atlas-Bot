@@ -103,7 +103,7 @@ def test_approval_binds_request_identity_to_authenticated_admin():
     end = main.index('@app.post("/api/admin/withdrawals/{withdrawal_id}/release")', start)
     block = main[start:end]
     assert 'authenticated_approver = str(claims.get("sub") or claims.get("user_id") or "").strip()' in block
-    assert 'hmac.compare_digest(authenticated_approver, str(req.admin_id or "").strip())' in block
+    assert '_constant_time_text_equal(authenticated_approver, str(req.admin_id or "").strip())' in block
     assert 'Approver identity must match the authenticated user' in block
 
 

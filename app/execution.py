@@ -474,7 +474,10 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
         if live:
             try:
                 ts = datetime.fromisoformat(signal_timestamp.replace("Z", "+00:00"))
-                age = (datetime.now(timezone.utc) - ts).total_seconds()
+                # A naive timestamp has no trustworthy timezone; fail closed rather than guess.
+                if ts.tzinfo is None or ts.utcoffset() is None:
+                    raise RiskBlocked("Signal timestamp must include a timezone")
+                age = (datetime.now(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds()
                 if age > settings.max_signal_age_seconds:
                     raise RiskBlocked("Signal is stale")
                 if age < -60:
@@ -977,6 +980,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 raise RiskBlocked("OANDA practice mode is enabled; live Forex is locked")
             mode = "FOREX_DEMO" if forex_demo else ("LIVE" if live else "PAPER")
             trading_account_id = account.id if account is not None else None
+            risk_equity = float(account.equity if account is not None else s.equity)
 
         base_scope = f"{strategy}:customer:{customer_id if customer_id is not None else 'platform'}"
         execution_instance = str(signal.get("request_id") or signal.get("idempotency_key") or signal.get("bot_id") or signal.get("executor_id") or "").strip()
@@ -1072,7 +1076,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     raise RiskBlocked("OANDA instrument is not tradeable for this account")
             except Exception as exc:
                 raise RiskBlocked(str(exc)) from exc
-        governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps)
+        governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps, equity=risk_equity, risk_per_trade=settings.risk_per_trade)
         if governor.action != "ALLOW":
             raise RiskBlocked("Risk Governor blocked order: " + ",".join(governor.reasons))
         await risk_gate(symbol, quote, quantity, live=live, signal_timestamp=signal_timestamp, side=side, customer_id=customer_id, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {})

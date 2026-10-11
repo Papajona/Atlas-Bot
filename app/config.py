@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     funding_webhook_secret: str = ""
     funding_webhook_max_skew_seconds: int = 300
 
+    customer_deficit_limit_usdt: float = 100.0  # USDT; threshold marker for deficit escalation (any deficit halts live trading)
+
     # Real USDT funding (TRON / TRC-20). Production API receives only a public
     # account-level extended public key (xpub) for new deposit-address derivation.
     # Private seeds never belong in the API runtime.
@@ -165,6 +167,10 @@ class Settings(BaseSettings):
     market_intelligence_timeout_seconds: float = 8.0
     market_intelligence_max_news_items: int = 60
     # AI research providers. Keys belong in Secret Manager / environment only.
+    # Optional OpenAI-compatible AI Gateway for authorized release diagnostics only.
+    ai_gateway_api_key: str = ""
+    ai_gateway_base_url: str = ""
+    ai_gateway_model: str = ""
     gemini_api_key: str = ""
     # gemini-2.5-* is scheduled to shut down in Oct 2026 (Google lists 16 and 20 Oct in different places); verify IDs with scripts/check_ai_models.py.
     gemini_model: str = "gemini-3.5-flash"
@@ -173,6 +179,9 @@ class Settings(BaseSettings):
     groq_model: str = "openai/gpt-oss-20b"
     groq_strategy_model: str = "openai/gpt-oss-20b"
     groq_max_completion_tokens: int = 2048
+    # Optional third-party fallback. Keep the key in Secret Manager/environment only.
+    cerebras_api_key: str = ""
+    cerebras_model: str = "llama3.1-8b"
 
     # Withdrawal approval/execution controls. Fund release is fail-closed unless explicitly configured.
     withdrawals_enabled: bool = True
@@ -449,6 +458,17 @@ class Settings(BaseSettings):
             if str(self.customer_live_market_type).lower() != "spot":
                 raise ValueError("CUSTOMER_LIVE_MARKET_TYPE must be spot for customer live execution")
         if self.environment in {"staging", "production"}:
+            if self.live_trading_enabled or self.customer_live_trading_enabled:
+                required = {"DISCIPLINE_ENABLED": self.discipline_enabled, "DISCIPLINE_ENFORCE_RISK_PER_TRADE": self.discipline_enforce_risk_per_trade, "EDGE_DECAY_HALT_ENABLED": self.edge_decay_halt_enabled, "REQUIRE_PROTECTIVE_STOP_FOR_LIVE": self.require_protective_stop_for_live}
+                disabled = [name for name, enabled in required.items() if not enabled]
+                if disabled:
+                    raise ValueError("Live trading requires enabled risk controls: " + ", ".join(disabled))
+                if not (0 < self.risk_per_trade <= 0.02):
+                    raise ValueError("RISK_PER_TRADE must be > 0 and <= 0.02 for live trading")
+                if not (0 < self.max_drawdown < 1) or not (0 < self.daily_loss_limit < 1):
+                    raise ValueError("MAX_DRAWDOWN and DAILY_LOSS_LIMIT must be > 0 and < 1 for live trading")
+                if self.discipline_max_entries_per_day <= 0 or self.discipline_entry_cooldown_seconds <= 0:
+                    raise ValueError("Live trading requires positive entry and cooldown limits")
             if self.usdt_tron_enabled and not self.usdt_tron_account_xpub:
                 raise ValueError("USDT_TRON_ACCOUNT_XPUB is required when TRON deposits are enabled")
             if self.process_role == "api":
@@ -478,6 +498,8 @@ class Settings(BaseSettings):
                     "RESEARCH_MIN_DEFLATED_SHARPE must be >= 0.95 in production "
                     "when adaptive AI promotion is enabled"
                 )
+        if not (0 < self.customer_deficit_limit_usdt < float("inf")):
+            raise ValueError("CUSTOMER_DEFICIT_LIMIT_USDT must be finite and > 0")
         if self.max_consecutive_losses < 0:
             raise ValueError("MAX_CONSECUTIVE_LOSSES must be >= 0")
         if self.max_order_latency_ms_p95 < 0:

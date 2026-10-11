@@ -9,10 +9,10 @@ import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from .config import settings
-from .db import CustodyAssetObservation, CustodyTransfer, utcnow
+from .db import CustodyAssetObservation, CustodyTransfer, CustomerBinanceAccount, utcnow
 
 D = Decimal
 
@@ -60,13 +60,13 @@ async def record_custody_observation(db, *, location: str, provider: str, curren
     )).scalar_one_or_none()
     if row is None:
         row = CustodyAssetObservation(location=location, provider=provider, customer_id=customer_id,
-                                      currency=currency, balance=float(amount), status="ACTIVE",
+                                      currency=currency, balance=amount, status="ACTIVE",
                                       source_reference=source_reference, observed_at=observed)
         db.add(row)
     else:
         row.provider = provider
         row.customer_id = customer_id
-        row.balance = float(amount)
+        row.balance = amount
         row.status = "ACTIVE"
         row.source_reference = source_reference
         row.observed_at = observed
@@ -94,7 +94,7 @@ async def create_custody_transfer(db, *, customer_id: int | None, currency: str,
             raise ValueError("custody transfer idempotency conflict")
         return existing
     row = CustodyTransfer(customer_id=customer_id, currency=str(currency).upper(),
-                          amount=float(amount_d), source_location=source_location,
+                          amount=amount_d, source_location=source_location,
                           destination_location=destination_location, status="REQUESTED",
                           idempotency_key=key)
     db.add(row)
@@ -127,6 +127,51 @@ async def transition_custody_transfer(db, transfer_id: int, *, status: str,
     row.updated_at = now
     return row
 
+
+async def flag_stale_custody_transfers(db, *, timeout_hours: int = 24, now: datetime | None = None) -> int:
+    """Move expired REQUESTED/SUBMITTED transfers to reconciliation, never to FAILED.
+
+    A timeout is not proof that an external transfer failed. This function only raises
+    an operational reconciliation flag; it does not release reserves or move money.
+    Caller owns the transaction and must commit the changes.
+    """
+    if isinstance(timeout_hours, bool) or int(timeout_hours) < 1:
+        raise ValueError("timeout_hours must be a positive integer")
+    current = now or utcnow()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    cutoff = current - timedelta(hours=int(timeout_hours))
+    stmt = (
+        select(CustodyTransfer)
+        .where(
+            or_(
+                and_(CustodyTransfer.status == "REQUESTED", CustodyTransfer.requested_at <= cutoff),
+                and_(CustodyTransfer.status == "SUBMITTED", CustodyTransfer.submitted_at.is_not(None),
+                     CustodyTransfer.submitted_at <= cutoff),
+            )
+        )
+        .with_for_update()
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    for row in rows:
+        try:
+            detail = json.loads(row.detail_json or "{}")
+            if not isinstance(detail, dict):
+                detail = {"previous_detail": detail}
+        except (TypeError, ValueError):
+            detail = {"previous_detail_unparsed": True}
+        detail["timeout_review"] = {
+            "flagged_at": current.isoformat(),
+            "timeout_hours": int(timeout_hours),
+            "previous_status": row.status,
+            "action": "RECONCILIATION_REQUIRED_NO_AUTOMATIC_RELEASE",
+        }
+        row.detail_json = json.dumps(detail, default=str, separators=(",", ":"))
+        row.status = "RECONCILIATION_REQUIRED"
+        row.updated_at = current
+    return len(rows)
+
+
 async def fresh_external_assets(db, *, currency: str = "USDT", provider: str = "binance") -> dict:
     """Only fresh observations count; in-flight transfers never count as assets."""
     cutoff = utcnow() - timedelta(seconds=max(1, int(settings.custody_observation_max_age_seconds)))
@@ -152,13 +197,39 @@ async def fresh_external_assets(db, *, currency: str = "USDT", provider: str = "
         "fresh_observation_available": bool(rows),
     }
 
+async def refresh_verified_binance_custody_observations(db) -> int:
+    """Refresh every verified customer account directly from Binance; fail on any provider error.
+
+    The caller must not treat a partial refresh as a complete solvency snapshot. This
+    function leaves transaction ownership with its caller.
+    """
+    accounts = (await db.execute(
+        select(CustomerBinanceAccount).where(CustomerBinanceAccount.status == "VERIFIED")
+    )).scalars().all()
+    for account in accounts:
+        await refresh_binance_custody_observation(db, account)
+    return len(accounts)
+
+
 async def custody_gate(db, *, customer_liabilities, currency: str = "USDT") -> dict:
     """Exchange-custody solvency decision. UNKNOWN never unlocks live execution."""
     liabilities = _amount(customer_liabilities)
     if not settings.binance_custody_reconciliation_enabled:
         return {"status": "DISABLED", "customer_liabilities": liabilities,
                 "exchange_assets": None, "reason": "BINANCE_CUSTODY_RECONCILIATION_DISABLED"}
+    try:
+        # Provider failure must not leave a partial refresh eligible for solvency.
+        async with db.begin_nested():
+            refreshed = await refresh_verified_binance_custody_observations(db)
+    except Exception as exc:
+        return {"status": "UNKNOWN", "customer_liabilities": liabilities,
+                "exchange_assets": None, "reason": "BINANCE_PROVIDER_REFRESH_FAILED",
+                "error_type": type(exc).__name__}
+    if refreshed == 0:
+        return {"status": "UNKNOWN", "customer_liabilities": liabilities,
+                "exchange_assets": None, "reason": "NO_VERIFIED_BINANCE_ACCOUNTS"}
     report = await fresh_external_assets(db, currency=currency)
+    report["provider_accounts_refreshed"] = refreshed
     if not report["fresh_observation_available"]:
         return {"status": "UNKNOWN", "customer_liabilities": liabilities, "exchange_assets": None,
                 "reason": "NO_FRESH_EXTERNAL_CUSTODY_OBSERVATION", **report}
@@ -168,3 +239,74 @@ async def custody_gate(db, *, customer_liabilities, currency: str = "USDT") -> d
     return {"status": status, "customer_liabilities": liabilities, "exchange_assets": assets,
             "solvency_ratio": ratio, "coverage_gap": assets - liabilities,
             "reason": "ABOVE_THRESHOLD" if status == "OK" else "BELOW_THRESHOLD", **report}
+
+
+async def refresh_binance_custody_observation(
+    db,
+    account,
+    *,
+    secret_fetcher=None,
+    broker_factory=None,
+    observed_at: datetime | None = None,
+) -> CustodyAssetObservation:
+    """Fetch a real customer Binance USDT balance and persist it as a fresh observation.
+
+    Provider failures propagate; no cached/stale balance is relabeled as current.
+    The caller owns transaction commit/rollback. The account must be a verified,
+    read-capable customer mapping accepted by the existing broker factory.
+    """
+    if account is None or not getattr(account, "customer_id", None):
+        raise ValueError("verified customer Binance account is required")
+    if str(getattr(account, "status", "")).upper() != "VERIFIED":
+        raise ValueError("customer Binance account must be VERIFIED")
+    if not str(getattr(account, "api_key", "") or "").strip() or not str(getattr(account, "secret_ref", "") or "").strip():
+        raise ValueError("customer Binance read credentials are incomplete")
+    if broker_factory is None:
+        # Custody reconciliation needs read access only; do not reuse the trading
+        # broker factory, which requires trade permission and is broader than needed.
+        from .broker import Broker, BrokerConfig
+        from .customer_binance_execution import resolve_secret
+        secret = resolve_secret(str(account.secret_ref), fetcher=secret_fetcher)
+        broker = Broker.get(BrokerConfig(
+            exchange_id="binance",
+            api_key=str(account.api_key).strip(),
+            api_secret=secret,
+            sandbox=False,
+            market_type="spot",
+            timeout_ms=10_000,
+        ))
+    else:
+        broker = broker_factory(account, secret_fetcher=secret_fetcher, sandbox=False)
+    # CCXT is synchronous. Keep network I/O off the async event loop.
+    import asyncio
+    balance_response = await asyncio.to_thread(broker.fetch_balance)
+    if not isinstance(balance_response, dict):
+        raise RuntimeError("Binance returned an invalid balance response")
+    # CCXT's normalized "total" values may be binary floats. For exact
+    # accounting, use Binance's raw decimal-string free/locked fields instead.
+    info = balance_response.get("info")
+    raw_balances = info.get("balances") if isinstance(info, dict) else None
+    raw_usdt = next(
+        (item for item in raw_balances if isinstance(item, dict) and item.get("asset") == "USDT"),
+        None,
+    ) if isinstance(raw_balances, list) else None
+    if raw_usdt is None or "free" not in raw_usdt or "locked" not in raw_usdt:
+        raise RuntimeError("Binance response lacks raw USDT free/locked decimal strings")
+    if not isinstance(raw_usdt["free"], str) or not isinstance(raw_usdt["locked"], str):
+        raise RuntimeError("Binance raw USDT balances must be decimal strings")
+    amount = _amount(D(raw_usdt["free"]) + D(raw_usdt["locked"]))
+    timestamp = observed_at or utcnow()
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError("observation timestamp must be timezone-aware")
+    # This reference identifies the observation only; it contains no credentials.
+    reference = f"binance:balance:{int(timestamp.timestamp())}:{int(account.customer_id)}"
+    return await record_custody_observation(
+        db,
+        location=location_for_binance(int(account.customer_id)),
+        provider="binance",
+        currency="USDT",
+        balance=amount,
+        source_reference=reference,
+        customer_id=int(account.customer_id),
+        observed_at=timestamp.astimezone(timezone.utc),
+    )

@@ -109,6 +109,39 @@ def _check_gemini(model: str) -> bool:
     return ok
 
 
+def _check_cerebras(model: str) -> bool:
+    """Minimal real inference check; never logs keys or generated response bodies."""
+    if not settings.cerebras_api_key:
+        print("[SKIP] Cerebras: CEREBRAS_API_KEY not configured (optional provider)")
+        return True
+    status, body = _request_json(
+        "https://api.cerebras.ai/v1/chat/completions",
+        {
+            "Authorization": f"Bearer {settings.cerebras_api_key}",
+            "Content-Type": "application/json",
+        },
+        {
+            "model": model,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "max_completion_tokens": 32,
+            "temperature": 0,
+        },
+    )
+    choices = body.get("choices")
+    output = ""
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        message = choices[0].get("message")
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            output = message["content"]
+    ok = status == 200 and bool(output.strip())
+    detail = "Chat Completions inference succeeded" if ok else f"Chat Completions inference failed (HTTP {status or 'network/error'})"
+    error = body.get("error")
+    if not ok and isinstance(error, dict) and isinstance(error.get("message"), str):
+        detail += "; provider_error=" + error["message"][:180]
+    print(f"[{'PASS' if ok else 'FAIL'}] Cerebras {model}: {detail}")
+    return ok
+
+
 def _check_groq(model: str) -> bool:
     headers = {
         "Authorization": f"Bearer {settings.groq_api_key}",
@@ -217,10 +250,12 @@ def main() -> int:
         print("AI provider verification: NOT VERIFIED (missing " + ", ".join(missing) + ").")
         return 2
 
-    models = (
+    models = [
         ("Gemini", sorted({settings.gemini_model, settings.gemini_strategy_model} - {""}), _check_gemini),
         ("Groq", sorted({settings.groq_model, settings.groq_strategy_model} - {""}), _check_groq),
-    )
+    ]
+    if settings.cerebras_api_key:
+        models.append(("Cerebras", sorted({settings.cerebras_model} - {""}), _check_cerebras))
     checked = 0
     failures = 0
     for provider, provider_models, checker in models:

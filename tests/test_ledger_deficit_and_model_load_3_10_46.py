@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.customer_funds import DEFICIT_ACCOUNT, settle_realized_pnl, settle_trading_fee
 from app.config import settings
-from app.db import Base, CustomerLedgerAccount, Incident, LedgerJournal, LedgerJournalLine
+from app.db import AppState, Base, CustomerLedgerAccount, Incident, LedgerJournal, LedgerJournalLine
 
 
 @pytest.fixture(autouse=True)
@@ -55,6 +55,24 @@ def test_loss_beyond_available_nonstrict_books_deficit_never_negative():
             assert (await db.execute(select(Incident))).scalars().all()
     asyncio.run(with_database(check))
 
+
+
+def test_deficit_engages_live_kill_switch():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(AppState(id=1, live_enabled=True, kill_switch=False))
+            db.add(CustomerLedgerAccount(customer_id=17, available=Decimal("2")))
+            await db.commit()
+            await settle_realized_pnl(db, customer_id=17, amount=-7, reference_id="close:deficit-kill", strict=False)
+            await db.commit()
+        async with sessions() as db:
+            state = await db.get(AppState, 1)
+            assert state is not None
+            assert state.kill_switch is True
+            assert state.live_enabled is False
+            incidents = (await db.execute(select(Incident))).scalars().all()
+            assert any(row.severity == "CRITICAL" and "CUSTOMER_DEFICIT_LIMIT" in row.incident_key for row in incidents)
+    asyncio.run(with_database(check))
 
 def test_loss_beyond_available_strict_still_raises():
     async def check(sessions):

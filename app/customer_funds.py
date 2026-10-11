@@ -4,7 +4,8 @@ import json
 import logging
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from .db import CustomerLedgerAccount, Incident, LedgerEntry, LedgerJournal, LedgerJournalLine, SessionLocal, Wallet, utcnow
+from .config import settings
+from .db import AppState, CustomerLedgerAccount, Incident, LedgerEntry, LedgerJournal, LedgerJournalLine, SessionLocal, Wallet, utcnow
 
 USDT = "USDT"
 D = Decimal
@@ -400,6 +401,8 @@ async def settle_withdrawal(db, customer_id: int, amount: float, *, reference_id
             summary="Withdrawal payout exceeded the customer's withdrawal reserve",
             detail={"customer_id": customer_id, "reference_id": reference_id, "payout": str(amount_d),
                     "reserved": str(reserved_now), "shortfall": str(shortfall)}, customer_id=customer_id)
+        await _engage_kill_switch_for_deficit(db, customer_id=customer_id, reference_id=reference_id,
+                                               shortfall=shortfall, source="WITHDRAWAL_SETTLEMENT")
     shortfall = amount_d - settle  # 0 unless the reserve was short
     if settle <= 0 and shortfall <= 0:
         return fresh_ledger
@@ -438,6 +441,36 @@ async def customer_balance(db, customer_id: int, currency: str = USDT, *, lock: 
 
 
 DEFICIT_ACCOUNT = "ASSET:RECEIVABLE:CUSTOMER_DEFICIT"
+
+
+async def _engage_kill_switch_for_deficit(db, *, customer_id: int, reference_id: str, shortfall: Decimal, source: str) -> None:
+    """Stop new live risk when a post-trade deficit is booked; never omit actual losses."""
+    threshold = D(str(settings.customer_deficit_limit_usdt))
+    if not threshold.is_finite() or threshold <= 0:
+        state = await db.get(AppState, 1)
+        if state is not None:
+            state.kill_switch = True
+            state.live_enabled = False
+        raise RuntimeError("CUSTOMER_DEFICIT_LIMIT_USDT must be finite and > 0")
+    # Any realized customer deficit is unsafe: engage the live kill switch for
+    # every positive shortfall. The configured threshold is recorded for severity/
+    # escalation telemetry, never used to permit continued live trading in deficit.
+    threshold_reached = shortfall >= threshold
+    state = await db.get(AppState, 1)
+    if shortfall > 0 and state is not None:
+        state.kill_switch = True
+        state.live_enabled = False
+    await record_ledger_incident(
+        db,
+        key=f"CUSTOMER_DEFICIT_LIMIT:{customer_id}:{reference_id}",
+        summary="Customer deficit recorded; live trading halted for any positive shortfall",
+        detail={"customer_id": customer_id, "reference_id": reference_id,
+                "shortfall": str(shortfall), "source": source,
+                "threshold_usdt": str(threshold), "threshold_reached": threshold_reached,
+                "action": "KILL_SWITCH_ENGAGED_FOR_ANY_POSITIVE_DEFICIT"},
+        customer_id=customer_id,
+        severity="CRITICAL",
+    )
 
 
 async def settle_realized_pnl(db, *, customer_id: int, amount: float, reference_id: str, strict: bool = True) -> None:
@@ -497,6 +530,8 @@ async def settle_realized_pnl(db, *, customer_id: int, amount: float, reference_
             summary="Realized trading loss exceeded the customer's available balance",
             detail={"customer_id": customer_id, "reference_id": reference_id, "loss": str(abs(pnl)),
                     "available_before": str(available), "shortfall": str(shortfall)}, customer_id=customer_id)
+        await _engage_kill_switch_for_deficit(db, customer_id=customer_id, reference_id=reference_id,
+                                               shortfall=shortfall, source="REALIZED_TRADING_LOSS")
 
 
 async def settle_trading_fee(db, *, customer_id: int, fee: float, reference_id: str, strict: bool = True) -> None:
@@ -549,6 +584,8 @@ async def settle_trading_fee(db, *, customer_id: int, fee: float, reference_id: 
             summary="Trading fee exceeded the customer's available + reserved balance",
             detail={"customer_id": customer_id, "reference_id": reference_id, "fee": str(fee_d),
                     "shortfall": str(shortfall)}, customer_id=customer_id)
+        await _engage_kill_switch_for_deficit(db, customer_id=customer_id, reference_id=reference_id,
+                                               shortfall=shortfall, source="TRADING_FEE")
 
 
 async def ledger_statement(db, customer_id: int, currency: str = USDT, limit: int = 100) -> list[dict]:

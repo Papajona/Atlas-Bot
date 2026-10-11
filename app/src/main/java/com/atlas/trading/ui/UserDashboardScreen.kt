@@ -28,6 +28,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.util.Locale
+import com.atlas.trading.network.CustomerDataClient
+import com.atlas.trading.auth.CustomerAuthClient
+import kotlinx.coroutines.launch
 import kotlin.math.max
 import kotlin.math.min
 
@@ -59,8 +62,9 @@ enum class AssetClass(val label: String, val badge: String) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UserDashboardScreen(
-    userName: String = "Alice",
+    userName: String = "Account",
     backendUrl: String = "",
+    customerAccessToken: String? = null,
     onOpenOperatorConsole: () -> Unit = {},
     onOpenPortal: () -> Unit = {}
 ) {
@@ -68,11 +72,25 @@ fun UserDashboardScreen(
     var selectedAssetClass by remember { mutableStateOf(AssetClass.ALL) }
     var selectedTimeframeDays by remember { mutableIntStateOf(30) } // 7 or 30 days
     var actionDialogMessage by remember { mutableStateOf<String?>(null) }
+    var activeCustomerToken by remember { mutableStateOf(customerAccessToken) }
+    var customerSnapshot by remember { mutableStateOf<CustomerDataClient.Snapshot?>(null) }
+    var customerSignInError by remember { mutableStateOf<String?>(null) }
+    var customerSignInBusy by remember { mutableStateOf(false) }
+    var customerMfaChallenge by remember { mutableStateOf<CustomerAuthClient.MfaChallenge?>(null) }
+    var pendingCustomerSession by remember { mutableStateOf<CustomerAuthClient.Session?>(null) }
+    val customerAuthScope = rememberCoroutineScope()
 
-    // Generate 30-day realistic historical equity curve
-    val equityHistory = remember {
-        generate30DayEquityData()
+    LaunchedEffect(backendUrl, activeCustomerToken) {
+        val token = activeCustomerToken?.takeIf { it.isNotBlank() }
+        customerSnapshot = if (token == null || backendUrl.isBlank()) {
+            null
+        } else {
+            runCatching { CustomerDataClient(backendUrl).loadSnapshot(token) }.getOrNull()
+        }
     }
+
+    // Do not fabricate account history. The authenticated customer API must supply it.
+    val equityHistory = remember { emptyList<EquityPoint>() }
 
     val displayPoints = remember(selectedTimeframeDays, equityHistory) {
         if (selectedTimeframeDays == 7) {
@@ -125,14 +143,75 @@ fun UserDashboardScreen(
                         item {
                             Spacer(modifier = Modifier.height(4.dp))
                             DashboardHeader(
-                                userName = userName,
+                                userName = customerSnapshot?.profile?.displayName ?: userName,
                                 brandTeal = brandTeal,
                                 textPrimary = textPrimary,
                                 onAvatarClick = { currentTab = DashboardTab.SETTINGS },
                                 onNotificationClick = {
-                                    actionDialogMessage = "Active Alerts across Multi-Asset Suite:\n• BTC/USDT: +0.05 bought at $68,450\n• EUR/USD: 4H breakout active (+18 pips)\n• Gold (XAU/USD): 4H trend target hit (+1.15%)"
+                                    actionDialogMessage = "Verified alerts are unavailable until an authenticated account and live alert feed are connected."
                                 }
                             )
+                        }
+
+                        item {
+                            if (activeCustomerToken.isNullOrBlank()) {
+                                CustomerSignInCard(
+                                    busy = customerSignInBusy,
+                                    error = customerSignInError,
+                                    requiresAuthenticator = customerMfaChallenge != null,
+                                    onSignIn = { email, password ->
+                                        customerAuthScope.launch {
+                                            customerSignInBusy = true
+                                            customerSignInError = null
+                                            try {
+                                                val auth = CustomerAuthClient(backendUrl)
+                                                val session = auth.login(email, password)
+                                                val status = auth.mfaStatus(session.accessToken)
+                                                if (!status.enabled || status.factorIds.isEmpty()) {
+                                                    throw IllegalStateException("Google Authenticator setup is required before customer sign-in can complete")
+                                                }
+                                                val challenge = auth.challenge(session.accessToken, status.factorIds.first())
+                                                pendingCustomerSession = session
+                                                customerMfaChallenge = challenge
+                                            } catch (error: Exception) {
+                                                pendingCustomerSession = null
+                                                customerMfaChallenge = null
+                                                customerSignInError = error.message ?: "Customer sign-in failed"
+                                            } finally {
+                                                customerSignInBusy = false
+                                            }
+                                        }
+                                    },
+                                    onVerifyAuthenticator = { code ->
+                                        customerAuthScope.launch {
+                                            customerSignInBusy = true
+                                            customerSignInError = null
+                                            try {
+                                                val session = pendingCustomerSession
+                                                    ?: throw IllegalStateException("Sign in again to request an authenticator challenge")
+                                                val challenge = customerMfaChallenge
+                                                    ?: throw IllegalStateException("Authenticator challenge expired; sign in again")
+                                                val verified = CustomerAuthClient(backendUrl).verify(session.accessToken, challenge, code)
+                                                activeCustomerToken = verified.accessToken
+                                                pendingCustomerSession = null
+                                                customerMfaChallenge = null
+                                            } catch (error: Exception) {
+                                                customerSignInError = error.message ?: "Authenticator verification failed"
+                                            } finally {
+                                                customerSignInBusy = false
+                                            }
+                                        }
+                                    }
+                                )
+                            } else {
+                                TextButton(onClick = {
+                                    activeCustomerToken = null
+                                    customerSnapshot = null
+                                    customerSignInError = null
+                                }) {
+                                    Text("Sign out customer")
+                                }
+                            }
                         }
 
                         // Asset Class Switcher (Crypto, Forex, Commodities)
@@ -149,14 +228,9 @@ fun UserDashboardScreen(
                         // Three summary metric cards side by side
                         item {
                             SummaryKpiRow(
-                                totalBalance = 1250.00,
-                                activeTrades = when (selectedAssetClass) {
-                                    AssetClass.ALL -> 5
-                                    AssetClass.CRYPTO -> 2
-                                    AssetClass.FOREX -> 2
-                                    AssetClass.COMMODITIES -> 1
-                                },
-                                profit24hPct = 3.5,
+                                totalBalance = customerSnapshot?.portfolio?.equity,
+                                activeTrades = customerSnapshot?.portfolio?.openPositions,
+                                profit24hPct = null,
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
                                 textPrimary = textPrimary,
@@ -215,6 +289,7 @@ fun UserDashboardScreen(
                         item {
                             WatchlistCard(
                                 selectedAssetClass = selectedAssetClass,
+                                marketQuotes = customerSnapshot?.marketQuotes.orEmpty(),
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
                                 textPrimary = textPrimary,
@@ -325,6 +400,7 @@ fun UserDashboardScreen(
                         item {
                             WatchlistCard(
                                 selectedAssetClass = selectedAssetClass,
+                                marketQuotes = customerSnapshot?.marketQuotes.orEmpty(),
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
                                 textPrimary = textPrimary,
@@ -350,7 +426,9 @@ fun UserDashboardScreen(
                                     )
                                     Spacer(modifier = Modifier.height(8.dp))
                                     Text(
-                                        text = "• 🪙 BTC/USDT: 4H Trend Momentum Bullish (ATR = 1,420)\n• 🪙 ETH/USDT: Mean-reversion hold (Z = +0.4)\n• 💱 EUR/USD: London session range breakout passed (1.0852)\n• 💱 GBP/USD: 1D Trend following target active (1.2940)\n• 🥇 Gold (XAU/USD): 4H Channel breakout intact ($2,354.20)",
+                                        text = customerSnapshot?.marketQuotes?.takeIf { it.isNotEmpty() }?.joinToString("\n") {
+                                    "${it.symbol}: ${it.price} • ${it.signal}"
+                                } ?: "Live market data unavailable. Sign in to an authorized customer account and ensure the market-scanner entitlement and provider are available.",
                                         fontSize = 13.sp,
                                         color = textMuted,
                                         lineHeight = 22.sp
@@ -364,8 +442,8 @@ fun UserDashboardScreen(
 
                 DashboardTab.SETTINGS -> {
                     ModernSettingsScreen(
-                        userName = "$userName Henderson",
-                        userEmail = "${userName.lowercase(Locale.US)}.henderson@atlas.trading",
+                        userName = customerSnapshot?.profile?.displayName ?: userName,
+                        userEmail = customerSnapshot?.profile?.email ?: "Unavailable until account sign-in",
                         onOpenOperatorConsole = onOpenOperatorConsole,
                         onOpenPortal = onOpenPortal,
                         modifier = Modifier.padding(innerPadding)
@@ -391,6 +469,85 @@ fun UserDashboardScreen(
             },
             containerColor = cardSurface
         )
+    }
+}
+
+@Composable
+private fun CustomerSignInCard(
+    busy: Boolean,
+    error: String?,
+    requiresAuthenticator: Boolean,
+    onSignIn: (String, String) -> Unit,
+    onVerifyAuthenticator: (String) -> Unit
+) {
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var authenticatorCode by remember { mutableStateOf("") }
+    val theme = com.atlas.trading.ui.theme.LocalAtlasColors.current
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = theme.cardSurface),
+        shape = RoundedCornerShape(18.dp),
+        border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(theme.cardBorder))
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text("Sign in to your customer account", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = theme.textPrimary)
+            Text(
+                "Account balances and market-scanner data are hidden until the backend authenticates your customer session.",
+                fontSize = 12.sp,
+                color = theme.textMuted
+            )
+            OutlinedTextField(
+                value = email,
+                onValueChange = { email = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Email") },
+                singleLine = true,
+                enabled = !busy
+            )
+            if (!requiresAuthenticator) {
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Password") },
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    singleLine = true,
+                    enabled = !busy
+                )
+            } else {
+                Text("Enter the 6-digit code from your authenticator app.", fontSize = 12.sp, color = theme.textMuted)
+                OutlinedTextField(
+                    value = authenticatorCode,
+                    onValueChange = { authenticatorCode = it.filter(Char::isDigit).take(6) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Authenticator code") },
+                    singleLine = true,
+                    enabled = !busy
+                )
+            }
+            if (!error.isNullOrBlank()) {
+                Text(error, color = theme.redDanger, fontSize = 12.sp)
+            }
+            Button(
+                onClick = {
+                    if (requiresAuthenticator) onVerifyAuthenticator(authenticatorCode)
+                    else onSignIn(email, password)
+                },
+                enabled = !busy && if (requiresAuthenticator) authenticatorCode.length == 6 else email.isNotBlank() && password.isNotBlank(),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                if (busy) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Text(when { busy -> "Verifying…"; requiresAuthenticator -> "Verify authenticator"; else -> "Sign in securely" })
+            }
+        }
     }
 }
 
@@ -525,9 +682,9 @@ private fun AssetClassSelectorRow(
 
 @Composable
 private fun SummaryKpiRow(
-    totalBalance: Double,
-    activeTrades: Int,
-    profit24hPct: Double,
+    totalBalance: Double?,
+    activeTrades: Int?,
+    profit24hPct: Double?,
     cardSurface: Color,
     cardBorder: Color,
     textPrimary: Color,
@@ -547,10 +704,10 @@ private fun SummaryKpiRow(
             border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(cardBorder))
         ) {
             Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-                Text(text = "Total Balance", fontSize = 11.sp, color = textMuted, maxLines = 1)
+                Text(text = "Equity (USDT)", fontSize = 11.sp, color = textMuted, maxLines = 1)
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
-                    text = "$${String.format(Locale.US, "%,.2f", totalBalance)}",
+                    text = totalBalance?.let { "USDT ${String.format(Locale.US, "%,.2f", it)}" } ?: "Unavailable",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     color = textPrimary,
@@ -567,10 +724,10 @@ private fun SummaryKpiRow(
             border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(cardBorder))
         ) {
             Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-                Text(text = "Active Trades", fontSize = 11.sp, color = textMuted, maxLines = 1)
+                Text(text = "Open Positions", fontSize = 11.sp, color = textMuted, maxLines = 1)
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
-                    text = "$activeTrades",
+                    text = activeTrades?.toString() ?: "Unavailable",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     color = textPrimary
@@ -591,14 +748,14 @@ private fun SummaryKpiRow(
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .background(emeraldBadgeBg)
+                        .background(if (profit24hPct != null) emeraldBadgeBg else cardBorder)
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
-                        text = "+${String.format(Locale.US, "%.1f", profit24hPct)}%",
+                        text = profit24hPct?.let { "${String.format(Locale.US, "%.1f", it)}%" } ?: "Unavailable",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
-                        color = emeraldBadgeText
+                        color = if (profit24hPct != null) emeraldBadgeText else textMuted
                     )
                 }
             }
@@ -702,11 +859,19 @@ private fun PortfolioPerformanceCard(
                         )
                     }
                     Text(
-                        text = if (selectedIndex != null) "Scrubbing active" else "Real-time curve",
+                        text = if (selectedIndex != null) "Scrubbing active" else "Historical account data",
                         fontSize = 10.sp,
                         color = textMuted
                     )
                 }
+            }
+
+            if (activePoint == null) {
+                Text(
+                    "Historical account performance unavailable — no verified customer history has been loaded.",
+                    fontSize = 12.sp,
+                    color = textMuted
+                )
             }
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -877,7 +1042,6 @@ private fun RecentActivityCard(
     emeraldAccent: Color,
     redDanger: Color
 ) {
-    val theme = com.atlas.trading.ui.theme.LocalAtlasColors.current
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = cardSurface),
@@ -885,108 +1049,13 @@ private fun RecentActivityCard(
         border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(cardBorder))
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Recent Activity",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = textPrimary
-                )
-                Text(
-                    text = selectedAssetClass.label,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = textMuted
-                )
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            when (selectedAssetClass) {
-                AssetClass.FOREX -> {
-                    // EUR/USD activity
-                    ActivityRow(
-                        badgeText = "€",
-                        badgeBg = Color(0xFF3B82F6),
-                        title = "EUR/USD bought:",
-                        value = "+25 pips",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    HorizontalDivider(color = theme.divider, thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(10.dp))
-                    // GBP/USD activity
-                    ActivityRow(
-                        badgeText = "£",
-                        badgeBg = Color(0xFF8B5CF6),
-                        title = "GBP/USD sold:",
-                        value = "+40 pips",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                }
-                AssetClass.COMMODITIES -> {
-                    // Gold activity
-                    ActivityRow(
-                        badgeText = "Au",
-                        badgeBg = Color(0xFFEAB308),
-                        title = "Gold (XAU) bought:",
-                        value = "+0.4 oz (TP)",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    HorizontalDivider(color = theme.divider, thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(10.dp))
-                    // Crude Oil activity
-                    ActivityRow(
-                        badgeText = "🛢",
-                        badgeBg = Color(0xFF475569),
-                        title = "Crude Oil (WTI) sold:",
-                        value = "+$1.20/bbl",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                }
-                else -> {
-                    // Crypto & Multi-Asset default
-                    ActivityRow(
-                        badgeText = "₿",
-                        badgeBg = Color(0xFFF7931A),
-                        title = "BTC bought:",
-                        value = "+0.05",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    HorizontalDivider(color = theme.divider, thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(10.dp))
-                    ActivityRow(
-                        badgeText = "Ξ",
-                        badgeBg = Color(0xFF627EEA),
-                        title = "ETH sold:",
-                        value = "-0.1",
-                        valueColor = redDanger,
-                        textPrimary = textPrimary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    HorizontalDivider(color = theme.divider, thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(10.dp))
-                    ActivityRow(
-                        badgeText = "€",
-                        badgeBg = Color(0xFF3B82F6),
-                        title = "EUR/USD limit filled:",
-                        value = "+18 pips",
-                        valueColor = emeraldAccent,
-                        textPrimary = textPrimary
-                    )
-                }
-            }
+            Text("Recent Activity", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = textPrimary)
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "Unavailable — recent trades require an authenticated customer account and verified trade history.",
+                fontSize = 12.sp,
+                color = textMuted
+            )
         }
     }
 }
@@ -1089,6 +1158,7 @@ private fun QuickActionsRow(
 @Composable
 private fun WatchlistCard(
     selectedAssetClass: AssetClass = AssetClass.ALL,
+    marketQuotes: List<CustomerDataClient.MarketQuote> = emptyList(),
     cardSurface: Color,
     cardBorder: Color,
     textPrimary: Color,
@@ -1103,173 +1173,27 @@ private fun WatchlistCard(
         border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(cardBorder))
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Text(
+                "Watchlist (${selectedAssetClass.label})",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = textPrimary
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            if (marketQuotes.isEmpty()) {
                 Text(
-                    text = "Watchlist (${selectedAssetClass.label})",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = textPrimary
+                    "Live prices unavailable — sign in to an authorized customer account and confirm market-scanner access. No placeholder prices are shown.",
+                    fontSize = 12.sp,
+                    color = textMuted
                 )
-                Text(
-                    text = "Live Scanner",
-                    fontSize = 11.sp,
-                    color = emeraldAccent,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            when (selectedAssetClass) {
-                AssetClass.FOREX -> {
-                    // EUR/USD
-                    WatchlistItemRow(
-                        badge = "€",
-                        badgeBg = Color(0xFF3B82F6),
-                        symbol = "EUR/USD",
-                        price = "1.0852",
-                        changePct = "+0.35%",
-                        isBullish = true,
-                        color = emeraldAccent,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
+            } else {
+                marketQuotes.forEach { quote ->
+                    Text(
+                        "${quote.symbol}  ${quote.price}  •  ${quote.signal}",
+                        fontSize = 13.sp,
+                        color = textPrimary,
+                        modifier = Modifier.padding(vertical = 4.dp)
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    // GBP/USD
-                    WatchlistItemRow(
-                        badge = "£",
-                        badgeBg = Color(0xFF8B5CF6),
-                        symbol = "GBP/USD",
-                        price = "1.2940",
-                        changePct = "-0.22%",
-                        isBullish = false,
-                        color = redDanger,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    // USD/JPY
-                    WatchlistItemRow(
-                        badge = "¥",
-                        badgeBg = Color(0xFFEC4899),
-                        symbol = "USD/JPY",
-                        price = "154.20",
-                        changePct = "+0.48%",
-                        isBullish = true,
-                        color = emeraldAccent,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                }
-                AssetClass.COMMODITIES -> {
-                    // Gold
-                    WatchlistItemRow(
-                        badge = "Au",
-                        badgeBg = Color(0xFFEAB308),
-                        symbol = "Gold (XAU)",
-                        price = "$2,354.20",
-                        changePct = "+1.15%",
-                        isBullish = true,
-                        color = emeraldAccent,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    // Silver
-                    WatchlistItemRow(
-                        badge = "Ag",
-                        badgeBg = Color(0xFF94A3B8),
-                        symbol = "Silver (XAG)",
-                        price = "$28.45",
-                        changePct = "+0.82%",
-                        isBullish = true,
-                        color = emeraldAccent,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    // Crude Oil
-                    WatchlistItemRow(
-                        badge = "🛢",
-                        badgeBg = Color(0xFF475569),
-                        symbol = "Crude (WTI)",
-                        price = "$78.60",
-                        changePct = "-0.90%",
-                        isBullish = false,
-                        color = redDanger,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                }
-                else -> {
-                    // Crypto or ALL
-                    WatchlistItemRow(
-                        badge = "₿",
-                        badgeBg = Color(0xFFF7931A),
-                        symbol = "BTC",
-                        price = "$68,450",
-                        changePct = "+2.4%",
-                        isBullish = true,
-                        color = emeraldAccent,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    WatchlistItemRow(
-                        badge = "Ξ",
-                        badgeBg = Color(0xFF627EEA),
-                        symbol = "ETH",
-                        price = "$3,480",
-                        changePct = "-1.1%",
-                        isBullish = false,
-                        color = redDanger,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted
-                    )
-                    if (selectedAssetClass == AssetClass.ALL) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        WatchlistItemRow(
-                            badge = "€",
-                            badgeBg = Color(0xFF3B82F6),
-                            symbol = "EUR/USD",
-                            price = "1.0852",
-                            changePct = "+0.35%",
-                            isBullish = true,
-                            color = emeraldAccent,
-                            textPrimary = textPrimary,
-                            textMuted = textMuted
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        WatchlistItemRow(
-                            badge = "Au",
-                            badgeBg = Color(0xFFEAB308),
-                            symbol = "Gold (XAU)",
-                            price = "$2,354.20",
-                            changePct = "+1.15%",
-                            isBullish = true,
-                            color = emeraldAccent,
-                            textPrimary = textPrimary,
-                            textMuted = textMuted
-                        )
-                    }
                 }
             }
         }
@@ -1405,34 +1329,4 @@ private fun DashboardBottomNavigation(
 /**
  * Generates realistic 30-day daily historical equity progression with positive trend.
  */
-private fun generate30DayEquityData(): List<EquityPoint> {
-    val result = mutableListOf<EquityPoint>()
-    var equity = 1064.60
-    var cumProfit = 0.0
-
-    // Modeled realistic 30-day progression ending at $1,250.00
-    val dailyChanges = listOf(
-        +4.20, +8.50, -3.10, +6.40, +12.30, -5.20, +9.10,
-        +14.50, -4.80, +11.20, +7.60, -6.10, +18.40, +10.50,
-        -7.20, +15.30, +8.90, -4.50, +13.20, +16.80, -8.10,
-        +12.40, +9.50, -3.80, +14.60, +17.20, -5.40, +12.80,
-        +10.60, +9.50
-    )
-
-    for (day in 1..30) {
-        val change = dailyChanges[day - 1]
-        equity += change
-        cumProfit += change
-        val dateLabel = "Day $day"
-        result.add(
-            EquityPoint(
-                day = day,
-                dateLabel = dateLabel,
-                equity = Math.round(equity * 100.0) / 100.0,
-                dailyPnl = change,
-                cumProfit = Math.round(cumProfit * 100.0) / 100.0
-            )
-        )
-    }
-    return result
-}
+internal fun generate30DayEquityData(): List<EquityPoint> = emptyList()

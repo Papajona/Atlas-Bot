@@ -26,20 +26,8 @@ class DashboardNavigationAndSettingsTest {
     }
 
     @Test
-    fun test30DayEquityGeneration() {
-        // Equity data should span 30 points and end with realistic positive return
-        val testPoints = (1..30).map { day ->
-            EquityPoint(
-                day = day,
-                dateLabel = "Day $day",
-                equity = 1000.0 + (day * 8.5),
-                dailyPnl = 8.5,
-                cumProfit = day * 8.5
-            )
-        }
-        assertEquals(30, testPoints.size)
-        assertEquals(1, testPoints.first().day)
-        assertEquals(30, testPoints.last().day)
-        assertTrue(testPoints.last().equity > testPoints.first().equity)
+    fun dashboardDoesNotFabricateHistoricalEquityData() {
+        // Historical values must come from an authenticated customer API, never a generated demo curve.
+        assertTrue(generate30DayEquityData().isEmpty())
     }
 }

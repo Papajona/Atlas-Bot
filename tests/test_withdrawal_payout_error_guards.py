@@ -71,7 +71,6 @@ def test_immediate_provider_failure_releases_the_withdrawal_reserve():
 
 def test_immediate_provider_unknown_never_releases_reserve():
     fn = _fn("release_withdrawal")
-    text = ast.unparse(fn)
     unknown = next(n for n in ast.walk(fn)
                    if isinstance(n, ast.ExceptHandler)
                    and ast.unparse(n.type) == "PayoutUnknown")
