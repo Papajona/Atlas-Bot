@@ -227,7 +227,6 @@ fun UserDashboardScreen(
                         item {
                             RecentActivityCard(
                                 selectedAssetClass = selectedAssetClass,
-                                marketQuotes = customerSnapshot?.marketQuotes.orEmpty(),
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
                                 textPrimary = textPrimary,
@@ -369,6 +368,7 @@ fun UserDashboardScreen(
                         item {
                             WatchlistCard(
                                 selectedAssetClass = selectedAssetClass,
+                                marketQuotes = customerSnapshot?.marketQuotes.orEmpty(),
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
                                 textPrimary = textPrimary,
@@ -654,10 +654,10 @@ private fun SummaryKpiRow(
             border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(cardBorder))
         ) {
             Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-                Text(text = "Total Balance", fontSize = 11.sp, color = textMuted, maxLines = 1)
+                Text(text = "Equity (USDT)", fontSize = 11.sp, color = textMuted, maxLines = 1)
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
-                    text = totalBalance?.let { "${String.format(Locale.US, "%,.2f", it)}" } ?: "Unavailable",
+                    text = totalBalance?.let { "USDT ${String.format(Locale.US, "%,.2f", it)}" } ?: "Unavailable",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     color = textPrimary,
@@ -809,7 +809,7 @@ private fun PortfolioPerformanceCard(
                         )
                     }
                     Text(
-                        text = if (selectedIndex != null) "Scrubbing active" else "Real-time curve",
+                        text = if (selectedIndex != null) "Scrubbing active" else "Historical account data",
                         fontSize = 10.sp,
                         color = textMuted
                     )
