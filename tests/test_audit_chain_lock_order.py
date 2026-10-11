@@ -44,12 +44,12 @@ def test_concurrent_audit_writers_never_fork_the_chain_on_postgres():
     async def _all():
         from app.db import SessionLocal
         async with SessionLocal() as db:
-            return (await db.execute(select(AuditLog).order_by(AuditLog.id))).scalars().all()
+            return (await db.execute(select(AuditLog.id, AuditLog.previous_hash, AuditLog.event_hash).order_by(AuditLog.id))).all()
     async def go():
         rows_before = await _all()
         res = await asyncio.gather(*[record_audit("PG_PROBE", {"i": i}, "t") for i in range(25)], return_exceptions=True)
         assert not [r for r in res if isinstance(r, Exception)]
         added = (await _all())[len(rows_before):]
         assert len(added) == 25
-        assert all(y.previous_hash == x.event_hash for x, y in zip(added, added[1:])), "audit chain forked"
+        assert all(y[1] == x[2] for x, y in zip(added, added[1:])), "audit chain forked"
     asyncio.run(go())
