@@ -15,6 +15,7 @@ on:
       - 'tests/test_postgres_ledger_concurrency_3_10_46.py'
       - 'tests/test_ledger_invariants_3_10_46.py'
       - 'tests/test_ledger_all_paths_concurrent_3_10_46.py'
+      - 'tests/test_unified_custody.py'
       - 'requirements-dev.txt'
       - 'alembic/**'
       - '.github/workflows/ci.yml'
@@ -84,6 +85,42 @@ jobs:
           alembic upgrade head
           alembic current
           alembic heads
+
+      - name: Verify PostgreSQL custody decimal schema and exact round-trip
+        env:
+          PGPASSWORD: test_password
+        run: |
+          psql "postgresql://atlas@localhost:5432/atlas_test" -v ON_ERROR_STOP=1 <<'SQL'
+          DO $
+          DECLARE
+            col record;
+            exact_value numeric(38,18) := 123456789.12345678;
+            round_trip numeric(38,18);
+          BEGIN
+            FOR col IN
+              SELECT table_name, column_name, data_type, numeric_precision, numeric_scale
+              FROM information_schema.columns
+              WHERE (table_name='custody_asset_observations' AND column_name='balance')
+                 OR (table_name='custody_transfers' AND column_name='amount')
+            LOOP
+              IF col.data_type <> 'numeric' OR col.numeric_precision <> 38 OR col.numeric_scale <> 18 THEN
+                RAISE EXCEPTION 'Unexpected custody schema for %.%: %(% , %)',
+                  col.table_name, col.column_name, col.data_type, col.numeric_precision, col.numeric_scale;
+              END IF;
+            END LOOP;
+            IF (SELECT count(*) FROM information_schema.columns
+                WHERE (table_name='custody_asset_observations' AND column_name='balance')
+                   OR (table_name='custody_transfers' AND column_name='amount')) <> 2 THEN
+              RAISE EXCEPTION 'Expected both custody NUMERIC(38,18) columns to exist';
+            END IF;
+            CREATE TEMP TABLE custody_decimal_roundtrip(value numeric(38,18));
+            INSERT INTO custody_decimal_roundtrip VALUES (exact_value);
+            SELECT value INTO round_trip FROM custody_decimal_roundtrip;
+            IF round_trip <> exact_value THEN
+              RAISE EXCEPTION 'PostgreSQL custody decimal round-trip lost precision: % <> %', round_trip, exact_value;
+            END IF;
+          END $;
+          SQL
 
       - name: Verify SQLAlchemy ledger money types
         run: |
