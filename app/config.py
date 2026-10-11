@@ -167,6 +167,10 @@ class Settings(BaseSettings):
     market_intelligence_timeout_seconds: float = 8.0
     market_intelligence_max_news_items: int = 60
     # AI research providers. Keys belong in Secret Manager / environment only.
+    # Optional OpenAI-compatible AI Gateway for authorized release diagnostics only.
+    ai_gateway_api_key: str = ""
+    ai_gateway_base_url: str = ""
+    ai_gateway_model: str = ""
     gemini_api_key: str = ""
     # gemini-2.5-* is scheduled to shut down in Oct 2026 (Google lists 16 and 20 Oct in different places); verify IDs with scripts/check_ai_models.py.
     gemini_model: str = "gemini-3.5-flash"
