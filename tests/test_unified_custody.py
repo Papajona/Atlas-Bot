@@ -175,3 +175,83 @@ def test_stale_custody_transfer_requires_reconciliation_without_release():
             assert submitted_row.provider_reference == "provider-pending"
             assert submitted_row.confirmed_at is None
     asyncio.run(with_database(check))
+
+
+
+def test_provider_backed_binance_refresh_records_exact_decimal_balance():
+    from types import SimpleNamespace
+    from app.custody_locations import refresh_binance_custody_observation
+    from app.db import CustodyAssetObservation
+
+    class FakeBroker:
+        def fetch_balance(self):
+            return {"total": {"USDT": "123456789.12345678"}}
+
+    def fake_factory(account, **kwargs):
+        assert kwargs["sandbox"] is False
+        return FakeBroker()
+
+    async def check(sessions):
+        account = SimpleNamespace(
+            customer_id=77, status="VERIFIED", api_key="read-key",
+            secret_ref="projects/test/secrets/binance-read/versions/latest",
+        )
+        async with sessions() as db:
+            row = await refresh_binance_custody_observation(
+                db, account, secret_fetcher=lambda _: "not-used-by-fake",
+                broker_factory=fake_factory,
+            )
+            await db.commit()
+            assert row.balance == Decimal("123456789.123456780000")
+            assert row.customer_id == 77
+            assert row.provider == "binance"
+            assert row.source_reference.startswith("binance:balance:")
+        async with sessions() as db:
+            saved = (await db.execute(select(CustodyAssetObservation))).scalar_one()
+            assert saved.balance == Decimal("123456789.123456780000")
+            report = await fresh_external_assets(db)
+            assert report["assets"] == Decimal("123456789.123456780000")
+    asyncio.run(with_database(check))
+
+
+def test_provider_refresh_failure_does_not_fabricate_or_refresh_observation():
+    from types import SimpleNamespace
+    from app.custody_locations import refresh_binance_custody_observation
+
+    class FailedBroker:
+        def fetch_balance(self):
+            raise TimeoutError("provider unavailable")
+
+    def failed_factory(account, **kwargs):
+        return FailedBroker()
+
+    async def check(sessions):
+        account = SimpleNamespace(
+            customer_id=78, status="VERIFIED", api_key="read-key",
+            secret_ref="projects/test/secrets/binance-read/versions/latest",
+        )
+        async with sessions() as db:
+            with pytest.raises(TimeoutError, match="provider unavailable"):
+                await refresh_binance_custody_observation(
+                    db, account, broker_factory=failed_factory,
+                )
+            await db.commit()
+            assert (await db.execute(select(__import__("app.db", fromlist=["CustodyAssetObservation"]).CustodyAssetObservation))).scalars().all() == []
+    asyncio.run(with_database(check))
+
+
+def test_custody_decimal_schema_matches_existing_migration():
+    from pathlib import Path
+    from app.db import CustodyAssetObservation, CustodyTransfer
+    assert str(CustodyAssetObservation.__table__.c.balance.type) == "NUMERIC(38, 18)"
+    assert str(CustodyTransfer.__table__.c.amount.type) == "NUMERIC(38, 18)"
+    migration = (Path(__file__).parents[1] / "alembic" / "versions" / "0022_unified_custody.py").read_text()
+    assert 'sa.Column("balance", sa.Numeric(38, 18)' in migration
+    assert 'sa.Column("amount", sa.Numeric(38, 18)' in migration
+
+
+def test_emergency_kill_route_is_exempt_from_redis_rate_limiter():
+    from pathlib import Path
+    source = (Path(__file__).parents[1] / "app" / "main.py").read_text()
+    middleware = source.split("async def api_rate_limit", 1)[1].split("@app.middleware", 1)[0]
+    assert '"/api/risk/kill"' in middleware
