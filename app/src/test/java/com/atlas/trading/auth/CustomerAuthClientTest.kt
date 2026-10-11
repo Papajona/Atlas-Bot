@@ -84,4 +84,64 @@ class CustomerAuthClientTest {
         }
     }
 
+    @Test
+    fun mfaStatusReturnsVerifiedFactorIdsFromBackend() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"enabled":true,"aal":"aal1","factor_count":1,"factor_ids":["factor-123"]}"""
+        ))
+        server.start()
+        try {
+            val status = CustomerAuthClient(server.url("/").toString()).mfaStatus("session-token")
+            assertEquals(true, status.enabled)
+            assertEquals(listOf("factor-123"), status.factorIds)
+            val request = server.takeRequest()
+            assertEquals("/api/auth/mfa/status", request.path)
+            assertEquals("Bearer session-token", request.getHeader("Authorization"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun mfaChallengeAndVerificationUseFactorChallengeAndReturnFreshSession() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"id":"challenge-456"}"""))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"access_token":"aal2-token","refresh_token":"refreshed-token"}"""
+        ))
+        server.start()
+        try {
+            val client = CustomerAuthClient(server.url("/").toString())
+            val challenge = client.challenge("aal1-token", "factor-123")
+            assertEquals("challenge-456", challenge.challengeId)
+            val session = client.verify("aal1-token", challenge, "123456")
+            assertEquals("aal2-token", session.accessToken)
+            assertEquals("refreshed-token", session.refreshToken)
+            val challengeRequest = server.takeRequest()
+            assertEquals("/api/auth/mfa/challenge", challengeRequest.path)
+            assertEquals("Bearer aal1-token", challengeRequest.getHeader("Authorization"))
+            assertEquals("factor-123", JSONObject(challengeRequest.body.readUtf8()).getString("factor_id"))
+            val verifyRequest = server.takeRequest()
+            assertEquals("/api/auth/mfa/verify", verifyRequest.path)
+            val verifyBody = JSONObject(verifyRequest.body.readUtf8())
+            assertEquals("factor-123", verifyBody.getString("factor_id"))
+            assertEquals("challenge-456", verifyBody.getString("challenge_id"))
+            assertEquals("123456", verifyBody.getString("code"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun mfaVerificationRejectsNonSixDigitCodesBeforeNetworkRequest() = runBlocking {
+        val client = CustomerAuthClient("http://127.0.0.1:1")
+        try {
+            client.verify("session-token", CustomerAuthClient.MfaChallenge("factor-1", "challenge-1"), "12ab")
+            fail("Non-numeric authenticator codes must be rejected")
+        } catch (expected: IllegalArgumentException) {
+            assertEquals("Enter the 6-digit authenticator code", expected.message)
+        }
+    }
+
 }
