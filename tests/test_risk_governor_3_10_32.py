@@ -27,3 +27,12 @@ def test_live_execution_spread_is_blocked_above_configured_ceiling():
                        take_profit_price=110, signal={}, spread_bps=101, max_spread_bps=100)
     assert d.action == "BLOCK"
     assert "spread_guard" in d.reasons
+
+
+def test_execute_signal_wires_live_equity_and_risk_budget_into_governor():
+    import inspect
+    from app.execution import execute_signal
+
+    source = inspect.getsource(execute_signal)
+    assert "risk_equity = float(account.equity if account is not None else s.equity)" in source
+    assert "equity=risk_equity, risk_per_trade=settings.risk_per_trade" in source
