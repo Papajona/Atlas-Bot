@@ -323,7 +323,8 @@ def test_naive_live_signal_timestamp_is_rejected_without_timezone_guessing():
 
 
 def test_deficit_threshold_rejects_nonpositive_and_nonfinite_values():
+    from pydantic import ValidationError
     from app.config import Settings
     for value in (0, -1, float("inf"), float("nan")):
-        with pytest.raises((ValueError, Exception)):
+        with pytest.raises(ValidationError):
             Settings(environment="staging", customer_deficit_limit_usdt=value)
