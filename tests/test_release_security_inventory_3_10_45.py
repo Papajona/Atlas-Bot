@@ -42,7 +42,11 @@ def test_admin_mutations_have_admin_auth_boundary():
             continue
         if path.startswith("/api/admin/auth/"):
             continue
-        assert "auth(" in body, (verb, path, name)
+        if path == "/api/admin/release-diagnostics":
+            # This route uses the shared Supabase AAL2 claim validator and explicit RBAC gate.
+            assert "admin_claims(" in body and "require_role(" in body, (verb, path, name)
+        else:
+            assert "auth(" in body, (verb, path, name)
 
 
 def test_production_docker_contains_migrations_and_not_test_suite():
