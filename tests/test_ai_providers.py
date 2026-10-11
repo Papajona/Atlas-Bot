@@ -3,6 +3,7 @@ import asyncio
 
 def test_dual_ai_returns_both_provider_outputs(monkeypatch):
     import app.ai_providers as ap
+    monkeypatch.setattr(ap.settings, "cerebras_api_key", "")
 
     async def fake_gemini(prompt):
         return {"provider": "gemini", "confidence": 0.8}
@@ -36,7 +37,7 @@ def test_dual_ai_degrades_per_provider(monkeypatch):
     assert out["execution_authority"] is False
 
 
-def test_config_uses_only_gemini_and_groq_for_external_ai():
+def test_config_exposes_configured_ai_provider_models():
     from app.config import settings
     assert settings.gemini_model
     assert settings.groq_model
@@ -98,6 +99,7 @@ def test_cerebras_can_substitute_for_exhausted_gemini_but_groq_remains_required(
     assert set(out["providers"]) == {"cerebras", "groq"}
     assert "gemini" not in out["providers"]
     assert out["execution_authority"] is False
+    assert out["fallbacks"] == {"gemini": "cerebras"}
 
     async def fail_groq(prompt):
         raise ap.AIProviderError("Groq unavailable")
