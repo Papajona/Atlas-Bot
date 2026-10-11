@@ -276,4 +276,6 @@ def test_production_verification_passes_provider_secrets_to_checker():
     block = workflow[block_start:block_end]
     assert 'GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}' in block
     assert 'GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}' in block
+    assert 'CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}' in block
+    assert "Cerebras .*Chat Completions inference failed" in block
     assert "BLOCKED: provider credentials are not configured" in block
