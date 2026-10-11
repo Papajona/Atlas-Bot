@@ -296,6 +296,6 @@ def test_custody_gate_refreshes_provider_and_fails_unknown_on_provider_error(mon
 def test_naive_live_signal_timestamp_is_rejected_without_timezone_guessing():
     from pathlib import Path
     source = (Path(__file__).parents[1] / "app" / "execution.py").read_text()
-    block = source.split("if live:", 1)[1].split("await db.commit()", 1)[0]
+    block = source.split("if live and not signal_timestamp:", 1)[1].split("await db.commit()", 1)[0]
     assert 'raise RiskBlocked("Signal timestamp must include a timezone")' in block
     assert "ts = ts.replace(tzinfo=timezone.utc)" not in block
