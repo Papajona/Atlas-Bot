@@ -6420,14 +6420,18 @@ async def admin_release_diagnostics(
     authorization: str | None = Header(default=None),
 ):
     """Analyze redacted Android release logs; never modifies source or changes release gates."""
-    claims = await admin_claims(authorization, require_aal2=True)
-    if claims.get("auth_method") == "legacy_admin_token":
-        raise HTTPException(403, "Supabase administrator sign-in with MFA is required")
-    await require_role(claims, "OPERATIONS", "RISK_OFFICER", "TREASURY", "COMPLIANCE", "FINANCE", "ADMINISTRATOR")
-    actor_id = str(claims.get("sub") or "")
     run_id = uuid.uuid4().hex
+    actor_id = ""
     outcome = "failed"
     try:
+        claims = await admin_claims(authorization, require_aal2=True)
+        if claims.get("auth_method") == "legacy_admin_token":
+            raise HTTPException(403, "Supabase administrator sign-in with MFA is required")
+        await require_role(claims, "OPERATIONS", "RISK_OFFICER", "TREASURY", "COMPLIANCE", "FINANCE", "ADMINISTRATOR")
+        actor_id = str(claims.get("sub") or "")
+        allowed, _ = await allow_rate_limit(f"release-diagnostics:admin:{actor_id}", 10)
+        if not allowed:
+            raise HTTPException(429, "Release diagnostics rate limit reached; retry later")
         if not settings.ai_gateway_api_key or not settings.ai_gateway_base_url or not settings.ai_gateway_model:
             raise HTTPException(503, "AI release diagnostics are not configured on the server")
         logs = str(payload.get("logs") or "")
