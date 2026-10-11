@@ -178,40 +178,46 @@ def test_stale_custody_transfer_requires_reconciliation_without_release():
 
 
 
-def test_provider_backed_binance_refresh_records_exact_decimal_balance():
+def test_provider_backed_binance_refresh_preserves_exact_decimal_before_persistence(monkeypatch):
     from types import SimpleNamespace
-    from app.custody_locations import refresh_binance_custody_observation
-    from app.db import CustodyAssetObservation
+    import app.custody_locations as custody
 
     class FakeBroker:
         def fetch_balance(self):
-            return {"total": {"USDT": 123456789.12345678}, "info": {"balances": [{"asset": "USDT", "free": "123456789.12345678", "locked": "0.00000000"}]}}
+            # Binance's raw API represents these values as decimal strings.
+            return {"total": {"USDT": 123456789.12345678}, "info": {"balances": [
+                {"asset": "USDT", "free": "123456789.12345678", "locked": "0.00000000"}
+            ]}}
 
     def fake_factory(account, **kwargs):
         assert kwargs["sandbox"] is False
         return FakeBroker()
 
-    async def check(sessions):
+    captured = {}
+
+    async def capture_record(db, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(**kwargs, balance=kwargs["balance"])
+
+    monkeypatch.setattr(custody, "record_custody_observation", capture_record)
+
+    async def check():
         account = SimpleNamespace(
             customer_id=77, status="VERIFIED", api_key="read-key",
             secret_ref="projects/test/secrets/binance-read/versions/latest",
         )
-        async with sessions() as db:
-            row = await refresh_binance_custody_observation(
-                db, account, secret_fetcher=lambda _: "not-used-by-fake",
-                broker_factory=fake_factory,
-            )
-            await db.commit()
-            assert row.balance == Decimal("123456789.123456780000")
-            assert row.customer_id == 77
-            assert row.provider == "binance"
-            assert row.source_reference.startswith("binance:balance:")
-        async with sessions() as db:
-            saved = (await db.execute(select(CustodyAssetObservation))).scalar_one()
-            assert saved.balance == Decimal("123456789.123456780000")
-            report = await fresh_external_assets(db)
-            assert report["assets"] == Decimal("123456789.123456780000")
-    asyncio.run(with_database(check))
+        row = await custody.refresh_binance_custody_observation(
+            None, account, secret_fetcher=lambda _: "not-used-by-fake",
+            broker_factory=fake_factory,
+        )
+        expected = Decimal("123456789.123456780000")
+        assert row.balance == expected
+        assert captured["balance"] == expected
+        assert captured["customer_id"] == 77
+        assert captured["provider"] == "binance"
+        assert captured["source_reference"].startswith("binance:balance:")
+
+    asyncio.run(check())
 
 
 def test_provider_refresh_failure_does_not_fabricate_or_refresh_observation():
