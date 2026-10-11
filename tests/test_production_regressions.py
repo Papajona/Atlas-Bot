@@ -133,4 +133,7 @@ def test_trading_discipline_controls_are_configured_and_fail_closed():
 def test_live_risk_path_passes_stop_to_portfolio_gate():
     source = open("app/execution.py", encoding="utf-8").read()
     assert "stop_loss_price=stop_loss_price" in source
-    assert "risk_per_trade=settings.risk_per_trade" not in source  # sizing is enforced inside risk_gate from account equity
+    # The dedicated risk governor must receive fresh account equity and the configured
+    # per-trade risk budget; the portfolio gate independently enforces stop and account limits.
+    assert "equity=risk_equity, risk_per_trade=settings.risk_per_trade" in source
+    assert "risk_gate(symbol, quote, quantity, live=live" in source
