@@ -1279,5 +1279,5 @@ private fun DashboardBottomNavigation(
 /**
  * Generates realistic 30-day daily historical equity progression with positive trend.
  */
-private fun generate30DayEquityData(): List<EquityPoint> = emptyList()
+internal fun generate30DayEquityData(): List<EquityPoint> = emptyList()
 }
