@@ -91,7 +91,7 @@ jobs:
           PGPASSWORD: test_password
         run: |
           psql "postgresql://atlas@localhost:5432/atlas_test" -v ON_ERROR_STOP=1 <<'SQL'
-          DO $
+          DO $$
           DECLARE
             col record;
             exact_value numeric(38,18) := 123456789.12345678;
@@ -119,7 +119,7 @@ jobs:
             IF round_trip <> exact_value THEN
               RAISE EXCEPTION 'PostgreSQL custody decimal round-trip lost precision: % <> %', round_trip, exact_value;
             END IF;
-          END $;
+          END $$;
           SQL
 
       - name: Verify SQLAlchemy ledger money types
