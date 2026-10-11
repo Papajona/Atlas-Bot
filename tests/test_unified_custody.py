@@ -255,3 +255,47 @@ def test_emergency_kill_route_is_exempt_from_redis_rate_limiter():
     source = (Path(__file__).parents[1] / "app" / "main.py").read_text()
     middleware = source.split("async def api_rate_limit", 1)[1].split("@app.middleware", 1)[0]
     assert '"/api/risk/kill"' in middleware
+
+
+
+def test_custody_gate_refreshes_provider_and_fails_unknown_on_provider_error(monkeypatch):
+    import app.custody_locations as custody
+
+    monkeypatch.setattr(settings, "binance_custody_reconciliation_enabled", True)
+    calls = {"count": 0}
+
+    async def refresh_ok(db):
+        calls["count"] += 1
+        await record_custody_observation(
+            db, location=location_for_binance(90), provider="binance", currency="USDT",
+            balance=Decimal("150"), source_reference="provider-test",
+        )
+        return 1
+
+    async def refresh_failed(db):
+        calls["count"] += 1
+        raise TimeoutError("provider offline")
+
+    async def check(sessions):
+        async with sessions() as db:
+            monkeypatch.setattr(custody, "refresh_verified_binance_custody_observations", refresh_ok)
+            report = await custody.custody_gate(db, customer_liabilities=Decimal("100"))
+            assert report["status"] == "OK"
+            assert report["provider_accounts_refreshed"] == 1
+            await db.commit()
+        async with sessions() as db:
+            monkeypatch.setattr(custody, "refresh_verified_binance_custody_observations", refresh_failed)
+            report = await custody.custody_gate(db, customer_liabilities=Decimal("100"))
+            assert report["status"] == "UNKNOWN"
+            assert report["reason"] == "BINANCE_PROVIDER_REFRESH_FAILED"
+            assert report["exchange_assets"] is None
+            assert calls["count"] == 2
+    asyncio.run(with_database(check))
+
+
+def test_naive_live_signal_timestamp_is_rejected_without_timezone_guessing():
+    from pathlib import Path
+    source = (Path(__file__).parents[1] / "app" / "execution.py").read_text()
+    block = source.split("if live:", 1)[1].split("await db.commit()", 1)[0]
+    assert 'raise RiskBlocked("Signal timestamp must include a timezone")' in block
+    assert "ts = ts.replace(tzinfo=timezone.utc)" not in block
