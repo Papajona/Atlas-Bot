@@ -37,6 +37,7 @@ def test_append_audit_refreshes_state_loaded_before_the_lock(tmp_path):
             await engine.dispose()
     asyncio.run(go())
 
+@pytest.mark.postgres
 @pytest.mark.skipif(not os.getenv("ATLAS_POSTGRES_URL"), reason="needs migrated PostgreSQL (ATLAS_POSTGRES_URL)")
 def test_concurrent_audit_writers_never_fork_the_chain_on_postgres():
     from app.audit_chain import record_audit
