@@ -213,3 +213,53 @@ async def custody_gate(db, *, customer_liabilities, currency: str = "USDT") -> d
     return {"status": status, "customer_liabilities": liabilities, "exchange_assets": assets,
             "solvency_ratio": ratio, "coverage_gap": assets - liabilities,
             "reason": "ABOVE_THRESHOLD" if status == "OK" else "BELOW_THRESHOLD", **report}
+
+
+async def refresh_binance_custody_observation(
+    db,
+    account,
+    *,
+    secret_fetcher=None,
+    broker_factory=None,
+    observed_at: datetime | None = None,
+) -> CustodyAssetObservation:
+    """Fetch a real customer Binance USDT balance and persist it as a fresh observation.
+
+    Provider failures propagate; no cached/stale balance is relabeled as current.
+    The caller owns transaction commit/rollback. The account must be a verified,
+    read-capable customer mapping accepted by the existing broker factory.
+    """
+    if account is None or not getattr(account, "customer_id", None):
+        raise ValueError("verified customer Binance account is required")
+    if str(getattr(account, "status", "")).upper() != "VERIFIED":
+        raise ValueError("customer Binance account must be VERIFIED")
+    if not str(getattr(account, "api_key", "") or "").strip() or not str(getattr(account, "secret_ref", "") or "").strip():
+        raise ValueError("customer Binance read credentials are incomplete")
+    if broker_factory is None:
+        from .customer_binance_execution import build_customer_binance_broker
+        broker_factory = build_customer_binance_broker
+    broker = broker_factory(account, secret_fetcher=secret_fetcher, sandbox=False)
+    # CCXT is synchronous. Keep network I/O off the async event loop.
+    import asyncio
+    balance_response = await asyncio.to_thread(broker.fetch_balance)
+    if not isinstance(balance_response, dict):
+        raise RuntimeError("Binance returned an invalid balance response")
+    total = balance_response.get("total")
+    if not isinstance(total, dict) or "USDT" not in total:
+        raise RuntimeError("Binance response did not include a total USDT balance")
+    amount = _amount(total["USDT"])
+    timestamp = observed_at or utcnow()
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError("observation timestamp must be timezone-aware")
+    # This reference identifies the observation only; it contains no credentials.
+    reference = f"binance:balance:{int(timestamp.timestamp())}:{int(account.customer_id)}"
+    return await record_custody_observation(
+        db,
+        location=location_for_binance(int(account.customer_id)),
+        provider="binance",
+        currency="USDT",
+        balance=amount,
+        source_reference=reference,
+        customer_id=int(account.customer_id),
+        observed_at=timestamp.astimezone(timezone.utc),
+    )
