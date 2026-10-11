@@ -179,6 +179,9 @@ class Settings(BaseSettings):
     groq_model: str = "openai/gpt-oss-20b"
     groq_strategy_model: str = "openai/gpt-oss-20b"
     groq_max_completion_tokens: int = 2048
+    # Optional third-party fallback. Keep the key in Secret Manager/environment only.
+    cerebras_api_key: str = ""
+    cerebras_model: str = "llama3.1-8b"
 
     # Withdrawal approval/execution controls. Fund release is fail-closed unless explicitly configured.
     withdrawals_enabled: bool = True
