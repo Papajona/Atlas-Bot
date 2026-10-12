@@ -1267,7 +1267,7 @@ async def _usdt_tron_monitor_loop():
                 await _gate.wait()
             scan_slots = asyncio.Semaphore(max(1, int(settings.usdt_tron_scan_concurrency)))
             async with httpx.AsyncClient(timeout=15.0, event_hooks={"request": [_pace]}) as client:
-                async def _scan_one(wallet, _headers=_headers):
+                async def _scan_one(wallet, _headers=headers):
                     lock_key = f"tron-deposit-scan:{wallet.id}"
                     if not await acquire_lock(lock_key, ttl_seconds=max(120, poll_seconds + 120)):
                         return
