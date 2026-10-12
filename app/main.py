@@ -1304,7 +1304,7 @@ async def _usdt_tron_monitor_loop():
                             if fingerprint:
                                 params["fingerprint"] = fingerprint
                             url = f"{settings.usdt_trongrid_base_url.rstrip('/')}/v1/accounts/{wallet.deposit_address}/transactions/trc20"
-                            response = await client.get(url, params=params, headers=headers)
+                            response = await client.get(url, params=params, headers=_headers)
                             response.raise_for_status()
                             body = response.json()
                             items = body.get("data", []) or []
@@ -1367,7 +1367,7 @@ async def _usdt_tron_monitor_loop():
                                         FundingTransaction.provider_reference == provider_ref))).first() is not None
                                 if not already_credited and settings.usdt_tron_verify_receipt:
                                     receipt_url = f"{settings.usdt_trongrid_base_url.rstrip('/')}/walletsolidity/gettransactioninfobyid"
-                                    receipt_response = await client.post(receipt_url, json={"value": txid}, headers=headers)
+                                    receipt_response = await client.post(receipt_url, json={"value": txid}, headers=_headers)
                                     receipt_response.raise_for_status()
                                     receipt = receipt_response.json() or {}
                                     if str((receipt.get("receipt") or {}).get("result", "")).upper() != "SUCCESS":
