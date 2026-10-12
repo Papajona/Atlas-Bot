@@ -135,6 +135,10 @@ jobs:
           SQL
       - name: Upgrade from production revision through merge and lockdown
         run: python -m alembic upgrade 0049_public_schema_rls_lockdown
+      - name: Check SQLAlchemy model/schema drift
+        # Do not replace this with alembic current/heads: those only check revision bookkeeping.
+        # This intentionally fails CI if ORM metadata and the migrated PostgreSQL schema differ.
+        run: python -m alembic check
       - name: Verify public-schema lockdown at runtime
         run: |
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
