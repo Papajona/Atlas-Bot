@@ -3800,7 +3800,6 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             "price_context": {"latest_close": float(df.close.iloc[-1]), "bars": int(len(df)), "spread_bps": spread_bps},
             "data_quality": deterministic["data_quality"],
             "adaptive_model": adaptive or {"status": "DISABLED"},
-            "strategy_router": router,
             "ml_signal": ml_signal if settings.adaptive_ai_enabled else {"status": "DISABLED"},
         }
         try:
