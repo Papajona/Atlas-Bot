@@ -24,9 +24,9 @@ jobs:
       LIVE_TRADING_ENABLED: "false"
       CUSTOMER_LIVE_TRADING_ENABLED: "false"
       BROKER_SANDBOX: "true"
+      MULTIDICT_NO_EXTENSIONS: "1"
       BACKGROUND_RECONCILIATION_ENABLED: "false"
       ADMIN_TOKEN: test-admin-token-for-ci
-      MULTIDICT_NO_EXTENSIONS: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -334,14 +334,16 @@ jobs:
         run: python scripts/check_no_secrets.py
       - name: Security scan
         run: python -m bandit -r app -lll
-      - name: Verify multidict pure-Python security workaround
+      - name: Verify multidict pure-Python security mitigation
         run: |
           python - <<'PY'
           import multidict
           assert multidict.CIMultiDict.__module__ == "multidict._multidict_py", multidict.CIMultiDict.__module__
           PY
+      - name: Ruff closure-capture checks
+        run: python -m ruff check app scripts tests --select B023
       - name: Dependency audit
-        # CVE-2026-104874 affects the multidict C extension 6.7.0-6.9.0; the upstream advisory documents MULTIDICT_NO_EXTENSIONS=1 as the pure-Python workaround.
+        # ccxt 4.5.85 hard-pins multidict 6.7.1; CI disables the vulnerable C extension using the documented upstream mitigation.
         run: python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325 --ignore-vuln CVE-2026-104874
       - name: Full PostgreSQL ledger concurrency suite
         run: |
