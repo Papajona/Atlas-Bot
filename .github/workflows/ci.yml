@@ -343,7 +343,6 @@ jobs:
       - name: Ruff closure-capture checks
         run: python -m ruff check app scripts tests --select B023
       - name: Dependency audit
-        # CVE-2026-104874 affects the multidict C extension 6.7.0-6.9.0; the upstream advisory documents MULTIDICT_NO_EXTENSIONS=1 as the pure-Python workaround.
         run: python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325
       - name: Full PostgreSQL ledger concurrency suite
         run: |
