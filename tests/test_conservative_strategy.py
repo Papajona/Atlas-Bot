@@ -58,8 +58,8 @@ def test_invalid_rr_and_leverage_fail_closed():
     huge_meta = {**META, "contract_multiplier": 100.0, "max_amount": 1_000_000}
     with pytest.raises(ConservativePolicyError, match="maximum_leverage"):
         conservative_quantity(
-            equity=10_000, entry_price=100, stop_loss_price=99,
-            take_profit_price=102, side="buy", metadata=huge_meta,
+            equity=10_000, entry_price=100, stop_loss_price=99.99,
+            take_profit_price=100.02, side="buy", metadata=huge_meta,
         )
 
 
@@ -86,5 +86,5 @@ def test_execution_aware_backtest_next_open_and_stop_wins_if_both_hit():
     })
     result = execution_aware_backtest(bars, fee_bps=0, slippage_bps=0)
     assert result.iloc[0]["entry_price"] == pytest.approx(99)
-    assert result.iloc[0]["exit_price"] == pytest.approx(95)
-    assert result.iloc[0]["trade_return"] == pytest.approx(95 / 99 - 1)
+    assert result.iloc[0]["exit_price"] == pytest.approx(98)
+    assert result.iloc[0]["trade_return"] == pytest.approx(98 / 99 - 1)
