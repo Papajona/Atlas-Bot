@@ -1263,11 +1263,11 @@ async def _usdt_tron_monitor_loop():
             _mark_worker_loop_success("usdt-tron")
             headers = {"accept": "application/json", "TRON-PRO-API-KEY": settings.usdt_trongrid_api_key}
             gate = _RateGate(settings.usdt_tron_max_qps)
-            async def _pace(_request):
-                await gate.wait()
+            async def _pace(_request, _gate=gate):
+                await _gate.wait()
             scan_slots = asyncio.Semaphore(max(1, int(settings.usdt_tron_scan_concurrency)))
             async with httpx.AsyncClient(timeout=15.0, event_hooks={"request": [_pace]}) as client:
-                async def _scan_one(wallet):
+                async def _scan_one(wallet, _headers=headers, _scan_slots=scan_slots):
                     lock_key = f"tron-deposit-scan:{wallet.id}"
                     if not await acquire_lock(lock_key, ttl_seconds=max(120, poll_seconds + 120)):
                         return
@@ -1304,7 +1304,7 @@ async def _usdt_tron_monitor_loop():
                             if fingerprint:
                                 params["fingerprint"] = fingerprint
                             url = f"{settings.usdt_trongrid_base_url.rstrip('/')}/v1/accounts/{wallet.deposit_address}/transactions/trc20"
-                            response = await client.get(url, params=params, headers=headers)
+                            response = await client.get(url, params=params, headers=_headers)
                             response.raise_for_status()
                             body = response.json()
                             items = body.get("data", []) or []
@@ -1367,7 +1367,7 @@ async def _usdt_tron_monitor_loop():
                                         FundingTransaction.provider_reference == provider_ref))).first() is not None
                                 if not already_credited and settings.usdt_tron_verify_receipt:
                                     receipt_url = f"{settings.usdt_trongrid_base_url.rstrip('/')}/walletsolidity/gettransactioninfobyid"
-                                    receipt_response = await client.post(receipt_url, json={"value": txid}, headers=headers)
+                                    receipt_response = await client.post(receipt_url, json={"value": txid}, headers=_headers)
                                     receipt_response.raise_for_status()
                                     receipt = receipt_response.json() or {}
                                     if str((receipt.get("receipt") or {}).get("result", "")).upper() != "SUCCESS":
@@ -1381,7 +1381,7 @@ async def _usdt_tron_monitor_loop():
                                             continue
                                         now_block_response = await client.post(
                                             f"{settings.usdt_trongrid_base_url.rstrip('/')}/wallet/getnowblock",
-                                            headers=headers, json={})
+                                            headers=_headers, json={})
                                         now_block_response.raise_for_status()
                                         now_block = now_block_response.json() or {}
                                         current_height = int(((now_block.get("block_header") or {}).get("raw_data") or {}).get("number") or 0)
@@ -1453,9 +1453,9 @@ async def _usdt_tron_monitor_loop():
                     finally:
                         await release_lock(lock_key)
 
-                async def _bounded(wallet):
-                    async with scan_slots:
-                        await _scan_one(wallet)
+                async def _bounded(wallet, _slots=scan_slots, _scan=_scan_one):
+                    async with _slots:
+                        await _scan(wallet)
                 await asyncio.gather(*(_bounded(w) for w in wallets))
         except asyncio.CancelledError:
             raise
@@ -2620,10 +2620,17 @@ async def admin_custody_reconciliation(authorization: str | None = Header(defaul
     import httpx
     async with SessionLocal() as db:
         rows = (await db.execute(select(CustomerLedgerAccount).where(CustomerLedgerAccount.currency == "USDT"))).scalars().all()
-        liability_available = sum(float(r.available) for r in rows)
-        liability_trading_reserved = sum(float(r.trading_reserved) for r in rows)
-        liability_withdrawal_reserved = sum(float(r.withdrawal_reserved) for r in rows)
-        customer_liabilities = liability_available + liability_trading_reserved + liability_withdrawal_reserved
+        from decimal import Decimal
+        # Keep aggregation exact at the ledger's six-decimal USDT precision. Convert to
+        # JSON numbers only at the response boundary; never accumulate money as binary floats.
+        liability_available_d = sum((Decimal(str(r.available or 0)) for r in rows), Decimal("0"))
+        liability_trading_reserved_d = sum((Decimal(str(r.trading_reserved or 0)) for r in rows), Decimal("0"))
+        liability_withdrawal_reserved_d = sum((Decimal(str(r.withdrawal_reserved or 0)) for r in rows), Decimal("0"))
+        customer_liabilities_d = liability_available_d + liability_trading_reserved_d + liability_withdrawal_reserved_d
+        liability_available = float(liability_available_d)
+        liability_trading_reserved = float(liability_trading_reserved_d)
+        liability_withdrawal_reserved = float(liability_withdrawal_reserved_d)
+        customer_liabilities = float(customer_liabilities_d)
         virtual_wallets = (await db.execute(select(Wallet).where(Wallet.currency == "USDT", Wallet.network == "TRON", Wallet.status == "ACTIVE"))).scalars().all()
     treasury_balance = None
     virtual_wallet_balances = {}
