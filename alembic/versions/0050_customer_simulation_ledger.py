@@ -60,6 +60,11 @@ def upgrade() -> None:
     op.create_index("ix_sim_event_customer_created", "customer_simulation_events", ["customer_id", "created_at"])
     op.create_index("ix_sim_event_account_created", "customer_simulation_events", ["account_id", "created_at"])
 
+    # Match the repository's public-schema lockdown: no generic client policy.
+    # Service-role access must be granted only through the application's DB role.
+    op.execute("ALTER TABLE public.customer_simulation_accounts ENABLE ROW LEVEL SECURITY")
+    op.execute("ALTER TABLE public.customer_simulation_events ENABLE ROW LEVEL SECURITY")
+
 
 def downgrade() -> None:
     op.drop_index("ix_sim_event_account_created", table_name="customer_simulation_events")
