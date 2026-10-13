@@ -76,3 +76,14 @@ def test_unwired_preferences_are_disabled_and_describe_their_limits():
     assert 'statusText = "NOT IMPLEMENTED"' in source
     assert "App-level biometric enforcement is not implemented here" in source
     assert "var biometricLock" not in source
+
+def test_customer_financial_quick_actions_are_gated_and_do_not_claim_unverified_flows():
+    source = (ROOT / "app/src/main/java/com/atlas/trading/ui/UserDashboardScreen.kt").read_text(encoding="utf-8")
+    assert "customerReady = customerSnapshot != null" in source
+    assert '"trade" -> false' in source
+    assert '"deposit", "withdraw" -> customerReady' in source
+    assert '"Deposit", "Withdraw" -> onOpenPortal()' in source
+    assert "Dedicated TRC-20 omnibus deposit addresses enabled." not in source
+    assert "Withdrawal Portal: 2-man approval and AAL2 step-up authentication required." not in source
+    assert "Trade entry is not available from this quick-action panel." in source
+    assert "No order has been placed." in source
