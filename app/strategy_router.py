@@ -48,6 +48,10 @@ def _periods_per_year(index: pd.Index, asset: str = "crypto") -> float:
         active_hours_per_day, active_days = 24.0, 252.0
     if not math.isfinite(median_seconds) or median_seconds <= 0:
         return float(active_days)
+    # Daily-or-slower bars represent one observation per active session/day; dividing
+    # active hours by a 24h calendar interval would undercount commodity/equity bars.
+    if median_seconds >= 20 * 3600:
+        return float(active_days)
     return float((active_days * active_hours_per_day * 3600.0) / median_seconds)
 
 
