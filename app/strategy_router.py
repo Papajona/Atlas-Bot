@@ -29,8 +29,33 @@ def classify_regime(df: pd.DataFrame, *, asset: str = "crypto") -> pd.Series:
     c = df["close"].astype(float)
     fast = c.ewm(span=50, adjust=False).mean()
     slow = c.ewm(span=200, adjust=False).mean()
-    annual = 365.25 if str(asset).lower() == "crypto" else 252.0
-    vol = c.pct_change().rolling(20).std() * np.sqrt(annual)
+    # Annualize using observed bar spacing and an asset-specific active-hours calendar.
+    # This avoids treating hourly bars as daily bars (252/365 observations per year).
+    if isinstance(df.index, pd.DatetimeIndex) and len(df.index) >= 3:
+        idx = pd.DatetimeIndex(df.index)
+        if idx.tz is not None:
+            idx = idx.tz_localize(None)
+        deltas = idx.to_series().diff().dt.total_seconds()
+        deltas = deltas[(deltas > 0) & np.isfinite(deltas)]
+        median_seconds = float(deltas.median()) if not deltas.empty else float("nan")
+    else:
+        median_seconds = float("nan")
+    market = str(asset).strip().lower()
+    if market == "crypto":
+        active_hours_per_day, active_days = 24.0, 365.25
+    elif market in {"forex", "fx"}:
+        active_hours_per_day, active_days = 24.0, 252.0
+    elif market in {"commodity", "commodities", "metal", "energy"}:
+        active_hours_per_day, active_days = 23.0, 252.0
+    elif market in {"stock", "stocks", "equity", "equities", "index", "indices"}:
+        active_hours_per_day, active_days = 6.5, 252.0
+    else:
+        active_hours_per_day, active_days = 24.0, 252.0
+    if not math.isfinite(median_seconds) or median_seconds <= 0:
+        periods_per_year = active_days
+    else:
+        periods_per_year = (active_days * active_hours_per_day * 3600.0) / median_seconds
+    vol = c.pct_change().rolling(20).std() * np.sqrt(periods_per_year)
     trend_gap = (fast / slow - 1.0).abs()
     trend = (fast / slow - 1.0)
     regime = pd.Series("RANGE", index=df.index, dtype="object")
