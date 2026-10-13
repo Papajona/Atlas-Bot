@@ -17,7 +17,7 @@ from .risk_governor import evaluate_trade
 from .forex_oanda import OandaBroker, OandaConfig
 from .config import settings
 from .db import (SessionLocal, OandaReconciliationState, AppState, TradingAccount, Trade, Position, CustomerBinanceAccount, StrategyOutcome, TradeLearningEpisode, OrderCommand,
-                  LiveExecutionLease, utcnow, quantize_money)
+                  LiveExecutionLease, CustomerRiskProfile, CustomerRiskDecision, utcnow, quantize_money)
 from .trading_core import PROFILES
 from .customer_funds import get_or_create_ledger, reserve_trading, release_trading, sync_wallet_from_ledger, settle_realized_pnl, settle_trading_fee, customer_balance
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
@@ -393,7 +393,23 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
 
         dd = 1 - (equity / peak) if peak else 0.0
         daily_loss = 1 - (equity / daily_start) if daily_start else 0.0
-        if dd >= settings.max_drawdown or daily_loss >= settings.daily_loss_limit:
+        customer_daily_limit = None
+        if customer_id is not None:
+            risk_profile = (await db.execute(
+                select(CustomerRiskProfile).where(CustomerRiskProfile.customer_id == customer_id).with_for_update()
+            )).scalar_one_or_none()
+            if risk_profile is not None:
+                customer_daily_limit = float(risk_profile.daily_loss_limit_pct)
+        effective_daily_limit = min(
+            float(settings.daily_loss_limit),
+            customer_daily_limit if customer_daily_limit is not None else float(settings.daily_loss_limit),
+        )
+        risk_reason = None
+        if dd >= settings.max_drawdown:
+            risk_reason = "Maximum drawdown limit reached"
+        elif daily_loss >= effective_daily_limit:
+            risk_reason = "Customer daily loss limit reached" if customer_daily_limit is not None and effective_daily_limit == customer_daily_limit else "Platform daily loss limit reached"
+        if risk_reason:
             already_halted_exit = account is not None and account.status == "HALTED" and account_reduce_only
             if account is not None:
                 account.status = "HALTED"
@@ -401,12 +417,32 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
                 s.kill_switch = True
                 s.live_enabled = False
                 s.mode = "HALTED"
+            if customer_id is not None:
+                db.add(CustomerRiskDecision(
+                    customer_id=customer_id,
+                    signal_id=str((signal or {}).get("signal_id") or ""),
+                    symbol=symbol, side=side,
+                    requested_price=price, quantity=quantity,
+                    execution_mode="LIVE" if live else "PAPER",
+                    verdict="BLOCKED",
+                    reason=risk_reason,
+                    signal_timestamp=str(signal_timestamp or ""),
+                ))
             if not already_halted_exit:
                 await db.commit()
-                raise RiskBlocked("Customer/account risk loss limit reached" if account is not None else "Maximum drawdown or daily loss limit reached")
-            # already_halted_exit: this order only closes/reduces an existing position on an
-            # account already marked HALTED by a prior breach -- let it through so the customer
-            # can exit, rather than re-raising and trapping them in the position again.
+                raise RiskBlocked(risk_reason)
+            # A reduce-only exit remains allowed for an already halted customer.
+        elif customer_id is not None:
+            db.add(CustomerRiskDecision(
+                customer_id=customer_id,
+                signal_id=str((signal or {}).get("signal_id") or ""),
+                symbol=symbol, side=side,
+                requested_price=price, quantity=quantity,
+                execution_mode="LIVE" if live else "PAPER",
+                verdict="ALLOWED",
+                reason="Daily-loss and drawdown checks passed",
+                signal_timestamp=str(signal_timestamp or ""),
+            ))
 
         notional = price * quantity
         pilot_max_notional = None
