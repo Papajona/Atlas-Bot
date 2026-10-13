@@ -2620,10 +2620,17 @@ async def admin_custody_reconciliation(authorization: str | None = Header(defaul
     import httpx
     async with SessionLocal() as db:
         rows = (await db.execute(select(CustomerLedgerAccount).where(CustomerLedgerAccount.currency == "USDT"))).scalars().all()
-        liability_available = sum(float(r.available) for r in rows)
-        liability_trading_reserved = sum(float(r.trading_reserved) for r in rows)
-        liability_withdrawal_reserved = sum(float(r.withdrawal_reserved) for r in rows)
-        customer_liabilities = liability_available + liability_trading_reserved + liability_withdrawal_reserved
+        from decimal import Decimal
+        # Keep aggregation exact at the ledger's six-decimal USDT precision. Convert to
+        # JSON numbers only at the response boundary; never accumulate money as binary floats.
+        liability_available_d = sum((Decimal(str(r.available or 0)) for r in rows), Decimal("0"))
+        liability_trading_reserved_d = sum((Decimal(str(r.trading_reserved or 0)) for r in rows), Decimal("0"))
+        liability_withdrawal_reserved_d = sum((Decimal(str(r.withdrawal_reserved or 0)) for r in rows), Decimal("0"))
+        customer_liabilities_d = liability_available_d + liability_trading_reserved_d + liability_withdrawal_reserved_d
+        liability_available = float(liability_available_d)
+        liability_trading_reserved = float(liability_trading_reserved_d)
+        liability_withdrawal_reserved = float(liability_withdrawal_reserved_d)
+        customer_liabilities = float(customer_liabilities_d)
         virtual_wallets = (await db.execute(select(Wallet).where(Wallet.currency == "USDT", Wallet.network == "TRON", Wallet.status == "ACTIVE"))).scalars().all()
     treasury_balance = None
     virtual_wallet_balances = {}
