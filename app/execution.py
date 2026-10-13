@@ -280,7 +280,7 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
                     signal_timestamp: str | None = None, side: str = "buy",
                     customer_id: int | None = None, reservation_key: str | None = None,
                     stop_loss_price: float | None = None, take_profit_price: float | None = None,
-                    signal: dict | None = None):
+                    signal: dict | None = None, conservative_profile: bool = False):
     if price <= 0 or quantity <= 0:
         raise RiskBlocked("Invalid price or quantity")
     async with SessionLocal() as db:
