@@ -96,12 +96,15 @@ async def create_simulation_account(
 async def post_simulation_event(
     *, customer_id: int, account_id: int, idempotency_key: str, event_type: str,
     balance_delta: Decimal | str | int | float, asset_class: str,
+    simulation_mode: str,
     symbol: str = "", quantity: Decimal | str | int | float = 0,
     price: Decimal | str | int | float = 0, metadata: dict | None = None,
 ) -> Decimal:
     """Atomically apply a virtual balance event; repeated keys return the original result."""
     asset = str(asset_class).strip().lower()
     kind = str(event_type).strip().upper()
+    if str(simulation_mode or "").strip().upper() != "SIMULATION":
+        raise SimulationLedgerError("Explicit SIMULATION mode is required")
     delta, qty, px = _amount(balance_delta), _amount(quantity), _amount(price)
     if customer_id <= 0 or account_id <= 0 or not idempotency_key.strip():
         raise SimulationLedgerError("Customer, account and idempotency key are required")
@@ -148,7 +151,7 @@ async def post_simulation_event(
             """), {"account_id": account_id, "customer_id": customer_id, "key": idempotency_key,
                    "kind": kind, "asset": asset, "symbol": symbol[:80], "quantity": qty,
                    "price": px, "delta": delta, "balance_after": new_balance,
-                   "metadata": json.dumps(metadata or {}, default=str), "now": now})
+                   "metadata": json.dumps({**(metadata or {}), "execution_mode": "SIMULATION", "virtual_only": True}, default=str), "now": now})
             await db.execute(text("""
                 UPDATE customer_simulation_accounts SET virtual_balance=:balance, updated_at=:now
                 WHERE id=:account_id AND customer_id=:customer_id
