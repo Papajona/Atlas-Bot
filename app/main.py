@@ -1454,7 +1454,7 @@ async def _usdt_tron_monitor_loop():
                         await release_lock(lock_key)
 
                 async def _bounded(wallet):
-                    async with scan_slots:
+                    async with _scan_slots:
                         await _scan_one(wallet)
                 await asyncio.gather(*(_bounded(w) for w in wallets))
         except asyncio.CancelledError:
