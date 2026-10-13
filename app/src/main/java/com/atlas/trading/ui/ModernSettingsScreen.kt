@@ -47,7 +47,6 @@ fun ModernSettingsScreen(
     var circuitBreakerAlerts by remember { mutableStateOf(true) }
     var hapticFeedback by remember { mutableStateOf(true) }
 
-    var biometricLock by remember { mutableStateOf(true) }
     var autoLockTimer by remember { mutableStateOf("15 min") }
 
     var activeDialogTitle by remember { mutableStateOf<String?>(null) }
@@ -289,7 +288,7 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.DateRange,
                     iconTint = brandTeal,
                     title = "Default Chart Window",
-                    subtitle = "Initial equity curve historical scope",
+                    subtitle = "Not connected to chart data yet; this setting is unavailable until saved preferences are implemented.",
                     options = listOf("7 Days", "30 Days"),
                     selectedOption = defaultTimeframe,
                     onOptionSelected = { defaultTimeframe = it },
@@ -304,11 +303,12 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Search,
                     iconTint = brandTeal,
                     title = "Interactive Chart Crosshair",
-                    subtitle = "Touch & drag tooltip showing exact daily equity & PnL",
+                    subtitle = "Chart crosshair behavior is not wired to this preference yet; unavailable in this build.",
                     checked = showCrosshair,
                     onCheckedChange = { showCrosshair = it },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -317,11 +317,12 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.ThumbUp,
                     iconTint = emeraldAccent,
                     title = "Live Market Sparklines",
-                    subtitle = "Display mini trendlines inside watchlist rows",
+                    subtitle = "Watchlist rendering is not wired to this preference yet; unavailable in this build.",
                     checked = showSparklines,
                     onCheckedChange = { showSparklines = it },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -330,13 +331,14 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.ShoppingCart,
                     iconTint = brandTeal,
                     title = "Display Currency",
-                    subtitle = "Base valuation for portfolios and reports",
+                    subtitle = "Portfolio and report currency conversion is not connected to this preference yet.",
                     options = listOf("USD ($)", "EUR (€)", "GBP (£)"),
                     selectedOption = baseCurrency,
                     onOptionSelected = { baseCurrency = it },
                     textPrimary = textPrimary,
                     textMuted = textMuted,
-                    brandTeal = brandTeal
+                    brandTeal = brandTeal,
+                    enabled = false
                 )
             }
         }
@@ -353,11 +355,12 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Notifications,
                     iconTint = brandTeal,
                     title = "Order Execution Alerts",
-                    subtitle = "Instant alert whenever a bot enters or exits a trade",
+                    subtitle = "Execution-alert delivery is not connected to this preference yet; unavailable in this build.",
                     checked = tradeExecutionAlerts,
                     onCheckedChange = { tradeExecutionAlerts = it },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -366,11 +369,12 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Info,
                     iconTint = emeraldAccent,
                     title = "Daily PnL Digest (00:00 UTC)",
-                    subtitle = "Summary of 24h win rate, profit factor, and net equity",
+                    subtitle = "Scheduled P&L summaries are not connected to this preference yet; unavailable in this build.",
                     checked = dailySummaryAlerts,
                     onCheckedChange = { dailySummaryAlerts = it },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -379,11 +383,12 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Warning,
                     iconTint = Color(0xFFEF4444),
                     title = "Circuit Breaker / Stop Alerts",
-                    subtitle = "High-priority notification if volatility breaker trips",
+                    subtitle = "Circuit-breaker notification delivery is not connected to this preference yet.",
                     checked = circuitBreakerAlerts,
                     onCheckedChange = { circuitBreakerAlerts = it },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -392,11 +397,12 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Refresh,
                     iconTint = brandTeal,
                     title = "Haptic Vibration Feedback",
-                    subtitle = "Vibrate on chart scrub, trade action, and alerts",
+                    subtitle = "Haptic feedback is not wired to chart, trade or alert events from this setting yet.",
                     checked = hapticFeedback,
                     onCheckedChange = { hapticFeedback = it },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
             }
         }
@@ -409,15 +415,14 @@ fun ModernSettingsScreen(
                 cardBorder = cardBorder,
                 textPrimary = textPrimary
             ) {
-                SettingsSwitchRow(
+                SettingsStatusRow(
                     icon = Icons.Default.Lock,
                     iconTint = brandTeal,
                     title = "Biometric App Lock",
-                    subtitle = "Require Fingerprint / Device Credential to unlock app",
-                    checked = biometricLock,
-                    onCheckedChange = { biometricLock = it },
+                    subtitle = "App-level biometric enforcement is not implemented here; this screen cannot enable a device lock.",
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    statusText = "NOT IMPLEMENTED"
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -444,13 +449,14 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Star,
                     iconTint = brandTeal,
                     title = "Auto-Lock Inactivity Timer",
-                    subtitle = "Lock screen after period of inactivity",
+                    subtitle = "Auto-lock enforcement is not wired to app lifecycle yet; unavailable in this build.",
                     options = listOf("5 min", "15 min", "30 min"),
                     selectedOption = autoLockTimer,
                     onOptionSelected = { autoLockTimer = it },
                     textPrimary = textPrimary,
                     textMuted = textMuted,
-                    brandTeal = brandTeal
+                    brandTeal = brandTeal,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -667,7 +673,8 @@ private fun SettingsStatusRow(
     title: String,
     subtitle: String,
     textPrimary: Color,
-    textMuted: Color
+    textMuted: Color,
+    statusText: String = "SERVER CONTROLLED"
 ) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
@@ -690,7 +697,7 @@ private fun SettingsStatusRow(
         }
         Spacer(modifier = Modifier.width(8.dp))
         Text(
-            text = "SERVER CONTROLLED",
+            text = statusText,
             fontSize = 9.sp,
             fontWeight = FontWeight.Bold,
             color = textMuted
@@ -798,7 +805,10 @@ private fun SettingsSegmentedRow(
                     modifier = Modifier
                         .weight(1f)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(if (isSelected) brandTeal else Color(0xFFF1F5F9))
+                        .background(
+                            if (isSelected) brandTeal.copy(alpha = if (enabled) 1f else 0.35f)
+                            else Color(0xFFF1F5F9).copy(alpha = if (enabled) 1f else 0.55f)
+                        )
                         .clickable(enabled = enabled) { if (enabled) onOptionSelected(option) }
                         .padding(vertical = 8.dp),
                     contentAlignment = Alignment.Center
@@ -807,7 +817,7 @@ private fun SettingsSegmentedRow(
                         text = option,
                         fontSize = 11.sp,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                        color = if (isSelected) Color.White else textPrimary
+                        color = if (isSelected && enabled) Color.White else textPrimary.copy(alpha = if (enabled) 1f else 0.6f)
                     )
                 }
             }
