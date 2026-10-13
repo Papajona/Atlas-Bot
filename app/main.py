@@ -124,7 +124,10 @@ def verify_local_signature(signature: str, digest: str) -> bool:
         return True
     except Exception:
         return False
-from .monitoring import TelemetryMiddleware, metrics_response, logger
+from .monitoring import (
+    TelemetryMiddleware, metrics_response, logger,
+    CRITICAL_WORKER_LOOP_FAILURES, CRITICAL_WORKER_LOOP_CONSECUTIVE_FAILURES,
+)
 from .schemas import (
     MarketRequest,
     CustomerBotStartRequest,
@@ -232,6 +235,74 @@ def _mark_worker_loop_failure(name: str, exc: Exception) -> None:
 
 def _worker_loop_health_snapshot() -> dict:
     return {name: dict(state) for name, state in _worker_loop_health.items()}
+
+
+_CRITICAL_WORKER_FAILURES: dict[str, int] = {}
+_CRITICAL_WORKER_HALT_ISSUED: set[str] = set()
+
+
+def _mark_critical_worker_success(name: str) -> None:
+    _CRITICAL_WORKER_FAILURES[name] = 0
+    CRITICAL_WORKER_LOOP_CONSECUTIVE_FAILURES.labels(name).set(0)
+    _mark_worker_loop_success(name)
+
+
+async def _handle_critical_worker_failure(name: str, exc: Exception) -> None:
+    """Count critical-loop failures and fail closed after a configurable consecutive streak."""
+    count = _CRITICAL_WORKER_FAILURES.get(name, 0) + 1
+    _CRITICAL_WORKER_FAILURES[name] = count
+    CRITICAL_WORKER_LOOP_FAILURES.labels(name).inc()
+    CRITICAL_WORKER_LOOP_CONSECUTIVE_FAILURES.labels(name).set(count)
+    _mark_worker_loop_failure(name, exc)
+    threshold = max(1, int(settings.critical_worker_failure_threshold))
+    logger.error(
+        "critical_worker_loop_failure loop=%s consecutive=%s threshold=%s",
+        name, count, threshold, exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    if count < threshold or name in _CRITICAL_WORKER_HALT_ISSUED:
+        return
+
+    _CRITICAL_WORKER_HALT_ISSUED.add(name)
+    halt_error = None
+    try:
+        async with SessionLocal() as db:
+            state = await db.get(AppState, 1)
+            if state is not None:
+                state.kill_switch = True
+                state.live_enabled = False
+                state.mode = "HALTED"
+            accounts = (
+                await db.execute(select(TradingAccount).where(TradingAccount.status != "CLOSED"))
+            ).scalars().all()
+            for account in accounts:
+                account.status = "HALTED"
+            await db.commit()
+    except Exception as halt_exc:
+        halt_error = type(halt_exc).__name__
+        logger.critical(
+            "critical_worker_loop_auto_halt_persistence_failed loop=%s error=%s",
+            name, halt_error, exc_info=True,
+        )
+
+    try:
+        await open_incident(
+            key=f"CRITICAL_WORKER_LOOP_FAILURE:{name}",
+            severity="CRITICAL",
+            category="EXECUTION_PROTECTION",
+            summary=f"Trading halted after repeated failures in critical worker loop: {name}",
+            detail={
+                "loop": name,
+                "consecutive_failures": count,
+                "threshold": threshold,
+                "error_type": type(exc).__name__,
+                "halt_persistence_error": halt_error,
+            },
+        )
+    except Exception:
+        logger.critical(
+            "critical_worker_loop_failure_incident_write_failed loop=%s",
+            name, exc_info=True,
+        )
 
 
 async def _supervise_worker_loop(factory, name: str) -> None:
@@ -1532,8 +1603,10 @@ async def _custody_reconciliation_loop():
                                 report.get("status"), report.get("solvency_ratio"), report.get("coverage_gap"))
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("custody_reconciliation_loop: pass failed")
+        except Exception as exc:
+            await _handle_critical_worker_failure("custody-reconciliation", exc)
+        else:
+            _mark_critical_worker_success("custody-reconciliation")
 
 
 def _classify_worker_health(rows, *, stale_after_seconds: int, now: datetime | None = None) -> dict:
@@ -1622,10 +1695,12 @@ async def _continuous_risk_enforcement_loop():
                 # broker orders. It is deliberately invoked outside the DB transaction.
                 try:
                     await emergency_stop()
-                except Exception:
-                    logger.exception("continuous risk monitor emergency stop failed")
-        except Exception:
-            logger.exception("continuous_risk_enforcement_loop: pass failed")
+                except Exception as exc:
+                    await _handle_critical_worker_failure("continuous-risk-enforcement", exc)
+            else:
+                _mark_critical_worker_success("continuous-risk-enforcement")
+        except Exception as exc:
+            await _handle_critical_worker_failure("continuous-risk-enforcement", exc)
         await asyncio.sleep(max(1, int(settings.continuous_risk_check_interval_seconds)))
 
 
@@ -1698,8 +1773,12 @@ async def _customer_key_audit_loop():
                 result = await audit_customer_binance_keys(db, fetch_binance_restrictions)
             if result["suspended"] or result["unverified"]:
                 await _audit("CUSTOMER_KEY_AUDIT", result)
-        except Exception:
-            logger.exception("customer_key_audit_loop: pass failed")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await _handle_critical_worker_failure("customer-key-audit", exc)
+        else:
+            _mark_critical_worker_success("customer-key-audit")
 
 
 async def _withdrawal_recovery_loop():
