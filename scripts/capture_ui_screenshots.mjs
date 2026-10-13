@@ -64,6 +64,12 @@ try {
         documentHeight: Math.max(doc.scrollHeight, body.scrollHeight),
         horizontalOverflow: doc.scrollWidth > window.innerWidth + 1,
         authScreenVisible: Boolean(document.querySelector("#auth") && getComputedStyle(document.querySelector("#auth")).display !== "none"),
+        authCenterOffsetPx: (() => {
+          const auth = document.querySelector("#auth");
+          if (!auth || getComputedStyle(auth).display === "none") return null;
+          const rect = auth.getBoundingClientRect();
+          return Math.round(Math.abs((rect.left + rect.width / 2) - window.innerWidth / 2));
+        })(),
         adminAuthPending: document.body.classList.contains("admin-auth-pending"),
         adminCredentialsVisible: Boolean(document.querySelector("#adminEmailField") && getComputedStyle(document.querySelector("#adminEmailField")).display !== "none" && document.querySelector("#adminEmailField").getClientRects().length),
         adminLogoutVisible: Boolean(document.querySelector("#adminLogoutBtn") && getComputedStyle(document.querySelector("#adminLogoutBtn")).display !== "none" && document.querySelector("#adminLogoutBtn").getClientRects().length),
@@ -88,6 +94,9 @@ try {
     }
     if (diagnostics.horizontalOverflow) {
       throw new Error(`${item.name}: horizontal overflow at ${diagnostics.viewportWidth}px: document width ${diagnostics.documentWidth}px`);
+    }
+    if (item.route === "/" && diagnostics.authScreenVisible && diagnostics.authCenterOffsetPx > 50) {
+      throw new Error(`${item.name}: customer authentication panel is ${diagnostics.authCenterOffsetPx}px off viewport center`);
     }
     if (item.route === "/" && item.mobile && diagnostics.authScreenVisible && diagnostics.mobileNavVisible) {
       throw new Error(`${item.name}: mobile navigation overlaps the unauthenticated customer auth screen`);
