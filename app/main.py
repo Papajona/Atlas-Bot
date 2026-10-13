@@ -3017,10 +3017,12 @@ async def admin_billing_cost(req: CostEventRequest, authorization: str | None = 
 async def admin_billing_revenue(req: RevenueEventRequest, authorization: str | None = Header(default=None), x_admin_token: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "FINANCE")
+    if req.refunds > req.gross_amount:
+        raise HTTPException(status_code=422, detail="Refunds cannot exceed gross amount")
     async with SessionLocal() as db:
         existing=(await db.execute(select(RevenueLedger).where(RevenueLedger.provider==req.provider,RevenueLedger.provider_reference==req.provider_reference))).scalar_one_or_none()
         if existing: return {"ok":True,"id":existing.id,"duplicate":True}
-        row=RevenueLedger(customer_id=req.customer_id,subscription_id=req.subscription_id,provider=req.provider,provider_reference=req.provider_reference,gross_amount=req.gross_amount,refunds=req.refunds,net_amount=max(0,req.gross_amount-req.refunds),currency=req.currency.upper())
+        row=RevenueLedger(customer_id=req.customer_id,subscription_id=req.subscription_id,provider=req.provider,provider_reference=req.provider_reference,gross_amount=req.gross_amount,refunds=req.refunds,net_amount=req.gross_amount-req.refunds,currency=req.currency.upper())
         db.add(row); await db.commit()
         return {"ok":True,"id":row.id}
 
@@ -3171,7 +3173,7 @@ async def approve_funding(funding_id: int, authorization: str | None = Header(de
         funding.status = "CONFIRMED"
         funding.confirmed_at = funding.confirmed_at or datetime.now(timezone.utc)
         await post_deposit(db, customer_id=funding.customer_id, wallet_id=funding.wallet_id,
-                            amount=float(funding.amount), provider_reference=funding.provider_reference,
+                            amount=funding.amount, provider_reference=funding.provider_reference,
                             provider=funding.provider, metadata=metadata)
         await sync_wallet_from_ledger(db, funding.customer_id, "USDT")
         account = (await db.execute(select(TradingAccount).where(
@@ -3800,7 +3802,6 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             "price_context": {"latest_close": float(df.close.iloc[-1]), "bars": int(len(df)), "spread_bps": spread_bps},
             "data_quality": deterministic["data_quality"],
             "adaptive_model": adaptive or {"status": "DISABLED"},
-            "strategy_router": router,
             "ml_signal": ml_signal if settings.adaptive_ai_enabled else {"status": "DISABLED"},
         }
         try:
