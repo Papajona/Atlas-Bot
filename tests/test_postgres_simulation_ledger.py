@@ -34,18 +34,15 @@ async def _setup():
 
 
 async def _customer(sessions):
-    from app.db import CustomerProfile
+    token = uuid.uuid4().hex
     async with sessions() as db:
         async with db.begin():
-            customer = CustomerProfile(
-                auth_user_id=f"sim-drill-{uuid.uuid4().hex}",
-                email=f"sim-{uuid.uuid4().hex}@example.invalid",
-                display_name="simulation isolation test",
-                status="ACTIVE",
-            )
-            db.add(customer)
-            await db.flush()
-            return customer.id
+            result = await db.execute(text("""
+                INSERT INTO customer_profiles (auth_user_id, email, display_name, status)
+                VALUES (:auth, :email, :name, 'ACTIVE') RETURNING id
+            """), {"auth": f"sim-drill-{token}", "email": f"sim-{token}@example.invalid",
+                   "name": "simulation isolation test"})
+            return int(result.scalar_one())
 
 
 async def _real_money_snapshot(sessions, customer_id):
@@ -77,7 +74,7 @@ async def test_concurrent_duplicate_events_apply_balance_delta_once():
         async def post():
             return await post_simulation_event(
                 customer_id=cid, account_id=account_id, idempotency_key="same-fill",
-                event_type="ORDER_FILL", balance_delta="-125", asset_class="forex",
+                event_type="ORDER_FILL", balance_delta="-125", asset_class="forex", simulation_mode="SIMULATION",
                 symbol="EUR_USD", quantity="1", price="1.08",
             )
         results = await asyncio.gather(*(post() for _ in range(16)))
@@ -108,7 +105,7 @@ async def test_concurrent_loss_events_cannot_exceed_daily_loss_cap():
             try:
                 return await post_simulation_event(
                     customer_id=cid, account_id=account_id, idempotency_key=f"loss-{i}",
-                    event_type="REALIZED_PNL", balance_delta="-60", asset_class="commodity",
+                    event_type="REALIZED_PNL", balance_delta="-60", asset_class="commodity", simulation_mode="SIMULATION",
                     symbol="XAUUSD",
                 )
             except SimulationLedgerError:
@@ -166,7 +163,7 @@ async def test_simulation_activity_cannot_change_real_customer_funds_or_journals
         account_id = await create_simulation_account(cid, "crypto", initial_virtual_balance="5000", daily_loss_limit="200")
         await post_simulation_event(
             customer_id=cid, account_id=account_id, idempotency_key="virtual-fill",
-            event_type="ORDER_FILL", balance_delta="-25", asset_class="crypto",
+            event_type="ORDER_FILL", balance_delta="-25", asset_class="crypto", simulation_mode="SIMULATION",
             symbol="BTCUSDT", quantity="0.001", price="25000",
         )
         await post_simulation_event(
