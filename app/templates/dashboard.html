@@ -25,7 +25,7 @@
 <div class="workspace">
 <header class="topbar">
   <div>
-    <div class="eyebrow">AI TRADING CONSOLE · PRODUCTION HARDENED</div>
+    <div class="eyebrow" id="adminEyebrow">ADMINISTRATOR ACCESS · SIGN-IN REQUIRED</div>
     <h1 id="adminTitle">Administrator sign-in</h1>
     <p class="muted" id="adminSubtitle">Sign in with an authorized administrator account to view operational controls.</p>
   </div>
@@ -35,13 +35,13 @@
 
 <main>
 <section id="overview" class="toolbar panel command-bar">
-  <div class="field"><label>Admin email</label><input id="adminEmail" type="email" autocomplete="username" placeholder="admin@example.com"></div>
-  <div class="field"><label>Admin password</label><input id="adminPassword" type="password" autocomplete="current-password" placeholder="Supabase Auth password"></div>
-  <button onclick="adminLogin()">Sign in</button>
-  <button onclick="adminEnroll()">Enroll Google Authenticator</button>
+  <div class="field" id="adminEmailField"><label>Admin email</label><input id="adminEmail" type="email" autocomplete="username" placeholder="admin@example.com"></div>
+  <div class="field" id="adminPasswordField"><label>Admin password</label><input id="adminPassword" type="password" autocomplete="current-password" placeholder="Supabase Auth password"></div>
+  <button id="adminSignInBtn" type="button" onclick="adminLogin()">Sign in</button>
+  <button id="adminEnrollBtn" type="button" onclick="adminEnroll()">Enroll Google Authenticator</button>
   <div id="adminMfaBox" class="field" style="display:none"><label>Authenticator code</label><input id="adminMfaCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit code"></div>
   <button id="adminMfaVerifyBtn" style="display:none" onclick="adminMfaVerify()">Verify Authenticator</button>
-  <span id="authState" class="muted">Production admin access requires Google Authenticator (TOTP).</span>
+  <span id="authState" class="muted" role="status" aria-live="polite">Sign in with an authorized administrator account. TOTP is required for production access.</span><button id="adminLogoutBtn" type="button" style="display:none" onclick="adminLogout()">Sign out</button>
 </section>
 
 <section class="grid cards kpi-grid">
@@ -142,9 +142,29 @@ async function unlockAdminConsole(){
     throw new Error('Authenticated control-plane state is incomplete; administrative controls remain locked.');
   }
   document.body.classList.remove('admin-auth-pending');
+  $('adminEyebrow').textContent='ATLAS TRADING OS · VERIFIED ADMIN SESSION';
   $('adminTitle').innerHTML='Signal <span>→</span> Risk <span>→</span> Execution';
   $('adminSubtitle').textContent='A calm command center for signal, risk, execution, and treasury operations.';
+  for(const id of ['adminEmailField','adminPasswordField','adminSignInBtn','adminEnrollBtn'])$(id).style.display='none';
+  $('adminMfaBox').style.display='none';
+  $('adminMfaVerifyBtn').style.display='none';
+  $('adminLogoutBtn').style.display='inline-block';
+  $('authState').textContent='Administrator session verified.';
   refresh();loadWithdrawals();loadRoles();loadMargin();
+}
+function adminLogout(){
+  for(const key of ['ait_admin_access_token','ait_admin_refresh_token','ait_approver_token'])sessionStorage.removeItem(key);
+  for(const id of ['adminEmailField','adminPasswordField','adminSignInBtn','adminEnrollBtn'])$(id).style.display='';
+  for(const id of ['adminEmail','adminPassword','adminMfaCode','adminId','approverToken','releaseId','releaseToken','releaseSignature','roleUserId'])if($(id))$(id).value='';
+  $('adminMfaBox').style.display='none';
+  $('adminMfaVerifyBtn').style.display='none';
+  $('adminLogoutBtn').style.display='none';
+  document.body.classList.add('admin-auth-pending');
+  $('adminEyebrow').textContent='ADMINISTRATOR ACCESS · SIGN-IN REQUIRED';
+  $('adminTitle').textContent='Administrator sign-in';
+  $('adminSubtitle').textContent='Sign in with an authorized administrator account to view operational controls.';
+  $('authState').textContent='Signed out. Administrator controls are locked.';
+  $('output').textContent='Ready.';
 }
 async function restoreAdminSession(){
   if(!token()){
