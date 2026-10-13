@@ -9,8 +9,10 @@ await fs.mkdir(outputDir, { recursive: true });
 const cases = [
   { name: "customer-desktop", route: "/", viewport: { width: 1440, height: 1000 } },
   { name: "customer-mobile", route: "/", viewport: { width: 390, height: 844 }, mobile: true },
-  { name: "admin-desktop", route: "/admin", viewport: { width: 1440, height: 1000 } },
-  { name: "admin-mobile", route: "/admin", viewport: { width: 390, height: 844 }, mobile: true },
+  { name: "admin-login-desktop", route: "/admin", viewport: { width: 1440, height: 1000 }, adminAuthenticatedPreview: false },
+  { name: "admin-login-mobile", route: "/admin", viewport: { width: 390, height: 844 }, mobile: true, adminAuthenticatedPreview: false },
+  { name: "admin-workbench-desktop", route: "/admin", viewport: { width: 1440, height: 1000 }, adminAuthenticatedPreview: true },
+  { name: "admin-workbench-mobile", route: "/admin", viewport: { width: 390, height: 844 }, mobile: true, adminAuthenticatedPreview: true },
 ];
 
 const browser = await chromium.launch({ headless: true });
@@ -27,6 +29,12 @@ try {
     const pageErrors = [];
     page.on("console", msg => { if (msg.type() === "error") consoleErrors.push(msg.text()); });
     page.on("pageerror", err => pageErrors.push(String(err)));
+    // This token is a synthetic UI fixture only and never leaves this local preview.
+    if (item.route === "/admin" && item.adminAuthenticatedPreview) {
+      await page.addInitScript(() => {
+        sessionStorage.setItem("ait_admin_access_token", "ui-audit-synthetic-session");
+      });
+    }
 
     // The visual pass is isolated: local templates/static assets only, synthetic API replies only.
     await page.route("**/*", async route => {
@@ -56,6 +64,8 @@ try {
         documentHeight: Math.max(doc.scrollHeight, body.scrollHeight),
         horizontalOverflow: doc.scrollWidth > window.innerWidth + 1,
         authScreenVisible: Boolean(document.querySelector("#auth") && getComputedStyle(document.querySelector("#auth")).display !== "none"),
+        adminAuthPending: document.body.classList.contains("admin-auth-pending"),
+        adminWorkbenchVisible: Boolean(document.querySelector("#strategy") && getComputedStyle(document.querySelector("#strategy")).display !== "none" && document.querySelector("#strategy").getClientRects().length),
         mobileNavVisible: Boolean(document.querySelector(".mobile-nav") && getComputedStyle(document.querySelector(".mobile-nav")).display !== "none" && document.querySelector(".mobile-nav").getClientRects().length),
         sidebarVisible: Boolean(document.querySelector(".sidebar") && getComputedStyle(document.querySelector(".sidebar")).display !== "none" && document.querySelector(".sidebar").getClientRects().length),
         topbarVisible: Boolean(document.querySelector(".topbar") && getComputedStyle(document.querySelector(".topbar")).display !== "none" && document.querySelector(".topbar").getClientRects().length),
@@ -77,8 +87,20 @@ try {
     if (diagnostics.horizontalOverflow) {
       throw new Error(`${item.name}: horizontal overflow at ${diagnostics.viewportWidth}px: document width ${diagnostics.documentWidth}px`);
     }
-    if (item.mobile && diagnostics.authScreenVisible && diagnostics.mobileNavVisible) {
+    if (item.route === "/" && item.mobile && diagnostics.authScreenVisible && diagnostics.mobileNavVisible) {
       throw new Error(`${item.name}: mobile navigation overlaps the unauthenticated customer auth screen`);
+    }
+    if (item.route === "/admin" && item.adminAuthenticatedPreview === false && !diagnostics.adminAuthPending) {
+      throw new Error(`${item.name}: unauthenticated admin preview unexpectedly exposed the control plane`);
+    }
+    if (item.route === "/admin" && item.adminAuthenticatedPreview === true && diagnostics.adminAuthPending) {
+      throw new Error(`${item.name}: synthetic authenticated preview did not unlock the admin workbench`);
+    }
+    if (item.route === "/admin" && item.adminAuthenticatedPreview === false && diagnostics.adminWorkbenchVisible) {
+      throw new Error(`${item.name}: admin workbench visible before session verification`);
+    }
+    if (item.route === "/admin" && item.adminAuthenticatedPreview === true && !diagnostics.adminWorkbenchVisible) {
+      throw new Error(`${item.name}: admin workbench remained hidden after session fixture verification`);
     }
     const screenshot = path.join(outputDir, `${item.name}.png`);
     await page.screenshot({ path: screenshot, fullPage: true, animations: "disabled" });
