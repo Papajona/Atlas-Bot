@@ -207,13 +207,11 @@ fun ModernSettingsScreen(
                 cardBorder = cardBorder,
                 textPrimary = textPrimary
             ) {
-                SettingsSwitchRow(
+                SettingsStatusRow(
                     icon = Icons.Default.PlayArrow,
                     iconTint = brandTeal,
-                    title = "Paper Trading Simulation",
-                    subtitle = if (isPaperTrading) "Safe demo execution (Zero financial risk)" else "Live order routing active",
-                    checked = isPaperTrading,
-                    onCheckedChange = { isPaperTrading = it },
+                    title = "Execution mode",
+                    subtitle = "Server-controlled. This screen cannot enable live trading; verify the current mode on the dashboard.",
                     textPrimary = textPrimary,
                     textMuted = textMuted
                 )
@@ -224,13 +222,14 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Info,
                     iconTint = emeraldAccent,
                     title = "Risk Budget Per Trade",
-                    subtitle = "Account preference; strategy and server risk caps may enforce a lower limit.",
+                    subtitle = "Not connected to saved server preferences yet. Display only; server risk caps remain authoritative.",
                     options = listOf("0.5%", "1.0%", "2.0%"),
                     selectedOption = riskBudgetPct,
                     onOptionSelected = { riskBudgetPct = it },
                     textPrimary = textPrimary,
                     textMuted = textMuted,
-                    brandTeal = brandTeal
+                    brandTeal = brandTeal,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -239,11 +238,12 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.CheckCircle,
                     iconTint = emeraldAccent,
                     title = "Automated Trailing Stop-Loss",
-                    subtitle = "Dynamic ATR-based exit to preserve accumulated gains",
+                    subtitle = "Not connected to the execution engine from this screen; unavailable until server-backed settings are implemented.",
                     checked = autoTrailingStop,
                     onCheckedChange = { autoTrailingStop = it },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -252,11 +252,12 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Warning,
                     iconTint = Color(0xFFF59E0B),
                     title = "Cost-Stress Gate (2.0x Multiplier)",
-                    subtitle = "Strictly rejects setups without 2x fee/slippage headroom",
+                    subtitle = "Not connected to the execution engine from this screen; unavailable until server-backed settings are implemented.",
                     checked = costStressFilter,
                     onCheckedChange = { costStressFilter = it },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -265,7 +266,7 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.ArrowDropDown,
                     iconTint = brandTeal,
                     title = "Max Slippage Tolerance",
-                    subtitle = "Maximum allowable deviation on market fills",
+                    subtitle = "Not connected to broker execution settings from this screen; unavailable until server-backed preferences are implemented.",
                     options = listOf("0.1%", "0.5%", "1.0%"),
                     selectedOption = slippageTolerance,
                     onOptionSelected = { slippageTolerance = it },
@@ -660,6 +661,44 @@ private fun SettingsGroup(
 }
 
 @Composable
+private fun SettingsStatusRow(
+    icon: ImageVector,
+    iconTint: Color,
+    title: String,
+    subtitle: String,
+    textPrimary: Color,
+    textMuted: Color
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(iconTint.copy(alpha = 0.12f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(imageVector = icon, contentDescription = title, tint = iconTint, modifier = Modifier.size(18.dp))
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = title, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = textPrimary)
+            Spacer(modifier = Modifier.height(1.dp))
+            Text(text = subtitle, fontSize = 11.sp, color = textMuted, lineHeight = 15.sp)
+        }
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = "SERVER CONTROLLED",
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            color = textMuted
+        )
+    }
+}
+
+@Composable
 private fun SettingsSwitchRow(
     icon: ImageVector,
     iconTint: Color,
@@ -668,12 +707,13 @@ private fun SettingsSwitchRow(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     textPrimary: Color,
-    textMuted: Color
+    textMuted: Color,
+    enabled: Boolean = true
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onCheckedChange(!checked) }
+            .clickable(enabled = enabled) { if (enabled) onCheckedChange(!checked) }
             .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -700,6 +740,7 @@ private fun SettingsSwitchRow(
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
+            enabled = enabled,
             colors = SwitchDefaults.colors(
                 checkedThumbColor = Color.White,
                 checkedTrackColor = Color(0xFF0D9488)
@@ -719,7 +760,8 @@ private fun SettingsSegmentedRow(
     onOptionSelected: (String) -> Unit,
     textPrimary: Color,
     textMuted: Color,
-    brandTeal: Color
+    brandTeal: Color,
+    enabled: Boolean = true
 ) {
     Column(
         modifier = Modifier
@@ -757,7 +799,7 @@ private fun SettingsSegmentedRow(
                         .weight(1f)
                         .clip(RoundedCornerShape(8.dp))
                         .background(if (isSelected) brandTeal else Color(0xFFF1F5F9))
-                        .clickable { onOptionSelected(option) }
+                        .clickable(enabled = enabled) { if (enabled) onOptionSelected(option) }
                         .padding(vertical = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {
