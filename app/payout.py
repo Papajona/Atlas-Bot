@@ -94,9 +94,19 @@ class CCXTPayoutProvider:
             params[settings.payout_client_id_param] = idempotency_key
         if network:
             params["network"] = network
+        # Normalize to the exchange's currency precision before submitting funds.
+        # A precision/format failure occurs before the provider call and is not UNKNOWN.
+        try:
+            normalized_amount = await self._call(self.exchange.currency_to_precision, currency, amount)
+            if not normalized_amount or float(normalized_amount) <= 0:
+                raise PayoutError("Withdrawal amount rounds to zero at provider precision")
+        except PayoutError:
+            raise
+        except Exception as e:
+            raise PayoutError("Withdrawal amount cannot be represented at provider precision") from e
         # Callers must reconcile on UNKNOWN.
         try:
-            tx = await self._call(self.exchange.withdraw, currency, amount, destination, tag, params)
+            tx = await self._call(self.exchange.withdraw, currency, normalized_amount, destination, tag, params)
         except Exception as e:
             raise classify_payout_exception(e) from e
         provider_id = str(tx.get("id") or tx.get("txid") or "")
