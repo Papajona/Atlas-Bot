@@ -1,5 +1,6 @@
 from __future__ import annotations
 import base64
+import logging
 import hashlib, hmac, os, shutil
 from pathlib import Path
 from .config import settings
@@ -23,6 +24,7 @@ def artifact_signature(digest: str) -> str:
                 return ""
             return base64.urlsafe_b64encode(key.sign(digest.encode())).decode().rstrip("=")
         except Exception:
+            logging.getLogger(__name__).exception("Model artifact signing failed")
             return ""
     key = str(settings.model_signing_key or "")
     if not key:
