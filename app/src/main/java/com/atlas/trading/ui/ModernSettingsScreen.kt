@@ -224,7 +224,7 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Info,
                     iconTint = emeraldAccent,
                     title = "Risk Budget Per Trade",
-                    subtitle = "Capital allocated per trade (Audit recommends 0.5%)",
+                    subtitle = "Account preference; strategy and server risk caps may enforce a lower limit.",
                     options = listOf("0.5%", "1.0%", "2.0%"),
                     selectedOption = riskBudgetPct,
                     onOptionSelected = { riskBudgetPct = it },
@@ -425,13 +425,13 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.CheckCircle,
                     iconTint = emeraldAccent,
                     title = "Two-Factor Authentication",
-                    badge = "ACTIVE (AAL2)",
+                    badge = "AAL2 REQUIRED",
                     badgeBg = emeraldBadgeBg,
                     badgeText = emeraldBadgeText,
-                    subtitle = "Google Authenticator TOTP enforced",
+                    subtitle = "Server-verified TOTP required for protected actions",
                     onClick = {
                         activeDialogTitle = "Two-Factor Authentication"
-                        activeDialogContent = "Two-factor authentication (AAL2) is enabled and enforced for all administrative and operator actions.\n\nAuthenticator: Google Authenticator / Hardware Key\nStatus: Active & Verified"
+                        activeDialogContent = "Protected administrative and operator actions require a server-verified AAL2 session.\n\nFactor enrollment and verification status are determined by the authenticated server session. This page cannot confirm that an authenticator is enrolled or currently verified."
                     },
                     textPrimary = textPrimary,
                     textMuted = textMuted
