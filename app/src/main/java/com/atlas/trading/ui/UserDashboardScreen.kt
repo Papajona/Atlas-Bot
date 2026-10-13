@@ -268,17 +268,27 @@ fun UserDashboardScreen(
                             )
                         }
 
-                        // Quick Actions Row (4 buttons)
+                        // Financial shortcuts stay locked until an authenticated account snapshot is loaded.
                         item {
+                            Text(
+                                text = if (customerSnapshot == null) {
+                                    "Sign in to unlock deposit and withdrawal portal actions. Trade entry is not available from this quick-action panel."
+                                } else {
+                                    "Deposits and withdrawals open the secured web portal; sign-in may be required. Trade entry is not available from this quick-action panel."
+                                },
+                                fontSize = 11.sp,
+                                color = textMuted,
+                                lineHeight = 15.sp
+                            )
                             QuickActionsRow(
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
                                 textPrimary = textPrimary,
+                                customerReady = customerSnapshot != null,
                                 onAction = { actionName ->
                                     when (actionName) {
-                                        "New Trade" -> actionDialogMessage = "New Paper Trade:\nSelect asset to place disciplined trade:\n• Crypto: BTC/USDT, ETH/USDT\n• Forex: EUR/USD, GBP/USD (OANDA demo)\n• Commodities: Gold XAU/USD (OANDA demo)"
-                                        "Deposit" -> actionDialogMessage = "Deposit USDT: Dedicated TRC-20 omnibus deposit addresses enabled."
-                                        "Withdraw" -> actionDialogMessage = "Withdrawal Portal: 2-man approval and AAL2 step-up authentication required."
+                                        "New Trade" -> actionDialogMessage = "Trade entry is not connected to this quick-action panel. No order has been placed."
+                                        "Deposit", "Withdraw" -> onOpenPortal()
                                         "Analytics" -> currentTab = DashboardTab.PORTFOLIO
                                     }
                                 }
@@ -1107,6 +1117,7 @@ private fun QuickActionsRow(
     cardSurface: Color,
     cardBorder: Color,
     textPrimary: Color,
+    customerReady: Boolean,
     onAction: (String) -> Unit
 ) {
     Row(
@@ -1121,11 +1132,18 @@ private fun QuickActionsRow(
         )
 
         actions.forEach { (label, icon, key) ->
+            val actionEnabled = when (key) {
+                "trade" -> false
+                "deposit", "withdraw" -> customerReady
+                else -> true
+            }
             Card(
                 modifier = Modifier
                     .weight(1f)
-                    .clickable { onAction(label) },
-                colors = CardDefaults.cardColors(containerColor = cardSurface),
+                    .clickable(enabled = actionEnabled) { if (actionEnabled) onAction(label) },
+                colors = CardDefaults.cardColors(
+                    containerColor = cardSurface.copy(alpha = if (actionEnabled) 1f else 0.55f)
+                ),
                 shape = RoundedCornerShape(14.dp),
                 border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(cardBorder))
             ) {
@@ -1138,7 +1156,7 @@ private fun QuickActionsRow(
                     Icon(
                         imageVector = icon,
                         contentDescription = label,
-                        tint = textPrimary,
+                        tint = textPrimary.copy(alpha = if (actionEnabled) 1f else 0.45f),
                         modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.height(4.dp))
@@ -1146,7 +1164,7 @@ private fun QuickActionsRow(
                         text = label,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Medium,
-                        color = textPrimary,
+                        color = textPrimary.copy(alpha = if (actionEnabled) 1f else 0.45f),
                         maxLines = 1
                     )
                 }
