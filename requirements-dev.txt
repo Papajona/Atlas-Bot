@@ -4,3 +4,4 @@ bandit==1.9.4
 pip-audit==2.10.1
 pytest-asyncio==1.2.0
 pyflakes==3.4.0
+ruff==0.12.10

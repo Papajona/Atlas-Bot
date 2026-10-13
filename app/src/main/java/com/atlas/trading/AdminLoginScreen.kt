@@ -248,7 +248,7 @@ fun AdminLoginScreen(
                         Spacer(modifier = Modifier.height(18.dp))
 
                         Text(
-                            text = "🔒 Encrypted TLS 1.3 • Hardware Key & Biometric Safe",
+                            text = "🔒 Secure connection • Server-verified admin session required",
                             fontSize = 10.sp,
                             color = textMuted
                         )

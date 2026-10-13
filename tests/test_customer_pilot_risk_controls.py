@@ -38,7 +38,8 @@ def test_risk_gate_enforces_customer_pilot_caps_for_live_orders():
     assert 'pilot_daily_loss = float(account.pilot_daily_loss_limit or 0)' in src
     assert 'max_notional_limit = min(max_notional_limit, pilot_max_notional)' in src
     assert 'max_exposure_limit = min(max_exposure_limit, pilot_max_exposure)' in src
-    assert 'max_open_position_limit = min(settings.max_open_positions, pilot_max_positions)' in src
+    assert 'configured_max_positions = min(settings.max_open_positions, CONSERVATIVE_PROFILE.max_open_positions) if conservative_profile else settings.max_open_positions' in src
+    assert 'max_open_position_limit = min(configured_max_positions, pilot_max_positions) if pilot_max_positions is not None else configured_max_positions' in src
 
 
 def test_customer_pilot_endpoint_requires_dual_risk_officer_approval():

@@ -337,6 +337,7 @@ class Settings(BaseSettings):
     # Re-verify customer exchange-key permissions against the exchange (0 disables). Needs background_reconciliation_enabled.
     customer_key_audit_interval_seconds: int = 900
     heartbeat_interval_seconds: int = 15
+    critical_worker_failure_threshold: int = 3
     stale_instance_seconds: int = 60
     require_backup_recovery_config: bool = True
     backup_recovery_url: str = ""

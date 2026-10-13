@@ -24,13 +24,44 @@ STRATEGIES = ("trend", "momentum", "breakout", "mean_reversion", "ensemble")
 REGIMES = ("TREND_UP", "TREND_DOWN", "RANGE", "HIGH_VOL", "TRANSITION")
 
 
+def _periods_per_year(index: pd.Index, asset: str = "crypto") -> float:
+    """Approximate annualized bar count from observed cadence and active market hours."""
+    if isinstance(index, pd.DatetimeIndex) and len(index) >= 3:
+        idx = pd.DatetimeIndex(index)
+        if idx.tz is not None:
+            idx = idx.tz_localize(None)
+        deltas = idx.to_series().diff().dt.total_seconds()
+        deltas = deltas[(deltas > 0) & np.isfinite(deltas)]
+        median_seconds = float(deltas.median()) if not deltas.empty else float("nan")
+    else:
+        median_seconds = float("nan")
+    market = str(asset).strip().lower()
+    if market == "crypto":
+        active_hours_per_day, active_days = 24.0, 365.25
+    elif market in {"forex", "fx"}:
+        active_hours_per_day, active_days = 24.0, 252.0
+    elif market in {"commodity", "commodities", "metal", "energy"}:
+        active_hours_per_day, active_days = 23.0, 252.0
+    elif market in {"stock", "stocks", "equity", "equities", "index", "indices"}:
+        active_hours_per_day, active_days = 6.5, 252.0
+    else:
+        active_hours_per_day, active_days = 24.0, 252.0
+    if not math.isfinite(median_seconds) or median_seconds <= 0:
+        return float(active_days)
+    # Daily-or-slower bars represent one observation per active session/day; dividing
+    # active hours by a 24h calendar interval would undercount commodity/equity bars.
+    if median_seconds >= 20 * 3600:
+        return float(active_days)
+    return float((active_days * active_hours_per_day * 3600.0) / median_seconds)
+
+
 def classify_regime(df: pd.DataFrame, *, asset: str = "crypto") -> pd.Series:
     """Classify each completed bar without using future observations."""
     c = df["close"].astype(float)
     fast = c.ewm(span=50, adjust=False).mean()
     slow = c.ewm(span=200, adjust=False).mean()
-    annual = 365.25 if str(asset).lower() == "crypto" else 252.0
-    vol = c.pct_change().rolling(20).std() * np.sqrt(annual)
+    periods_per_year = _periods_per_year(df.index, asset)
+    vol = c.pct_change().rolling(20).std() * np.sqrt(periods_per_year)
     trend_gap = (fast / slow - 1.0).abs()
     trend = (fast / slow - 1.0)
     regime = pd.Series("RANGE", index=df.index, dtype="object")

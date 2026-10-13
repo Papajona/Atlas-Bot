@@ -14,6 +14,16 @@ ORDERS = Counter("trader_orders_total", "Orders by mode/status", ["mode", "statu
 EQUITY = Gauge("trader_equity", "Current account equity")
 DRAWDOWN = Gauge("trader_drawdown", "Current equity drawdown")
 OPEN_POSITIONS = Gauge("trader_open_positions", "Number of non-zero positions")
+CRITICAL_WORKER_LOOP_FAILURES = Counter(
+    "atlas_critical_worker_loop_failures_total",
+    "Failures in custody, continuous risk enforcement, and customer-key audit loops",
+    ["loop"],
+)
+CRITICAL_WORKER_LOOP_CONSECUTIVE_FAILURES = Gauge(
+    "atlas_critical_worker_loop_consecutive_failures",
+    "Consecutive failures in critical worker loops; reset to zero after a successful cycle",
+    ["loop"],
+)
 
 
 class TelemetryMiddleware(BaseHTTPMiddleware):
