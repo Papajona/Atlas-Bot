@@ -26,6 +26,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.UniqueConstraint("customer_id", "asset_class", "currency", name="uq_sim_account_customer_asset_currency"),
+        sa.UniqueConstraint("id", "customer_id", name="uq_sim_account_id_customer"),
         sa.CheckConstraint("asset_class IN ('crypto', 'forex', 'commodity')", name="ck_sim_account_asset_class"),
         sa.CheckConstraint("virtual_balance >= 0", name="ck_sim_account_nonnegative_balance"),
         sa.CheckConstraint("initial_virtual_balance >= 0", name="ck_sim_account_nonnegative_initial"),
