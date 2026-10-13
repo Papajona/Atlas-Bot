@@ -24,15 +24,10 @@ STRATEGIES = ("trend", "momentum", "breakout", "mean_reversion", "ensemble")
 REGIMES = ("TREND_UP", "TREND_DOWN", "RANGE", "HIGH_VOL", "TRANSITION")
 
 
-def classify_regime(df: pd.DataFrame, *, asset: str = "crypto") -> pd.Series:
-    """Classify each completed bar without using future observations."""
-    c = df["close"].astype(float)
-    fast = c.ewm(span=50, adjust=False).mean()
-    slow = c.ewm(span=200, adjust=False).mean()
-    # Annualize using observed bar spacing and an asset-specific active-hours calendar.
-    # This avoids treating hourly bars as daily bars (252/365 observations per year).
-    if isinstance(df.index, pd.DatetimeIndex) and len(df.index) >= 3:
-        idx = pd.DatetimeIndex(df.index)
+def _periods_per_year(index: pd.Index, asset: str = "crypto") -> float:
+    """Approximate annualized bar count from observed cadence and active market hours."""
+    if isinstance(index, pd.DatetimeIndex) and len(index) >= 3:
+        idx = pd.DatetimeIndex(index)
         if idx.tz is not None:
             idx = idx.tz_localize(None)
         deltas = idx.to_series().diff().dt.total_seconds()
@@ -52,9 +47,16 @@ def classify_regime(df: pd.DataFrame, *, asset: str = "crypto") -> pd.Series:
     else:
         active_hours_per_day, active_days = 24.0, 252.0
     if not math.isfinite(median_seconds) or median_seconds <= 0:
-        periods_per_year = active_days
-    else:
-        periods_per_year = (active_days * active_hours_per_day * 3600.0) / median_seconds
+        return float(active_days)
+    return float((active_days * active_hours_per_day * 3600.0) / median_seconds)
+
+
+def classify_regime(df: pd.DataFrame, *, asset: str = "crypto") -> pd.Series:
+    """Classify each completed bar without using future observations."""
+    c = df["close"].astype(float)
+    fast = c.ewm(span=50, adjust=False).mean()
+    slow = c.ewm(span=200, adjust=False).mean()
+    periods_per_year = _periods_per_year(df.index, asset)
     vol = c.pct_change().rolling(20).std() * np.sqrt(periods_per_year)
     trend_gap = (fast / slow - 1.0).abs()
     trend = (fast / slow - 1.0)
