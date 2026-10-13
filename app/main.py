@@ -1453,7 +1453,7 @@ async def _usdt_tron_monitor_loop():
                     finally:
                         await release_lock(lock_key)
 
-                async def _bounded(wallet, _slots=_scan_slots, _scan=_scan_one):
+                async def _bounded(wallet, _slots=scan_slots, _scan=_scan_one):
                     async with _slots:
                         await _scan(wallet)
                 await asyncio.gather(*(_bounded(w) for w in wallets))
