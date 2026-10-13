@@ -52,6 +52,11 @@ def test_admin_controls_are_hidden_until_server_state_is_verified():
     reveal = html.index("document.body.classList.remove('admin-auth-pending')", start)
     assert start < state_check < positions_check < reveal
     assert "await api('/api/state')" in html[start:reveal]
+    assert "adminEmailField" in html[start:reveal]
+    assert "adminPasswordField" in html[start:reveal]
+    assert "adminLogoutBtn" in html[start:reveal]
+    assert "function adminLogout()" in html
+    assert "ait_admin_access_token" in html[html.index("function adminLogout()"):]
 
 
 def test_ui_screenshot_capture_covers_customer_and_both_admin_states():
