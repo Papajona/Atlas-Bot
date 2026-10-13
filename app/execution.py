@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from .broker import Broker, BrokerConfig
 from .customer_binance_execution import build_customer_binance_broker, CustomerBinanceExecutionError
 from .risk_governor import evaluate_trade
+from .conservative_strategy import validate_conservative_order, ConservativePolicyError
 from .forex_oanda import OandaBroker, OandaConfig
 from .config import settings
 from .db import (SessionLocal, OandaReconciliationState, AppState, TradingAccount, Trade, Position, CustomerBinanceAccount, StrategyOutcome, TradeLearningEpisode, OrderCommand,
@@ -1079,6 +1080,24 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     raise RiskBlocked("OANDA instrument is not tradeable for this account")
             except Exception as exc:
                 raise RiskBlocked(str(exc)) from exc
+        if strategy == "atlas_conservative_v1":
+            # The conservative profile is research/paper-only until separately certified.
+            # Never let this profile silently enter any live broker path.
+            if live:
+                raise RiskBlocked("Atlas Conservative v1 is not certified for live execution")
+            try:
+                validate_conservative_order(
+                    equity=risk_equity,
+                    entry_price=quote,
+                    quantity=quantity,
+                    stop_loss_price=stop_loss_price,
+                    take_profit_price=take_profit_price,
+                    side=side,
+                    spread_bps=spread_bps if spread_bps is not None else signal.get("spread_bps"),
+                    metadata=signal.get("instrument_metadata"),
+                )
+            except ConservativePolicyError as exc:
+                raise RiskBlocked("Conservative policy blocked order: " + str(exc)) from exc
         governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps, equity=risk_equity, risk_per_trade=settings.risk_per_trade)
         if governor.action != "ALLOW":
             raise RiskBlocked("Risk Governor blocked order: " + ",".join(governor.reasons))
