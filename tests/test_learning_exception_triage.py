@@ -25,7 +25,6 @@ def test_prior_trial_label_database_errors_propagate_instead_of_disabling_leakag
 
 def test_per_episode_learning_failures_are_persisted_and_counted():
     src = (ROOT / "app/trade_learning.py").read_text()
-    start = src.index("async def")
     marker = 'ep.replay_status = "ERROR"'
     assert marker in src
     assert "ep.replay_error = str(exc)" in src
