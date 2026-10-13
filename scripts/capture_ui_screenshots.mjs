@@ -65,6 +65,8 @@ try {
         horizontalOverflow: doc.scrollWidth > window.innerWidth + 1,
         authScreenVisible: Boolean(document.querySelector("#auth") && getComputedStyle(document.querySelector("#auth")).display !== "none"),
         adminAuthPending: document.body.classList.contains("admin-auth-pending"),
+        adminCredentialsVisible: Boolean(document.querySelector("#adminEmailField") && getComputedStyle(document.querySelector("#adminEmailField")).display !== "none" && document.querySelector("#adminEmailField").getClientRects().length),
+        adminLogoutVisible: Boolean(document.querySelector("#adminLogoutBtn") && getComputedStyle(document.querySelector("#adminLogoutBtn")).display !== "none" && document.querySelector("#adminLogoutBtn").getClientRects().length),
         adminWorkbenchVisible: Boolean(document.querySelector("#strategy") && getComputedStyle(document.querySelector("#strategy")).display !== "none" && document.querySelector("#strategy").getClientRects().length),
         mobileNavVisible: Boolean(document.querySelector(".mobile-nav") && getComputedStyle(document.querySelector(".mobile-nav")).display !== "none" && document.querySelector(".mobile-nav").getClientRects().length),
         sidebarVisible: Boolean(document.querySelector(".sidebar") && getComputedStyle(document.querySelector(".sidebar")).display !== "none" && document.querySelector(".sidebar").getClientRects().length),
@@ -101,6 +103,15 @@ try {
     }
     if (item.route === "/admin" && item.adminAuthenticatedPreview === true && !diagnostics.adminWorkbenchVisible) {
       throw new Error(`${item.name}: admin workbench remained hidden after session fixture verification`);
+    }
+    if (item.route === "/admin" && item.adminAuthenticatedPreview === false && !diagnostics.adminCredentialsVisible) {
+      throw new Error(`${item.name}: login controls are hidden before authentication`);
+    }
+    if (item.route === "/admin" && item.adminAuthenticatedPreview === true && diagnostics.adminCredentialsVisible) {
+      throw new Error(`${item.name}: sign-in credentials remain visible after session verification`);
+    }
+    if (item.route === "/admin" && item.adminAuthenticatedPreview === true && !diagnostics.adminLogoutVisible) {
+      throw new Error(`${item.name}: verified administrator has no visible sign-out control`);
     }
     const screenshot = path.join(outputDir, `${item.name}.png`);
     await page.screenshot({ path: screenshot, fullPage: true, animations: "disabled" });
