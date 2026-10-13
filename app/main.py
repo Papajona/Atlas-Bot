@@ -1697,6 +1697,8 @@ async def _continuous_risk_enforcement_loop():
                     await emergency_stop()
                 except Exception as exc:
                     await _handle_critical_worker_failure("continuous-risk-enforcement", exc)
+                else:
+                    _mark_critical_worker_success("continuous-risk-enforcement")
             else:
                 _mark_critical_worker_success("continuous-risk-enforcement")
         except Exception as exc:
