@@ -53,6 +53,20 @@ class RiskBlocked(RuntimeError):
     pass
 
 
+def _require_conservative_execution_ready(*, live: bool) -> None:
+    """Fail closed until trusted provider metadata and FX conversion are wired end-to-end."""
+    if live:
+        raise RiskBlocked("Atlas Conservative v1 is not certified for live execution")
+    raise RiskBlocked(
+        "Conservative strategy unavailable: trusted instrument metadata and "
+        "account-currency conversion are not yet wired to this execution path"
+    )
+
+
+
+    pass
+
+
 _EXECUTION_LOCK = asyncio.Lock()
 
 _EXECUTION_OWNER = os.getenv("K_REVISION", "local") + ":" + uuid.uuid4().hex[:16]
@@ -1088,16 +1102,9 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
         if strategy == "atlas_conservative_v1":
             # The conservative profile is research/paper-only until separately certified.
             # Never let this profile silently enter any live broker path.
-            if live:
-                raise RiskBlocked("Atlas Conservative v1 is not certified for live execution")
             # Signal payloads can originate from API clients. Do not accept contract
             # metadata or spreads from the signal as authoritative instrument facts.
-            # Paper execution currently has no verified server-side metadata provider
-            # covering all supported markets and account-currency conversions; fail closed.
-            raise RiskBlocked(
-                "Conservative strategy unavailable: trusted instrument metadata and "
-                "account-currency conversion are not yet wired to this execution path"
-            )
+            _require_conservative_execution_ready(live=live)
         governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps, equity=risk_equity, risk_per_trade=settings.risk_per_trade)
         if governor.action != "ALLOW":
             raise RiskBlocked("Risk Governor blocked order: " + ",".join(governor.reasons))
