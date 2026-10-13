@@ -120,23 +120,21 @@ def compute_run_drift(previous: dict[str, Any] | None, current: dict[str, Any], 
 
 
 async def _prior_trial_labels(symbol: str, days: int = 365) -> set[str]:
-    """Union of every configuration label evaluated on this symbol in the last `days` (best-effort; empty set on failure)."""
-    try:
-        from datetime import timedelta
-        from sqlalchemy import select
-        from .db import SessionLocal, ResearchRun
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        async with SessionLocal() as db:
-            rows = (await db.execute(select(ResearchRun.research_json).where(ResearchRun.symbol == symbol, ResearchRun.created_at >= cutoff))).scalars().all()
-        labels: set[str] = set()
-        for raw in rows:
-            try:
-                labels.update(str(x) for x in (json.loads(raw or "{}").get("trial_labels") or []))
-            except (TypeError, ValueError):
-                continue
-        return labels
-    except Exception:
-        return set()
+    """Return prior trial labels; database errors propagate so research cannot silently lose leakage controls."""
+    from datetime import timedelta
+    from sqlalchemy import select
+    from .db import SessionLocal, ResearchRun
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    async with SessionLocal() as db:
+        rows = (await db.execute(select(ResearchRun.research_json).where(ResearchRun.symbol == symbol, ResearchRun.created_at >= cutoff))).scalars().all()
+    labels: set[str] = set()
+    for raw in rows:
+        try:
+            payload = json.loads(raw or "{}")
+            labels.update(str(x) for x in (payload.get("trial_labels") or []))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return labels
 
 
 async def _persist_research_run(symbol: str, research: dict[str, Any], review: dict[str, Any],
