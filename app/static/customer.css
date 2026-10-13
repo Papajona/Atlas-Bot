@@ -86,4 +86,6 @@ body.customer-auth-active .workspace {
 }
 body.customer-auth-active main {
   max-width: 920px;
+  margin-left: auto;
+  margin-right: auto;
 }
