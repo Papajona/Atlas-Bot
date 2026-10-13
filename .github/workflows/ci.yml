@@ -459,7 +459,22 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ui-audit-artifacts
-          echo "no" | avdmanager create avd --force --name atlas-ui-audit --package "system-images;android-35;google_apis;x86_64" --device pixel_2
+          export ANDROID_AVD_HOME="${RUNNER_TEMP}/atlas-android-avd"
+          export ANDROID_USER_HOME="${RUNNER_TEMP}/atlas-android-user"
+          mkdir -p "$ANDROID_AVD_HOME" "$ANDROID_USER_HOME"
+          if ! printf 'no\n' | avdmanager create avd --force --name atlas-ui-audit --package "system-images;android-35;google_apis;x86_64" --device pixel_2 --path "$ANDROID_AVD_HOME/atlas-ui-audit.avd"; then
+            echo "AVD creation command failed" >&2
+            avdmanager list avd || true
+            find "$ANDROID_AVD_HOME" "$ANDROID_USER_HOME" -maxdepth 4 -type f -print || true
+            exit 1
+          fi
+          echo "AVDs created by avdmanager:"
+          avdmanager list avd
+          if [ ! -f "$ANDROID_AVD_HOME/atlas-ui-audit.ini" ] && [ ! -f "$ANDROID_AVD_HOME/atlas-ui-audit.avd/config.ini" ]; then
+            echo "AVD creation reported success, but configuration is absent from ANDROID_AVD_HOME=$ANDROID_AVD_HOME" >&2
+            find "$RUNNER_TEMP" "$HOME/.android" -maxdepth 5 -iname '*atlas-ui-audit*' -print || true
+            exit 1
+          fi
           EMULATOR_BIN="${ANDROID_HOME}/emulator/emulator"
           if [ ! -x "$EMULATOR_BIN" ]; then
             echo "Android emulator package was installed but binary is missing at $EMULATOR_BIN" >&2
