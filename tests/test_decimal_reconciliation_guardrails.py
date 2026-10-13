@@ -3,6 +3,8 @@ import ast
 from decimal import Decimal
 from pathlib import Path
 
+from app.db import LedgerJournalLine
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
