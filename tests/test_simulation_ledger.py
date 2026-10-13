@@ -33,6 +33,7 @@ def test_simulation_event_rejects_unsupported_asset_before_database_access():
             event_type="ORDER_FILL",
             balance_delta="-1",
             asset_class="equities",
+            simulation_mode="SIMULATION",
         ))
 
 
@@ -45,6 +46,7 @@ def test_simulation_seed_cannot_be_posted_as_an_ordinary_event():
             event_type="VIRTUAL_SEED",
             balance_delta="10000",
             asset_class="forex",
+            simulation_mode="SIMULATION",
         ))
 
 
@@ -63,3 +65,13 @@ def test_customer_paper_execution_guard_remains_enabled_until_integration_is_ver
     assert customer_paper_execution_blocked(42, True) is True
     assert customer_paper_execution_blocked(42, False) is False
     assert customer_paper_execution_blocked(None, True) is False
+
+
+def test_simulation_event_rejects_missing_or_ambiguous_mode_before_database_access():
+    for mode in (None, "", "LIVE", "PAPER", "SIMULATION_OR_LIVE"):
+        with pytest.raises(SimulationLedgerError, match="Explicit SIMULATION mode is required"):
+            asyncio.run(post_simulation_event(
+                customer_id=42, account_id=7, idempotency_key="mode-check",
+                event_type="ORDER_FILL", balance_delta="-1", asset_class="forex",
+                simulation_mode=mode,
+            ))
