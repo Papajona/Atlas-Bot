@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+from decimal import Decimal
 import time
 import hashlib
 import hmac
@@ -97,8 +98,9 @@ class CCXTPayoutProvider:
         # Normalize to the exchange's currency precision before submitting funds.
         # A precision/format failure occurs before the provider call and is not UNKNOWN.
         try:
+            await self._call(self.exchange.load_markets)
             normalized_amount = await self._call(self.exchange.currency_to_precision, currency, amount)
-            if not normalized_amount or float(normalized_amount) <= 0:
+            if not normalized_amount or Decimal(str(normalized_amount)) <= 0:
                 raise PayoutError("Withdrawal amount rounds to zero at provider precision")
         except PayoutError:
             raise
