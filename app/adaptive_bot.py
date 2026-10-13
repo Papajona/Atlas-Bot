@@ -57,7 +57,8 @@ def _read_streak(model_path: str | Path) -> dict:
     try:
         value = json.loads(p.read_text())
         return value if isinstance(value, dict) else {"consecutive_passes": 0}
-    except Exception:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        # Corrupt/unreadable streak state must reset the consecutive-pass counter (fail closed).
         return {"consecutive_passes": 0}
 
 
@@ -68,7 +69,8 @@ def _read_meta(model_path: str | Path) -> dict | None:
     try:
         value = json.loads(p.read_text())
         return value if isinstance(value, dict) else None
-    except Exception:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        # Missing/corrupt metadata is treated as unavailable; promotion gates still apply.
         return None
 
 
