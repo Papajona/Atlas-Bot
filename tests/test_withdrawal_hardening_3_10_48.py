@@ -209,8 +209,16 @@ class _FakeExchange:
         self.withdraw_params = None
         self.fetch_args = None
 
+    def load_markets(self):
+        return {}
+
+    def currency_to_precision(self, currency, amount):
+        # Mirror CCXT's string output for a valid amount in this deterministic test double.
+        return str(amount)
+
     def withdraw(self, currency, amount, destination, tag, params):
         self.withdraw_params = dict(params)
+        self.withdraw_amount = amount
         return {"id": "tx-1", "status": "pending"}
 
     def fetch_withdrawals(self, currency, since, limit):
