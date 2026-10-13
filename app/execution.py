@@ -63,10 +63,6 @@ def _require_conservative_execution_ready(*, live: bool) -> None:
     )
 
 
-
-    pass
-
-
 _EXECUTION_LOCK = asyncio.Lock()
 
 _EXECUTION_OWNER = os.getenv("K_REVISION", "local") + ":" + uuid.uuid4().hex[:16]
