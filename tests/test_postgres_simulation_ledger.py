@@ -52,7 +52,7 @@ async def _real_money_snapshot(sessions, customer_id):
             FROM customer_ledger_accounts WHERE customer_id=:cid
         """), {"cid": customer_id})).all()
         wallets = (await db.execute(text("""
-            SELECT id, balance, updated_at FROM wallets WHERE customer_id=:cid ORDER BY id
+            SELECT id, available_balance, locked_balance, updated_at FROM wallets WHERE customer_id=:cid ORDER BY id
         """), {"cid": customer_id})).all()
         journals = (await db.execute(text("""
             SELECT count(*) FROM ledger_journals WHERE customer_id=:cid
