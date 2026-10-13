@@ -3,12 +3,6 @@ import ast
 from decimal import Decimal
 from pathlib import Path
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
-from app.db import Base, LedgerJournal, LedgerJournalLine
-
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -35,7 +29,6 @@ def test_reconciliation_endpoint_aggregates_liabilities_with_decimal_not_float()
 
 
 def test_postgres_numeric_journal_line_columns_preserve_six_decimal_scale():
-    from app.db import LedgerJournalLine
     assert str(LedgerJournalLine.__table__.c.debit.type) == "NUMERIC(38, 6)"
     assert str(LedgerJournalLine.__table__.c.credit.type) == "NUMERIC(38, 6)"
 
