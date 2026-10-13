@@ -20,8 +20,6 @@ try {
     const page = await browser.newPage({
       viewport: item.viewport,
       deviceScaleFactor: 1,
-      isMobile: Boolean(item.mobile),
-      hasTouch: Boolean(item.mobile),
       colorScheme: "dark",
       reducedMotion: "reduce",
     });
@@ -34,13 +32,7 @@ try {
     await page.route("**/*", async route => {
       const url = new URL(route.request().url());
       if (!["127.0.0.1", "localhost"].includes(url.hostname)) return route.abort();
-      if (url.pathname.startsWith("/api/")) {
-        return route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({ ok: true, preview: true, status: "PAPER", items: [], data: [] }),
-        });
-      }
+      // Local API requests are handled by ui_preview_server.py's endpoint-shaped fixtures.
       return route.continue();
     });
 
@@ -63,6 +55,10 @@ try {
         viewportHeight: window.innerHeight,
         documentHeight: Math.max(doc.scrollHeight, body.scrollHeight),
         horizontalOverflow: doc.scrollWidth > window.innerWidth + 1,
+        authScreenVisible: Boolean(document.querySelector("#auth") && getComputedStyle(document.querySelector("#auth")).display !== "none"),
+        mobileNavVisible: Boolean(document.querySelector(".mobile-nav") && getComputedStyle(document.querySelector(".mobile-nav")).display !== "none" && document.querySelector(".mobile-nav").getClientRects().length),
+        sidebarVisible: Boolean(document.querySelector(".sidebar") && getComputedStyle(document.querySelector(".sidebar")).display !== "none" && document.querySelector(".sidebar").getClientRects().length),
+        topbarVisible: Boolean(document.querySelector(".topbar") && getComputedStyle(document.querySelector(".topbar")).display !== "none" && document.querySelector(".topbar").getClientRects().length),
         mainHeadings: Array.from(document.querySelectorAll("h1, h2"))
           .slice(0, 18).map(el => (el.innerText || "").trim()).filter(Boolean),
         styleSheets,
@@ -74,6 +70,15 @@ try {
     });
     if (!diagnostics.title || diagnostics.documentHeight < 200) {
       throw new Error(`${item.name}: rendered document appears incomplete: ${JSON.stringify(diagnostics)}`);
+    }
+    if (diagnostics.viewportWidth !== item.viewport.width) {
+      throw new Error(`${item.name}: viewport mismatch, requested ${item.viewport.width}px but rendered ${diagnostics.viewportWidth}px`);
+    }
+    if (diagnostics.horizontalOverflow) {
+      throw new Error(`${item.name}: horizontal overflow at ${diagnostics.viewportWidth}px: document width ${diagnostics.documentWidth}px`);
+    }
+    if (item.mobile && diagnostics.authScreenVisible && diagnostics.mobileNavVisible) {
+      throw new Error(`${item.name}: mobile navigation overlaps the unauthenticated customer auth screen`);
     }
     const screenshot = path.join(outputDir, `${item.name}.png`);
     await page.screenshot({ path: screenshot, fullPage: true, animations: "disabled" });
