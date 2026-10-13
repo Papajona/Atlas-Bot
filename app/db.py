@@ -1263,3 +1263,31 @@ class ArbitrageOpportunity(Base):
     net_edge_pct: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[str] = mapped_column(String(30), default="PAPER_CANDIDATE")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+class CustomerRiskProfile(Base):
+    __tablename__ = "customer_risk_profiles"
+    __table_args__ = (
+        UniqueConstraint("customer_id", name="uq_customer_risk_profile_customer"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customer_profiles.id", ondelete="CASCADE"), nullable=False)
+    daily_loss_limit_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.02)
+    updated_by: Mapped[str] = mapped_column(String(160), nullable=False, default="customer")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class CustomerRiskDecision(Base):
+    __tablename__ = "customer_risk_decisions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customer_profiles.id", ondelete="CASCADE"), nullable=False)
+    signal_id: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    symbol: Mapped[str] = mapped_column(String(80), nullable=False)
+    side: Mapped[str] = mapped_column(String(10), nullable=False)
+    requested_price: Mapped[float] = mapped_column(FinancialNumeric, nullable=False)
+    quantity: Mapped[float] = mapped_column(FinancialNumeric, nullable=False)
+    execution_mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    verdict: Mapped[str] = mapped_column(String(20), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    signal_timestamp: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
