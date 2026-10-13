@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from .broker import Broker, BrokerConfig
 from .customer_binance_execution import build_customer_binance_broker, CustomerBinanceExecutionError
 from .risk_governor import evaluate_trade
-from .conservative_strategy import (validate_conservative_order, ConservativePolicyError, CONSERVATIVE_PROFILE)
+from .conservative_strategy import CONSERVATIVE_PROFILE
 from .forex_oanda import OandaBroker, OandaConfig
 from .config import settings
 from .db import (SessionLocal, OandaReconciliationState, AppState, TradingAccount, Trade, Position, CustomerBinanceAccount, StrategyOutcome, TradeLearningEpisode, OrderCommand,
