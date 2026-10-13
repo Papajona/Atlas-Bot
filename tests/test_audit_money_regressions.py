@@ -42,6 +42,7 @@ class _PrecisionExchange:
     def __init__(self, precision_value):
         self.precision_value = precision_value
         self.withdraw_amount = None
+        self.precision_inputs = []
         self.loaded = False
 
     def load_markets(self):
@@ -51,7 +52,7 @@ class _PrecisionExchange:
     def currency_to_precision(self, currency, amount):
         assert self.loaded, "market metadata must load before precision conversion"
         assert currency == "USDT"
-        assert Decimal(str(amount)) == Decimal("1.234567")
+        self.precision_inputs.append(Decimal(str(amount)))
         return self.precision_value
 
     def withdraw(self, currency, amount, destination, tag, params):
@@ -73,6 +74,7 @@ def test_ccxt_withdraw_uses_exchange_normalized_amount(monkeypatch):
         tag=None, network="TRON", idempotency_key="precision-test", metadata={},
     ))
     assert exchange.loaded
+    assert exchange.precision_inputs == [Decimal("1.234567")]
     assert exchange.withdraw_amount == "1.2345"
     assert result.provider_id == "provider-withdrawal-1"
 
@@ -85,4 +87,5 @@ def test_ccxt_withdraw_rejects_amount_that_rounds_to_zero_before_provider_call(m
             currency="USDT", amount=Decimal("0.000001"), destination="T" + "A" * 33,
             tag=None, network="TRON", idempotency_key="precision-zero", metadata={},
         ))
+    assert exchange.precision_inputs == [Decimal("0.000001")]
     assert exchange.withdraw_amount is None
