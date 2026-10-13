@@ -18,7 +18,7 @@ def test_daily_annualization_uses_market_calendar():
     daily = pd.date_range("2025-01-01", periods=100, freq="D", tz="UTC")
     assert _periods_per_year(daily, "crypto") == 365.25
     assert _periods_per_year(daily, "forex") == 252
-    assert _periods_per_year(daily, "commodity") == 252 * 23
+    assert _periods_per_year(daily, "commodity") == 252  # daily bars are one observation per active trading day
 
 
 def test_regime_classifier_is_finite_and_aligned_for_hourly_data():
