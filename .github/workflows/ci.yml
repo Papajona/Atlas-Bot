@@ -321,15 +321,10 @@ jobs:
             " | grep -qx RLS_OK
           PGPASSWORD=test_password dropdb -h 127.0.0.1 -U atlas atlas_restore
           rm -f /tmp/atlas-ci.dump
-      - name: Python lint (fatal static errors)
-        run: |
-          set +e
-          python -m pyflakes app scripts tests > /tmp/pyflakes.txt 2>&1
-          status=$?
-          set -e
-          cat /tmp/pyflakes.txt
-          if grep -E "undefined name|redefinition of" /tmp/pyflakes.txt; then exit 1; fi
-          echo "Pyflakes completed with status $status; only fatal static errors fail CI."
+      - name: Python lint (Ruff correctness rules)
+        run: ruff check app scripts tests --select E9,F63,F7,F82,F811,F823
+      - name: Dependency vulnerability audit
+        run: pip-audit -r requirements.txt
       - name: Repository secret scan
         run: python scripts/check_no_secrets.py
       - name: Security scan
@@ -395,8 +390,10 @@ jobs:
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
         with:
           gradle-version: "8.9"
+      - name: Run Android unit tests
+        run: gradle --no-daemon :app:testDebugUnitTest
       - name: Compile Android debug artifact
-        run: gradle :app:assembleDebug
+        run: gradle --no-daemon :app:assembleDebug
       - name: Verify Android security source gates
         run: |
           python -m pytest -q tests/test_production_security_gates.py
