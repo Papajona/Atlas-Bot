@@ -32,7 +32,6 @@ fun ModernSettingsScreen(
     modifier: Modifier = Modifier
 ) {
     // Preferences State
-    var isPaperTrading by remember { mutableStateOf(true) }
     var riskBudgetPct by remember { mutableStateOf("0.5%") }
     var autoTrailingStop by remember { mutableStateOf(true) }
     var costStressFilter by remember { mutableStateOf(true) }
@@ -272,7 +271,8 @@ fun ModernSettingsScreen(
                     onOptionSelected = { slippageTolerance = it },
                     textPrimary = textPrimary,
                     textMuted = textMuted,
-                    brandTeal = brandTeal
+                    brandTeal = brandTeal,
+                    enabled = false
                 )
             }
         }
