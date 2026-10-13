@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from .broker import Broker, BrokerConfig
 from .customer_binance_execution import build_customer_binance_broker, CustomerBinanceExecutionError
 from .risk_governor import evaluate_trade
-from .conservative_strategy import validate_conservative_order, ConservativePolicyError
+from .conservative_strategy import (validate_conservative_order, ConservativePolicyError, CONSERVATIVE_PROFILE)
 from .forex_oanda import OandaBroker, OandaConfig
 from .config import settings
 from .db import (SessionLocal, OandaReconciliationState, AppState, TradingAccount, Trade, Position, CustomerBinanceAccount, StrategyOutcome, TradeLearningEpisode, OrderCommand,
@@ -394,7 +394,9 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
 
         dd = 1 - (equity / peak) if peak else 0.0
         daily_loss = 1 - (equity / daily_start) if daily_start else 0.0
-        if dd >= settings.max_drawdown or daily_loss >= settings.daily_loss_limit:
+        drawdown_limit = min(settings.max_drawdown, CONSERVATIVE_PROFILE.max_drawdown_fraction) if conservative_profile else settings.max_drawdown
+        daily_loss_limit = min(settings.daily_loss_limit, CONSERVATIVE_PROFILE.daily_loss_fraction) if conservative_profile else settings.daily_loss_limit
+        if dd >= drawdown_limit or daily_loss >= daily_loss_limit:
             already_halted_exit = account is not None and account.status == "HALTED" and account_reduce_only
             if account is not None:
                 account.status = "HALTED"
@@ -447,10 +449,12 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
             if stop_loss_price is None or stop_loss_price <= 0:
                 raise RiskBlocked("Trading discipline requires a protective stop for new exposure")
             risk_cash = abs(price - float(stop_loss_price)) * quantity
-            allowed_risk = equity * settings.risk_per_trade * (1.0 + settings.discipline_risk_tolerance)
+            configured_risk_fraction = min(settings.risk_per_trade, CONSERVATIVE_PROFILE.risk_fraction) if conservative_profile else settings.risk_per_trade
+            allowed_risk = equity * configured_risk_fraction * (1.0 + (0.0 if conservative_profile else settings.discipline_risk_tolerance))
             if not (risk_cash <= allowed_risk + 1e-9):
                 raise RiskBlocked("Per-trade risk exceeds the configured discipline limit")
-        max_leverage = min(settings.max_leverage, pilot_max_leverage) if pilot_max_leverage is not None else settings.max_leverage
+        configured_max_leverage = min(settings.max_leverage, CONSERVATIVE_PROFILE.max_leverage) if conservative_profile else settings.max_leverage
+        max_leverage = min(configured_max_leverage, pilot_max_leverage) if pilot_max_leverage is not None else configured_max_leverage
         max_account_notional = equity * max_leverage
         max_notional_limit = min(settings.max_notional_usd, settings.max_position_notional_usd, max_account_notional)
         if pilot_max_notional is not None:
@@ -467,7 +471,8 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
         if customer_id is not None:
             q = q.where(Position.customer_id == customer_id)
         open_positions = (await db.execute(q)).scalars().all()
-        max_open_position_limit = min(settings.max_open_positions, pilot_max_positions) if pilot_max_positions is not None else settings.max_open_positions
+        configured_max_positions = min(settings.max_open_positions, CONSERVATIVE_PROFILE.max_open_positions) if conservative_profile else settings.max_open_positions
+        max_open_position_limit = min(configured_max_positions, pilot_max_positions) if pilot_max_positions is not None else configured_max_positions
         if symbol not in {p.symbol for p in open_positions} and len(open_positions) >= max_open_position_limit:
             raise RiskBlocked("Maximum open position count reached")
         if live and not signal_timestamp:
@@ -1101,7 +1106,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
         governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps, equity=risk_equity, risk_per_trade=settings.risk_per_trade)
         if governor.action != "ALLOW":
             raise RiskBlocked("Risk Governor blocked order: " + ",".join(governor.reasons))
-        await risk_gate(symbol, quote, quantity, live=live, signal_timestamp=signal_timestamp, side=side, customer_id=customer_id, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {})
+        await risk_gate(symbol, quote, quantity, live=live, signal_timestamp=signal_timestamp, side=side, customer_id=customer_id, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, conservative_profile=(strategy == "atlas_conservative_v1"))
         trade_id, created = await _create_trade(
             symbol, timeframe, side, quantity, quote, exchange, mode, signal, signal_id, cid,
             stop_loss_price or 0.0, take_profit_price or 0.0, customer_id=customer_id, trading_account_id=trading_account_id,
