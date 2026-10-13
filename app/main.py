@@ -1601,12 +1601,16 @@ async def _custody_reconciliation_loop():
             if report.get("status") != "OK":
                 logger.critical("custody_solvency_reconciliation status=%s ratio=%s gap=%s",
                                 report.get("status"), report.get("solvency_ratio"), report.get("coverage_gap"))
+                await _handle_critical_worker_failure(
+                    "custody-reconciliation",
+                    RuntimeError(f"custody reconciliation status is {report.get('status')!r}"),
+                )
+            else:
+                _mark_critical_worker_success("custody-reconciliation")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             await _handle_critical_worker_failure("custody-reconciliation", exc)
-        else:
-            _mark_critical_worker_success("custody-reconciliation")
 
 
 def _classify_worker_health(rows, *, stale_after_seconds: int, now: datetime | None = None) -> dict:
@@ -1650,6 +1654,8 @@ async def _continuous_risk_enforcement_loop():
             breached = []
             async with SessionLocal() as db:
                 state = await db.get(AppState, 1)
+                if state is None:
+                    raise RuntimeError("AppState row is missing; platform risk limits cannot be enforced")
                 if state:
                     peak = float(state.peak_equity or state.equity or 0.0)
                     daily_start = float(state.daily_start_equity or state.equity or 0.0)
