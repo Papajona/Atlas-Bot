@@ -112,7 +112,7 @@ async def post_simulation_event(
     async with SessionLocal() as db:
         async with db.begin():
             account = (await db.execute(text("""
-                SELECT virtual_balance, status, asset_class FROM customer_simulation_accounts
+                SELECT virtual_balance, status, asset_class, daily_loss_limit FROM customer_simulation_accounts
                 WHERE id=:account_id AND customer_id=:customer_id FOR UPDATE
             """), {"account_id": account_id, "customer_id": customer_id})).first()
             if not account:
@@ -125,6 +125,16 @@ async def post_simulation_event(
             """), {"account_id": account_id, "key": idempotency_key})).first()
             if existing:
                 return Decimal(existing.balance_after)
+            if kind == "REALIZED_PNL" and delta < 0:
+                daily = (await db.execute(text("""
+                    SELECT COALESCE(SUM(-balance_delta), 0)
+                    FROM customer_simulation_events
+                    WHERE account_id=:account_id AND event_type='REALIZED_PNL'
+                      AND balance_delta < 0
+                      AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                """), {"account_id": account_id})).scalar_one()
+                if Decimal(daily) + abs(delta) > Decimal(account.daily_loss_limit):
+                    raise SimulationLedgerError("Simulation daily realized-loss limit exceeded")
             new_balance = Decimal(account.virtual_balance) + delta
             if new_balance < 0:
                 raise SimulationLedgerError("Simulation event would make virtual balance negative")
