@@ -294,7 +294,8 @@ fun ModernSettingsScreen(
                     onOptionSelected = { defaultTimeframe = it },
                     textPrimary = textPrimary,
                     textMuted = textMuted,
-                    brandTeal = brandTeal
+                    brandTeal = brandTeal,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
