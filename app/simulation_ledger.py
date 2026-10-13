@@ -96,7 +96,7 @@ async def create_simulation_account(
 async def post_simulation_event(
     *, customer_id: int, account_id: int, idempotency_key: str, event_type: str,
     balance_delta: Decimal | str | int | float, asset_class: str,
-    simulation_mode: str,
+    simulation_mode: str | None = None,
     symbol: str = "", quantity: Decimal | str | int | float = 0,
     price: Decimal | str | int | float = 0, metadata: dict | None = None,
 ) -> Decimal:
