@@ -47,14 +47,16 @@ def test_admin_controls_are_hidden_until_server_state_is_verified():
     assert "admin-auth-pending" in audit.body_classes
     assert "body.admin-auth-pending main > section:not(#overview)" in css
     start = html.index("async function unlockAdminConsole()")
-    state_check = html.index("typeof state.live_enabled!=='boolean'", start)
-    positions_check = html.index("!Array.isArray(state.open_positions)", start)
-    reveal = html.index("document.body.classList.remove('admin-auth-pending')", start)
-    assert start < state_check < positions_check < reveal
-    assert "await api('/api/state')" in html[start:reveal]
-    assert "adminEmailField" in html[start:reveal]
-    assert "adminPasswordField" in html[start:reveal]
-    assert "adminLogoutBtn" in html[start:reveal]
+    end = html.index("async function restoreAdminSession()", start)
+    unlock = html[start:end]
+    state_check = unlock.index("typeof state.live_enabled!=='boolean'")
+    positions_check = unlock.index("!Array.isArray(state.open_positions)")
+    reveal = unlock.index("document.body.classList.remove('admin-auth-pending')")
+    assert state_check < positions_check < reveal
+    assert "await api('/api/state')" in unlock
+    assert "adminEmailField" in unlock
+    assert "adminPasswordField" in unlock
+    assert "adminLogoutBtn" in unlock
     assert "function adminLogout()" in html
     assert "ait_admin_access_token" in html[html.index("function adminLogout()"):]
 
