@@ -126,6 +126,7 @@ def verify_local_signature(signature: str, digest: str) -> bool:
         return False
 from .monitoring import TelemetryMiddleware, metrics_response, logger
 from .schemas import (
+    CustomerRiskProfileRequest,
     MarketRequest,
     CustomerBotStartRequest,
     SmartTradeRequest,
@@ -3965,6 +3966,48 @@ async def customer_subscription_entitlements(authorization: str | None = Header(
         plan_code = next((code for code, definition in PLAN_DEFINITIONS.items() if definition == plan), "free")
         return {"plan": plan["name"], "plan_code": plan_code, "limits": {"ai_credits": int(plan["ai_credits"]), "exchanges": int(plan["exchanges"]), "strategies": int(plan["strategies"])}, "usage": {"ai_credits": used, "exchanges": connected, "strategies": active_bots + active_executors}, "features": list(plan.get("features", [])), "subscription_status": sub.status if sub else "free"}
 
+
+
+
+@app.get("/api/customer/risk-profile")
+async def customer_risk_profile(authorization: str | None = Header(default=None)):
+    from .db import CustomerRiskProfile
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db)
+        row = (await db.execute(select(CustomerRiskProfile).where(CustomerRiskProfile.customer_id == profile.id))).scalar_one_or_none()
+        if row is None:
+            row = CustomerRiskProfile(customer_id=profile.id, daily_loss_limit_pct=0.02, updated_by="customer")
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+        return {"daily_loss_limit_pct": float(row.daily_loss_limit_pct), "minimum_pct": 0.001, "maximum_pct": 0.15}
+
+
+@app.put("/api/customer/risk-profile")
+async def update_customer_risk_profile(body: CustomerRiskProfileRequest, authorization: str | None = Header(default=None)):
+    from .db import CustomerRiskProfile
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db)
+        row = (await db.execute(select(CustomerRiskProfile).where(CustomerRiskProfile.customer_id == profile.id).with_for_update())).scalar_one_or_none()
+        if row is None:
+            row = CustomerRiskProfile(customer_id=profile.id)
+            db.add(row)
+        row.daily_loss_limit_pct = body.daily_loss_limit_pct
+        row.updated_by = f"customer:{profile.id}"
+        row.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+        return {"daily_loss_limit_pct": float(row.daily_loss_limit_pct)}
+
+
+@app.get("/api/customer/risk-decisions")
+async def customer_risk_decisions(limit: int = 100, authorization: str | None = Header(default=None)):
+    from .db import CustomerRiskDecision
+    if limit < 1 or limit > 500:
+        raise HTTPException(422, "limit must be between 1 and 500")
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db)
+        rows = (await db.execute(select(CustomerRiskDecision).where(CustomerRiskDecision.customer_id == profile.id).order_by(desc(CustomerRiskDecision.created_at)).limit(limit))).scalars().all()
+        return {"items": [{"id": r.id, "signal_id": r.signal_id, "symbol": r.symbol, "side": r.side, "requested_price": float(r.requested_price), "quantity": float(r.quantity), "execution_mode": r.execution_mode, "verdict": r.verdict, "reason": r.reason, "signal_timestamp": r.signal_timestamp, "created_at": r.created_at.isoformat() if r.created_at else None} for r in rows]}
 
 
 @app.get("/api/customer/portfolio")
