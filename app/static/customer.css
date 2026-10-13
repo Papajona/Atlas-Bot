@@ -71,3 +71,19 @@ button:disabled,input:disabled,select:disabled,textarea:disabled{cursor:not-allo
   html{scroll-behavior:auto!important}
   *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
 }
+
+
+/* Authentication is a dedicated pre-account state. Do not show dashboard navigation
+   behind registration/sign-in, or let fixed mobile navigation cover auth controls. */
+body.customer-auth-active .sidebar,
+body.customer-auth-active .topbar,
+body.customer-auth-active .mobile-nav {
+  display: none !important;
+}
+body.customer-auth-active .workspace {
+  margin-left: 0;
+  width: 100%;
+}
+body.customer-auth-active main {
+  max-width: 920px;
+}
