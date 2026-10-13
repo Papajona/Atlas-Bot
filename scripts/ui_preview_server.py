@@ -41,6 +41,32 @@ async def admin_dashboard(request: Request):
 @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 async def stub_api(path: str):
     # Keep the rendered page deterministic and guarantee no API call reaches a live service.
+    # Return each UI endpoint's documented top-level shape so preview screenshots represent
+    # normal empty/loading states rather than artificial "rows.map is not a function" errors.
+    if path == "state":
+        return JSONResponse({
+            "mode": "PAPER", "equity": 0.0, "realized_pnl": 0.0, "unrealized_pnl": 0.0,
+            "drawdown": 0.0, "daily_loss": 0.0, "live_enabled": False,
+            "kill_switch": False, "open_positions": [],
+        })
+    if path == "trades" or path == "admin/withdrawals" or path == "admin/security/roles":
+        return JSONResponse([])
+    if path == "admin/withdrawals/summary":
+        return JSONResponse({
+            "pending_count": 0, "pending_amount": 0.0,
+            "approved_count": 0, "approved_amount": 0.0,
+            "in_flight_count": 0, "rejected_count": 0,
+        })
+    if path == "admin/billing/margin":
+        return JSONResponse({
+            "gross_subscription_revenue": 0.0, "operating_costs": 0.0,
+            "referral_commissions": 0.0, "contribution_margin_pct": 0.0,
+            "contribution_profit": 0.0,
+        })
+    if path == "customer/me":
+        return JSONResponse({"email": "preview@example.invalid", "status": "PREVIEW"})
+    if path in {"customer/wallets", "customer/funding", "customer/withdrawals"}:
+        return JSONResponse([])
     return JSONResponse({"ok": True, "preview": True, "status": "PAPER", "items": [], "data": []})
 
 
