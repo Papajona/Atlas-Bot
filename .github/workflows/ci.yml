@@ -460,7 +460,14 @@ jobs:
           set -euo pipefail
           mkdir -p ui-audit-artifacts
           echo "no" | avdmanager create avd --force --name atlas-ui-audit --package "system-images;android-35;google_apis;x86_64" --device pixel_2
-          emulator -avd atlas-ui-audit -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot -no-snapshot-save -memory 2048 -cores 2 > /tmp/atlas-ui-emulator.log 2>&1 &
+          EMULATOR_BIN="${ANDROID_HOME}/emulator/emulator"
+          if [ ! -x "$EMULATOR_BIN" ]; then
+            echo "Android emulator package was installed but binary is missing at $EMULATOR_BIN" >&2
+            find "$ANDROID_HOME" -maxdepth 3 -type f -name emulator -print || true
+            exit 1
+          fi
+          export PATH="${ANDROID_HOME}/emulator:${ANDROID_HOME}/platform-tools:$PATH"
+          "$EMULATOR_BIN" -avd atlas-ui-audit -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot -no-snapshot-save -memory 2048 -cores 2 > /tmp/atlas-ui-emulator.log 2>&1 &
           if ! timeout 150s adb wait-for-device; then
             echo "Android emulator did not become visible to ADB within 150 seconds" >&2
             adb devices -l || true
