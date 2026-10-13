@@ -49,7 +49,7 @@ def find_text(root: ET.Element, text: str) -> tuple[int, int] | None:
     return x, y
 
 
-def tap_visible_text(name: str, *, attempts: int = 2) -> None:
+def tap_visible_text(name: str, *, attempts: int = 8) -> None:
     for attempt in range(attempts):
         root = dump_ui(f"before-tap-{name.replace(' ', '-')}-{attempt}")
         point = find_text(root, name)
@@ -57,8 +57,10 @@ def tap_visible_text(name: str, *, attempts: int = 2) -> None:
             run(["adb", "shell", "input", "tap", str(point[0]), str(point[1])], timeout=15)
             time.sleep(1.3)
             return
-        time.sleep(0.6)
-    raise RuntimeError(f"Could not find visible Android control text: {name!r}")
+        # Settings is a long scrollable screen; reveal lower items without using fixed coordinates.
+        run(["adb", "shell", "input", "swipe", "800", "1900", "800", "620", "400"], timeout=15)
+        time.sleep(0.5)
+    raise RuntimeError(f"Could not find visible Android control text after scrolling: {name!r}")
 
 
 def main() -> None:
