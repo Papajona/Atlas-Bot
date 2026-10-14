@@ -81,7 +81,7 @@ def _request_json(url: str, headers: dict[str, str], payload: dict | None = None
 
 
 def _select_gemini_flash_alternatives(models: list[dict], configured_model: str) -> list[str]:
-    """Select at most two currently listed stable Flash model IDs for failure diagnostics."""
+    """Select at most four currently listed stable Flash model IDs for failure diagnostics."""
     import re
 
     candidates: list[tuple[int, int, int, str]] = []
@@ -103,11 +103,11 @@ def _select_gemini_flash_alternatives(models: list[dict], configured_model: str)
         # Prefer the non-lite model at the same version, then newer versions.
         candidates.append((major, minor, 0 if match.group(3) else 1, model_id))
     candidates.sort(reverse=True)
-    return [item[3] for item in candidates[:2]]
+    return [item[3] for item in candidates[:4]]
 
 
 def _diagnose_gemini_flash_alternatives(configured_model: str) -> None:
-    """After a configured model fails, probe up to two catalogue-listed stable Flash alternatives.
+    """After a configured model fails, probe up to four catalogue-listed stable Flash alternatives.
 
     This diagnostic never converts a failed configured-model check into success. It only
     reports a candidate that actually generated text with the configured API credential.
