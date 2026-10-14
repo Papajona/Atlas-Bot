@@ -37,6 +37,16 @@ jobs:
           pip install -r requirements-dev.txt
       - name: Wait for PostgreSQL
         run: until pg_isready -h 127.0.0.1 -p 5432 -U atlas -d atlas_test; do sleep 1; done
+      - name: Resolve official Python base-image digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect docker.io/library/python:3.13-slim | awk '/^Digest:/ {print $2; exit}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "Unable to resolve an official Python base-image digest" >&2
+            exit 1
+          }
+          echo "Official python:3.13-slim OCI digest: $digest"
       - name: Compile source
         run: python -m compileall -q app alembic
       - name: Create Supabase API roles for migration verification
