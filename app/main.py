@@ -2416,10 +2416,18 @@ async def admin_prepare_tron_sweep(req: dict, authorization: str | None = Header
         wallet_id = int(req.get("wallet_id"))
         amount = req.get("amount_usdt")
         async with SessionLocal() as db:
+            # Read owner identity first, then acquire locks in the global customer-cash
+            # order: ledger -> wallet. Re-check wallet status/owner after locking it.
+            candidate = (await db.execute(select(Wallet).where(
+                Wallet.id == wallet_id, Wallet.currency == "USDT", Wallet.network == "TRON",
+            ))).scalar_one_or_none()
+            if not candidate or not candidate.deposit_address:
+                raise HTTPException(404, "active TRON USDT wallet not found")
+            await get_or_create_ledger(db, candidate.customer_id, "USDT")
             wallet = (await db.execute(select(Wallet).where(
                 Wallet.id == wallet_id, Wallet.currency == "USDT", Wallet.network == "TRON",
                 Wallet.status == "ACTIVE").with_for_update())).scalar_one_or_none()
-            if not wallet or not wallet.deposit_address:
+            if not wallet or wallet.customer_id != candidate.customer_id or not wallet.deposit_address:
                 raise HTTPException(404, "active TRON USDT wallet not found")
             balance = await customer_balance(db, wallet.customer_id, "USDT")
             if float(amount) < settings.usdt_tron_sweep_min_amount:
