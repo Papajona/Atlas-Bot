@@ -33,9 +33,9 @@ def parse_tron_usdt_balance(data: Any, contract_address: str) -> Decimal:
         if not isinstance(info, dict):
             raise ValueError("TRON provider token record has invalid token_info")
         address = info.get("address")
-        if not isinstance(address, str) or not address.strip():
-            raise ValueError("TRON provider token record is missing a valid contract address")
-        if address.strip() == contract:
+        if not isinstance(address, str) or not address or address != address.strip():
+            raise ValueError("TRON provider token record is missing a valid canonical contract address")
+        if address == contract:
             matches.append(item)
 
     if not matches:
