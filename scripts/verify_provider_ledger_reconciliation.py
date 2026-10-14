@@ -175,7 +175,14 @@ def build_query(provider: str, from_utc: datetime, to_utc: datetime) -> str:
           'journal_balance_failures', (SELECT count(*) FROM public.ledger_journals j
             WHERE j.reference_type='WITHDRAWAL' AND j.reference_id IN
               (w.request_id, w.request_id || ':release')
-              AND (SELECT count(*) FROM public.ledger_journal_lines l WHERE l.journal_id=j.id) < 2)
+              AND (
+                (SELECT count(*) FROM public.ledger_journal_lines l WHERE l.journal_id=j.id) < 2
+                OR (SELECT coalesce(sum(l.debit),0) FROM public.ledger_journal_lines l WHERE l.journal_id=j.id)
+                   <> (SELECT coalesce(sum(l.credit),0) FROM public.ledger_journal_lines l WHERE l.journal_id=j.id)
+                OR EXISTS (SELECT 1 FROM public.ledger_journal_lines l WHERE l.journal_id=j.id
+                           AND (l.debit < 0 OR l.credit < 0 OR (l.debit=0 AND l.credit=0)
+                                OR (l.debit>0 AND l.credit>0)))
+              ))
         ) ORDER BY w.created_at)
         FROM matching_withdrawals w
       ), '[]'::json)
