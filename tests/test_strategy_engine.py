@@ -109,10 +109,14 @@ def test_ai_walk_forward_aggregate_metrics_only_use_held_out_bars(monkeypatch):
         captured["cost_return_count"] = len(returns_gross)
         captured["cost_turnover_count"] = len(turnover)
         captured["fixed_cost_count"] = len(kwargs.get("fixed_cost_drag", []))
+        captured["bars_per_year"] = kwargs.get("bars_per_year")
+        captured["taker_bps"] = kwargs.get("taker_bps")
+        captured["slippage_bps"] = kwargs.get("slippage_bps")
         return original_cost_report(returns_gross, turnover, **kwargs)
 
     def dsr_spy(net_returns, trial_sharpes_annual, bars_per_year):
         captured["dsr_return_count"] = len(net_returns)
+        captured["dsr_bars_per_year"] = bars_per_year
         return {"status": "MISSING_TRIAL_HISTORY"}
 
     monkeypatch.setattr(trading_core, "cost_breakeven_report", cost_report_spy)
@@ -120,7 +124,15 @@ def test_ai_walk_forward_aggregate_metrics_only_use_held_out_bars(monkeypatch):
 
     frame = sample_df(1800)
     result = trading_core.ai_walk_forward_backtest(
-        frame, asset="crypto", folds=4, min_train=500
+        frame,
+        asset="crypto",
+        folds=4,
+        min_train=500,
+        bars_per_year=252,
+        taker_bps=0.8,
+        slippage_bps=1.2,
+        carry_bps_per_bar=0.1,
+        max_hold_bars=10,
     )
     expected_oos = sum(int(fold["test_bars"]) for fold in result["folds"])
     assert len(result["folds"]) == 4
@@ -130,7 +142,19 @@ def test_ai_walk_forward_aggregate_metrics_only_use_held_out_bars(monkeypatch):
         "cost_return_count": expected_oos,
         "cost_turnover_count": expected_oos,
         "fixed_cost_count": expected_oos,
+        "bars_per_year": 252,
+        "taker_bps": 0.8,
+        "slippage_bps": 1.2,
         "dsr_return_count": expected_oos,
+        "dsr_bars_per_year": 252,
+    }
+    assert result["research_assumptions"] == {
+        "asset_profile": "crypto",
+        "bars_per_year": 252,
+        "taker_bps": 0.8,
+        "slippage_bps": 1.2,
+        "carry_bps_per_bar": 0.1,
+        "max_hold_bars": 10,
     }
     assert result["research_trial_history_status"] == "MISSING_TRIAL_HISTORY"
 
