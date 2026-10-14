@@ -112,6 +112,7 @@ def compounded_stake(
     *,
     absolute_cap: float,
     growth_fraction: float = 0.5,
+    paper_edge_haircut: float = 0.30,
     max_growth_multiple: float = 3.0,
     drawdown_shrink: float = 0.5,
 ) -> StakeRecommendation:
@@ -120,9 +121,10 @@ def compounded_stake(
     This is advisory sizing, not an order: the caller still supplies (and this function
     still bounds) the actual request. Deliberately asymmetric and conservative:
 
-    - Growth only comes from `growth_fraction` of *cumulative* realized simulated edge
-      (net_edge_pct summed across the customer's own PAPER_CANDIDATE history), never from
-      a single good cycle -- one lucky triangle should not double the next stake.
+    - Growth uses only a conservative fraction of *cumulative* simulated edge. The
+      `paper_edge_haircut` defaults to 0.30 because paper triangle quotes omit queue
+      position, partial fills and latency competition; paper-only edge must not feed
+      stake growth at its raw value.
     - A negative cumulative record shrinks the stake toward (never below) `base_stake *
       drawdown_shrink`, so a losing streak reduces size instead of "averaging up" into it.
     - Growth is capped at `max_growth_multiple * base_stake`, and the result is always
@@ -139,8 +141,10 @@ def compounded_stake(
     if cumulative_realized_pct >= 0:
         # cumulative_realized_pct is a sum of per-cycle net_edge_pct values (percent units);
         # dividing by 100 turns that into a fraction of base_stake added as growth.
-        stake = base_stake * (1.0 + max(0.0, growth_fraction) * (cumulative_realized_pct / 100.0))
-        rationale = "growth_from_cumulative_simulated_edge" if stake > base_stake else "flat_no_net_edge_yet"
+        haircut = min(1.0, max(0.0, float(paper_edge_haircut)))
+        effective_growth_fraction = max(0.0, float(growth_fraction)) * haircut
+        stake = base_stake * (1.0 + effective_growth_fraction * (cumulative_realized_pct / 100.0))
+        rationale = "growth_from_haircut_simulated_edge" if stake > base_stake else "flat_no_net_edge_yet"
     else:
         severity = min(1.0, abs(cumulative_realized_pct) / 100.0)
         stake = base_stake - (base_stake - floor) * severity
