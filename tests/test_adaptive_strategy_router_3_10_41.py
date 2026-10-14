@@ -166,4 +166,4 @@ def test_full_policy_walk_forward_executes_after_signal_bar(monkeypatch):
     assert observed_counts[0] == 0
     assert observed_counts[1] == 0
     assert observed_counts[2] > 0
-\n
+
