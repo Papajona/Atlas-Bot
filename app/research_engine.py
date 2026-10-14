@@ -468,37 +468,62 @@ def live_strategy_signals(df: pd.DataFrame, strategies: list[str], cfg: Strategy
 def ai_market_review(research: dict, live_signal: dict | None = None) -> dict:
     rows = research.get("strategies", [])
     regime = research.get("regime", {})
+    validation = research.get("validation") or {}
+    oos_by_strategy = validation.get("per_strategy_oos") or {}
     if not rows:
         return {"status": "NO_DATA", "summary": "No strategy research results are available."}
-    best = max(rows, key=lambda r: r.get("research_score", -1e9))
-    profitable = [r for r in rows if r.get("total_return", 0) > 0 and r.get("sharpe", 0) > 0]
-    drawdown_warnings = [r["strategy"] for r in rows if r.get("max_drawdown", 0) < -0.25]
+
+    ranked_oos = _rank_by_oos(rows, oos_by_strategy)
+    measured = [row for row in ranked_oos if (oos_by_strategy.get(str(row.get("strategy") or "")) or {}).get("status") == "OK"]
+    best = measured[0] if measured else None
+    profitable_oos = [
+        row for row in measured
+        if float((oos_by_strategy.get(str(row.get("strategy") or "")) or {}).get("oos_total_return", 0.0) or 0.0) > 0
+        and float((oos_by_strategy.get(str(row.get("strategy") or "")) or {}).get("sharpe") or 0.0) > 0
+    ]
+    drawdown_warnings = [
+        str(row["strategy"]) for row in measured
+        if float((oos_by_strategy.get(str(row.get("strategy") or "")) or {}).get("max_drawdown") or 0.0) < -0.25
+    ]
     summary = (
         f"Current regime classified as {regime.get('regime', 'UNKNOWN')}. "
-        f"The research set contains {len(rows)} rule-based strategy variants. "
-        f"{len(profitable)} showed positive return and positive Sharpe in this historical test."
+        f"The research set contains {len(rows)} rule-based strategy variants; "
+        f"{len(profitable_oos)} measured out-of-sample results showed positive net return and Sharpe."
     )
     observations = [
-        f"Highest research score in this run: {best['strategy']} ({best['research_score']:.3f}).",
+        (
+            f"Highest measured out-of-sample result (not promotion approval): {best['strategy']} "
+            f"(net return {float(oos_by_strategy[best['strategy']].get('oos_total_return', 0.0)):.3f}, "
+            f"Sharpe {float(oos_by_strategy[best['strategy']].get('sharpe') or 0.0):.3f})."
+            if best else "No strategy has a valid out-of-sample measurement; no headline winner is reported."
+        ),
         f"Current annualized realized volatility: {regime.get('annualized_realized_vol', 0):.3f}.",
     ]
     if drawdown_warnings:
-        observations.append("Large historical drawdowns detected in: " + ", ".join(drawdown_warnings) + ".")
+        observations.append("Large out-of-sample drawdowns detected in: " + ", ".join(drawdown_warnings) + ".")
     if live_signal:
         observations.append(
             f"Live ensemble signal is {live_signal.get('side', 'unknown')} with score "
             f"{float(live_signal.get('ensemble_score', 0)):.3f}; this is context, not a trade recommendation."
         )
+    universe_bias = research.get("universe_bias") or (research.get("data_quality") or {}).get("universe_bias", "UNKNOWN")
     return {
         "status": "REVIEW_READY",
         "summary": summary,
         "observations": observations,
         "regime": regime,
+        "top_strategy": str(best["strategy"]) if best else "",
+        "top_strategy_basis": "OUT_OF_SAMPLE_MEASUREMENT_ONLY",
+        "top_strategy_oos_status": "OK" if best else "NO_VALID_OOS_MEASUREMENT",
         "research_order": research.get("research_order", []),
+        "research_order_basis": research.get("research_order_basis", "OOS_ONLY"),
+        "universe_bias": universe_bias,
         "paper_candidates": paper_candidates(research),
         "limitations": [
             "Historical backtests do not guarantee future performance.",
             "Walk-forward validation reduces but does not eliminate overfitting.",
+            "An out-of-sample measurement is not promotion approval; all promotion and risk gates must still pass.",
+            f"Research universe limitation: {universe_bias}.",
             "Live promotion should require paper/shadow evidence and risk gates.",
         ],
     }
