@@ -9,7 +9,6 @@ from .strategy_engine import StrategyConfig, strategy_signals, risk_scaled_posit
 from .trading_core import ai_walk_forward_backtest
 from .strategy_evidence import evidence_for
 from .research_validation import monte_carlo_bootstrap, parameter_plateau_score, cost_breakeven_report
-from .trading_core import PROFILES
 from .config import settings
 from .research_validation import (validate_ohlcv_frame, bootstrap_mean_ci,
                                   multiple_testing_sharpe_adjustment, cost_sensitivity,
