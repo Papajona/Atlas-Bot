@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import math
-from decimal import Decimal
 from pathlib import Path
 
 import numpy as np
@@ -26,7 +25,7 @@ def test_backtest_halt_uses_one_net_equity_curve_and_does_not_count_hypothetical
         daily_loss_limit=0.99,
         loss_event_threshold=2,
         cooldown_bars=2,
-        loss_lookback_bars=4,
+        loss_lookback_bars=2,
     )
 
     assert protected.iloc[-1] == 1.0  # the old raw-position event counter could re-halt forever
