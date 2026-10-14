@@ -65,7 +65,9 @@ async def assert_database_role_compatible_with_rls_lockdown() -> None:
                 " AS api_schema_access_blocked, "
                 "(SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace "
                 " WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relowner = r.oid) "
-                " AS owned_public_table_count FROM pg_roles AS r WHERE r.rolname = current_user"
+                " AS owned_public_table_count, "
+                "(SELECT count(*) FROM pg_auth_members AS membership WHERE membership.member = r.oid) "
+                "AS role_membership_count FROM pg_roles AS r WHERE r.rolname = current_user"
             ))
             row = result.mappings().one_or_none()
         if row is None:
@@ -88,6 +90,7 @@ async def assert_database_role_compatible_with_rls_lockdown() -> None:
             can_create_roles=bool(row["can_create_roles"]),
             can_create_databases=bool(row["can_create_databases"]),
             can_replicate=bool(row["can_replicate"]),
+            role_membership_count=int(row["role_membership_count"]),
         )
     except RuntimeError:
         raise
