@@ -288,40 +288,74 @@ def deflated_sharpe_report(net_returns, trial_sharpes_annual, n_trials: int, bar
             "note": "Probability the Sharpe is real after correcting for selection among `trials`; >= 0.95 is the usual bar."}
 
 
-def cost_breakeven_report(returns_gross, turnover, *, taker_bps: float, slippage_bps: float,
-                          bars_per_year: int, stress_multiplier: float = 2.0) -> dict:
-    """What the strategy earns per unit of trading, and how much cost it can absorb.
+def cost_breakeven_report(
+    returns_gross,
+    turnover,
+    *,
+    taker_bps: float,
+    slippage_bps: float,
+    bars_per_year: int,
+    stress_multiplier: float = 2.0,
+    fixed_cost_drag: Iterable[float] | None = None,
+) -> dict:
+    """Stress trading fees/slippage plus any fixed per-bar drag such as carry/funding.
 
-    breakeven_cost_bps is the one-way cost (bps of notional traded) at which mean net return hits zero. If it is not
-    comfortably above the venue's real all-in cost (fee + slippage + funding drag), the strategy has no tradable edge.
-    stress_ok requires the mean net return to stay positive when ALL costs are multiplied by stress_multiplier, because
-    live slippage, fee tiers and funding are routinely worse than the backtest assumption.
+    `fixed_cost_drag` is non-negative per-bar cost already measured against the same
+    return/turnover observations. The break-even variable fee estimate deducts that
+    fixed drag first. Missing observations or non-finite/negative cost inputs fail closed.
     """
     g = np.asarray(list(returns_gross), dtype=float)
     t = np.asarray(list(turnover), dtype=float)
-    n = min(len(g), len(t))
+    fixed = np.zeros(len(g), dtype=float) if fixed_cost_drag is None else np.asarray(list(fixed_cost_drag), dtype=float)
+    n = min(len(g), len(t), len(fixed))
     if n < 30:
         return {"status": "INSUFFICIENT_DATA", "observations": int(n), "stress_ok": False}
-    g, t = g[:n], t[:n]
-    cost = (float(taker_bps) + float(slippage_bps)) / 10_000.0
-    mean_gross = float(np.nanmean(g))
-    mean_turn = float(np.nanmean(t))
-    net = float(np.nanmean(g - t * cost))
-    stressed = float(np.nanmean(g - t * cost * float(stress_multiplier)))
-    breakeven_bps = (mean_gross / mean_turn * 10_000.0) if mean_turn > 0 else float("inf")
+    g, t, fixed = g[:n], t[:n], fixed[:n]
+    try:
+        taker = float(taker_bps)
+        slippage = float(slippage_bps)
+        multiplier = float(stress_multiplier)
+    except (TypeError, ValueError, OverflowError):
+        return {"status": "INVALID_COST_INPUT", "observations": int(n), "stress_ok": False}
+    if (
+        not np.all(np.isfinite(g))
+        or not np.all(np.isfinite(t))
+        or not np.all(np.isfinite(fixed))
+        or np.any(t < 0)
+        or np.any(fixed < 0)
+        or not np.isfinite(taker)
+        or not np.isfinite(slippage)
+        or not np.isfinite(multiplier)
+        or taker < 0
+        or slippage < 0
+        or multiplier <= 0
+    ):
+        return {"status": "INVALID_COST_INPUT", "observations": int(n), "stress_ok": False}
+    variable_cost = (taker + slippage) / 10_000.0
+    mean_gross = float(g.mean())
+    mean_fixed = float(fixed.mean())
+    mean_turn = float(t.mean())
+    net = float((g - fixed - t * variable_cost).mean())
+    stressed = float((g - fixed - t * variable_cost * multiplier).mean())
+    breakeven_bps = ((mean_gross - mean_fixed) / mean_turn * 10_000.0) if mean_turn > 0 else float("inf")
     per_year = max(1, int(bars_per_year))
-    return {"status": "OK",
-            "annual_turnover": mean_turn * per_year,                      # multiples of capital traded per year
-            "annual_gross_return": mean_gross * per_year,
-            "annual_cost_drag": mean_turn * cost * per_year,
-            "annual_net_return": net * per_year,
-            "annual_net_return_stressed": stressed * per_year,
-            "assumed_cost_bps": cost * 10_000.0,
-            "breakeven_cost_bps": breakeven_bps,
-            "cost_headroom": (breakeven_bps / (cost * 10_000.0)) if cost > 0 and np.isfinite(breakeven_bps) else None,
-            "stress_multiplier": float(stress_multiplier),
-            "stress_ok": bool(stressed > 0.0 and net > 0.0),
-            "note": "Arithmetic annualisation of mean bar returns; ignores compounding and funding. A headroom below the stress multiplier means costs, not the market, decide the outcome."}
+    return {
+        "status": "OK",
+        "observations": int(n),
+        "annual_turnover": mean_turn * per_year,
+        "annual_gross_return": mean_gross * per_year,
+        "annual_fixed_cost_drag": mean_fixed * per_year,
+        "annual_variable_cost_drag": mean_turn * variable_cost * per_year,
+        "annual_cost_drag": (mean_fixed + mean_turn * variable_cost) * per_year,
+        "annual_net_return": net * per_year,
+        "annual_net_return_stressed": stressed * per_year,
+        "assumed_cost_bps": variable_cost * 10_000.0,
+        "breakeven_cost_bps": breakeven_bps,
+        "cost_headroom": (breakeven_bps / (variable_cost * 10_000.0)) if variable_cost > 0 and np.isfinite(breakeven_bps) else None,
+        "stress_multiplier": multiplier,
+        "stress_ok": bool(stressed > 0.0 and net > 0.0),
+        "note": "Arithmetic annualisation of mean bar returns; carry/funding is included in fixed_cost_drag when supplied. The stress gate multiplies trading fees/slippage and retains the full fixed cost.",
+    }
 
 
 def edge_decay_check(realized_returns, *, expected_mean: float, min_obs: int = 60, z_halt: float = 2.0,

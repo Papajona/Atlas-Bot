@@ -1,0 +1,133 @@
+name: Audit restored staging database
+
+on:
+  workflow_dispatch:
+    inputs:
+      restore_operation_id:
+        description: Backup provider's real restore operation ID
+        required: true
+        type: string
+      backup_reference:
+        description: Immutable backup ID or archive URI that was restored
+        required: true
+        type: string
+      restore_evidence_uri:
+        description: Provider operation detail URL (https://) or immutable audit-log URI (gs://)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: atlas-staging-restore-audit
+  cancel-in-progress: false
+
+jobs:
+  audit-restored-target:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: staging
+    env:
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ secrets.GCP_REGION }}
+      STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
+      PRODUCTION_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}
+      STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
+      EXPECTED_RUNTIME_DB_ROLE: ${{ vars.ATLAS_STAGING_RUNTIME_DB_ROLE }}
+      AUDIT_ARCHIVE_BUCKET: ${{ vars.ATLAS_STAGING_EVIDENCE_BUCKET }}
+      RESTORE_OPERATION_ID: ${{ inputs.restore_operation_id }}
+      BACKUP_REFERENCE: ${{ inputs.backup_reference }}
+      RESTORE_EVIDENCE_URI: ${{ inputs.restore_evidence_uri }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Require protected staging configuration and distinct project refs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          : "${GCP_PROJECT_ID:?Missing GCP_PROJECT_ID}"
+          : "${GCP_REGION:?Missing GCP_REGION}"
+          : "${STAGING_SUPABASE_PROJECT_REF:?Missing ATLAS_STAGING_SUPABASE_PROJECT_REF}"
+          : "${PRODUCTION_SUPABASE_PROJECT_REF:?Missing ATLAS_PRODUCTION_SUPABASE_PROJECT_REF}"
+          : "${STAGING_DATABASE_SECRET:?Missing ATLAS_STAGING_DATABASE_SECRET}"
+          : "${EXPECTED_RUNTIME_DB_ROLE:?Missing ATLAS_STAGING_RUNTIME_DB_ROLE}"
+          : "${AUDIT_ARCHIVE_BUCKET:?Missing ATLAS_STAGING_EVIDENCE_BUCKET}"
+          : "${RESTORE_OPERATION_ID:?A real restore operation ID is required}"
+          : "${BACKUP_REFERENCE:?An immutable backup reference is required}"
+          : "${RESTORE_EVIDENCE_URI:?A provider restore evidence URL/URI is required}"
+          test "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" || {
+            echo "BLOCKED: staging and production refs must differ"
+            exit 1
+          }
+          [[ "$STAGING_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]
+          [[ "$PRODUCTION_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]
+          [[ "$EXPECTED_RUNTIME_DB_ROLE" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]
+          case "$RESTORE_EVIDENCE_URI" in
+            https://*) ;;
+            gs://*) ;;
+            *) echo "BLOCKED: restore evidence must be an https:// or gs:// URI"; exit 1 ;;
+          esac
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+      - name: Validate provider evidence URI and retrieve staging database secret
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RESTORE_EVIDENCE_URI" == gs://* ]]; then
+            gcloud storage ls "$RESTORE_EVIDENCE_URI" >/dev/null
+          fi
+          umask 077
+          gcloud secrets versions access latest \
+            --secret="$STAGING_DATABASE_SECRET" \
+            --project="$GCP_PROJECT_ID" > "$RUNNER_TEMP/atlas-staging-db-url"
+          test -s "$RUNNER_TEMP/atlas-staging-db-url"
+          chmod 600 "$RUNNER_TEMP/atlas-staging-db-url"
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: Run read-only restored-database invariants
+        env:
+          STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
+          PRODUCTION_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DATABASE_URL="$(cat "$RUNNER_TEMP/atlas-staging-db-url")"
+          python scripts/verify_staging_restore.py \
+            --restore-operation-id "$RESTORE_OPERATION_ID" \
+            --backup-reference "$BACKUP_REFERENCE" \
+            --restore-evidence-uri "$RESTORE_EVIDENCE_URI" \
+            --expected-runtime-role "$EXPECTED_RUNTIME_DB_ROLE" \
+            --expected-revision 0049_public_schema_rls_lockdown \
+            --output "$RUNNER_TEMP/staging-restore-audit.json"
+      - name: Archive audit output even if ledger invariants failed
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -s "$RUNNER_TEMP/staging-restore-audit.json" ]]; then
+            gcloud storage cp "$RUNNER_TEMP/staging-restore-audit.json" \
+              "gs://$AUDIT_ARCHIVE_BUCKET/staging-restore-audits/$GITHUB_RUN_ID-$GITHUB_SHA/report.json"
+          else
+            echo "No audit report was produced. Restore is not certified."
+          fi
+      - name: Preserve audit report as workflow artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: atlas-staging-restore-audit-${{ github.run_id }}
+          path: ${{ runner.temp }}/staging-restore-audit.json
+          if-no-files-found: warn
+          retention-days: 90

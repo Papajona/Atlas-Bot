@@ -8,6 +8,7 @@ from sqlalchemy import select
 from .config import settings
 from .db import AppState, CustomerLedgerAccount, Incident, Wallet
 from .custody_locations import fresh_external_assets
+from .tron_reconciliation import parse_tron_usdt_balance
 
 USDT = "USDT"
 TRON = "TRON"
@@ -48,6 +49,14 @@ async def _resolve_incident(db, *, key: str) -> None:
         row.updated_at = datetime.now(timezone.utc)
 
 
+async def _halt_live_for_unverified_custody(db) -> None:
+    """Fail closed when custody cannot be verified; re-enabling stays an operator action."""
+    state = await db.get(AppState, 1)
+    if state:
+        state.kill_switch = True
+        state.live_enabled = False
+
+
 def solvency_decision(*, assets: Decimal, liabilities: Decimal, minimum_ratio: Decimal = D("1.0")) -> dict:
     """Pure solvency decision used by both the worker and regression tests."""
     assets = D(str(assets))
@@ -80,20 +89,10 @@ async def _address_balance(client: httpx.AsyncClient, address: str) -> Decimal:
         },
     )
     response.raise_for_status()
-    data = response.json().get("data", [])
-    token = next(
-        (
-            item for item in data
-            if str((item.get("token_info") or {}).get("address") or "").lower()
-            == str(settings.usdt_tron_usdt_contract).lower()
-        ),
-        None,
-    )
-    if not token:
-        return D("0")
-    raw = D(str(token.get("balance") or "0"))
-    decimals = int((token.get("token_info") or {}).get("decimals") or 6)
-    return raw / (D("10") ** decimals)
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("TRON provider returned a malformed JSON balance response")
+    return parse_tron_usdt_balance(payload.get("data"), settings.usdt_tron_usdt_contract)
 
 
 async def reconcile_usdt_custody(db) -> dict:
@@ -146,6 +145,7 @@ async def reconcile_usdt_custody(db) -> dict:
             "addresses_checked": len(addresses),
             "error": "TRON custody credentials or treasury address are not configured",
         }
+        await _halt_live_for_unverified_custody(db)
         await _upsert_incident(
             db,
             key="CUSTODY_RECONCILIATION:USDT:TRON:CONFIG",
@@ -173,6 +173,7 @@ async def reconcile_usdt_custody(db) -> dict:
             "addresses_checked": len(balances),
             "error": str(exc),
         }
+        await _halt_live_for_unverified_custody(db)
         await _upsert_incident(
             db,
             key="CUSTODY_RECONCILIATION:USDT:TRON:ERROR",

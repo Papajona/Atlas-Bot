@@ -44,6 +44,7 @@ from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
 from .payout import get_payout_provider, PayoutError, PayoutUnknown, PayoutNotFound
 from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, release_separation_violation, verify_release_operator
 from .usdt_tron import derive_usdt_tron_address_from_xpub, validate_tron_account_xpub
+from .tron_reconciliation import parse_tron_usdt_balance
 from .tron_sweep import build_sweep_intent, serialize_sweep_intent, SweepError, classify_solidified_sweep, USDT_SCALE
 from .custody_locations import create_custody_transfer, transition_custody_transfer, flag_stale_custody_transfers
 from .customer_funds import record_ledger_incident, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, ledger_statement, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal
@@ -2620,13 +2621,13 @@ async def admin_custody_reconciliation(authorization: str | None = Header(defaul
     import httpx
     async with SessionLocal() as db:
         rows = (await db.execute(select(CustomerLedgerAccount).where(CustomerLedgerAccount.currency == "USDT"))).scalars().all()
-        liability_available = sum(float(r.available) for r in rows)
-        liability_trading_reserved = sum(float(r.trading_reserved) for r in rows)
-        liability_withdrawal_reserved = sum(float(r.withdrawal_reserved) for r in rows)
+        liability_available = sum((Decimal(str(r.available or 0)) for r in rows), Decimal("0"))
+        liability_trading_reserved = sum((Decimal(str(r.trading_reserved or 0)) for r in rows), Decimal("0"))
+        liability_withdrawal_reserved = sum((Decimal(str(r.withdrawal_reserved or 0)) for r in rows), Decimal("0"))
         customer_liabilities = liability_available + liability_trading_reserved + liability_withdrawal_reserved
         virtual_wallets = (await db.execute(select(Wallet).where(Wallet.currency == "USDT", Wallet.network == "TRON", Wallet.status == "ACTIVE"))).scalars().all()
-    treasury_balance = None
-    virtual_wallet_balances = {}
+    treasury_balance: Decimal | None = None
+    virtual_wallet_balances: dict[str, Decimal] = {}
     chain_error = ""
     if settings.usdt_trongrid_api_key and settings.usdt_tron_treasury_address:
         try:
@@ -2638,16 +2639,18 @@ async def admin_custody_reconciliation(authorization: str | None = Header(defaul
                     response = await client.get(f"{base}/v1/accounts/{address}/trc20/balance",
                                                 params={"contract_address": settings.usdt_tron_usdt_contract}, headers=headers)
                     response.raise_for_status()
-                    data = response.json().get("data", [])
-                    token = next((x for x in data if str((x.get("token_info") or {}).get("address") or "").lower() == settings.usdt_tron_usdt_contract.lower()), None)
-                    balance = float(token.get("balance") or 0) / (10 ** int((token.get("token_info") or {}).get("decimals") or 6)) if token else 0.0
+                    body = response.json()
+                    if not isinstance(body, dict):
+                        raise ValueError("TRON provider returned a malformed JSON balance response")
+                    balance = parse_tron_usdt_balance(body.get("data"), settings.usdt_tron_usdt_contract)
                     if address == settings.usdt_tron_treasury_address:
                         treasury_balance = balance
                     else:
                         virtual_wallet_balances[address] = balance
         except Exception as exc:
-            chain_error = str(exc)
-    custody_onchain = (treasury_balance or 0.0) + sum(virtual_wallet_balances.values()) if not chain_error else None
+            # Return REVIEW with no coverage value when provider evidence is unreliable.
+            chain_error = f"{type(exc).__name__}: TRON USDT balance verification failed"
+    custody_onchain = (treasury_balance or Decimal("0")) + sum(virtual_wallet_balances.values(), Decimal("0")) if not chain_error else None
     coverage_gap = None if custody_onchain is None else custody_onchain - customer_liabilities
     return {
         "asset": "USDT", "network": "TRON", "treasury_address": settings.usdt_tron_treasury_address,
@@ -2655,10 +2658,10 @@ async def admin_custody_reconciliation(authorization: str | None = Header(defaul
                                   "withdrawal_reserved": liability_withdrawal_reserved, "total": customer_liabilities},
         "active_virtual_deposit_addresses": len(virtual_wallets),
         "treasury_onchain_balance": treasury_balance,
-        "virtual_wallet_onchain_balance": sum(virtual_wallet_balances.values()),
+        "virtual_wallet_onchain_balance": sum(virtual_wallet_balances.values(), Decimal("0")),
         "custody_onchain_balance": custody_onchain,
         "coverage_gap": coverage_gap,
-        "status": "OK" if coverage_gap is not None and coverage_gap >= -1e-6 else "REVIEW",
+        "status": "OK" if coverage_gap is not None and coverage_gap >= Decimal("-0.000001") else "REVIEW",
         "chain_error": chain_error,
     }
 

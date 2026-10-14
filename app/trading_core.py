@@ -10,7 +10,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import balanced_accuracy_score, f1_score, log_loss
 from lightgbm import LGBMClassifier
 from .config import settings
-from .research_validation import deflated_sharpe_report, cost_breakeven_report
+from .research_validation import deflated_sharpe_report, cost_breakeven_report, purged_walk_forward_splits
 from .model_registry import sha256_file, artifact_signature, verify_artifact_signature
 
 
@@ -274,24 +274,120 @@ def predict_latest(df: pd.DataFrame, model_path: str, threshold: float = 0.05) -
     }
 
 
-def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int = 5,
-                             min_train: int = 800, threshold: float = 0.05,
-                             cost_stress_multiplier: float = 2.0) -> dict:
-    if not np.isfinite(float(cost_stress_multiplier)) or float(cost_stress_multiplier) <= 0:
+def _research_trial_dsr_report(
+    net_returns: np.ndarray,
+    trial_sharpes_annual: list[float] | None,
+    bars_per_year: int,
+) -> dict:
+    """Compute DSR only when the full experiment's trial Sharpe history is supplied.
+
+    Fold Sharpe values are not a substitute for the distribution of all strategy,
+    feature, threshold, and parameter variants explored during selection. A missing
+    or incomplete trial ledger must not produce a promotion-grade DSR.
+    """
+    if not trial_sharpes_annual:
+        return {
+            "status": "MISSING_TRIAL_HISTORY",
+            "observations": int(np.isfinite(np.asarray(net_returns, dtype=float)).sum()),
+            "note": "Provide every evaluated variant's annualized Sharpe from the immutable experiment ledger.",
+        }
+    try:
+        trials = [float(value) for value in trial_sharpes_annual]
+    except (TypeError, ValueError, OverflowError):
+        return {"status": "INVALID_TRIAL_HISTORY", "observations": int(len(net_returns))}
+    if not trials or not all(np.isfinite(value) for value in trials):
+        return {"status": "INVALID_TRIAL_HISTORY", "observations": int(len(net_returns))}
+    return deflated_sharpe_report(
+        net_returns,
+        trials,
+        len(trials),
+        bars_per_year,
+    )
+
+
+def ai_walk_forward_backtest(
+    df: pd.DataFrame,
+    asset: str = "crypto",
+    folds: int = 5,
+    min_train: int = 800,
+    threshold: float = 0.05,
+    cost_stress_multiplier: float = 2.0,
+    research_trial_sharpes: list[float] | None = None,
+    bars_per_year: int | None = None,
+    taker_bps: float | None = None,
+    slippage_bps: float | None = None,
+    carry_bps_per_bar: float | None = None,
+    max_hold_bars: int | None = None,
+) -> dict:
+    """Chronological OOS backtest using explicit annualization and execution-cost assumptions."""
+    try:
+        stress_multiplier = float(cost_stress_multiplier)
+        profile = PROFILES[asset]
+        raw_annualization = profile.bars_per_year if bars_per_year is None else bars_per_year
+        raw_hold_horizon = profile.max_hold if max_hold_bars is None else max_hold_bars
+        if (
+            isinstance(raw_annualization, (bool, np.bool_))
+            or not isinstance(raw_annualization, (int, np.integer))
+            or isinstance(raw_hold_horizon, (bool, np.bool_))
+            or not isinstance(raw_hold_horizon, (int, np.integer))
+        ):
+            raise ValueError("bars_per_year and max_hold_bars must be explicit integer values")
+        annualization = int(raw_annualization)
+        taker_cost_bps = float(profile.taker_bps if taker_bps is None else taker_bps)
+        slippage_cost_bps = float(profile.slippage_bps if slippage_bps is None else slippage_bps)
+        carry_cost_bps = float(profile.carry_bps_per_bar if carry_bps_per_bar is None else carry_bps_per_bar)
+        hold_horizon = int(raw_hold_horizon)
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Invalid asset or walk-forward evaluation assumptions") from exc
+    if not np.isfinite(stress_multiplier) or stress_multiplier <= 0:
         raise ValueError("cost_stress_multiplier must be a finite positive number")
+    if annualization < 1 or hold_horizon < 1:
+        raise ValueError("bars_per_year and max_hold_bars must be positive integers")
+    if (
+        not np.isfinite(taker_cost_bps)
+        or not np.isfinite(slippage_cost_bps)
+        or not np.isfinite(carry_cost_bps)
+        or taker_cost_bps < 0
+        or slippage_cost_bps < 0
+        or carry_cost_bps < 0
+    ):
+        raise ValueError("Execution costs and carry must be finite non-negative bps values")
     X = build_features(df)
     aligned = df.reindex(X.index)
-    profile = PROFILES[asset]
-    y = triple_barrier(aligned.close, X.vol_24, aligned.high, aligned.low, max_hold=profile.max_hold)
+    y = triple_barrier(aligned.close, X.vol_24, aligned.high, aligned.low, max_hold=hold_horizon)
     valid = y.notna()
     X, aligned = X.loc[valid], aligned.loc[valid]
-    if len(X) < min_train + folds * (profile.max_hold + 20):
-        raise RuntimeError("Insufficient data for AI walk-forward backtest")
-    tscv = TimeSeriesSplit(n_splits=folds, gap=profile.max_hold)
+    # Use an explicitly expanding chronological split with a full label-horizon purge
+    # between every train/test boundary. sklearn.TimeSeriesSplit makes early training
+    # folds shorter than min_train, silently skipping them (for example, 1,799 bars
+    # with min_train=800 and five splits yields only three usable folds).
+    minimum_test_bars = 20
+    gap = hold_horizon
+    required_bars = int(min_train) + int(folds) * minimum_test_bars + (2 * int(folds) - 1) * gap
+    if folds < 2 or min_train < 1 or len(X) < required_bars:
+        raise RuntimeError("Insufficient data for requested purged AI walk-forward folds")
+    test_size = (len(X) - int(min_train) - (2 * int(folds) - 1) * gap) // int(folds)
+    split_specs = purged_walk_forward_splits(
+        len(X),
+        folds=int(folds),
+        min_train=int(min_train),
+        test_size=int(test_size),
+        purge=gap,
+        embargo=gap,
+    )
+    if len(split_specs) != int(folds) or any((fold.test_end - fold.test_start) < minimum_test_bars for fold in split_specs):
+        raise RuntimeError("Could not construct the requested number of non-empty purged OOS folds")
     scores = []
     fold_metrics = []
+    oos_net_blocks: list[np.ndarray] = []
+    oos_gross_blocks: list[np.ndarray] = []
+    oos_turnover_blocks: list[np.ndarray] = []
+    oos_position_blocks: list[np.ndarray] = []
+    oos_carry_blocks: list[np.ndarray] = []
     pred_signal = pd.Series(np.nan, index=X.index)
-    for tr, te in tscv.split(X):
+    for fold in split_specs:
+        tr = np.arange(fold.train_start, fold.train_end, dtype=int)
+        te = np.arange(fold.test_start, fold.test_end, dtype=int)
         if len(tr) < min_train or len(np.unique((y.iloc[tr] + 1).to_numpy())) < 2:
             continue
         m = LGBMClassifier(objective="multiclass", class_weight="balanced",
@@ -311,27 +407,58 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
         fold_ret = aligned.close.iloc[te].pct_change().fillna(0).to_numpy()
         # A signal generated from bar t can only earn the return beginning at t+1.
         # Using sig[t] * return[t] would leak the realized bar return into OOS metrics.
-        fold_position = np.r_[0, sig[:-1]]
-        fold_turnover = np.abs(np.diff(np.r_[0, fold_position]))
-        fold_net = fold_position * fold_ret - fold_turnover * ((profile.taker_bps + profile.slippage_bps) / 10_000) - np.abs(fold_position) * (profile.carry_bps_per_bar / 10_000)
+        fold_position = np.r_[0, sig[:-1]].astype(float)
+        fold_turnover = np.abs(np.diff(np.r_[0, fold_position])).astype(float)
+        # Flatten at the end of each test fold. Without this terminal exit cost, the
+        # reported OOS net returns overstate performance at each fold boundary.
+        if len(fold_turnover):
+            fold_turnover[-1] += abs(fold_position[-1])
+        fold_gross = fold_position * fold_ret
+        fold_carry = np.abs(fold_position) * (carry_cost_bps / 10_000)
+        fold_net = fold_gross - fold_turnover * ((taker_cost_bps + slippage_cost_bps) / 10_000) - fold_carry
+        oos_net_blocks.append(np.asarray(fold_net, dtype=float))
+        oos_gross_blocks.append(np.asarray(fold_gross, dtype=float))
+        oos_turnover_blocks.append(np.asarray(fold_turnover, dtype=float))
+        oos_position_blocks.append(np.asarray(fold_position, dtype=float))
+        oos_carry_blocks.append(np.asarray(fold_carry, dtype=float))
         fold_equity = np.cumprod(1.0 + fold_net) if len(fold_net) else np.array([1.0])
         fold_peak = np.maximum.accumulate(fold_equity)
         fold_dd = fold_equity / fold_peak - 1.0
-        fold_sharpe = float(fold_net.mean() / fold_net.std() * np.sqrt(profile.bars_per_year)) if float(fold_net.std()) > 0 else 0.0
-        fold_metrics.append({"train_bars":int(len(tr)),"test_bars":int(len(te)),"total_return":float(fold_equity[-1]-1.0),"max_drawdown":float(fold_dd.min()),"trades":int(np.count_nonzero(np.diff(np.r_[0,sig])) ),"sharpe":fold_sharpe})
-    ret = aligned.close.pct_change().fillna(0)
-    position = pred_signal.fillna(0).shift(1).fillna(0)
-    turnover = position.diff().abs().fillna(position.abs())
-    costs = turnover * ((profile.taker_bps + profile.slippage_bps) / 10_000)
-    carry = position.abs() * (profile.carry_bps_per_bar / 10_000)
-    net = position * ret - costs - carry
+        fold_sharpe = float(fold_net.mean() / fold_net.std() * np.sqrt(annualization)) if float(fold_net.std()) > 0 else 0.0
+        fold_metrics.append({"train_bars":int(len(tr)),"test_bars":int(len(te)),"total_return":float(fold_equity[-1]-1.0),"max_drawdown":float(fold_dd.min()),"trades":int(np.count_nonzero(fold_turnover)),"sharpe":fold_sharpe})
+    if not fold_metrics or not oos_net_blocks:
+        raise RuntimeError("No valid chronological out-of-sample folds could be evaluated")
+    if len(fold_metrics) != int(folds):
+        raise RuntimeError(
+            f"Expected {int(folds)} purged OOS folds, but only {len(fold_metrics)} had sufficient training-class diversity"
+        )
+    # All aggregate statistics are calculated from held-out test windows only. Do not
+    # include training rows or bars in the gaps between test folds, and do not shift a
+    # final test signal into the following non-test window.
+    net = pd.Series(np.concatenate(oos_net_blocks), dtype=float)
+    gross_returns = np.concatenate(oos_gross_blocks)
+    turnover = pd.Series(np.concatenate(oos_turnover_blocks), dtype=float)
+    position = pd.Series(np.concatenate(oos_position_blocks), dtype=float)
+    carry = np.concatenate(oos_carry_blocks)
     equity = (1 + net).cumprod()
     peak = equity.cummax()
     dd = equity / peak - 1
-    cost_report = cost_breakeven_report((position * ret).to_numpy(), turnover.to_numpy(), taker_bps=profile.taker_bps, slippage_bps=profile.slippage_bps, bars_per_year=profile.bars_per_year, stress_multiplier=cost_stress_multiplier)
-    dsr_report = deflated_sharpe_report(net.to_numpy(), [float(f.get("sharpe", 0.0)) for f in fold_metrics], max(1, len(fold_metrics)), profile.bars_per_year)
+    cost_report = cost_breakeven_report(
+        gross_returns,
+        turnover.to_numpy(),
+        taker_bps=taker_cost_bps,
+        slippage_bps=slippage_cost_bps,
+        bars_per_year=annualization,
+        stress_multiplier=cost_stress_multiplier,
+        fixed_cost_drag=carry,
+    )
+    dsr_report = _research_trial_dsr_report(
+        net.to_numpy(),
+        research_trial_sharpes,
+        annualization,
+    )
     vol = float(net.std())
-    annual = profile.bars_per_year
+    annual = annualization
     downside = net[net < 0].std()
     sortino = float(net.mean() / downside * np.sqrt(annual)) if downside and np.isfinite(downside) and downside > 0 else 0.0
     max_dd = float(dd.min())
@@ -340,7 +467,7 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
     losses = -net[position != 0][net[position != 0] < 0].sum()
     profit_factor = float(wins / losses) if losses > 0 else (float("inf") if wins > 0 else 0.0)
     return {
-        "bars": int(len(df)), "features": int(X.shape[1]), "validated_bars": int(pred_signal.notna().sum()),
+        "bars": int(len(df)), "oos_bars": int(len(net)), "features": int(X.shape[1]), "validated_bars": int(pred_signal.notna().sum()),
         "total_return": float(equity.iloc[-1] - 1),
         "max_drawdown": max_dd,
         "sharpe": float(net.mean() / vol * np.sqrt(annual)) if vol > 0 else 0.0,
@@ -354,8 +481,18 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
         "prediction_gap_policy": "NO_FORWARD_FILL_ACROSS_NON_TEST_WINDOWS",
         "folds": fold_metrics,
         "cost_stress_ok": bool(cost_report.get("stress_ok")) if cost_report.get("status") == "OK" else False,
-        "cost_stress_multiplier": float(cost_stress_multiplier),
+        "cost_stress_multiplier": float(stress_multiplier),
+        "research_assumptions": {
+            "asset_profile": asset,
+            "bars_per_year": annualization,
+            "taker_bps": taker_cost_bps,
+            "slippage_bps": slippage_cost_bps,
+            "carry_bps_per_bar": carry_cost_bps,
+            "max_hold_bars": hold_horizon,
+        },
         "cost_analysis": cost_report,
+        "research_trial_count": len(research_trial_sharpes) if research_trial_sharpes else 0,
+        "research_trial_history_status": dsr_report.get("status"),
         "deflated_sharpe": dsr_report.get("deflated_sharpe_ratio") if dsr_report.get("status") == "OK" else None,
         "deflated_sharpe_status": dsr_report.get("status"),
     }

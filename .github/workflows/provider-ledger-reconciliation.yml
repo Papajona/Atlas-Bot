@@ -1,0 +1,151 @@
+name: Reconcile provider payout statement to staging ledger
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: Exact Atlas payout provider name recorded on withdrawals
+        required: true
+        type: string
+      provider_statement_object:
+        description: Restricted GCS object under provider-statements/ containing the exported Atlas payout CSV
+        required: true
+        type: string
+      from_utc:
+        description: Inclusive UTC withdrawal-created window start, ISO-8601 with Z/offset
+        required: true
+        type: string
+      to_utc:
+        description: Exclusive UTC withdrawal-created window end, ISO-8601 with Z/offset
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: atlas-provider-ledger-reconciliation
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: staging
+    env:
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      STATEMENT_BUCKET: ${{ vars.ATLAS_PROVIDER_STATEMENT_BUCKET }}
+      EVIDENCE_BUCKET: ${{ vars.ATLAS_STAGING_EVIDENCE_BUCKET }}
+      STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
+      PRODUCTION_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}
+      STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
+      EXPECTED_RUNTIME_DB_ROLE: ${{ vars.ATLAS_STAGING_RUNTIME_DB_ROLE }}
+      PROVIDER: ${{ inputs.provider }}
+      STATEMENT_OBJECT: ${{ inputs.provider_statement_object }}
+      FROM_UTC: ${{ inputs.from_utc }}
+      TO_UTC: ${{ inputs.to_utc }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate protected staging config and input paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          : "${GCP_PROJECT_ID:?Missing protected GCP_PROJECT_ID}"
+          : "${STATEMENT_BUCKET:?Set ATLAS_PROVIDER_STATEMENT_BUCKET in staging}"
+          : "${EVIDENCE_BUCKET:?Set ATLAS_STAGING_EVIDENCE_BUCKET in staging}"
+          : "${STAGING_SUPABASE_PROJECT_REF:?Set ATLAS_STAGING_SUPABASE_PROJECT_REF in staging}"
+          : "${PRODUCTION_SUPABASE_PROJECT_REF:?Set ATLAS_PRODUCTION_SUPABASE_PROJECT_REF in staging}"
+          : "${STAGING_DATABASE_SECRET:?Set ATLAS_STAGING_DATABASE_SECRET in staging}"
+          : "${EXPECTED_RUNTIME_DB_ROLE:?Set ATLAS_STAGING_RUNTIME_DB_ROLE in staging}"
+          : "${PROVIDER:?Supply a provider name}"
+          : "${STATEMENT_OBJECT:?Supply the provider statement object}"
+          [[ "$PROVIDER" =~ ^[A-Za-z0-9_-]{1,40}$ ]] || { echo "BLOCKED: invalid provider name"; exit 1; }
+          [[ "$STAGING_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]
+          [[ "$PRODUCTION_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]
+          test "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" || {
+            echo "BLOCKED: staging and production project refs are the same"
+            exit 1
+          }
+          [[ "$STATEMENT_OBJECT" =~ ^provider-statements/[A-Za-z0-9._/-]+\.csv$ && "$STATEMENT_OBJECT" != *".."* ]] || {
+            echo "BLOCKED: provider statement must be a CSV object under provider-statements/"
+            exit 1
+          }
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_STAGING_RECONCILIATION_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+      - name: Download only the requested provider CSV and staging DB secret
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          gcloud storage cp "gs://$STATEMENT_BUCKET/$STATEMENT_OBJECT" "$RUNNER_TEMP/provider-statement.csv"
+          test -s "$RUNNER_TEMP/provider-statement.csv"
+          gcloud secrets versions access latest --secret="$STAGING_DATABASE_SECRET" --project="$GCP_PROJECT_ID" > "$RUNNER_TEMP/atlas-staging-db-url"
+          test -s "$RUNNER_TEMP/atlas-staging-db-url"
+          chmod 600 "$RUNNER_TEMP/atlas-staging-db-url"
+      - name: Install PostgreSQL client and locked Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client
+          python -m pip install --upgrade "pip==25.3"
+          python -m pip install --require-hashes -r requirements-dev.lock
+          python -m pip check
+      - name: Reconcile authoritative provider rows and staging ledger
+        env:
+          DATABASE_URL: ""
+          STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
+          PRODUCTION_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DATABASE_URL="$(cat "$RUNNER_TEMP/atlas-staging-db-url")"
+          python scripts/verify_provider_ledger_reconciliation.py \
+            --statement-csv "$RUNNER_TEMP/provider-statement.csv" \
+            --provider "$PROVIDER" \
+            --from-utc "$FROM_UTC" \
+            --to-utc "$TO_UTC" \
+            --expected-runtime-role "$EXPECTED_RUNTIME_DB_ROLE" \
+            --expected-revision 0049_public_schema_rls_lockdown \
+            --output "$RUNNER_TEMP/provider-ledger-reconciliation.json"
+      - name: Archive restricted reconciliation report even if a mismatch is found
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -s "$RUNNER_TEMP/provider-ledger-reconciliation.json" ]]; then
+            gcloud storage cp "$RUNNER_TEMP/provider-ledger-reconciliation.json" \
+              "gs://$EVIDENCE_BUCKET/provider-ledger-reconciliations/$GITHUB_RUN_ID-$GITHUB_SHA/report.json"
+          else
+            echo "No reconciliation report was created. Provider-to-ledger evidence is not passed."
+          fi
+      - name: Publish sanitized summary only (never upload raw provider statement)
+        if: always()
+        shell: bash
+        run: |
+          if [[ -s "$RUNNER_TEMP/provider-ledger-reconciliation.json" ]]; then
+            python - "$RUNNER_TEMP/provider-ledger-reconciliation.json" <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, sys
+          report=json.load(open(sys.argv[1],encoding="utf-8"))
+          print("## Provider-to-ledger reconciliation")
+          print(f"- Result: **{report.get('result')}**")
+          print(f"- Provider: {report.get('provider')}")
+          print(f"- Statement SHA-256: `{report.get('provider_statement_sha256')}`")
+          print(f"- Statement rows: {report.get('statement_records')}")
+          print(f"- Matched rows: {report.get('matched_records')}")
+          print(f"- Staging rows: {report.get('staging_withdrawal_records')}")
+          print(f"- Failure count: {len(report.get('failures', []))}")
+          print("- The detailed restricted report is in the configured GCS evidence bucket; no raw statement/customer details were uploaded as an Actions artifact.")
+          PY
+          fi
+      - name: Remove staging credentials and raw statement from runner
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/atlas-staging-db-url" "$RUNNER_TEMP/provider-statement.csv"

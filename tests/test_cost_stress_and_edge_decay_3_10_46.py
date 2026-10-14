@@ -61,3 +61,35 @@ def test_customer_ui_carries_risk_disclosure():
     from pathlib import Path
     html = (Path(__file__).resolve().parents[1] / "app" / "templates" / "customer.html").read_text()
     assert 'id="riskDisclosure"' in html and "lose some or all" in html and "hypothetical" in html
+
+
+def test_fixed_carry_drag_is_included_in_cost_stress():
+    gross = np.full(400, 0.001, dtype=float)
+    turnover = np.full(400, 0.05, dtype=float)
+    carry = np.full(400, 0.001, dtype=float)
+    report = cost_breakeven_report(
+        gross,
+        turnover,
+        taker_bps=5.5,
+        slippage_bps=1.0,
+        bars_per_year=252,
+        stress_multiplier=2.0,
+        fixed_cost_drag=carry,
+    )
+    assert report["status"] == "OK"
+    assert np.isclose(report["annual_fixed_cost_drag"], 0.252, rtol=0, atol=1e-12)
+    assert report["annual_net_return"] < 0
+    assert report["stress_ok"] is False
+
+
+def test_invalid_fixed_cost_drag_fails_closed():
+    report = cost_breakeven_report(
+        [0.001] * 40,
+        [0.05] * 40,
+        taker_bps=5.5,
+        slippage_bps=1.0,
+        bars_per_year=252,
+        fixed_cost_drag=[float("nan")] * 40,
+    )
+    assert report["status"] == "INVALID_COST_INPUT"
+    assert report["stress_ok"] is False

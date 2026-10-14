@@ -282,7 +282,7 @@ def test_staging_identity_preflight_requires_a_distinct_project_and_runtime_iden
     assert "DATABASE_URL must reference exactly the configured staging database secret" in workflow
     assert "if login_role != role:" in workflow
     assert "BLOCKED: deployed staging service account differs" in workflow
-    assert 'role in {"postgres", "supabase_admin", "supabase_auth_admin", "authenticator"}' in workflow
+    assert 'if role in {"postgres", "service_role", "supabase_admin", "supabase_auth_admin", "authenticator", "anon", "authenticated"}:' in workflow
     assert "runtime database role has administrative privileges" in workflow
     assert "role_membership_count" in workflow
     assert "runtime DB role inherits other PostgreSQL roles" in workflow
