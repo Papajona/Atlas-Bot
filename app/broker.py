@@ -25,6 +25,8 @@ class Broker:
         self.config = config
         self.client = None
         self._lock = RLock()
+        # Per-call cancellation errors are consumed by emergency-stop reporting.
+        self.last_cancel_errors: list[dict[str, str]] = []
 
     @classmethod
     def get(cls, config: BrokerConfig) -> "Broker":
@@ -130,21 +132,62 @@ class Broker:
             return self._c().cancel_order(order_id, symbol)
 
     def cancel_all_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        """Attempt every scoped cancellation and retain structured failures for the caller.
+
+        A failed cancellation is not treated as proof an order remains open (the exchange
+        may have accepted it before a timeout), nor is it silently discarded. Callers must
+        re-fetch open orders and use that authoritative state before confirming a halt.
+        """
         with self._lock:
+            self.last_cancel_errors = []
             c = self._c()
             if c.has.get("cancelAllOrders"):
-                result = c.cancel_all_orders(symbol) if symbol else c.cancel_all_orders()
-                return result if isinstance(result, list) else [result]
+                try:
+                    result = c.cancel_all_orders(symbol) if symbol else c.cancel_all_orders()
+                except Exception as exc:
+                    # A bulk endpoint error does not prove no orders remain. Record it and
+                    # fall back to individual cancellations; callers still re-fetch open orders.
+                    failure = {
+                        "order_id": "",
+                        "symbol": str(symbol or ""),
+                        "error_type": type(exc).__name__,
+                        "error": f"bulk cancel failed: {str(exc)[:900]}",
+                    }
+                    self.last_cancel_errors.append(failure)
+                    logging.getLogger(__name__).warning(
+                        "cancel_all_bulk_failed error_type=%s error=%s",
+                        failure["error_type"], failure["error"], exc_info=True,
+                    )
+                else:
+                    return result if isinstance(result, list) else [result]
             orders = self.fetch_open_orders(symbol)
             out = []
             for order in orders:
                 oid = order.get("id")
                 sym = order.get("symbol") or symbol
-                if oid and sym:
-                    try:
-                        out.append(c.cancel_order(oid, sym))
-                    except Exception:
-                        logging.getLogger(__name__).warning("cancel_all_order_failed (order may still be open)", exc_info=True)
+                if not oid or not sym:
+                    self.last_cancel_errors.append({
+                        "order_id": str(oid or ""),
+                        "symbol": str(sym or ""),
+                        "error_type": "InvalidOpenOrder",
+                        "error": "open order is missing an order id or symbol; refusing to guess cancellation scope",
+                    })
+                    continue
+                try:
+                    out.append(c.cancel_order(oid, sym))
+                except Exception as exc:
+                    failure = {
+                        "order_id": str(oid),
+                        "symbol": str(sym),
+                        "error_type": type(exc).__name__,
+                        "error": str(exc)[:1000],
+                    }
+                    self.last_cancel_errors.append(failure)
+                    logging.getLogger(__name__).warning(
+                        "cancel_all_order_failed order_id=%s symbol=%s error_type=%s error=%s",
+                        failure["order_id"], failure["symbol"], failure["error_type"], failure["error"],
+                        exc_info=True,
+                    )
             return out
 
     def server_time(self) -> int | None:

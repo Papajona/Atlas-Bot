@@ -23,7 +23,7 @@ from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocke
 from fastapi.responses import HTMLResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, desc, or_, func
+from sqlalchemy import select, desc, or_, func, case, cast, Numeric
 from sqlalchemy.exc import IntegrityError
 from .config import settings
 from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
@@ -1401,16 +1401,23 @@ async def _usdt_tron_monitor_loop():
                                 highest_ts = max(highest_ts, block_ts)
                                 if already_credited:
                                     continue
-                                amount = raw_value / 1_000_000
+                                amount = Decimal(raw_value) / Decimal("1000000")
                                 async with SessionLocal() as db:
                                     existing = (await db.execute(select(FundingTransaction).where(
                                         FundingTransaction.provider == "tron-usdt",
-                                        FundingTransaction.provider_reference == provider_ref))).scalar_one_or_none()
+                                        FundingTransaction.provider_reference == provider_ref
+                                    ).with_for_update())).scalar_one_or_none()
                                     if existing:
                                         continue
-                                    locked_wallet = (await db.execute(select(Wallet).where(Wallet.id == wallet.id).with_for_update())).scalar_one_or_none()
-                                    if not locked_wallet:
-                                        continue
+                                    # Keep the ledger -> wallet -> trading-account lock order used by
+                                    # withdrawals and the generic funding webhook.
+                                    if not settings.funding_manual_review_required:
+                                        await get_or_create_ledger(db, wallet.customer_id, "USDT")
+                                    locked_wallet = (await db.execute(
+                                        select(Wallet).where(Wallet.id == wallet.id).with_for_update()
+                                    )).scalar_one_or_none()
+                                    if not locked_wallet or locked_wallet.customer_id != wallet.customer_id:
+                                        raise RuntimeError("TRON deposit wallet ownership changed during scan")
                                     funding = FundingTransaction(
                                         customer_id=locked_wallet.customer_id, wallet_id=locked_wallet.id,
                                         provider="tron-usdt", provider_reference=provider_ref,
@@ -2409,10 +2416,18 @@ async def admin_prepare_tron_sweep(req: dict, authorization: str | None = Header
         wallet_id = int(req.get("wallet_id"))
         amount = req.get("amount_usdt")
         async with SessionLocal() as db:
+            # Read owner identity first, then acquire locks in the global customer-cash
+            # order: ledger -> wallet. Re-check wallet status/owner after locking it.
+            candidate = (await db.execute(select(Wallet).where(
+                Wallet.id == wallet_id, Wallet.currency == "USDT", Wallet.network == "TRON",
+            ))).scalar_one_or_none()
+            if not candidate or not candidate.deposit_address:
+                raise HTTPException(404, "active TRON USDT wallet not found")
+            await get_or_create_ledger(db, candidate.customer_id, "USDT")
             wallet = (await db.execute(select(Wallet).where(
                 Wallet.id == wallet_id, Wallet.currency == "USDT", Wallet.network == "TRON",
                 Wallet.status == "ACTIVE").with_for_update())).scalar_one_or_none()
-            if not wallet or not wallet.deposit_address:
+            if not wallet or wallet.customer_id != candidate.customer_id or not wallet.deposit_address:
                 raise HTTPException(404, "active TRON USDT wallet not found")
             balance = await customer_balance(db, wallet.customer_id, "USDT")
             if float(amount) < settings.usdt_tron_sweep_min_amount:
@@ -3183,15 +3198,20 @@ async def approve_funding(funding_id: int, authorization: str | None = Header(de
             raise HTTPException(404, "Funding transaction not found")
         if str(funding.status or "").upper() != "PENDING_REVIEW":
             raise HTTPException(409, "Funding transaction is not pending review")
+        if str(funding.currency or "").upper() != "USDT":
+            raise HTTPException(409, "Only USDT funding is supported by the customer cash ledger")
+        # Match the customer-cash lock order used by automatic deposits and withdrawals.
+        await get_or_create_ledger(db, funding.customer_id, "USDT")
         wallet = (await db.execute(select(Wallet).where(Wallet.id == funding.wallet_id)
                                    .with_for_update())).scalar_one_or_none()
-        if not wallet or wallet.customer_id != funding.customer_id:
-            raise HTTPException(409, "Funding wallet/customer mismatch")
+        if not wallet or wallet.customer_id != funding.customer_id or wallet.currency.upper() != "USDT":
+            raise HTTPException(409, "Funding wallet/customer/currency mismatch")
         metadata = json.loads(funding.metadata_json or "{}")
         funding.status = "CONFIRMED"
         funding.confirmed_at = funding.confirmed_at or datetime.now(timezone.utc)
+        wallet.status = "ACTIVE"
         await post_deposit(db, customer_id=funding.customer_id, wallet_id=funding.wallet_id,
-                            amount=float(funding.amount), provider_reference=funding.provider_reference,
+                            amount=Decimal(str(funding.amount)), provider_reference=funding.provider_reference,
                             provider=funding.provider, metadata=metadata)
         await sync_wallet_from_ledger(db, funding.customer_id, "USDT")
         account = (await db.execute(select(TradingAccount).where(
@@ -3247,6 +3267,13 @@ async def funding_webhook(
     if not _funding_signature_valid(raw, x_funding_signature, x_funding_timestamp):
         raise HTTPException(401, "Invalid funding webhook signature")
     payload = FundingWebhook.model_validate(json.loads(raw))
+    if payload.currency.strip().upper() != "USDT":
+        raise HTTPException(422, "Only USDT funding is supported by the customer trading ledger")
+    funding_amount = Decimal(str(payload.amount))
+    if not funding_amount.is_finite() or funding_amount <= 0:
+        raise HTTPException(422, "Funding amount must be finite and positive")
+    if payload.currency.strip().upper() == "USDT" and funding_amount.as_tuple().exponent < -6:
+        raise HTTPException(422, "USDT funding amount supports at most 6 decimal places")
     async with SessionLocal() as db:
         customer = (await db.execute(select(CustomerProfile).where(CustomerProfile.auth_user_id == payload.customer_auth_user_id)
                                       .with_for_update())).scalar_one_or_none()
@@ -3254,74 +3281,101 @@ async def funding_webhook(
             raise HTTPException(404, "Customer account not found")
         existing = (await db.execute(select(FundingTransaction).where(
             FundingTransaction.provider == payload.provider,
-            FundingTransaction.provider_reference == payload.provider_reference))).scalar_one_or_none()
+            FundingTransaction.provider_reference == payload.provider_reference
+        ).with_for_update())).scalar_one_or_none()
         if existing:
-            incoming = payload.status
-            current = str(existing.status or "PENDING").upper()
-            if incoming == current:
-                return {"ok": True, "id": existing.id, "status": existing.status, "wallet_id": existing.wallet_id, "idempotent": True}
-            allowed = {"PENDING": {"CONFIRMED", "FAILED"}, "PENDING_REVIEW": {"CONFIRMED", "REJECTED"}, "FAILED": {"CONFIRMED"}, "CONFIRMED": set()}
-            if incoming not in allowed.get(current, set()):
-                raise HTTPException(409, f"Invalid funding state transition: {current} -> {incoming}")
-            currency = str(existing.currency or payload.currency).upper()
+            # A provider/reference identifies one immutable funding operation. Validate the
+            # owner, wallet, currency and exact amount before even accepting an idempotent replay.
+            if existing.customer_id != customer.id:
+                raise HTTPException(409, "Funding provider reference belongs to a different customer")
+            currency = str(existing.currency or "").upper()
             if payload.currency.upper() != currency:
                 raise HTTPException(409, "Funding currency does not match the recorded transaction")
-            stored_amount = float(existing.amount or 0.0)
-            if abs(stored_amount - float(payload.amount)) > 1e-9:
-                await _audit("FUNDING_AMOUNT_MISMATCH", {"id": existing.id, "provider": existing.provider,
-                                                          "stored_amount": stored_amount, "payload_amount": payload.amount})
-            wallet = (await db.execute(select(Wallet).where(Wallet.id == existing.wallet_id).with_for_update())).scalar_one_or_none()
-            if not wallet:
-                raise HTTPException(409, "Funding wallet no longer exists")
-            existing.status = incoming
+            stored_amount = Decimal(str(existing.amount or 0))
+            incoming_amount = Decimal(str(payload.amount))
+            if stored_amount != incoming_amount:
+                await _audit("FUNDING_AMOUNT_MISMATCH", {
+                    "id": existing.id, "provider": existing.provider,
+                    "stored_amount": str(stored_amount), "payload_amount": str(incoming_amount),
+                })
+                raise HTTPException(409, "Funding amount mismatch; no credit posted, reconciliation required")
+            incoming = payload.status
+            current = str(existing.status or "PENDING").upper()
+            allowed = {"PENDING": {"CONFIRMED", "FAILED"}, "PENDING_REVIEW": {"CONFIRMED", "REJECTED"}, "FAILED": {"CONFIRMED"}, "CONFIRMED": set()}
+            if incoming != current and incoming not in allowed.get(current, set()):
+                raise HTTPException(409, f"Invalid funding state transition: {current} -> {incoming}")
+            auto_credit = (
+                incoming == "CONFIRMED" and current != "CONFIRMED"
+                and currency == "USDT" and not settings.funding_manual_review_required
+            )
+            # Global customer-cash lock order: ledger before wallet, then trading account.
+            if auto_credit:
+                await get_or_create_ledger(db, customer.id, "USDT")
+            wallet = (await db.execute(
+                select(Wallet).where(Wallet.id == existing.wallet_id).with_for_update()
+            )).scalar_one_or_none()
+            if not wallet or wallet.customer_id != existing.customer_id or wallet.currency.upper() != currency:
+                raise HTTPException(409, "Funding wallet/customer/currency mismatch; reconciliation required")
+            if incoming == current:
+                return {"ok": True, "id": existing.id, "status": existing.status, "wallet_id": existing.wallet_id, "idempotent": True}
             existing.metadata_json = json.dumps(payload.metadata, separators=(",", ":"))
             if incoming == "CONFIRMED":
-                wallet.status = "ACTIVE"
                 existing.confirmed_at = existing.confirmed_at or datetime.now(timezone.utc)
                 if settings.funding_manual_review_required:
                     existing.status = "PENDING_REVIEW"
-                elif currency == "USDT" and current != "CONFIRMED":
-                    await post_deposit(db, customer_id=customer.id, wallet_id=wallet.id, amount=stored_amount,
-                                        provider_reference=payload.provider_reference, metadata=payload.metadata, provider=existing.provider)
-                    await sync_wallet_from_ledger(db, customer.id, "USDT")
-                    account = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == customer.id).with_for_update())).scalar_one_or_none()
-                    if account:
-                        bal = await customer_balance(db, customer.id, "USDT")
-                        account.cash_equity = bal["available"] + bal["trading_reserved"]
-                        account.equity = max(0.0, bal["available"] + bal["trading_reserved"] + account.realized_pnl + account.unrealized_pnl)
-                        account.peak_equity = max(account.peak_equity, account.equity)
+                else:
+                    existing.status = "CONFIRMED"
+                    if currency == "USDT":
+                        wallet.status = "ACTIVE"
+                        await post_deposit(db, customer_id=customer.id, wallet_id=wallet.id, amount=stored_amount,
+                                            provider_reference=payload.provider_reference, metadata=payload.metadata, provider=existing.provider)
+                        await sync_wallet_from_ledger(db, customer.id, "USDT")
+                        account = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == customer.id).with_for_update())).scalar_one_or_none()
+                        if account:
+                            bal = await customer_balance(db, customer.id, "USDT")
+                            account.cash_equity = bal["available"] + bal["trading_reserved"]
+                            account.equity = max(0.0, bal["available"] + bal["trading_reserved"] + account.realized_pnl + account.unrealized_pnl)
+                            account.peak_equity = max(account.peak_equity, account.equity)
+            else:
+                existing.status = incoming
             await db.commit()
             return {"ok": True, "id": existing.id, "status": existing.status, "wallet_id": existing.wallet_id, "idempotent": False, "state_transition": f"{current}->{incoming}"}
         currency = payload.currency.upper()
+        requires_review = settings.funding_manual_review_required and payload.status == "CONFIRMED"
+        # On the automatic USDT-credit path, acquire the ledger before the wallet lock.
+        if currency == "USDT" and payload.status == "CONFIRMED" and not requires_review:
+            await get_or_create_ledger(db, customer.id, "USDT")
         wallet = (await db.execute(select(Wallet).where(Wallet.customer_id == customer.id, Wallet.currency == currency)
                                    .with_for_update())).scalar_one_or_none()
         if not wallet and payload.status == "CONFIRMED":
-            wallet = Wallet(customer_id=customer.id, currency=currency, wallet_type="INTERNAL_TRADING", status="ACTIVE")
+            wallet = Wallet(customer_id=customer.id, currency=currency, wallet_type="INTERNAL_TRADING",
+                            status="PENDING" if requires_review else "ACTIVE")
             db.add(wallet)
             await db.flush()
         if not wallet:
-            # Pending funding does not create a spendable wallet yet.
+            # Pending/manual-review funding does not create a spendable wallet.
             wallet = Wallet(customer_id=customer.id, currency=currency, wallet_type="INTERNAL_TRADING", status="PENDING")
             db.add(wallet)
             await db.flush()
         funding = FundingTransaction(customer_id=customer.id, wallet_id=wallet.id,
             provider=payload.provider, provider_reference=payload.provider_reference,
-            amount=payload.amount, currency=currency,
-            status=("PENDING_REVIEW" if settings.funding_manual_review_required and payload.status == "CONFIRMED" else payload.status),
+            amount=funding_amount, currency=currency,
+            status=("PENDING_REVIEW" if requires_review else payload.status),
             metadata_json=json.dumps(payload.metadata, separators=(",", ":")))
         if payload.status == "CONFIRMED":
-            wallet.status = "ACTIVE"
             funding.confirmed_at = datetime.now(timezone.utc)
-            if currency == "USDT":
-                await post_deposit(db, customer_id=customer.id, wallet_id=wallet.id, amount=payload.amount,
-                                    provider_reference=payload.provider_reference, metadata=payload.metadata, provider=payload.provider)
-                await sync_wallet_from_ledger(db, customer.id, "USDT")
-                account = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == customer.id).with_for_update())).scalar_one_or_none()
-                if account:
-                    bal = await customer_balance(db, customer.id, "USDT")
-                    account.cash_equity = bal["available"] + bal["trading_reserved"]
-                    account.equity = max(0.0, account.cash_equity + account.realized_pnl + account.unrealized_pnl)
-                    account.peak_equity = max(account.peak_equity, account.equity)
+            if not requires_review:
+                wallet.status = "ACTIVE"
+                if currency == "USDT":
+                    await post_deposit(db, customer_id=customer.id, wallet_id=wallet.id, amount=Decimal(str(payload.amount)),
+                                        provider_reference=payload.provider_reference, metadata=payload.metadata, provider=payload.provider)
+                    await sync_wallet_from_ledger(db, customer.id, "USDT")
+                    account = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == customer.id).with_for_update())).scalar_one_or_none()
+                    if account:
+                        bal = await customer_balance(db, customer.id, "USDT")
+                        account.cash_equity = bal["available"] + bal["trading_reserved"]
+                        account.equity = max(0.0, account.cash_equity + account.realized_pnl + account.unrealized_pnl)
+                        account.peak_equity = max(account.peak_equity, account.equity)
         db.add(funding)
         await db.commit()
         return {"ok": True, "id": funding.id, "status": funding.status,
@@ -5586,16 +5640,33 @@ async def reject_withdrawal(withdrawal_id: int, req: WithdrawalDecision, x_admin
 async def withdrawal_summary(x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
+    pending_statuses = ("PENDING", "PARTIALLY_APPROVED")
+    in_flight_statuses = ("SUBMITTING", "SUBMITTED", "UNKNOWN")
+    precise_amount = cast(Withdrawal.amount, Numeric(38, 18))
     async with SessionLocal() as db:
-        rows = (await db.execute(select(Withdrawal))).scalars().all()
-    pending = [r for r in rows if r.status in {"PENDING", "PARTIALLY_APPROVED"}]
+        # Aggregate at the database instead of materializing the entire withdrawal
+        # history into API memory. Numeric casts keep SQL SUM exact until serialization.
+        summary = (await db.execute(select(
+            func.count(case((Withdrawal.status.in_(pending_statuses), 1))).label("pending_count"),
+            func.coalesce(func.sum(case(
+                (Withdrawal.status.in_(pending_statuses), precise_amount), else_=None
+            )), Decimal("0")).label("pending_amount"),
+            func.count(case((Withdrawal.status == "APPROVED", 1))).label("approved_count"),
+            func.coalesce(func.sum(case(
+                (Withdrawal.status == "APPROVED", precise_amount), else_=None
+            )), Decimal("0")).label("approved_amount"),
+            func.count(case((Withdrawal.status.in_(in_flight_statuses), 1))).label("in_flight_count"),
+            func.count(case((Withdrawal.status == "REJECTED", 1))).label("rejected_count"),
+        ))).one()
     return {
-        "pending_count": len(pending),
-        "pending_amount": sum(r.amount for r in pending),
-        "approved_count": sum(r.status == "APPROVED" for r in rows),
-        "approved_amount": sum(r.amount for r in rows if r.status == "APPROVED"),
-        "in_flight_count": sum(r.status in {"SUBMITTING", "SUBMITTED", "UNKNOWN"} for r in rows),
-        "rejected_count": sum(r.status == "REJECTED" for r in rows),
+        "pending_count": int(summary.pending_count),
+        "pending_amount": float(summary.pending_amount),
+        "pending_amount_exact": format(Decimal(str(summary.pending_amount)), "f"),
+        "approved_count": int(summary.approved_count),
+        "approved_amount": float(summary.approved_amount),
+        "approved_amount_exact": format(Decimal(str(summary.approved_amount)), "f"),
+        "in_flight_count": int(summary.in_flight_count),
+        "rejected_count": int(summary.rejected_count),
         "requires_dual_approval": settings.withdrawal_dual_approval,
     }
 

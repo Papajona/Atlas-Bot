@@ -140,6 +140,8 @@ def test_oos_promotion_gate_requires_complete_trial_history_and_strong_evidence(
     }
     assert oos_promotion_gate(strong)["passed"] is True
     assert oos_promotion_gate({**strong, "trial_registry_complete": False})["passed"] is False
+    assert oos_promotion_gate({key: value for key, value in strong.items() if key != "deflated_sharpe"})["passed"] is False
+    assert oos_promotion_gate({**strong, "deflated_sharpe": None})["passed"] is False
     assert oos_promotion_gate({**strong, "deflated_sharpe": 0.94})["passed"] is False
     assert oos_promotion_gate({**strong, "cost_stress_ok": False})["passed"] is False
     assert oos_promotion_gate({**strong, "trades": 99})["passed"] is False

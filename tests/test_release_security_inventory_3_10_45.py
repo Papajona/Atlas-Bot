@@ -55,7 +55,7 @@ def test_production_docker_contains_migrations_and_not_test_suite():
     assert "COPY alembic.ini ./alembic.ini" in docker
     assert "COPY tests" not in docker
     assert "COPY requirements.lock ./" in docker
-    assert "RUN python -m pip install --no-cache-dir --require-hashes -r requirements.lock" in docker
+    assert "RUN python -m pip install --no-cache-dir --no-binary=multidict --require-hashes -r requirements.lock" in docker
     assert "pytest" not in (ROOT / "requirements.txt").read_text()
 
 

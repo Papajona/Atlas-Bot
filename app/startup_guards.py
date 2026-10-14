@@ -18,6 +18,13 @@ def assert_multidict_safe_backend() -> None:
         raise RuntimeError("MULTIDICT_NO_EXTENSIONS=1 is required outside development")
     try:
         import multidict
+        version = str(getattr(multidict, "__version__", ""))
+        try:
+            version_parts = tuple(int(part) for part in version.split(".")[:3])
+        except ValueError as exc:
+            raise RuntimeError("Unable to verify multidict version") from exc
+        if len(version_parts) != 3 or version_parts < (6, 9, 1):
+            raise RuntimeError("multidict>=6.9.1 is required; version is unsupported")
         if str(multidict.CIMultiDict.__module__) != "multidict._multidict_py":
             raise RuntimeError("multidict is not using the required pure-Python backend")
     except RuntimeError:

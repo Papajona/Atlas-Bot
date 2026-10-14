@@ -1,9 +1,9 @@
 FROM python:3.13-slim@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PYTHONHASHSEED=random MULTIDICT_NO_EXTENSIONS=1
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PYTHONHASHSEED=random MULTIDICT_NO_EXTENSIONS=1 OMP_NUM_THREADS=2
 RUN useradd --create-home --uid 10001 appuser
 WORKDIR /app
 COPY requirements.lock ./
-RUN python -m pip install --no-cache-dir --require-hashes -r requirements.lock
+RUN python -m pip install --no-cache-dir --no-binary=multidict --require-hashes -r requirements.lock
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./alembic.ini

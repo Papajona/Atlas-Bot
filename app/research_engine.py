@@ -219,6 +219,37 @@ def _rank_for_research(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=lambda x: x["research_score"], reverse=True)
 
 
+def _has_valid_oos_measurement(metrics: dict) -> bool:
+    if not isinstance(metrics, dict) or metrics.get("status") != "OK":
+        return False
+    try:
+        return bool(np.isfinite(float(metrics.get("oos_total_return"))))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _rank_by_oos(rows: list[dict], oos_by_strategy: dict[str, dict]) -> list[dict]:
+    """Order measured OOS results first; place missing/invalid OOS results last."""
+    def finite_or_negative_infinity(value) -> float:
+        try:
+            number = float(value)
+            return number if np.isfinite(number) else float("-inf")
+        except (TypeError, ValueError, OverflowError):
+            return float("-inf")
+
+    def key(row: dict) -> tuple[bool, float, float]:
+        metrics = oos_by_strategy.get(str(row.get("strategy") or ""), {})
+        valid = _has_valid_oos_measurement(metrics)
+        if not valid:
+            return (False, float("-inf"), float("-inf"))
+        return (
+            True,
+            finite_or_negative_infinity(metrics.get("oos_total_return")),
+            finite_or_negative_infinity(metrics.get("sharpe")),
+        )
+    return sorted(rows, key=key, reverse=True)
+
+
 def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                             taker_bps: float = 5.5, slippage_bps: float = 2.0,
                             include_ai: bool = True, asset: str = "crypto",
@@ -227,6 +258,13 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                             prior_trial_labels=None) -> dict:
     cfg = cfg or StrategyConfig()
     data_quality = validate_ohlcv_frame(df)
+    # The current established-coin allowlist is a live liquidity control, not a
+    # historical point-in-time universe. Carry this limitation into every research result.
+    universe_bias = (
+        "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
+        if str(asset).lower() == "crypto" else "NOT_APPLICABLE"
+    )
+    data_quality["universe_bias"] = universe_bias
     provenance = dict(df.attrs.get("data_provenance") or {})
     if not provenance.get("sha256"):
         data_quality.setdefault("issues", []).append("missing_data_provenance_hash")
@@ -234,7 +272,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     if not data_quality["valid"]:
         return {"research_version": "3.10.3-validation-v2", "status": "DATA_INVALID",
                 "data_quality": data_quality, "data_provenance": provenance,
-                "strategies": [], "strategy_count": 0}
+                "universe_bias": universe_bias, "strategies": [], "strategy_count": 0}
     components = ["trend", "momentum", "breakout", "mean_reversion", "ensemble"]
     results = [_component_backtest(df, c, cfg, taker_bps, slippage_bps, asset) for c in components]
     for row in results:
@@ -344,11 +382,14 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             ai_result = ai_walk_forward_backtest(df, asset, folds, min_train, ai_threshold)
         except Exception as exc:
             ai_result = {"strategy": "ai_walk_forward", "status": "INSUFFICIENT_DATA", "error": str(exc)}
-    ranked = _rank_for_research(results.copy())
+    in_sample_ranked = _rank_for_research(results.copy())
+    # Headline order is based on held-out metrics; invalid OOS results always rank last.
+    oos_ranked = _rank_by_oos(results.copy(), per_strategy_oos)
     return {
         "research_version": "3.10.3-validation-v2",
         "data_quality": data_quality,
         "data_provenance": provenance,
+        "universe_bias": universe_bias,
         "validation": {"purged_walk_forward_folds": [fold.__dict__ for fold in validation_splits],
                         "cost_sensitivity": sensitivity,
                         "bootstrap_mean_return_ci": ci,
@@ -364,7 +405,10 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "regime_conditioned_performance": regime_performance},
         "strategy_count": len(results) + (1 if ai_result else 0),
         "strategies": results,
-        "research_order": [r["strategy"] for r in ranked],
+        "research_order": [r["strategy"] for r in oos_ranked],
+        "research_order_basis": "OOS_RETURN_THEN_SHARPE_NON_OK_LAST",
+        "in_sample_rank_order": [r["strategy"] for r in in_sample_ranked],
+        "in_sample_rank_order_basis": "IN_SAMPLE_DIAGNOSTIC_ONLY_NOT_PROMOTION_EVIDENCE",
         "ai_walk_forward": ai_result,
         "regime": _regime_snapshot(df, cfg, asset=asset),
         "robustness": robustness,
@@ -434,37 +478,70 @@ def live_strategy_signals(df: pd.DataFrame, strategies: list[str], cfg: Strategy
 def ai_market_review(research: dict, live_signal: dict | None = None) -> dict:
     rows = research.get("strategies", [])
     regime = research.get("regime", {})
+    validation = research.get("validation") or {}
+    oos_by_strategy = validation.get("per_strategy_oos") or {}
     if not rows:
         return {"status": "NO_DATA", "summary": "No strategy research results are available."}
-    best = max(rows, key=lambda r: r.get("research_score", -1e9))
-    profitable = [r for r in rows if r.get("total_return", 0) > 0 and r.get("sharpe", 0) > 0]
-    drawdown_warnings = [r["strategy"] for r in rows if r.get("max_drawdown", 0) < -0.25]
+
+    ranked_oos = _rank_by_oos(rows, oos_by_strategy)
+    measured = [row for row in ranked_oos if _has_valid_oos_measurement(oos_by_strategy.get(str(row.get("strategy") or ""), {}))]
+    best = measured[0] if measured else None
+
+    def _finite_metric(strategy_name: str, metric_name: str, default: float = 0.0) -> float:
+        try:
+            value = float((oos_by_strategy.get(strategy_name) or {}).get(metric_name))
+            return value if np.isfinite(value) else default
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+    profitable_oos = [
+        row for row in measured
+        if _finite_metric(str(row.get("strategy") or ""), "oos_total_return") > 0
+        and _finite_metric(str(row.get("strategy") or ""), "sharpe") > 0
+    ]
+    drawdown_warnings = [
+        str(row["strategy"]) for row in measured
+        if _finite_metric(str(row.get("strategy") or ""), "max_drawdown") < -0.25
+    ]
     summary = (
         f"Current regime classified as {regime.get('regime', 'UNKNOWN')}. "
-        f"The research set contains {len(rows)} rule-based strategy variants. "
-        f"{len(profitable)} showed positive return and positive Sharpe in this historical test."
+        f"The research set contains {len(rows)} rule-based strategy variants; "
+        f"{len(profitable_oos)} measured out-of-sample results showed positive net return and Sharpe."
     )
     observations = [
-        f"Highest research score in this run: {best['strategy']} ({best['research_score']:.3f}).",
+        (
+            f"Highest measured out-of-sample result (not promotion approval): {best['strategy']} "
+            f"(net return {_finite_metric(str(best['strategy']), 'oos_total_return'):.3f}, "
+            f"Sharpe {_finite_metric(str(best['strategy']), 'sharpe'):.3f})."
+            if best else "No strategy has a valid out-of-sample measurement; no headline winner is reported."
+        ),
         f"Current annualized realized volatility: {regime.get('annualized_realized_vol', 0):.3f}.",
     ]
     if drawdown_warnings:
-        observations.append("Large historical drawdowns detected in: " + ", ".join(drawdown_warnings) + ".")
+        observations.append("Large out-of-sample drawdowns detected in: " + ", ".join(drawdown_warnings) + ".")
     if live_signal:
         observations.append(
             f"Live ensemble signal is {live_signal.get('side', 'unknown')} with score "
             f"{float(live_signal.get('ensemble_score', 0)):.3f}; this is context, not a trade recommendation."
         )
+    universe_bias = research.get("universe_bias") or (research.get("data_quality") or {}).get("universe_bias", "UNKNOWN")
     return {
         "status": "REVIEW_READY",
         "summary": summary,
         "observations": observations,
         "regime": regime,
+        "top_strategy": str(best["strategy"]) if best else "",
+        "top_strategy_basis": "OUT_OF_SAMPLE_MEASUREMENT_ONLY",
+        "top_strategy_oos_status": "OK" if best else "NO_VALID_OOS_MEASUREMENT",
         "research_order": research.get("research_order", []),
+        "research_order_basis": research.get("research_order_basis", "OOS_ONLY"),
+        "universe_bias": universe_bias,
         "paper_candidates": paper_candidates(research),
         "limitations": [
             "Historical backtests do not guarantee future performance.",
             "Walk-forward validation reduces but does not eliminate overfitting.",
+            "An out-of-sample measurement is not promotion approval; all promotion and risk gates must still pass.",
+            f"Research universe limitation: {universe_bias}.",
             "Live promotion should require paper/shadow evidence and risk gates.",
         ],
     }

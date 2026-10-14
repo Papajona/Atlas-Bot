@@ -83,7 +83,7 @@ def test_immediate_provider_unknown_never_releases_reserve():
 
 def test_withdrawal_provider_identifier_is_unique_and_recovery_is_durable():
     db = (ROOT / "app" / "db.py").read_text(encoding="utf-8")
-    migration = (ROOT / "alembic" / "versions" / "0034_withdrawal_provider_identity.py").read_text(encoding="utf-8")
+    migration = (ROOT / "alembic" / "versions" / "0034b_withdrawal_provider_identity.py").read_text(encoding="utf-8")
     assert "uq_withdrawal_provider_id_nonempty" in db
     assert "unique=True" in db
     assert "provider_id <> ''" in migration

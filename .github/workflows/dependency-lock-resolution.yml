@@ -49,8 +49,8 @@ jobs:
       - name: Verify hash-enforced installation from generated lock files
         run: |
           set -euo pipefail
-          python -m pip install --require-hashes -r "$RUNNER_TEMP/requirements.lock"
-          python -m pip install --require-hashes -r "$RUNNER_TEMP/requirements-dev.lock"
+          MULTIDICT_NO_EXTENSIONS=1 python -m pip install --no-binary=multidict --require-hashes -r "$RUNNER_TEMP/requirements.lock"
+          MULTIDICT_NO_EXTENSIONS=1 python -m pip install --no-binary=multidict --require-hashes -r "$RUNNER_TEMP/requirements-dev.lock"
           python -m pip check
       - name: Verify dependency installation did not mutate the lock candidates
         run: |
@@ -70,7 +70,13 @@ jobs:
 
   commit-verified-locks:
     needs: resolve-hash-locks
-    if: github.event_name == 'pull_request' && github.event.pull_request.number == 115 && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'fix/remaining-audit-gates-2026-10-14'
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (
+        (github.event.pull_request.number == 115 && github.head_ref == 'fix/remaining-audit-gates-2026-10-14') ||
+        (github.event.pull_request.number == 122 && github.head_ref == 'fix/audit-bias-runtime-money-2026-10-14')
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -99,11 +105,17 @@ jobs:
       - name: Commit locks to the specific audit-repair PR only
         env:
           PR_BRANCH: ${{ github.head_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           LOCKS: ${{ runner.temp }}/verified-lock-candidates
         shell: bash
         run: |
           set -euo pipefail
-          test "$PR_BRANCH" = "fix/remaining-audit-gates-2026-10-14"
+          if [[ "$PR_NUMBER" == "115" && "$PR_BRANCH" == "fix/remaining-audit-gates-2026-10-14" ]] || [[ "$PR_NUMBER" == "122" && "$PR_BRANCH" == "fix/audit-bias-runtime-money-2026-10-14" ]]; then
+            :
+          else
+            echo "Refusing to commit lock artifact to unexpected PR/branch: $PR_NUMBER:$PR_BRANCH" >&2
+            exit 1
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           install -m 0644 "$LOCKS/requirements.lock" requirements.lock

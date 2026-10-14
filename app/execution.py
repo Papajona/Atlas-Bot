@@ -1911,6 +1911,7 @@ async def emergency_stop(exchange: str | None = None):
 
     canceled: list[dict[str, str]] = []
     failures: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
     cancel_error = None
     barrier_timeout = max(15.0, float(settings.exchange_timeout_ms) / 1000.0 + 15.0)
     barrier_confirmed = await _wait_for_live_submission_barrier(barrier_timeout)
@@ -1927,16 +1928,47 @@ async def emergency_stop(exchange: str | None = None):
             broker = OandaBroker(OandaConfig(settings.oanda_account_id, settings.oanda_api_token, settings.oanda_practice, settings.oanda_timeout_seconds))
             try:
                 orders = await asyncio.to_thread(broker.orders)
+                order_cancel_errors: list[dict[str, str]] = []
                 for order in orders:
                     order_id = str(order.get("id") or "")
                     state = str(order.get("state") or "").upper()
-                    if order_id and state in {"PENDING", "OPEN"}:
+                    if state not in {"PENDING", "OPEN"}:
+                        continue
+                    if not order_id:
+                        failure = {
+                            "scope": "platform_oanda_order_cancel",
+                            "error_type": "InvalidOpenOrder",
+                            "error": "Open OANDA order is missing its order id; refusing to guess cancellation scope",
+                        }
+                        failures.append(failure)
+                        order_cancel_errors.append(failure)
+                        continue
+                    try:
                         await asyncio.to_thread(broker.cancel_order, order_id)
                         canceled.append({"scope": "platform_oanda", "order_id": order_id})
+                    except Exception as exc:
+                        # Continue the halt sweep; the cancellation may have reached OANDA
+                        # before a timeout. Always re-fetch orders and positions below.
+                        failure = {
+                            "scope": "platform_oanda_order_cancel",
+                            "order_id": order_id,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc)[:1000],
+                        }
+                        order_cancel_errors.append(failure)
+                        warnings.append(failure)
+                        logging.getLogger(__name__).warning(
+                            "emergency_stop_oanda_cancel_failed order_id=%s error_type=%s error=%s",
+                            order_id, failure["error_type"], failure["error"], exc_info=True,
+                        )
                 remaining = await asyncio.to_thread(broker.orders)
                 still_open = [str(o.get("id") or "") for o in remaining if str(o.get("state") or "").upper() in {"PENDING", "OPEN"}]
                 if still_open:
-                    failures.append({"scope": "platform_oanda", "error": f"Open orders remain after cancellation: {still_open[:20]}"})
+                    failures.append({
+                        "scope": "platform_oanda",
+                        "error": f"Open orders remain after cancellation: {still_open[:20]}",
+                        "cancel_errors": order_cancel_errors[:50],
+                    })
                 positions = await asyncio.to_thread(broker.positions)
                 for position in positions or []:
                     instrument = str(position.get("instrument") or "")
@@ -1977,9 +2009,16 @@ async def emergency_stop(exchange: str | None = None):
             rows = await asyncio.to_thread(broker.cancel_all_orders)
             for item in rows or []:
                 canceled.append({"scope": "platform_exchange", "order_id": str(item.get("id") or "")})
+            platform_cancel_errors = list(getattr(broker, "last_cancel_errors", []) or [])
+            warnings.extend({"scope": "platform_exchange_order_cancel", **item} for item in platform_cancel_errors)
             remaining = await asyncio.to_thread(broker.fetch_open_orders)
             if remaining:
-                failures.append({"scope": "platform_exchange", "error": f"Open orders remain after cancellation: {len(remaining)}"})
+                failures.append({
+                    "scope": "platform_exchange",
+                    "error": f"Open orders remain after cancellation: {len(remaining)}",
+                    "open_order_ids": [str(item.get("id") or "") for item in remaining[:50]],
+                    "cancel_errors": platform_cancel_errors[:50],
+                })
             if _is_derivatives_market(broker):
                 await _flatten_exchange_positions(broker, "platform_exchange", failures, canceled)
             else:
@@ -2066,9 +2105,16 @@ async def emergency_stop(exchange: str | None = None):
                 rows = await asyncio.to_thread(broker.cancel_all_orders)
                 for item in rows or []:
                     canceled.append({"scope": f"customer:{account.customer_id}", "order_id": str(item.get("id") or "")})
+                customer_cancel_errors = list(getattr(broker, "last_cancel_errors", []) or [])
+                warnings.extend({"scope": f"customer:{account.customer_id}_order_cancel", **item} for item in customer_cancel_errors)
                 remaining = await asyncio.to_thread(broker.fetch_open_orders)
                 if remaining:
-                    failures.append({"scope": f"customer:{account.customer_id}", "error": f"Open orders remain after cancellation: {len(remaining)}"})
+                    failures.append({
+                        "scope": f"customer:{account.customer_id}",
+                        "error": f"Open orders remain after cancellation: {len(remaining)}",
+                        "open_order_ids": [str(item.get("id") or "") for item in remaining[:50]],
+                        "cancel_errors": customer_cancel_errors[:50],
+                    })
                 await _flatten_customer_spot_positions(account, broker, failures, canceled)
             except Exception as exc:
                 failure = {"scope": f"customer:{account.customer_id}", "error": str(exc)[:1000]}
@@ -2098,4 +2144,5 @@ async def emergency_stop(exchange: str | None = None):
     })
     return {"ok": broker_halt_confirmed, "broker_halt_confirmed": broker_halt_confirmed,
             "canceled_count": len(canceled), "failure_count": len(failures),
+            "warning_count": len(warnings), "warnings": warnings,
             "cancel_error": cancel_error, "failures": failures, "mode": "HALTED"}

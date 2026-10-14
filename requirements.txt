@@ -13,7 +13,7 @@ numpy==2.3.5
 scikit-learn==1.6.1
 lightgbm==4.6.0
 joblib==1.5.1
-ccxt==4.5.85
+ccxt==4.5.88
 yfinance==0.2.55
 pyarrow==23.0.1
 httpx==0.28.1
@@ -29,7 +29,8 @@ websockets==15.0.1
 bip-utils==2.12.2
 
 
-# ccxt 4.5.85 pins multidict 6.7.1. CI verifies the pure-Python backend to avoid the vulnerable C extension.
-multidict==6.7.1
+# Use the fixed upstream release. Locked installs use the hash-verified source archive
+# with extensions disabled, so the vulnerable native backend is not loaded.
+multidict==6.9.1
 
 defusedxml==0.7.1

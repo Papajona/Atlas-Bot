@@ -251,7 +251,7 @@ def test_custody_decimal_schema_matches_existing_migration():
     from app.db import CustodyAssetObservation, CustodyTransfer
     assert str(CustodyAssetObservation.__table__.c.balance.type) == "NUMERIC(38, 18)"
     assert str(CustodyTransfer.__table__.c.amount.type) == "NUMERIC(38, 18)"
-    migration = (Path(__file__).parents[1] / "alembic" / "versions" / "0022_unified_custody.py").read_text()
+    migration = (Path(__file__).parents[1] / "alembic" / "versions" / "0022b_unified_custody.py").read_text()
     assert 'sa.Column("balance", sa.Numeric(38, 18)' in migration
     assert 'sa.Column("amount", sa.Numeric(38, 18)' in migration
 

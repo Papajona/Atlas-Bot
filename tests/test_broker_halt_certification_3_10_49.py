@@ -202,3 +202,16 @@ def test_emergency_stop_does_not_reset_cancellation_state_after_barrier_failure(
     emergency = _function_source(EXEC, "emergency_stop")
     assert emergency.count("canceled: list[dict[str, str]] = []") == 1
     assert emergency.count("cancel_error = None") == 1
+
+def test_oanda_cancel_failure_does_not_abort_remaining_emergency_sweep():
+    emergency = _function_source(EXEC, "emergency_stop")
+    start = emergency.index("for order in orders:")
+    recheck = emergency.index("remaining = await asyncio.to_thread(broker.orders)", start)
+    positions = emergency.index("positions = await asyncio.to_thread(broker.positions)", recheck)
+    cancel_loop = emergency[start:recheck]
+    assert "except Exception as exc:" in cancel_loop
+    assert "order_cancel_errors.append(failure)" in cancel_loop
+    assert 'warnings.append(failure)' in cancel_loop
+    assert "continue" in cancel_loop
+    assert recheck < positions
+    assert '"cancel_errors": order_cancel_errors[:50]' in emergency

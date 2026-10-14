@@ -173,7 +173,7 @@ def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: 
             class_weight="balanced", n_estimators=300, max_depth=3,
             learning_rate=0.05, subsample=0.8, colsample_bytree=0.8,
             min_child_samples=50, reg_lambda=1.0, random_state=7,
-            verbosity=-1, bagging_freq=1,
+            verbosity=-1, bagging_freq=1, n_jobs=settings.ml_threads,
         )
         model.fit(X.iloc[tr_idx], encoded.iloc[tr_idx].to_numpy(dtype=int))
         pred = model.predict(X.iloc[te_idx])
@@ -196,7 +196,7 @@ def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: 
         class_weight="balanced", n_estimators=300, max_depth=3,
         learning_rate=0.05, subsample=0.8, colsample_bytree=0.8,
         min_child_samples=50, reg_lambda=1.0, random_state=7,
-        verbosity=-1, bagging_freq=1,
+        verbosity=-1, bagging_freq=1, n_jobs=settings.ml_threads,
     )
     final_model.fit(X, encoded.to_numpy(dtype=int))
     model_file, meta_file = _model_paths(model_path)
@@ -393,7 +393,7 @@ def ai_walk_forward_backtest(
         m = LGBMClassifier(objective="multiclass", class_weight="balanced",
                            n_estimators=300, max_depth=3, learning_rate=0.05,
                            subsample=0.8, colsample_bytree=0.8, min_child_samples=50,
-                           reg_lambda=1.0, random_state=7, verbosity=-1, bagging_freq=1)
+                           reg_lambda=1.0, random_state=7, verbosity=-1, bagging_freq=1, n_jobs=settings.ml_threads)
         m.fit(X.iloc[tr], (y.iloc[tr] + 1).to_numpy(dtype=int))
         p = m.predict_proba(X.iloc[te])
         # Explicit class order from model, mapped to {-1,0,1}.
