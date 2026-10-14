@@ -157,6 +157,9 @@ def fixed_signal_walk_forward_oos(
     folds: int = 5,
     min_train: int = 800,
     annualization_factor: float = 252.0,
+    taker_bps: float | None = None,
+    slippage_bps: float | None = None,
+    cost_stress_multiplier: float = 2.0,
 ) -> dict:
     """Evaluate a fixed signal only on forward test windows.
 
@@ -169,29 +172,46 @@ def fixed_signal_walk_forward_oos(
         return {"status": "INSUFFICIENT_DATA", "folds": []}
     try:
         annualization = float(annualization_factor)
-    except (TypeError, ValueError):
-        return {"status": "INVALID_CONFIG", "reason": "invalid_annualization_factor", "folds": []}
+        total_cost_bps = float(costs_bps)
+        effective_taker_bps = total_cost_bps if taker_bps is None else float(taker_bps)
+        effective_slippage_bps = 0.0 if slippage_bps is None else float(slippage_bps)
+        stress_multiplier = float(cost_stress_multiplier)
+    except (TypeError, ValueError, OverflowError):
+        return {"status": "INVALID_CONFIG", "reason": "invalid_numeric_config", "folds": []}
     if not math.isfinite(annualization) or annualization <= 0:
         return {"status": "INVALID_CONFIG", "reason": "invalid_annualization_factor", "folds": []}
+    if (
+        not math.isfinite(total_cost_bps) or total_cost_bps < 0
+        or not math.isfinite(effective_taker_bps) or effective_taker_bps < 0
+        or not math.isfinite(effective_slippage_bps) or effective_slippage_bps < 0
+        or not math.isclose(effective_taker_bps + effective_slippage_bps, total_cost_bps, abs_tol=1e-8)
+        or not math.isfinite(stress_multiplier) or stress_multiplier <= 0
+    ):
+        return {"status": "INVALID_CONFIG", "reason": "invalid_cost_config", "folds": []}
 
     s = pd.Series(signal, index=df.index).astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
     position = s.shift(1).fillna(0.0)
     # next_open_returns returns a gross price ratio (neutral = 1.0); subtract 1
     # exactly once to derive the per-bar return used for P&L.
     ret = (next_open_returns(df) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    gross = position * ret
     turnover = position.diff().abs().fillna(position.abs())
-    net = (position * ret - turnover * float(costs_bps) / 10000.0).replace(
+    net = (gross - turnover * total_cost_bps / 10000.0).replace(
         [np.inf, -np.inf], np.nan
     ).fillna(0.0)
 
     fold_rows = []
     oos_returns = []
+    oos_gross_returns = []
+    oos_turnover = []
     trades = 0
     for fold in splits:
         start, end = fold.test_start, fold.test_end
         x = net.iloc[start:end]
         p = position.iloc[start:end]
         oos_returns.append(x)
+        oos_gross_returns.append(gross.iloc[start:end])
+        oos_turnover.append(turnover.iloc[start:end])
         prior_p = p.shift(1).fillna(0.0)
         trade_starts = (p != 0.0) & ((prior_p == 0.0) | (np.sign(p) != np.sign(prior_p)))
         trades += int(trade_starts.sum())
@@ -218,6 +238,16 @@ def fixed_signal_walk_forward_oos(
     equity = np.cumprod(1.0 + values)
     peak = np.maximum.accumulate(np.maximum(equity, 1.0))
     max_drawdown = float(np.min(equity / peak - 1.0)) if len(equity) else None
+    all_oos_gross = pd.concat(oos_gross_returns) if oos_gross_returns else pd.Series(dtype=float)
+    all_oos_turnover = pd.concat(oos_turnover) if oos_turnover else pd.Series(dtype=float)
+    cost_analysis = cost_breakeven_report(
+        all_oos_gross.to_numpy(dtype=float),
+        all_oos_turnover.to_numpy(dtype=float),
+        taker_bps=effective_taker_bps,
+        slippage_bps=effective_slippage_bps,
+        bars_per_year=max(1, int(round(annualization))),
+        stress_multiplier=stress_multiplier,
+    )
 
     return {
         "status": "OK",
@@ -229,7 +259,9 @@ def fixed_signal_walk_forward_oos(
         "max_drawdown": max_drawdown,
         "trades": trades,
         "annualization_factor": annualization,
-        "costs_bps": float(costs_bps),
+        "costs_bps": total_cost_bps,
+        "cost_stress_ok": cost_analysis.get("stress_ok") is True,
+        "cost_analysis": cost_analysis,
     }
 
 
