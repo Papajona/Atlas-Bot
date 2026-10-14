@@ -50,6 +50,8 @@ def test_oos_and_regime_metrics_are_forward_only_and_finite():
     assert out["max_drawdown"] is not None and np.isfinite(out["max_drawdown"])
     assert isinstance(out["trades"], int) and out["trades"] >= 0
     assert out["annualization_factor"] == 252.0
+    assert out["cost_analysis"]["observations"] == out["oos_bars"]
+    assert out["cost_stress_ok"] is (out["cost_analysis"].get("stress_ok") is True)
     regimes = regime_conditioned_performance(df, pd.Series(0.001, index=df.index))
     assert regimes and all(np.isfinite(v["total_return"]) for v in regimes.values())
 
