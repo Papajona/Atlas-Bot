@@ -18,6 +18,34 @@ if ! gcloud monitoring channels describe "$NOTIFICATION_CHANNEL_ID" --project="$
   exit 2
 fi
 
+# Verify metric labels/units before constructing filters; a misspelled label must not
+# silently create an alert that can never fire.
+for METRIC in \
+  run.googleapis.com/request_count \
+  run.googleapis.com/request_latencies \
+  run.googleapis.com/container/cpu/utilizations \
+  run.googleapis.com/container/memory/utilizations; do
+  gcloud monitoring metrics descriptors describe "$METRIC" --project="$GCP_PROJECT_ID" --format=json > "/tmp/atlas-metric-descriptor.json" || {
+    echo "ERROR: Cloud Monitoring metric descriptor is unavailable: $METRIC" >&2
+    exit 2
+  }
+done
+gcloud monitoring metrics descriptors describe run.googleapis.com/request_count --project="$GCP_PROJECT_ID" --format=json > "/tmp/atlas-request-count-descriptor.json"
+gcloud monitoring metrics descriptors describe run.googleapis.com/request_latencies --project="$GCP_PROJECT_ID" --format=json > "/tmp/atlas-request-latencies-descriptor.json"
+python - <<'PY'
+import json
+from pathlib import Path
+request = json.loads(Path("/tmp/atlas-request-count-descriptor.json").read_text(encoding="utf-8"))
+labels = {str(item.get("key", "")) for item in request.get("labels", [])}
+if "response_code_class" not in labels:
+    raise SystemExit("ERROR: request_count metric has no response_code_class label; revise the alert filter for this project's metric schema")
+latency = json.loads(Path("/tmp/atlas-request-latencies-descriptor.json").read_text(encoding="utf-8"))
+unit = str(latency.get("unit", "")).lower()
+if not unit.startswith("ms"):
+    raise SystemExit(f"ERROR: request latency unit is not milliseconds (observed unit={unit!r}); do not apply the 2000 ms threshold")
+PY
+rm -f /tmp/atlas-metric-descriptor.json /tmp/atlas-request-count-descriptor.json /tmp/atlas-request-latencies-descriptor.json
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 export CHANNEL GCP_PROJECT_ID GCP_REGION CLOUD_RUN_SERVICE WORK
