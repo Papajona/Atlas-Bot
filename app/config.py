@@ -103,7 +103,8 @@ class Settings(BaseSettings):
     # Customer-live execution is deliberately fixed to Binance Spot; research venue defaults are separate.
     customer_live_exchange: str = "binance"
     customer_live_market_type: str = "spot"
-    binance_customer_subaccounts_enabled: bool = True
+    # Atlas does not provision Binance subaccounts by default; customer live trading remains disabled until the approved platform-account allocation model is implemented and verified.
+    binance_customer_subaccounts_enabled: bool = False
     binance_customer_universal_transfer_allowed: bool = False
     broker_sandbox: bool = True
     require_live_confirmation: bool = True
