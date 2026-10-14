@@ -4,21 +4,51 @@ Keep this module free of database and application imports so its policy can be
 unit-tested by lightweight CI jobs that do not install SQLAlchemy.
 """
 
+_RESERVED_RUNTIME_ROLES = {
+    "postgres",
+    "service_role",
+    "supabase_admin",
+    "supabase_auth_admin",
+    "authenticator",
+    "anon",
+    "authenticated",
+}
+
 
 def require_rls_bypass_role(
     role_name: str,
     is_superuser: bool,
     bypass_rls: bool,
-    owns_all_rls_tables: bool = False,
+    owned_public_table_count: int = 0,
+    can_create_roles: bool = False,
+    can_create_databases: bool = False,
+    can_replicate: bool = False,
 ) -> None:
-    """Reject roles that would be blocked by RLS on public tables."""
-    if not (is_superuser or bypass_rls or owns_all_rls_tables):
-        raise RuntimeError(
-            "Database role is not authorized to bypass row-level security: "
-            f"role={role_name!r}. Migration 0049 enables RLS on public tables; "
-            "configure DATABASE_URL with the approved trusted server-side PostgreSQL role."
-        )
+    """Require a dedicated non-owner/non-admin server role for the backend-only DB path.
 
+    Migration 0049 enables RLS without generic policies and revokes public API schema
+    access. Therefore the trusted application connection needs BYPASSRLS, but it must
+    not be a superuser, owner of application tables, role/database administrator, or
+    a built-in Supabase gateway/service role. Those powers belong to operators, not
+    the deployed API/worker.
+    """
+    normalized_role = str(role_name or "").strip().lower()
+    invalid = (
+        normalized_role in _RESERVED_RUNTIME_ROLES
+        or is_superuser
+        or not bypass_rls
+        or owned_public_table_count > 0
+        or can_create_roles
+        or can_create_databases
+        or can_replicate
+    )
+    if invalid:
+        raise RuntimeError(
+            "Database role is not authorized to bypass row-level security with least privilege: "
+            f"role={role_name!r}. Use a dedicated non-owner, non-admin runtime role with "
+            "BYPASSRLS and explicit application-table grants; do not use postgres, a "
+            "Supabase gateway/service role, a table-owner role, or an administrative role."
+        )
 
 
 def require_public_schema_rls_complete(public_table_count: int, tables_without_rls: int) -> None:
