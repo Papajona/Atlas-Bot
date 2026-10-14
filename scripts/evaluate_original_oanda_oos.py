@@ -149,70 +149,142 @@ def verify_reference_identity(dataset_dir: Path, reference_path: Path, expected_
     }
 
 
+def _safe_archive_member_path(value: object, label: str) -> str:
+    from pathlib import PurePosixPath
+
+    name = str(value or "")
+    member = PurePosixPath(name)
+    if (
+        not name
+        or member.is_absolute()
+        or any(part in {"", ".", ".."} for part in member.parts)
+        or "\\" in name
+        or name != member.as_posix()
+        or name == "atlas_trial_manifest.json"
+    ):
+        raise ValueError(f"Unsafe or invalid archive member path for {label}")
+    return name
+
+
+def _zip_member_sha256(archive: ZipFile, path: str, label: str) -> str:
+    matches = [item for item in archive.infolist() if item.filename == path]
+    if len(matches) != 1:
+        raise ValueError(f"Archive must contain exactly one evidence file for {label}: {path}")
+    info = matches[0]
+    if info.is_dir() or info.file_size < 1 or info.file_size > 100_000_000:
+        raise ValueError(f"Archive evidence file has invalid size/type for {label}: {path}")
+    digest = hashlib.sha256()
+    with archive.open(info, "r") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def verify_experiment_archive_manifest(
     archive_path: Path,
     experiment_id: str,
-    ledger_sharpes: dict[str, float],
+    ledger_variants: dict[str, dict[str, Any]],
     provenance: dict[str, Any],
 ) -> dict[str, Any]:
-    """Compare ledger variants to the manifest stored inside the bound experiment ZIP."""
+    """Bind every tested variant to checksummed result evidence inside the experiment ZIP."""
     try:
         with ZipFile(archive_path, "r") as archive:
             matches = [info for info in archive.infolist() if info.filename == "atlas_trial_manifest.json"]
             if len(matches) != 1:
                 raise ValueError("Experiment ZIP must contain exactly one atlas_trial_manifest.json")
             info = matches[0]
-            if info.file_size > 5_000_000:
+            if info.file_size < 1 or info.file_size > 5_000_000:
                 raise ValueError("Experiment trial manifest exceeds the 5 MB safety limit")
             raw_manifest = archive.read(info)
+            try:
+                manifest = json.loads(raw_manifest.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("Archived trial manifest is not valid UTF-8 JSON") from exc
+            if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+                raise ValueError("Archived trial manifest schema_version must be 1")
+            if manifest.get("complete") is not True or manifest.get("all_variants_included") is not True:
+                raise ValueError("Archived trial manifest must attest complete=true and all_variants_included=true")
+            if str(manifest.get("experiment_id") or "").strip() != experiment_id:
+                raise ValueError("Ledger experiment_id does not match the experiment ZIP manifest")
+            expected_data = {
+                "dataset_raw_response_sha256": provenance["raw_response_sha256"],
+                "dataset_csv_sha256": provenance["normalized_csv_sha256"],
+                "instrument": provenance["instrument"],
+                "granularity": provenance["granularity"],
+                "request_parameters": provenance["request_parameters"],
+                "evaluation_assumptions": provenance["evaluation_assumptions"],
+            }
+            for key, expected in expected_data.items():
+                if manifest.get(key) != expected:
+                    raise ValueError(f"Archived trial manifest data identity mismatch: {key}")
+
+            log_path = _safe_archive_member_path(manifest.get("experiment_log_path"), "experiment log")
+            log_sha = str(manifest.get("experiment_log_sha256") or "").lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", log_sha):
+                raise ValueError("Archived trial manifest must include the SHA-256 of the full experiment log")
+            observed_log_sha = _zip_member_sha256(archive, log_path, "experiment log")
+            if observed_log_sha != log_sha:
+                raise ValueError("Experiment log SHA-256 differs from its archived trial manifest")
+
+            archived_variants = manifest.get("variants")
+            if not isinstance(archived_variants, list) or not archived_variants:
+                raise ValueError("Archived trial manifest must list every evaluated variant")
+            archive_variants: dict[str, dict[str, Any]] = {}
+            for item in archived_variants:
+                if not isinstance(item, dict):
+                    raise ValueError("Archived trial manifest contains a malformed variant entry")
+                variant_id = str(item.get("variant_id") or "").strip()
+                if not variant_id or variant_id in archive_variants:
+                    raise ValueError("Archived trial manifest variant_id values must be present and unique")
+                raw_sharpe = item.get("annualized_sharpe")
+                if isinstance(raw_sharpe, bool):
+                    raise ValueError(f"Archived annualized Sharpe invalid for variant {variant_id}")
+                try:
+                    sharpe = float(raw_sharpe)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError(f"Archived annualized Sharpe invalid for variant {variant_id}") from exc
+                if not math.isfinite(sharpe):
+                    raise ValueError(f"Archived annualized Sharpe non-finite for variant {variant_id}")
+                evidence_path = _safe_archive_member_path(item.get("evidence_path"), f"variant {variant_id}")
+                evidence_sha = str(item.get("evidence_sha256") or "").lower()
+                if not re.fullmatch(r"[0-9a-f]{64}", evidence_sha):
+                    raise ValueError(f"Variant {variant_id} is missing its evidence SHA-256")
+                if evidence_path == log_path:
+                    raise ValueError(f"Variant {variant_id} result evidence must be separate from the experiment log")
+                observed_evidence_sha = _zip_member_sha256(archive, evidence_path, f"variant {variant_id}")
+                if observed_evidence_sha != evidence_sha:
+                    raise ValueError(f"Variant {variant_id} evidence SHA-256 mismatch")
+                archive_variants[variant_id] = {
+                    "annualized_sharpe": sharpe,
+                    "evidence_path": evidence_path,
+                    "evidence_sha256": evidence_sha,
+                }
+
+            if archive_variants.keys() != ledger_variants.keys():
+                raise ValueError("Trial ledger variants do not exactly match archived experiment trial manifest")
+            for variant_id, archive_item in archive_variants.items():
+                ledger_item = ledger_variants[variant_id]
+                if not math.isclose(
+                    archive_item["annualized_sharpe"],
+                    ledger_item["annualized_sharpe"],
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                ):
+                    raise ValueError(f"Trial ledger Sharpe differs from archived experiment manifest for {variant_id}")
+                if (
+                    archive_item["evidence_path"] != ledger_item["evidence_path"]
+                    or archive_item["evidence_sha256"] != ledger_item["evidence_sha256"]
+                ):
+                    raise ValueError(f"Trial ledger evidence reference differs from archive manifest for {variant_id}")
     except (BadZipFile, OSError) as exc:
         raise ValueError("Full experiment archive is not a valid readable ZIP") from exc
-    try:
-        manifest = json.loads(raw_manifest.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("Archived trial manifest is not valid UTF-8 JSON") from exc
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
-        raise ValueError("Archived trial manifest schema_version must be 1")
-    if manifest.get("complete") is not True or manifest.get("all_variants_included") is not True:
-        raise ValueError("Archived trial manifest must attest complete=true and all_variants_included=true")
-    if str(manifest.get("experiment_id") or "").strip() != experiment_id:
-        raise ValueError("Ledger experiment_id does not match the experiment ZIP manifest")
-    expected_data = {
-        "dataset_raw_response_sha256": provenance["raw_response_sha256"],
-        "dataset_csv_sha256": provenance["normalized_csv_sha256"],
-        "instrument": provenance["instrument"],
-        "granularity": provenance["granularity"],
-        "request_parameters": provenance["request_parameters"],
-        "evaluation_assumptions": provenance["evaluation_assumptions"],
-    }
-    for key, expected in expected_data.items():
-        if manifest.get(key) != expected:
-            raise ValueError(f"Archived trial manifest data identity mismatch: {key}")
-    archived_variants = manifest.get("variants")
-    if not isinstance(archived_variants, list) or not archived_variants:
-        raise ValueError("Archived trial manifest must list every evaluated variant")
-    archive_sharpes: dict[str, float] = {}
-    for item in archived_variants:
-        if not isinstance(item, dict):
-            raise ValueError("Archived trial manifest contains a malformed variant entry")
-        variant_id = str(item.get("variant_id") or "").strip()
-        if not variant_id or variant_id in archive_sharpes:
-            raise ValueError("Archived trial manifest variant_id values must be present and unique")
-        try:
-            sharpe = float(item.get("annualized_sharpe"))
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError(f"Archived annualized Sharpe invalid for variant {variant_id}") from exc
-        if not math.isfinite(sharpe):
-            raise ValueError(f"Archived annualized Sharpe non-finite for variant {variant_id}")
-        archive_sharpes[variant_id] = sharpe
-    if archive_sharpes.keys() != ledger_sharpes.keys():
-        raise ValueError("Trial ledger variants do not exactly match archived experiment trial manifest")
-    for variant_id, sharpe in ledger_sharpes.items():
-        if not math.isclose(archive_sharpes[variant_id], sharpe, rel_tol=0.0, abs_tol=1e-12):
-            raise ValueError(f"Trial ledger Sharpe differs from archived experiment manifest for {variant_id}")
+
     return {
         "manifest_sha256": hashlib.sha256(raw_manifest).hexdigest(),
-        "manifest_variant_count": len(archive_sharpes),
+        "experiment_log_sha256": log_sha,
+        "experiment_log_verified": True,
+        "manifest_variant_count": len(archive_variants),
+        "variant_evidence_verified": len(archive_variants),
         "data_identity_matches": True,
         "trial_list_matches_archive": True,
     }
@@ -244,6 +316,7 @@ def load_complete_trial_history(
         raise ValueError(f"Trial ledger must identify an experiment and list at least {minimum_variants} variants")
     identifiers: set[str] = set()
     sharpes: list[float] = []
+    ledger_variants: dict[str, dict[str, Any]] = {}
     for item in variants:
         if not isinstance(item, dict):
             raise ValueError("Every trial entry must be an object")
@@ -260,13 +333,18 @@ def load_complete_trial_history(
             raise ValueError(f"Invalid annualized_sharpe for variant {variant_id}") from exc
         if not math.isfinite(sharpe):
             raise ValueError(f"Non-finite annualized_sharpe for variant {variant_id}")
+        evidence_path = _safe_archive_member_path(item.get("evidence_path"), f"ledger variant {variant_id}")
+        evidence_sha = str(item.get("evidence_sha256") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", evidence_sha):
+            raise ValueError(f"Trial ledger variant {variant_id} is missing an evidence SHA-256")
         sharpes.append(sharpe)
-    ledger_sharpes = {
-        str(item["variant_id"]).strip(): float(item["annualized_sharpe"])
-        for item in variants
-    }
+        ledger_variants[variant_id] = {
+            "annualized_sharpe": sharpe,
+            "evidence_path": evidence_path,
+            "evidence_sha256": evidence_sha,
+        }
     archive_manifest = verify_experiment_archive_manifest(
-        experiment_archive_path, experiment_id, ledger_sharpes, provenance
+        experiment_archive_path, experiment_id, ledger_variants, provenance
     )
     return sharpes, {
         "experiment_id": experiment_id,
