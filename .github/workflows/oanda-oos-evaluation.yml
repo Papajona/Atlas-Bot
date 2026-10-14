@@ -55,8 +55,8 @@ jobs:
             echo "BLOCKED: dataset_archive_prefix must be a run/SHA path under oanda-practice/"
             exit 1
           }
-          [[ "$EXPECTED_ROWS" =~ ^[0-9]+$ ]] && (( EXPECTED_ROWS > 0 )) || {
-            echo "BLOCKED: expected_rows must be a positive integer"
+          [[ "$EXPECTED_ROWS" == "1799" ]] || {
+            echo "BLOCKED: this gate verifies the known original dataset and requires exactly 1799 completed candles"
             exit 1
           }
           : "${RESEARCH_TAKER_BPS:?Set approved ATLAS_RESEARCH_TAKER_BPS in staging}"
