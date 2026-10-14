@@ -174,6 +174,15 @@ async def post_deposit(db, *, customer_id: int, wallet_id: int, amount: float, p
     keys = {idem, legacy_idem}
     existing = (await db.execute(select(LedgerEntry).where(LedgerEntry.idempotency_key.in_(keys)))).scalars().first()
     if existing:
+        # Idempotency is not permission to reuse another customer's transaction or
+        # silently accept the same provider reference with a different amount.
+        if (
+            existing.customer_id != customer_id
+            or str(existing.currency or "").upper() != USDT
+            or existing.entry_type != "DEPOSIT_CREDIT"
+            or D(str(existing.amount or 0)) != amount_d
+        ):
+            raise ValueError("deposit idempotency key already belongs to a different customer, currency, type, or amount")
         return await get_or_create_ledger(db, customer_id, USDT)
     fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
         CustomerLedgerAccount.customer_id == customer_id,
