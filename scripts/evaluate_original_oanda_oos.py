@@ -111,13 +111,25 @@ def verify_reference_identity(dataset_dir: Path, reference_path: Path, expected_
     }
 
 
-def load_complete_trial_history(path: Path, minimum_variants: int) -> tuple[list[float], dict[str, Any]]:
-    """Load the immutable ledger of every tested variant, not only CV folds."""
+def load_complete_trial_history(
+    path: Path,
+    minimum_variants: int,
+    experiment_archive_path: Path,
+) -> tuple[list[float], dict[str, Any]]:
+    """Load every tested variant and bind the ledger to an immutable experiment archive."""
     payload = load_json(path)
     if payload.get("schema_version") != 1:
         raise ValueError("Trial ledger schema_version must be 1")
     if payload.get("complete") is not True or payload.get("all_variants_included") is not True:
         raise ValueError("Trial ledger must attest complete=true and all_variants_included=true")
+    claimed_archive_hash = str(payload.get("experiment_archive_sha256") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", claimed_archive_hash):
+        raise ValueError("Trial ledger must include a SHA-256 hash for the full experiment archive")
+    if not experiment_archive_path.is_file():
+        raise ValueError("Full experiment archive is missing")
+    observed_archive_hash = sha256_file(experiment_archive_path)
+    if observed_archive_hash != claimed_archive_hash:
+        raise ValueError("Experiment archive SHA-256 does not match the complete trial ledger")
     experiment_id = str(payload.get("experiment_id") or "").strip()
     variants = payload.get("variants")
     if not experiment_id or not isinstance(variants, list) or len(variants) < minimum_variants:
@@ -145,6 +157,8 @@ def load_complete_trial_history(path: Path, minimum_variants: int) -> tuple[list
         "experiment_id": experiment_id,
         "variant_count": len(sharpes),
         "trial_ledger_sha256": sha256_file(path),
+        "experiment_archive_sha256": observed_archive_hash,
+        "experiment_archive_file": experiment_archive_path.name,
     }
 
 
@@ -157,7 +171,9 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     if integrity.get("status") != "verified":
         raise ValueError("Candidate dataset failed its manifest/hash integrity check")
     provenance = verify_reference_identity(dataset_dir, reference_path, args.expected_rows)
-    trial_sharpes, trial_evidence = load_complete_trial_history(trial_path, args.folds)
+    trial_sharpes, trial_evidence = load_complete_trial_history(
+        trial_path, args.folds, Path(args.experiment_archive)
+    )
 
     csv_path = dataset_dir / "oanda_completed_mid_candles.csv"
     frame = pd.read_csv(csv_path)
@@ -223,6 +239,7 @@ def main() -> int:
     parser.add_argument("--dataset-dir", required=True)
     parser.add_argument("--reference-manifest", required=True, help="Separately archived manifest for the known original dataset")
     parser.add_argument("--trial-ledger", required=True, help="Complete immutable JSON ledger of all tested variants and annualized Sharpe values")
+    parser.add_argument("--experiment-archive", required=True, help="Full experiment archive whose SHA-256 is recorded in the trial ledger")
     parser.add_argument("--expected-rows", type=int, default=1799)
     parser.add_argument("--asset", choices=("crypto", "forex"), default="forex")
     parser.add_argument("--folds", type=int, default=5)
