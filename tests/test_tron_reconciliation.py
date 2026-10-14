@@ -20,6 +20,12 @@ def test_zero_balance_requires_explicit_matching_contract_metadata():
     assert parse_tron_usdt_balance([record("0")], CONTRACT) == Decimal("0")
 
 
+def test_large_raw_balance_is_scaled_without_decimal_context_rounding():
+    raw = "12345678901234567890123456789012345678901234567890"
+    expected = Decimal("12345678901234567890123456789012345678901234.567890")
+    assert parse_tron_usdt_balance([record(raw)], CONTRACT) == expected
+
+
 def test_absent_configured_contract_is_missing_evidence_not_zero():
     with pytest.raises(ValueError, match="missing the configured USDT contract"):
         parse_tron_usdt_balance([record(address="different-contract")], CONTRACT)
