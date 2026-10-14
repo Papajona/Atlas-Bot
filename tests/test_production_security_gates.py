@@ -103,9 +103,30 @@ def test_database_role_guard_accepts_only_dedicated_non_owner_non_admin_bypass_r
 
     require_rls_bypass_role("atlas_backend", is_superuser=False, bypass_rls=True)
 
+def test_database_role_guard_rejects_superuser_database_admin_and_reserved_service_roles():
+    import pytest
+    from app.rls_role_policy import require_rls_bypass_role
+
+    invalid_roles = [
+        {"role_name": "atlas_superuser", "is_superuser": True, "bypass_rls": True},
+        {"role_name": "atlas_create_db", "is_superuser": False, "bypass_rls": True, "can_create_databases": True},
+        {"role_name": "atlas_replication", "is_superuser": False, "bypass_rls": True, "can_replicate": True},
+        {"role_name": "service_role", "is_superuser": False, "bypass_rls": True},
+        {"role_name": "supabase_admin", "is_superuser": False, "bypass_rls": True},
+    ]
+    for values in invalid_roles:
+        role_name = values.pop("role_name")
+        with pytest.raises(RuntimeError, match="not authorized to bypass row-level security"):
+            require_rls_bypass_role(role_name, **values)
+
+
+
 
 def test_rls_role_compatibility_guard_runs_before_database_initialization():
     src = (ROOT / "app" / "main.py").read_text()
+    startup = (ROOT / "app" / "startup_guards.py").read_text(encoding="utf-8")
+    assert "session_user AS login_role" in startup
+    assert 'if str(row["login_role"]) != str(row["role_name"]):' in startup
     migration_check = src.index("await assert_database_migrations_current()")
     role_check = src.index("await assert_database_role_compatible_with_rls_lockdown()")
     database_init = src.index("await init_db()", role_check)
@@ -257,6 +278,8 @@ def test_staging_identity_preflight_requires_a_distinct_project_and_runtime_iden
     assert "ATLAS_STAGING_CLOUD_RUN_SERVICE" in workflow
     assert "ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT" in workflow
     assert "gcloud run services describe" in workflow
+    assert "DATABASE_URL must reference exactly the configured staging database secret" in workflow
+    assert "if login_role != role:" in workflow
     assert "BLOCKED: deployed staging service account differs" in workflow
     assert 'role in {"postgres", "supabase_admin", "supabase_auth_admin", "authenticator"}' in workflow
     assert "runtime database role has administrative privileges" in workflow
