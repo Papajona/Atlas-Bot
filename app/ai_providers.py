@@ -15,6 +15,17 @@ class AIProviderError(RuntimeError):
     pass
 
 
+def _response_json_object(response, provider: str) -> dict[str, Any]:
+    """Normalize malformed or non-object provider HTTP bodies to a typed safe error."""
+    try:
+        body = _response_json_object(response, "Gemini")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise AIProviderError(f"{provider} returned an invalid JSON response body") from exc
+    if not isinstance(body, dict):
+        raise AIProviderError(f"{provider} response body must be a JSON object")
+    return body
+
+
 def _extract_json(text: str) -> dict[str, Any]:
     if not isinstance(text, str) or not text.strip():
         raise AIProviderError("AI provider returned empty or non-text output")
@@ -53,7 +64,7 @@ async def _gemini_json(prompt: str, *, timeout: float = 30.0, system_instruction
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(url, headers=headers, json=payload)
         response.raise_for_status()
-        body = response.json()
+        body = _response_json_object(response, "Cerebras")
     try:
         text = body["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError, TypeError) as exc:
@@ -82,7 +93,7 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(url, headers=headers, json=payload)
         response.raise_for_status()
-        body = response.json()
+        body = _response_json_object(response, "Groq")
     try:
         text = body["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
