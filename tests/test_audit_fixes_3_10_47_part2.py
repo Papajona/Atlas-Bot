@@ -49,10 +49,12 @@ def test_h2_loss_limit_uses_synced_app_state_and_calls_stop(tmp_path, monkeypatc
     monkeypatch.setattr(execution, 'emergency_stop', stop)
     monkeypatch.setattr(execution, 'audit', audit)
     async def run():
-        await _seed(maker, equity=960.0, peak_equity=1000.0, daily_start_equity=1000.0)
-        out = await execution.enforce_platform_loss_limits()
-        await engine.dispose()
-        return out
+        try:
+            await _seed(maker, equity=960.0, peak_equity=1000.0, daily_start_equity=1000.0)
+            return await execution.enforce_platform_loss_limits()
+        finally:
+            # Always close the SQLite async pool, including when setup or stop fails.
+            await engine.dispose()
     out = asyncio.run(run())
     assert out['status'] == 'KILLED'
     assert len(calls) == 1
