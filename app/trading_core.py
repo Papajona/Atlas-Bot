@@ -322,6 +322,11 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
     tscv = TimeSeriesSplit(n_splits=folds, gap=profile.max_hold)
     scores = []
     fold_metrics = []
+    oos_net_blocks: list[np.ndarray] = []
+    oos_gross_blocks: list[np.ndarray] = []
+    oos_turnover_blocks: list[np.ndarray] = []
+    oos_position_blocks: list[np.ndarray] = []
+    oos_carry_blocks: list[np.ndarray] = []
     pred_signal = pd.Series(np.nan, index=X.index)
     for tr, te in tscv.split(X):
         if len(tr) < min_train or len(np.unique((y.iloc[tr] + 1).to_numpy())) < 2:
@@ -343,24 +348,47 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
         fold_ret = aligned.close.iloc[te].pct_change().fillna(0).to_numpy()
         # A signal generated from bar t can only earn the return beginning at t+1.
         # Using sig[t] * return[t] would leak the realized bar return into OOS metrics.
-        fold_position = np.r_[0, sig[:-1]]
-        fold_turnover = np.abs(np.diff(np.r_[0, fold_position]))
-        fold_net = fold_position * fold_ret - fold_turnover * ((profile.taker_bps + profile.slippage_bps) / 10_000) - np.abs(fold_position) * (profile.carry_bps_per_bar / 10_000)
+        fold_position = np.r_[0, sig[:-1]].astype(float)
+        fold_turnover = np.abs(np.diff(np.r_[0, fold_position])).astype(float)
+        # Flatten at the end of each test fold. Without this terminal exit cost, the
+        # reported OOS net returns overstate performance at each fold boundary.
+        if len(fold_turnover):
+            fold_turnover[-1] += abs(fold_position[-1])
+        fold_gross = fold_position * fold_ret
+        fold_carry = np.abs(fold_position) * (profile.carry_bps_per_bar / 10_000)
+        fold_net = fold_gross - fold_turnover * ((profile.taker_bps + profile.slippage_bps) / 10_000) - fold_carry
+        oos_net_blocks.append(np.asarray(fold_net, dtype=float))
+        oos_gross_blocks.append(np.asarray(fold_gross, dtype=float))
+        oos_turnover_blocks.append(np.asarray(fold_turnover, dtype=float))
+        oos_position_blocks.append(np.asarray(fold_position, dtype=float))
+        oos_carry_blocks.append(np.asarray(fold_carry, dtype=float))
         fold_equity = np.cumprod(1.0 + fold_net) if len(fold_net) else np.array([1.0])
         fold_peak = np.maximum.accumulate(fold_equity)
         fold_dd = fold_equity / fold_peak - 1.0
         fold_sharpe = float(fold_net.mean() / fold_net.std() * np.sqrt(profile.bars_per_year)) if float(fold_net.std()) > 0 else 0.0
-        fold_metrics.append({"train_bars":int(len(tr)),"test_bars":int(len(te)),"total_return":float(fold_equity[-1]-1.0),"max_drawdown":float(fold_dd.min()),"trades":int(np.count_nonzero(np.diff(np.r_[0,sig])) ),"sharpe":fold_sharpe})
-    ret = aligned.close.pct_change().fillna(0)
-    position = pred_signal.fillna(0).shift(1).fillna(0)
-    turnover = position.diff().abs().fillna(position.abs())
-    costs = turnover * ((profile.taker_bps + profile.slippage_bps) / 10_000)
-    carry = position.abs() * (profile.carry_bps_per_bar / 10_000)
-    net = position * ret - costs - carry
+        fold_metrics.append({"train_bars":int(len(tr)),"test_bars":int(len(te)),"total_return":float(fold_equity[-1]-1.0),"max_drawdown":float(fold_dd.min()),"trades":int(np.count_nonzero(fold_turnover)),"sharpe":fold_sharpe})
+    if not fold_metrics or not oos_net_blocks:
+        raise RuntimeError("No valid chronological out-of-sample folds could be evaluated")
+    # All aggregate statistics are calculated from held-out test windows only. Do not
+    # include training rows or bars in the gaps between test folds, and do not shift a
+    # final test signal into the following non-test window.
+    net = pd.Series(np.concatenate(oos_net_blocks), dtype=float)
+    gross_returns = np.concatenate(oos_gross_blocks)
+    turnover = pd.Series(np.concatenate(oos_turnover_blocks), dtype=float)
+    position = pd.Series(np.concatenate(oos_position_blocks), dtype=float)
+    carry = np.concatenate(oos_carry_blocks)
     equity = (1 + net).cumprod()
     peak = equity.cummax()
     dd = equity / peak - 1
-    cost_report = cost_breakeven_report((position * ret).to_numpy(), turnover.to_numpy(), taker_bps=profile.taker_bps, slippage_bps=profile.slippage_bps, bars_per_year=profile.bars_per_year, stress_multiplier=cost_stress_multiplier)
+    cost_report = cost_breakeven_report(
+        gross_returns,
+        turnover.to_numpy(),
+        taker_bps=profile.taker_bps,
+        slippage_bps=profile.slippage_bps,
+        bars_per_year=profile.bars_per_year,
+        stress_multiplier=cost_stress_multiplier,
+        fixed_cost_drag=carry,
+    )
     dsr_report = _research_trial_dsr_report(
         net.to_numpy(),
         research_trial_sharpes,
@@ -376,7 +404,7 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
     losses = -net[position != 0][net[position != 0] < 0].sum()
     profit_factor = float(wins / losses) if losses > 0 else (float("inf") if wins > 0 else 0.0)
     return {
-        "bars": int(len(df)), "features": int(X.shape[1]), "validated_bars": int(pred_signal.notna().sum()),
+        "bars": int(len(df)), "oos_bars": int(len(net)), "features": int(X.shape[1]), "validated_bars": int(pred_signal.notna().sum()),
         "total_return": float(equity.iloc[-1] - 1),
         "max_drawdown": max_dd,
         "sharpe": float(net.mean() / vol * np.sqrt(annual)) if vol > 0 else 0.0,
