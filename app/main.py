@@ -173,7 +173,17 @@ from .schemas import (
 
 docs_url = "/docs" if settings.docs_enabled else None
 redoc_url = "/redoc" if settings.docs_enabled else None
-app = FastAPI(title=settings.app_name, version=settings.app_version, docs_url=docs_url, redoc_url=redoc_url)
+@contextlib.asynccontextmanager
+async def app_lifespan(app: FastAPI):
+    """Use FastAPI's lifespan protocol for deterministic worker startup/shutdown."""
+    try:
+        await startup()
+        yield
+    finally:
+        await shutdown()
+
+
+app = FastAPI(title=settings.app_name, version=settings.app_version, docs_url=docs_url, redoc_url=redoc_url, lifespan=app_lifespan)
 _APP_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(_APP_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(_APP_DIR / "static")), name="static")
@@ -331,7 +341,6 @@ def _trusted_client_ip(request: Request) -> str:
     return str(chain[0]) if chain else peer
 
 
-@app.on_event("startup")
 async def startup():
     global _background_task, _usdt_task
     assert_multidict_safe_backend()
@@ -417,7 +426,6 @@ async def startup():
         _track_worker_task(_heartbeat_loop())
 
 
-@app.on_event("shutdown")
 async def shutdown():
     """Cancel worker loops and allow up to 30 seconds for cancellation cleanup.
 
@@ -6351,7 +6359,11 @@ def json_loads(v):
     import json
     try:
         return json.loads(v or "[]")
-    except Exception:
+    except (json.JSONDecodeError, TypeError, UnicodeDecodeError) as exc:
+        logging.getLogger(__name__).warning(
+            "invalid_json_column defaulted_to_empty value_type=%s error_type=%s",
+            type(v).__name__, type(exc).__name__,
+        )
         return []
 
 def json_dumps(v):
