@@ -18,7 +18,7 @@ def test_live_admin_deriv_has_operations_role_gate():
     assert 'require_role(claims, "OPERATIONS")' in block
 
 def test_postgres_migration_repair_present():
-    m=(ROOT/'alembic/versions/0033_live_money_hardening.py').read_text()
+    m=(ROOT/'alembic/versions/0033a_live_money_hardening.py').read_text()
     assert 'ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(128)' in m
     assert 'incidents' in m
     assert 'destination_fingerprint' in m
