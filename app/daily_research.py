@@ -1,4 +1,5 @@
 from __future__ import annotations
+import math
 import logging
 import asyncio
 import json
@@ -74,10 +75,16 @@ def summarize_research(research: dict[str, Any]) -> dict[str, Any]:
     order = research.get("research_order") or []
     # Skip strategies that could not be evaluated on held-out bars. An OOS measurement
     # is still not promotion approval; that separate gate must pass independently.
-    top = next(
-        (name for name in order if (oos_by_strategy.get(name) or {}).get("status") == "OK"),
-        "",
-    )
+    def valid_oos(name: str) -> bool:
+        metrics = oos_by_strategy.get(name) or {}
+        if metrics.get("status") != "OK":
+            return False
+        try:
+            return math.isfinite(float(metrics.get("oos_total_return")))
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    top = next((name for name in order if valid_oos(name)), "")
     oos = oos_by_strategy.get(top) or {}
 
     def finite_oos(key: str) -> float:
