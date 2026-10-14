@@ -412,7 +412,7 @@ def test_custody_reconciliation_resolves_stale_binance_unknown_after_fresh_obser
 def test_tron_sweep_is_bound_to_custody_transfer_and_unique_txid():
     db = Path("app/db.py").read_text()
     main = Path("app/main.py").read_text()
-    migration = Path("alembic/versions/0033_sweep_reconciliation_integrity.py").read_text()
+    migration = Path("alembic/versions/0033b_sweep_reconciliation_integrity.py").read_text()
     assert "custody_transfer_id" in db
     assert "uq_tron_sweep_transaction_id_nonempty" in db
     assert "create_custody_transfer" in main
