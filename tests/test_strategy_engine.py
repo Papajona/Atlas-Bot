@@ -167,9 +167,11 @@ def test_adaptive_policy_object_is_explicit_and_fail_closed():
     from app.adaptive_bot import AdaptiveModelPolicy
     p = AdaptiveModelPolicy()
     assert p.max_age_hours > 0
-    assert p.min_sharpe > 0
-    assert p.max_drawdown < 0
-    assert p.min_trades > 0
+    assert p.min_sharpe == 0.50
+    assert p.max_drawdown == -0.20
+    assert p.min_trades == 100
+    assert p.research_min_deflated_sharpe == 0.95
+    assert p.research_require_cost_stress is True
 
 
 def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch):
