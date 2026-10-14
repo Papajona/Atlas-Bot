@@ -49,6 +49,14 @@ async def _resolve_incident(db, *, key: str) -> None:
         row.updated_at = datetime.now(timezone.utc)
 
 
+async def _halt_live_for_unverified_custody(db) -> None:
+    """Fail closed when custody cannot be verified; re-enabling stays an operator action."""
+    state = await db.get(AppState, 1)
+    if state:
+        state.kill_switch = True
+        state.live_enabled = False
+
+
 def solvency_decision(*, assets: Decimal, liabilities: Decimal, minimum_ratio: Decimal = D("1.0")) -> dict:
     """Pure solvency decision used by both the worker and regression tests."""
     assets = D(str(assets))
@@ -137,6 +145,7 @@ async def reconcile_usdt_custody(db) -> dict:
             "addresses_checked": len(addresses),
             "error": "TRON custody credentials or treasury address are not configured",
         }
+        await _halt_live_for_unverified_custody(db)
         await _upsert_incident(
             db,
             key="CUSTODY_RECONCILIATION:USDT:TRON:CONFIG",
@@ -164,6 +173,7 @@ async def reconcile_usdt_custody(db) -> dict:
             "addresses_checked": len(balances),
             "error": str(exc),
         }
+        await _halt_live_for_unverified_custody(db)
         await _upsert_incident(
             db,
             key="CUSTODY_RECONCILIATION:USDT:TRON:ERROR",
