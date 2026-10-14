@@ -96,7 +96,7 @@ def _select_gemini_flash_alternatives(models: list[dict], configured_model: str)
         model_id = name.removeprefix("models/")
         if model_id == configured or "preview" in model_id.lower():
             continue
-        match = re.fullmatch(r"gemini-(\\d+)\\.(\\d+)-flash(-lite)?", model_id)
+        match = re.fullmatch(r"gemini-(\d+)\.(\d+)-flash(-lite)?", model_id)
         if not match:
             continue
         major, minor = int(match.group(1)), int(match.group(2))
