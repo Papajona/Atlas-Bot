@@ -105,6 +105,7 @@ def test_ai_provider_empty_or_non_object_content_returns_typed_error(value):
 
 @pytest.mark.parametrize("payload", [
     {"safe": True},
+    {"safe": True, "confidence": 0.9, "reasons": [], "data_quality_flags": []},
     {"safe": "true", "confidence": 0.9, "reasons": [], "data_quality_flags": []},
     {"safe": True, "confidence": 2.0, "reasons": [], "data_quality_flags": []},
     {"safe": True, "confidence": 0.9, "reasons": "looks good", "data_quality_flags": []},
