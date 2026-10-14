@@ -85,6 +85,19 @@ SELECT jsonb_build_object(
         SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='public' AND c.relkind IN ('r','p')
           AND NOT has_table_privilege(r.rolname,c.oid,'SELECT')
+      ),
+      'public_schema_create', has_schema_privilege(r.rolname, 'public', 'CREATE'),
+      'public_tables_missing_dml', (
+        SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relkind IN ('r','p')
+          AND NOT (has_table_privilege(r.rolname,c.oid,'INSERT')
+               AND has_table_privilege(r.rolname,c.oid,'UPDATE')
+               AND has_table_privilege(r.rolname,c.oid,'DELETE'))
+      ),
+      'public_sequences_missing_usage', (
+        SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relkind='S'
+          AND NOT has_sequence_privilege(r.rolname,c.oid,'USAGE')
       )
     )
     FROM pg_roles r WHERE r.rolname=current_user
@@ -179,8 +192,15 @@ def audit(args: argparse.Namespace) -> dict:
         failures.append("runtime role has inherited memberships or membership count is unavailable")
     if not truthy(role.get("public_schema_usage")):
         failures.append("runtime role lacks public schema USAGE")
-    if int(role.get("public_tables_missing_select", -1)) != 0:
-        failures.append("runtime role lacks SELECT access to one or more application tables")
+    if truthy(role.get("public_schema_create")):
+        failures.append("runtime role must not have CREATE on the public schema")
+    for key in ("public_tables_missing_select", "public_tables_missing_dml", "public_sequences_missing_usage"):
+        try:
+            count = int(role.get(key, -1))
+        except (TypeError, ValueError):
+            count = -1
+        if count != 0:
+            failures.append(f"{key} expected 0, observed {count}")
     revision = str(observed.get("revision") or "")
     if revision != expected_revision:
         failures.append(f"restored database revision must be exactly {expected_revision}")
