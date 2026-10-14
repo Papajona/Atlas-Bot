@@ -60,6 +60,8 @@ python scripts/evaluate_original_oanda_oos.py \
 
 The trial ledger must be JSON with `schema_version: 1`, `complete: true`, `all_variants_included: true`, a non-empty `experiment_id`, and unique `variant_id` entries each carrying a finite `annualized_sharpe`. Those flags are an auditable assertion, not a substitute for retaining the actual experiment archive. Review and archive the dataset hashes, trial-ledger hash, complete output JSON, code SHA, walk-forward fold metrics, net costs, drawdown, trades, DSR, and cost-stress results. A failed gate means no model promotion. A passed research gate does not authorize live execution.
 
+For a repeatable protected run, configure `ATLAS_OANDA_ARCHIVE_BUCKET`, `ATLAS_ORIGINAL_OANDA_REFERENCE_OBJECT` (under `trusted-reference/`), and `ATLAS_RESEARCH_TRIAL_LEDGER_OBJECT` (under `research-trials/`) as staging environment variables. Configure a separate least-privilege `GCP_STAGING_RESEARCH_SERVICE_ACCOUNT` secret through Workload Identity Federation. Use the `Original OANDA walk-forward release evidence` workflow from `main`, supply the exact durable archive prefix `oanda-practice/{run-id}-{capture-commit-sha}`, and retain the resulting evaluation artifact and GCS report even when the research gate fails. A missing reference manifest or complete trial ledger is a hard block. The workflow will not manufacture those inputs or reinterpret a new capture as the old dataset.
+
 ## Staging runtime database identity
 
 Run `.github/workflows/staging-identity-preflight.yml` manually from `main`, using the protected `staging` environment and explicit non-production Supabase project ref. The job is read-only: it verifies the deployed Cloud Run service account, database Secret Manager reference, database host, connection identity, Alembic revision, public-table RLS, and runtime role capabilities. It never creates roles or alters grants.
@@ -83,7 +85,7 @@ If no isolated target or read-only provider proof is available, mark both drills
 
 ## Alerting
 
-Deploy the Cloud Monitoring policy set with `deploy/gcp-alert-policies.sh` in the intended project, using a valid notification channel. Inspect the resulting policies in Cloud Monitoring and send a test notification. Script execution alone is not proof that notification delivery works. Keep the policies tied to the exact Cloud Run service and region; do not silently deploy global/noisy policies.
+Deploy the Cloud Monitoring policy set with `bash deploy/gcp-alert-policies.sh` in the intended project, using a valid notification channel. The script checks metric descriptor availability and the request-count label/latency units before applying policies; if the project's metric schema differs, update and re-review the filters rather than bypassing that check. Inspect the resulting policies in Cloud Monitoring and send a test notification. Script execution alone is not proof that notification delivery works. Keep the policies tied to the exact Cloud Run service and region; do not silently deploy global/noisy policies.
 
 At minimum, monitor sustained Cloud Run 5xx responses, p95 request latency, and high CPU/memory utilization. Add a verified uptime check for the public health endpoint and route it to the same on-call notification channel. Document owner, routing, escalation, and acknowledgement expectations.
 
