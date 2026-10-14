@@ -120,17 +120,19 @@ def compute_run_drift(previous: dict[str, Any] | None, current: dict[str, Any], 
     }
 
 
-async def _prior_trial_labels(symbol: str, days: int = 365) -> set[str]:
+async def _prior_trial_labels(symbol: str, days: int | None = None) -> set[str]:
     """Load prior labels; malformed history fails closed rather than undercounting trials."""
     from datetime import timedelta
     from sqlalchemy import select
     from .db import SessionLocal, ResearchRun
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    query = select(ResearchRun.research_json).where(ResearchRun.symbol == symbol)
+    # Selection bias is cumulative; default to all persisted attempts rather than
+    # quietly dropping a trial after a rolling one-year window.
+    if days is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        query = query.where(ResearchRun.created_at >= cutoff)
     async with SessionLocal() as db:
-        rows = (await db.execute(select(ResearchRun.research_json).where(
-            ResearchRun.symbol == symbol,
-            ResearchRun.created_at >= cutoff,
-        ))).scalars().all()
+        rows = (await db.execute(query)).scalars().all()
     labels: set[str] = set()
     for raw in rows:
         try:
