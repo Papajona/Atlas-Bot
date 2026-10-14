@@ -17,7 +17,7 @@ def _load_qty_ref():
         src = pathlib.Path(__file__).resolve().parents[1].joinpath("app", "execution.py").read_text()
         tree = ast.parse(src)
         fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_qty_ref")
-        ns = {"Decimal": Decimal, "ROUND_HALF_EVEN": ROUND_HALF_EVEN}
+        ns = {"Decimal": Decimal, "ROUND_HALF_EVEN": ROUND_HALF_EVEN, "_QTY_QUANTUM": Decimal("0.000001")}
         exec(compile(ast.Module([fn], []), "execution.py", "exec"), ns)
         return ns["_qty_ref"]
 
