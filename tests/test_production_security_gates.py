@@ -113,6 +113,7 @@ def test_database_role_guard_rejects_superuser_database_admin_and_reserved_servi
         {"role_name": "atlas_replication", "is_superuser": False, "bypass_rls": True, "can_replicate": True},
         {"role_name": "service_role", "is_superuser": False, "bypass_rls": True},
         {"role_name": "supabase_admin", "is_superuser": False, "bypass_rls": True},
+        {"role_name": "atlas_inherited", "is_superuser": False, "bypass_rls": True, "role_membership_count": 1},
     ]
     for values in invalid_roles:
         role_name = values.pop("role_name")
@@ -283,6 +284,8 @@ def test_staging_identity_preflight_requires_a_distinct_project_and_runtime_iden
     assert "BLOCKED: deployed staging service account differs" in workflow
     assert 'role in {"postgres", "supabase_admin", "supabase_auth_admin", "authenticator"}' in workflow
     assert "runtime database role has administrative privileges" in workflow
+    assert "role_membership_count" in workflow
+    assert "runtime DB role inherits other PostgreSQL roles" in workflow
     assert "no migration or write was executed" in workflow
     assert "alembic upgrade" not in workflow
 
@@ -295,6 +298,8 @@ def test_staging_preflight_runtime_role_is_non_owner_and_non_admin():
     assert "c.relowner = r.oid" in guard
     assert "r.rolcreaterole AS can_create_roles" in guard
     assert "r.rolcreatedb AS can_create_databases" in guard
+    assert "pg_auth_members AS membership" in guard
+    assert 'role_membership_count=int(row["role_membership_count"])' in guard
 
 
 def test_production_deploy_requires_staging_identity_preflight():
