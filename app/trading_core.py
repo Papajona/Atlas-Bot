@@ -446,7 +446,7 @@ def ai_walk_forward_backtest(
     dsr_report = _research_trial_dsr_report(
         net.to_numpy(),
         research_trial_sharpes,
-        profile.bars_per_year,
+        annualization,
     )
     vol = float(net.std())
     annual = annualization
