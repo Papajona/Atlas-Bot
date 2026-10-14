@@ -1,3 +1,5 @@
+import os
+
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -32,6 +34,15 @@ class Settings(BaseSettings):
     funding_webhook_max_skew_seconds: int = 300
 
     customer_deficit_limit_usdt: float = 100.0  # USDT; threshold marker for deficit escalation (any deficit halts live trading)
+    # Keep LightGBM/OpenMP within the two-CPU Cloud Run API/worker allocation by default.
+    ml_threads: int = max(1, min(2, os.cpu_count() or 1))
+
+    @field_validator("ml_threads")
+    @classmethod
+    def _validate_ml_threads(cls, value: int) -> int:
+        if value < 1 or value > 2:
+            raise ValueError("ML_THREADS must be between 1 and 2 for the deployed CPU budget")
+        return value
 
     # Real USDT funding (TRON / TRC-20). Production API receives only a public
     # account-level extended public key (xpub) for new deposit-address derivation.
