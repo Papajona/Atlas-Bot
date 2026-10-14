@@ -70,10 +70,15 @@ TRANSFER_TOPIC = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3
 
 
 def _hex_topic_to_tron_address(value: str) -> str | None:
-    raw = (value or "").lower().removeprefix("0x")
-    if len(raw) != 64:
+    raw = str(value or "").lower().removeprefix("0x")
+    if len(raw) != 64 or any(char not in "0123456789abcdef" for char in raw):
         return None
-    payload = bytes.fromhex(raw)
+    try:
+        payload = bytes.fromhex(raw)
+    except ValueError:
+        return None
+    if len(payload) != 32:
+        return None
     try:
         from bip_utils import Base58Encoder
     except ImportError as exc:
@@ -107,38 +112,64 @@ def _address_to_hex20(value: str) -> str | None:
 
 def extract_trc20_transfer(receipt: dict[str, Any], contract: str, source: str, destination: str) -> int | None:
     """Return the raw USDT amount for a matching solidified Transfer event, else None."""
-    for log in receipt.get("log", []) or receipt.get("logs", []) or []:
-        topics = [str(x) for x in (log.get("topics") or [])]
+    if not isinstance(receipt, dict):
+        return None
+    logs = receipt.get("log") or receipt.get("logs") or []
+    if not isinstance(logs, list):
+        return None
+    wanted_contract = _address_to_hex20(contract)
+    if wanted_contract is None:
+        return None
+    for log in logs:
+        if not isinstance(log, dict):
+            continue
+        raw_topics = log.get("topics") or []
+        if not isinstance(raw_topics, list):
+            continue
+        topics = [str(x) for x in raw_topics]
         if len(topics) < 3 or topics[0].lower().removeprefix("0x") != TRANSFER_TOPIC:
             continue
-        wanted_contract = _address_to_hex20(contract)
-        if wanted_contract is None or _address_to_hex20(str(log.get("address") or "")) != wanted_contract:
+        if _address_to_hex20(str(log.get("address") or "")) != wanted_contract:
             continue
         from_addr = _hex_topic_to_tron_address(topics[1])
         to_addr = _hex_topic_to_tron_address(topics[2])
         data = str(log.get("data") or "").removeprefix("0x")
-        if from_addr != source or to_addr != destination or len(data) != 64:
+        if from_addr != source or to_addr != destination:
             continue
-        return int(data, 16)
+        if len(data) != 64 or any(char not in "0123456789abcdefABCDEF" for char in data):
+            continue
+        try:
+            return int(data, 16)
+        except ValueError:
+            # Malformed provider log data is not evidence of a transfer.
+            continue
     return None
 
 
 def classify_solidified_sweep(*, tx_body: dict[str, Any], receipt: dict[str, Any],
                               transaction_id: str, source: str, treasury: str, contract: str,
                               expected_raw_amount: int) -> tuple[str, dict[str, Any]]:
-    """Classify a sweep only from solidified transaction body + receipt evidence."""
+    """Classify a sweep only from explicit solidified transaction + receipt evidence."""
     if not tx_body or not receipt:
         return "UNKNOWN", {"reason": "solidified transaction/receipt not yet available"}
+    if not isinstance(tx_body, dict) or not isinstance(receipt, dict):
+        return "REVIEW", {"reason": "malformed solidified transaction or receipt body"}
     if str(tx_body.get("txID") or tx_body.get("txid") or "").lower() != transaction_id.lower():
         return "REVIEW", {"reason": "transaction id mismatch"}
-    ret = (tx_body.get("ret") or [{}])[0]
-    if str(ret.get("contractRet") or "").upper() not in {"", "SUCCESS"}:
-        return "FAILED", {"reason": f"contractRet={ret.get('contractRet')}"}
+    ret_values = tx_body.get("ret")
+    if not isinstance(ret_values, list) or not ret_values or not isinstance(ret_values[0], dict):
+        return "REVIEW", {"reason": "transaction contract result is missing"}
+    contract_result = str(ret_values[0].get("contractRet") or "").strip().upper()
+    if not contract_result:
+        return "REVIEW", {"reason": "transaction contract result is missing"}
+    if contract_result != "SUCCESS":
+        return "FAILED", {"reason": f"contractRet={contract_result}"}
     if str(receipt.get("id") or "").lower() not in {"", transaction_id.lower()}:
         return "REVIEW", {"reason": "receipt id mismatch"}
     if str(receipt.get("result") or "").upper() == "FAILED":
         return "FAILED", {"reason": "solidified receipt result=FAILED"}
-    receipt_result = str((receipt.get("receipt") or {}).get("result") or "").upper()
+    receipt_body = receipt.get("receipt")
+    receipt_result = str(receipt_body.get("result") or "").upper() if isinstance(receipt_body, dict) else ""
     if receipt_result != "SUCCESS":
         return "REVIEW", {"reason": f"solidified receipt result={receipt_result or 'missing'}"}
     observed = extract_trc20_transfer(receipt, contract, source, treasury)
