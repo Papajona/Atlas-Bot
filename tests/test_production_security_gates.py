@@ -277,7 +277,7 @@ def test_staging_identity_preflight_requires_a_distinct_project_and_runtime_iden
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' in workflow
     assert "ATLAS_STAGING_CLOUD_RUN_SERVICE" in workflow
     assert "ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT" in workflow
-    assert "gcloud run services describe" in workflow
+    assert '"gcloud", "run", "services", "describe"' in workflow
     assert "DATABASE_URL must reference exactly the configured staging database secret" in workflow
     assert "if login_role != role:" in workflow
     assert "BLOCKED: deployed staging service account differs" in workflow
