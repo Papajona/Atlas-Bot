@@ -18,7 +18,7 @@ class AIProviderError(RuntimeError):
 def _response_json_object(response, provider: str) -> dict[str, Any]:
     """Normalize malformed or non-object provider HTTP bodies to a typed safe error."""
     try:
-        body = _response_json_object(response, "Gemini")
+        body = response.json()
     except (ValueError, UnicodeDecodeError) as exc:
         raise AIProviderError(f"{provider} returned an invalid JSON response body") from exc
     if not isinstance(body, dict):
@@ -64,7 +64,7 @@ async def _gemini_json(prompt: str, *, timeout: float = 30.0, system_instruction
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(url, headers=headers, json=payload)
         response.raise_for_status()
-        body = _response_json_object(response, "Cerebras")
+        body = _response_json_object(response, "Gemini")
     try:
         text = body["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError, TypeError) as exc:
@@ -93,7 +93,7 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(url, headers=headers, json=payload)
         response.raise_for_status()
-        body = _response_json_object(response, "Groq")
+        body = _response_json_object(response, "Cerebras")
     try:
         text = body["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
@@ -122,7 +122,7 @@ async def _groq_json(prompt: str, *, timeout: float = 30.0, system_instruction: 
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(url, headers=headers, json=payload)
         response.raise_for_status()
-        body = response.json()
+        body = _response_json_object(response, "Groq")
     try:
         text = body["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
