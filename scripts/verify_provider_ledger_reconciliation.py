@@ -97,6 +97,10 @@ def load_provider_statement(path: Path) -> list[dict[str, str]]:
 
 def build_query(provider: str, from_utc: datetime, to_utc: datetime) -> str:
     # Provider and timestamps are validated and escaped before interpolating SQL literals.
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", provider):
+        raise ValueError("Invalid provider name")
+    if from_utc.tzinfo is None or to_utc.tzinfo is None or from_utc >= to_utc:
+        raise ValueError("A valid increasing timezone-aware timestamp window is required")
     provider_sql = provider.replace("'", "''")
     start = from_utc.isoformat(timespec="microseconds")
     end = to_utc.isoformat(timespec="microseconds")
@@ -179,6 +183,84 @@ def build_query(provider: str, from_utc: datetime, to_utc: datetime) -> str:
     """
 
 
+def reconcile_rows(
+    statement_rows: list[dict[str, str]],
+    database_rows: list[dict[str, Any]],
+    provider: str,
+) -> tuple[int, int, list[str]]:
+    """Compare provider payout rows to DB withdrawals and their terminal ledger journals."""
+    failures: list[str] = []
+    provider_rows = {row["provider_id"]: row for row in statement_rows}
+    if not database_rows:
+        failures.append("no Atlas withdrawals found in the specified created_at window")
+    db_by_id: dict[str, dict[str, Any]] = {}
+    unresolved_no_id = 0
+    for record in database_rows:
+        provider_id = str(record.get("provider_id") or "")
+        internal = str(record.get("status") or "").upper()
+        if not provider_id:
+            if internal in {"SUBMITTING", "SUBMITTED", "UNKNOWN"}:
+                unresolved_no_id += 1
+                failures.append("ambiguous withdrawal has no provider_id")
+            continue
+        if provider_id in db_by_id:
+            failures.append("duplicate provider_id in staging withdrawals")
+        db_by_id[provider_id] = record
+
+    for provider_id in provider_rows.keys() - db_by_id.keys():
+        failures.append("provider statement contains an unmatched provider_id:" + short_hash(provider_id))
+    for provider_id in db_by_id.keys() - provider_rows.keys():
+        failures.append("staging withdrawal missing from provider statement:" + short_hash(provider_id))
+
+    matched = 0
+    for provider_id in provider_rows.keys() & db_by_id.keys():
+        statement = provider_rows[provider_id]
+        record = db_by_id[provider_id]
+        matched += 1
+        if str(record.get("provider") or "").upper() != provider.upper():
+            failures.append("provider name mismatch:" + short_hash(provider_id))
+        try:
+            db_amount = Decimal(str(record["amount"]))
+            provider_amount = Decimal(statement["amount"])
+            if not db_amount.is_finite() or not provider_amount.is_finite() or db_amount != provider_amount:
+                failures.append("amount mismatch:" + short_hash(provider_id))
+        except (InvalidOperation, KeyError, ValueError):
+            failures.append("invalid amount in staging row:" + short_hash(provider_id))
+        if str(record.get("currency") or "").upper() != statement["currency"].upper():
+            failures.append("currency mismatch:" + short_hash(provider_id))
+
+        db_kind = status_kind(str(record.get("provider_status") or ""))
+        ext_kind = status_kind(statement["status"])
+        if db_kind == "UNKNOWN" or db_kind != ext_kind:
+            failures.append("provider status mismatch/unknown:" + short_hash(provider_id))
+
+        try:
+            reserve_count = int(record.get("reserve_count") or 0)
+            settlement_count = int(record.get("settlement_count") or 0)
+            release_count = int(record.get("release_count") or 0)
+            journal_balance_failures = int(record.get("journal_balance_failures") or 0)
+        except (TypeError, ValueError):
+            failures.append("invalid ledger journal evidence:" + short_hash(provider_id))
+            continue
+
+        if reserve_count != 1:
+            failures.append("withdrawal must have exactly one reserve journal:" + short_hash(provider_id))
+        if journal_balance_failures:
+            failures.append("withdrawal journal is unbalanced or has fewer than two lines:" + short_hash(provider_id))
+
+        internal_status = str(record.get("status") or "").upper()
+        if ext_kind == "COMPLETED":
+            if internal_status not in {"RELEASED", "COMPLETED"} or settlement_count != 1 or release_count != 0:
+                failures.append("completed payout lacks exactly one settlement or has a release journal:" + short_hash(provider_id))
+        elif ext_kind == "FAILED":
+            if internal_status not in {"FAILED", "REJECTED", "CANCELLED", "CANCELED"} or release_count != 1 or settlement_count != 0:
+                failures.append("failed payout lacks exactly one reserve release or has a settlement journal:" + short_hash(provider_id))
+        elif ext_kind == "PENDING":
+            if internal_status not in {"SUBMITTING", "SUBMITTED", "UNKNOWN"} or settlement_count != 0 or release_count != 0:
+                failures.append("pending/ambiguous payout has an invalid terminal state or journal:" + short_hash(provider_id))
+    return matched, unresolved_no_id, failures
+
+
 def audit(args: argparse.Namespace) -> dict[str, Any]:
     path = Path(args.statement_csv)
     provider = args.provider.strip()
@@ -232,68 +314,9 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         if count != 0:
             failures.append(f"runtime role {key} expected 0, observed {count}")
 
-    provider_rows: dict[str, dict[str, str]] = {r["provider_id"]: r for r in rows}
     db_rows = db.get("withdrawals") or []
-    if not db_rows:
-        failures.append("no Atlas withdrawals found in the specified created_at window")
-    db_by_id: dict[str, dict[str, Any]] = {}
-    unresolved_no_id = 0
-    for record in db_rows:
-        pid = str(record.get("provider_id") or "")
-        internal = str(record.get("status") or "").upper()
-        if not pid:
-            if internal in {"SUBMITTING", "SUBMITTED", "UNKNOWN"}:
-                unresolved_no_id += 1
-                failures.append("ambiguous withdrawal has no provider_id")
-            continue
-        if pid in db_by_id:
-            failures.append("duplicate provider_id in staging withdrawals")
-        db_by_id[pid] = record
-    for provider_id in provider_rows.keys() - db_by_id.keys():
-        failures.append("provider statement contains an unmatched provider_id:" + short_hash(provider_id))
-    for provider_id in db_by_id.keys() - provider_rows.keys():
-        failures.append("staging withdrawal missing from provider statement:" + short_hash(provider_id))
-
-    matched = 0
-    for provider_id in provider_rows.keys() & db_by_id.keys():
-        statement = provider_rows[provider_id]
-        record = db_by_id[provider_id]
-        matched += 1
-        if str(record.get("provider") or "").upper() != provider.upper():
-            failures.append("provider name mismatch:" + short_hash(provider_id))
-        try:
-            db_amount = Decimal(str(record["amount"]))
-            provider_amount = Decimal(statement["amount"])
-            if not db_amount.is_finite() or db_amount != provider_amount:
-                failures.append("amount mismatch:" + short_hash(provider_id))
-        except (InvalidOperation, KeyError, ValueError):
-            failures.append("invalid amount in staging row:" + short_hash(provider_id))
-        if str(record.get("currency") or "").upper() != statement["currency"].upper():
-            failures.append("currency mismatch:" + short_hash(provider_id))
-        db_kind = status_kind(str(record.get("provider_status") or ""))
-        ext_kind = status_kind(statement["status"])
-        if db_kind == "UNKNOWN" or db_kind != ext_kind:
-            failures.append("provider status mismatch/unknown:" + short_hash(provider_id))
-
-        reserve_count = int(record.get("reserve_count") or 0)
-        settlement_count = int(record.get("settlement_count") or 0)
-        release_count = int(record.get("release_count") or 0)
-        journal_balance_failures = int(record.get("journal_balance_failures") or 0)
-        if reserve_count != 1:
-            failures.append("withdrawal must have exactly one reserve journal:" + short_hash(provider_id))
-        if journal_balance_failures:
-            failures.append("withdrawal journal has fewer than two lines:" + short_hash(provider_id))
-
-        internal_status = str(record.get("status") or "").upper()
-        if ext_kind == "COMPLETED":
-            if internal_status not in {"RELEASED", "COMPLETED"} or settlement_count != 1 or release_count != 0:
-                failures.append("completed payout lacks exactly one settlement or has a release journal:" + short_hash(provider_id))
-        elif ext_kind == "FAILED":
-            if internal_status not in {"FAILED", "REJECTED", "CANCELLED", "CANCELED"} or release_count != 1 or settlement_count != 0:
-                failures.append("failed payout lacks exactly one reserve release or has a settlement journal:" + short_hash(provider_id))
-        elif ext_kind == "PENDING":
-            if internal_status not in {"SUBMITTING", "SUBMITTED", "UNKNOWN"} or settlement_count != 0 or release_count != 0:
-                failures.append("pending/ambiguous payout has an invalid terminal state or journal:" + short_hash(provider_id))
+    matched, unresolved_no_id, reconciliation_failures = reconcile_rows(rows, db_rows, provider)
+    failures.extend(reconciliation_failures)
 
     return {
         "schema_version": 1,
