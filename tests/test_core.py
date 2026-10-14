@@ -74,7 +74,7 @@ def test_training_refuses_collapsed_target():
 def test_triple_barrier_labels_timeouts_by_terminal_return_with_dead_zone():
     idx = pd.date_range("2025-01-01", periods=6, freq="h", tz="UTC")
     # None of these bars reaches a +/-2-volatility barrier. t=2 has a +1%
-    # terminal return; t=3's return is within the 0.25-volatility dead zone.
+    # terminal return; t=3's return is within the half-volatility dead zone.
     close = pd.Series([100.0, 100.0, 101.0, 100.1, 100.1, 100.1], index=idx)
     vol = pd.Series(0.01, index=idx)
     y = triple_barrier(close, vol, close, close, pt=2.0, sl=2.0, max_hold=2)
