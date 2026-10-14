@@ -12,6 +12,8 @@ def test_staging_identity_preflight_fails_closed_on_rls_migration_blockers():
     assert 'role has administrative privileges' in workflow
     assert 'if bypass_rls.lower() != "true"' in workflow
     assert 'if int(owned_count) > 0' in workflow
+    assert "role_membership_count" in workflow
+    assert "runtime DB role inherits other PostgreSQL roles" in workflow
     assert 'raise SystemExit("BLOCKED: public tables without RLS remain' in workflow
     assert 'print("PASS: read-only target identity' in workflow
 
