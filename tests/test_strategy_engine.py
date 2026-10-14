@@ -110,15 +110,43 @@ def test_multi_timeframe_structure_and_risk_levels():
     assert sig["side"] in {"buy", "sell", "flat"}
 
 
-def test_ai_walk_forward_does_not_forward_fill_between_oos_windows():
+def _install_fast_walk_forward_model(monkeypatch):
+    """Test fold accounting without fitting hundreds of LightGBM trees."""
+    from app import trading_core
+
+    class DeterministicModel:
+        def __init__(self, **kwargs):
+            self.classes_ = np.array([0, 1, 2], dtype=int)
+
+        def fit(self, features, labels):
+            assert len(features) == len(labels)
+            return self
+
+        def predict_proba(self, features):
+            # Stable long signal exercises position lag, turnover, and fold exit costs.
+            return np.tile(np.array([[0.05, 0.10, 0.85]], dtype=float), (len(features), 1))
+
+    monkeypatch.setattr(trading_core, "LGBMClassifier", DeterministicModel)
+
+
+def test_ai_walk_forward_does_not_forward_fill_between_oos_windows(monkeypatch):
     from app.trading_core import ai_walk_forward_backtest
+
+    _install_fast_walk_forward_model(monkeypatch)
     out = ai_walk_forward_backtest(sample_df(1800), asset="crypto", folds=4, min_train=500)
+    expected_oos = sum(int(fold["test_bars"]) for fold in out["folds"])
     assert out["prediction_gap_policy"] == "NO_FORWARD_FILL_ACROSS_NON_TEST_WINDOWS"
+    assert out["oos_bars"] == expected_oos
+    assert out["validated_bars"] == expected_oos
+    assert out["validation_signal_count"] == expected_oos
+    assert 0 < expected_oos < out["bars"]
     assert np.isfinite(out["sharpe"])
 
 
 def test_ai_walk_forward_aggregate_metrics_only_use_held_out_bars(monkeypatch):
     from app import trading_core
+
+    _install_fast_walk_forward_model(monkeypatch)
 
     captured = {}
     original_cost_report = trading_core.cost_breakeven_report

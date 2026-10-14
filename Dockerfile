@@ -3,7 +3,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PYTHONHASHSE
 RUN useradd --create-home --uid 10001 appuser
 WORKDIR /app
 COPY requirements.lock ./
-RUN python -m pip install --no-cache-dir --require-hashes -r requirements.lock
+RUN python -m pip install --no-cache-dir --no-binary=multidict --require-hashes -r requirements.lock
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./alembic.ini

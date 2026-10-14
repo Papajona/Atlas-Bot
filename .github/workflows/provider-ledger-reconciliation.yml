@@ -95,7 +95,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends postgresql-client
           python -m pip install --upgrade "pip==25.3"
-          python -m pip install --require-hashes -r requirements-dev.lock
+          MULTIDICT_NO_EXTENSIONS=1 python -m pip install --no-binary=multidict --require-hashes -r requirements-dev.lock
           python -m pip check
       - name: Reconcile authoritative provider rows and staging ledger
         env:

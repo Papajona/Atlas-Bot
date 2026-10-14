@@ -6,6 +6,13 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_release_dependency_and_multidict_runtime_guard_are_declared():
     req = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     assert "defusedxml==" in req
+    assert "multidict==6.9.1" in req
+    for lock_name in ("requirements.lock", "requirements-dev.lock"):
+        lock = (ROOT / lock_name).read_text(encoding="utf-8")
+        assert "multidict==6.9.1" in lock
+        assert "0f06e60fa190aa7abd0914c2a766736fdc8e9f34878c4346338534b73d1b20e2" in lock
+        assert "multidict==6.7.1" not in lock
+    assert "multidict==6.7.1" not in req
     main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
     guards = (ROOT / "app" / "startup_guards.py").read_text(encoding="utf-8")
     assert "assert_multidict_safe_backend" in main

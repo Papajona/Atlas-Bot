@@ -49,8 +49,8 @@ jobs:
       - name: Verify hash-enforced installation from generated lock files
         run: |
           set -euo pipefail
-          python -m pip install --require-hashes -r "$RUNNER_TEMP/requirements.lock"
-          python -m pip install --require-hashes -r "$RUNNER_TEMP/requirements-dev.lock"
+          MULTIDICT_NO_EXTENSIONS=1 python -m pip install --no-binary=multidict --require-hashes -r "$RUNNER_TEMP/requirements.lock"
+          MULTIDICT_NO_EXTENSIONS=1 python -m pip install --no-binary=multidict --require-hashes -r "$RUNNER_TEMP/requirements-dev.lock"
           python -m pip check
       - name: Verify dependency installation did not mutate the lock candidates
         run: |

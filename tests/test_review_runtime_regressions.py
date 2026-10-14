@@ -139,6 +139,17 @@ def test_multidict_production_backend_guard(monkeypatch):
     assert_multidict_safe_backend()
 
 
+def test_multidict_production_guard_rejects_vulnerable_version(monkeypatch):
+    import multidict
+    from app.startup_guards import assert_multidict_safe_backend
+
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.setenv("MULTIDICT_NO_EXTENSIONS", "1")
+    monkeypatch.setattr(multidict, "__version__", "6.7.1")
+    with pytest.raises(RuntimeError, match="multidict>=6.9.1"):
+        assert_multidict_safe_backend()
+
+
 def test_live_order_requires_signal_timestamp():
     src = (Path(__file__).resolve().parents[1] / "app" / "execution.py").read_text()
     assert "if live and not signal_timestamp:" in src

@@ -62,7 +62,7 @@ jobs:
       - name: Install hash-locked dependencies
         run: |
           python -m pip install --upgrade "pip==25.3"
-          python -m pip install --require-hashes -r requirements-dev.lock
+          MULTIDICT_NO_EXTENSIONS=1 python -m pip install --no-binary=multidict --require-hashes -r requirements-dev.lock
           python -m pip check
       - name: Validate production settings and release identity
         run: |
@@ -143,8 +143,8 @@ jobs:
           assert multidict.CIMultiDict.__module__ == "multidict._multidict_py", multidict.CIMultiDict.__module__
           print("multidict pure-Python backend verified")
           PY
-          # CVE-2026-104874 concerns the C extension; the runtime assertion above proves it is not loaded.
-          python -m pip_audit -r requirements.lock --strict --ignore-vuln PYSEC-2026-1325 --ignore-vuln CVE-2026-104874
+          # Verify the fixed multidict release and pure-Python backend; do not suppress its advisory.
+          python -m pip_audit -r requirements.lock --strict --ignore-vuln PYSEC-2026-1325
       - name: Create disposable least-privilege runtime-role fixture
         shell: bash
         run: |
