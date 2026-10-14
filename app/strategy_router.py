@@ -371,10 +371,14 @@ def policy_walk_forward_backtest(
         prev_pos = 0.0
         net_rows = []
         test_start, test_end = fold.test_start, fold.test_end
-        if test_end - test_start < 2:
+        if test_end - test_start < 3:
             continue
         stride = max(1, int(decision_stride))
-        decision_points = list(range(test_start, max(test_start + 1, test_end - 1), stride))
+        # A decision made after close[i] may only enter at open[i + 1].  Leave
+        # enough bars inside the held-out fold to measure an executable open-to-open
+        # return without borrowing prices from the next fold.
+        decision_points = list(range(test_start, max(test_start + 1, test_end - 2), stride))
+        net_index = []
         for i in decision_points:
             history = df.iloc[: i + 1]
             current_regime = str(regimes.iloc[i])
@@ -404,25 +408,34 @@ def policy_walk_forward_backtest(
                     last_switch_bar = i
                 current_strategy = str(decision.get("strategy") or current_strategy or "") or None
 
-            next_i = min(i + stride, test_end - 1)
-            if next_i <= i:
+            # Price exposure starts at the first executable open after the signal bar.
+            # The next decision likewise only changes exposure at its following open.
+            next_i = min(i + stride, test_end - 2)
+            entry_i = i + 1
+            exit_i = next_i + 1
+            if exit_i <= entry_i:
                 continue
-            next_ret = float(df["close"].iloc[next_i] / df["close"].iloc[i] - 1.0)
+            entry_open = float(df["open"].iloc[entry_i])
+            exit_open = float(df["open"].iloc[exit_i])
+            if not np.isfinite(entry_open) or not np.isfinite(exit_open) or entry_open <= 0:
+                raise ValueError("router walk-forward requires finite positive executable open prices")
+            next_ret = exit_open / entry_open - 1.0
             turnover = abs(target_pos - prev_pos)
             net = target_pos * next_ret - turnover * float(costs_bps) / 10000.0
             net_rows.append(net)
+            net_index.append(df.index[exit_i])
             if target_pos != 0.0:
                 reward_bps = float(np.sign(target_pos) * next_ret * 10000.0 - float(costs_bps) * (1.0 if prev_pos == 0.0 else 0.5))
                 observed.append({
                     "strategy": str(current_strategy or decision.get("strategy") or "ensemble"),
                     "regime": current_regime,
                     "net_return_bps": reward_bps,
-                    "created_at": df.index[i + 1].to_pydatetime(),
+                    # Feedback is not available until the scored open-to-open period ends.
+                    "created_at": df.index[exit_i].to_pydatetime(),
                 })
             prev_pos = target_pos
 
-        fold_index = [df.index[min(i + stride, test_end - 1)] for i in decision_points if min(i + stride, test_end - 1) > i]
-        fold_net = pd.Series(net_rows, index=fold_index)
+        fold_net = pd.Series(net_rows, index=net_index)
         aggregate.extend(net_rows)
         fm = _metrics(fold_net)
         fm.update({
