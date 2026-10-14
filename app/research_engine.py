@@ -293,14 +293,19 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         sig = strategy_signals(df, cfg, asset=asset)[component].fillna(0.0)
         component_pos = sig.shift(1).fillna(0.0)
         net_c = (component_pos * (next_open_returns(df) - 1.0) - component_pos.diff().abs().fillna(component_pos.abs()) * ((taker_bps + slippage_bps) / 10000.0)).to_numpy()
-        if trial_registry_complete:
-            comp_dsr = deflated_sharpe_report(net_c, trial_sharpes, n_trials, ann_bars)
-        else:
-            comp_dsr = {
-                "status": "MISSING_TRIAL_HISTORY",
-                "observations": int(np.isfinite(net_c).sum()),
-                "trial_count_current_run": n_trials,
-            }
+        # Component Sharpe values cannot be deflated from prior labels alone either.
+        comp_dsr = {
+            "status": "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
+            "observations": int(np.isfinite(net_c).sum()),
+            "trial_count_current_run": len(this_labels),
+            "known_prior_trial_label_count": len(known_prior_labels),
+            "trial_count_known_lower_bound": n_trials,
+            "note": (
+                "Prior trial labels do not contain historical Sharpe outcomes measured on "
+                "the same OOS sample; trusted trial-performance evidence and chronological "
+                "re-evaluation are required before promotion-grade DSR can be computed."
+            ),
+        }
         comp_cost = cost_breakeven_report((component_pos * (next_open_returns(df) - 1.0)).to_numpy(), component_pos.diff().abs().fillna(component_pos.abs()).to_numpy(),
                                           taker_bps=taker_bps, slippage_bps=slippage_bps, bars_per_year=ann_bars, stress_multiplier=cost_mult)
         per_strategy_oos[component]["trial_registry_complete"] = trial_registry_complete
