@@ -323,11 +323,20 @@ def ai_walk_forward_backtest(
     try:
         stress_multiplier = float(cost_stress_multiplier)
         profile = PROFILES[asset]
-        annualization = int(profile.bars_per_year if bars_per_year is None else bars_per_year)
+        raw_annualization = profile.bars_per_year if bars_per_year is None else bars_per_year
+        raw_hold_horizon = profile.max_hold if max_hold_bars is None else max_hold_bars
+        if (
+            isinstance(raw_annualization, (bool, np.bool_))
+            or not isinstance(raw_annualization, (int, np.integer))
+            or isinstance(raw_hold_horizon, (bool, np.bool_))
+            or not isinstance(raw_hold_horizon, (int, np.integer))
+        ):
+            raise ValueError("bars_per_year and max_hold_bars must be explicit integer values")
+        annualization = int(raw_annualization)
         taker_cost_bps = float(profile.taker_bps if taker_bps is None else taker_bps)
         slippage_cost_bps = float(profile.slippage_bps if slippage_bps is None else slippage_bps)
         carry_cost_bps = float(profile.carry_bps_per_bar if carry_bps_per_bar is None else carry_bps_per_bar)
-        hold_horizon = int(profile.max_hold if max_hold_bars is None else max_hold_bars)
+        hold_horizon = int(raw_hold_horizon)
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise ValueError("Invalid asset or walk-forward evaluation assumptions") from exc
     if not np.isfinite(stress_multiplier) or stress_multiplier <= 0:
