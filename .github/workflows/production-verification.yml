@@ -144,7 +144,32 @@ jobs:
           PY
           # CVE-2026-104874 concerns the C extension; the runtime assertion above proves it is not loaded.
           python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325 --ignore-vuln CVE-2026-104874
+      - name: Create disposable least-privilege runtime-role fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          PGPASSWORD=verification_password psql -v ON_ERROR_STOP=1 \
+            -h 127.0.0.1 -U atlas -d atlas_production_verify <<'SQL'
+          CREATE ROLE atlas_runtime LOGIN
+              PASSWORD 'atlas_runtime_test_password'
+              NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS;
+          GRANT CONNECT ON DATABASE atlas_production_verify TO atlas_runtime;
+          GRANT USAGE ON SCHEMA public TO atlas_runtime;
+          GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+              ON ALL TABLES IN SCHEMA public TO atlas_runtime;
+          GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO atlas_runtime;
+          GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO atlas_runtime;
+          SQL
+          # Keep the runtime fixture non-owner and non-administrative; only the CI
+          # migration/setup role retains DDL privileges in this disposable database.
+          PGPASSWORD=verification_password psql -X -A -t -v ON_ERROR_STOP=1 \
+            -h 127.0.0.1 -U atlas -d atlas_production_verify \
+            -c "SELECT current_user, rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls FROM pg_roles WHERE rolname='atlas_runtime'" \
+            | grep -Fx 'atlas|f|f|f|f|t'
+
       - name: Production startup smoke test
+        env:
+          DATABASE_URL: postgresql+asyncpg://atlas_runtime:atlas_runtime_test_password@localhost:5432/atlas_production_verify
         run: |
           python - <<'PY'
           import asyncio
