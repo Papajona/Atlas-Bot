@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from app.config import Settings
 from app.live_execution import LiveExecutionBlocked, require_live_subscription_entitlement
@@ -76,3 +77,14 @@ def test_binance_customer_subaccount_provisioning_defaults_off():
     settings = Settings(environment="test")
     assert settings.binance_customer_subaccounts_enabled is False
     assert settings.customer_live_trading_enabled is False
+
+
+def test_customer_live_execution_fails_startup_until_platform_account_model_exists():
+    with pytest.raises(ValidationError, match="approved platform-owned account allocation model"):
+        Settings(
+            environment="test",
+            customer_live_trading_enabled=True,
+            live_trading_enabled=True,
+            paper_trading=False,
+            broker_sandbox=False,
+        )
