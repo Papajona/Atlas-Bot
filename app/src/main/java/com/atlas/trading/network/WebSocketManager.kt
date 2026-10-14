@@ -1,6 +1,7 @@
 package com.atlas.trading.network
 
 import android.util.Log
+import com.atlas.trading.BuildConfig
 import com.atlas.trading.ui.PortfolioRiskMetrics
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -176,13 +177,35 @@ class WebSocketManager(
             return min(15_000L, 1_000L * (1L shl min(4, boundedAttempt - 1)))
         }
 
-        fun buildWebSocketUrl(rawUrl: String): String {
+        fun buildWebSocketUrl(
+            rawUrl: String,
+            allowInsecure: Boolean = BuildConfig.DEBUG
+        ): String {
             val trimmed = rawUrl.trim().trimEnd('/')
+            require(trimmed.isNotEmpty()) { "WebSocket base URL must not be blank" }
+            val usesHttp = trimmed.startsWith("http://", ignoreCase = true)
+            val usesWs = trimmed.startsWith("ws://", ignoreCase = true)
+            if ((usesHttp || usesWs) && !allowInsecure) {
+                throw IllegalArgumentException("Cleartext WebSocket URLs are forbidden in release builds")
+            }
+            val hasExplicitScheme = Regex("^[a-z][a-z0-9+.-]*://", RegexOption.IGNORE_CASE)
+                .containsMatchIn(trimmed)
+            if (hasExplicitScheme && !(
+                    trimmed.startsWith("https://", ignoreCase = true) ||
+                    trimmed.startsWith("http://", ignoreCase = true) ||
+                    trimmed.startsWith("wss://", ignoreCase = true) ||
+                    trimmed.startsWith("ws://", ignoreCase = true)
+                )) {
+                throw IllegalArgumentException("Unsupported WebSocket URL scheme")
+            }
             val wsScheme = when {
                 trimmed.startsWith("https://", ignoreCase = true) -> "wss://" + trimmed.substring(8)
-                trimmed.startsWith("http://", ignoreCase = true) -> "ws://" + trimmed.substring(7)
-                trimmed.startsWith("wss://", ignoreCase = true) || trimmed.startsWith("ws://", ignoreCase = true) -> trimmed
+                usesHttp -> "ws://" + trimmed.substring(7)
+                trimmed.startsWith("wss://", ignoreCase = true) || usesWs -> trimmed
                 else -> "wss://$trimmed"
+            }
+            if (!allowInsecure && !wsScheme.startsWith("wss://", ignoreCase = true)) {
+                throw IllegalArgumentException("TLS-secured wss:// is required in release builds")
             }
             return if (wsScheme.endsWith("/ws/risk-telemetry") || wsScheme.endsWith("/ws/equity")) {
                 wsScheme
