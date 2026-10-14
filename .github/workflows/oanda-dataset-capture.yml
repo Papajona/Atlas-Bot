@@ -27,10 +27,13 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   capture:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    environment: staging
     timeout-minutes: 10
     env:
       OANDA_API_TOKEN: ${{ secrets.OANDA_API_TOKEN }}
@@ -62,6 +65,43 @@ jobs:
         if: success()
         run: |
           python -c 'import json, sys; m=json.load(open("oanda_dataset_capture/manifest.json", encoding="utf-8")); ok=m.get("row_count_matches_expectation"); print("row_count_matches_expectation =", ok); sys.exit(0 if ok is True else 1)'
+      - name: Authenticate for durable dataset archive
+        if: always() && vars.ATLAS_OANDA_ARCHIVE_BUCKET != ''
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT }}
+      - name: Set up gcloud for durable dataset archive
+        if: always() && vars.ATLAS_OANDA_ARCHIVE_BUCKET != ''
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+      - name: Preserve capture in the restricted durable archive
+        if: always() && vars.ATLAS_OANDA_ARCHIVE_BUCKET != ''
+        shell: bash
+        env:
+          ARCHIVE_BUCKET: ${{ vars.ATLAS_OANDA_ARCHIVE_BUCKET }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          : "${GCP_PROJECT_ID:?Missing protected GCP_PROJECT_ID}"
+          [[ "$ARCHIVE_BUCKET" =~ ^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$ ]] || {
+            echo "BLOCKED: ATLAS_OANDA_ARCHIVE_BUCKET must be a bucket name, not an arbitrary URL"
+            exit 1
+          }
+          test -d oanda_dataset_capture || {
+            echo "BLOCKED: no dataset directory exists to archive"
+            exit 1
+          }
+          # Unique run/SHA path avoids overwriting prior evidence; bucket retention is configured out-of-band.
+          gcloud storage cp --recursive oanda_dataset_capture "gs://$ARCHIVE_BUCKET/oanda-practice/$GITHUB_RUN_ID-$GITHUB_SHA/"
+          gcloud storage ls "gs://$ARCHIVE_BUCKET/oanda-practice/$GITHUB_RUN_ID-$GITHUB_SHA/**"
+      - name: Block if durable dataset archive is not configured
+        if: always() && vars.ATLAS_OANDA_ARCHIVE_BUCKET == ''
+        shell: bash
+        run: |
+          echo "BLOCKED: configure protected staging variable ATLAS_OANDA_ARCHIVE_BUCKET so research captures are not limited to a 90-day Actions artifact." >&2
+          exit 1
       - name: Preserve capture files for inspection, including row-count mismatches
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
