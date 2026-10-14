@@ -7,6 +7,7 @@ from typing import Any
 
 
 _RAW_BALANCE_RE = re.compile(r"^[0-9]+$")
+_MAX_UINT256 = (1 << 256) - 1
 
 
 def parse_tron_usdt_balance(data: Any, contract_address: str) -> Decimal:
@@ -61,6 +62,10 @@ def parse_tron_usdt_balance(data: Any, contract_address: str) -> Decimal:
         # Reject floats (which may already have lost integer precision), booleans,
         # fractional amounts, and unexpected provider JSON types.
         raise ValueError("TRON provider returned missing or invalid integer USDT raw-balance metadata")
+
+    # TRC-20 balances are uint256 values; a longer/out-of-range provider value is malformed.
+    if len(raw_text) > 78 or int(raw_text) > _MAX_UINT256:
+        raise ValueError("TRON provider USDT raw balance exceeds the uint256 token balance range")
 
     # Construct Decimal directly from its digit tuple with exponent -6. Dividing
     # by 10**6 uses the active Decimal context (28 significant digits by default)
