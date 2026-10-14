@@ -80,22 +80,28 @@ def test_worker_health_and_local_security_audit_are_wired():
 
 
 
-def test_database_role_guard_fails_closed_for_rls_incompatible_role():
+def test_database_role_guard_fails_closed_for_rls_incompatible_or_privileged_roles():
     import pytest
     from app.rls_role_policy import require_rls_bypass_role
 
     with pytest.raises(RuntimeError, match="not authorized to bypass row-level security"):
         require_rls_bypass_role("atlas_app", is_superuser=False, bypass_rls=False)
+    with pytest.raises(RuntimeError, match="not authorized to bypass row-level security"):
+        require_rls_bypass_role("postgres", is_superuser=False, bypass_rls=True)
+    with pytest.raises(RuntimeError, match="not authorized to bypass row-level security"):
+        require_rls_bypass_role(
+            "atlas_backend", is_superuser=False, bypass_rls=True, can_create_roles=True
+        )
+    with pytest.raises(RuntimeError, match="not authorized to bypass row-level security"):
+        require_rls_bypass_role(
+            "atlas_table_owner", is_superuser=False, bypass_rls=True, owned_public_table_count=57
+        )
 
 
-def test_database_role_guard_accepts_superuser_bypassrls_or_table_owner_role():
+def test_database_role_guard_accepts_only_dedicated_non_owner_non_admin_bypass_role():
     from app.rls_role_policy import require_rls_bypass_role
 
-    require_rls_bypass_role("postgres", is_superuser=True, bypass_rls=False)
     require_rls_bypass_role("atlas_backend", is_superuser=False, bypass_rls=True)
-    require_rls_bypass_role(
-        "atlas_table_owner", is_superuser=False, bypass_rls=False, owns_all_rls_tables=True
-    )
 
 
 def test_rls_role_compatibility_guard_runs_before_database_initialization():
@@ -243,19 +249,29 @@ def test_staging_identity_preflight_is_manual_main_only_and_read_only():
     assert "alembic upgrade" not in workflow
 
 
-def test_staging_identity_preflight_fails_closed_on_migration_blockers():
+def test_staging_identity_preflight_requires_a_distinct_project_and_runtime_identity():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
-    assert 'raise SystemExit("BLOCKED: runtime role neither bypasses RLS' in workflow
-    assert 'raise SystemExit("BLOCKED: public tables without RLS remain' in workflow
+    assert "ATLAS_PRODUCTION_SUPABASE_PROJECT_REF" in workflow
+    assert "STAGING_SUPABASE_PROJECT_REF" in workflow
+    assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' in workflow
+    assert "ATLAS_STAGING_CLOUD_RUN_SERVICE" in workflow
+    assert "ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT" in workflow
+    assert "gcloud run services describe" in workflow
+    assert "BLOCKED: deployed staging service account differs" in workflow
+    assert 'role in {"postgres", "supabase_admin", "supabase_auth_admin", "authenticator"}' in workflow
+    assert "runtime database role has administrative privileges" in workflow
     assert "no migration or write was executed" in workflow
     assert "alembic upgrade" not in workflow
 
 
-def test_staging_preflight_owner_compatibility_matches_runtime_guard():
+def test_staging_preflight_runtime_role_is_non_owner_and_non_admin():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
     guard = (ROOT / "app" / "startup_guards.py").read_text(encoding="utf-8")
-    assert "c.relrowsecurity AND NOT c.relforcerowsecurity" in workflow
-    assert "c.relowner <> r.oid OR c.relforcerowsecurity" in guard
+    assert "owned_public_table_count" in workflow
+    assert "if int(owned_count) > 0" in workflow
+    assert "c.relowner = r.oid" in guard
+    assert "r.rolcreaterole AS can_create_roles" in guard
+    assert "r.rolcreatedb AS can_create_databases" in guard
 
 
 def test_production_deploy_requires_staging_identity_preflight():
