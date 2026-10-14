@@ -139,7 +139,13 @@ def test_full_policy_walk_forward_executes_after_signal_bar(monkeypatch):
         router, "classify_regime",
         lambda df, asset="crypto": pd.Series("RANGE", index=df.index),
     )
-    monkeypatch.setattr(router, "online_strategy_scores", lambda *a, **k: {})
+    observed_counts = []
+
+    def capture_observed(observed, **kwargs):
+        observed_counts.append(len(observed))
+        return {}
+
+    monkeypatch.setattr(router, "online_strategy_scores", capture_observed)
     monkeypatch.setattr(
         router, "select_strategy",
         lambda *a, **k: {
@@ -155,4 +161,9 @@ def test_full_policy_walk_forward_executes_after_signal_bar(monkeypatch):
     assert result["status"] == "OK"
     assert result["total_return"] > 0.0
     assert all(fold["total_return"] > 0.0 for fold in result["folds"])
+    # First reward ends at open[i+2], so it must not be seen by the immediately
+    # following close[i+1] decision. It becomes available at the endpoint bar close.
+    assert observed_counts[0] == 0
+    assert observed_counts[1] == 0
+    assert observed_counts[2] > 0
 \n
