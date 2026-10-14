@@ -35,6 +35,9 @@ def adjusted_group_exposure(positions, *, proposed_symbol: str, proposed_notiona
         if risk_group(getattr(p, "symbol", "")) != target:
             continue
         quantity = float(getattr(p, "quantity", 0) or 0)
+        if math.isfinite(quantity) and quantity == 0:
+            members.append((getattr(p, "symbol", ""), 0.0))
+            continue
         raw_price = getattr(p, "mark_price", 0)
         try:
             price = float(raw_price or 0)
