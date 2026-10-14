@@ -227,6 +227,13 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                             prior_trial_labels=None) -> dict:
     cfg = cfg or StrategyConfig()
     data_quality = validate_ohlcv_frame(df)
+    # The current established-coin allowlist is a live liquidity control, not a
+    # historical point-in-time universe. Carry this limitation into every research result.
+    universe_bias = (
+        "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
+        if str(asset).lower() == "crypto" else "NOT_APPLICABLE"
+    )
+    data_quality["universe_bias"] = universe_bias
     provenance = dict(df.attrs.get("data_provenance") or {})
     if not provenance.get("sha256"):
         data_quality.setdefault("issues", []).append("missing_data_provenance_hash")
@@ -234,7 +241,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     if not data_quality["valid"]:
         return {"research_version": "3.10.3-validation-v2", "status": "DATA_INVALID",
                 "data_quality": data_quality, "data_provenance": provenance,
-                "strategies": [], "strategy_count": 0}
+                "universe_bias": universe_bias, "strategies": [], "strategy_count": 0}
     components = ["trend", "momentum", "breakout", "mean_reversion", "ensemble"]
     results = [_component_backtest(df, c, cfg, taker_bps, slippage_bps, asset) for c in components]
     for row in results:
@@ -344,11 +351,31 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             ai_result = ai_walk_forward_backtest(df, asset, folds, min_train, ai_threshold)
         except Exception as exc:
             ai_result = {"strategy": "ai_walk_forward", "status": "INSUFFICIENT_DATA", "error": str(exc)}
-    ranked = _rank_for_research(results.copy())
+    in_sample_ranked = _rank_for_research(results.copy())
+    # Headline order is based on held-out measurements. Strategies with no valid OOS
+    # evaluation are placed after measured strategies and can never become the summary top.
+    def _oos_key(row):
+        metrics = per_strategy_oos.get(str(row.get("strategy") or ""), {})
+        valid = metrics.get("status") == "OK"
+        try:
+            oos_return = float(metrics.get("oos_total_return"))
+            if not np.isfinite(oos_return):
+                oos_return = float("-inf")
+        except (TypeError, ValueError):
+            oos_return = float("-inf")
+        try:
+            oos_sharpe = float(metrics.get("sharpe"))
+            if not np.isfinite(oos_sharpe):
+                oos_sharpe = float("-inf")
+        except (TypeError, ValueError):
+            oos_sharpe = float("-inf")
+        return (valid, oos_return if valid else float("-inf"), oos_sharpe if valid else float("-inf"))
+    oos_ranked = sorted(results, key=_oos_key, reverse=True)
     return {
         "research_version": "3.10.3-validation-v2",
         "data_quality": data_quality,
         "data_provenance": provenance,
+        "universe_bias": universe_bias,
         "validation": {"purged_walk_forward_folds": [fold.__dict__ for fold in validation_splits],
                         "cost_sensitivity": sensitivity,
                         "bootstrap_mean_return_ci": ci,
@@ -364,7 +391,10 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "regime_conditioned_performance": regime_performance},
         "strategy_count": len(results) + (1 if ai_result else 0),
         "strategies": results,
-        "research_order": [r["strategy"] for r in ranked],
+        "research_order": [r["strategy"] for r in oos_ranked],
+        "research_order_basis": "OOS_RETURN_THEN_SHARPE_NON_OK_LAST",
+        "in_sample_rank_order": [r["strategy"] for r in in_sample_ranked],
+        "in_sample_rank_order_basis": "IN_SAMPLE_DIAGNOSTIC_ONLY_NOT_PROMOTION_EVIDENCE",
         "ai_walk_forward": ai_result,
         "regime": _regime_snapshot(df, cfg, asset=asset),
         "robustness": robustness,
