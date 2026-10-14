@@ -206,7 +206,7 @@ def regime_conditioned_performance(df: pd.DataFrame, returns: pd.Series, asset: 
     return out
 
 
-def oos_promotion_gate(oos: dict, *, min_dsr: float | None = None, require_cost_stress: bool = False, min_folds: int = 5, min_total_return: float = 0.0, min_positive_fold_ratio: float = 0.5, max_negative_fold_return: float = -0.20, require_last_fold_positive: bool = True, min_sharpe: float | None = None, max_drawdown: float | None = None, min_trades: int | None = None) -> dict:
+def oos_promotion_gate(oos: dict, *, min_dsr: float | None = 0.95, require_cost_stress: bool = True, min_folds: int = 5, min_total_return: float = 0.0, min_positive_fold_ratio: float = 0.5, max_negative_fold_return: float = -0.20, require_last_fold_positive: bool = True, min_sharpe: float | None = 0.5, max_drawdown: float | None = -0.20, min_trades: int | None = 100) -> dict:
     folds = list(oos.get("folds") or [])
     returns = [float(f.get("total_return", 0.0)) for f in folds]
     positive_ratio = (sum(r > 0 for r in returns) / len(returns)) if returns else 0.0
@@ -222,16 +222,17 @@ def oos_promotion_gate(oos: dict, *, min_dsr: float | None = None, require_cost_
     # Fail closed: when a DSR floor is configured, a missing/insufficient DSR is NOT a pass.
     dsr_ok = True if min_dsr is None else (dsr_value is not None and float(dsr_value) >= float(min_dsr))
     stress_value = oos.get("cost_stress_ok")
-    # Fail closed: with the requirement on, no stress evidence is NOT a pass.
+    # Cost stress and a persisted prior-trial registry are mandatory by default.
     stress_ok = True if not require_cost_stress else bool(stress_value is True)
+    trial_registry_complete = oos.get("trial_registry_complete") is True
     passed = bool(
-        str(oos.get("status", "OK")) == "OK" and len(returns) >= int(min_folds) and
+        str(oos.get("status", "OK")) == "OK" and trial_registry_complete and len(returns) >= int(min_folds) and
         ("oos_total_return" in oos or "total_return" in oos) and
         float(oos.get("oos_total_return", oos.get("total_return"))) >= float(min_total_return) and
         positive_ratio >= float(min_positive_fold_ratio) and worst >= float(max_negative_fold_return) and
         (last_positive if require_last_fold_positive else True) and sharpe_ok and dd_ok and trades_ok and dsr_ok and stress_ok
     )
-    return {"passed": passed, "folds": len(returns), "positive_fold_ratio": positive_ratio, "worst_fold_return": worst, "last_fold_positive": last_positive, "sharpe": sharpe, "max_drawdown": max_dd, "trades": trades, "sharpe_ok": sharpe_ok, "max_drawdown_ok": dd_ok, "min_trades_ok": trades_ok, "thresholds": {"min_folds": min_folds, "min_total_return": min_total_return, "min_positive_fold_ratio": min_positive_fold_ratio, "max_negative_fold_return": max_negative_fold_return, "require_last_fold_positive": require_last_fold_positive, "min_sharpe": min_sharpe, "max_drawdown": max_drawdown, "min_trades": min_trades}, "deflated_sharpe": dsr_value, "min_dsr": min_dsr, "dsr_ok": dsr_ok, "cost_stress_ok": stress_value, "require_cost_stress": require_cost_stress, "stress_ok": stress_ok}
+    return {"passed": passed, "folds": len(returns), "positive_fold_ratio": positive_ratio, "worst_fold_return": worst, "last_fold_positive": last_positive, "sharpe": sharpe, "max_drawdown": max_dd, "trades": trades, "sharpe_ok": sharpe_ok, "max_drawdown_ok": dd_ok, "min_trades_ok": trades_ok, "thresholds": {"min_folds": min_folds, "min_total_return": min_total_return, "min_positive_fold_ratio": min_positive_fold_ratio, "max_negative_fold_return": max_negative_fold_return, "require_last_fold_positive": require_last_fold_positive, "min_sharpe": min_sharpe, "max_drawdown": max_drawdown, "min_trades": min_trades, "trial_registry_complete_required": True}, "deflated_sharpe": dsr_value, "min_dsr": min_dsr, "dsr_ok": dsr_ok, "cost_stress_ok": stress_value, "require_cost_stress": require_cost_stress, "stress_ok": stress_ok, "trial_registry_complete": trial_registry_complete, "trial_registry_ok": trial_registry_complete}
 
 def monte_carlo_bootstrap(returns, *, trials: int = 2000, seed: int = 7, block_size: int = 5) -> dict:
     """Time-series-aware block bootstrap stress summary; research only, not a forecast."""
