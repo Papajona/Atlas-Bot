@@ -17,6 +17,9 @@ main{max-width:1600px;padding:28px max(26px,4vw) 70px}.panel{background:linear-g
 :focus-visible{outline:3px solid rgba(125,211,252,.9);outline-offset:3px;box-shadow:0 0 0 5px rgba(125,211,252,.16)}
 button:disabled,input:disabled,select:disabled{opacity:.55;cursor:not-allowed}
 body:not(.admin-session-ready) main>section:not(#overview){display:none}
+body:not(.admin-session-ready) .sidebar{display:none}
+body:not(.admin-session-ready) .workspace{margin-left:0;width:100%}
+body:not(.admin-session-ready) .mobile-nav{display:none!important}
 body:not(.admin-session-ready) #overview{align-items:stretch;flex-wrap:wrap}
 #adminMfaEnrollment{padding:16px;margin-top:14px;border:1px solid var(--line);border-radius:14px;background:rgba(10,16,29,.72)}
 #adminMfaEnrollment img{display:block;width:min(240px,100%);height:auto;background:#fff;padding:8px;border-radius:8px}
