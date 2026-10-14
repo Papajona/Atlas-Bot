@@ -52,12 +52,15 @@ def test_customer_balance_api_preserves_decimal_wire_values_and_minor_units():
         "withdrawal_reserved_exact": "0.000002",
         "total_exact": "1.123459",
     })
-    # Legacy JSON keys remain numeric for existing Android/Web consumers.
-    assert result["available"] == pytest.approx(0.123456)
-    assert result["trading_reserved"] == pytest.approx(1.000001)
-    assert result["withdrawal_reserved"] == pytest.approx(0.000002)
-    assert result["total"] == pytest.approx(1.123459)
-    assert result["locked"] == pytest.approx(1.000003)
+    # Public balance keys must never be JSON floats.
+    assert result["available"] == "0.123456"
+    assert result["trading_reserved"] == "1.000001"
+    assert result["withdrawal_reserved"] == "0.000002"
+    assert result["total"] == "1.123459"
+    assert result["locked"] == "1.000003"
+    assert all(not isinstance(result[key], float) for key in (
+        "available", "trading_reserved", "withdrawal_reserved", "total", "locked"
+    ))
     # Explicit decimal strings are authoritative for exact comparisons and round-trips.
     assert result["available_exact"] == "0.123456"
     assert result["trading_reserved_exact"] == "1.000001"
