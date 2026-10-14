@@ -103,6 +103,27 @@ def test_ai_provider_empty_or_non_object_content_returns_typed_error(value):
         _extract_json(value)
 
 
+@pytest.mark.parametrize("payload", [
+    {"safe": True},
+    {"safe": "true", "confidence": 0.9, "reasons": [], "data_quality_flags": []},
+    {"safe": True, "confidence": 2.0, "reasons": [], "data_quality_flags": []},
+    {"safe": True, "confidence": 0.9, "reasons": "looks good", "data_quality_flags": []},
+    {"safe": False, "confidence": float("nan"), "reasons": ["bad data"], "data_quality_flags": []},
+])
+def test_trade_safety_provider_output_requires_complete_schema(payload):
+    from app.ai_providers import AIProviderError, _validate_trade_safety_payload
+
+    with pytest.raises(AIProviderError):
+        _validate_trade_safety_payload(payload)
+
+
+def test_trade_safety_provider_output_accepts_complete_schema():
+    from app.ai_providers import _validate_trade_safety_payload
+
+    payload = {"safe": True, "confidence": 0.95, "reasons": ["plan consistent"], "data_quality_flags": []}
+    assert _validate_trade_safety_payload(payload) is payload
+
+
 def test_json_loads_logs_corruption_and_fails_closed(caplog):
     from app.main import json_loads
 
