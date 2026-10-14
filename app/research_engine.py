@@ -80,17 +80,26 @@ def _apply_protective_halts(
         active_positions.append(active_position)
         net_returns.append(step_return)
 
-        # Only actually exposed bars can be stop-loss proxy events. Never count
-        # hypothetical raw strategy losses while protected exposure is zero.
-        if active_position != 0.0 and step_return < 0.0:
+        # Only actual market-loss bars while exposed count as loss events. Entry
+        # fees alone are not stop-loss events, and losses during a halt are not fills.
+        new_loss_event = active_position != 0.0 and (active_position * float(gross_return)) < 0.0
+        if new_loss_event:
             loss_event_times.append(i)
         cutoff = i - max(1, int(loss_lookback_bars))
         loss_event_times = [event_i for event_i in loss_event_times if event_i >= cutoff]
 
+        # A cluster cooldown is triggered only when a new real loss event reaches
+        # the threshold. Otherwise old losses would repeatedly re-trigger the same
+        # cooldown on every post-halt bar even when no new loss occurred.
+        loss_cluster_trigger = (
+            new_loss_event
+            and int(loss_event_threshold) > 0
+            and len(loss_event_times) >= int(loss_event_threshold)
+        )
         if (
             drawdown >= float(drawdown_limit)
             or daily_loss >= float(daily_loss_limit)
-            or (int(loss_event_threshold) > 0 and len(loss_event_times) >= int(loss_event_threshold))
+            or loss_cluster_trigger
         ):
             halted_until = max(halted_until, i + max(0, int(cooldown_bars)))
         previous_position = active_position
