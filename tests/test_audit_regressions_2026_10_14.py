@@ -89,3 +89,24 @@ def test_invalid_crypto_research_result_exposes_survivorship_limitation():
     assert result["status"] == "DATA_INVALID"
     assert result["universe_bias"] == "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
     assert result["data_quality"]["universe_bias"] == result["universe_bias"]
+
+def test_all_lightgbm_models_use_the_bounded_thread_setting():
+    from app.config import settings
+
+    source = (ROOT / "app" / "trading_core.py").read_text(encoding="utf-8")
+    assert 1 <= settings.ml_threads <= 2
+    assert source.count("LGBMClassifier(") == 3
+    assert source.count("n_jobs=settings.ml_threads") == 3
+
+
+def test_invalid_oos_numeric_metrics_cannot_win_the_headline_rank():
+    from app.research_engine import _rank_by_oos
+
+    rows = [{"strategy": "finite"}, {"strategy": "nan"}, {"strategy": "missing"}]
+    oos = {
+        "finite": {"status": "OK", "oos_total_return": 0.01, "sharpe": 0.2},
+        "nan": {"status": "OK", "oos_total_return": float("nan"), "sharpe": 100.0},
+        "missing": {"status": "INSUFFICIENT_DATA"},
+    }
+    assert [row["strategy"] for row in _rank_by_oos(rows, oos)] == ["finite", "nan", "missing"]
+
