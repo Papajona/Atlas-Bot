@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from app.forex_oanda import OandaBroker, OandaConfig
+from app.broker import Broker, BrokerConfig
 
 
 def test_oanda_price_and_units_are_normalized_to_account_instrument_rules(monkeypatch):
@@ -133,3 +134,46 @@ def test_oanda_practice_outcomes_are_not_reported_as_real_money_live():
     assert 'await audit("LIVE_ORDER_SUBMITTED", submitted_detail)' in source
     assert 'await audit("LIVE_ORDER_UNKNOWN", unknown_detail)' in source
     assert 'return {"duplicate": False, "trade_id": trade_id, "mode": mode, "status": status,' in source
+
+def test_broker_cancel_all_retains_each_failure_and_continues_best_effort():
+    class FakeExchange:
+        has = {}
+
+        def __init__(self):
+            self.orders = [
+                {"id": "timeout", "symbol": "BTC/USDT"},
+                {"id": "ok", "symbol": "ETH/USDT"},
+                {"id": "", "symbol": "SOL/USDT"},
+            ]
+
+        def fetch_open_orders(self):
+            return list(self.orders)
+
+        def cancel_order(self, order_id, symbol):
+            if order_id == "timeout":
+                raise TimeoutError("simulated exchange response timeout")
+            self.orders = [order for order in self.orders if order.get("id") != order_id]
+            return {"id": order_id, "symbol": symbol, "status": "closed"}
+
+    broker = Broker(BrokerConfig(exchange_id="binance", api_key="test-key", api_secret="test-secret"))
+    exchange = FakeExchange()
+    broker.client = exchange
+
+    canceled = broker.cancel_all_orders()
+
+    assert [item["id"] for item in canceled] == ["ok"]
+    assert broker.last_cancel_errors == [
+        {
+            "order_id": "timeout",
+            "symbol": "BTC/USDT",
+            "error_type": "TimeoutError",
+            "error": "simulated exchange response timeout",
+        },
+        {
+            "order_id": "",
+            "symbol": "SOL/USDT",
+            "error_type": "InvalidOpenOrder",
+            "error": "open order is missing an order id or symbol; refusing to guess cancellation scope",
+        },
+    ]
+    assert {item.get("id") for item in exchange.fetch_open_orders()} == {"timeout", ""}
