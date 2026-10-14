@@ -7,6 +7,7 @@ usable generated text. Exit 0 = all requests succeeded, 1 = request failed,
 """
 import json
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -21,50 +22,62 @@ from app.config import settings
 
 
 def _request_json(url: str, headers: dict[str, str], payload: dict | None = None) -> tuple[int, dict]:
+    """Request JSON and retry transient provider/network failures a bounded number of times."""
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     method = "POST" if payload is not None else "GET"
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            status = response.status
-            raw = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        # Preserve only parsed provider error metadata so the gate can explain
-        # authorization/model-access failures without logging credentials.
+    transient_statuses = {429, 500, 502, 503, 504}
+    for attempt in range(3):
+        request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            raw_error = exc.read(4096).decode("utf-8", errors="replace")
+            with urllib.request.urlopen(request, timeout=20) as response:
+                status = response.status
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            try:
+                raw_error = exc.read(4096).decode("utf-8", errors="replace")
+            except Exception:
+                raw_error = ""
+            if exc.code in transient_statuses and attempt < 2:
+                # Honor a short Retry-After but bound wait time so release verification
+                # never sleeps indefinitely on an unhealthy provider.
+                try:
+                    retry_after = float(exc.headers.get("Retry-After", ""))
+                    delay = min(5.0, max(1.0, retry_after))
+                except (AttributeError, TypeError, ValueError):
+                    delay = 1.5 * (attempt + 1)
+                time.sleep(delay)
+                continue
+            try:
+                parsed_error = json.loads(raw_error)
+                if isinstance(parsed_error, dict):
+                    error = parsed_error.get("error")
+                    if isinstance(error, dict):
+                        safe_error = {
+                            key: value[:240] if isinstance(value, str) else value
+                            for key, value in error.items()
+                            if key in {"message", "type", "code", "status", "detail"}
+                            and isinstance(value, (str, int, float, bool, type(None)))
+                        }
+                        return exc.code, {"error": safe_error}
+                    message = parsed_error.get("message") or parsed_error.get("detail")
+                    if isinstance(message, str):
+                        return exc.code, {"message": message[:240]}
+                    return exc.code, {"response_preview": raw_error[:240]}
+            except json.JSONDecodeError:
+                pass
+            # Keep only a short sanitized preview; never log request headers or credentials.
+            return exc.code, {"response_preview": raw_error[:240]}
         except Exception:
-            return exc.code, {}
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            return 0, {}
         try:
-            parsed_error = json.loads(raw_error)
-            if isinstance(parsed_error, dict):
-                # Keep the standard provider error structure, but bound strings
-                # so CI logs cannot be flooded by an upstream response.
-                error = parsed_error.get("error")
-                if isinstance(error, dict):
-                    safe_error = {
-                        key: value[:240] if isinstance(value, str) else value
-                        for key, value in error.items()
-                        if key in {"message", "type", "code", "status", "detail"}
-                        and isinstance(value, (str, int, float, bool, type(None)))
-                    }
-                    return exc.code, {"error": safe_error}
-                message = parsed_error.get("message") or parsed_error.get("detail")
-                if isinstance(message, str):
-                    return exc.code, {"message": message[:240]}
-                return exc.code, {"response_preview": raw_error[:240]}
-        except json.JSONDecodeError:
-            pass
-        # Non-JSON responses commonly come from a proxy/gateway; retain only a
-        # short sanitized preview, never request headers or credentials.
-        return exc.code, {"response_preview": raw_error[:240]}
-    except Exception:
-        return 0, {}
-    try:
-        parsed = json.loads(raw)
-        return status, parsed if isinstance(parsed, dict) else {}
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return status, {}
+            parsed = json.loads(raw)
+            return status, parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return status, {}
+    return 0, {}
 
 
 def _check_gemini(model: str) -> bool:
