@@ -210,10 +210,13 @@ def next_open_returns(df: pd.DataFrame) -> pd.Series:
     """
     if "open" not in df.columns:
         raise ValueError("OHLCV data must contain an open column")
+    # Callers treat this as a gross price ratio and subtract 1.0 to get a return.
+    # The final bar has no next open, so its neutral gross ratio must be 1.0;
+    # filling it with 0.0 would manufacture a -100% terminal loss.
     return (
         df["open"].shift(-1).div(df["open"])
         .replace([np.inf, -np.inf], np.nan)
-        .fillna(0.0)
+        .fillna(1.0)
     )
 
 
