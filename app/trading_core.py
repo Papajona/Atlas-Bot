@@ -274,9 +274,41 @@ def predict_latest(df: pd.DataFrame, model_path: str, threshold: float = 0.05) -
     }
 
 
+def _research_trial_dsr_report(
+    net_returns: np.ndarray,
+    trial_sharpes_annual: list[float] | None,
+    bars_per_year: int,
+) -> dict:
+    """Compute DSR only when the full experiment's trial Sharpe history is supplied.
+
+    Fold Sharpe values are not a substitute for the distribution of all strategy,
+    feature, threshold, and parameter variants explored during selection. A missing
+    or incomplete trial ledger must not produce a promotion-grade DSR.
+    """
+    if not trial_sharpes_annual:
+        return {
+            "status": "MISSING_TRIAL_HISTORY",
+            "observations": int(np.isfinite(np.asarray(net_returns, dtype=float)).sum()),
+            "note": "Provide every evaluated variant's annualized Sharpe from the immutable experiment ledger.",
+        }
+    try:
+        trials = [float(value) for value in trial_sharpes_annual]
+    except (TypeError, ValueError, OverflowError):
+        return {"status": "INVALID_TRIAL_HISTORY", "observations": int(len(net_returns))}
+    if not trials or not all(np.isfinite(value) for value in trials):
+        return {"status": "INVALID_TRIAL_HISTORY", "observations": int(len(net_returns))}
+    return deflated_sharpe_report(
+        net_returns,
+        trials,
+        len(trials),
+        bars_per_year,
+    )
+
+
 def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int = 5,
                              min_train: int = 800, threshold: float = 0.05,
-                             cost_stress_multiplier: float = 2.0) -> dict:
+                             cost_stress_multiplier: float = 2.0,
+                             research_trial_sharpes: list[float] | None = None) -> dict:
     if not np.isfinite(float(cost_stress_multiplier)) or float(cost_stress_multiplier) <= 0:
         raise ValueError("cost_stress_multiplier must be a finite positive number")
     X = build_features(df)
@@ -329,7 +361,11 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
     peak = equity.cummax()
     dd = equity / peak - 1
     cost_report = cost_breakeven_report((position * ret).to_numpy(), turnover.to_numpy(), taker_bps=profile.taker_bps, slippage_bps=profile.slippage_bps, bars_per_year=profile.bars_per_year, stress_multiplier=cost_stress_multiplier)
-    dsr_report = deflated_sharpe_report(net.to_numpy(), [float(f.get("sharpe", 0.0)) for f in fold_metrics], max(1, len(fold_metrics)), profile.bars_per_year)
+    dsr_report = _research_trial_dsr_report(
+        net.to_numpy(),
+        research_trial_sharpes,
+        profile.bars_per_year,
+    )
     vol = float(net.std())
     annual = profile.bars_per_year
     downside = net[net < 0].std()
@@ -356,6 +392,8 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
         "cost_stress_ok": bool(cost_report.get("stress_ok")) if cost_report.get("status") == "OK" else False,
         "cost_stress_multiplier": float(cost_stress_multiplier),
         "cost_analysis": cost_report,
+        "research_trial_count": len(research_trial_sharpes) if research_trial_sharpes else 0,
+        "research_trial_history_status": dsr_report.get("status"),
         "deflated_sharpe": dsr_report.get("deflated_sharpe_ratio") if dsr_report.get("status") == "OK" else None,
         "deflated_sharpe_status": dsr_report.get("status"),
     }
