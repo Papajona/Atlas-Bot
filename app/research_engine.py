@@ -219,17 +219,27 @@ def _rank_for_research(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=lambda x: x["research_score"], reverse=True)
 
 
+def _has_valid_oos_measurement(metrics: dict) -> bool:
+    if not isinstance(metrics, dict) or metrics.get("status") != "OK":
+        return False
+    try:
+        return bool(np.isfinite(float(metrics.get("oos_total_return"))))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def _rank_by_oos(rows: list[dict], oos_by_strategy: dict[str, dict]) -> list[dict]:
     """Order measured OOS results first; place missing/invalid OOS results last."""
+    def finite_or_negative_infinity(value) -> float:
+        try:
+            number = float(value)
+            return number if np.isfinite(number) else float("-inf")
+        except (TypeError, ValueError, OverflowError):
+            return float("-inf")
+
     def key(row: dict) -> tuple[bool, float, float]:
         metrics = oos_by_strategy.get(str(row.get("strategy") or ""), {})
-        valid = metrics.get("status") == "OK"
-        def finite_or_negative_infinity(value) -> float:
-            try:
-                number = float(value)
-                return number if np.isfinite(number) else float("-inf")
-            except (TypeError, ValueError, OverflowError):
-                return float("-inf")
+        valid = _has_valid_oos_measurement(metrics)
         if not valid:
             return (False, float("-inf"), float("-inf"))
         return (
@@ -474,7 +484,7 @@ def ai_market_review(research: dict, live_signal: dict | None = None) -> dict:
         return {"status": "NO_DATA", "summary": "No strategy research results are available."}
 
     ranked_oos = _rank_by_oos(rows, oos_by_strategy)
-    measured = [row for row in ranked_oos if (oos_by_strategy.get(str(row.get("strategy") or "")) or {}).get("status") == "OK"]
+    measured = [row for row in ranked_oos if _has_valid_oos_measurement(oos_by_strategy.get(str(row.get("strategy") or ""), {}))]
     best = measured[0] if measured else None
     profitable_oos = [
         row for row in measured
