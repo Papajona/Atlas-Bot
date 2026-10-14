@@ -49,6 +49,12 @@ def test_h2_loss_limit_uses_synced_app_state_and_calls_stop(tmp_path, monkeypatc
         return None
     monkeypatch.setattr(execution, 'emergency_stop', stop)
     monkeypatch.setattr(execution, 'audit', audit)
+    # This regression targets risk-state synchronization and the stop trigger.
+    # Incident persistence is covered independently; isolate it to avoid adding
+    # a second SQLite session to this focused loss-limit test.
+    async def incident(*args, **kwargs):
+        return None
+    monkeypatch.setattr(execution, 'open_incident', incident)
     async def run():
         try:
             await _init(engine)
