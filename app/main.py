@@ -6370,15 +6370,23 @@ async def _safe_audit(event: str, detail: dict, actor_id: str | None = None) -> 
 
 
 def json_loads(v):
+    """Decode persisted JSON without masking corruption as an empty list.
+
+    Null/empty columns retain the legacy empty-list default. Malformed non-empty
+    values are logged and raised so callers cannot mistake corrupt risk/audit data
+    for a valid absence of flags or events.
+    """
     import json
+    if v is None or v == "":
+        return []
     try:
-        return json.loads(v or "[]")
+        return json.loads(v)
     except (json.JSONDecodeError, TypeError, UnicodeDecodeError) as exc:
-        logging.getLogger(__name__).warning(
-            "invalid_json_column defaulted_to_empty value_type=%s error_type=%s",
+        logging.getLogger(__name__).error(
+            "invalid_json_column refusing_default value_type=%s error_type=%s",
             type(v).__name__, type(exc).__name__,
         )
-        return []
+        raise ValueError("Stored JSON column is malformed; refusing unsafe default") from exc
 
 def json_dumps(v):
     import json
