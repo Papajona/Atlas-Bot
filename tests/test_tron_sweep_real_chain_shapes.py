@@ -37,6 +37,32 @@ def test_real_shaped_transfer_settles_with_base58_contract_as_stored_by_atlas():
     assert status == "SETTLED" and evidence["observed_raw"] == RAW_AMOUNT
 
 
+def test_missing_transaction_contract_result_is_review_even_with_valid_transfer_receipt():
+    status, evidence = classify_solidified_sweep(
+        tx_body={"txID": TXID},
+        receipt=_receipt(),
+        transaction_id=TXID,
+        source=FROM_B58,
+        treasury=TO_B58,
+        contract=USDT_BASE58,
+        expected_raw_amount=RAW_AMOUNT,
+    )
+    assert status == "REVIEW"
+    assert evidence["reason"] == "transaction contract result is missing"
+
+
+@pytest.mark.parametrize("bad_topic", ["g" * 64, " " * 64, "0" * 63])
+def test_malformed_transfer_topics_do_not_crash_or_settle(bad_topic):
+    receipt = _receipt()
+    receipt["log"][0]["topics"][1] = bad_topic
+    assert _classify(receipt)[0] == "REVIEW"
+
+
+def test_malformed_transfer_data_does_not_crash_or_settle():
+    receipt = _receipt(data="g" * 64)
+    assert _classify(receipt)[0] == "REVIEW"
+
+
 @pytest.mark.parametrize("contract", [USDT_BASE58, "41" + USDT_LOG_ADDRESS, USDT_LOG_ADDRESS, "0x" + USDT_LOG_ADDRESS])
 def test_contract_encodings_are_equivalent(contract):
     assert _address_to_hex20(contract) == USDT_LOG_ADDRESS
