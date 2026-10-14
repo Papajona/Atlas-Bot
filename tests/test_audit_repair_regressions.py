@@ -100,3 +100,19 @@ def test_ai_provider_checker_retries_transient_503(monkeypatch):
     assert status == 200
     assert body == {"ok": True}
     assert len(calls) == 2
+
+
+def test_gemini_alternative_discovery_uses_only_listed_stable_flash_models():
+    from scripts.check_ai_models import _select_gemini_flash_alternatives
+
+    models = [
+        {"name": "models/gemini-3.6-flash", "supportedGenerationMethods": ["generateContent"]},
+        {"name": "models/gemini-3.7-flash-preview", "supportedGenerationMethods": ["generateContent"]},
+        {"name": "models/gemini-3.5-flash", "supportedGenerationMethods": ["generateContent"]},
+        {"name": "models/gemini-3.5-flash-lite", "supportedGenerationMethods": ["generateContent"]},
+        {"name": "models/gemini-3.4-flash", "supportedGenerationMethods": ["embedContent"]},
+        {"name": "models/gemini-3.3-pro", "supportedGenerationMethods": ["generateContent"]},
+    ]
+    assert _select_gemini_flash_alternatives(models, "gemini-3.6-flash") == [
+        "gemini-3.5-flash", "gemini-3.5-flash-lite"
+    ]
