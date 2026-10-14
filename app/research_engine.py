@@ -259,23 +259,26 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     this_labels = {f"{r.get('strategy')}@{fp}" for r in results} | {f"variant:{v['multiplier']}@{fp}" for v in variants}
     if include_ai:
         this_labels.add(f"ai@{fp}")
-    trial_registry_complete = prior_trial_labels is not None
-    n_trials = len(set(prior_trial_labels or ()) | this_labels)
-    trial_sharpes = [r.get("sharpe", 0.0) for r in results] + [v["sharpe"] for v in variants]
-    if trial_registry_complete:
-        dsr = deflated_sharpe_report(
-            net_ensemble, trial_sharpes, n_trials,
-            PROFILES.get(asset, PROFILES["crypto"]).bars_per_year,
-        )
-    else:
-        # The local trial count is not the full selection history. Do not present
-        # this as a promotion-grade DSR when no persisted registry was supplied.
-        dsr = {
-            "status": "MISSING_TRIAL_HISTORY",
-            "observations": int(np.isfinite(np.asarray(net_ensemble, dtype=float)).sum()),
-            "trial_count_current_run": n_trials,
-            "note": "Prior trial labels from the persisted research registry are required for promotion-grade DSR.",
-        }
+    # A set of trial labels proves only that configurations were named in prior runs.
+    # It does not provide the historical trial Sharpe distribution evaluated on the
+    # same OOS observations, which DSR needs to correct selection bias. Never promote
+    # from labels/counts alone; the trusted research archive and its comparable trial
+    # outcomes must be restored and verified first.
+    known_prior_labels = set(prior_trial_labels or ())
+    n_trials = len(known_prior_labels | this_labels)
+    trial_registry_complete = False
+    dsr = {
+        "status": "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
+        "observations": int(np.isfinite(np.asarray(net_ensemble, dtype=float)).sum()),
+        "trial_count_current_run": len(this_labels),
+        "known_prior_trial_label_count": len(known_prior_labels),
+        "trial_count_known_lower_bound": n_trials,
+        "note": (
+            "Prior trial labels do not contain historical Sharpe outcomes measured on "
+            "the same OOS sample; a complete trusted experiment archive and chronological "
+            "re-evaluation are required before promotion-grade DSR can be computed."
+        ),
+    }
     oos["trial_registry_complete"] = trial_registry_complete
     if dsr.get("status") == "OK":
         oos["deflated_sharpe"] = dsr["deflated_sharpe_ratio"]
@@ -324,7 +327,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "deflated_sharpe": dsr,
                         "trial_labels": sorted(this_labels),
                         "trial_registry_complete": trial_registry_complete,
-                        "trial_registry_status": "COMPLETE" if trial_registry_complete else "MISSING_PRIOR_TRIAL_LABELS",
+                        "trial_registry_status": "COMPLETE" if trial_registry_complete else "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
                         "cumulative_trials": n_trials,
                         "cost_analysis": ens_cost,
                         "fixed_signal_oos": oos,
