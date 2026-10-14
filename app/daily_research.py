@@ -67,25 +67,37 @@ def _ai_research_brief(research: dict[str, Any], intelligence: dict[str, Any]) -
 
 
 def summarize_research(research: dict[str, Any]) -> dict[str, Any]:
-    """Reduce a backtest_all_strategies() payload to the handful of fields tracked across runs."""
-    regime = (research.get("regime") or {})
+    """Summarize out-of-sample evidence; never relabel an in-sample winner as validated."""
+    regime = research.get("regime") or {}
+    validation = research.get("validation") or {}
+    oos_by_strategy = validation.get("per_strategy_oos") or {}
     order = research.get("research_order") or []
-    top = order[0] if order else ""
-    row = next((r for r in (research.get("strategies") or []) if r.get("strategy") == top), {}) or {}
-    def f(key: str) -> float:
+    # Skip strategies that could not be evaluated on held-out bars. An OOS measurement
+    # is still not promotion approval; that separate gate must pass independently.
+    top = next(
+        (name for name in order if (oos_by_strategy.get(name) or {}).get("status") == "OK"),
+        "",
+    )
+    oos = oos_by_strategy.get(top) or {}
+
+    def finite_oos(key: str) -> float:
         try:
-            v = float(row.get(key, 0.0))
-            return v if v == v and abs(v) != float("inf") else 0.0
+            value = float(oos.get(key, 0.0))
+            return value if value == value and abs(value) != float("inf") else 0.0
         except (TypeError, ValueError):
             return 0.0
+
     return {
         "regime": str(regime.get("regime", "")),
         "annualized_realized_vol": regime.get("annualized_realized_vol"),
         "top_strategy": str(top),
-        "sharpe": f("sharpe"),
-        "max_drawdown": f("max_drawdown"),
-        "total_return": f("total_return"),
-        "trial_labels": list((research.get("validation") or {}).get("trial_labels") or []),
+        "top_strategy_basis": "OUT_OF_SAMPLE_MEASUREMENT_ONLY",
+        "top_strategy_oos_status": str(oos.get("status") or "NO_VALID_OOS_MEASUREMENT"),
+        "sharpe": finite_oos("sharpe"),
+        "max_drawdown": finite_oos("max_drawdown"),
+        "total_return": finite_oos("oos_total_return"),
+        "universe_bias": research.get("universe_bias") or (research.get("data_quality") or {}).get("universe_bias", "UNKNOWN"),
+        "trial_labels": list(validation.get("trial_labels") or []),
     }
 
 
