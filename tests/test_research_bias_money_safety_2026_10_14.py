@@ -39,6 +39,54 @@ def test_backtest_halt_uses_one_net_equity_curve_and_does_not_count_hypothetical
     )
 
 
+def test_hard_risk_halt_takes_precedence_over_same_bar_loss_cooldown():
+    from app.research_engine import _apply_protective_halts
+
+    index = pd.date_range("2026-01-01", periods=8, freq="h", tz="UTC")
+    position = pd.Series(1.0, index=index)
+    returns = pd.Series([-0.04] + [0.01] * 7, index=index)
+    protected, _, diagnostic = _apply_protective_halts(
+        position,
+        returns,
+        cost_rate=0.0,
+        drawdown_limit=0.02,
+        daily_loss_limit=0.02,
+        loss_event_threshold=1,
+        cooldown_bars=6,
+        loss_lookback_bars=8,
+    )
+
+    assert protected.iloc[0] == 1.0  # end-of-bar control reacts without look-ahead
+    assert (protected.iloc[1:] == 0.0).all()
+    assert diagnostic["hard_halt"] is True
+    assert diagnostic["hard_halt_reason"] == "DRAWDOWN"
+    assert diagnostic["hard_halt_triggered_at"] == 0
+    assert diagnostic["cooldown_triggers"] == 0
+    assert diagnostic["cooldown_until"] == -1
+
+
+def test_one_loss_below_hard_and_cluster_thresholds_does_not_flatten_backtest():
+    from app.research_engine import _apply_protective_halts
+
+    index = pd.date_range("2026-01-01", periods=12, freq="h", tz="UTC")
+    position = pd.Series(1.0, index=index)
+    returns = pd.Series([-0.005] + [0.004] * 11, index=index)
+    protected, _, diagnostic = _apply_protective_halts(
+        position,
+        returns,
+        cost_rate=0.0,
+        drawdown_limit=0.10,
+        daily_loss_limit=0.03,
+        loss_event_threshold=3,
+        cooldown_bars=5,
+        loss_lookback_bars=12,
+    )
+
+    assert (protected == 1.0).all()
+    assert diagnostic["hard_halt"] is False
+    assert diagnostic["cooldown_triggers"] == 0
+
+
 def test_customer_balance_api_preserves_decimal_wire_values_and_minor_units():
     from app.customer_funds import customer_balance_api
 
