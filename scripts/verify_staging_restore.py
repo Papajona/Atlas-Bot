@@ -138,6 +138,10 @@ def audit(args: argparse.Namespace) -> dict:
         raise ValueError("A real backup restore operation ID is required")
     if not args.backup_reference.strip():
         raise ValueError("A backup source identifier/reference is required")
+    evidence = str(args.restore_evidence_uri or "").strip()
+    evidence_url = urlparse(evidence)
+    if evidence_url.scheme not in {"https", "gs"} or not evidence_url.netloc:
+        raise ValueError("A provider restore-operation evidence URI (https:// or gs://) is required")
     proc = subprocess.run(
         ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", QUERY],
         capture_output=True, text=True, env=env, check=False,
@@ -197,6 +201,7 @@ def audit(args: argparse.Namespace) -> dict:
         "result": "PASS" if not failures else "FAIL",
         "restore_operation_id": args.restore_operation_id,
         "backup_reference": args.backup_reference,
+        "restore_evidence_uri": evidence,
         "production_supabase_ref": os.environ["PRODUCTION_SUPABASE_PROJECT_REF"],
         "staging_supabase_ref": os.environ["STAGING_SUPABASE_PROJECT_REF"],
         "staging_database_host": host,
@@ -214,6 +219,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--restore-operation-id", required=True)
     parser.add_argument("--backup-reference", required=True, help="Provider backup ID or immutable backup object URI")
+    parser.add_argument("--restore-evidence-uri", required=True, help="Provider restore operation evidence URL or immutable audit-log URI")
     parser.add_argument("--expected-runtime-role", required=True)
     parser.add_argument("--expected-revision", default="0049_public_schema_rls_lockdown")
     parser.add_argument("--output", default="staging-restore-audit.json")
