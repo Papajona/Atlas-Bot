@@ -426,7 +426,7 @@ async def settle_withdrawal(db, customer_id: int, amount: float, *, reference_id
     return fresh_ledger
 
 async def customer_balance(db, customer_id: int, currency: str = USDT, *, lock: bool = False) -> dict:
-    """Read customer balances without locking on normal dashboard reads."""
+    """Read ledger balances while retaining exact wire values alongside legacy numeric values."""
     ledger = None
     if not lock:
         ledger = (await db.execute(select(CustomerLedgerAccount).where(
@@ -435,9 +435,44 @@ async def customer_balance(db, customer_id: int, currency: str = USDT, *, lock: 
         ))).scalar_one_or_none()
     if ledger is None:
         ledger = await get_or_create_ledger(db, customer_id, currency)
-    return {"available": float(ledger.available), "trading_reserved": float(ledger.trading_reserved),
-            "withdrawal_reserved": float(ledger.withdrawal_reserved),
-            "total": float(D(str(ledger.available)) + D(str(ledger.trading_reserved)) + D(str(ledger.withdrawal_reserved)))}
+
+    available = D(str(ledger.available))
+    trading_reserved = D(str(ledger.trading_reserved))
+    withdrawal_reserved = D(str(ledger.withdrawal_reserved))
+    total = available + trading_reserved + withdrawal_reserved
+    # Keep numeric aliases for in-process risk calculations. Public API handlers
+    # must use customer_balance_api(), which emits the exact Decimal strings.
+    return {
+        "available": float(available),
+        "trading_reserved": float(trading_reserved),
+        "withdrawal_reserved": float(withdrawal_reserved),
+        "total": float(total),
+        "available_exact": format(available, "f"),
+        "trading_reserved_exact": format(trading_reserved, "f"),
+        "withdrawal_reserved_exact": format(withdrawal_reserved, "f"),
+        "total_exact": format(total, "f"),
+    }
+
+
+def customer_balance_api(balance: dict) -> dict[str, str | int]:
+    """Serialize authoritative customer funds without converting them through binary float."""
+    available = D(str(balance.get("available_exact", balance["available"])))
+    trading_reserved = D(str(balance.get("trading_reserved_exact", balance["trading_reserved"])))
+    withdrawal_reserved = D(str(balance.get("withdrawal_reserved_exact", balance["withdrawal_reserved"])))
+    total = D(str(balance.get("total_exact", balance["total"])))
+    scale = Decimal("1000000")  # ledger Numeric(38, 6) precision
+    return {
+        "available": format(available, "f"),
+        "trading_reserved": format(trading_reserved, "f"),
+        "withdrawal_reserved": format(withdrawal_reserved, "f"),
+        "total": format(total, "f"),
+        "locked": format(trading_reserved + withdrawal_reserved, "f"),
+        "available_minor_units": int(available * scale),
+        "trading_reserved_minor_units": int(trading_reserved * scale),
+        "withdrawal_reserved_minor_units": int(withdrawal_reserved * scale),
+        "total_minor_units": int(total * scale),
+        "minor_units_scale": 1_000_000,
+    }
 
 
 DEFICIT_ACCOUNT = "ASSET:RECEIVABLE:CUSTOMER_DEFICIT"
