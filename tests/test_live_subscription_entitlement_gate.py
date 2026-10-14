@@ -88,3 +88,8 @@ def test_customer_live_execution_fails_startup_until_platform_account_model_exis
             paper_trading=False,
             broker_sandbox=False,
         )
+
+
+def test_binance_subaccount_override_cannot_reenable_provisioning():
+    with pytest.raises(ValidationError, match="Binance customer subaccounts are disabled"):
+        Settings(environment="test", binance_customer_subaccounts_enabled=True)
