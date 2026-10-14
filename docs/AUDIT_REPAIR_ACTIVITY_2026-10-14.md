@@ -35,3 +35,11 @@
 
 ## Release policy
 This PR is not a production-release approval. Keep it unmerged until the latest required Atlas CI and PostgreSQL checks are green and the Production Verification Gate has successful provider verification. Keep paper-only/live-funding safeguards unchanged, and do not mark the Android release as signed without its signing and checksum evidence.
+
+
+## Follow-up from the uploaded deep audit — 2026-10-14
+- Reviewed the user-uploaded `ATLAS_AUDIT_REPORT.md`. Its explicit evidence boundary is preserved: the offline mini-pytest results do not replace a real pytest run; staging database identity, isolated Supabase migration validation, backup restore/provider reconciliation, and signed APK evidence cannot be inferred from static review.
+- Updated `scripts/verify_release.sh` to use the same two pip-audit advisory exceptions as mandatory Atlas CI: `PYSEC-2026-1325` and `CVE-2026-104874`. This makes the local release script's policy consistent with CI; it does not claim either advisory is harmless beyond the existing documented exception policy.
+- Added `:app:testDebugUnitTest` to the Android pull-request workflow before assembling the debug APK. This closes the workflow gap where Kotlin unit tests were not executed. The test task has not yet been proven green on the resulting commit.
+- The following remain operational evidence gates, not source-only fixes: verify the deployed runtime database identity and effective grants; apply/validate migration 0049 only on an isolated staging clone and exercise real application roles; restore a backup to a clean target and reconcile provider transactions against the ledger; produce a signed release APK and verify package, signing certificate fingerprint, and SHA-256; retrain after timeout-label changes and evaluate chronologically out of sample.
+- Current branch remains `fix/audit-repair-verified-2026-10-14`; do not merge until fresh checks complete on the latest head and operational gates are recorded with evidence.
