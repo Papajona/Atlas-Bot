@@ -4754,10 +4754,10 @@ async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorizatio
             amount_d = Decimal(str(req.amount))
             if amount_d > Decimal(str(trading_account.cash_equity)):
                 raise HTTPException(409, "Withdrawal exceeds unallocated trading-account capital")
-            trading_account.cash_equity = quantize_money(trading_account.cash_equity - req.amount)
-            trading_account.equity = max(0.0, quantize_money(trading_account.equity - req.amount))
-            trading_account.peak_equity = max(trading_account.equity, quantize_money(trading_account.peak_equity - req.amount))
-            trading_account.daily_start_equity = max(0.0, quantize_money(trading_account.daily_start_equity - req.amount))
+            trading_account.cash_equity = quantize_money(Decimal(str(trading_account.cash_equity)) - amount_d)
+            trading_account.equity = max(0.0, quantize_money(Decimal(str(trading_account.equity)) - amount_d))
+            trading_account.peak_equity = max(trading_account.equity, quantize_money(Decimal(str(trading_account.peak_equity)) - amount_d))
+            trading_account.daily_start_equity = max(0.0, quantize_money(Decimal(str(trading_account.daily_start_equity)) - amount_d))
         risk = await score_withdrawal(db, customer_id=profile.id, wallet_balance=balance["available"], amount=req.amount, destination=req.destination, currency="USDT", network="TRON")
         if risk["decision"] == "BLOCK":
             await db.rollback()

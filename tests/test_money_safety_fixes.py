@@ -84,6 +84,26 @@ def test_reserve_rounds_up_and_amounts_are_ledger_precision():
             assert ledger.available == Decimal("10") - ledger.trading_reserved
     asyncio.run(with_database(check))
 
+def test_full_trading_allocation_release_unwinds_upward_rounding_dust():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(CustomerLedgerAccount(customer_id=1, available=Decimal("10")))
+            await db.commit()
+            await reserve_trading(db, 1, 0.0000001, reference_id="r:submicro")
+            await db.commit()
+            ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
+            assert ledger.trading_reserved == Decimal("0.000001")
+
+            await release_trading(
+                db, 1, 0.0000001, reference_id="release:submicro", full_allocation=True
+            )
+            await db.commit()
+
+            ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
+            assert ledger.trading_reserved == Decimal("0.000000")
+            assert ledger.available == Decimal("10.000000")
+    asyncio.run(with_database(check))
+
 
 def test_withdrawal_settlement_shortfall_opens_critical_incident():
     async def check(sessions):
