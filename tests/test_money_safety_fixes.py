@@ -200,7 +200,7 @@ def test_tron_scanner_marks_deferrals_before_advancing_cursor():
     assert "_next_tron_cursor(" in scan
 
 
-def test_confirming_a_pending_funding_credits_the_stored_amount_not_the_payload(monkeypatch):
+def test_confirming_pending_funding_posts_exact_matching_amount(monkeypatch):
     from fastapi.testclient import TestClient
     # This regression exercises the legacy automatic-confirmation webhook path.
     # The pilot default is manual review, so explicitly disable it for this test.
@@ -227,7 +227,7 @@ def test_confirming_a_pending_funding_credits_the_stored_amount_not_the_payload(
 
     cid = asyncio.run(seed())
     body = json.dumps({"customer_auth_user_id": uid, "provider": "wire", "provider_reference": ref,
-                       "amount": 1000.0, "currency": "USDT", "status": "CONFIRMED"}).encode()
+                       "amount": 10.0, "currency": "USDT", "status": "CONFIRMED"}).encode()
     timestamp = str(int(time.time()))
     signed = timestamp.encode() + b"." + body
     sig = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
@@ -633,3 +633,149 @@ def test_old_completed_learning_replays_are_reprocessed_after_version_change(mon
             assert updated.mfe_bps == pytest.approx(10.0)
 
     asyncio.run(with_database(check))
+
+def _signed_funding_headers(secret: str, body: bytes) -> dict[str, str]:
+    timestamp = str(int(time.time()))
+    signed = timestamp.encode() + b"." + body
+    signature = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+    return {"x-funding-signature": signature, "x-funding-timestamp": timestamp}
+
+
+def test_mismatched_funding_confirmation_is_rejected_without_credit(monkeypatch):
+    from fastapi.testclient import TestClient
+    import app.main as main
+    from app.db import init_db, SessionLocal, CustomerProfile, Wallet, FundingTransaction
+
+    monkeypatch.setattr(settings, "funding_manual_review_required", False)
+    secret = "mismatch-funding-secret"
+    monkeypatch.setattr(settings, "funding_webhook_secret", secret)
+    uid, ref = "auth-" + uuid.uuid4().hex, "ref-" + uuid.uuid4().hex
+
+    async def seed():
+        await init_db()
+        async with SessionLocal() as db:
+            customer = CustomerProfile(auth_user_id=uid)
+            db.add(customer); await db.flush()
+            wallet = Wallet(customer_id=customer.id, currency="USDT", wallet_type="INTERNAL_TRADING", status="PENDING")
+            db.add(wallet); await db.flush()
+            db.add(FundingTransaction(customer_id=customer.id, wallet_id=wallet.id, provider="wire",
+                                      provider_reference=ref, amount=10.0, currency="USDT", status="PENDING"))
+            await db.commit()
+            return customer.id
+
+    customer_id = asyncio.run(seed())
+    body = json.dumps({
+        "customer_auth_user_id": uid, "provider": "wire", "provider_reference": ref,
+        "amount": 1000.0, "currency": "USDT", "status": "CONFIRMED",
+    }).encode()
+    with TestClient(main.app) as client:
+        response = client.post("/api/internal/funding/webhook", content=body,
+                               headers=_signed_funding_headers(secret, body))
+    assert response.status_code == 409, response.text
+
+    async def balance_and_entries():
+        async with SessionLocal() as db:
+            ledger = (await db.execute(
+                select(CustomerLedgerAccount).where(CustomerLedgerAccount.customer_id == customer_id)
+            )).scalar_one_or_none()
+            entries = (await db.execute(
+                select(LedgerEntry).where(LedgerEntry.customer_id == customer_id)
+            )).scalars().all()
+            return (ledger.available if ledger else Decimal("0")), len(entries)
+
+    balance, entry_count = asyncio.run(balance_and_entries())
+    assert balance == Decimal("0")
+    assert entry_count == 0
+
+
+def test_new_confirmed_usdt_funding_waits_for_manual_review(monkeypatch):
+    from fastapi.testclient import TestClient
+    import app.main as main
+    from app.db import init_db, SessionLocal, CustomerProfile, Wallet, FundingTransaction
+
+    monkeypatch.setattr(settings, "funding_manual_review_required", True)
+    secret = "manual-review-funding-secret"
+    monkeypatch.setattr(settings, "funding_webhook_secret", secret)
+    uid, ref = "auth-" + uuid.uuid4().hex, "ref-" + uuid.uuid4().hex
+
+    async def seed():
+        await init_db()
+        async with SessionLocal() as db:
+            customer = CustomerProfile(auth_user_id=uid)
+            db.add(customer)
+            await db.commit()
+            return customer.id
+
+    customer_id = asyncio.run(seed())
+    body = json.dumps({
+        "customer_auth_user_id": uid, "provider": "wire", "provider_reference": ref,
+        "amount": 10.0, "currency": "USDT", "status": "CONFIRMED",
+    }).encode()
+    with TestClient(main.app) as client:
+        response = client.post("/api/internal/funding/webhook", content=body,
+                               headers=_signed_funding_headers(secret, body))
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "PENDING_REVIEW"
+
+    async def review_state():
+        async with SessionLocal() as db:
+            funding = (await db.execute(select(FundingTransaction).where(
+                FundingTransaction.provider == "wire", FundingTransaction.provider_reference == ref
+            ))).scalar_one()
+            wallet = (await db.execute(select(Wallet).where(Wallet.id == funding.wallet_id))).scalar_one()
+            ledger = (await db.execute(select(CustomerLedgerAccount).where(
+                CustomerLedgerAccount.customer_id == customer_id
+            ))).scalar_one_or_none()
+            entries = (await db.execute(select(LedgerEntry).where(
+                LedgerEntry.customer_id == customer_id
+            ))).scalars().all()
+            return funding.status, wallet.status, ledger.available if ledger else Decimal("0"), len(entries)
+
+    funding_status, wallet_status, balance, entry_count = asyncio.run(review_state())
+    assert funding_status == "PENDING_REVIEW"
+    assert wallet_status == "PENDING"
+    assert balance == Decimal("0")
+    assert entry_count == 0
+
+
+def test_funding_reference_cannot_be_confirmed_under_another_customer(monkeypatch):
+    from fastapi.testclient import TestClient
+    import app.main as main
+    from app.db import init_db, SessionLocal, CustomerProfile, Wallet, FundingTransaction
+
+    monkeypatch.setattr(settings, "funding_manual_review_required", False)
+    secret = "funding-owner-secret"
+    monkeypatch.setattr(settings, "funding_webhook_secret", secret)
+    owner_uid, other_uid = "auth-" + uuid.uuid4().hex, "auth-" + uuid.uuid4().hex
+    ref = "ref-" + uuid.uuid4().hex
+
+    async def seed():
+        await init_db()
+        async with SessionLocal() as db:
+            owner, other = CustomerProfile(auth_user_id=owner_uid), CustomerProfile(auth_user_id=other_uid)
+            db.add_all([owner, other]); await db.flush()
+            wallet = Wallet(customer_id=owner.id, currency="USDT", wallet_type="INTERNAL_TRADING", status="PENDING")
+            db.add(wallet); await db.flush()
+            db.add(FundingTransaction(customer_id=owner.id, wallet_id=wallet.id, provider="wire",
+                                      provider_reference=ref, amount=10.0, currency="USDT", status="PENDING"))
+            await db.commit()
+            return owner.id
+
+    owner_id = asyncio.run(seed())
+    body = json.dumps({
+        "customer_auth_user_id": other_uid, "provider": "wire", "provider_reference": ref,
+        "amount": 10.0, "currency": "USDT", "status": "CONFIRMED",
+    }).encode()
+    with TestClient(main.app) as client:
+        response = client.post("/api/internal/funding/webhook", content=body,
+                               headers=_signed_funding_headers(secret, body))
+    assert response.status_code == 409, response.text
+
+    async def owner_balance():
+        async with SessionLocal() as db:
+            ledger = (await db.execute(select(CustomerLedgerAccount).where(
+                CustomerLedgerAccount.customer_id == owner_id
+            ))).scalar_one_or_none()
+            return ledger.available if ledger else Decimal("0")
+    assert asyncio.run(owner_balance()) == Decimal("0")
+
