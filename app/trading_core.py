@@ -492,6 +492,7 @@ def ai_walk_forward_backtest(
         },
         "cost_analysis": cost_report,
         "research_trial_count": len(research_trial_sharpes) if research_trial_sharpes else 0,
+        "trial_registry_complete": bool(research_trial_sharpes) and dsr_report.get("status") == "OK",
         "research_trial_history_status": dsr_report.get("status"),
         "deflated_sharpe": dsr_report.get("deflated_sharpe_ratio") if dsr_report.get("status") == "OK" else None,
         "deflated_sharpe_status": dsr_report.get("status"),
