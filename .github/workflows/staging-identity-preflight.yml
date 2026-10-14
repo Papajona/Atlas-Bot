@@ -61,7 +61,7 @@ jobs:
           [[ "$STAGING_CLOUD_RUN_SERVICE" =~ ^[a-z][a-z0-9-]{0,48}$ ]] || { echo "BLOCKED: invalid staging Cloud Run service name"; exit 1; }
           [[ "$EXPECTED_RUNTIME_SERVICE_ACCOUNT" =~ ^[a-zA-Z0-9._@-]+$ ]] || { echo "BLOCKED: invalid expected staging runtime service account"; exit 1; }
           [[ "$EXPECTED_RUNTIME_DB_ROLE" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || { echo "BLOCKED: invalid expected runtime database role"; exit 1; }
-          [[ "$EXPECTED_RUNTIME_DB_ROLE" != "postgres" ]] || { echo "BLOCKED: postgres is not an approved runtime database role"; exit 1; }
+          [[ ! "$EXPECTED_RUNTIME_DB_ROLE" =~ ^(postgres|service_role|supabase_admin|supabase_auth_admin|authenticator|anon|authenticated)$ ]] || { echo "BLOCKED: reserved or privileged role is not an approved runtime database role"; exit 1; }
           echo "Explicit isolated-staging identity configuration is present."
 
       - name: Verify deployed staging Cloud Run runtime service account
@@ -154,7 +154,7 @@ jobs:
                  COALESCE((SELECT rolreplication FROM pg_roles WHERE rolname=current_user), false),
                  COALESCE((SELECT rolbypassrls FROM pg_roles WHERE rolname=current_user), false),
                  (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner)=current_user AND c.relrowsecurity AND NOT c.relforcerowsecurity);
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner)=current_user);
           """
           p = subprocess.run(
               ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", query],
