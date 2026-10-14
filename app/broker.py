@@ -142,8 +142,24 @@ class Broker:
             self.last_cancel_errors = []
             c = self._c()
             if c.has.get("cancelAllOrders"):
-                result = c.cancel_all_orders(symbol) if symbol else c.cancel_all_orders()
-                return result if isinstance(result, list) else [result]
+                try:
+                    result = c.cancel_all_orders(symbol) if symbol else c.cancel_all_orders()
+                except Exception as exc:
+                    # A bulk endpoint error does not prove no orders remain. Record it and
+                    # fall back to individual cancellations; callers still re-fetch open orders.
+                    failure = {
+                        "order_id": "",
+                        "symbol": str(symbol or ""),
+                        "error_type": type(exc).__name__,
+                        "error": f"bulk cancel failed: {str(exc)[:900]}",
+                    }
+                    self.last_cancel_errors.append(failure)
+                    logging.getLogger(__name__).warning(
+                        "cancel_all_bulk_failed error_type=%s error=%s",
+                        failure["error_type"], failure["error"], exc_info=True,
+                    )
+                else:
+                    return result if isinstance(result, list) else [result]
             orders = self.fetch_open_orders(symbol)
             out = []
             for order in orders:
