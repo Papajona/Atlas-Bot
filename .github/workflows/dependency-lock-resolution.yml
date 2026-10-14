@@ -8,13 +8,17 @@ on:
       - ".github/workflows/dependency-lock-resolution.yml"
   workflow_dispatch:
 
+# Dependency resolution/testing runs without write credentials. Only the separate,
+# narrowly gated commit job receives contents:write and never installs packages.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   resolve-hash-locks:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -23,6 +27,7 @@ jobs:
           cache: pip
       - name: Install compatible pinned pip and pip-tools resolver
         run: |
+          set -euo pipefail
           python -m pip install --upgrade "pip==25.3" "pip-tools==7.5.2"
           python -m pip --version
           python -m pip show pip-tools
@@ -36,43 +41,77 @@ jobs:
           set -euo pipefail
           pip-compile --resolver=backtracking --generate-hashes --allow-unsafe \
             --output-file "$RUNNER_TEMP/requirements-dev.lock" requirements-dev.txt
-      - name: Verify hash-enforced installation from the generated lock files
+      - name: Record generated lock hashes before dependency installation
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          sha256sum requirements.lock requirements-dev.lock > requirements-locks.sha256
+      - name: Verify hash-enforced installation from generated lock files
         run: |
           set -euo pipefail
           python -m pip install --require-hashes -r "$RUNNER_TEMP/requirements.lock"
           python -m pip install --require-hashes -r "$RUNNER_TEMP/requirements-dev.lock"
           python -m pip check
-      - name: Publish hash-lock candidates with artifact checksum
+      - name: Verify dependency installation did not mutate the lock candidates
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          sha256sum --check requirements-locks.sha256
+      - name: Publish verified lock candidates and checksum
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: atlas-python-hash-lock-candidates
           path: |
             ${{ runner.temp }}/requirements.lock
             ${{ runner.temp }}/requirements-dev.lock
+            ${{ runner.temp }}/requirements-locks.sha256
           if-no-files-found: error
           retention-days: 7
-      - name: Commit verified lockfiles to this audit-repair PR only
-        if: github.event_name == 'pull_request' && github.event.pull_request.number == 115 && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'fix/remaining-audit-gates-2026-10-14'
+
+  commit-verified-locks:
+    needs: resolve-hash-locks
+    if: github.event_name == 'pull_request' && github.event.pull_request.number == 115 && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'fix/remaining-audit-gates-2026-10-14'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      # No package installation, scripts from dependencies, or build steps run in
+      # the job with write access. It only verifies hashes and copies artifact data.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: atlas-python-hash-lock-candidates
+          path: ${{ runner.temp }}/verified-lock-candidates
+      - name: Verify artifact lock hashes before committing
+        env:
+          LOCKS: ${{ runner.temp }}/verified-lock-candidates
+        run: |
+          set -euo pipefail
+          cd "$LOCKS"
+          test -s requirements.lock
+          test -s requirements-dev.lock
+          test -s requirements-locks.sha256
+          sha256sum --check requirements-locks.sha256
+      - name: Commit locks to the specific audit-repair PR only
         env:
           PR_BRANCH: ${{ github.head_ref }}
-          LOCKS: ${{ runner.temp }}
+          LOCKS: ${{ runner.temp }}/verified-lock-candidates
         shell: bash
         run: |
           set -euo pipefail
-          test -s "$LOCKS/requirements.lock"
-          test -s "$LOCKS/requirements-dev.lock"
-          # The just-completed --require-hashes install step is the authorization
-          # condition for writing lockfiles. Never target main or any other PR.
-          git fetch origin "refs/heads/$PR_BRANCH:refs/remotes/origin/$PR_BRANCH"
-          git checkout -B "$PR_BRANCH" "refs/remotes/origin/$PR_BRANCH"
+          test "$PR_BRANCH" = "fix/remaining-audit-gates-2026-10-14"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           install -m 0644 "$LOCKS/requirements.lock" requirements.lock
           install -m 0644 "$LOCKS/requirements-dev.lock" requirements-dev.lock
           git add -- requirements.lock requirements-dev.lock
           if git diff --cached --quiet; then
-            echo "Committed lockfiles already match the verified generated candidates."
+            echo "Committed lockfiles already match the verified candidates."
             exit 0
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Lock Python dependencies with verified artifact hashes"
           git push origin "HEAD:refs/heads/$PR_BRANCH"
