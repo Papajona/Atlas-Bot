@@ -157,7 +157,7 @@ jobs:
           python - <<'PY'
           import os, subprocess, sys
           from pathlib import Path
-          from urllib.parse import urlparse
+          from urllib.parse import unquote, urlparse
           uri = Path(os.environ["RUNNER_TEMP"], "atlas-staging-db-url").read_text().strip()
           parsed = urlparse(uri)
           expected_role = os.environ["EXPECTED_RUNTIME_DB_ROLE"]
