@@ -461,6 +461,12 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _production_security_requirements(self):
         if self.customer_live_trading_enabled:
+            raise ValueError(
+                "Customer live trading is blocked: the current execution path uses customer-specific "
+                "Binance credentials, not the approved platform-owned account allocation model. "
+                "Keep CUSTOMER_LIVE_TRADING_ENABLED=false until that model is implemented and verified."
+            )
+        if self.customer_live_trading_enabled:
             if self.paper_trading:
                 raise ValueError("CUSTOMER_LIVE_TRADING_ENABLED cannot be true while PAPER_TRADING=true")
             if not self.live_trading_enabled:
