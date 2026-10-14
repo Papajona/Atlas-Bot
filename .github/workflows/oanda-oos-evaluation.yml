@@ -99,8 +99,11 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - name: Install project dependencies
-        run: python -m pip install -r requirements.txt
+      - name: Install hash-locked runtime dependencies
+        run: |
+          python -m pip install --upgrade "pip==25.3"
+          python -m pip install --require-hashes -r requirements.lock
+          python -m pip check
       - name: Evaluate only the verified original dataset
         env:
           ENVIRONMENT: test
