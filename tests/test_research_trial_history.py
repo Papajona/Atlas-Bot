@@ -60,30 +60,55 @@ def test_reference_manifest_must_be_separate_from_candidate(tmp_path):
 
 
 def test_trial_ledger_rejects_incomplete_or_duplicate_variants(tmp_path):
+    import hashlib
     import json
     import pytest
     from scripts.evaluate_original_oanda_oos import load_complete_trial_history
 
+    archive = tmp_path / "experiment.zip"
+    archive.write_bytes(b"immutable experiment archive bytes")
+    archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
     ledger = tmp_path / "trials.json"
-    ledger.write_text(json.dumps({
+    payload = {
         "schema_version": 1,
         "experiment_id": "experiment-001",
+        "experiment_archive_sha256": archive_hash,
         "complete": False,
         "all_variants_included": True,
         "variants": [{"variant_id": "base", "annualized_sharpe": 0.8}],
-    }), encoding="utf-8")
+    }
+    ledger.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="complete=true"):
-        load_complete_trial_history(ledger, 1)
+        load_complete_trial_history(ledger, 1, archive)
 
-    ledger.write_text(json.dumps({
-        "schema_version": 1,
-        "experiment_id": "experiment-001",
+    payload.update({
         "complete": True,
         "all_variants_included": True,
         "variants": [
             {"variant_id": "base", "annualized_sharpe": 0.8},
             {"variant_id": "base", "annualized_sharpe": 0.7},
         ],
-    }), encoding="utf-8")
+    })
+    ledger.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="unique"):
-        load_complete_trial_history(ledger, 2)
+        load_complete_trial_history(ledger, 2, archive)
+
+
+def test_trial_ledger_requires_exact_experiment_archive_hash(tmp_path):
+    import json
+    import pytest
+    from scripts.evaluate_original_oanda_oos import load_complete_trial_history
+
+    archive = tmp_path / "experiment.zip"
+    archive.write_bytes(b"actual archived data")
+    ledger = tmp_path / "trials.json"
+    ledger.write_text(json.dumps({
+        "schema_version": 1,
+        "experiment_id": "experiment-002",
+        "experiment_archive_sha256": "0" * 64,
+        "complete": True,
+        "all_variants_included": True,
+        "variants": [{"variant_id": "base", "annualized_sharpe": 0.7}],
+    }), encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match"):
+        load_complete_trial_history(ledger, 1, archive)
