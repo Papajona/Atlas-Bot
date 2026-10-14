@@ -41,7 +41,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          digest="$(sed -nE '1s#^FROM python:3\.13-slim@(sha256:[0-9a-f]{64})$\1#p' Dockerfile)"
+          digest="$(sed -nE '1s#^FROM python:3\.13-slim@(sha256:[0-9a-f]{64})$#\1#p' Dockerfile)"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
             echo "Dockerfile Python base image is not pinned to a SHA-256 digest" >&2
             exit 1
