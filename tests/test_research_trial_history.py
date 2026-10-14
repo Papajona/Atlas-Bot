@@ -129,3 +129,20 @@ def test_oos_gate_adapter_fails_closed_when_cost_stress_is_missing():
     from scripts.evaluate_original_oanda_oos import promotion_gate_metrics
 
     assert promotion_gate_metrics({"fold_metrics": []})["cost_stress_ok"] is False
+
+
+def test_oos_gate_adapter_preserves_actual_walk_forward_backtest_fold_key():
+    from scripts.evaluate_original_oanda_oos import promotion_gate_metrics
+
+    emitted_folds = [
+        {"total_return": 0.01},
+        {"total_return": 0.02},
+        {"total_return": 0.03},
+    ]
+    backtest_metrics = {
+        "folds": emitted_folds,
+        "cost_analysis": {"stress_ok": True},
+    }
+    normalized = promotion_gate_metrics(backtest_metrics)
+    assert normalized["folds"] == emitted_folds
+    assert normalized["cost_stress_ok"] is True
