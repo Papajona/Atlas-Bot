@@ -120,20 +120,34 @@ def compute_run_drift(previous: dict[str, Any] | None, current: dict[str, Any], 
 
 
 async def _prior_trial_labels(symbol: str, days: int = 365) -> set[str]:
-    """Return prior trial labels; database errors propagate so research cannot silently lose leakage controls."""
+    """Load prior labels; malformed history fails closed rather than undercounting trials."""
     from datetime import timedelta
     from sqlalchemy import select
     from .db import SessionLocal, ResearchRun
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     async with SessionLocal() as db:
-        rows = (await db.execute(select(ResearchRun.research_json).where(ResearchRun.symbol == symbol, ResearchRun.created_at >= cutoff))).scalars().all()
+        rows = (await db.execute(select(ResearchRun.research_json).where(
+            ResearchRun.symbol == symbol,
+            ResearchRun.created_at >= cutoff,
+        ))).scalars().all()
     labels: set[str] = set()
     for raw in rows:
         try:
             payload = json.loads(raw or "{}")
-            labels.update(str(x) for x in (payload.get("trial_labels") or []))
-        except (TypeError, ValueError, AttributeError):
-            continue
+            if not isinstance(payload, dict):
+                raise ValueError("persisted research run must be a JSON object")
+            raw_labels = payload.get("trial_labels")
+            if raw_labels is not None and not isinstance(raw_labels, list):
+                raise ValueError("persisted trial_labels must be a JSON array")
+            labels.update(str(x) for x in (raw_labels or []))
+        except (TypeError, ValueError, AttributeError) as exc:
+            logging.getLogger(__name__).error(
+                "research_trial_registry_corrupt symbol=%s error_type=%s",
+                symbol, type(exc).__name__,
+            )
+            raise RuntimeError(
+                "Persisted research trial history is malformed; refusing promotion-grade research."
+            ) from exc
     return labels
 
 
