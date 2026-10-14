@@ -1,0 +1,50 @@
+name: Resolve Python hash locks (review artifact)
+
+on:
+  pull_request:
+    paths:
+      - "requirements.txt"
+      - "requirements-dev.txt"
+      - ".github/workflows/dependency-lock-resolution.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-hash-locks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install pinned pip-tools resolver
+        run: python -m pip install "pip-tools==7.5.2"
+      - name: Resolve runtime lock with hashes
+        run: |
+          set -euo pipefail
+          pip-compile --resolver=backtracking --generate-hashes --allow-unsafe \
+            --output-file "$RUNNER_TEMP/requirements.lock" requirements.txt
+      - name: Resolve full test/development lock with hashes
+        run: |
+          set -euo pipefail
+          pip-compile --resolver=backtracking --generate-hashes --allow-unsafe \
+            --output-file "$RUNNER_TEMP/requirements-dev.lock" requirements-dev.txt
+      - name: Verify hash-enforced installation from the generated lock files
+        run: |
+          set -euo pipefail
+          python -m pip install --require-hashes -r "$RUNNER_TEMP/requirements.lock"
+          python -m pip install --require-hashes -r "$RUNNER_TEMP/requirements-dev.lock"
+          python -m pip check
+      - name: Publish reviewed lockfile candidate (not automatically committed)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: atlas-python-hash-lock-candidates
+          path: |
+            ${{ runner.temp }}/requirements.lock
+            ${{ runner.temp }}/requirements-dev.lock
+          if-no-files-found: error
+          retention-days: 7
