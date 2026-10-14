@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: staging
     steps:
-      - name: Assert this is the protected main branch
+      - name: Require exact main ref (branch protection is a separate repository setting)
         shell: bash
         run: |
           set -euo pipefail
@@ -184,6 +184,11 @@ jobs:
                  COALESCE((SELECT rolcreatedb FROM pg_roles WHERE rolname=current_user), false),
                  COALESCE((SELECT rolreplication FROM pg_roles WHERE rolname=current_user), false),
                  COALESCE((SELECT rolbypassrls FROM pg_roles WHERE rolname=current_user), false),
+                 COALESCE((SELECT rolcanlogin FROM pg_roles WHERE rolname=current_user), false),
+                 COALESCE((SELECT rolinherit FROM pg_roles WHERE rolname=current_user), true),
+                 has_schema_privilege(current_user, 'public', 'USAGE'),
+                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT has_table_privilege(current_user,c.oid,'SELECT')),
                  (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
                    WHERE n.nspname='public' AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner)=current_user),
                  (SELECT count(*) FROM pg_auth_members membership
@@ -197,35 +202,47 @@ jobs:
               print("BLOCKED: read-only database identity query failed; database output withheld")
               sys.exit(1)
           fields = p.stdout.strip().split("|")
-          if len(fields) != 13:
+          if len(fields) != 16:
               raise SystemExit("BLOCKED: unexpected identity query output")
           (db, role, login_role, revision, table_count, unprotected_count, is_superuser,
-           can_create_roles, can_create_databases, can_replicate, bypass_rls, owned_count,
+           can_create_roles, can_create_databases, can_replicate, bypass_rls, can_login,
+           can_inherit, public_schema_usage, tables_missing_select, owned_count,
            role_membership_count) = fields
-          print(f"Observed database={db}, current_role={role}, login_role={login_role}, revision={revision or 'missing'}, public_tables={table_count}, tables_without_rls={unprotected_count}, superuser={is_superuser}, create_role={can_create_roles}, create_database={can_create_databases}, replication={can_replicate}, bypass_rls={bypass_rls}, owned_public_tables={owned_count}, role_memberships={role_membership_count}")
+          def is_true(value):
+              # psql's default unaligned boolean representation is "t"/"f", not "true"/"false".
+              return str(value).strip().lower() in {"t", "true", "1", "yes"}
+          print(f"Observed database={db}, current_role={role}, login_role={login_role}, revision={revision or 'missing'}, public_tables={table_count}, tables_without_rls={unprotected_count}, superuser={is_superuser}, create_role={can_create_roles}, create_database={can_create_databases}, replication={can_replicate}, bypass_rls={bypass_rls}, can_login={can_login}, inherit={can_inherit}, public_schema_usage={public_schema_usage}, tables_missing_select={tables_missing_select}, owned_public_tables={owned_count}, role_memberships={role_membership_count}")
           if db != "postgres":
               raise SystemExit("BLOCKED: unexpected staging database name")
           if login_role != role:
               raise SystemExit("BLOCKED: PostgreSQL session_user differs from current_user; SET ROLE or privileged login indirection is not permitted")
           if role != expected_role:
               raise SystemExit("BLOCKED: connected database role does not match configured staging runtime role")
-          if role in {"postgres", "supabase_admin", "supabase_auth_admin", "authenticator"}:
-              raise SystemExit("BLOCKED: privileged or gateway database role is not approved for Cloud Run runtime")
-          if is_superuser.lower() == "true" or can_create_roles.lower() == "true" or can_create_databases.lower() == "true" or can_replicate.lower() == "true":
+          if role in {"postgres", "service_role", "supabase_admin", "supabase_auth_admin", "authenticator", "anon", "authenticated"}:
+              raise SystemExit("BLOCKED: privileged, gateway, or public API role is not approved for Cloud Run runtime")
+          if any(is_true(value) for value in (is_superuser, can_create_roles, can_create_databases, can_replicate)):
               raise SystemExit("BLOCKED: runtime database role has administrative privileges")
+          if not is_true(can_login):
+              raise SystemExit("BLOCKED: runtime database role is not a LOGIN role")
+          if is_true(can_inherit):
+              raise SystemExit("BLOCKED: runtime database role must be NOINHERIT; permissions must be directly granted")
+          if not is_true(public_schema_usage):
+              raise SystemExit("BLOCKED: runtime database role lacks USAGE on public schema")
           if not revision:
               raise SystemExit("BLOCKED: Alembic revision is missing or ambiguous")
           if int(table_count) == 0:
               raise SystemExit("BLOCKED: public schema table inventory is empty")
           if int(unprotected_count) > 0:
               raise SystemExit("BLOCKED: public tables without RLS remain; do not deploy until isolated staging migration tests pass")
-          if bypass_rls.lower() != "true":
+          if not is_true(bypass_rls):
               raise SystemExit("BLOCKED: no table-specific RLS policies are installed; a reviewed trusted runtime role with BYPASSRLS is required for this backend-only access model")
+          if int(tables_missing_select) > 0:
+              raise SystemExit("BLOCKED: runtime role lacks direct SELECT privileges on one or more application tables")
           if int(owned_count) > 0:
               raise SystemExit("BLOCKED: runtime DB role owns public tables; use a non-owner runtime role with explicit grants")
           if int(role_membership_count) > 0:
               raise SystemExit("BLOCKED: runtime DB role inherits other PostgreSQL roles; grant only explicit privileges directly")
-          print("IDENTITY PASS: runtime role is non-owner/non-admin, public RLS is enabled on all inventoried tables, and access was checked on the isolated staging database.")
+          print("IDENTITY PASS: direct non-owner/non-admin login with NOINHERIT, explicit public-schema/table-read access, BYPASSRLS, and RLS enabled on all inventoried tables.")
           print("PASS: read-only target identity and current migration revision were verified; no migration or write was executed")
           PY
           rm -f "$RUNNER_TEMP/atlas-staging-db-url"
