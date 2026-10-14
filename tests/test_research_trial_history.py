@@ -274,3 +274,17 @@ def test_trial_ledger_rejects_variants_missing_from_archive_manifest(tmp_path):
     }), encoding="utf-8")
     with pytest.raises(ValueError, match="do not exactly match"):
         load_complete_trial_history(ledger, 2, archive, provenance)
+
+
+def test_walk_forward_rejects_fractional_and_coerced_annualization_or_horizon():
+    import pandas as pd
+    import pytest
+
+    from app.trading_core import ai_walk_forward_backtest
+
+    for invalid in (252.5, 252.0, "252", True):
+        with pytest.raises(ValueError, match="Invalid asset or walk-forward evaluation assumptions"):
+            ai_walk_forward_backtest(pd.DataFrame(), bars_per_year=invalid)
+    for invalid in (10.5, 10.0, "10", True):
+        with pytest.raises(ValueError, match="Invalid asset or walk-forward evaluation assumptions"):
+            ai_walk_forward_backtest(pd.DataFrame(), max_hold_bars=invalid)
