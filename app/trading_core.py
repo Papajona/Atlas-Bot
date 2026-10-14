@@ -305,16 +305,47 @@ def _research_trial_dsr_report(
     )
 
 
-def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int = 5,
-                             min_train: int = 800, threshold: float = 0.05,
-                             cost_stress_multiplier: float = 2.0,
-                             research_trial_sharpes: list[float] | None = None) -> dict:
-    if not np.isfinite(float(cost_stress_multiplier)) or float(cost_stress_multiplier) <= 0:
+def ai_walk_forward_backtest(
+    df: pd.DataFrame,
+    asset: str = "crypto",
+    folds: int = 5,
+    min_train: int = 800,
+    threshold: float = 0.05,
+    cost_stress_multiplier: float = 2.0,
+    research_trial_sharpes: list[float] | None = None,
+    bars_per_year: int | None = None,
+    taker_bps: float | None = None,
+    slippage_bps: float | None = None,
+    carry_bps_per_bar: float | None = None,
+    max_hold_bars: int | None = None,
+) -> dict:
+    """Chronological OOS backtest using explicit annualization and execution-cost assumptions."""
+    try:
+        stress_multiplier = float(cost_stress_multiplier)
+        profile = PROFILES[asset]
+        annualization = int(profile.bars_per_year if bars_per_year is None else bars_per_year)
+        taker_cost_bps = float(profile.taker_bps if taker_bps is None else taker_bps)
+        slippage_cost_bps = float(profile.slippage_bps if slippage_bps is None else slippage_bps)
+        carry_cost_bps = float(profile.carry_bps_per_bar if carry_bps_per_bar is None else carry_bps_per_bar)
+        hold_horizon = int(profile.max_hold if max_hold_bars is None else max_hold_bars)
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Invalid asset or walk-forward evaluation assumptions") from exc
+    if not np.isfinite(stress_multiplier) or stress_multiplier <= 0:
         raise ValueError("cost_stress_multiplier must be a finite positive number")
+    if annualization < 1 or hold_horizon < 1:
+        raise ValueError("bars_per_year and max_hold_bars must be positive integers")
+    if (
+        not np.isfinite(taker_cost_bps)
+        or not np.isfinite(slippage_cost_bps)
+        or not np.isfinite(carry_cost_bps)
+        or taker_cost_bps < 0
+        or slippage_cost_bps < 0
+        or carry_cost_bps < 0
+    ):
+        raise ValueError("Execution costs and carry must be finite non-negative bps values")
     X = build_features(df)
     aligned = df.reindex(X.index)
-    profile = PROFILES[asset]
-    y = triple_barrier(aligned.close, X.vol_24, aligned.high, aligned.low, max_hold=profile.max_hold)
+    y = triple_barrier(aligned.close, X.vol_24, aligned.high, aligned.low, max_hold=hold_horizon)
     valid = y.notna()
     X, aligned = X.loc[valid], aligned.loc[valid]
     # Use an explicitly expanding chronological split with a full label-horizon purge
@@ -322,7 +353,7 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
     # folds shorter than min_train, silently skipping them (for example, 1,799 bars
     # with min_train=800 and five splits yields only three usable folds).
     minimum_test_bars = 20
-    gap = int(profile.max_hold)
+    gap = hold_horizon
     required_bars = int(min_train) + int(folds) * minimum_test_bars + (2 * int(folds) - 1) * gap
     if folds < 2 or min_train < 1 or len(X) < required_bars:
         raise RuntimeError("Insufficient data for requested purged AI walk-forward folds")
@@ -374,8 +405,8 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
         if len(fold_turnover):
             fold_turnover[-1] += abs(fold_position[-1])
         fold_gross = fold_position * fold_ret
-        fold_carry = np.abs(fold_position) * (profile.carry_bps_per_bar / 10_000)
-        fold_net = fold_gross - fold_turnover * ((profile.taker_bps + profile.slippage_bps) / 10_000) - fold_carry
+        fold_carry = np.abs(fold_position) * (carry_cost_bps / 10_000)
+        fold_net = fold_gross - fold_turnover * ((taker_cost_bps + slippage_cost_bps) / 10_000) - fold_carry
         oos_net_blocks.append(np.asarray(fold_net, dtype=float))
         oos_gross_blocks.append(np.asarray(fold_gross, dtype=float))
         oos_turnover_blocks.append(np.asarray(fold_turnover, dtype=float))
@@ -384,7 +415,7 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
         fold_equity = np.cumprod(1.0 + fold_net) if len(fold_net) else np.array([1.0])
         fold_peak = np.maximum.accumulate(fold_equity)
         fold_dd = fold_equity / fold_peak - 1.0
-        fold_sharpe = float(fold_net.mean() / fold_net.std() * np.sqrt(profile.bars_per_year)) if float(fold_net.std()) > 0 else 0.0
+        fold_sharpe = float(fold_net.mean() / fold_net.std() * np.sqrt(annualization)) if float(fold_net.std()) > 0 else 0.0
         fold_metrics.append({"train_bars":int(len(tr)),"test_bars":int(len(te)),"total_return":float(fold_equity[-1]-1.0),"max_drawdown":float(fold_dd.min()),"trades":int(np.count_nonzero(fold_turnover)),"sharpe":fold_sharpe})
     if not fold_metrics or not oos_net_blocks:
         raise RuntimeError("No valid chronological out-of-sample folds could be evaluated")
@@ -406,9 +437,9 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
     cost_report = cost_breakeven_report(
         gross_returns,
         turnover.to_numpy(),
-        taker_bps=profile.taker_bps,
-        slippage_bps=profile.slippage_bps,
-        bars_per_year=profile.bars_per_year,
+        taker_bps=taker_cost_bps,
+        slippage_bps=slippage_cost_bps,
+        bars_per_year=annualization,
         stress_multiplier=cost_stress_multiplier,
         fixed_cost_drag=carry,
     )
@@ -418,7 +449,7 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
         profile.bars_per_year,
     )
     vol = float(net.std())
-    annual = profile.bars_per_year
+    annual = annualization
     downside = net[net < 0].std()
     sortino = float(net.mean() / downside * np.sqrt(annual)) if downside and np.isfinite(downside) and downside > 0 else 0.0
     max_dd = float(dd.min())
@@ -441,7 +472,15 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
         "prediction_gap_policy": "NO_FORWARD_FILL_ACROSS_NON_TEST_WINDOWS",
         "folds": fold_metrics,
         "cost_stress_ok": bool(cost_report.get("stress_ok")) if cost_report.get("status") == "OK" else False,
-        "cost_stress_multiplier": float(cost_stress_multiplier),
+        "cost_stress_multiplier": float(stress_multiplier),
+        "research_assumptions": {
+            "asset_profile": asset,
+            "bars_per_year": annualization,
+            "taker_bps": taker_cost_bps,
+            "slippage_bps": slippage_cost_bps,
+            "carry_bps_per_bar": carry_cost_bps,
+            "max_hold_bars": hold_horizon,
+        },
         "cost_analysis": cost_report,
         "research_trial_count": len(research_trial_sharpes) if research_trial_sharpes else 0,
         "research_trial_history_status": dsr_report.get("status"),
