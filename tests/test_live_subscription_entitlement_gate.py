@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.config import Settings
 from app.live_execution import LiveExecutionBlocked, require_live_subscription_entitlement
 
 
@@ -69,3 +70,9 @@ def test_naive_database_timestamps_are_treated_as_utc():
         subscription(current_period_end=(NOW + timedelta(days=1)).replace(tzinfo=None)),
         now=NOW,
     )
+
+
+def test_binance_customer_subaccount_provisioning_defaults_off():
+    settings = Settings(environment="test")
+    assert settings.binance_customer_subaccounts_enabled is False
+    assert settings.customer_live_trading_enabled is False
