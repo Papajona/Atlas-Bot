@@ -37,12 +37,13 @@ gcloud monitoring metrics-descriptors describe run.googleapis.com/request_count 
 gcloud monitoring metrics-descriptors describe run.googleapis.com/request_latencies --project="$GCP_PROJECT_ID" --format=json > "$WORK/atlas-request-latencies-descriptor.json"
 python - <<'PY'
 import json
+import os
 from pathlib import Path
-request = json.loads(Path(os.environ["WORK"]) / "atlas-request-count-descriptor.json".read_text(encoding="utf-8"))
+request = json.loads((Path(os.environ["WORK"]) / "atlas-request-count-descriptor.json").read_text(encoding="utf-8"))
 labels = {str(item.get("key", "")) for item in request.get("labels", [])}
 if "response_code_class" not in labels:
     raise SystemExit("ERROR: request_count metric has no response_code_class label; revise the alert filter for this project's metric schema")
-latency = json.loads(Path(os.environ["WORK"]) / "atlas-request-latencies-descriptor.json".read_text(encoding="utf-8"))
+latency = json.loads((Path(os.environ["WORK"]) / "atlas-request-latencies-descriptor.json").read_text(encoding="utf-8"))
 unit = str(latency.get("unit", "")).lower()
 if not unit.startswith("ms"):
     raise SystemExit(f"ERROR: request latency unit is not milliseconds (observed unit={unit!r}); do not apply the 2000 ms threshold")
