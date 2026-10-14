@@ -13,7 +13,7 @@ numpy==2.3.5
 scikit-learn==1.6.1
 lightgbm==4.6.0
 joblib==1.5.1
-ccxt==4.5.85
+ccxt==4.5.88
 yfinance==0.2.55
 pyarrow==23.0.1
 httpx==0.28.1
