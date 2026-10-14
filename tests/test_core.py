@@ -83,6 +83,16 @@ def test_triple_barrier_labels_timeouts_by_terminal_return_with_dead_zone():
     assert y.iloc[-2:].isna().all()
 
 
+def test_triple_barrier_timeout_dead_zone_neutralizes_sub_half_sigma_return():
+    idx = pd.date_range("2025-02-01", periods=6, freq="h", tz="UTC")
+    close = pd.Series([100.0, 100.0, 100.2, 100.4, 100.4, 100.4], index=idx)
+    vol = pd.Series(0.01, index=idx)
+    y = triple_barrier(close, vol, close, close, pt=2.0, sl=2.0, max_hold=2)
+    # At t=1, timeout return is +0.4%; half-sigma is +0.5%, so it must be flat.
+    # This assertion fails with the previous 0.25*sigma threshold.
+    assert y.iloc[1] == 0.0
+
+
 def test_aligned_log_loss_handles_classes_absent_from_training_fold():
     y_true = np.array([0, 1, 2], dtype=int)
     # The fold trained only on labels 0 and 2, so class 1 has no probability column.
