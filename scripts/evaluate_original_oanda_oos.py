@@ -46,6 +46,36 @@ IDENTITY_FIELDS = (
     "normalized_csv_sha256",
 )
 
+def granularity_bars_per_year(granularity: str) -> int:
+    """Use the verified OANDA candle granularity, not an asset-wide hourly default."""
+    known = {
+        "S5": 4_354_560,
+        "S10": 2_177_280,
+        "S15": 1_451_520,
+        "S30": 725_760,
+        "M1": 362_880,
+        "M2": 181_440,
+        "M4": 90_720,
+        "M5": 72_576,
+        "M10": 36_288,
+        "M15": 24_192,
+        "M30": 12_096,
+        "H1": 6_048,
+        "H2": 3_024,
+        "H3": 2_016,
+        "H4": 1_512,
+        "H6": 1_008,
+        "H8": 756,
+        "H12": 504,
+        "D": 252,
+        "W": 52,
+        "M": 12,
+    }
+    value = str(granularity or "").strip().upper()
+    if value not in known:
+        raise ValueError(f"Unsupported OANDA granularity for annualization: {value!r}")
+    return known[value]
+
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -109,6 +139,7 @@ def verify_reference_identity(dataset_dir: Path, reference_path: Path, expected_
         "normalized_csv_sha256": actual["normalized_csv_sha256"],
         "instrument": actual["instrument"],
         "granularity": actual["granularity"],
+        "bars_per_year": granularity_bars_per_year(actual["granularity"]),
         "requested_from": request.get("from"),
         "requested_to": request.get("to"),
         "rows": int(actual["completed_row_count"]),
@@ -152,6 +183,7 @@ def verify_experiment_archive_manifest(
         "instrument": provenance["instrument"],
         "granularity": provenance["granularity"],
         "request_parameters": provenance["request_parameters"],
+        "evaluation_assumptions": provenance["evaluation_assumptions"],
     }
     for key, expected in expected_data.items():
         if manifest.get(key) != expected:
@@ -269,6 +301,21 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     if integrity.get("status") != "verified":
         raise ValueError("Candidate dataset failed its manifest/hash integrity check")
     provenance = verify_reference_identity(dataset_dir, reference_path, args.expected_rows)
+    cost_values = {
+        "taker_bps": args.taker_bps,
+        "slippage_bps": args.slippage_bps,
+        "carry_bps_per_bar": args.carry_bps_per_bar,
+    }
+    if any(not math.isfinite(float(value)) or float(value) < 0 for value in cost_values.values()):
+        raise ValueError("Approved taker/slippage/carry assumptions must be finite and non-negative")
+    if args.max_hold_bars < 1:
+        raise ValueError("max_hold_bars must be a positive integer")
+    evaluation_assumptions = {
+        "bars_per_year": int(provenance["bars_per_year"]),
+        **{key: float(value) for key, value in cost_values.items()},
+        "max_hold_bars": int(args.max_hold_bars),
+    }
+    provenance["evaluation_assumptions"] = evaluation_assumptions
     trial_sharpes, trial_evidence = load_complete_trial_history(
         trial_path, args.folds, Path(args.experiment_archive), provenance
     )
@@ -298,6 +345,11 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         threshold=args.threshold,
         cost_stress_multiplier=args.cost_stress_multiplier,
         research_trial_sharpes=trial_sharpes,
+        bars_per_year=evaluation_assumptions["bars_per_year"],
+        taker_bps=evaluation_assumptions["taker_bps"],
+        slippage_bps=evaluation_assumptions["slippage_bps"],
+        carry_bps_per_bar=evaluation_assumptions["carry_bps_per_bar"],
+        max_hold_bars=evaluation_assumptions["max_hold_bars"],
     )
     # Preserve the backtest's status; never turn an insufficient/failed run into an OK.
     gate = oos_promotion_gate(
@@ -344,6 +396,10 @@ def main() -> int:
     parser.add_argument("--min-train", type=int, default=800)
     parser.add_argument("--threshold", type=float, default=0.05)
     parser.add_argument("--cost-stress-multiplier", type=float, default=2.0)
+    parser.add_argument("--taker-bps", type=float, required=True, help="Approved target-venue taker/commission cost in bps per traded notional")
+    parser.add_argument("--slippage-bps", type=float, required=True, help="Evidence-backed target-venue slippage assumption in bps")
+    parser.add_argument("--carry-bps-per-bar", type=float, required=True, help="Evidence-backed per-bar financing/swap/carry drag in bps; do not assume zero without evidence")
+    parser.add_argument("--max-hold-bars", type=int, required=True, help="Approved triple-barrier holding horizon expressed in this dataset's verified candle bars")
     parser.add_argument("--min-total-return", type=float, default=0.0)
     parser.add_argument("--min-sharpe", type=float, default=0.50)
     parser.add_argument("--max-drawdown", type=float, default=-0.25)
