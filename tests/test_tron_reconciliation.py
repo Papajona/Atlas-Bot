@@ -46,6 +46,7 @@ def test_absent_configured_contract_is_missing_evidence_not_zero():
     [{"balance": "12", "token_info": {"address": CONTRACT, "decimals": 6.9}}],
     [{"balance": "12", "token_info": {"address": CONTRACT, "decimals": "6"}}],
     [{"balance": "12", "token_info": {"address": CONTRACT, "decimals": True}}],
+    [{"balance": "12", "token_info": {"address": f" {CONTRACT}", "decimals": 6}}],
     [{"balance": "NaN", "token_info": {"address": CONTRACT, "decimals": 6}}],
     [{"balance": "Infinity", "token_info": {"address": CONTRACT, "decimals": 6}}],
     [{"balance": "-1", "token_info": {"address": CONTRACT, "decimals": 6}}],
