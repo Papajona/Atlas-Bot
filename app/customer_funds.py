@@ -454,28 +454,37 @@ async def customer_balance(db, customer_id: int, currency: str = USDT, *, lock: 
     }
 
 
-def customer_balance_api(balance: dict) -> dict[str, str | int | float]:
-    """Serialize authoritative customer funds without converting them through binary float."""
+def customer_balance_api(balance: dict) -> dict[str, str | int]:
+    """Serialize customer ledger balances as exact decimal strings and integer micro-USDT.
+
+    In-process risk code uses customer_balance(); this API serializer never emits a
+    binary float for the authoritative ledger buckets. UI clients may parse the decimal
+    strings for display but must use strings/minor units for comparisons and round-trips.
+    """
     available = D(str(balance.get("available_exact", balance["available"])))
     trading_reserved = D(str(balance.get("trading_reserved_exact", balance["trading_reserved"])))
     withdrawal_reserved = D(str(balance.get("withdrawal_reserved_exact", balance["withdrawal_reserved"])))
     total = D(str(balance.get("total_exact", balance["total"])))
     scale = Decimal("1000000")  # ledger Numeric(38, 6) precision
     locked = trading_reserved + withdrawal_reserved
+    available_text = format(available, "f")
+    trading_text = format(trading_reserved, "f")
+    withdrawal_text = format(withdrawal_reserved, "f")
+    total_text = format(total, "f")
+    locked_text = format(locked, "f")
     return {
-        # Original numeric keys remain compatible with the existing Web/Android clients.
-        "available": float(available),
-        "trading_reserved": float(trading_reserved),
-        "withdrawal_reserved": float(withdrawal_reserved),
-        "total": float(total),
-        "locked": float(locked),
-        # These exact decimal strings and integer micro-USDT units are the authoritative
-        # representation for clients doing balances, reconciliation or round-trips.
-        "available_exact": format(available, "f"),
-        "trading_reserved_exact": format(trading_reserved, "f"),
-        "withdrawal_reserved_exact": format(withdrawal_reserved, "f"),
-        "total_exact": format(total, "f"),
-        "locked_exact": format(locked, "f"),
+        # Primary public amount fields are exact decimal strings, not JSON floats.
+        "available": available_text,
+        "trading_reserved": trading_text,
+        "withdrawal_reserved": withdrawal_text,
+        "total": total_text,
+        "locked": locked_text,
+        # Explicitly named aliases remain for client migrations and reconciliation.
+        "available_exact": available_text,
+        "trading_reserved_exact": trading_text,
+        "withdrawal_reserved_exact": withdrawal_text,
+        "total_exact": total_text,
+        "locked_exact": locked_text,
         "available_minor_units": int(available * scale),
         "trading_reserved_minor_units": int(trading_reserved * scale),
         "withdrawal_reserved_minor_units": int(withdrawal_reserved * scale),
@@ -641,9 +650,9 @@ async def ledger_statement(db, customer_id: int, currency: str = USDT, limit: in
     return [{
         "journal_id": j.id, "entry_type": j.entry_type, "reference_type": j.reference_type,
         "reference_id": j.reference_id, "account_code": line.account_code,
-        # Preserve legacy numeric fields while publishing exact forms for reconciliation.
-        "debit": float(line.debit),
-        "credit": float(line.credit),
+        # Ledger statement amounts are serialized as exact decimal strings, never floats.
+        "debit": format(D(str(line.debit)), "f"),
+        "credit": format(D(str(line.credit)), "f"),
         "debit_exact": format(D(str(line.debit)), "f"),
         "credit_exact": format(D(str(line.credit)), "f"),
         "debit_minor_units": int(D(str(line.debit)) * Decimal("1000000")),
