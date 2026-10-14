@@ -242,13 +242,30 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # Persistent trial accounting: count DISTINCT configurations ever evaluated (label = strategy/variant + config fingerprint), not runs.
     # Re-running the same configs on one more day of data is not a new trial; changing any parameter or adding a strategy is.
     import hashlib
-    fp = hashlib.sha1(json.dumps(getattr(cfg, "__dict__", {}), default=str, sort_keys=True).encode(), usedforsecurity=False).hexdigest()[:8]
+    # Use a full SHA-256 fingerprint so config variants cannot silently collide
+    # because a short fingerprint was truncated to only 32 bits.
+    fp = hashlib.sha256(json.dumps(asdict(cfg), default=str, sort_keys=True).encode()).hexdigest()
     this_labels = {f"{r.get('strategy')}@{fp}" for r in results} | {f"variant:{v['multiplier']}@{fp}" for v in variants}
     if include_ai:
         this_labels.add(f"ai@{fp}")
+    trial_registry_complete = prior_trial_labels is not None
     n_trials = len(set(prior_trial_labels or ()) | this_labels)
     trial_sharpes = [r.get("sharpe", 0.0) for r in results] + [v["sharpe"] for v in variants]
-    dsr = deflated_sharpe_report(net_ensemble, trial_sharpes, n_trials, PROFILES.get(asset, PROFILES["crypto"]).bars_per_year)
+    if trial_registry_complete:
+        dsr = deflated_sharpe_report(
+            net_ensemble, trial_sharpes, n_trials,
+            PROFILES.get(asset, PROFILES["crypto"]).bars_per_year,
+        )
+    else:
+        # The local trial count is not the full selection history. Do not present
+        # this as a promotion-grade DSR when no persisted registry was supplied.
+        dsr = {
+            "status": "MISSING_TRIAL_HISTORY",
+            "observations": int(np.isfinite(np.asarray(net_ensemble, dtype=float)).sum()),
+            "trial_count_current_run": n_trials,
+            "note": "Prior trial labels from the persisted research registry are required for promotion-grade DSR.",
+        }
+    oos["trial_registry_complete"] = trial_registry_complete
     if dsr.get("status") == "OK":
         oos["deflated_sharpe"] = dsr["deflated_sharpe_ratio"]
     cost_mult = float(getattr(settings, "research_cost_stress_multiplier", 2.0))
@@ -262,9 +279,17 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         sig = strategy_signals(df, cfg, asset=asset)[component].fillna(0.0)
         component_pos = sig.shift(1).fillna(0.0)
         net_c = (component_pos * (next_open_returns(df) - 1.0) - component_pos.diff().abs().fillna(component_pos.abs()) * ((taker_bps + slippage_bps) / 10000.0)).to_numpy()
-        comp_dsr = deflated_sharpe_report(net_c, trial_sharpes, n_trials, ann_bars)
+        if trial_registry_complete:
+            comp_dsr = deflated_sharpe_report(net_c, trial_sharpes, n_trials, ann_bars)
+        else:
+            comp_dsr = {
+                "status": "MISSING_TRIAL_HISTORY",
+                "observations": int(np.isfinite(net_c).sum()),
+                "trial_count_current_run": n_trials,
+            }
         comp_cost = cost_breakeven_report((component_pos * (next_open_returns(df) - 1.0)).to_numpy(), component_pos.diff().abs().fillna(component_pos.abs()).to_numpy(),
                                           taker_bps=taker_bps, slippage_bps=slippage_bps, bars_per_year=ann_bars, stress_multiplier=cost_mult)
+        per_strategy_oos[component]["trial_registry_complete"] = trial_registry_complete
         per_strategy_oos[component]["cost_stress_ok"] = bool(comp_cost.get("stress_ok"))
         per_strategy_oos[component]["cost_analysis"] = comp_cost
         per_strategy_oos[component]["deflated_sharpe_detail"] = comp_dsr
@@ -287,6 +312,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "multiple_testing_sharpe_proxy": adjusted,
                         "deflated_sharpe": dsr,
                         "trial_labels": sorted(this_labels),
+                        "trial_registry_complete": trial_registry_complete,
+                        "trial_registry_status": "COMPLETE" if trial_registry_complete else "MISSING_PRIOR_TRIAL_LABELS",
                         "cumulative_trials": n_trials,
                         "cost_analysis": ens_cost,
                         "fixed_signal_oos": oos,
