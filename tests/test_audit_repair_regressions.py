@@ -116,3 +116,18 @@ def test_gemini_alternative_discovery_uses_only_listed_stable_flash_models():
     assert _select_gemini_flash_alternatives(models, "gemini-3.6-flash") == [
         "gemini-3.5-flash", "gemini-3.5-flash-lite"
     ]
+
+
+def test_production_gate_has_no_provider_quota_waiver_and_uses_verified_model():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    verify = (root / ".github" / "workflows" / "production-verification.yml").read_text()
+    deploy = (root / ".github" / "workflows" / "production-deploy.yml").read_text()
+    expected = "gemini-3.5-flash-lite"
+    assert "temporarily waived" not in verify
+    assert "GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}" in verify
+    assert "GEMINI_STRATEGY_MODEL: ${{ vars.GEMINI_STRATEGY_MODEL || 'gemini-3.5-flash-lite' }}" in verify
+    assert "GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}" in deploy
+    assert "GEMINI_STRATEGY_MODEL: ${{ vars.GEMINI_STRATEGY_MODEL || 'gemini-3.5-flash-lite' }}" in deploy
+    assert expected not in ""
