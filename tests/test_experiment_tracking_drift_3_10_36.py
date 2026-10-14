@@ -101,7 +101,12 @@ def test_summarize_research_tolerates_empty_and_nan():
     assert summarize_research({})["top_strategy"] == ""
     out = summarize_research({"regime": {"regime": "TREND_UP"}, "research_order": ["trend"],
                               "strategies": [{"strategy": "trend", "sharpe": float("nan"), "max_drawdown": -0.1, "total_return": 0.3}]})
-    assert out["sharpe"] == 0.0 and out["total_return"] == 0.3
+    # Without a valid held-out measurement, this is not a top strategy and in-sample
+    # returns must not be represented as validated headline evidence.
+    assert out["top_strategy"] == ""
+    assert out["top_strategy_basis"] == "OUT_OF_SAMPLE_MEASUREMENT_ONLY"
+    assert out["top_strategy_oos_status"] == "NO_VALID_OOS_MEASUREMENT"
+    assert out["sharpe"] == 0.0 and out["total_return"] == 0.0
 
 
 def test_strategy_builder_is_no_longer_a_dead_end():
