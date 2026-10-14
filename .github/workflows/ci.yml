@@ -37,18 +37,19 @@ jobs:
           pip install -r requirements-dev.txt
       - name: Wait for PostgreSQL
         run: until pg_isready -h 127.0.0.1 -p 5432 -U atlas -d atlas_test; do sleep 1; done
-      - name: Resolve official Python base-image digest
+      - name: Verify pinned Python base-image digest
         shell: bash
         run: |
           set -euo pipefail
-          docker pull docker.io/library/python:3.13-slim
-          repo_digest="$(docker image inspect docker.io/library/python:3.13-slim --format '{{index .RepoDigests 0}}')"
-          digest="${repo_digest##*@}"
+          digest="$(sed -nE '1s#^FROM python:3\\.13-slim@(sha256:[0-9a-f]{64})$#\\1#p' Dockerfile)"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-            echo "Unable to resolve an official Python base-image digest" >&2
+            echo "Dockerfile Python base image is not pinned to a SHA-256 digest" >&2
             exit 1
           }
-          echo "Official python:3.13-slim pulled image digest: $digest"
+          docker pull "docker.io/library/python@${digest}"
+          echo "Verified pinned Python base-image digest: $digest"
+      - name: Build application container image
+        run: docker build --tag atlas-bot-ci:repair .
       - name: Compile source
         run: python -m compileall -q app alembic
       - name: Create Supabase API roles for migration verification
