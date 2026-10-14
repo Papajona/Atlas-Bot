@@ -388,6 +388,10 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
         fold_metrics.append({"train_bars":int(len(tr)),"test_bars":int(len(te)),"total_return":float(fold_equity[-1]-1.0),"max_drawdown":float(fold_dd.min()),"trades":int(np.count_nonzero(fold_turnover)),"sharpe":fold_sharpe})
     if not fold_metrics or not oos_net_blocks:
         raise RuntimeError("No valid chronological out-of-sample folds could be evaluated")
+    if len(fold_metrics) != int(folds):
+        raise RuntimeError(
+            f"Expected {int(folds)} purged OOS folds, but only {len(fold_metrics)} had sufficient training-class diversity"
+        )
     # All aggregate statistics are calculated from held-out test windows only. Do not
     # include training rows or bars in the gaps between test folds, and do not shift a
     # final test signal into the following non-test window.
