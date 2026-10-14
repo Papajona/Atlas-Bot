@@ -110,3 +110,79 @@ def test_custody_worker_uses_the_same_strict_balance_parser(monkeypatch):
     missing = Client({"data": []})
     with pytest.raises(ValueError, match="missing the configured USDT contract"):
         asyncio.run(custody_reconciliation._address_balance(missing, "TTestAddress"))
+
+
+def test_reconcile_reports_error_not_zero_when_provider_has_no_usdt_metadata(monkeypatch):
+    import asyncio
+
+    from app import custody_reconciliation
+    from app.config import settings
+    from app.db import CustomerLedgerAccount, Incident, Wallet
+
+    class FakeResult:
+        def __init__(self, rows=()):
+            self.rows = list(rows)
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+        def scalar_one_or_none(self):
+            return self.rows[0] if self.rows else None
+
+    class FakeDB:
+        def __init__(self):
+            self.added = []
+
+        async def execute(self, statement):
+            entity = statement.column_descriptions[0]["entity"]
+            if entity in (CustomerLedgerAccount, Wallet, Incident):
+                return FakeResult()
+            raise AssertionError(f"Unexpected database entity in custody test: {entity!r}")
+
+        def add(self, row):
+            self.added.append(row)
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": []}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(settings, "usdt_trongrid_base_url", "https://provider.example")
+    monkeypatch.setattr(settings, "usdt_tron_usdt_contract", CONTRACT)
+    monkeypatch.setattr(settings, "usdt_trongrid_api_key", "unit-test-not-a-real-key")
+    monkeypatch.setattr(settings, "usdt_tron_treasury_address", "TTestTreasuryAddress")
+    monkeypatch.setattr(settings, "binance_custody_reconciliation_enabled", False)
+    monkeypatch.setattr(custody_reconciliation.httpx, "AsyncClient", FakeClient)
+
+    db = FakeDB()
+    report = asyncio.run(custody_reconciliation.reconcile_usdt_custody(db))
+
+    assert report["status"] == "ERROR"
+    assert report["custody_onchain_balance"] is None
+    assert report["coverage_gap"] is None
+    assert report["solvency_ratio"] is None
+    assert "missing the configured USDT contract" in report["error"]
+    assert any(
+        isinstance(row, Incident)
+        and row.category == "CUSTODY_RECONCILIATION"
+        and row.severity == "HIGH"
+        for row in db.added
+    )
