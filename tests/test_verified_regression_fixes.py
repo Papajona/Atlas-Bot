@@ -113,6 +113,6 @@ def test_worker_supervisor_restarts_failed_loop(monkeypatch):
 
 def test_trade_learning_replay_is_started_only_when_enabled():
     source = _source("app/main.py")
-    startup = source[source.index('@app.on_event("startup")'):source.index('@app.on_event("shutdown")')]
+    startup = source[source.index("async def startup()"):source.index("async def shutdown()")]
     assert "if settings.trade_learning_enabled:" in startup
     assert "_trade_learning_replay_loop" in startup
