@@ -368,6 +368,9 @@ def policy_walk_forward_backtest(
         current_strategy = None
         last_switch_bar = -10**9
         observed = []
+        # A result ending at open[t] is not available to decisions made at earlier
+        # closes. Queue feedback until its endpoint bar has completed.
+        pending_feedback = []
         prev_pos = 0.0
         net_rows = []
         test_start, test_end = fold.test_start, fold.test_end
@@ -380,6 +383,13 @@ def policy_walk_forward_backtest(
         decision_points = list(range(test_start, max(test_start + 1, test_end - 2), stride))
         net_index = []
         for i in decision_points:
+            still_pending = []
+            for available_at, feedback in pending_feedback:
+                if available_at <= i:
+                    observed.append(feedback)
+                else:
+                    still_pending.append((available_at, feedback))
+            pending_feedback = still_pending
             history = df.iloc[: i + 1]
             current_regime = str(regimes.iloc[i])
             cooldown_active = (i - last_switch_bar) < int(max(0, cooldown_bars))
@@ -426,13 +436,13 @@ def policy_walk_forward_backtest(
             net_index.append(df.index[exit_i])
             if target_pos != 0.0:
                 reward_bps = float(np.sign(target_pos) * next_ret * 10000.0 - float(costs_bps) * (1.0 if prev_pos == 0.0 else 0.5))
-                observed.append({
+                pending_feedback.append((exit_i, {
                     "strategy": str(current_strategy or decision.get("strategy") or "ensemble"),
                     "regime": current_regime,
                     "net_return_bps": reward_bps,
-                    # Feedback is not available until the scored open-to-open period ends.
+                    # Feedback is queued until the endpoint bar has completed.
                     "created_at": df.index[exit_i].to_pydatetime(),
-                })
+                }))
             prev_pos = target_pos
 
         fold_net = pd.Series(net_rows, index=net_index)
