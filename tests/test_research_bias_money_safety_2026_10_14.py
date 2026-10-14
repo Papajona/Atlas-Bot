@@ -17,7 +17,7 @@ def test_backtest_halt_uses_one_net_equity_curve_and_does_not_count_hypothetical
     # The raw strategy remains invested, but its signal losses after the first two
     # events occur while the protection system is halted; those are not executed trades.
     position = pd.Series(1.0, index=index)
-    returns = pd.Series([0.0, -0.02, -0.02] + [-0.02] * 13, index=index)
+    returns = pd.Series([0.0, -0.02, -0.02, -0.02, -0.02] + [0.0] * 11, index=index)
     protected, net, diagnostic = _apply_protective_halts(
         position,
         returns,
