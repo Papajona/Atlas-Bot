@@ -113,6 +113,17 @@ def test_missing_provider_id_for_unknown_withdrawal_is_a_blocker():
     assert any("no provider_id" in f for f in failures)
 
 
+def test_completed_withdrawal_without_provider_id_is_still_a_blocker():
+    matched, unresolved, failures = reconcile_rows(
+        [provider_row()],
+        [db_row(provider_id="", status="RELEASED")],
+        "sandbox-payout",
+    )
+    assert matched == 0
+    assert unresolved == 0
+    assert any("cannot be reconciled" in item for item in failures)
+
+
 def test_unmatched_statement_and_database_transactions_fail_closed():
     matched, _, failures = reconcile_rows(
         [provider_row(provider_id="external-only")],
