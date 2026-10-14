@@ -15,7 +15,9 @@ class AIProviderError(RuntimeError):
 
 
 def _extract_json(text: str) -> dict[str, Any]:
-    raw = (text or "").strip()
+    if not isinstance(text, str) or not text.strip():
+        raise AIProviderError("AI provider returned empty or non-text output")
+    raw = text.strip()
     if raw.startswith("```"):
         raw = raw.strip("`")
         if raw.startswith("json"):
