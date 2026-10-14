@@ -81,6 +81,8 @@ Run this only against a separately isolated staging target. Restore into a *new 
 5. Reconcile against the provider's sandbox/practice or read-only transaction export. Every provider operation must map to exactly one intended ledger transition. Do not issue a real transfer or retry a payout as part of verification.
 6. Record discrepancies, fixes, rerun results, restore RTO, data-loss/RPO observations, and reviewer sign-off. A test suite running on a temporary database is supporting evidence only; it is not a backup restoration or external-provider reconciliation.
 
+For the read-only database checks, first perform the provider's real restore into a dedicated staging project and retain its operation record. Then run `Audit restored staging database` manually from `main` with the provider operation ID, immutable backup reference, and operation-record URL/URI. The workflow checks that the target host maps to the explicit staging project (distinct from production), that the database revision is 0049, and that public-table RLS, role permissions, journal balance/idempotency, and non-negative customer ledger buckets pass. Its supplied operation ID/URI is operator-provided evidence metadata; a reviewer must corroborate it against the backup provider's own record. The workflow is read-only and does not perform the restore or modify/migrate the database.
+
 If no isolated target or read-only provider proof is available, mark both drills BLOCKED and keep the pilot closed.
 
 ## Alerting
