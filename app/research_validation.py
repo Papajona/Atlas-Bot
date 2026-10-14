@@ -150,39 +150,85 @@ def ohlc_trade_ambiguity(df: pd.DataFrame, stop: pd.Series, target: pd.Series,
             "policy": "WORST_CASE" if ambiguous else "NONE"}
 
 
-def fixed_signal_walk_forward_oos(df: pd.DataFrame, signal: pd.Series, costs_bps: float = 7.5,
-                                 folds: int = 5, min_train: int = 800) -> dict:
+def fixed_signal_walk_forward_oos(
+    df: pd.DataFrame,
+    signal: pd.Series,
+    costs_bps: float = 7.5,
+    folds: int = 5,
+    min_train: int = 800,
+    annualization_factor: float = 252.0,
+) -> dict:
     """Evaluate a fixed signal only on forward test windows.
 
-    No parameter fitting occurs here; the split is used to make the evaluation
-    boundary explicit and prevent accidentally reporting in-sample performance
-    as out-of-sample evidence.
+    Aggregate metrics are computed from held-out returns only. The annualization
+    factor is explicit because a Sharpe computed with the wrong bar frequency can
+    invert a promotion decision. No training-period return is included.
     """
     splits = purged_walk_forward_splits(len(df), folds=folds, min_train=min_train, purge=1, embargo=1)
     if not splits:
         return {"status": "INSUFFICIENT_DATA", "folds": []}
-    s = pd.Series(signal, index=df.index).astype(float).fillna(0.0)
+    try:
+        annualization = float(annualization_factor)
+    except (TypeError, ValueError):
+        return {"status": "INVALID_CONFIG", "reason": "invalid_annualization_factor", "folds": []}
+    if not math.isfinite(annualization) or annualization <= 0:
+        return {"status": "INVALID_CONFIG", "reason": "invalid_annualization_factor", "folds": []}
+
+    s = pd.Series(signal, index=df.index).astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
     position = s.shift(1).fillna(0.0)
-    ret = next_open_returns(df) - 1.0
+    # next_open_returns returns a gross price ratio (neutral = 1.0); subtract 1
+    # exactly once to derive the per-bar return used for P&L.
+    ret = (next_open_returns(df) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
     turnover = position.diff().abs().fillna(position.abs())
-    net = position * ret - turnover * float(costs_bps) / 10000.0
+    net = (position * ret - turnover * float(costs_bps) / 10000.0).replace(
+        [np.inf, -np.inf], np.nan
+    ).fillna(0.0)
+
     fold_rows = []
-    oos = []
+    oos_returns = []
+    trades = 0
     for fold in splits:
-        x = net.iloc[fold.test_start:fold.test_end]
-        oos.append(x)
+        start, end = fold.test_start, fold.test_end
+        x = net.iloc[start:end]
+        p = position.iloc[start:end]
+        oos_returns.append(x)
+        prior_p = p.shift(1).fillna(0.0)
+        trade_starts = (p != 0.0) & ((prior_p == 0.0) | (np.sign(p) != np.sign(prior_p)))
+        trades += int(trade_starts.sum())
+        x_values = x.to_numpy(dtype=float)
         fold_rows.append({
-            "test_start": df.index[fold.test_start].isoformat(),
-            "test_end": df.index[fold.test_end - 1].isoformat(),
+            "test_start": df.index[start].isoformat(),
+            "test_end": df.index[end - 1].isoformat(),
             "bars": int(len(x)),
-            "total_return": float(np.prod(1 + x.to_numpy()) - 1) if len(x) else 0.0,
-            "mean_return": float(x.mean()) if len(x) else 0.0,
+            "total_return": float(np.prod(1.0 + x_values) - 1.0) if len(x_values) else 0.0,
+            "mean_return": float(np.mean(x_values)) if len(x_values) else 0.0,
         })
-    all_oos = pd.concat(oos) if oos else pd.Series(dtype=float)
+
+    all_oos = pd.concat(oos_returns) if oos_returns else pd.Series(dtype=float)
+    values = all_oos.to_numpy(dtype=float)
+    if len(values) == 0:
+        return {"status": "INSUFFICIENT_DATA", "folds": fold_rows, "oos_bars": 0}
+    mean_return = float(np.mean(values))
+    std_return = float(np.std(values, ddof=1)) if len(values) > 1 else 0.0
+    sharpe = (
+        float(mean_return / std_return * math.sqrt(annualization))
+        if std_return > 0 and math.isfinite(std_return)
+        else None
+    )
+    equity = np.cumprod(1.0 + values)
+    peak = np.maximum.accumulate(np.maximum(equity, 1.0))
+    max_drawdown = float(np.min(equity / peak - 1.0)) if len(equity) else None
+
     return {
-        "status": "OK", "folds": fold_rows, "oos_bars": int(len(all_oos)),
-        "oos_total_return": float(np.prod(1 + all_oos.to_numpy()) - 1) if len(all_oos) else 0.0,
-        "oos_mean_return": float(all_oos.mean()) if len(all_oos) else 0.0,
+        "status": "OK",
+        "folds": fold_rows,
+        "oos_bars": int(len(values)),
+        "oos_total_return": float(np.prod(1.0 + values) - 1.0),
+        "oos_mean_return": mean_return,
+        "sharpe": sharpe,
+        "max_drawdown": max_drawdown,
+        "trades": trades,
+        "annualization_factor": annualization,
         "costs_bps": float(costs_bps),
     }
 
@@ -206,33 +252,140 @@ def regime_conditioned_performance(df: pd.DataFrame, returns: pd.Series, asset: 
     return out
 
 
-def oos_promotion_gate(oos: dict, *, min_dsr: float | None = 0.95, require_cost_stress: bool = True, min_folds: int = 5, min_total_return: float = 0.0, min_positive_fold_ratio: float = 0.5, max_negative_fold_return: float = -0.20, require_last_fold_positive: bool = True, min_sharpe: float | None = 0.5, max_drawdown: float | None = -0.20, min_trades: int | None = 100) -> dict:
-    folds = list(oos.get("folds") or [])
-    returns = [float(f.get("total_return", 0.0)) for f in folds]
-    positive_ratio = (sum(r > 0 for r in returns) / len(returns)) if returns else 0.0
+def oos_promotion_gate(
+    oos: dict,
+    *,
+    min_dsr: float | None = 0.95,
+    require_cost_stress: bool = True,
+    min_folds: int = 5,
+    min_total_return: float = 0.0,
+    min_positive_fold_ratio: float = 0.5,
+    max_negative_fold_return: float = -0.20,
+    require_last_fold_positive: bool = True,
+    min_sharpe: float | None = 0.5,
+    max_drawdown: float | None = -0.20,
+    min_trades: int | None = 100,
+) -> dict:
+    """Fail-closed OOS promotion gate with explicit rejection reasons."""
+    def finite_number(value):
+        if value is None or isinstance(value, (bool, np.bool_)):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    raw_folds = oos.get("folds")
+    fold_list_valid = isinstance(raw_folds, (list, tuple))
+    folds = list(raw_folds) if fold_list_valid else []
+    returns = []
+    for fold in folds:
+        if not isinstance(fold, dict):
+            fold_list_valid = False
+            continue
+        value = finite_number(fold.get("total_return"))
+        if value is None:
+            fold_list_valid = False
+            continue
+        returns.append(value)
+    fold_metrics_complete = fold_list_valid and len(returns) == len(folds)
+    positive_ratio = (sum(value > 0 for value in returns) / len(returns)) if returns else 0.0
     worst = min(returns) if returns else -1.0
     last_positive = bool(returns and returns[-1] > 0)
-    sharpe = float(oos.get("sharpe", 0.0)) if "sharpe" in oos else None
-    max_dd = float(oos.get("max_drawdown", -1.0)) if "max_drawdown" in oos else None
-    trades = int(oos.get("trades", 0)) if "trades" in oos else None
+
+    raw_oos_return = oos.get("oos_total_return") if "oos_total_return" in oos else oos.get("total_return")
+    oos_total_return = finite_number(raw_oos_return)
+    sharpe = finite_number(oos.get("sharpe"))
+    max_dd = finite_number(oos.get("max_drawdown"))
+    raw_trades = finite_number(oos.get("trades"))
+    trades = (
+        int(raw_trades)
+        if raw_trades is not None and raw_trades >= 0 and raw_trades.is_integer()
+        else None
+    )
+
     sharpe_ok = True if min_sharpe is None else (sharpe is not None and sharpe >= float(min_sharpe))
     dd_ok = True if max_drawdown is None else (max_dd is not None and max_dd >= float(max_drawdown))
     trades_ok = True if min_trades is None else (trades is not None and trades >= int(min_trades))
-    dsr_value = oos.get("deflated_sharpe")
-    # Fail closed: when a DSR floor is configured, a missing/insufficient DSR is NOT a pass.
-    dsr_ok = True if min_dsr is None else (dsr_value is not None and float(dsr_value) >= float(min_dsr))
+    dsr_value = finite_number(oos.get("deflated_sharpe"))
+    # Missing DSR cannot meet a configured floor; no synthetic value is substituted.
+    dsr_ok = True if min_dsr is None else (dsr_value is not None and dsr_value >= float(min_dsr))
     stress_value = oos.get("cost_stress_ok")
-    # Cost stress and a persisted prior-trial registry are mandatory by default.
-    stress_ok = True if not require_cost_stress else bool(stress_value is True)
+    stress_ok = True if not require_cost_stress else stress_value is True
     trial_registry_complete = oos.get("trial_registry_complete") is True
-    passed = bool(
-        str(oos.get("status", "OK")) == "OK" and trial_registry_complete and len(returns) >= int(min_folds) and
-        ("oos_total_return" in oos or "total_return" in oos) and
-        float(oos.get("oos_total_return", oos.get("total_return"))) >= float(min_total_return) and
-        positive_ratio >= float(min_positive_fold_ratio) and worst >= float(max_negative_fold_return) and
-        (last_positive if require_last_fold_positive else True) and sharpe_ok and dd_ok and trades_ok and dsr_ok and stress_ok
-    )
-    return {"passed": passed, "folds": len(returns), "positive_fold_ratio": positive_ratio, "worst_fold_return": worst, "last_fold_positive": last_positive, "sharpe": sharpe, "max_drawdown": max_dd, "trades": trades, "sharpe_ok": sharpe_ok, "max_drawdown_ok": dd_ok, "min_trades_ok": trades_ok, "thresholds": {"min_folds": min_folds, "min_total_return": min_total_return, "min_positive_fold_ratio": min_positive_fold_ratio, "max_negative_fold_return": max_negative_fold_return, "require_last_fold_positive": require_last_fold_positive, "min_sharpe": min_sharpe, "max_drawdown": max_drawdown, "min_trades": min_trades, "trial_registry_complete_required": True}, "deflated_sharpe": dsr_value, "min_dsr": min_dsr, "dsr_ok": dsr_ok, "cost_stress_ok": stress_value, "require_cost_stress": require_cost_stress, "stress_ok": stress_ok, "trial_registry_complete": trial_registry_complete, "trial_registry_ok": trial_registry_complete}
+    status_ok = str(oos.get("status", "OK")) == "OK"
+    enough_folds = len(returns) >= int(min_folds)
+    total_return_ok = oos_total_return is not None and oos_total_return >= float(min_total_return)
+    positive_ratio_ok = positive_ratio >= float(min_positive_fold_ratio)
+    worst_fold_ok = bool(returns) and worst >= float(max_negative_fold_return)
+    last_fold_ok = (last_positive if require_last_fold_positive else True)
+
+    rejection_reasons = []
+    if not status_ok:
+        rejection_reasons.append("oos_status_not_ok")
+    if not fold_metrics_complete:
+        rejection_reasons.append("fold_metrics_missing_or_invalid")
+    if not enough_folds:
+        rejection_reasons.append("insufficient_oos_folds")
+    if not total_return_ok:
+        rejection_reasons.append("missing_or_below_minimum_oos_total_return")
+    if not positive_ratio_ok:
+        rejection_reasons.append("positive_fold_ratio_below_minimum")
+    if not worst_fold_ok:
+        rejection_reasons.append("worst_fold_return_below_minimum_or_missing")
+    if require_last_fold_positive and not last_fold_ok:
+        rejection_reasons.append("last_oos_fold_not_positive")
+    if not sharpe_ok:
+        rejection_reasons.append("missing_or_below_minimum_oos_sharpe")
+    if not dd_ok:
+        rejection_reasons.append("missing_or_excessive_oos_drawdown")
+    if not trades_ok:
+        rejection_reasons.append("missing_or_insufficient_oos_trades")
+    if not dsr_ok:
+        rejection_reasons.append("missing_or_below_minimum_deflated_sharpe")
+    if not stress_ok:
+        rejection_reasons.append("cost_stress_not_passed")
+    if not trial_registry_complete:
+        rejection_reasons.append("comparable_trial_registry_incomplete")
+
+    passed = not rejection_reasons
+    return {
+        "passed": passed,
+        "rejection_reasons": rejection_reasons,
+        "folds": len(returns),
+        "fold_metrics_complete": fold_metrics_complete,
+        "positive_fold_ratio": positive_ratio,
+        "worst_fold_return": worst,
+        "last_fold_positive": last_positive,
+        "oos_total_return": oos_total_return,
+        "sharpe": sharpe,
+        "max_drawdown": max_dd,
+        "trades": trades,
+        "sharpe_ok": sharpe_ok,
+        "max_drawdown_ok": dd_ok,
+        "min_trades_ok": trades_ok,
+        "thresholds": {
+            "min_folds": min_folds,
+            "min_total_return": min_total_return,
+            "min_positive_fold_ratio": min_positive_fold_ratio,
+            "max_negative_fold_return": max_negative_fold_return,
+            "require_last_fold_positive": require_last_fold_positive,
+            "min_sharpe": min_sharpe,
+            "max_drawdown": max_drawdown,
+            "min_trades": min_trades,
+            "trial_registry_complete_required": True,
+        },
+        "deflated_sharpe": dsr_value,
+        "min_dsr": min_dsr,
+        "dsr_ok": dsr_ok,
+        "cost_stress_ok": stress_value,
+        "require_cost_stress": require_cost_stress,
+        "stress_ok": stress_ok,
+        "trial_registry_complete": trial_registry_complete,
+        "trial_registry_ok": trial_registry_complete,
+    }
+
 
 def monte_carlo_bootstrap(returns, *, trials: int = 2000, seed: int = 7, block_size: int = 5) -> dict:
     """Time-series-aware block bootstrap stress summary; research only, not a forecast."""
