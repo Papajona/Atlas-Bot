@@ -220,7 +220,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         cost_stress_multiplier=args.cost_stress_multiplier,
         research_trial_sharpes=trial_sharpes,
     )
-    metrics["status"] = "OK"
+    # Preserve the backtest's status; never turn an insufficient/failed run into an OK.
     gate = oos_promotion_gate(
         promotion_gate_metrics(metrics),
         min_dsr=0.95,
