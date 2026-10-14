@@ -16,21 +16,39 @@ def test_parses_raw_tron_balance_without_binary_float_arithmetic():
     assert parse_tron_usdt_balance([record("1234567")], CONTRACT) == Decimal("1.234567")
 
 
-def test_missing_contract_record_is_zero_but_not_fabricated_metadata():
-    assert parse_tron_usdt_balance([record(address="different-contract")], CONTRACT) == Decimal("0")
+def test_zero_balance_requires_explicit_matching_contract_metadata():
+    assert parse_tron_usdt_balance([record("0")], CONTRACT) == Decimal("0")
+
+
+def test_absent_configured_contract_is_missing_evidence_not_zero():
+    with pytest.raises(ValueError, match="missing the configured USDT contract"):
+        parse_tron_usdt_balance([record(address="different-contract")], CONTRACT)
+
+    with pytest.raises(ValueError, match="missing the configured USDT contract"):
+        parse_tron_usdt_balance([], CONTRACT)
 
 
 @pytest.mark.parametrize("payload", [
     [{"balance": "12", "token_info": {"address": CONTRACT}}],
     [{"balance": "12", "token_info": {"address": CONTRACT, "decimals": 18}}],
+    [{"balance": "12", "token_info": {"address": CONTRACT, "decimals": 6.9}}],
+    [{"balance": "12", "token_info": {"address": CONTRACT, "decimals": "6"}}],
+    [{"balance": "12", "token_info": {"address": CONTRACT, "decimals": True}}],
     [{"balance": "NaN", "token_info": {"address": CONTRACT, "decimals": 6}}],
     [{"balance": "Infinity", "token_info": {"address": CONTRACT, "decimals": 6}}],
     [{"balance": "-1", "token_info": {"address": CONTRACT, "decimals": 6}}],
+    [{"balance": "1.5", "token_info": {"address": CONTRACT, "decimals": 6}}],
     [{"balance": "abc", "token_info": {"address": CONTRACT, "decimals": 6}}],
+    [{"balance": 1234567.0, "token_info": {"address": CONTRACT, "decimals": 6}}],
 ])
 def test_malformed_or_unexpected_contract_metadata_fails_closed(payload):
     with pytest.raises(ValueError):
         parse_tron_usdt_balance(payload, CONTRACT)
+
+
+def test_contract_address_comparison_respects_base58_case_sensitivity():
+    with pytest.raises(ValueError, match="missing the configured USDT contract"):
+        parse_tron_usdt_balance([record(address=CONTRACT.lower())], CONTRACT)
 
 
 def test_duplicate_contract_records_fail_closed():
@@ -76,3 +94,7 @@ def test_custody_worker_uses_the_same_strict_balance_parser(monkeypatch):
     invalid = Client({"data": [record("1234567", decimals=18)]})
     with pytest.raises(ValueError, match="exactly 6"):
         asyncio.run(custody_reconciliation._address_balance(invalid, "TTestAddress"))
+
+    missing = Client({"data": []})
+    with pytest.raises(ValueError, match="missing the configured USDT contract"):
+        asyncio.run(custody_reconciliation._address_balance(missing, "TTestAddress"))
