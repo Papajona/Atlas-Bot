@@ -42,12 +42,12 @@ SELECT jsonb_build_object(
       LEFT JOIN public.ledger_journal_lines l ON l.journal_id=j.id
       GROUP BY j.id
       HAVING count(l.id) < 2
-          OR abs(coalesce(sum(l.debit),0) - coalesce(sum(l.credit),0)) > 0.000001
+          OR coalesce(sum(l.debit),0) <> coalesce(sum(l.credit),0)
     ) invalid
   ),
   'invalid_journal_lines', (
     SELECT count(*) FROM public.ledger_journal_lines
-    WHERE debit < 0 OR credit < 0 OR (debit > 0 AND credit > 0)
+    WHERE debit < 0 OR credit < 0 OR (debit > 0 AND credit > 0) OR (debit = 0 AND credit = 0)
   ),
   'orphan_journal_lines', (
     SELECT count(*) FROM public.ledger_journal_lines l
@@ -61,7 +61,7 @@ SELECT jsonb_build_object(
   ),
   'negative_ledger_entries', (
     SELECT count(*) FROM public.ledger_entries
-    WHERE debit < 0 OR credit < 0 OR amount < 0 OR (debit > 0 AND credit > 0)
+    WHERE debit < 0 OR credit < 0 OR amount <= 0 OR (debit > 0 AND credit > 0) OR (debit = 0 AND credit = 0)
   ),
   'runtime_role', (
     SELECT jsonb_build_object(
