@@ -2282,13 +2282,44 @@ async def _ensure_billing_plans(db):
 
 
 async def _get_active_subscription(db, customer_id: int):
-    sub = (await db.execute(select(Subscription).where(Subscription.customer_id == customer_id, Subscription.status.in_(["trialing", "active", "past_due"])).order_by(desc(Subscription.created_at)).limit(1))).scalar_one_or_none()
-    if sub and sub.status == "trialing" and sub.trial_end and sub.trial_end <= datetime.now(timezone.utc):
-        sub.status = "active"
-        sub.plan_code = "free"
-        sub.current_period_start = datetime.now(timezone.utc)
-        sub.current_period_end = datetime.now(timezone.utc)
-        await db.flush()
+    # Select the newest record before evaluating status. Filtering by status here
+    # can resurrect an older paid subscription after a newer cancellation/failure.
+    sub = (await db.execute(
+        select(Subscription)
+        .where(Subscription.customer_id == customer_id)
+        .order_by(desc(Subscription.created_at), desc(Subscription.id))
+        .limit(1)
+    )).scalar_one_or_none()
+    if sub is None:
+        return None
+
+    now = datetime.now(timezone.utc)
+    status = str(sub.status or "").strip().lower()
+    if status not in {"trialing", "active", "past_due"}:
+        return None
+
+    if status == "trialing":
+        trial_end = sub.trial_end
+        if trial_end is None:
+            return None
+        if trial_end.tzinfo is None:
+            trial_end = trial_end.replace(tzinfo=timezone.utc)
+        if trial_end <= now:
+            # An expired trial becomes the free tier, never a renewed paid period.
+            sub.status = "active"
+            sub.plan_code = "free"
+            sub.current_period_start = now
+            sub.current_period_end = now
+            await db.flush()
+            return None
+
+    period_end = sub.current_period_end
+    if period_end is None:
+        return None
+    if period_end.tzinfo is None:
+        period_end = period_end.replace(tzinfo=timezone.utc)
+    if period_end <= now:
+        return None
     return sub
 
 
