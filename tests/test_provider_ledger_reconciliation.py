@@ -36,7 +36,7 @@ def db_row(
     return {
         "request_id": "req-001",
         "provider_id": provider_id,
-        "provider": "sandbox-payout",
+        "provider": provider,
         "amount": amount,
         "currency": currency,
         "status": status,
@@ -150,5 +150,5 @@ def test_query_window_requires_timezone_and_provider_is_restricted():
     assert "TIMESTAMPTZ" in query
     with pytest.raises(ValueError, match="Invalid provider"):
         build_query("'; DROP TABLE withdrawals;--", start, end)
-    with pytest.raises(ValueError, match="timezone"):
+    with pytest.raises(ValueError, match="UTC offset"):
         parse_utc("2026-10-14T00:00:00", "start")
