@@ -47,7 +47,7 @@ from .usdt_tron import derive_usdt_tron_address_from_xpub, validate_tron_account
 from .tron_reconciliation import parse_tron_usdt_balance
 from .tron_sweep import build_sweep_intent, serialize_sweep_intent, SweepError, classify_solidified_sweep, USDT_SCALE
 from .custody_locations import create_custody_transfer, transition_custody_transfer, flag_stale_custody_transfers
-from .customer_funds import record_ledger_incident, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, ledger_statement, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal
+from .customer_funds import record_ledger_incident, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, customer_balance_api, ledger_statement, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal
 from .distributed import allow_rate_limit, check_redis, acquire_lock, release_lock, refresh_lock
 from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
@@ -3061,10 +3061,13 @@ async def customer_wallets(authorization: str | None = Header(default=None)):
         await db.commit()
         out = []
         for w in rows:
-            bal = await customer_balance(db, profile.id, w.currency)
+            bal = customer_balance_api(await customer_balance(db, profile.id, w.currency))
             out.append({"id": w.id, "currency": w.currency, "wallet_type": w.wallet_type,
-                 "available_balance": bal["available"], "locked_balance": bal["trading_reserved"] + bal["withdrawal_reserved"],
+                 "available_balance": bal["available"], "locked_balance": bal["locked"],
                  "trading_reserved": bal["trading_reserved"], "withdrawal_reserved": bal["withdrawal_reserved"],
+                 "available_minor_units": bal["available_minor_units"],
+                 "locked_minor_units": bal["trading_reserved_minor_units"] + bal["withdrawal_reserved_minor_units"],
+                 "minor_units_scale": bal["minor_units_scale"],
                  "status": w.status, "network": w.network, "deposit_address": w.deposit_address,
                  "token_contract": w.token_contract, "derivation_path": w.derivation_path, "created_at": w.created_at.isoformat()})
         return out
@@ -3112,7 +3115,7 @@ async def customer_usdt_deposit(authorization: str | None = Header(default=None)
             # address itself is sufficient for scanning/crediting.
             wallet.derivation_path = "LEGACY_OFFLINE_RECOVERY_REQUIRED"
             await db.commit()
-        balance = await customer_balance(db, profile.id, "USDT")
+        balance = customer_balance_api(await customer_balance(db, profile.id, "USDT"))
         if settings.usdt_tron_shared_deposit_mode:
             return {"currency": "USDT", "network": "TRON", "standard": "TRC-20",
                     "deposit_address": settings.usdt_tron_treasury_address,
@@ -3132,7 +3135,7 @@ async def customer_usdt_deposit(authorization: str | None = Header(default=None)
 async def customer_ledger(authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
         profile, _ = await get_customer(authorization, db)
-        balance = await customer_balance(db, profile.id, "USDT")
+        balance = customer_balance_api(await customer_balance(db, profile.id, "USDT"))
         entries = await ledger_statement(db, profile.id, "USDT", 100)
         return {"currency": "USDT", "balance": balance, "entries": entries}
 
@@ -3977,11 +3980,34 @@ async def customer_portfolio(authorization: str | None = Header(default=None)):
         account = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == profile.id))).scalar_one_or_none()
         wallets = (await db.execute(select(Wallet).where(Wallet.customer_id == profile.id))).scalars().all()
         positions = (await db.execute(select(Position).where(Position.customer_id == profile.id, Position.quantity != 0))).scalars().all()
-        bal = await customer_balance(db, profile.id, "USDT")
-        return {"equity": float(account.equity) if account else bal["total"], "cash_equity": bal["available"],
-                "reserved_margin": bal["trading_reserved"], "withdrawal_reserved": bal["withdrawal_reserved"],
-                "wallets":[{"currency":w.currency,"available":(await customer_balance(db, profile.id, w.currency))["available"],"locked":(await customer_balance(db, profile.id, w.currency))["trading_reserved"] + (await customer_balance(db, profile.id, w.currency))["withdrawal_reserved"]} for w in wallets],
-                "positions":[{"id":p.id,"exchange":p.exchange,"symbol":p.symbol,"quantity":float(p.quantity),"entry":float(p.average_entry_price),"mark":float(p.mark_price),"unrealized_pnl":float(p.unrealized_pnl)} for p in positions]}
+        balance_api = customer_balance_api(await customer_balance(db, profile.id, "USDT"))
+        wallet_balances = []
+        for wallet in wallets:
+            wallet_balance = customer_balance_api(await customer_balance(db, profile.id, wallet.currency))
+            wallet_balances.append({
+                "currency": wallet.currency,
+                "available": wallet_balance["available"],
+                "locked": wallet_balance["locked"],
+                "trading_reserved": wallet_balance["trading_reserved"],
+                "withdrawal_reserved": wallet_balance["withdrawal_reserved"],
+                "available_minor_units": wallet_balance["available_minor_units"],
+                "locked_minor_units": wallet_balance["trading_reserved_minor_units"] + wallet_balance["withdrawal_reserved_minor_units"],
+                "minor_units_scale": wallet_balance["minor_units_scale"],
+            })
+        return {
+            "equity": float(account.equity) if account else balance_api["total"],
+            "cash_equity": balance_api["available"],
+            "reserved_margin": balance_api["trading_reserved"],
+            "withdrawal_reserved": balance_api["withdrawal_reserved"],
+            "cash_equity_minor_units": balance_api["available_minor_units"],
+            "reserved_margin_minor_units": balance_api["trading_reserved_minor_units"],
+            "withdrawal_reserved_minor_units": balance_api["withdrawal_reserved_minor_units"],
+            "minor_units_scale": balance_api["minor_units_scale"],
+            "wallets": wallet_balances,
+            "positions": [{"id": p.id, "exchange": p.exchange, "symbol": p.symbol, "quantity": float(p.quantity),
+                           "entry": float(p.average_entry_price), "mark": float(p.mark_price),
+                           "unrealized_pnl": float(p.unrealized_pnl)} for p in positions],
+        }
 
 
 @app.get("/api/customer/portfolio/analytics")
