@@ -103,6 +103,20 @@ def test_ai_provider_empty_or_non_object_content_returns_typed_error(value):
         _extract_json(value)
 
 
+@pytest.mark.parametrize("body", [ValueError("malformed body"), [], None, "text"])
+def test_ai_provider_http_body_must_be_json_object(body):
+    from app.ai_providers import AIProviderError, _response_json_object
+
+    class Response:
+        def json(self):
+            if isinstance(body, Exception):
+                raise body
+            return body
+
+    with pytest.raises(AIProviderError):
+        _response_json_object(Response(), "test provider")
+
+
 @pytest.mark.parametrize("payload", [
     {"safe": True},
     {"safe": True, "confidence": 0.9, "reasons": [], "data_quality_flags": []},
