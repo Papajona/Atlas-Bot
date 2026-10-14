@@ -53,16 +53,17 @@ def parse_tron_usdt_balance(data: Any, contract_address: str) -> Decimal:
         raw_text = raw_value.strip()
         if not _RAW_BALANCE_RE.fullmatch(raw_text):
             raise ValueError("TRON provider returned missing or invalid integer USDT raw-balance metadata")
-        raw_balance = Decimal(raw_text)
     elif type(raw_value) is int:
         if raw_value < 0:
             raise ValueError("TRON provider returned a negative USDT raw balance")
-        raw_balance = Decimal(raw_value)
+        raw_text = str(raw_value)
     else:
         # Reject floats (which may already have lost integer precision), booleans,
         # fractional amounts, and unexpected provider JSON types.
         raise ValueError("TRON provider returned missing or invalid integer USDT raw-balance metadata")
 
-    if not raw_balance.is_finite() or raw_balance < 0:
-        raise ValueError("TRON provider returned non-finite or negative USDT balance")
-    return raw_balance / Decimal(10 ** decimals_value)
+    # Construct Decimal directly from its digit tuple with exponent -6. Dividing
+    # by 10**6 uses the active Decimal context (28 significant digits by default)
+    # and can round uint256-sized balances. Tuple construction is exact regardless
+    # of token amount magnitude or the current Decimal context precision.
+    return Decimal((0, tuple(int(digit) for digit in raw_text), -decimals_value))
