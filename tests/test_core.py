@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from app.trading_core import build_features, triple_barrier, rsi
+from app.trading_core import build_features, triple_barrier, rsi, _aligned_log_loss
 from app.ids import client_order_id, make_signal_id
 
 
@@ -68,3 +68,25 @@ def test_training_refuses_collapsed_target():
         assert "two target classes" in str(exc) or "collapsed" in str(exc)
     else:
         raise AssertionError("Training should refuse a collapsed target")
+
+
+
+def test_triple_barrier_labels_timeouts_by_terminal_return_with_dead_zone():
+    idx = pd.date_range("2025-01-01", periods=6, freq="h", tz="UTC")
+    # None of these bars reaches a +/-2-volatility barrier. t=2 has a +1%
+    # terminal return; t=3's return is within the 0.25-volatility dead zone.
+    close = pd.Series([100.0, 100.0, 101.0, 100.1, 100.1, 100.1], index=idx)
+    vol = pd.Series(0.01, index=idx)
+    y = triple_barrier(close, vol, close, close, pt=2.0, sl=2.0, max_hold=2)
+    assert y.iloc[0] == 1.0
+    assert y.iloc[1] == 0.0
+    assert y.iloc[-2:].isna().all()
+
+
+def test_aligned_log_loss_handles_classes_absent_from_training_fold():
+    y_true = np.array([0, 1, 2], dtype=int)
+    # The fold trained only on labels 0 and 2, so class 1 has no probability column.
+    probs = np.array([[0.9, 0.1], [0.5, 0.5], [0.1, 0.9]], dtype=float)
+    score = _aligned_log_loss(y_true, probs, np.array([0, 2]))
+    assert np.isfinite(score)
+    assert score > 0
