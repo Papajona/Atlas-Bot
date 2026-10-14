@@ -11,6 +11,14 @@ def fake_provenance():
         "normalized_csv_sha256": "b" * 64,
         "instrument": "XAU_USD",
         "granularity": "D",
+        "bars_per_year": 252,
+        "evaluation_assumptions": {
+            "bars_per_year": 252,
+            "taker_bps": 0.5,
+            "slippage_bps": 0.5,
+            "carry_bps_per_bar": 0.0,
+            "max_hold_bars": 24,
+        },
         "request_parameters": {"price": "M", "from": "2020-01-01T00:00:00Z", "to": "2025-01-01T00:00:00Z"},
     }
 
@@ -176,6 +184,7 @@ def test_trial_ledger_must_match_manifest_inside_hashed_experiment_archive(tmp_p
         "instrument": provenance["instrument"],
         "granularity": provenance["granularity"],
         "request_parameters": provenance["request_parameters"],
+        "evaluation_assumptions": provenance["evaluation_assumptions"],
         "variants": [
             {"variant_id": "feature-set-a", "annualized_sharpe": 0.8},
             {"variant_id": "feature-set-b", "annualized_sharpe": -0.1},
@@ -216,6 +225,7 @@ def test_trial_ledger_rejects_archive_with_wrong_dataset_identity(tmp_path):
         "dataset_csv_sha256": provenance["normalized_csv_sha256"],
         "instrument": provenance["instrument"], "granularity": provenance["granularity"],
         "request_parameters": provenance["request_parameters"],
+        "evaluation_assumptions": provenance["evaluation_assumptions"],
         "variants": [{"variant_id": "base", "annualized_sharpe": 0.7}],
     }
     with ZipFile(archive, "w") as stream:
