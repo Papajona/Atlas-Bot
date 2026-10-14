@@ -302,6 +302,21 @@ def test_production_deploy_requires_staging_identity_preflight():
     assert 'require_success "staging-identity-preflight.yml" "Supabase staging identity preflight"' in workflow
 
 
+def test_production_startup_smoke_uses_non_admin_runtime_role_fixture():
+    workflow = (ROOT / ".github" / "workflows" / "production-verification.yml").read_text(encoding="utf-8")
+    fixture_start = workflow.index("Create disposable least-privilege runtime-role fixture")
+    smoke_start = workflow.index("Production startup smoke test", fixture_start)
+    block = workflow[fixture_start:smoke_start]
+    assert "CREATE ROLE atlas_runtime LOGIN" in block
+    assert "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS" in block
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE" in block
+    assert "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES" in block
+    smoke_end = workflow.index("Full regression suite in safe mode", smoke_start)
+    smoke = workflow[smoke_start:smoke_end]
+    assert "DATABASE_URL: postgresql+asyncpg://atlas_runtime:" in smoke
+    assert "postgresql+asyncpg://atlas:verification_password" not in smoke
+
+
 def test_production_verification_blocks_missing_provider_credentials():
     workflow = (ROOT / ".github" / "workflows" / "production-verification.yml").read_text(encoding="utf-8")
     assert "BLOCKED: provider credentials are not configured" in workflow
