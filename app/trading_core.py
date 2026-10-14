@@ -93,8 +93,10 @@ def triple_barrier(close: pd.Series, vol: pd.Series, high: pd.Series | None = No
     h = (high.reindex(close.index).to_numpy(dtype=float) if high is not None else c.copy())
     l = (low.reindex(close.index).to_numpy(dtype=float) if low is not None else c.copy())
     y = np.full(len(c), np.nan, dtype=float)
+    if max_hold < 1:
+        raise ValueError("max_hold must be at least 1")
     for i in range(len(c) - max_hold):
-        if not np.isfinite(v[i]) or v[i] <= 0 or not np.isfinite(c[i]):
+        if not np.isfinite(v[i]) or v[i] <= 0 or not np.isfinite(c[i]) or c[i] <= 0:
             continue
         upper, lower = c[i] * (1 + pt * v[i]), c[i] * (1 - sl * v[i])
         end = min(len(c), i + max_hold + 1)
@@ -111,12 +113,37 @@ def triple_barrier(close: pd.Series, vol: pd.Series, high: pd.Series | None = No
             if down_hit:
                 y[i] = -1
                 break
+        else:
+            # A complete holding window elapsed without touching either barrier.
+            # Label the timeout by terminal return, with a volatility-scaled dead zone.
+            terminal_return = c[end - 1] / c[i] - 1.0
+            dead_zone = 0.5 * v[i]
+            if np.isfinite(terminal_return):
+                y[i] = 1 if terminal_return > dead_zone else (-1 if terminal_return < -dead_zone else 0)
     return pd.Series(y, index=close.index, dtype="float64")
 
 
 def _model_paths(model_path: str):
     p = Path(model_path)
     return p, p.with_suffix(p.suffix + ".meta.json")
+
+
+def _aligned_log_loss(y_true, probabilities: np.ndarray, model_classes) -> float:
+    """Score encoded {-1, 0, 1} labels even when a chronological train fold omits a class."""
+    y = np.asarray(y_true, dtype=int)
+    probs = np.asarray(probabilities, dtype=float)
+    if probs.ndim != 2 or probs.shape[0] != y.shape[0] or probs.shape[1] != len(model_classes):
+        raise ValueError("probability matrix does not match validation labels/model classes")
+    aligned = np.full((len(probs), 3), 1e-15, dtype=float)
+    for column, label in enumerate(model_classes):
+        label_index = int(label)
+        if 0 <= label_index < 3:
+            aligned[:, label_index] = np.clip(probs[:, column], 0.0, None)
+    row_sums = aligned.sum(axis=1, keepdims=True)
+    if not np.isfinite(aligned).all() or not np.isfinite(row_sums).all() or np.any(row_sums <= 0):
+        raise ValueError("model returned non-finite or invalid probabilities")
+    aligned /= row_sums
+    return float(log_loss(y, aligned, labels=[0, 1, 2]))
 
 
 def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: int = 5, asset: str = "crypto") -> dict:
@@ -154,7 +181,7 @@ def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: 
         scores.append({
             "balanced_accuracy": float(balanced_accuracy_score(encoded.iloc[te_idx], pred)),
             "f1_macro": float(f1_score(encoded.iloc[te_idx], pred, average="macro", zero_division=0)),
-            "log_loss": float(log_loss(encoded.iloc[te_idx], probs, labels=list(model.classes_))),
+            "log_loss": _aligned_log_loss(encoded.iloc[te_idx].to_numpy(dtype=int), probs, model.classes_),
             "train_samples": int(len(tr_idx)),
             "test_samples": int(len(te_idx)),
         })
@@ -182,7 +209,8 @@ def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: 
         "created_at": datetime.now(timezone.utc).isoformat(),
         "samples": int(len(X)),
         "features": FEATURE_COLUMNS,
-        "classes": [-1, 0, 1],
+        "classes": [int(cls) for cls in final_model.classes_],
+        "class_mapping": {"0": -1, "1": 0, "2": 1},
         "validation": scores,
         "model_sha256": model_hash,
         "manifest_signature": manifest_signature,
@@ -207,7 +235,7 @@ def load_model(model_path: str):
     digest = hashlib.sha256(model_bytes).hexdigest()
     if digest != meta.get("model_sha256"):
         raise RuntimeError("Model artifact hash mismatch")
-    if settings.environment in {"staging", "production"} and settings.model_integrity_required_for_live:
+    if settings.environment in {"staging", "production"}:
         expected_signature = str(meta.get("manifest_signature") or "")
         if not (settings.model_signing_public_key or settings.model_signing_key) or not expected_signature:
             raise RuntimeError("Model artifact signature is required in staging/production")

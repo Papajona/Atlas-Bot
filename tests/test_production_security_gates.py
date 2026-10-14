@@ -80,26 +80,54 @@ def test_worker_health_and_local_security_audit_are_wired():
 
 
 
-def test_database_role_guard_fails_closed_for_rls_incompatible_role():
+def test_database_role_guard_fails_closed_for_rls_incompatible_or_privileged_roles():
     import pytest
     from app.rls_role_policy import require_rls_bypass_role
 
     with pytest.raises(RuntimeError, match="not authorized to bypass row-level security"):
         require_rls_bypass_role("atlas_app", is_superuser=False, bypass_rls=False)
+    with pytest.raises(RuntimeError, match="not authorized to bypass row-level security"):
+        require_rls_bypass_role("postgres", is_superuser=False, bypass_rls=True)
+    with pytest.raises(RuntimeError, match="not authorized to bypass row-level security"):
+        require_rls_bypass_role(
+            "atlas_backend", is_superuser=False, bypass_rls=True, can_create_roles=True
+        )
+    with pytest.raises(RuntimeError, match="not authorized to bypass row-level security"):
+        require_rls_bypass_role(
+            "atlas_table_owner", is_superuser=False, bypass_rls=True, owned_public_table_count=57
+        )
 
 
-def test_database_role_guard_accepts_superuser_bypassrls_or_table_owner_role():
+def test_database_role_guard_accepts_only_dedicated_non_owner_non_admin_bypass_role():
     from app.rls_role_policy import require_rls_bypass_role
 
-    require_rls_bypass_role("postgres", is_superuser=True, bypass_rls=False)
     require_rls_bypass_role("atlas_backend", is_superuser=False, bypass_rls=True)
-    require_rls_bypass_role(
-        "atlas_table_owner", is_superuser=False, bypass_rls=False, owns_all_rls_tables=True
-    )
+
+def test_database_role_guard_rejects_superuser_database_admin_and_reserved_service_roles():
+    import pytest
+    from app.rls_role_policy import require_rls_bypass_role
+
+    invalid_roles = [
+        {"role_name": "atlas_superuser", "is_superuser": True, "bypass_rls": True},
+        {"role_name": "atlas_create_db", "is_superuser": False, "bypass_rls": True, "can_create_databases": True},
+        {"role_name": "atlas_replication", "is_superuser": False, "bypass_rls": True, "can_replicate": True},
+        {"role_name": "service_role", "is_superuser": False, "bypass_rls": True},
+        {"role_name": "supabase_admin", "is_superuser": False, "bypass_rls": True},
+        {"role_name": "atlas_inherited", "is_superuser": False, "bypass_rls": True, "role_membership_count": 1},
+    ]
+    for values in invalid_roles:
+        role_name = values.pop("role_name")
+        with pytest.raises(RuntimeError, match="not authorized to bypass row-level security"):
+            require_rls_bypass_role(role_name, **values)
+
+
 
 
 def test_rls_role_compatibility_guard_runs_before_database_initialization():
     src = (ROOT / "app" / "main.py").read_text()
+    startup = (ROOT / "app" / "startup_guards.py").read_text(encoding="utf-8")
+    assert "session_user AS login_role" in startup
+    assert 'if str(row["login_role"]) != str(row["role_name"]):' in startup
     migration_check = src.index("await assert_database_migrations_current()")
     role_check = src.index("await assert_database_role_compatible_with_rls_lockdown()")
     database_init = src.index("await init_db()", role_check)
@@ -243,24 +271,70 @@ def test_staging_identity_preflight_is_manual_main_only_and_read_only():
     assert "alembic upgrade" not in workflow
 
 
-def test_staging_identity_preflight_fails_closed_on_migration_blockers():
+def test_staging_identity_preflight_requires_a_distinct_project_and_runtime_identity():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
-    assert 'raise SystemExit("BLOCKED: runtime role neither bypasses RLS' in workflow
-    assert 'raise SystemExit("BLOCKED: public tables without RLS remain' in workflow
+    assert "ATLAS_PRODUCTION_SUPABASE_PROJECT_REF" in workflow
+    assert "STAGING_SUPABASE_PROJECT_REF" in workflow
+    assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' in workflow
+    assert "ATLAS_STAGING_CLOUD_RUN_SERVICE" in workflow
+    assert "ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT" in workflow
+    assert '"gcloud", "run", "services", "describe"' in workflow
+    assert "DATABASE_URL must reference exactly the configured staging database secret" in workflow
+    assert "if login_role != role:" in workflow
+    assert "BLOCKED: deployed staging service account differs" in workflow
+    assert 'role in {"postgres", "supabase_admin", "supabase_auth_admin", "authenticator"}' in workflow
+    assert "runtime database role has administrative privileges" in workflow
+    assert "role_membership_count" in workflow
+    assert "runtime DB role inherits other PostgreSQL roles" in workflow
     assert "no migration or write was executed" in workflow
     assert "alembic upgrade" not in workflow
 
 
-def test_staging_preflight_owner_compatibility_matches_runtime_guard():
+def test_staging_preflight_runtime_role_is_non_owner_and_non_admin():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
     guard = (ROOT / "app" / "startup_guards.py").read_text(encoding="utf-8")
-    assert "c.relrowsecurity AND NOT c.relforcerowsecurity" in workflow
-    assert "c.relowner <> r.oid OR c.relforcerowsecurity" in guard
+    assert "owned_count" in workflow
+    assert "if int(owned_count) > 0" in workflow
+    assert "c.relowner = r.oid" in guard
+    assert "r.rolcreaterole AS can_create_roles" in guard
+    assert "r.rolcreatedb AS can_create_databases" in guard
+    assert "pg_auth_members AS membership" in guard
+    assert 'role_membership_count=int(row["role_membership_count"])' in guard
 
+
+def test_production_deploy_checks_database_role_before_any_deployment():
+    workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+    check_start = workflow.index("Verify production database runtime role before deployment")
+    deploy_start = workflow.index("Deploy immutable API release", check_start)
+    block = workflow[check_start:deploy_start]
+    assert 'gcloud secrets versions access "$SECRET_DATABASE_VERSION"' in block
+    assert "default_transaction_read_only=on" in block
+    assert "current_database(), current_user, session_user" in block
+    assert "pg_auth_members" in block
+    assert "BLOCKED: production runtime cannot use a reserved" in block
+    assert "BLOCKED: production runtime role must own no public tables and inherit no other roles" in block
+    assert 'print("BLOCKED: read-only production database role check failed; database output withheld")' in block
+    assert 'db_url_file="$RUNNER_TEMP/atlas-production-db-url"' in block
+    assert "trap 'rm -f \"$db_url_file\"' EXIT" in block
 
 def test_production_deploy_requires_staging_identity_preflight():
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
     assert 'require_success "staging-identity-preflight.yml" "Supabase staging identity preflight"' in workflow
+
+
+def test_production_startup_smoke_uses_non_admin_runtime_role_fixture():
+    workflow = (ROOT / ".github" / "workflows" / "production-verification.yml").read_text(encoding="utf-8")
+    fixture_start = workflow.index("Create disposable least-privilege runtime-role fixture")
+    smoke_start = workflow.index("Production startup smoke test", fixture_start)
+    block = workflow[fixture_start:smoke_start]
+    assert "CREATE ROLE atlas_runtime LOGIN" in block
+    assert "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS" in block
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE" in block
+    assert "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES" in block
+    smoke_end = workflow.index("Full regression suite in safe mode", smoke_start)
+    smoke = workflow[smoke_start:smoke_end]
+    assert "DATABASE_URL: postgresql+asyncpg://atlas_runtime:" in smoke
+    assert "postgresql+asyncpg://atlas:verification_password" not in smoke
 
 
 def test_production_verification_blocks_missing_provider_credentials():
@@ -277,5 +351,6 @@ def test_production_verification_passes_provider_secrets_to_checker():
     assert 'GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}' in block
     assert 'GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}' in block
     assert 'CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}' in block
-    assert "Cerebras .*Chat Completions inference failed" in block
+    assert "python -m scripts.check_ai_models" in block
+    assert "temporarily waived" not in block
     assert "BLOCKED: provider credentials are not configured" in block

@@ -1,5 +1,9 @@
+import json
+
 import pytest
-from app.execution_optimizer import BookLevel, build_execution_plan, executable_vwap
+from app.execution_optimizer import (
+    BookLevel, build_execution_plan, executable_vwap, execution_plan_payload,
+)
 
 
 def test_vwap_walks_multiple_levels():
@@ -39,3 +43,37 @@ def test_negative_fee_is_rejected():
     with pytest.raises(ValueError):
         build_execution_plan(side="buy", quantity=1, best_price=100,
                              levels=[BookLevel(100, 1)], maker_fee_bps=-1, taker_fee_bps=5)
+
+
+
+@pytest.mark.parametrize(
+    "levels,quantity",
+    [
+        ([BookLevel(float("nan"), 1.0)], 1.0),
+        ([BookLevel(100.0, float("inf"))], 1.0),
+        ([BookLevel(100.0, 1.0)], float("nan")),
+        ([BookLevel(100.0, 1.0)], float("inf")),
+    ],
+)
+def test_non_finite_book_values_and_quantities_are_rejected(levels, quantity):
+    with pytest.raises(ValueError, match="finite|invalid"):
+        executable_vwap(levels, quantity)
+
+
+def test_insufficient_depth_plan_serializes_as_strict_json():
+    plan = build_execution_plan(
+        side="buy", quantity=10, best_price=100,
+        levels=[BookLevel(100, 2)], maker_fee_bps=1, taker_fee_bps=5
+    )
+    payload = execution_plan_payload(plan)
+    assert payload["total_cost_bps"] is None
+    json.dumps(payload, allow_nan=False)
+
+
+def test_non_finite_execution_cost_parameters_are_rejected():
+    with pytest.raises(ValueError, match="finite"):
+        build_execution_plan(
+            side="buy", quantity=1, best_price=100,
+            levels=[BookLevel(100, 1)], maker_fee_bps=1, taker_fee_bps=5,
+            max_adverse_bps=float("nan"),
+        )

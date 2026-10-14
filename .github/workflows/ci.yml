@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: public.ecr.aws/docker/library/postgres:15-alpine
+        image: docker.io/library/postgres:15-alpine
         env: {POSTGRES_DB: atlas_test, POSTGRES_USER: atlas, POSTGRES_PASSWORD: test_password}
         ports: ["5432:5432"]
         options: >-
@@ -37,6 +37,19 @@ jobs:
           pip install -r requirements-dev.txt
       - name: Wait for PostgreSQL
         run: until pg_isready -h 127.0.0.1 -p 5432 -U atlas -d atlas_test; do sleep 1; done
+      - name: Verify pinned Python base-image digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(sed -nE '1s#^FROM python:3\.13-slim@(sha256:[0-9a-f]{64})$#\1#p' Dockerfile)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "Dockerfile Python base image is not pinned to a SHA-256 digest" >&2
+            exit 1
+          }
+          docker pull "docker.io/library/python@${digest}"
+          echo "Verified pinned Python base-image digest: $digest"
+      - name: Build application container image
+        run: docker build --tag atlas-bot-ci:repair .
       - name: Compile source
         run: python -m compileall -q app alembic
       - name: Create Supabase API roles for migration verification

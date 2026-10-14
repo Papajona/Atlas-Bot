@@ -7,6 +7,7 @@ usable generated text. Exit 0 = all requests succeeded, 1 = request failed,
 """
 import json
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -21,50 +22,132 @@ from app.config import settings
 
 
 def _request_json(url: str, headers: dict[str, str], payload: dict | None = None) -> tuple[int, dict]:
+    """Request JSON and retry transient provider/network failures a bounded number of times."""
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     method = "POST" if payload is not None else "GET"
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            status = response.status
-            raw = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        # Preserve only parsed provider error metadata so the gate can explain
-        # authorization/model-access failures without logging credentials.
+    transient_statuses = {429, 500, 502, 503, 504}
+    for attempt in range(3):
+        request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            raw_error = exc.read(4096).decode("utf-8", errors="replace")
+            with urllib.request.urlopen(request, timeout=20) as response:
+                status = response.status
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            try:
+                raw_error = exc.read(4096).decode("utf-8", errors="replace")
+            except Exception:
+                raw_error = ""
+            if exc.code in transient_statuses and attempt < 2:
+                # Honor a short Retry-After but bound wait time so release verification
+                # never sleeps indefinitely on an unhealthy provider.
+                try:
+                    retry_after = float(exc.headers.get("Retry-After", ""))
+                    delay = min(5.0, max(1.0, retry_after))
+                except (AttributeError, TypeError, ValueError):
+                    delay = 1.5 * (attempt + 1)
+                time.sleep(delay)
+                continue
+            try:
+                parsed_error = json.loads(raw_error)
+                if isinstance(parsed_error, dict):
+                    error = parsed_error.get("error")
+                    if isinstance(error, dict):
+                        safe_error = {
+                            key: value[:240] if isinstance(value, str) else value
+                            for key, value in error.items()
+                            if key in {"message", "type", "code", "status", "detail"}
+                            and isinstance(value, (str, int, float, bool, type(None)))
+                        }
+                        return exc.code, {"error": safe_error}
+                    message = parsed_error.get("message") or parsed_error.get("detail")
+                    if isinstance(message, str):
+                        return exc.code, {"message": message[:240]}
+                    return exc.code, {"response_preview": raw_error[:240]}
+            except json.JSONDecodeError:
+                pass
+            # Keep only a short sanitized preview; never log request headers or credentials.
+            return exc.code, {"response_preview": raw_error[:240]}
         except Exception:
-            return exc.code, {}
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            return 0, {}
         try:
-            parsed_error = json.loads(raw_error)
-            if isinstance(parsed_error, dict):
-                # Keep the standard provider error structure, but bound strings
-                # so CI logs cannot be flooded by an upstream response.
-                error = parsed_error.get("error")
-                if isinstance(error, dict):
-                    safe_error = {
-                        key: value[:240] if isinstance(value, str) else value
-                        for key, value in error.items()
-                        if key in {"message", "type", "code", "status", "detail"}
-                        and isinstance(value, (str, int, float, bool, type(None)))
-                    }
-                    return exc.code, {"error": safe_error}
-                message = parsed_error.get("message") or parsed_error.get("detail")
-                if isinstance(message, str):
-                    return exc.code, {"message": message[:240]}
-                return exc.code, {"response_preview": raw_error[:240]}
-        except json.JSONDecodeError:
-            pass
-        # Non-JSON responses commonly come from a proxy/gateway; retain only a
-        # short sanitized preview, never request headers or credentials.
-        return exc.code, {"response_preview": raw_error[:240]}
-    except Exception:
-        return 0, {}
-    try:
-        parsed = json.loads(raw)
-        return status, parsed if isinstance(parsed, dict) else {}
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return status, {}
+            parsed = json.loads(raw)
+            return status, parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return status, {}
+    return 0, {}
+
+
+def _select_gemini_flash_alternatives(models: list[dict], configured_model: str) -> list[str]:
+    """Select at most four currently listed stable Flash model IDs for failure diagnostics."""
+    import re
+
+    candidates: list[tuple[int, int, int, str]] = []
+    configured = configured_model.removeprefix("models/")
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        methods = item.get("supportedGenerationMethods")
+        if not isinstance(name, str) or not isinstance(methods, list) or "generateContent" not in methods:
+            continue
+        model_id = name.removeprefix("models/")
+        if model_id == configured or "preview" in model_id.lower():
+            continue
+        match = re.fullmatch(r"gemini-(\d+)\.(\d+)-flash(-lite)?", model_id)
+        if not match:
+            continue
+        major, minor = int(match.group(1)), int(match.group(2))
+        # Prefer the non-lite model at the same version, then newer versions.
+        candidates.append((major, minor, 0 if match.group(3) else 1, model_id))
+    candidates.sort(reverse=True)
+    return [item[3] for item in candidates[:4]]
+
+
+def _diagnose_gemini_flash_alternatives(configured_model: str) -> None:
+    """After a configured model fails, probe up to four catalogue-listed stable Flash alternatives.
+
+    This diagnostic never converts a failed configured-model check into success. It only
+    reports a candidate that actually generated text with the configured API credential.
+    """
+    status, body = _request_json(
+        "https://generativelanguage.googleapis.com/v1beta/models",
+        {"x-goog-api-key": settings.gemini_api_key, "Accept": "application/json"},
+    )
+    listed = body.get("models")
+    if status != 200 or not isinstance(listed, list):
+        print(f"[DIAGNOSTIC] Gemini model catalogue unavailable (HTTP {status or 'network/error'}); no alternative inferred.")
+        return
+    alternatives = _select_gemini_flash_alternatives(listed, configured_model)
+    if not alternatives:
+        print("[DIAGNOSTIC] Gemini catalogue returned no stable alternative Flash IDs; no alternative inferred.")
+        return
+    for alternative in alternatives:
+        encoded_model = urllib.parse.quote(alternative, safe="-_.")
+        alt_status, alt_body = _request_json(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{encoded_model}:generateContent",
+            {"Content-Type": "application/json", "x-goog-api-key": settings.gemini_api_key},
+            {
+                "contents": [{"parts": [{"text": "Reply with OK."}]}],
+                "generationConfig": {"maxOutputTokens": 32, "temperature": 0},
+            },
+        )
+        candidates = alt_body.get("candidates")
+        text = ""
+        if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
+            content = candidates[0].get("content")
+            parts = content.get("parts") if isinstance(content, dict) else []
+            if isinstance(parts, list):
+                text = "".join(
+                    part.get("text", "") for part in parts
+                    if isinstance(part, dict) and isinstance(part.get("text", ""), str)
+                )
+        print(f"[DIAGNOSTIC {'PASS' if alt_status == 200 and text.strip() else 'FAIL'}] Gemini alternative {alternative}: "
+              + ("inference succeeded; configure and rerun the gate before release."
+                 if alt_status == 200 and text.strip()
+                 else f"generation failed (HTTP {alt_status or 'network/error'}); not recommended."))
 
 
 def _check_gemini(model: str) -> bool:
@@ -264,7 +347,10 @@ def main() -> int:
             return 2
         for model in provider_models:
             checked += 1
-            failures += not checker(model)
+            model_ok = checker(model)
+            if not model_ok and provider == "Gemini":
+                _diagnose_gemini_flash_alternatives(model)
+            failures += not model_ok
     if not checked:
         print("AI provider verification: NOT VERIFIED (no model checks were configured).")
         return 2

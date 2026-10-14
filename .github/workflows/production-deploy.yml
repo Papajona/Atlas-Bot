@@ -175,6 +175,100 @@ jobs:
 
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+      - name: Verify production database runtime role before deployment
+        shell: bash
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          SECRET_DATABASE_VERSION: ${{ secrets.SECRET_DATABASE_VERSION }}
+        run: |
+          set -euo pipefail
+          umask 077
+          db_url_file="$RUNNER_TEMP/atlas-production-db-url"
+          trap 'rm -f "$db_url_file"' EXIT
+          gcloud secrets versions access "$SECRET_DATABASE_VERSION" \
+            --secret=atlas-database-url --project="$GCP_PROJECT_ID" > "$db_url_file"
+          test -s "$db_url_file"
+          python - "$db_url_file" <<'PY'
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+          from urllib.parse import unquote, urlparse
+
+          secret_path = Path(sys.argv[1])
+          uri = secret_path.read_text(encoding="utf-8").strip()
+          parsed = urlparse(uri)
+          if parsed.scheme not in {"postgres", "postgresql", "postgresql+asyncpg", "postgresql+psycopg"} or not parsed.hostname:
+              raise SystemExit("BLOCKED: production DATABASE_URL is not a valid PostgreSQL URI")
+          env = {
+              k: v for k, v in os.environ.items()
+              if k not in {"DATABASE_URL", "PGPASSWORD", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS"}
+          }
+          env.update({
+              "PGHOST": parsed.hostname,
+              "PGPORT": str(parsed.port or 5432),
+              "PGUSER": unquote(parsed.username or ""),
+              "PGPASSWORD": unquote(parsed.password or ""),
+              "PGDATABASE": parsed.path.lstrip("/"),
+              "PGSSLMODE": "require",
+              "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=10000",
+          })
+          query = """
+          SELECT current_database(), current_user, session_user,
+                 COALESCE((SELECT string_agg(version_num, ',' ORDER BY version_num)
+                           FROM public.alembic_version), ''),
+                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p')),
+                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relrowsecurity),
+                 r.rolsuper, r.rolcreaterole, r.rolcreatedb, r.rolreplication, r.rolbypassrls,
+                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relowner=r.oid),
+                 (SELECT count(*) FROM pg_auth_members m WHERE m.member=r.oid),
+                 (NOT has_schema_privilege('anon','public','USAGE')
+                  AND NOT has_schema_privilege('authenticated','public','USAGE'))
+          FROM pg_roles r WHERE r.rolname=current_user
+          """
+          result = subprocess.run(
+              ["psql", "-X", "-A", "-t", "-F", "|", "-v", "ON_ERROR_STOP=1", "-c", query],
+              check=False, capture_output=True, text=True, env=env,
+          )
+          if result.returncode:
+              print("BLOCKED: read-only production database role check failed; database output withheld")
+              sys.exit(1)
+          fields = result.stdout.strip().split("|")
+          if len(fields) != 14:
+              raise SystemExit("BLOCKED: unexpected production database role query result")
+          (database, role, login_role, revision, table_count, unprotected_count,
+           is_superuser, can_create_roles, can_create_databases, can_replicate, bypass_rls,
+           owned_count, membership_count, api_schema_blocked) = fields
+          reserved = {"postgres", "service_role", "supabase_admin", "supabase_auth_admin",
+                      "authenticator", "anon", "authenticated"}
+          print(
+              f"Production DB role audit: database={database}, role={role}, login_role={login_role}, "
+              f"revision={revision or 'missing'}, public_tables={table_count}, "
+              f"tables_without_rls={unprotected_count}, owned_tables={owned_count}, "
+              f"role_memberships={membership_count}, bypass_rls={bypass_rls}"
+          )
+          if database != "postgres" or not role or login_role != role:
+              raise SystemExit("BLOCKED: unexpected database or login/current-role identity mismatch")
+          if role in reserved:
+              raise SystemExit("BLOCKED: production runtime cannot use a reserved PostgreSQL/Supabase role")
+          if is_superuser.lower() == "true" or can_create_roles.lower() == "true" or can_create_databases.lower() == "true" or can_replicate.lower() == "true":
+              raise SystemExit("BLOCKED: production database runtime role has administrative privileges")
+          if bypass_rls.lower() != "true":
+              raise SystemExit("BLOCKED: production runtime role must have reviewed BYPASSRLS for the backend-only/no-policy RLS design")
+          if int(owned_count) > 0 or int(membership_count) > 0:
+              raise SystemExit("BLOCKED: production runtime role must own no public tables and inherit no other roles")
+          if int(table_count) < 1 or int(unprotected_count) > 0:
+              raise SystemExit("BLOCKED: production public-schema RLS is incomplete")
+          if api_schema_blocked.lower() != "true":
+              raise SystemExit("BLOCKED: anon/authenticated still have public schema USAGE")
+          if not revision:
+              raise SystemExit("BLOCKED: production database Alembic revision is missing")
+          print("PASS: production DB URL resolves to a dedicated non-owner/non-admin runtime role with RLS lockdown intact.")
+          PY
+
       - name: Deploy immutable API release
         env:
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
@@ -200,8 +294,8 @@ jobs:
           FORWARDED_ALLOW_IPS: ${{ secrets.FORWARDED_ALLOW_IPS }}
           SECRET_GEMINI_API_KEY_VERSION: ${{ secrets.SECRET_GEMINI_API_KEY_VERSION }}
           SECRET_GROQ_API_KEY_VERSION: ${{ secrets.SECRET_GROQ_API_KEY_VERSION }}
-          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
-          GEMINI_STRATEGY_MODEL: ${{ vars.GEMINI_STRATEGY_MODEL }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
+          GEMINI_STRATEGY_MODEL: ${{ vars.GEMINI_STRATEGY_MODEL || 'gemini-3.5-flash-lite' }}
           RESEARCH_FEE_SOURCE: ${{ vars.RESEARCH_FEE_SOURCE }}
           RESEARCH_FEE_EVIDENCE_ID: ${{ vars.RESEARCH_FEE_EVIDENCE_ID }}
           RESEARCH_MIN_DEFLATED_SHARPE: ${{ vars.RESEARCH_MIN_DEFLATED_SHARPE }}

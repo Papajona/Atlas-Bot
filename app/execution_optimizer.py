@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from math import ceil
+from math import ceil, isfinite
 from typing import Literal
 
 
@@ -28,12 +28,12 @@ class ExecutionPlan:
 
 
 def _validate(levels: list[BookLevel], quantity: float) -> None:
-    if quantity <= 0:
-        raise ValueError("quantity must be positive")
+    if not isfinite(quantity) or quantity <= 0:
+        raise ValueError("quantity must be finite and positive")
     if not levels:
         raise ValueError("order book is empty")
     for x in levels:
-        if x.price <= 0 or x.quantity <= 0:
+        if not (isfinite(x.price) and isfinite(x.quantity)) or x.price <= 0 or x.quantity <= 0:
             raise ValueError("order book contains invalid level")
 
 
@@ -56,8 +56,8 @@ def executable_vwap(levels: list[BookLevel], quantity: float) -> tuple[float, fl
 
 
 def impact_bps(reference_price: float, executable_price: float, side: str) -> float:
-    if reference_price <= 0 or executable_price <= 0:
-        raise ValueError("prices must be positive")
+    if not (isfinite(reference_price) and isfinite(executable_price)) or reference_price <= 0 or executable_price <= 0:
+        raise ValueError("prices must be finite and positive")
     direction = 1 if side == "buy" else -1
     return max(0.0, direction * (executable_price / reference_price - 1.0) * 10_000)
 
@@ -78,10 +78,18 @@ def build_execution_plan(
     """Cost-aware execution selector. This is a conservative planning model, not an HFT guarantee."""
     if side not in {"buy", "sell"}:
         raise ValueError("side must be buy or sell")
+    numeric_inputs = (
+        quantity, best_price, maker_fee_bps, taker_fee_bps, latency_ms,
+        short_term_vol_bps_per_s, max_adverse_bps, urgency,
+    )
+    if not all(isfinite(value) for value in numeric_inputs):
+        raise ValueError("execution inputs must be finite")
+    if best_price <= 0:
+        raise ValueError("best_price must be positive")
     if maker_fee_bps < 0 or taker_fee_bps < 0:
         raise ValueError("fees cannot be negative")
-    if latency_ms < 0 or short_term_vol_bps_per_s < 0:
-        raise ValueError("latency/volatility cannot be negative")
+    if latency_ms < 0 or short_term_vol_bps_per_s < 0 or max_adverse_bps < 0:
+        raise ValueError("latency/volatility/adverse-cost budget cannot be negative")
     urgency = min(1.0, max(0.0, urgency))
     vwap, unfilled = executable_vwap(levels, quantity)
     if unfilled > 1e-12:
@@ -117,3 +125,12 @@ def build_execution_plan(
 
     return ExecutionPlan(side, quantity, best_price, vwap, spread_bps, impact, taker_fee_bps,
                          latency_buffer, taker_cost, max_adverse_bps, order_type, slices, rationale)
+
+
+def execution_plan_payload(plan: ExecutionPlan) -> dict[str, object]:
+    """Return a JSON-safe representation; non-finite sentinels become JSON null."""
+    payload: dict[str, object] = dict(plan.__dict__)
+    for key, value in payload.items():
+        if isinstance(value, float) and not isfinite(value):
+            payload[key] = None
+    return payload

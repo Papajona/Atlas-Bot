@@ -8,9 +8,23 @@ def test_staging_identity_preflight_fails_closed_on_rls_migration_blockers():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(
         encoding="utf-8"
     )
-    assert 'raise SystemExit("BLOCKED: runtime role neither bypasses RLS' in workflow
+    assert 'role in {"postgres", "supabase_admin", "supabase_auth_admin", "authenticator"}' in workflow
+    assert 'role has administrative privileges' in workflow
+    assert 'if bypass_rls.lower() != "true"' in workflow
+    assert 'if int(owned_count) > 0' in workflow
+    assert "role_membership_count" in workflow
+    assert "runtime DB role inherits other PostgreSQL roles" in workflow
     assert 'raise SystemExit("BLOCKED: public tables without RLS remain' in workflow
     assert 'print("PASS: read-only target identity' in workflow
+
+
+def test_staging_preflight_rejects_the_production_project_as_staging():
+    workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "ATLAS_PRODUCTION_SUPABASE_PROJECT_REF" in workflow
+    assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' in workflow
+    assert '"gcloud", "run", "services", "describe"' in workflow
 
 
 def test_staging_preflight_decodes_percent_encoded_database_credentials():

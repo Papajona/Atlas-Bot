@@ -7,6 +7,7 @@ services:
     volumes:
       - trading-data:/app/data
       - trading-models:/app/models
+      - trading-model-staging:/app/model-staging
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -25,3 +26,4 @@ services:
 volumes:
   trading-data:
   trading-models:
+  trading-model-staging:

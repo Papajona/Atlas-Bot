@@ -60,7 +60,7 @@ from .derivatives_context import fetch_public_derivatives_context
 from .multi_timeframe import multi_timeframe_signal
 from .grid_trading import build_grid, grid_profit_pct
 from .arbitrage import TriangleQuote, evaluate_triangle, compounded_stake
-from .execution_optimizer import BookLevel, build_execution_plan
+from .execution_optimizer import BookLevel, build_execution_plan, execution_plan_payload
 from .fx_engine import FXModelConfig, fx_model_signal, fx_walk_forward_score
 from .deriv import DerivBroker, DerivConfig, DerivError, DerivUnknown
 
@@ -91,7 +91,7 @@ def _parse_stepup_token(token: str | None, uid: str, purpose: str = "withdrawal"
         return None
     body, sig = token.rsplit(".", 1)
     expected = hmac.new(settings.secret_key.encode(), body.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(sig, expected):
+    if not _constant_time_text_equal(sig, expected):
         return None
     try:
         padded = body + "=" * (-len(body) % 4)
@@ -1936,7 +1936,7 @@ async def auth(x_admin_token: str | None = None, authorization: str | None = Non
         raise HTTPException(401, "Administrator authentication requires Supabase Auth with MFA outside development")
     configured = str(settings.admin_token or "").strip()
     supplied = str(x_admin_token or "").strip()
-    if not configured or not supplied or not hmac.compare_digest(supplied, configured):
+    if not configured or not supplied or not _constant_time_text_equal(supplied, configured):
         raise HTTPException(401, "Administrator authentication required")
     _audit_actor.set("legacy-admin-token")
     return {"auth_method": "legacy_admin_token"}
@@ -1955,9 +1955,9 @@ def approver_auth(admin_id: str, approver_token: str | None, admin_token: str | 
         if key.strip() and secret.strip():
             pairs[key.strip()] = secret.strip()
     expected = pairs.get(admin_id)
-    if not expected or not hmac.compare_digest(token, expected):
+    if not expected or not _constant_time_text_equal(token, expected):
         raise HTTPException(403, "Invalid withdrawal approver credentials")
-    if admin_token and hmac.compare_digest(token, str(admin_token)):
+    if admin_token and _constant_time_text_equal(token, str(admin_token)):
         raise HTTPException(403, "Approver credential must be distinct from administrator credential")
     return True
 
@@ -1999,7 +1999,7 @@ def _funding_signature_valid(raw_body: bytes, signature: str | None, timestamp: 
     signed = str(timestamp).strip().encode() + b"." + raw_body
     expected = hmac.new(settings.funding_webhook_secret.encode(), signed, hashlib.sha256).hexdigest()
     supplied = signature.removeprefix("sha256=").strip()
-    return hmac.compare_digest(expected, supplied)
+    return _constant_time_text_equal(expected, supplied)
 
 def _normalize_oanda_instrument(symbol: str) -> str:
     raw = str(symbol or "").strip().upper().replace("/", "_").replace("-", "_")
@@ -2899,7 +2899,7 @@ async def customer_otp_verify(req: OtpVerifyRequest, authorization: str | None =
         intent = (await db.execute(select(WithdrawalOtpIntent).where(WithdrawalOtpIntent.jti == jti, WithdrawalOtpIntent.auth_user_id == uid).with_for_update())).scalar_one_or_none()
         if not intent or intent.consumed_at or intent.expires_at < datetime.now(timezone.utc):
             raise HTTPException(401, "OTP verification session has expired or is invalid")
-        if not hmac.compare_digest(intent.contact_hash, hashlib.sha256(contact.encode()).hexdigest()):
+        if not _constant_time_text_equal(intent.contact_hash, hashlib.sha256(contact.encode()).hexdigest()):
             raise HTTPException(403, "OTP contact does not match the issued verification")
         if not _constant_time_text_equal(str(intent.destination_fingerprint), fp) or (intent.purpose == "withdrawal" and not _constant_time_text_equal(str(intent.proposal_digest), expected_digest)):
             raise HTTPException(409, "Withdrawal details do not match the OTP verification request")
@@ -4223,7 +4223,7 @@ async def customer_execution_plan(req: ExecutionPlanRequest, authorization: str 
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise _safe_http_error(400, exc, "Invalid request") from exc
-    return {**plan.__dict__, "execution_authority": False, "mode": "RESEARCH_ONLY"}
+    return {**execution_plan_payload(plan), "execution_authority": False, "mode": "RESEARCH_ONLY"}
 
 
 @app.get("/api/customer/arbitrage/opportunities")
@@ -4263,7 +4263,7 @@ async def receive_customer_webhook(endpoint_id:int, request:Request, x_atlas_web
     async with SessionLocal() as db:
         endpoint=(await db.execute(select(WebhookEndpoint).where(WebhookEndpoint.id==endpoint_id,WebhookEndpoint.status=="ACTIVE"))).scalar_one_or_none()
         if not endpoint: raise HTTPException(404,"Webhook endpoint not found")
-        if not x_atlas_webhook_token or not hmac.compare_digest(hashlib.sha256(x_atlas_webhook_token.encode()).hexdigest(), endpoint.secret_hash):
+        if not x_atlas_webhook_token or not _constant_time_text_equal(hashlib.sha256(x_atlas_webhook_token.encode()).hexdigest(), endpoint.secret_hash):
             raise HTTPException(401,"Invalid webhook credential")
         event_id=(x_atlas_event_id or hashlib.sha256(raw).hexdigest())[:160]
         existing=(await db.execute(select(WebhookEvent).where(WebhookEvent.endpoint_id==endpoint.id,WebhookEvent.event_id==event_id))).scalar_one_or_none()
@@ -4633,7 +4633,7 @@ async def customer_create_withdrawal(req: CustomerWithdrawalCreate, authorizatio
             WithdrawalStepUpToken.used_at.is_(None),
             WithdrawalStepUpToken.expires_at >= datetime.now(timezone.utc),
         ).with_for_update())).scalar_one_or_none()
-        if not stepup or not hmac.compare_digest(stepup.token_hash, hashlib.sha256(x_withdrawal_step_up.encode()).hexdigest()):
+        if not stepup or not _constant_time_text_equal(stepup.token_hash, hashlib.sha256(x_withdrawal_step_up.encode()).hexdigest()):
             raise HTTPException(403, "Fresh OTP step-up verification is required before withdrawal")
         # Canonical customer-cash lock order: ledger -> wallet -> trading account.
         # This matches funding, fills, and trading-account bootstrap.
@@ -5273,7 +5273,7 @@ async def release_withdrawal(withdrawal_id: int, req: WithdrawalExecuteRequest, 
         expected_digest = proposal_digest(request_id=w.request_id, amount=w.amount, currency=w.currency, destination=w.destination, tag=w.destination_tag, network=w.network, provider=provider_name)
         if not w.proposal_digest:
             raise HTTPException(409, "Withdrawal proposal digest is missing; re-approval is required")
-        if not hmac.compare_digest(w.proposal_digest, expected_digest):
+        if not _constant_time_text_equal(w.proposal_digest, expected_digest):
             raise HTTPException(409, "Withdrawal proposal changed after approval; re-approval required")
         if settings.local_signing_enabled:
             if not verify_local_signature(req.signature or "", expected_digest):
@@ -5452,7 +5452,7 @@ async def mark_withdrawal_not_sent(
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
     authenticated_operator = str(claims.get("sub") or claims.get("user_id") or "").strip()
-    if not authenticated_operator or not hmac.compare_digest(authenticated_operator, str(req.operator_id or "").strip()):
+    if not authenticated_operator or not _constant_time_text_equal(authenticated_operator, str(req.operator_id or "").strip()):
         raise HTTPException(403, "Release operator identity must match the authenticated user")
     approver_auth(req.admin_id, x_approver_token, x_admin_token)
     if req.admin_id.strip().casefold() == req.operator_id.strip().casefold():

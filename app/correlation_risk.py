@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 # Conservative risk buckets. These are not claimed statistical correlations; they prevent
 # obvious concentration across highly related crypto/FX exposures when a live correlation
 # matrix is unavailable. A research-time matrix can override the bucket coefficient.
@@ -25,11 +27,46 @@ def risk_group(symbol: str) -> str:
     return _GROUPS.get(base, "OTHER")
 
 def adjusted_group_exposure(positions, *, proposed_symbol: str, proposed_notional: float, cap_usd: float) -> dict:
-    target=risk_group(proposed_symbol); existing=0.0
-    members=[]
+    target = risk_group(proposed_symbol)
+    existing = 0.0
+    members = []
+    valuation_complete = True
     for p in positions or []:
-        if risk_group(getattr(p,"symbol", "")) == target:
-            notional=abs(float(getattr(p,"quantity",0) or 0)*float(getattr(p,"mark_price",0) or 0))
-            existing += notional; members.append((getattr(p,"symbol",""),notional))
-    projected=existing+abs(float(proposed_notional or 0))
-    return {"group":target,"existing_notional":round(existing,8),"proposed_notional":round(abs(float(proposed_notional or 0)),8),"projected_notional":round(projected,8),"cap_usd":float(cap_usd),"allowed":projected <= float(cap_usd)+1e-9,"members":members}
+        if risk_group(getattr(p, "symbol", "")) != target:
+            continue
+        quantity = float(getattr(p, "quantity", 0) or 0)
+        if math.isfinite(quantity) and quantity == 0:
+            members.append((getattr(p, "symbol", ""), 0.0))
+            continue
+        raw_price = getattr(p, "mark_price", 0)
+        try:
+            price = float(raw_price or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        if not math.isfinite(price) or price <= 0:
+            try:
+                price = float(getattr(p, "average_entry_price", 0) or 0)
+            except (TypeError, ValueError):
+                price = 0.0
+        if not math.isfinite(quantity) or not math.isfinite(price) or price <= 0:
+            # Unknown exposure cannot safely be treated as zero.
+            valuation_complete = False
+            members.append((getattr(p, "symbol", ""), None))
+            continue
+        notional = abs(quantity * price)
+        existing += notional
+        members.append((getattr(p, "symbol", ""), notional))
+    proposed = abs(float(proposed_notional or 0))
+    cap = float(cap_usd)
+    projected = existing + proposed
+    allowed = valuation_complete and projected <= cap + 1e-9
+    return {
+        "group": target,
+        "existing_notional": round(existing, 8),
+        "proposed_notional": round(proposed, 8),
+        "projected_notional": round(projected, 8),
+        "cap_usd": cap,
+        "allowed": allowed,
+        "valuation_complete": valuation_complete,
+        "members": members,
+    }

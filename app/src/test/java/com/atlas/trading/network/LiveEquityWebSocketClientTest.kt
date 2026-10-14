@@ -19,6 +19,28 @@ class LiveEquityWebSocketClientTest {
     }
 
     @Test
+    fun testBuildWebSocketUrlHttpIsRejectedWhenInsecureIsDisallowed() {
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            WebSocketManager.buildWebSocketUrl("http://localhost:8000", allowInsecure = false)
+        }
+        assertTrue(error.message!!.contains("Cleartext WebSocket URLs are forbidden"))
+    }
+
+    @Test
+    fun testBuildWebSocketUrlRawWsIsRejectedWhenInsecureIsDisallowed() {
+        assertThrows(IllegalArgumentException::class.java) {
+            WebSocketManager.buildWebSocketUrl("ws://localhost:8000", allowInsecure = false)
+        }
+    }
+
+    @Test
+    fun testBuildWebSocketUrlUnsupportedSchemeIsRejected() {
+        assertThrows(IllegalArgumentException::class.java) {
+            WebSocketManager.buildWebSocketUrl("ftp://example.invalid", allowInsecure = false)
+        }
+    }
+
+    @Test
     fun testBuildWebSocketUrlPreservesExistingWsPath() {
         val result = WebSocketManager.buildWebSocketUrl("wss://ais-dev.run.app/ws/equity")
         assertEquals("wss://ais-dev.run.app/ws/equity", result)

@@ -173,18 +173,18 @@ class Settings(BaseSettings):
     ai_gateway_model: str = ""
     gemini_api_key: str = ""
     # gemini-2.5-* is scheduled to shut down in Oct 2026 (Google lists 16 and 20 Oct in different places); verify IDs with scripts/check_ai_models.py.
-    gemini_model: str = "gemini-3.5-flash"
-    gemini_strategy_model: str = "gemini-3.5-flash"
+    gemini_model: str = "gemini-3.5-flash-lite"
+    gemini_strategy_model: str = "gemini-3.5-flash-lite"
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-20b"
     groq_strategy_model: str = "openai/gpt-oss-20b"
     groq_max_completion_tokens: int = 2048
     # Optional third-party fallback. Keep the key in Secret Manager/environment only.
     cerebras_api_key: str = ""
-    cerebras_model: str = "llama3.1-8b"
+    cerebras_model: str = "gpt-oss-120b"
 
     # Withdrawal approval/execution controls. Fund release is fail-closed unless explicitly configured.
-    withdrawals_enabled: bool = True
+    withdrawals_enabled: bool = False
     withdrawal_dual_approval: bool = True
     # A payout left in SUBMITTING longer than this with no provider id may be resolved via mark-not-sent
     # (still dual-control + provider recovery). Shorter windows risk racing an in-flight send.

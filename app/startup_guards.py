@@ -52,8 +52,9 @@ async def assert_database_role_compatible_with_rls_lockdown() -> None:
     try:
         async with engine.connect() as conn:
             result = await conn.execute(text(
-                "SELECT current_user AS role_name, r.rolsuper AS is_superuser, "
-                "r.rolbypassrls AS bypass_rls, "
+                "SELECT current_user AS role_name, session_user AS login_role, r.rolsuper AS is_superuser, "
+                "r.rolbypassrls AS bypass_rls, r.rolcreaterole AS can_create_roles, "
+                "r.rolcreatedb AS can_create_databases, r.rolreplication AS can_replicate, "
                 "(SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace "
                 " WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')) AS public_table_count, "
                 "(SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace "
@@ -61,15 +62,18 @@ async def assert_database_role_compatible_with_rls_lockdown() -> None:
                 " AS tables_without_rls, "
                 "(NOT has_schema_privilege('anon', 'public', 'USAGE') "
                 " AND NOT has_schema_privilege('authenticated', 'public', 'USAGE')) "
-                " AS api_schema_access_blocked, NOT EXISTS ("
-                "SELECT 1 FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace "
-                "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') "
-                "AND (NOT c.relrowsecurity OR c.relowner <> r.oid OR c.relforcerowsecurity)"
-                ") AS owns_all_rls_tables FROM pg_roles AS r WHERE r.rolname = current_user"
+                " AS api_schema_access_blocked, "
+                "(SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace "
+                " WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relowner = r.oid) "
+                " AS owned_public_table_count, "
+                "(SELECT count(*) FROM pg_auth_members AS membership WHERE membership.member = r.oid) "
+                "AS role_membership_count FROM pg_roles AS r WHERE r.rolname = current_user"
             ))
             row = result.mappings().one_or_none()
         if row is None:
             raise RuntimeError("Unable to identify the current PostgreSQL application role")
+        if str(row["login_role"]) != str(row["role_name"]):
+            raise RuntimeError("Database login role differs from current role; SET ROLE is not allowed for Atlas runtime")
         if not bool(row["api_schema_access_blocked"]):
             raise RuntimeError(
                 "Public schema is still accessible to anon/authenticated; "
@@ -79,8 +83,14 @@ async def assert_database_role_compatible_with_rls_lockdown() -> None:
             int(row["public_table_count"]), int(row["tables_without_rls"])
         )
         require_rls_bypass_role(
-            str(row["role_name"]), bool(row["is_superuser"]), bool(row["bypass_rls"]),
-            bool(row["owns_all_rls_tables"])
+            str(row["role_name"]),
+            bool(row["is_superuser"]),
+            bool(row["bypass_rls"]),
+            owned_public_table_count=int(row["owned_public_table_count"]),
+            can_create_roles=bool(row["can_create_roles"]),
+            can_create_databases=bool(row["can_create_databases"]),
+            can_replicate=bool(row["can_replicate"]),
+            role_membership_count=int(row["role_membership_count"]),
         )
     except RuntimeError:
         raise

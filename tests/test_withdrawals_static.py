@@ -38,7 +38,7 @@ def test_release_requires_stored_proposal_digest():
     main = Path("app/main.py").read_text()
     block = main[main.index('async def release_withdrawal'):main.index('@app.post("/api/admin/withdrawals/{withdrawal_id}/proposal")')]
     assert 'if not w.proposal_digest:' in block
-    assert 'hmac.compare_digest(w.proposal_digest, expected_digest)' in block
+    assert '_constant_time_text_equal(w.proposal_digest, expected_digest)' in block
 
 
 def test_model_path_sanitizes_all_user_controlled_components():
@@ -128,5 +128,5 @@ def test_mark_not_sent_binds_authenticated_operator_and_enforces_separation():
     end = main.index('@app.post("/api/admin/withdrawals/{withdrawal_id}/reject")', start)
     block = main[start:end]
     assert 'authenticated_operator = str(claims.get("sub") or claims.get("user_id") or "").strip()' in block
-    assert 'hmac.compare_digest(authenticated_operator, str(req.operator_id or "").strip())' in block
+    assert '_constant_time_text_equal(authenticated_operator, str(req.operator_id or "").strip())' in block
     assert "release_separation_violation(req.operator_id, x_release_token, [w.first_approved_by, w.second_approved_by])" in block

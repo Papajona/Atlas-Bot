@@ -70,5 +70,5 @@ def test_binance_user_stream_has_heartbeat_reconnect_and_reconciliation():
 def test_model_integrity_is_runtime_fail_closed():
     src = (ROOT / "app/model_registry.py").read_text()
     assert "verify_artifact_signature" in src
-    assert "model_integrity_required_for_live" in src
+    assert 'settings.environment in {"staging", "production"}' in src
     assert "return False" in src
