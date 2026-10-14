@@ -202,7 +202,7 @@ jobs:
               print("BLOCKED: read-only database identity query failed; database output withheld")
               sys.exit(1)
           fields = p.stdout.strip().split("|")
-          if len(fields) != 16:
+          if len(fields) != 17:
               raise SystemExit("BLOCKED: unexpected identity query output")
           (db, role, login_role, revision, table_count, unprotected_count, is_superuser,
            can_create_roles, can_create_databases, can_replicate, bypass_rls, can_login,
