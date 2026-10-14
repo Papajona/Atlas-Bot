@@ -99,6 +99,42 @@ def test_ai_walk_forward_does_not_forward_fill_between_oos_windows():
     assert np.isfinite(out["sharpe"])
 
 
+def test_ai_walk_forward_aggregate_metrics_only_use_held_out_bars(monkeypatch):
+    from app import trading_core
+
+    captured = {}
+    original_cost_report = trading_core.cost_breakeven_report
+
+    def cost_report_spy(returns_gross, turnover, **kwargs):
+        captured["cost_return_count"] = len(returns_gross)
+        captured["cost_turnover_count"] = len(turnover)
+        captured["fixed_cost_count"] = len(kwargs.get("fixed_cost_drag", []))
+        return original_cost_report(returns_gross, turnover, **kwargs)
+
+    def dsr_spy(net_returns, trial_sharpes_annual, bars_per_year):
+        captured["dsr_return_count"] = len(net_returns)
+        return {"status": "MISSING_TRIAL_HISTORY"}
+
+    monkeypatch.setattr(trading_core, "cost_breakeven_report", cost_report_spy)
+    monkeypatch.setattr(trading_core, "_research_trial_dsr_report", dsr_spy)
+
+    frame = sample_df(1800)
+    result = trading_core.ai_walk_forward_backtest(
+        frame, asset="crypto", folds=4, min_train=500
+    )
+    expected_oos = sum(int(fold["test_bars"]) for fold in result["folds"])
+    assert len(result["folds"]) == 4
+    assert result["oos_bars"] == expected_oos
+    assert 0 < expected_oos < result["bars"]
+    assert captured == {
+        "cost_return_count": expected_oos,
+        "cost_turnover_count": expected_oos,
+        "fixed_cost_count": expected_oos,
+        "dsr_return_count": expected_oos,
+    }
+    assert result["research_trial_history_status"] == "MISSING_TRIAL_HISTORY"
+
+
 def test_adaptive_policy_object_is_explicit_and_fail_closed():
     from app.adaptive_bot import AdaptiveModelPolicy
     p = AdaptiveModelPolicy()
