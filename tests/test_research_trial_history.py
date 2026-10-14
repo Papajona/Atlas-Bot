@@ -35,18 +35,23 @@ def make_archive_manifest(provenance, experiment_id, variants, log_bytes=b"compl
 
 
 def write_experiment_archive(path, manifest):
+    import json
     from zipfile import ZipFile
 
+    serializable = {
+        key: value for key, value in manifest.items() if not key.startswith("_")
+    }
+    serializable["variants"] = [
+        {key: value for key, value in variant.items() if not key.startswith("_")}
+        for variant in manifest["variants"]
+    ]
     with ZipFile(path, "w") as stream:
-        stream.writestr("atlas_trial_manifest.json", __import__("json").dumps({
-            key: value for key, value in manifest.items() if not key.startswith("_")
-        }))
+        stream.writestr("atlas_trial_manifest.json", json.dumps(serializable))
         stream.writestr(manifest["experiment_log_path"], manifest["_log_bytes"])
         for variant in manifest["variants"]:
-            content = variant.pop("_evidence_bytes", None)
-            if content is not None:
-                stream.writestr(variant["evidence_path"], content)
-                variant["_evidence_bytes"] = content
+            evidence_bytes = variant.get("_evidence_bytes")
+            if evidence_bytes is not None:
+                stream.writestr(variant["evidence_path"], evidence_bytes)
 
 
 def fake_provenance():
