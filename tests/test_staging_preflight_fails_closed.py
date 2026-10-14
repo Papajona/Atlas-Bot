@@ -24,7 +24,7 @@ def test_staging_preflight_rejects_the_production_project_as_staging():
     )
     assert "ATLAS_PRODUCTION_SUPABASE_PROJECT_REF" in workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' in workflow
-    assert "gcloud run services describe" in workflow
+    assert '"gcloud", "run", "services", "describe"' in workflow
 
 
 def test_staging_preflight_decodes_percent_encoded_database_credentials():
