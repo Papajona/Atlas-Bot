@@ -8,6 +8,7 @@ from sqlalchemy import select
 from .config import settings
 from .db import AppState, CustomerLedgerAccount, Incident, Wallet
 from .custody_locations import fresh_external_assets
+from .tron_reconciliation import parse_tron_usdt_balance
 
 USDT = "USDT"
 TRON = "TRON"
@@ -80,20 +81,10 @@ async def _address_balance(client: httpx.AsyncClient, address: str) -> Decimal:
         },
     )
     response.raise_for_status()
-    data = response.json().get("data", [])
-    token = next(
-        (
-            item for item in data
-            if str((item.get("token_info") or {}).get("address") or "").lower()
-            == str(settings.usdt_tron_usdt_contract).lower()
-        ),
-        None,
-    )
-    if not token:
-        return D("0")
-    raw = D(str(token.get("balance") or "0"))
-    decimals = int((token.get("token_info") or {}).get("decimals") or 6)
-    return raw / (D("10") ** decimals)
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("TRON provider returned a malformed JSON balance response")
+    return parse_tron_usdt_balance(payload.get("data"), settings.usdt_tron_usdt_contract)
 
 
 async def reconcile_usdt_custody(db) -> dict:
