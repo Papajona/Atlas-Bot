@@ -59,7 +59,11 @@ def test_all_strategy_research_and_ai_review():
         "row_count": len(df),
         "sha256": "0" * 64,
     }
-    out = backtest_all_strategies(df, include_ai=False)
+    # A persisted label is not a historical Sharpe distribution: the DSR gate must
+    # remain closed until trusted prior-trial outcomes on a comparable OOS sample exist.
+    out = backtest_all_strategies(df, include_ai=False, prior_trial_labels={"prior-variant@sha256:trusted-config"})
+    assert out["validation"]["trial_registry_complete"] is False
+    assert out["validation"]["deflated_sharpe"]["status"] == "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY"
     assert out["strategy_count"] == 5
     assert set(out["research_order"]) == {"trend", "momentum", "breakout", "mean_reversion", "ensemble"}
     review = ai_market_review(out)
