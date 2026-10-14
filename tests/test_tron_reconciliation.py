@@ -26,6 +26,12 @@ def test_large_raw_balance_is_scaled_without_decimal_context_rounding():
     assert parse_tron_usdt_balance([record(raw)], CONTRACT) == expected
 
 
+@pytest.mark.parametrize("raw", ["1" * 79, str(2**256)])
+def test_raw_balance_outside_uint256_range_is_rejected(raw):
+    with pytest.raises(ValueError, match="uint256"):
+        parse_tron_usdt_balance([record(raw)], CONTRACT)
+
+
 def test_absent_configured_contract_is_missing_evidence_not_zero():
     with pytest.raises(ValueError, match="missing the configured USDT contract"):
         parse_tron_usdt_balance([record(address="different-contract")], CONTRACT)
