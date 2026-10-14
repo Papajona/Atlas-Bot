@@ -1,8 +1,52 @@
 from __future__ import annotations
 
+import hashlib
 import numpy as np
 
 import app.trading_core as trading_core
+
+
+def make_archive_variant(variant_id, sharpe, evidence_path, evidence_bytes):
+    return {
+        "variant_id": variant_id,
+        "annualized_sharpe": sharpe,
+        "evidence_path": evidence_path,
+        "evidence_sha256": hashlib.sha256(evidence_bytes).hexdigest(),
+    }
+
+
+def make_archive_manifest(provenance, experiment_id, variants, log_bytes=b"complete experiment log"):
+    return {
+        "schema_version": 1,
+        "complete": True,
+        "all_variants_included": True,
+        "experiment_id": experiment_id,
+        "dataset_raw_response_sha256": provenance["raw_response_sha256"],
+        "dataset_csv_sha256": provenance["normalized_csv_sha256"],
+        "instrument": provenance["instrument"],
+        "granularity": provenance["granularity"],
+        "request_parameters": provenance["request_parameters"],
+        "evaluation_assumptions": provenance["evaluation_assumptions"],
+        "experiment_log_path": "logs/experiment.log",
+        "experiment_log_sha256": hashlib.sha256(log_bytes).hexdigest(),
+        "variants": variants,
+        "_log_bytes": log_bytes,
+    }
+
+
+def write_experiment_archive(path, manifest):
+    from zipfile import ZipFile
+
+    with ZipFile(path, "w") as stream:
+        stream.writestr("atlas_trial_manifest.json", __import__("json").dumps({
+            key: value for key, value in manifest.items() if not key.startswith("_")
+        }))
+        stream.writestr(manifest["experiment_log_path"], manifest["_log_bytes"])
+        for variant in manifest["variants"]:
+            content = variant.pop("_evidence_bytes", None)
+            if content is not None:
+                stream.writestr(variant["evidence_path"], content)
+                variant["_evidence_bytes"] = content
 
 
 def fake_provenance():
