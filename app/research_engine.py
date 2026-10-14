@@ -219,6 +219,27 @@ def _rank_for_research(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=lambda x: x["research_score"], reverse=True)
 
 
+def _rank_by_oos(rows: list[dict], oos_by_strategy: dict[str, dict]) -> list[dict]:
+    """Order measured OOS results first; place missing/invalid OOS results last."""
+    def key(row: dict) -> tuple[bool, float, float]:
+        metrics = oos_by_strategy.get(str(row.get("strategy") or ""), {})
+        valid = metrics.get("status") == "OK"
+        def finite_or_negative_infinity(value) -> float:
+            try:
+                number = float(value)
+                return number if np.isfinite(number) else float("-inf")
+            except (TypeError, ValueError, OverflowError):
+                return float("-inf")
+        if not valid:
+            return (False, float("-inf"), float("-inf"))
+        return (
+            True,
+            finite_or_negative_infinity(metrics.get("oos_total_return")),
+            finite_or_negative_infinity(metrics.get("sharpe")),
+        )
+    return sorted(rows, key=key, reverse=True)
+
+
 def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                             taker_bps: float = 5.5, slippage_bps: float = 2.0,
                             include_ai: bool = True, asset: str = "crypto",
@@ -352,25 +373,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         except Exception as exc:
             ai_result = {"strategy": "ai_walk_forward", "status": "INSUFFICIENT_DATA", "error": str(exc)}
     in_sample_ranked = _rank_for_research(results.copy())
-    # Headline order is based on held-out measurements. Strategies with no valid OOS
-    # evaluation are placed after measured strategies and can never become the summary top.
-    def _oos_key(row):
-        metrics = per_strategy_oos.get(str(row.get("strategy") or ""), {})
-        valid = metrics.get("status") == "OK"
-        try:
-            oos_return = float(metrics.get("oos_total_return"))
-            if not np.isfinite(oos_return):
-                oos_return = float("-inf")
-        except (TypeError, ValueError):
-            oos_return = float("-inf")
-        try:
-            oos_sharpe = float(metrics.get("sharpe"))
-            if not np.isfinite(oos_sharpe):
-                oos_sharpe = float("-inf")
-        except (TypeError, ValueError):
-            oos_sharpe = float("-inf")
-        return (valid, oos_return if valid else float("-inf"), oos_sharpe if valid else float("-inf"))
-    oos_ranked = sorted(results, key=_oos_key, reverse=True)
+    # Headline order is based on held-out metrics; invalid OOS results always rank last.
+    oos_ranked = _rank_by_oos(results.copy(), per_strategy_oos)
     return {
         "research_version": "3.10.3-validation-v2",
         "data_quality": data_quality,
