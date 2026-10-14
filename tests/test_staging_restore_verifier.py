@@ -4,7 +4,7 @@ from scripts.verify_staging_restore import read_database_uri, truthy
 
 
 STAGING = "abcdefghijklmnopqrst"
-PRODUCTION = "uvwxyzabcdefghijkl"
+PRODUCTION = "uvwxyzabcdefghijklmn"
 
 
 def url(project):
