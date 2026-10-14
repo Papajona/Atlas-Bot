@@ -23,7 +23,7 @@ from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocke
 from fastapi.responses import HTMLResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, desc, or_, func
+from sqlalchemy import select, desc, or_, func, case, cast, Numeric
 from sqlalchemy.exc import IntegrityError
 from .config import settings
 from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
@@ -5638,16 +5638,33 @@ async def reject_withdrawal(withdrawal_id: int, req: WithdrawalDecision, x_admin
 async def withdrawal_summary(x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
+    pending_statuses = ("PENDING", "PARTIALLY_APPROVED")
+    in_flight_statuses = ("SUBMITTING", "SUBMITTED", "UNKNOWN")
+    precise_amount = cast(Withdrawal.amount, Numeric(38, 18))
     async with SessionLocal() as db:
-        rows = (await db.execute(select(Withdrawal))).scalars().all()
-    pending = [r for r in rows if r.status in {"PENDING", "PARTIALLY_APPROVED"}]
+        # Aggregate at the database instead of materializing the entire withdrawal
+        # history into API memory. Numeric casts keep SQL SUM exact until serialization.
+        summary = (await db.execute(select(
+            func.count(case((Withdrawal.status.in_(pending_statuses), 1))).label("pending_count"),
+            func.coalesce(func.sum(case(
+                (Withdrawal.status.in_(pending_statuses), precise_amount), else_=None
+            )), Decimal("0")).label("pending_amount"),
+            func.count(case((Withdrawal.status == "APPROVED", 1))).label("approved_count"),
+            func.coalesce(func.sum(case(
+                (Withdrawal.status == "APPROVED", precise_amount), else_=None
+            )), Decimal("0")).label("approved_amount"),
+            func.count(case((Withdrawal.status.in_(in_flight_statuses), 1))).label("in_flight_count"),
+            func.count(case((Withdrawal.status == "REJECTED", 1))).label("rejected_count"),
+        ))).one()
     return {
-        "pending_count": len(pending),
-        "pending_amount": sum(r.amount for r in pending),
-        "approved_count": sum(r.status == "APPROVED" for r in rows),
-        "approved_amount": sum(r.amount for r in rows if r.status == "APPROVED"),
-        "in_flight_count": sum(r.status in {"SUBMITTING", "SUBMITTED", "UNKNOWN"} for r in rows),
-        "rejected_count": sum(r.status == "REJECTED" for r in rows),
+        "pending_count": int(summary.pending_count),
+        "pending_amount": float(summary.pending_amount),
+        "pending_amount_exact": format(Decimal(str(summary.pending_amount)), "f"),
+        "approved_count": int(summary.approved_count),
+        "approved_amount": float(summary.approved_amount),
+        "approved_amount_exact": format(Decimal(str(summary.approved_amount)), "f"),
+        "in_flight_count": int(summary.in_flight_count),
+        "rejected_count": int(summary.rejected_count),
         "requires_dual_approval": settings.withdrawal_dual_approval,
     }
 
