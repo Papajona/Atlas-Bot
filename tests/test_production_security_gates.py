@@ -302,6 +302,19 @@ def test_staging_preflight_runtime_role_is_non_owner_and_non_admin():
     assert 'role_membership_count=int(row["role_membership_count"])' in guard
 
 
+def test_production_deploy_checks_database_role_before_any_deployment():
+    workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+    check_start = workflow.index("Verify production database runtime role before deployment")
+    deploy_start = workflow.index("Deploy immutable API release", check_start)
+    block = workflow[check_start:deploy_start]
+    assert 'gcloud secrets versions access "$SECRET_DATABASE_VERSION"' in block
+    assert "default_transaction_read_only=on" in block
+    assert "current_database(), current_user, session_user" in block
+    assert "pg_auth_members" in block
+    assert "BLOCKED: production runtime cannot use a reserved" in block
+    assert "BLOCKED: production runtime role must own no public tables and inherit no other roles" in block
+    assert "DATABASE_URL" not in block.replace("DATABASE_URL is not a valid PostgreSQL URI", "")
+
 def test_production_deploy_requires_staging_identity_preflight():
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
     assert 'require_success "staging-identity-preflight.yml" "Supabase staging identity preflight"' in workflow
