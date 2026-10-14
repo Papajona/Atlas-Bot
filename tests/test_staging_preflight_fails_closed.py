@@ -10,7 +10,7 @@ def test_staging_identity_preflight_fails_closed_on_rls_migration_blockers():
     )
     assert 'role in {"postgres", "service_role", "supabase_admin", "supabase_auth_admin", "authenticator", "anon", "authenticated"}' in workflow
     assert 'role has administrative privileges' in workflow
-    assert 'if bypass_rls.lower() != "true"' in workflow
+    assert "if not is_true(bypass_rls)" in workflow
     assert 'if int(owned_count) > 0' in workflow
     assert "role_membership_count" in workflow
     assert "runtime DB role inherits other PostgreSQL roles" in workflow
