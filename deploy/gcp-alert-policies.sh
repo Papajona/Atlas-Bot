@@ -12,6 +12,9 @@ set -euo pipefail
 [[ "$NOTIFICATION_CHANNEL_ID" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "ERROR: provide the notification channel ID, not an arbitrary resource path" >&2; exit 2; }
 
 gcloud config set project "$GCP_PROJECT_ID" >/dev/null
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
 CHANNEL="projects/$GCP_PROJECT_ID/notificationChannels/$NOTIFICATION_CHANNEL_ID"
 if ! gcloud monitoring channels describe "$NOTIFICATION_CHANNEL_ID" --project="$GCP_PROJECT_ID" --format='value(name)' | grep -Fxq "$CHANNEL"; then
   echo "ERROR: notification channel does not exist in the configured GCP project." >&2
@@ -25,29 +28,26 @@ for METRIC in \
   run.googleapis.com/request_latencies \
   run.googleapis.com/container/cpu/utilizations \
   run.googleapis.com/container/memory/utilizations; do
-  gcloud monitoring metrics descriptors describe "$METRIC" --project="$GCP_PROJECT_ID" --format=json > "/tmp/atlas-metric-descriptor.json" || {
+  gcloud monitoring metrics-descriptors describe "$METRIC" --project="$GCP_PROJECT_ID" --format=json > "$WORK/atlas-metric-descriptor.json" || {
     echo "ERROR: Cloud Monitoring metric descriptor is unavailable: $METRIC" >&2
     exit 2
   }
 done
-gcloud monitoring metrics descriptors describe run.googleapis.com/request_count --project="$GCP_PROJECT_ID" --format=json > "/tmp/atlas-request-count-descriptor.json"
-gcloud monitoring metrics descriptors describe run.googleapis.com/request_latencies --project="$GCP_PROJECT_ID" --format=json > "/tmp/atlas-request-latencies-descriptor.json"
+gcloud monitoring metrics-descriptors describe run.googleapis.com/request_count --project="$GCP_PROJECT_ID" --format=json > "$WORK/atlas-request-count-descriptor.json"
+gcloud monitoring metrics-descriptors describe run.googleapis.com/request_latencies --project="$GCP_PROJECT_ID" --format=json > "$WORK/atlas-request-latencies-descriptor.json"
 python - <<'PY'
 import json
 from pathlib import Path
-request = json.loads(Path("/tmp/atlas-request-count-descriptor.json").read_text(encoding="utf-8"))
+request = json.loads(Path(os.environ["WORK"]) / "atlas-request-count-descriptor.json".read_text(encoding="utf-8"))
 labels = {str(item.get("key", "")) for item in request.get("labels", [])}
 if "response_code_class" not in labels:
     raise SystemExit("ERROR: request_count metric has no response_code_class label; revise the alert filter for this project's metric schema")
-latency = json.loads(Path("/tmp/atlas-request-latencies-descriptor.json").read_text(encoding="utf-8"))
+latency = json.loads(Path(os.environ["WORK"]) / "atlas-request-latencies-descriptor.json".read_text(encoding="utf-8"))
 unit = str(latency.get("unit", "")).lower()
 if not unit.startswith("ms"):
     raise SystemExit(f"ERROR: request latency unit is not milliseconds (observed unit={unit!r}); do not apply the 2000 ms threshold")
 PY
-rm -f /tmp/atlas-metric-descriptor.json /tmp/atlas-request-count-descriptor.json /tmp/atlas-request-latencies-descriptor.json
 
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
 export CHANNEL GCP_PROJECT_ID GCP_REGION CLOUD_RUN_SERVICE WORK
 
 python - <<'PY'
@@ -137,8 +137,16 @@ for FILE in "$WORK"/policy-*.json; do
 import json
 import sys
 policies = json.load(open(sys.argv[1], encoding="utf-8"))
-name = next((p.get("name", "") for p in policies if p.get("displayName") == sys.argv[2]), "")
-print(name)
+matches = [p for p in policies if p.get("displayName") == sys.argv[2]]
+if len(matches) > 1:
+    raise SystemExit("ERROR: duplicate Monitoring policy display names; resolve them manually")
+if not matches:
+    print("")
+else:
+    policy = matches[0]
+    if (policy.get("userLabels") or {}).get("managed_by") != "atlas-audit-hardening":
+        raise SystemExit("ERROR: existing policy has this display name but is not managed by this script; rename or review it manually")
+    print(policy.get("name", ""))
 PY
 )"
   if [[ -n "$POLICY_NAME" ]]; then
