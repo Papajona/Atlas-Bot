@@ -58,6 +58,20 @@ def load_json(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path} must contain a JSON object")
     return value
 
+def finite_json(value: Any) -> Any:
+    """Convert NumPy scalars and non-finite floats into strict JSON-safe primitives."""
+    import numpy as np
+
+    if isinstance(value, dict):
+        return {str(key): finite_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [finite_json(item) for item in value]
+    if isinstance(value, np.generic):
+        return finite_json(value.item())
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
 
 def verify_reference_identity(dataset_dir: Path, reference_path: Path, expected_rows: int) -> dict[str, Any]:
     actual_path = dataset_dir / "manifest.json"
@@ -226,7 +240,7 @@ def main() -> int:
     try:
         report = evaluate(args)
         output = Path(args.output)
-        output.write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
+        output.write_text(json.dumps(finite_json(report), indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
         print(json.dumps({
             "result": report["result"],
             "promotion_authorized": report["promotion_authorized"],
