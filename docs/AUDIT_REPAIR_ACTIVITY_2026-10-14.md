@@ -47,3 +47,26 @@ This PR is not a production-release approval. Keep it unmerged until the latest 
 
 ## Labeling threshold clarification — 2026-10-14
 The timeout dead-zone threshold has been aligned from `0.25 * v[i]` to `0.5 * v[i]`, following the explicit example in the uploaded deep audit. A new test distinguishes the two thresholds using a terminal return of +0.4% when volatility is 1%. This patch requires exact-head CI verification. Retraining and chronological out-of-sample evaluation against the original dataset remain outstanding until its instrument, granularity, fixed request window and SHA-256 provenance can be verified.
+
+
+## Follow-up verification — 2026-10-14 (exact PR head review)
+
+Repository: `Papajona/Atlas-Bot`; PR #114 remains open and unmerged.
+
+### CI evidence inspected
+- Atlas CI run `38535096347`: passed. Python job completed its full test suite with **863 passed, 16 deselected**; its separately required Postgres-marked suite reported **16 passed, 863 deselected**. The optional OANDA practice connectivity step was skipped because its credentials are optional.
+- PostgreSQL ledger concurrency run `38535096171`: passed.
+- Production Verification Gate run `38535096201`: passed, including disposable least-privilege runtime-role fixture and safe-mode regression checks. This is CI evidence, not proof that the connected staging deployment uses that role.
+- Android release workflow run `38535096245`: overall workflow concluded success, but its `android-release` signing job was **skipped** and the run has **no artifacts**. The debug build passed; no signed APK/certificate/SHA-256 evidence exists for this run.
+- CI completed the disposable PostgreSQL backup/restore smoke test, migration from the pre-lockdown fixture through public-schema lockdown, runtime lockdown checks, migration graph round-trip, and TRON/provider reconciliation regression tests. These are isolated regression tests, not a real production backup restore or live-chain/provider reconciliation drill.
+
+### Labeling and chronological evaluation
+- The timeout-label patch is present in `app/trading_core.py`: when a complete holding window ends without barrier touches, it labels by terminal return with a half-volatility dead zone; incomplete future windows remain unlabeled.
+- Unit tests for timeout direction/dead-zone behavior and missing-class log-loss alignment are present and included in the passing Python suite.
+- **Actual retraining and chronological out-of-sample evaluation remain blocked**: the original 1,799-row OANDA dataset and its instrument/granularity/timestamp/hash provenance are not present in the accessible repository. No trained artifact or out-of-sample performance claim is made.
+
+### Live connected Supabase role check (read-only)
+The connected project query returned `postgres` and `service_role`, but no `atlas_runtime`, `atlas_backend`, or `atlas_app` role. `postgres` owns all 57 public tables and has administrative privileges. `service_role` has `BYPASSRLS` and owns no public tables, but it is a reserved Supabase role and must not be treated as the application's dedicated runtime role. Therefore live staging identity/database-access verification is **not passed**.
+
+### Release decision
+Keep PR #114 unmerged. The remaining external prerequisites are: provision the dedicated staging runtime identity and protected staging configuration; execute the main-only staging identity preflight in the protected environment; run a successful protected Android signing job on an approved main commit and retain its APK evidence; and provide the original dataset with verifiable provenance before retraining and chronological out-of-sample evaluation. No production data was modified by this verification pass.
