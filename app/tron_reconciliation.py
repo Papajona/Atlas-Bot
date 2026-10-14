@@ -1,18 +1,24 @@
 """Exact-decimal parsing for TRON TRC-20 token balance reconciliation."""
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
+import re
+from decimal import Decimal
 from typing import Any
 
 
-def parse_tron_usdt_balance(data: Any, contract_address: str) -> Decimal:
-    """Return the exact USDT token balance; malformed provider evidence fails closed.
+_RAW_BALANCE_RE = re.compile(r"^[0-9]+$")
 
-    The configured Tron USDT contract is expected to use six decimals. A missing token
-    row is a zero balance, but malformed rows, duplicate matches, absent decimals, a
-    different decimal scale, and invalid/negative raw balances are not zero balances.
+
+def parse_tron_usdt_balance(data: Any, contract_address: str) -> Decimal:
+    """Return exact USDT balance or reject missing/malformed provider evidence.
+
+    TRON contract addresses are Base58Check strings and must be compared exactly;
+    they are not case-insensitive identifiers. A valid zero must be explicit in a
+    matching token record. An absent contract record is missing provider evidence,
+    not proof of a zero balance. The configured USDT contract must report integer
+    metadata `decimals == 6`, and the raw on-chain balance must be an integer value.
     """
-    contract = str(contract_address or "").strip().lower()
+    contract = str(contract_address or "").strip()
     if not contract:
         raise ValueError("Configured USDT contract address is empty")
     if not isinstance(data, list):
@@ -25,23 +31,38 @@ def parse_tron_usdt_balance(data: Any, contract_address: str) -> Decimal:
         info = item.get("token_info")
         if not isinstance(info, dict):
             raise ValueError("TRON provider token record has invalid token_info")
-        if str(info.get("address") or "").strip().lower() == contract:
+        address = info.get("address")
+        if not isinstance(address, str) or not address.strip():
+            raise ValueError("TRON provider token record is missing a valid contract address")
+        if address.strip() == contract:
             matches.append(item)
 
     if not matches:
-        return Decimal("0")
+        raise ValueError("TRON provider response is missing the configured USDT contract balance metadata")
     if len(matches) != 1:
         raise ValueError("TRON provider returned duplicate records for the configured USDT contract")
 
     token = matches[0]
     info = token["token_info"]
-    try:
-        decimals = int(info["decimals"])
-        raw_balance = Decimal(str(token["balance"]))
-    except (KeyError, TypeError, ValueError, InvalidOperation, OverflowError) as exc:
-        raise ValueError("TRON provider returned missing or invalid USDT balance/decimal metadata") from exc
-    if decimals != 6:
-        raise ValueError("TRON USDT contract returned unexpected decimals; expected exactly 6")
+    decimals_value = info.get("decimals")
+    if type(decimals_value) is not int or decimals_value != 6:
+        raise ValueError("TRON USDT contract must report integer decimals metadata equal to exactly 6")
+
+    raw_value = token.get("balance")
+    if isinstance(raw_value, str):
+        raw_text = raw_value.strip()
+        if not _RAW_BALANCE_RE.fullmatch(raw_text):
+            raise ValueError("TRON provider returned missing or invalid integer USDT raw-balance metadata")
+        raw_balance = Decimal(raw_text)
+    elif type(raw_value) is int:
+        if raw_value < 0:
+            raise ValueError("TRON provider returned a negative USDT raw balance")
+        raw_balance = Decimal(raw_value)
+    else:
+        # Reject floats (which may already have lost integer precision), booleans,
+        # fractional amounts, and unexpected provider JSON types.
+        raise ValueError("TRON provider returned missing or invalid integer USDT raw-balance metadata")
+
     if not raw_balance.is_finite() or raw_balance < 0:
         raise ValueError("TRON provider returned non-finite or negative USDT balance")
-    return raw_balance / (Decimal(10) ** decimals)
+    return raw_balance / Decimal(10 ** decimals_value)
