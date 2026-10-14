@@ -8,7 +8,7 @@ import pandas as pd
 from .strategy_engine import StrategyConfig, strategy_signals, risk_scaled_position, next_open_returns
 from .trading_core import ai_walk_forward_backtest
 from .strategy_evidence import evidence_for
-from .research_validation import monte_carlo_bootstrap, parameter_plateau_score, deflated_sharpe_report, cost_breakeven_report
+from .research_validation import monte_carlo_bootstrap, parameter_plateau_score, cost_breakeven_report
 from .trading_core import PROFILES
 from .config import settings
 from .research_validation import (validate_ohlcv_frame, bootstrap_mean_ci,
@@ -19,6 +19,101 @@ from .research_validation import (validate_ohlcv_frame, bootstrap_mean_ci,
 
 def _safe(x: float, default: float = 0.0) -> float:
     return float(x) if np.isfinite(x) else default
+
+
+
+def _apply_protective_halts(
+    position: pd.Series,
+    bar_returns: pd.Series,
+    *,
+    cost_rate: float,
+    drawdown_limit: float,
+    daily_loss_limit: float,
+    loss_event_threshold: int,
+    cooldown_bars: int,
+    loss_lookback_bars: int = 24,
+) -> tuple[pd.Series, pd.Series, dict]:
+    """Apply risk halts to the same net returns used for reported performance.
+
+    A halted position is flat, but closing/re-entry turnover costs remain in the
+    portfolio equity curve. Loss events are recorded only on bars where a
+    protected position was actually active, so losses from hypothetical trades
+    during a halt cannot perpetually extend the halt.
+    """
+    positions = position.fillna(0.0).astype(float)
+    returns = bar_returns.reindex(positions.index).fillna(0.0).astype(float)
+    active_positions: list[float] = []
+    net_returns: list[float] = []
+    equity = 1.0
+    peak = 1.0
+    day_start = 1.0
+    current_day = None
+    halted_until = -1
+    hard_halt = False
+    halted_bars = 0
+    loss_event_times: list[int] = []
+    previous_position = 0.0
+
+    for i, gross_return in enumerate(returns.to_numpy(dtype=float)):
+        ts = positions.index[i]
+        day = ts.date() if hasattr(ts, "date") else None
+        if day != current_day:
+            current_day = day
+            day_start = equity
+
+        is_halted = hard_halt or i <= halted_until
+        active_position = 0.0 if is_halted else float(positions.iloc[i])
+        if is_halted:
+            halted_bars += 1
+
+        # This is the one authoritative net return stream. In particular, a
+        # transition into a halt pays the turnover cost to flatten exposure.
+        step_return = active_position * float(gross_return)
+        step_return -= abs(active_position - previous_position) * float(cost_rate)
+        # The equity model has limited liability; keep its arithmetic consistent
+        # with the per-period compounding used by the reported metrics.
+        step_return = max(-1.0, step_return)
+        equity = max(0.0, equity * (1.0 + step_return))
+        peak = max(peak, equity)
+        drawdown = 1.0 - (equity / peak if peak else 0.0)
+        daily_loss = 1.0 - (equity / day_start if day_start else 0.0)
+
+        active_positions.append(active_position)
+        net_returns.append(step_return)
+
+        # Only actual market-loss bars while exposed count as loss events. Entry
+        # fees alone are not stop-loss events, and losses during a halt are not fills.
+        new_loss_event = active_position != 0.0 and (active_position * float(gross_return)) < 0.0
+        if new_loss_event:
+            loss_event_times.append(i)
+        cutoff = i - max(1, int(loss_lookback_bars))
+        loss_event_times = [event_i for event_i in loss_event_times if event_i >= cutoff]
+
+        # A cluster cooldown is triggered only when a new real loss event reaches
+        # the threshold. Otherwise old losses would repeatedly re-trigger the same
+        # cooldown on every post-halt bar even when no new loss occurred.
+        loss_cluster_trigger = (
+            new_loss_event
+            and int(loss_event_threshold) > 0
+            and len(loss_event_times) >= int(loss_event_threshold)
+        )
+        # Drawdown/daily-loss limits latch until operator reset; only a stop-loss
+        # cluster is a timed cooldown. Re-evaluating a breached hard limit as a
+        # fresh cooldown on every flat bar would silently keep extending it.
+        if drawdown >= float(drawdown_limit) or daily_loss >= float(daily_loss_limit):
+            hard_halt = True
+        elif not is_halted and loss_cluster_trigger:
+            halted_until = max(halted_until, i + max(0, int(cooldown_bars)))
+        previous_position = active_position
+
+    protected_position = pd.Series(active_positions, index=positions.index, dtype=float)
+    protected_net = pd.Series(net_returns, index=positions.index, dtype=float)
+    return protected_position, protected_net, {
+        "final_equity": equity,
+        "halted_bars": halted_bars,
+        "active_bars": int((protected_position != 0.0).sum()),
+        "loss_events": len(loss_event_times),
+    }
 
 
 def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, taker_bps: float, slippage_bps: float, asset: str = "crypto") -> dict:
@@ -34,52 +129,22 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
     vol = s["realized_vol"]
     lev = (cfg.target_vol_annual / vol.replace(0, np.nan)).clip(upper=cfg.max_leverage)
     pos = (raw * lev).clip(-cfg.max_leverage, cfg.max_leverage).shift(1).fillna(0.0)
-    ret = next_open_returns(df) - 1.0
-    turnover = pos.diff().abs().fillna(pos.abs())
-    costs = turnover * ((taker_bps + slippage_bps) / 10_000.0)
-    net = pos * ret - costs
-
-    equity = 1.0
-    peak = 1.0
-    day_start = 1.0
-    current_day = None
-    halted_until = -1
-    loss_event_times: list[int] = []
-    equity_curve = []
-    protected_pos = []
-    for i, value in enumerate(net.to_numpy(dtype=float)):
-        ts = df.index[i]
-        day = ts.date() if hasattr(ts, "date") else None
-        if day != current_day:
-            current_day = day
-            day_start = equity
-        if i <= halted_until:
-            effective = 0.0
-        else:
-            effective = float(value)
-        equity = max(0.0, equity * (1.0 + effective))
-        peak = max(peak, equity)
-        dd = 1.0 - (equity / peak if peak else 0.0)
-        daily_loss = 1.0 - (equity / day_start if day_start else 0.0)
-        protected_pos.append(0.0 if i <= halted_until else float(pos.iloc[i]))
-        equity_curve.append(equity)
-
-        # Approximate a stop-loss event from a negative active-bar return. This
-        # is intentionally conservative; execution-level backtests remain the
-        # authoritative place for exact stop ordering.
-        if pos.iloc[i] != 0 and value < 0:
-            loss_event_times.append(i)
-        cutoff = i - 24
-        loss_event_times = [x for x in loss_event_times if x >= cutoff]
-        if (dd >= settings.strategy_drawdown_halt or daily_loss >= settings.strategy_daily_loss_halt or len(loss_event_times) >= settings.strategy_stoploss_guard_trades):
-            halted_until = max(halted_until, i + settings.strategy_stoploss_guard_bars)
-
-    protected = pd.Series(protected_pos, index=df.index)
-    turnover_protected = protected.diff().abs().fillna(protected.abs())
-    active = protected != 0
+    ret = (next_open_returns(df) - 1.0).fillna(0.0)
     ann = float(s.attrs.get("annualization_factor", 252.0))
-    protected_net = protected * ret - turnover_protected * ((taker_bps + slippage_bps) / 10_000.0)
+    protected, protected_net, protection_audit = _apply_protective_halts(
+        pos,
+        ret,
+        cost_rate=(taker_bps + slippage_bps) / 10_000.0,
+        drawdown_limit=settings.strategy_drawdown_halt,
+        daily_loss_limit=settings.strategy_daily_loss_halt,
+        loss_event_threshold=settings.strategy_stoploss_guard_trades,
+        cooldown_bars=settings.strategy_stoploss_guard_bars,
+    )
+    active = protected != 0
     protected_equity = (1.0 + protected_net).cumprod()
+    reported_equity = float(protected_equity.iloc[-1]) if len(protected_equity) else 1.0
+    if not math.isclose(reported_equity, float(protection_audit["final_equity"]), rel_tol=1e-10, abs_tol=1e-12):
+        raise RuntimeError("Research risk-control equity differs from the reported protected return curve")
     protected_peak = protected_equity.cummax()
     protected_dd = protected_equity / protected_peak - 1.0
     std = float(protected_net.std())
@@ -94,6 +159,8 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
         "hit_rate": _safe((protected_net[active] > 0).mean()) if bool(active.any()) else 0.0,
         "average_leverage": _safe(protected.abs().mean()),
         "max_leverage": _safe(protected.abs().max()),
+        "protected_active_bars": protection_audit["active_bars"],
+        "risk_halted_bars": protection_audit["halted_bars"],
         "transaction_cost_bps": float(taker_bps + slippage_bps),
         "annualization_factor": ann,
         "risk_protections": {
@@ -186,13 +253,33 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # Persistent trial accounting: count DISTINCT configurations ever evaluated (label = strategy/variant + config fingerprint), not runs.
     # Re-running the same configs on one more day of data is not a new trial; changing any parameter or adding a strategy is.
     import hashlib
-    fp = hashlib.sha1(json.dumps(getattr(cfg, "__dict__", {}), default=str, sort_keys=True).encode(), usedforsecurity=False).hexdigest()[:8]
+    # Use a full SHA-256 fingerprint so config variants cannot silently collide
+    # because a short fingerprint was truncated to only 32 bits.
+    fp = hashlib.sha256(json.dumps(asdict(cfg), default=str, sort_keys=True).encode()).hexdigest()
     this_labels = {f"{r.get('strategy')}@{fp}" for r in results} | {f"variant:{v['multiplier']}@{fp}" for v in variants}
     if include_ai:
         this_labels.add(f"ai@{fp}")
-    n_trials = len(set(prior_trial_labels or ()) | this_labels)
-    trial_sharpes = [r.get("sharpe", 0.0) for r in results] + [v["sharpe"] for v in variants]
-    dsr = deflated_sharpe_report(net_ensemble, trial_sharpes, n_trials, PROFILES.get(asset, PROFILES["crypto"]).bars_per_year)
+    # A set of trial labels proves only that configurations were named in prior runs.
+    # It does not provide the historical trial Sharpe distribution evaluated on the
+    # same OOS observations, which DSR needs to correct selection bias. Never promote
+    # from labels/counts alone; the trusted research archive and its comparable trial
+    # outcomes must be restored and verified first.
+    known_prior_labels = set(prior_trial_labels or ())
+    n_trials = len(known_prior_labels | this_labels)
+    trial_registry_complete = False
+    dsr = {
+        "status": "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
+        "observations": int(np.isfinite(np.asarray(net_ensemble, dtype=float)).sum()),
+        "trial_count_current_run": len(this_labels),
+        "known_prior_trial_label_count": len(known_prior_labels),
+        "trial_count_known_lower_bound": n_trials,
+        "note": (
+            "Prior trial labels do not contain historical Sharpe outcomes measured on "
+            "the same OOS sample; a complete trusted experiment archive and chronological "
+            "re-evaluation are required before promotion-grade DSR can be computed."
+        ),
+    }
+    oos["trial_registry_complete"] = trial_registry_complete
     if dsr.get("status") == "OK":
         oos["deflated_sharpe"] = dsr["deflated_sharpe_ratio"]
     cost_mult = float(getattr(settings, "research_cost_stress_multiplier", 2.0))
@@ -206,9 +293,22 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         sig = strategy_signals(df, cfg, asset=asset)[component].fillna(0.0)
         component_pos = sig.shift(1).fillna(0.0)
         net_c = (component_pos * (next_open_returns(df) - 1.0) - component_pos.diff().abs().fillna(component_pos.abs()) * ((taker_bps + slippage_bps) / 10000.0)).to_numpy()
-        comp_dsr = deflated_sharpe_report(net_c, trial_sharpes, n_trials, ann_bars)
+        # Component Sharpe values cannot be deflated from prior labels alone either.
+        comp_dsr = {
+            "status": "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
+            "observations": int(np.isfinite(net_c).sum()),
+            "trial_count_current_run": len(this_labels),
+            "known_prior_trial_label_count": len(known_prior_labels),
+            "trial_count_known_lower_bound": n_trials,
+            "note": (
+                "Prior trial labels do not contain historical Sharpe outcomes measured on "
+                "the same OOS sample; trusted trial-performance evidence and chronological "
+                "re-evaluation are required before promotion-grade DSR can be computed."
+            ),
+        }
         comp_cost = cost_breakeven_report((component_pos * (next_open_returns(df) - 1.0)).to_numpy(), component_pos.diff().abs().fillna(component_pos.abs()).to_numpy(),
                                           taker_bps=taker_bps, slippage_bps=slippage_bps, bars_per_year=ann_bars, stress_multiplier=cost_mult)
+        per_strategy_oos[component]["trial_registry_complete"] = trial_registry_complete
         per_strategy_oos[component]["cost_stress_ok"] = bool(comp_cost.get("stress_ok"))
         per_strategy_oos[component]["cost_analysis"] = comp_cost
         per_strategy_oos[component]["deflated_sharpe_detail"] = comp_dsr
@@ -231,6 +331,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "multiple_testing_sharpe_proxy": adjusted,
                         "deflated_sharpe": dsr,
                         "trial_labels": sorted(this_labels),
+                        "trial_registry_complete": trial_registry_complete,
+                        "trial_registry_status": "COMPLETE" if trial_registry_complete else "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
                         "cumulative_trials": n_trials,
                         "cost_analysis": ens_cost,
                         "fixed_signal_oos": oos,

@@ -22,14 +22,15 @@ def _db(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, 'app_encryption_keys_json', '', raising=False)
     monkeypatch.setattr(settings, 'app_encryption_active_key_id', 'v1', raising=False)
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'risk.db'}")
-    async def init():
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-    asyncio.run(init())
     maker = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(execution, 'SessionLocal', maker)
     monkeypatch.setattr(incidents, 'SessionLocal', maker)
     return engine, maker
+
+async def _init(engine):
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
 
 async def _seed(maker, **kw):
     values = dict(cash_equity=1000.0, equity=1000.0, peak_equity=1000.0, daily_start_equity=1000.0, live_enabled=True, mode='LIVE', kill_switch=False)
@@ -48,11 +49,20 @@ def test_h2_loss_limit_uses_synced_app_state_and_calls_stop(tmp_path, monkeypatc
         return None
     monkeypatch.setattr(execution, 'emergency_stop', stop)
     monkeypatch.setattr(execution, 'audit', audit)
+    # This regression targets risk-state synchronization and the stop trigger.
+    # Incident persistence is covered independently; isolate it to avoid adding
+    # a second SQLite session to this focused loss-limit test.
+    async def incident(*args, **kwargs):
+        return None
+    monkeypatch.setattr(execution, 'open_incident', incident)
     async def run():
-        await _seed(maker, equity=960.0, peak_equity=1000.0, daily_start_equity=1000.0)
-        out = await execution.enforce_platform_loss_limits()
-        await engine.dispose()
-        return out
+        try:
+            await _init(engine)
+            await _seed(maker, equity=960.0, peak_equity=1000.0, daily_start_equity=1000.0)
+            return await execution.enforce_platform_loss_limits()
+        finally:
+            # Always close the SQLite async pool, including when setup or stop fails.
+            await engine.dispose()
     out = asyncio.run(run())
     assert out['status'] == 'KILLED'
     assert len(calls) == 1
@@ -73,6 +83,7 @@ def test_h1_spot_residual_exposure_fails_broker_confirmation(tmp_path, monkeypat
     monkeypatch.setattr(execution, '_wait_for_live_submission_barrier', barrier)
     monkeypatch.setattr(execution, 'audit', audit)
     async def run():
+        await _init(engine)
         await _seed(maker)
         out = await execution.emergency_stop('binance')
         await engine.dispose()
@@ -91,6 +102,7 @@ def test_h1_barrier_failure_also_fails_confirmation(tmp_path, monkeypatch):
     monkeypatch.setattr(execution, '_wait_for_live_submission_barrier', barrier)
     monkeypatch.setattr(execution, 'audit', audit)
     async def run():
+        await _init(engine)
         await _seed(maker)
         out = await execution.emergency_stop(None)
         await engine.dispose()
@@ -112,6 +124,7 @@ def test_alert_webhook_never_sends_incident_detail(tmp_path, monkeypatch):
     monkeypatch.setattr(httpx, 'AsyncClient', Client)
     monkeypatch.setattr(settings, 'alert_webhook_url', 'https://hooks.example.invalid/x', raising=False)
     async def run():
+        await _init(engine)
         await incidents.open_incident(key='A1', severity='HIGH', category='TEST', summary='safe summary', detail={'secret':'do-not-send'})
         await incidents.open_incident(key='A1', severity='HIGH', category='TEST', summary='safe summary', detail={'secret':'do-not-send'})
         await incidents.open_incident(key='A1', severity='CRITICAL', category='TEST', summary='escalated', detail={'secret':'do-not-send'})

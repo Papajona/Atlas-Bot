@@ -28,8 +28,9 @@ def test_append_audit_refreshes_state_loaded_before_the_lock(tmp_path):
             second = await append_audit(b, event="E2", detail={}, actor_id="t")
             third = await append_audit(a, event="E3", detail={}, actor_id="t")
             assert third.previous_hash == second.event_hash
-            rows = (await S().execute(select(AuditLog).order_by(AuditLog.id))).scalars().all()
-            assert all(y.previous_hash == x.event_hash for x, y in zip(rows, rows[1:]))
+            async with S() as reader:
+                rows = (await reader.execute(select(AuditLog).order_by(AuditLog.id))).scalars().all()
+                assert all(y.previous_hash == x.event_hash for x, y in zip(rows, rows[1:]))
             assert held is not None
         finally:
             await a.close()

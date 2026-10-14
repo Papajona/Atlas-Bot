@@ -47,10 +47,22 @@ def test_meta_label_walk_forward_insufficient_data_is_safe():
 # Arbitrage cumulative sizing
 # ---------------------------------------------------------------------------
 
-def test_compounded_stake_grows_with_positive_cumulative_edge():
+def test_compounded_stake_grows_only_on_haircut_positive_cumulative_edge():
     rec = compounded_stake(100.0, cumulative_realized_pct=40.0, absolute_cap=1000.0)
-    assert rec.stake > 100.0
-    assert rec.rationale == "growth_from_cumulative_simulated_edge"
+    assert rec.stake == 106.0  # 40% simulated cumulative edge x 50% growth x 30% haircut
+    assert rec.rationale == "growth_from_haircut_simulated_edge"
+
+
+def test_compounded_stake_haircut_is_bounded_and_zero_haircut_disables_growth():
+    base = compounded_stake(100.0, cumulative_realized_pct=40.0, absolute_cap=1000.0,
+                            paper_edge_haircut=0.0)
+    capped = compounded_stake(100.0, cumulative_realized_pct=40.0, absolute_cap=1000.0,
+                              paper_edge_haircut=10.0)
+    full = compounded_stake(100.0, cumulative_realized_pct=40.0, absolute_cap=1000.0,
+                            paper_edge_haircut=1.0)
+    assert base.stake == 100.0
+    assert capped.stake == full.stake
+    assert full.stake == 120.0
 
 
 def test_compounded_stake_never_exceeds_absolute_cap_or_growth_multiple():

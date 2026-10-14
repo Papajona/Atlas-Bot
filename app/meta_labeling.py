@@ -38,7 +38,7 @@ def meta_label_walk_forward(df: pd.DataFrame, *, horizon: int = 3, min_edge_bps:
         te_full = splits[i]
         te = te_full[embargo:] if embargo and len(te_full) > embargo else te_full[len(te_full):]
         if len(tr)<100 or len(te)==0 or y.iloc[tr].nunique()<2: continue
-        model=make_pipeline(StandardScaler(),LogisticRegression(max_iter=500,class_weight="balanced",random_state=7))
+        model=make_pipeline(StandardScaler(),LogisticRegression(solver="liblinear", max_iter=500, class_weight="balanced", random_state=7))
         model.fit(X.iloc[tr],y.iloc[tr])
         p=model.predict_proba(X.iloc[te])[:,1]
         probs.extend(p.tolist())
@@ -47,7 +47,7 @@ def meta_label_walk_forward(df: pd.DataFrame, *, horizon: int = 3, min_edge_bps:
     # horizon bars behind the current bar, so using X.iloc[-1] here would make
     # the live gate stale. The current feature vector is never used as a training
     # label because its future outcome does not yet exist.
-    latest_model=make_pipeline(StandardScaler(),LogisticRegression(max_iter=500,class_weight="balanced",random_state=7))
+    latest_model=make_pipeline(StandardScaler(),LogisticRegression(solver="liblinear", max_iter=500, class_weight="balanced", random_state=7))
     latest_model.fit(X,y)
     current_sig = strategy_signals(df)[META_FEATURES].replace([np.inf,-np.inf],np.nan)
     current = current_sig.iloc[[-1]]

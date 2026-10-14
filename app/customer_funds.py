@@ -426,7 +426,7 @@ async def settle_withdrawal(db, customer_id: int, amount: float, *, reference_id
     return fresh_ledger
 
 async def customer_balance(db, customer_id: int, currency: str = USDT, *, lock: bool = False) -> dict:
-    """Read customer balances without locking on normal dashboard reads."""
+    """Read ledger balances while retaining exact wire values alongside legacy numeric values."""
     ledger = None
     if not lock:
         ledger = (await db.execute(select(CustomerLedgerAccount).where(
@@ -435,9 +435,63 @@ async def customer_balance(db, customer_id: int, currency: str = USDT, *, lock: 
         ))).scalar_one_or_none()
     if ledger is None:
         ledger = await get_or_create_ledger(db, customer_id, currency)
-    return {"available": float(ledger.available), "trading_reserved": float(ledger.trading_reserved),
-            "withdrawal_reserved": float(ledger.withdrawal_reserved),
-            "total": float(D(str(ledger.available)) + D(str(ledger.trading_reserved)) + D(str(ledger.withdrawal_reserved)))}
+
+    available = D(str(ledger.available))
+    trading_reserved = D(str(ledger.trading_reserved))
+    withdrawal_reserved = D(str(ledger.withdrawal_reserved))
+    total = available + trading_reserved + withdrawal_reserved
+    # Keep numeric aliases for in-process risk calculations. Public API handlers
+    # must use customer_balance_api(), which emits the exact Decimal strings.
+    return {
+        "available": float(available),
+        "trading_reserved": float(trading_reserved),
+        "withdrawal_reserved": float(withdrawal_reserved),
+        "total": float(total),
+        "available_exact": format(available, "f"),
+        "trading_reserved_exact": format(trading_reserved, "f"),
+        "withdrawal_reserved_exact": format(withdrawal_reserved, "f"),
+        "total_exact": format(total, "f"),
+    }
+
+
+def customer_balance_api(balance: dict) -> dict[str, str | int]:
+    """Serialize customer ledger balances as exact decimal strings and integer micro-USDT.
+
+    In-process risk code uses customer_balance(); this API serializer never emits a
+    binary float for the authoritative ledger buckets. UI clients may parse the decimal
+    strings for display but must use strings/minor units for comparisons and round-trips.
+    """
+    available = D(str(balance.get("available_exact", balance["available"])))
+    trading_reserved = D(str(balance.get("trading_reserved_exact", balance["trading_reserved"])))
+    withdrawal_reserved = D(str(balance.get("withdrawal_reserved_exact", balance["withdrawal_reserved"])))
+    total = D(str(balance.get("total_exact", balance["total"])))
+    scale = Decimal("1000000")  # ledger Numeric(38, 6) precision
+    locked = trading_reserved + withdrawal_reserved
+    available_text = format(available, "f")
+    trading_text = format(trading_reserved, "f")
+    withdrawal_text = format(withdrawal_reserved, "f")
+    total_text = format(total, "f")
+    locked_text = format(locked, "f")
+    return {
+        # Primary public amount fields are exact decimal strings, not JSON floats.
+        "available": available_text,
+        "trading_reserved": trading_text,
+        "withdrawal_reserved": withdrawal_text,
+        "total": total_text,
+        "locked": locked_text,
+        # Explicitly named aliases remain for client migrations and reconciliation.
+        "available_exact": available_text,
+        "trading_reserved_exact": trading_text,
+        "withdrawal_reserved_exact": withdrawal_text,
+        "total_exact": total_text,
+        "locked_exact": locked_text,
+        "available_minor_units": int(available * scale),
+        "trading_reserved_minor_units": int(trading_reserved * scale),
+        "withdrawal_reserved_minor_units": int(withdrawal_reserved * scale),
+        "total_minor_units": int(total * scale),
+        "locked_minor_units": int(locked * scale),
+        "minor_units_scale": 1_000_000,
+    }
 
 
 DEFICIT_ACCOUNT = "ASSET:RECEIVABLE:CUSTOMER_DEFICIT"
@@ -593,10 +647,19 @@ async def ledger_statement(db, customer_id: int, currency: str = USDT, limit: in
         LedgerJournalLine, LedgerJournalLine.journal_id == LedgerJournal.id
     ).where(LedgerJournalLine.customer_id == customer_id, LedgerJournal.currency == currency)
       .order_by(LedgerJournal.created_at.desc(), LedgerJournalLine.line_no).limit(limit))).all()
-    return [{"journal_id": j.id, "entry_type": j.entry_type, "reference_type": j.reference_type,
-             "reference_id": j.reference_id, "account_code": line.account_code,
-             "debit": float(line.debit), "credit": float(line.credit),
-             "created_at": j.created_at.isoformat() if j.created_at else None} for j, line in rows]
+    return [{
+        "journal_id": j.id, "entry_type": j.entry_type, "reference_type": j.reference_type,
+        "reference_id": j.reference_id, "account_code": line.account_code,
+        # Ledger statement amounts are serialized as exact decimal strings, never floats.
+        "debit": format(D(str(line.debit)), "f"),
+        "credit": format(D(str(line.credit)), "f"),
+        "debit_exact": format(D(str(line.debit)), "f"),
+        "credit_exact": format(D(str(line.credit)), "f"),
+        "debit_minor_units": int(D(str(line.debit)) * Decimal("1000000")),
+        "credit_minor_units": int(D(str(line.credit)) * Decimal("1000000")),
+        "minor_units_scale": 1_000_000,
+        "created_at": j.created_at.isoformat() if j.created_at else None,
+    } for j, line in rows]
 
 
 async def _invariant_snapshot(db, tol: Decimal):

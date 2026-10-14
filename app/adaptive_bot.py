@@ -19,8 +19,8 @@ import numpy as np
 class AdaptiveModelPolicy:
     max_age_hours: float = 24.0
     min_sharpe: float = 0.50
-    max_drawdown: float = -0.25
-    min_trades: int = 20
+    max_drawdown: float = -0.20
+    min_trades: int = 100
     min_total_return: float = 0.0
     max_champion_sharpe_drop: float = 0.10
     max_champion_drawdown_worsening: float = 0.05
@@ -35,7 +35,7 @@ class AdaptiveModelPolicy:
     # keeping daily retraining -- that trade-off (promotion latency vs. adaptation speed)
     # is a product decision, not something to hardcode here.
     consecutive_passes_required: int = 2
-    research_min_deflated_sharpe: float = 0.0
+    research_min_deflated_sharpe: float = 0.95
     research_require_cost_stress: bool = True
     research_cost_stress_multiplier: float = 2.0
 
@@ -276,13 +276,16 @@ def ensure_adaptive_model(
     )
     oos_gate = oos_promotion_gate(
         wfo,
-        min_dsr=policy.research_min_deflated_sharpe,
-        require_cost_stress=policy.research_require_cost_stress,
+        min_dsr=max(float(policy.research_min_deflated_sharpe), 0.95),
+        require_cost_stress=True,
         min_folds=5,
         min_total_return=policy.min_total_return,
         min_positive_fold_ratio=0.50,
         max_negative_fold_return=-0.20,
-        require_last_fold_positive=True
+        require_last_fold_positive=True,
+        min_sharpe=max(float(policy.min_sharpe), 0.5),
+        max_drawdown=max(float(policy.max_drawdown), -0.20),
+        min_trades=max(int(policy.min_trades), 100),
     )
     absolute_pass = (
         wfo.get("sharpe", 0.0) >= policy.min_sharpe

@@ -1869,6 +1869,10 @@ async def enforce_platform_loss_limits() -> dict[str, Any]:
         daily_start = float(s.daily_start_equity or equity)
         dd = 1 - (equity / peak) if peak else 0.0
         daily_loss = 1 - (equity / daily_start) if daily_start else 0.0
+        # _get_state_locked() applies a UTC daily-boundary reset to AppState. Commit
+        # that baseline explicitly and finish the transaction before incident delivery
+        # or broker-stop calls; do not leave a pooled DB connection checked out.
+        await db.commit()
     if not (dd >= settings.max_drawdown or daily_loss >= settings.daily_loss_limit):
         return {"status": "WITHIN_LIMITS", "drawdown": dd, "daily_loss": daily_loss}
     await open_incident(

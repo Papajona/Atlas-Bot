@@ -313,7 +313,7 @@ def test_release_withdrawal_route_contains_separation_gate():
 
 
 def test_release_route_binds_operator_identity_over_http(monkeypatch):
-    from fastapi.testclient import TestClient
+    import httpx
 
     async def fake_auth(*args, **kwargs):
         return {"sub": "authenticated-operator", "role": "TREASURY"}
@@ -327,14 +327,18 @@ def test_release_route_binds_operator_identity_over_http(monkeypatch):
     monkeypatch.setattr(settings, "payout_live_enabled", True)
     monkeypatch.setattr(settings, "withdrawal_release_tokens", "operator-1:operator-secret")
 
-    client = TestClient(main.app)
-    response = client.post(
-        "/api/admin/withdrawals/1/release",
-        json={"operator_id": "operator-1", "signature": None},
-        headers={"X-Admin-Token": "admin", "X-Release-Token": "operator-secret"},
-    )
-    assert response.status_code == 403
-    assert "identity" in response.json()["detail"].lower()
+    async def run():
+        transport = httpx.ASGITransport(app=main.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/admin/withdrawals/1/release",
+                json={"operator_id": "operator-1", "signature": None},
+                headers={"X-Admin-Token": "admin", "X-Release-Token": "operator-secret"},
+            )
+        assert response.status_code == 403
+        assert "identity" in response.json()["detail"].lower()
+
+    asyncio.run(run())
 
 
 def test_mark_not_sent_rejects_provider_recovery_result_without_transaction_id(monkeypatch):

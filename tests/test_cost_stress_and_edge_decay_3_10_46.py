@@ -38,14 +38,28 @@ def test_insufficient_data_is_not_a_pass():
 
 
 def _oos(**extra):
-    return {"status": "OK", "folds": [{"total_return": 0.02}] * 6, "oos_total_return": 0.12, **extra}
+    return {
+        "status": "OK",
+        "folds": [{"total_return": 0.02}] * 6,
+        "oos_total_return": 0.12,
+        "sharpe": 0.8,
+        "max_drawdown": -0.10,
+        "trades": 150,
+        "deflated_sharpe": 0.97,
+        "cost_stress_ok": True,
+        "trial_registry_complete": True,
+        **extra,
+    }
 
 
-def test_gate_cost_stress_off_by_default_and_fails_closed_when_required():
+def test_gate_is_strict_by_default_and_fails_closed_without_evidence():
     assert oos_promotion_gate(_oos())["passed"] is True
-    assert oos_promotion_gate(_oos(), require_cost_stress=True)["passed"] is False                 # no evidence -> no promotion
-    assert oos_promotion_gate(_oos(cost_stress_ok=False), require_cost_stress=True)["passed"] is False
-    assert oos_promotion_gate(_oos(cost_stress_ok=True), require_cost_stress=True)["passed"] is True
+    assert oos_promotion_gate(_oos(cost_stress_ok=None))["passed"] is False
+    assert oos_promotion_gate(_oos(cost_stress_ok=False))["passed"] is False
+    assert oos_promotion_gate(_oos(trial_registry_complete=False))["passed"] is False
+    assert oos_promotion_gate(_oos(deflated_sharpe=0.94))["passed"] is False
+    assert oos_promotion_gate(_oos(trades=99))["passed"] is False
+    assert oos_promotion_gate(_oos(max_drawdown=-0.21))["passed"] is False
 
 
 def test_edge_decay_detects_a_vanished_edge_but_not_noise():

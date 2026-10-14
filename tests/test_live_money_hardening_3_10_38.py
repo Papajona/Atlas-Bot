@@ -7,10 +7,21 @@ os.environ.setdefault('APP_ENCRYPTION_KEY','')
 
 def test_oos_promotion_gate_rejects_weak_last_fold_and_tail_loss():
     from app.research_validation import oos_promotion_gate
-    good={'status':'OK','oos_total_return':0.20,'folds':[{'total_return':0.03},{'total_return':0.02},{'total_return':0.01},{'total_return':0.04},{'total_return':0.02}]}
-    assert oos_promotion_gate(good,min_folds=5,min_total_return=0,min_positive_fold_ratio=.5,max_negative_fold_return=-.2,require_last_fold_positive=True)['passed']
-    bad={'status':'OK','oos_total_return':0.20,'folds':[{'total_return':0.03},{'total_return':0.02},{'total_return':-0.25},{'total_return':0.04},{'total_return':-0.01}]}
-    assert not oos_promotion_gate(bad,min_folds=5,min_total_return=0,min_positive_fold_ratio=.5,max_negative_fold_return=-.2,require_last_fold_positive=True)['passed']
+    metrics = {
+        'status': 'OK', 'oos_total_return': 0.20, 'sharpe': 0.8,
+        'max_drawdown': -0.10, 'trades': 150, 'deflated_sharpe': 0.97,
+        'cost_stress_ok': True, 'trial_registry_complete': True,
+    }
+    good = {**metrics, 'folds': [{'total_return': 0.03}, {'total_return': 0.02},
+                                 {'total_return': 0.01}, {'total_return': 0.04},
+                                 {'total_return': 0.02}]}
+    assert oos_promotion_gate(good, min_folds=5, min_total_return=0, min_positive_fold_ratio=.5,
+                              max_negative_fold_return=-.2, require_last_fold_positive=True)['passed']
+    bad = {**metrics, 'folds': [{'total_return': 0.03}, {'total_return': 0.02},
+                                {'total_return': -0.25}, {'total_return': 0.04},
+                                {'total_return': -0.01}]}
+    assert not oos_promotion_gate(bad, min_folds=5, min_total_return=0, min_positive_fold_ratio=.5,
+                                  max_negative_fold_return=-.2, require_last_fold_positive=True)['passed']
 
 
 def test_monte_carlo_requires_real_sample():
