@@ -1,0 +1,67 @@
+"""Regression tests for audit findings fixed in the October 2026 repair branch."""
+import hashlib
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+
+def test_constant_time_text_comparison_handles_non_ascii_values():
+    from app.main import _constant_time_text_equal
+    assert _constant_time_text_equal("valid-signature", "valid-signature") is True
+    assert _constant_time_text_equal("sig-nature", "sig-ñature") is False
+    assert _constant_time_text_equal(None, "") is True
+
+
+def test_correlation_cap_uses_average_entry_when_mark_is_unavailable():
+    from app.correlation_risk import adjusted_group_exposure
+    position = SimpleNamespace(
+        symbol="BTC", quantity=1.0, mark_price=0.0, average_entry_price=60_000.0
+    )
+    result = adjusted_group_exposure(
+        [position], proposed_symbol="BTC", proposed_notional=40_000, cap_usd=50_000
+    )
+    assert result["existing_notional"] == 60_000.0
+    assert result["projected_notional"] == 100_000.0
+    assert result["allowed"] is False
+
+
+def test_unvalued_correlated_position_fails_closed():
+    from app.correlation_risk import adjusted_group_exposure
+    position = SimpleNamespace(
+        symbol="BTC", quantity=1.0, mark_price=0.0, average_entry_price=float("nan")
+    )
+    result = adjusted_group_exposure(
+        [position], proposed_symbol="BTC", proposed_notional=1, cap_usd=50_000
+    )
+    assert result["valuation_complete"] is False
+    assert result["allowed"] is False
+    json.dumps(result, allow_nan=False)
+
+
+def test_staging_and_production_model_integrity_cannot_be_disabled(tmp_path, monkeypatch):
+    import app.trading_core as core
+    artifact = tmp_path / "bad-model.joblib"
+    artifact.write_bytes(b"not-a-model")
+    meta = {
+        "model_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        "manifest_signature": "",
+    }
+    artifact.with_suffix(artifact.suffix + ".meta.json").write_text(json.dumps(meta))
+    monkeypatch.setattr(core.settings, "environment", "production")
+    monkeypatch.setattr(core.settings, "model_integrity_required_for_live", False)
+    monkeypatch.setattr(core.settings, "model_signing_public_key", "")
+    monkeypatch.setattr(core.settings, "model_signing_key", "")
+    with pytest.raises(RuntimeError, match="signature is required"):
+        core.load_model(str(artifact))
+
+
+def test_withdrawal_destination_whitelist_is_fail_closed(monkeypatch):
+    from app import withdrawal_security as security
+    monkeypatch.setattr(security.settings, "environment", "staging")
+    monkeypatch.setattr(security.settings, "withdrawal_whitelist_enabled", False)
+    monkeypatch.setattr(security.settings, "withdrawal_destination_fingerprints", "")
+    assert security.destination_allowed("TExampleAddress", "USDT", "TRON") is False
+    monkeypatch.setattr(security.settings, "withdrawal_whitelist_enabled", True)
+    assert security.destination_allowed("TExampleAddress", "USDT", "TRON") is False
