@@ -3,6 +3,7 @@ import logging
 
 import asyncio
 import json
+import math
 from typing import Any
 
 import httpx
@@ -162,6 +163,27 @@ async def dual_ai_research_review(research: dict[str, Any], intelligence: dict[s
     }
 
 
+def _validate_trade_safety_payload(value: dict[str, Any]) -> dict[str, Any]:
+    """Reject semantically incomplete model output before it can participate in a safety vote."""
+    if not isinstance(value, dict):
+        raise AIProviderError("Trade-safety response must be a JSON object")
+    if type(value.get("safe")) is not bool:
+        raise AIProviderError("Trade-safety response requires a boolean safe field")
+    confidence = value.get("confidence")
+    if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence)) or not 0.0 <= float(confidence) <= 1.0):
+        raise AIProviderError("Trade-safety response requires finite confidence between 0 and 1")
+    for field in ("reasons", "data_quality_flags"):
+        items = value.get(field)
+        if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
+            raise AIProviderError(f"Trade-safety response requires {field} to be an array of strings")
+    return value
+
+
+async def _validated_trade_safety_call(call) -> dict[str, Any]:
+    return _validate_trade_safety_payload(await call)
+
+
 async def dual_ai_trade_safety_review(trade_packet: dict[str, Any]) -> dict[str, Any]:
     """Dual-provider safety veto for a deterministic trade plan.
 
@@ -181,17 +203,17 @@ async def dual_ai_trade_safety_review(trade_packet: dict[str, Any]) -> dict[str,
     # may substitute only when Gemini is unavailable, and Groq must independently pass.
     if not settings.gemini_api_key and settings.cerebras_api_key:
         primary_name = "cerebras"
-        primary_call = _cerebras_json(prompt)
+        primary_call = _validated_trade_safety_call(_cerebras_json(prompt))
     else:
         primary_name = "gemini"
-        primary_call = _gemini_json(prompt)
+        primary_call = _validated_trade_safety_call(_gemini_json(prompt))
     primary_result, groq_result = await asyncio.gather(
-        primary_call, _groq_json(prompt), return_exceptions=True
+        primary_call, _validated_trade_safety_call(_groq_json(prompt)), return_exceptions=True
     )
     fallback_used = False
     if isinstance(primary_result, Exception) and primary_name == "gemini" and settings.cerebras_api_key:
         try:
-            primary_result = await _cerebras_json(prompt)
+            primary_result = await _validated_trade_safety_call(_cerebras_json(prompt))
             primary_name = "cerebras"
             fallback_used = True
         except Exception as exc:
