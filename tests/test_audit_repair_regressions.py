@@ -1,7 +1,6 @@
 """Regression tests for audit findings fixed in the October 2026 repair branch."""
 import hashlib
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -65,3 +64,39 @@ def test_withdrawal_destination_whitelist_is_fail_closed(monkeypatch):
     assert security.destination_allowed("TExampleAddress", "USDT", "TRON") is False
     monkeypatch.setattr(security.settings, "withdrawal_whitelist_enabled", True)
     assert security.destination_allowed("TExampleAddress", "USDT", "TRON") is False
+
+
+def test_ai_provider_checker_retries_transient_503(monkeypatch):
+    import io
+    import urllib.error
+    import scripts.check_ai_models as checker
+
+    calls = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    def fake_urlopen(request, timeout):
+        calls.append((request.full_url, timeout))
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(
+                request.full_url, 503, "busy", {"Retry-After": "0"},
+                io.BytesIO(b'{"error":{"message":"temporarily busy"}}'),
+            )
+        return Response()
+
+    monkeypatch.setattr(checker.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(checker.time, "sleep", lambda _delay: None)
+    status, body = checker._request_json("https://provider.invalid/models", {}, None)
+    assert status == 200
+    assert body == {"ok": True}
+    assert len(calls) == 2
