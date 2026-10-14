@@ -118,7 +118,7 @@ def test_reconcile_reports_error_not_zero_when_provider_has_no_usdt_metadata(mon
 
     from app import custody_reconciliation
     from app.config import settings
-    from app.db import CustomerLedgerAccount, Incident, Wallet
+    from app.db import AppState, CustomerLedgerAccount, Incident, Wallet
 
     class FakeResult:
         def __init__(self, rows=()):
@@ -133,9 +133,18 @@ def test_reconcile_reports_error_not_zero_when_provider_has_no_usdt_metadata(mon
         def scalar_one_or_none(self):
             return self.rows[0] if self.rows else None
 
+    class FakeState:
+        kill_switch = False
+        live_enabled = True
+
     class FakeDB:
         def __init__(self):
             self.added = []
+            self.state = FakeState()
+
+        async def get(self, model, ident):
+            assert model is AppState and ident == 1
+            return self.state
 
         async def execute(self, statement):
             entity = statement.column_descriptions[0]["entity"]
@@ -177,6 +186,8 @@ def test_reconcile_reports_error_not_zero_when_provider_has_no_usdt_metadata(mon
     report = asyncio.run(custody_reconciliation.reconcile_usdt_custody(db))
 
     assert report["status"] == "ERROR"
+    assert db.state.kill_switch is True
+    assert db.state.live_enabled is False
     assert report["custody_onchain_balance"] is None
     assert report["coverage_gap"] is None
     assert report["solvency_ratio"] is None
