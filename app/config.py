@@ -121,12 +121,12 @@ class Settings(BaseSettings):
     adaptive_ai_enabled: bool = True
     adaptive_retrain_hours: float = 24.0
     adaptive_min_sharpe: float = 0.50
-    adaptive_max_drawdown: float = -0.25
-    adaptive_min_trades: int = 20
+    adaptive_max_drawdown: float = -0.20
+    adaptive_min_trades: int = 100
     adaptive_min_total_return: float = 0.0
     research_min_oos_total_return: float = 0.0
-    # Deflated Sharpe Ratio floor for promotion (0 = off). Recommended 0.95 once you have seen real values on your data.
-    research_min_deflated_sharpe: float = 0.0
+    # Fail-closed DSR floor; production startup additionally rejects values below 0.95.
+    research_min_deflated_sharpe: float = 0.95
     # Promotion requires a positive net edge even when ALL costs are multiplied by this factor (live costs usually exceed backtest assumptions).
     research_require_cost_stress: bool = True
     research_cost_stress_multiplier: float = 2.0
