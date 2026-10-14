@@ -83,10 +83,10 @@ def test_cerebras_can_be_primary_when_gemini_is_not_configured(monkeypatch):
     monkeypatch.setattr(ap.settings, "cerebras_api_key", "configured-cerebras")
 
     async def safe_cerebras(prompt):
-        return {"safe": True, "provider": "cerebras"}
+        return {"safe": True, "confidence": 0.95, "reasons": ["plan consistent"], "data_quality_flags": [], "provider": "cerebras"}
 
     async def safe_groq(prompt):
-        return {"safe": True, "provider": "groq"}
+        return {"safe": True, "confidence": 0.95, "reasons": ["plan consistent"], "data_quality_flags": [], "provider": "groq"}
 
     async def unexpected_gemini(prompt):
         raise AssertionError("Gemini must not be called when its key is absent")
@@ -113,10 +113,10 @@ def test_cerebras_can_substitute_for_exhausted_gemini_but_groq_remains_required(
         raise ap.AIProviderError("Gemini quota exhausted")
 
     async def safe_cerebras(prompt):
-        return {"safe": True, "provider": "cerebras"}
+        return {"safe": True, "confidence": 0.95, "reasons": ["plan consistent"], "data_quality_flags": [], "provider": "cerebras"}
 
     async def safe_groq(prompt):
-        return {"safe": True, "provider": "groq"}
+        return {"safe": True, "confidence": 0.95, "reasons": ["plan consistent"], "data_quality_flags": [], "provider": "groq"}
 
     monkeypatch.setattr(ap, "_gemini_json", fail_gemini)
     monkeypatch.setattr(ap, "_cerebras_json", safe_cerebras)
