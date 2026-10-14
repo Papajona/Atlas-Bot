@@ -8,7 +8,7 @@ import pandas as pd
 from .strategy_engine import StrategyConfig, strategy_signals, risk_scaled_position, next_open_returns
 from .trading_core import ai_walk_forward_backtest
 from .strategy_evidence import evidence_for
-from .research_validation import monte_carlo_bootstrap, parameter_plateau_score, deflated_sharpe_report, cost_breakeven_report
+from .research_validation import monte_carlo_bootstrap, parameter_plateau_score, cost_breakeven_report
 from .trading_core import PROFILES
 from .config import settings
 from .research_validation import (validate_ohlcv_frame, bootstrap_mean_ci,
