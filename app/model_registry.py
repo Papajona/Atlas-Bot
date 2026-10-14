@@ -50,7 +50,7 @@ def verify_model_file(model_path: str | Path, expected_sha256: str, expected_sig
         if required:
             return verify_artifact_signature(digest, required)
         # Production live models require an independent manifest signature.
-        if settings.environment in {"staging", "production"} and settings.model_integrity_required_for_live:
+        if settings.environment in {"staging", "production"}:
             return False
         return True
     except OSError: return False
