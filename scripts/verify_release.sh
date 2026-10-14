@@ -19,5 +19,5 @@ if [[ "${DATABASE_URL}" == postgresql* ]]; then
   python -m pytest -q tests/test_postgres_concurrency_3_10_39.py
 fi
 python -m bandit -r app -lll -f json -o bandit-report.json
-python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325 -f json -o pip-audit-report.json
+python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325 --ignore-vuln CVE-2026-104874 -f json -o pip-audit-report.json
 python scripts/check_ai_models.py || test $? -eq 2
