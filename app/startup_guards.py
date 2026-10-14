@@ -52,7 +52,7 @@ async def assert_database_role_compatible_with_rls_lockdown() -> None:
     try:
         async with engine.connect() as conn:
             result = await conn.execute(text(
-                "SELECT current_user AS role_name, r.rolsuper AS is_superuser, "
+                "SELECT current_user AS role_name, session_user AS login_role, r.rolsuper AS is_superuser, "
                 "r.rolbypassrls AS bypass_rls, r.rolcreaterole AS can_create_roles, "
                 "r.rolcreatedb AS can_create_databases, r.rolreplication AS can_replicate, "
                 "(SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace "
@@ -70,6 +70,8 @@ async def assert_database_role_compatible_with_rls_lockdown() -> None:
             row = result.mappings().one_or_none()
         if row is None:
             raise RuntimeError("Unable to identify the current PostgreSQL application role")
+        if str(row["login_role"]) != str(row["role_name"]):
+            raise RuntimeError("Database login role differs from current role; SET ROLE is not allowed for Atlas runtime")
         if not bool(row["api_schema_access_blocked"]):
             raise RuntimeError(
                 "Public schema is still accessible to anon/authenticated; "
