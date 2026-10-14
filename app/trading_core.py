@@ -117,7 +117,7 @@ def triple_barrier(close: pd.Series, vol: pd.Series, high: pd.Series | None = No
             # A complete holding window elapsed without touching either barrier.
             # Label the timeout by terminal return, with a volatility-scaled dead zone.
             terminal_return = c[end - 1] / c[i] - 1.0
-            dead_zone = 0.25 * v[i]
+            dead_zone = 0.5 * v[i]
             if np.isfinite(terminal_return):
                 y[i] = 1 if terminal_return > dead_zone else (-1 if terminal_return < -dead_zone else 0)
     return pd.Series(y, index=close.index, dtype="float64")
