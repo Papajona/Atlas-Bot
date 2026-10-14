@@ -209,7 +209,7 @@ def test_confirming_pending_funding_posts_exact_matching_amount(monkeypatch):
     from app.db import init_db, SessionLocal, CustomerProfile, Wallet, FundingTransaction
 
     secret = "test-funding-secret"
-    settings.funding_webhook_secret = secret
+    monkeypatch.setattr(settings, "funding_webhook_secret", secret)
     uid = "auth-" + uuid.uuid4().hex
     ref = "ref-" + uuid.uuid4().hex
 
