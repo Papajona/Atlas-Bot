@@ -46,5 +46,54 @@ def test_oos_and_regime_metrics_are_forward_only_and_finite():
     signal = pd.Series(0.5, index=df.index)
     out = fixed_signal_walk_forward_oos(df, signal, costs_bps=7.5, folds=3, min_train=500)
     assert out["status"] == "OK" and out["oos_bars"] > 0
+    assert out["sharpe"] is not None and np.isfinite(out["sharpe"])
+    assert out["max_drawdown"] is not None and np.isfinite(out["max_drawdown"])
+    assert isinstance(out["trades"], int) and out["trades"] >= 0
+    assert out["annualization_factor"] == 252.0
     regimes = regime_conditioned_performance(df, pd.Series(0.001, index=df.index))
     assert regimes and all(np.isfinite(v["total_return"]) for v in regimes.values())
+
+
+def test_oos_gate_reports_missing_metrics_and_never_promotes_them():
+    from app.research_validation import oos_promotion_gate
+
+    strong = {
+        "status": "OK",
+        "folds": [{"total_return": value} for value in (0.03, 0.02, 0.01, 0.04, 0.02, 0.01)],
+        "oos_total_return": 0.12,
+        "sharpe": 0.8,
+        "max_drawdown": -0.10,
+        "trades": 150,
+        "deflated_sharpe": 0.97,
+        "cost_stress_ok": True,
+        "trial_registry_complete": True,
+    }
+    missing_sharpe = dict(strong)
+    missing_sharpe.pop("sharpe")
+    report = oos_promotion_gate(missing_sharpe)
+    assert report["passed"] is False
+    assert "missing_or_below_minimum_oos_sharpe" in report["rejection_reasons"]
+
+    malformed = {**strong, "sharpe": "nan"}
+    report = oos_promotion_gate(malformed)
+    assert report["passed"] is False
+    assert "missing_or_below_minimum_oos_sharpe" in report["rejection_reasons"]
+
+
+def test_oos_gate_names_incomplete_trial_registry_as_a_blocker():
+    from app.research_validation import oos_promotion_gate
+
+    evidence = {
+        "status": "OK",
+        "folds": [{"total_return": 0.03}] * 6,
+        "oos_total_return": 0.18,
+        "sharpe": 1.0,
+        "max_drawdown": -0.05,
+        "trades": 120,
+        "deflated_sharpe": 0.98,
+        "cost_stress_ok": True,
+        "trial_registry_complete": False,
+    }
+    report = oos_promotion_gate(evidence)
+    assert report["passed"] is False
+    assert report["rejection_reasons"] == ["comparable_trial_registry_incomplete"]
