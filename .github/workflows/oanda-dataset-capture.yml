@@ -70,7 +70,7 @@ jobs:
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT }}
+          service_account: ${{ secrets.GCP_STAGING_RESEARCH_SERVICE_ACCOUNT }}
       - name: Set up gcloud for durable dataset archive
         if: always() && vars.ATLAS_OANDA_ARCHIVE_BUCKET != ''
         uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
