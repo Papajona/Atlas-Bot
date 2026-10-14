@@ -1401,16 +1401,23 @@ async def _usdt_tron_monitor_loop():
                                 highest_ts = max(highest_ts, block_ts)
                                 if already_credited:
                                     continue
-                                amount = raw_value / 1_000_000
+                                amount = Decimal(raw_value) / Decimal("1000000")
                                 async with SessionLocal() as db:
                                     existing = (await db.execute(select(FundingTransaction).where(
                                         FundingTransaction.provider == "tron-usdt",
-                                        FundingTransaction.provider_reference == provider_ref))).scalar_one_or_none()
+                                        FundingTransaction.provider_reference == provider_ref
+                                    ).with_for_update())).scalar_one_or_none()
                                     if existing:
                                         continue
-                                    locked_wallet = (await db.execute(select(Wallet).where(Wallet.id == wallet.id).with_for_update())).scalar_one_or_none()
-                                    if not locked_wallet:
-                                        continue
+                                    # Keep the ledger -> wallet -> trading-account lock order used by
+                                    # withdrawals and the generic funding webhook.
+                                    if not settings.funding_manual_review_required:
+                                        await get_or_create_ledger(db, wallet.customer_id, "USDT")
+                                    locked_wallet = (await db.execute(
+                                        select(Wallet).where(Wallet.id == wallet.id).with_for_update()
+                                    )).scalar_one_or_none()
+                                    if not locked_wallet or locked_wallet.customer_id != wallet.customer_id:
+                                        raise RuntimeError("TRON deposit wallet ownership changed during scan")
                                     funding = FundingTransaction(
                                         customer_id=locked_wallet.customer_id, wallet_id=locked_wallet.id,
                                         provider="tron-usdt", provider_reference=provider_ref,
@@ -3252,6 +3259,11 @@ async def funding_webhook(
     if not _funding_signature_valid(raw, x_funding_signature, x_funding_timestamp):
         raise HTTPException(401, "Invalid funding webhook signature")
     payload = FundingWebhook.model_validate(json.loads(raw))
+    funding_amount = Decimal(str(payload.amount))
+    if not funding_amount.is_finite() or funding_amount <= 0:
+        raise HTTPException(422, "Funding amount must be finite and positive")
+    if payload.currency.strip().upper() == "USDT" and funding_amount.as_tuple().exponent < -6:
+        raise HTTPException(422, "USDT funding amount supports at most 6 decimal places")
     async with SessionLocal() as db:
         customer = (await db.execute(select(CustomerProfile).where(CustomerProfile.auth_user_id == payload.customer_auth_user_id)
                                       .with_for_update())).scalar_one_or_none()
@@ -3337,7 +3349,7 @@ async def funding_webhook(
             await db.flush()
         funding = FundingTransaction(customer_id=customer.id, wallet_id=wallet.id,
             provider=payload.provider, provider_reference=payload.provider_reference,
-            amount=payload.amount, currency=currency,
+            amount=funding_amount, currency=currency,
             status=("PENDING_REVIEW" if requires_review else payload.status),
             metadata_json=json.dumps(payload.metadata, separators=(",", ":")))
         if payload.status == "CONFIRMED":
