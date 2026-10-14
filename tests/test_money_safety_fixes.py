@@ -779,3 +779,63 @@ def test_funding_reference_cannot_be_confirmed_under_another_customer(monkeypatc
             return ledger.available if ledger else Decimal("0")
     assert asyncio.run(owner_balance()) == Decimal("0")
 
+
+def test_10000_partial_fills_stay_close_to_decimal_ledger_reserve():
+    from app import execution as ex
+    from app.db import Trade, Position, CustomerProfile
+
+    async def check(sessions):
+        async with sessions() as db:
+            profile = CustomerProfile(auth_user_id="fill-drift-" + uuid.uuid4().hex)
+            db.add(profile)
+            await db.flush()
+            db.add(CustomerLedgerAccount(
+                customer_id=profile.id, available=Decimal("1000"),
+                trading_reserved=Decimal("0"), withdrawal_reserved=Decimal("0"),
+            ))
+            trade = Trade(
+                customer_id=profile.id, trading_account_id=None, exchange="binance",
+                symbol="DRIFT/USDT", side="buy", timeframe="1m", mode="LIVE",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=0.0,
+                remaining_quantity=1.0, requested_price=100.0, reserved_cash=100.0,
+                average_fill_price=0.0, fee=0.0, notional=100.0, status="PARTIALLY_FILLED",
+                signal_id="fill-drift-" + uuid.uuid4().hex,
+                client_order_id="fill-drift-" + uuid.uuid4().hex, reason="{}",
+            )
+            db.add(trade)
+            await db.flush()
+
+            batch_notional = Decimal("0")
+            exact_notional = Decimal("0")
+            exact_prices = []
+            for fill_no in range(1, 10_001):
+                price_decimal = Decimal("100") + Decimal(fill_no % 37) / Decimal("1000")
+                price = float(price_decimal)
+                await ex._apply_fill_to_position(db, trade, fill_no / 10_000.0, price)
+                exact_notional += Decimal("0.0001") * price_decimal
+                exact_prices.append(price_decimal)
+                batch_notional += Decimal("0.0001") * price_decimal
+                if fill_no % 100 == 0:
+                    await reserve_trading(
+                        db, profile.id, batch_notional,
+                        reference_id=f"fill-drift-audit:{fill_no}",
+                    )
+                    batch_notional = Decimal("0")
+            await db.commit()
+
+            position = (await db.execute(select(Position).where(
+                Position.customer_id == profile.id, Position.symbol == "DRIFT/USDT"
+            ))).scalar_one()
+            ledger = (await db.execute(select(CustomerLedgerAccount).where(
+                CustomerLedgerAccount.customer_id == profile.id
+            ))).scalar_one()
+            expected_average = sum(exact_prices, Decimal("0")) / Decimal(len(exact_prices))
+            assert abs(Decimal(str(position.quantity)) - Decimal("1")) <= Decimal("0.00000001")
+            assert abs(Decimal(str(position.average_entry_price)) - expected_average) <= Decimal("0.000001")
+            # The six-decimal ledger rounds each 100-fill reserve batch upward; its bounded
+            # difference from the float-materialized position reserve must remain tiny.
+            assert abs(ledger.trading_reserved - Decimal(str(position.reserved_capital))) <= Decimal("0.001")
+            assert abs(ledger.trading_reserved - exact_notional) <= Decimal("0.001")
+
+    asyncio.run(with_database(check))
+
