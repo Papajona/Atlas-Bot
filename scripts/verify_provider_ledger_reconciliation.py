@@ -213,6 +213,8 @@ def reconcile_rows(
             if internal in {"SUBMITTING", "SUBMITTED", "UNKNOWN"}:
                 unresolved_no_id += 1
                 failures.append("ambiguous withdrawal has no provider_id")
+            else:
+                failures.append("withdrawal has no provider_id and cannot be reconciled")
             continue
         if provider_id in db_by_id:
             failures.append("duplicate provider_id in staging withdrawals")
