@@ -95,7 +95,7 @@ def test_readyz_requires_execution_fencing_not_single_worker_assumption():
 
 
 def test_production_live_payouts_require_external_signer():
-    startup = MAIN[MAIN.index('@app.on_event("startup")'):MAIN.index('@app.get("/healthz")')]
+    startup = MAIN[MAIN.index("async def startup()"):MAIN.index("async def shutdown()")]
     assert 'payout_live_enabled and not settings.external_custody_signer_required' in startup
     assert 'EXTERNAL_CUSTODY_SIGNER_REQUIRED=true is mandatory' in startup
 
