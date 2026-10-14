@@ -41,12 +41,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          digest="$(docker buildx imagetools inspect docker.io/library/python:3.13-slim | awk '/^Digest:/ {print $2; exit}')"
+          docker pull docker.io/library/python:3.13-slim
+          repo_digest="$(docker image inspect docker.io/library/python:3.13-slim --format '{{index .RepoDigests 0}}')"
+          digest="${repo_digest##*@}"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
             echo "Unable to resolve an official Python base-image digest" >&2
             exit 1
           }
-          echo "Official python:3.13-slim OCI digest: $digest"
+          echo "Official python:3.13-slim pulled image digest: $digest"
       - name: Compile source
         run: python -m compileall -q app alembic
       - name: Create Supabase API roles for migration verification
