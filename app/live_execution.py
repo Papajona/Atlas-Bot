@@ -127,7 +127,7 @@ async def assert_live_system_enabled(
     sub = (await db.execute(
         select(Subscription)
         .where(Subscription.customer_id == customer_id)
-        .order_by(Subscription.created_at.desc())
+        .order_by(Subscription.created_at.desc(), Subscription.id.desc())
         .limit(1)
         .with_for_update()
     )).scalar_one_or_none()
