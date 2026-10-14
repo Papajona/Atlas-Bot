@@ -44,6 +44,7 @@ from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
 from .payout import get_payout_provider, PayoutError, PayoutUnknown, PayoutNotFound
 from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, release_separation_violation, verify_release_operator
 from .usdt_tron import derive_usdt_tron_address_from_xpub, validate_tron_account_xpub
+from .tron_reconciliation import parse_tron_usdt_balance
 from .tron_sweep import build_sweep_intent, serialize_sweep_intent, SweepError, classify_solidified_sweep, USDT_SCALE
 from .custody_locations import create_custody_transfer, transition_custody_transfer, flag_stale_custody_transfers
 from .customer_funds import record_ledger_incident, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, ledger_statement, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal
@@ -2638,26 +2639,10 @@ async def admin_custody_reconciliation(authorization: str | None = Header(defaul
                     response = await client.get(f"{base}/v1/accounts/{address}/trc20/balance",
                                                 params={"contract_address": settings.usdt_tron_usdt_contract}, headers=headers)
                     response.raise_for_status()
-                    data = response.json().get("data", [])
-                    if not isinstance(data, list):
-                        raise ValueError("TRON provider balance response has no data list")
-                    token = next((x for x in data if str((x.get("token_info") or {}).get("address") or "").lower() == settings.usdt_tron_usdt_contract.lower()), None)
-                    if token is None:
-                        # No matching USDT token record means a zero token balance; malformed token
-                        # metadata must not be silently converted to zero.
-                        balance = Decimal("0")
-                    else:
-                        token_info = token.get("token_info") or {}
-                        try:
-                            decimals = int(token_info["decimals"])
-                            raw_balance = Decimal(str(token["balance"]))
-                        except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
-                            raise ValueError("TRON provider returned missing or invalid USDT balance/decimal metadata") from exc
-                        if decimals != 6:
-                            raise ValueError("TRON USDT contract returned unexpected decimals; expected exactly 6")
-                        if not raw_balance.is_finite() or raw_balance < 0:
-                            raise ValueError("TRON provider returned non-finite or negative USDT balance")
-                        balance = raw_balance / (Decimal(10) ** decimals)
+                    body = response.json()
+                    if not isinstance(body, dict):
+                        raise ValueError("TRON provider returned a malformed JSON balance response")
+                    balance = parse_tron_usdt_balance(body.get("data"), settings.usdt_tron_usdt_contract)
                     if address == settings.usdt_tron_treasury_address:
                         treasury_balance = balance
                     else:
