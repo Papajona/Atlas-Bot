@@ -152,8 +152,8 @@ def test_trial_ledger_rejects_incomplete_or_duplicate_variants(tmp_path):
         "complete": True,
         "all_variants_included": True,
         "variants": [
-            {"variant_id": "base", "annualized_sharpe": 0.8},
-            {"variant_id": "base", "annualized_sharpe": 0.7},
+            {"variant_id": "base", "annualized_sharpe": 0.8, "evidence_path": "results/base.json", "evidence_sha256": "a" * 64},
+            {"variant_id": "base", "annualized_sharpe": 0.7, "evidence_path": "results/base2.json", "evidence_sha256": "b" * 64},
         ],
     })
     ledger.write_text(json.dumps(payload), encoding="utf-8")
@@ -216,75 +216,62 @@ def test_oos_gate_adapter_preserves_actual_walk_forward_backtest_fold_key():
 
 
 def test_trial_ledger_must_match_manifest_inside_hashed_experiment_archive(tmp_path):
-    import hashlib
     import json
-    from zipfile import ZipFile
     from scripts.evaluate_original_oanda_oos import load_complete_trial_history
 
     provenance = fake_provenance()
     archive = tmp_path / "experiment.zip"
-    archived_manifest = {
-        "schema_version": 1,
-        "complete": True,
-        "all_variants_included": True,
-        "experiment_id": "experiment-valid",
-        "dataset_raw_response_sha256": provenance["raw_response_sha256"],
-        "dataset_csv_sha256": provenance["normalized_csv_sha256"],
-        "instrument": provenance["instrument"],
-        "granularity": provenance["granularity"],
-        "request_parameters": provenance["request_parameters"],
-        "evaluation_assumptions": provenance["evaluation_assumptions"],
-        "variants": [
-            {"variant_id": "feature-set-a", "annualized_sharpe": 0.8},
-            {"variant_id": "feature-set-b", "annualized_sharpe": -0.1},
-        ],
-    }
-    with ZipFile(archive, "w") as stream:
-        stream.writestr("atlas_trial_manifest.json", json.dumps(archived_manifest))
-        stream.writestr("experiment-notes.txt", "full experiment artifacts are archived")
+    bytes_a, bytes_b = b"variant A full metrics and OOS returns", b"variant B full metrics and OOS returns"
+    variant_a = make_archive_variant("feature-set-a", 0.8, "results/feature-set-a.json", bytes_a)
+    variant_a["_evidence_bytes"] = bytes_a
+    variant_b = make_archive_variant("feature-set-b", -0.1, "results/feature-set-b.json", bytes_b)
+    variant_b["_evidence_bytes"] = bytes_b
+    manifest = make_archive_manifest(provenance, "experiment-valid", [variant_a, variant_b])
+    write_experiment_archive(archive, manifest)
+
     ledger = tmp_path / "trials.json"
+    clean_variants = [
+        {key: value for key, value in item.items() if not key.startswith("_")}
+        for item in manifest["variants"]
+    ]
     ledger.write_text(json.dumps({
         "schema_version": 1,
         "experiment_id": "experiment-valid",
-        "experiment_archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+        "experiment_archive_sha256": __import__("hashlib").sha256(archive.read_bytes()).hexdigest(),
         "complete": True,
         "all_variants_included": True,
-        "variants": archived_manifest["variants"],
+        "variants": clean_variants,
     }), encoding="utf-8")
 
     sharpes, evidence = load_complete_trial_history(ledger, 2, archive, provenance)
     assert sharpes == [0.8, -0.1]
     assert evidence["archive_manifest"]["trial_list_matches_archive"] is True
     assert evidence["archive_manifest"]["data_identity_matches"] is True
+    assert evidence["archive_manifest"]["variant_evidence_verified"] == 2
 
 
 def test_trial_ledger_rejects_archive_with_wrong_dataset_identity(tmp_path):
     import hashlib
     import json
-    from zipfile import ZipFile
     import pytest
     from scripts.evaluate_original_oanda_oos import load_complete_trial_history
 
     provenance = fake_provenance()
     archive = tmp_path / "experiment.zip"
-    archived_manifest = {
-        "schema_version": 1, "complete": True, "all_variants_included": True,
-        "experiment_id": "experiment-wrong-data",
-        "dataset_raw_response_sha256": "f" * 64,
-        "dataset_csv_sha256": provenance["normalized_csv_sha256"],
-        "instrument": provenance["instrument"], "granularity": provenance["granularity"],
-        "request_parameters": provenance["request_parameters"],
-        "evaluation_assumptions": provenance["evaluation_assumptions"],
-        "variants": [{"variant_id": "base", "annualized_sharpe": 0.7}],
-    }
-    with ZipFile(archive, "w") as stream:
-        stream.writestr("atlas_trial_manifest.json", json.dumps(archived_manifest))
+    result_bytes = b"full variant results"
+    variant = make_archive_variant("base", 0.7, "results/base.json", result_bytes)
+    variant["_evidence_bytes"] = result_bytes
+    manifest = make_archive_manifest(provenance, "experiment-wrong-data", [variant])
+    manifest["dataset_raw_response_sha256"] = "f" * 64
+    write_experiment_archive(archive, manifest)
     ledger = tmp_path / "trials.json"
     ledger.write_text(json.dumps({
-        "schema_version": 1, "experiment_id": archived_manifest["experiment_id"],
+        "schema_version": 1,
+        "experiment_id": manifest["experiment_id"],
         "experiment_archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-        "complete": True, "all_variants_included": True,
-        "variants": archived_manifest["variants"],
+        "complete": True,
+        "all_variants_included": True,
+        "variants": [{key: value for key, value in variant.items() if not key.startswith("_")}],
     }), encoding="utf-8")
     with pytest.raises(ValueError, match="dataset_raw_response_sha256"):
         load_complete_trial_history(ledger, 1, archive, provenance)
@@ -293,32 +280,29 @@ def test_trial_ledger_rejects_archive_with_wrong_dataset_identity(tmp_path):
 def test_trial_ledger_rejects_variants_missing_from_archive_manifest(tmp_path):
     import hashlib
     import json
-    from zipfile import ZipFile
     import pytest
     from scripts.evaluate_original_oanda_oos import load_complete_trial_history
 
     provenance = fake_provenance()
     archive = tmp_path / "experiment.zip"
-    archived_manifest = {
-        "schema_version": 1, "complete": True, "all_variants_included": True,
-        "experiment_id": "experiment-omission",
-        "dataset_raw_response_sha256": provenance["raw_response_sha256"],
-        "dataset_csv_sha256": provenance["normalized_csv_sha256"],
-        "instrument": provenance["instrument"], "granularity": provenance["granularity"],
-        "request_parameters": provenance["request_parameters"],
-        "evaluation_assumptions": provenance["evaluation_assumptions"],
-        "variants": [{"variant_id": "base", "annualized_sharpe": 0.7}],
-    }
-    with ZipFile(archive, "w") as stream:
-        stream.writestr("atlas_trial_manifest.json", json.dumps(archived_manifest))
+    base_bytes = b"verified base variant results"
+    base = make_archive_variant("base", 0.7, "results/base.json", base_bytes)
+    base["_evidence_bytes"] = base_bytes
+    manifest = make_archive_manifest(provenance, "experiment-omission", [base])
+    write_experiment_archive(archive, manifest)
+
+    extra_bytes = b"ledger claims another variant that is not in the archived manifest"
+    extra = make_archive_variant("forgotten-variant", 1.6, "results/forgotten.json", extra_bytes)
     ledger = tmp_path / "trials.json"
     ledger.write_text(json.dumps({
-        "schema_version": 1, "experiment_id": archived_manifest["experiment_id"],
+        "schema_version": 1,
+        "experiment_id": manifest["experiment_id"],
         "experiment_archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-        "complete": True, "all_variants_included": True,
+        "complete": True,
+        "all_variants_included": True,
         "variants": [
-            {"variant_id": "base", "annualized_sharpe": 0.7},
-            {"variant_id": "forgotten-variant", "annualized_sharpe": 1.6},
+            {key: value for key, value in base.items() if not key.startswith("_")},
+            extra,
         ],
     }), encoding="utf-8")
     with pytest.raises(ValueError, match="do not exactly match"):
