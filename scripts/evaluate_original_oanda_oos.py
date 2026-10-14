@@ -17,6 +17,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zipfile import BadZipFile, ZipFile
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
@@ -113,6 +114,75 @@ def verify_reference_identity(dataset_dir: Path, reference_path: Path, expected_
         "rows": int(actual["completed_row_count"]),
         "first_timestamp_utc": actual["first_completed_timestamp_utc"],
         "last_timestamp_utc": actual["last_completed_timestamp_utc"],
+        "request_parameters": request,
+    }
+
+
+def verify_experiment_archive_manifest(
+    archive_path: Path,
+    experiment_id: str,
+    ledger_sharpes: dict[str, float],
+    provenance: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare ledger variants to the manifest stored inside the bound experiment ZIP."""
+    try:
+        with ZipFile(archive_path, "r") as archive:
+            matches = [info for info in archive.infolist() if info.filename == "atlas_trial_manifest.json"]
+            if len(matches) != 1:
+                raise ValueError("Experiment ZIP must contain exactly one atlas_trial_manifest.json")
+            info = matches[0]
+            if info.file_size > 5_000_000:
+                raise ValueError("Experiment trial manifest exceeds the 5 MB safety limit")
+            raw_manifest = archive.read(info)
+    except (BadZipFile, OSError) as exc:
+        raise ValueError("Full experiment archive is not a valid readable ZIP") from exc
+    try:
+        manifest = json.loads(raw_manifest.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Archived trial manifest is not valid UTF-8 JSON") from exc
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+        raise ValueError("Archived trial manifest schema_version must be 1")
+    if manifest.get("complete") is not True or manifest.get("all_variants_included") is not True:
+        raise ValueError("Archived trial manifest must attest complete=true and all_variants_included=true")
+    if str(manifest.get("experiment_id") or "").strip() != experiment_id:
+        raise ValueError("Ledger experiment_id does not match the experiment ZIP manifest")
+    expected_data = {
+        "dataset_raw_response_sha256": provenance["raw_response_sha256"],
+        "dataset_csv_sha256": provenance["normalized_csv_sha256"],
+        "instrument": provenance["instrument"],
+        "granularity": provenance["granularity"],
+        "request_parameters": provenance["request_parameters"],
+    }
+    for key, expected in expected_data.items():
+        if manifest.get(key) != expected:
+            raise ValueError(f"Archived trial manifest data identity mismatch: {key}")
+    archived_variants = manifest.get("variants")
+    if not isinstance(archived_variants, list) or not archived_variants:
+        raise ValueError("Archived trial manifest must list every evaluated variant")
+    archive_sharpes: dict[str, float] = {}
+    for item in archived_variants:
+        if not isinstance(item, dict):
+            raise ValueError("Archived trial manifest contains a malformed variant entry")
+        variant_id = str(item.get("variant_id") or "").strip()
+        if not variant_id or variant_id in archive_sharpes:
+            raise ValueError("Archived trial manifest variant_id values must be present and unique")
+        try:
+            sharpe = float(item.get("annualized_sharpe"))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"Archived annualized Sharpe invalid for variant {variant_id}") from exc
+        if not math.isfinite(sharpe):
+            raise ValueError(f"Archived annualized Sharpe non-finite for variant {variant_id}")
+        archive_sharpes[variant_id] = sharpe
+    if archive_sharpes.keys() != ledger_sharpes.keys():
+        raise ValueError("Trial ledger variants do not exactly match archived experiment trial manifest")
+    for variant_id, sharpe in ledger_sharpes.items():
+        if not math.isclose(archive_sharpes[variant_id], sharpe, rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError(f"Trial ledger Sharpe differs from archived experiment manifest for {variant_id}")
+    return {
+        "manifest_sha256": hashlib.sha256(raw_manifest).hexdigest(),
+        "manifest_variant_count": len(archive_sharpes),
+        "data_identity_matches": True,
+        "trial_list_matches_archive": True,
     }
 
 
@@ -120,6 +190,7 @@ def load_complete_trial_history(
     path: Path,
     minimum_variants: int,
     experiment_archive_path: Path,
+    provenance: dict[str, Any],
 ) -> tuple[list[float], dict[str, Any]]:
     """Load every tested variant and bind the ledger to an immutable experiment archive."""
     payload = load_json(path)
@@ -158,12 +229,20 @@ def load_complete_trial_history(
         if not math.isfinite(sharpe):
             raise ValueError(f"Non-finite annualized_sharpe for variant {variant_id}")
         sharpes.append(sharpe)
+    ledger_sharpes = {
+        str(item["variant_id"]).strip(): float(item["annualized_sharpe"])
+        for item in variants
+    }
+    archive_manifest = verify_experiment_archive_manifest(
+        experiment_archive_path, experiment_id, ledger_sharpes, provenance
+    )
     return sharpes, {
         "experiment_id": experiment_id,
         "variant_count": len(sharpes),
         "trial_ledger_sha256": sha256_file(path),
         "experiment_archive_sha256": observed_archive_hash,
         "experiment_archive_file": experiment_archive_path.name,
+        "archive_manifest": archive_manifest,
     }
 
 
@@ -191,7 +270,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("Candidate dataset failed its manifest/hash integrity check")
     provenance = verify_reference_identity(dataset_dir, reference_path, args.expected_rows)
     trial_sharpes, trial_evidence = load_complete_trial_history(
-        trial_path, args.folds, Path(args.experiment_archive)
+        trial_path, args.folds, Path(args.experiment_archive), provenance
     )
 
     csv_path = dataset_dir / "oanda_completed_mid_candles.csv"
