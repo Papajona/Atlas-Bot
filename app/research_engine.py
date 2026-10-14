@@ -51,6 +51,9 @@ def _apply_protective_halts(
     halted_until = -1
     hard_halt = False
     halted_bars = 0
+    hard_halt_reason: str | None = None
+    hard_halt_triggered_at: int | None = None
+    cooldown_triggers = 0
     loss_event_times: list[int] = []
     previous_position = 0.0
 
@@ -100,10 +103,20 @@ def _apply_protective_halts(
         # Drawdown/daily-loss limits latch until operator reset; only a stop-loss
         # cluster is a timed cooldown. Re-evaluating a breached hard limit as a
         # fresh cooldown on every flat bar would silently keep extending it.
-        if drawdown >= float(drawdown_limit) or daily_loss >= float(daily_loss_limit):
+        hard_limit_reason = (
+            "DRAWDOWN" if drawdown >= float(drawdown_limit)
+            else "DAILY_LOSS" if daily_loss >= float(daily_loss_limit)
+            else None
+        )
+        # A hard risk limit takes precedence over the timed loss-cluster cooldown.
+        # It latches permanently for this backtest; the cooldown must never mask it.
+        if hard_limit_reason is not None and not hard_halt:
             hard_halt = True
+            hard_halt_reason = hard_limit_reason
+            hard_halt_triggered_at = i
         elif not is_halted and loss_cluster_trigger:
             halted_until = max(halted_until, i + max(0, int(cooldown_bars)))
+            cooldown_triggers += 1
         previous_position = active_position
 
     protected_position = pd.Series(active_positions, index=positions.index, dtype=float)
@@ -113,6 +126,11 @@ def _apply_protective_halts(
         "halted_bars": halted_bars,
         "active_bars": int((protected_position != 0.0).sum()),
         "loss_events": len(loss_event_times),
+        "hard_halt": hard_halt,
+        "hard_halt_reason": hard_halt_reason,
+        "hard_halt_triggered_at": hard_halt_triggered_at,
+        "cooldown_until": halted_until,
+        "cooldown_triggers": cooldown_triggers,
     }
 
 
@@ -230,15 +248,20 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     sensitivity = cost_sensitivity(gross.to_numpy(), turnover.to_numpy())
     ci = bootstrap_mean_ci((gross - turnover * ((taker_bps + slippage_bps) / 10000.0)).to_numpy(), block_size=10)
     adjusted = multiple_testing_sharpe_adjustment([r.get("sharpe", 0.0) for r in results], trials=len(results))
-    oos = fixed_signal_walk_forward_oos(df, ensemble_signal,
-                                        costs_bps=taker_bps + slippage_bps, folds=folds, min_train=min_train)
+    oos = fixed_signal_walk_forward_oos(
+        df, ensemble_signal, costs_bps=taker_bps + slippage_bps,
+        folds=folds, min_train=min_train,
+        annualization_factor=PROFILES.get(asset, PROFILES["crypto"]).bars_per_year,
+    )
     gross_net = ensemble_pos * (next_open_returns(df) - 1.0)
     regime_performance = regime_conditioned_performance(df, gross_net - turnover * ((taker_bps + slippage_bps) / 10000.0), asset=asset)
     per_strategy_oos = {}
     for component in components:
         component_signal = strategy_signals(df, cfg, asset=asset)[component]
         per_strategy_oos[component] = fixed_signal_walk_forward_oos(
-            df, component_signal, costs_bps=taker_bps + slippage_bps, folds=folds, min_train=min_train
+            df, component_signal, costs_bps=taker_bps + slippage_bps,
+            folds=folds, min_train=min_train,
+            annualization_factor=PROFILES.get(asset, PROFILES["crypto"]).bars_per_year,
         )
     # Parameter-plateau check: small changes to the signal threshold should not destroy
     # the measured edge. A narrow single-point optimum is treated as fragile research.
