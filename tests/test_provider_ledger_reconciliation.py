@@ -27,6 +27,7 @@ def db_row(
     currency="USDT",
     status="RELEASED",
     provider_status="SUCCESS",
+    provider="sandbox-payout",
     reserve_count=1,
     settlement_count=1,
     release_count=0,
