@@ -103,12 +103,15 @@ def test_ai_provider_empty_or_non_object_content_returns_typed_error(value):
         _extract_json(value)
 
 
-def test_json_loads_logs_corruption_before_compatibility_fallback(caplog):
+def test_json_loads_logs_corruption_and_fails_closed(caplog):
     from app.main import json_loads
 
-    with caplog.at_level(logging.WARNING):
-        assert json_loads("{corrupt") == []
-    assert any("invalid_json_column" in record.message for record in caplog.records)
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(ValueError, match="Stored JSON column is malformed"):
+            json_loads("{corrupt")
+    assert any("invalid_json_column refusing_default" in record.message for record in caplog.records)
+    assert json_loads(None) == []
+    assert json_loads("") == []
 
 
 def test_fastapi_lifecycle_uses_lifespan_not_deprecated_event_handlers():
