@@ -12,8 +12,8 @@ android {
         applicationId = "com.atlas.trading"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1047
-        versionName = "3.10.47"
+        versionCode = 1048
+        versionName = "3.10.48"
     }
 
     buildFeatures {
