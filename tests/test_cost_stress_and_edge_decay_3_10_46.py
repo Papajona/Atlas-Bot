@@ -77,7 +77,7 @@ def test_fixed_carry_drag_is_included_in_cost_stress():
         fixed_cost_drag=carry,
     )
     assert report["status"] == "OK"
-    assert report["annual_fixed_cost_drag"] == 0.252
+    assert np.isclose(report["annual_fixed_cost_drag"], 0.252, rtol=0, atol=1e-12)
     assert report["annual_net_return"] < 0
     assert report["stress_ok"] is False
 
