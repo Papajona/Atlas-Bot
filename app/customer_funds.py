@@ -461,16 +461,26 @@ def customer_balance_api(balance: dict) -> dict[str, str | int]:
     withdrawal_reserved = D(str(balance.get("withdrawal_reserved_exact", balance["withdrawal_reserved"])))
     total = D(str(balance.get("total_exact", balance["total"])))
     scale = Decimal("1000000")  # ledger Numeric(38, 6) precision
+    locked = trading_reserved + withdrawal_reserved
     return {
-        "available": format(available, "f"),
-        "trading_reserved": format(trading_reserved, "f"),
-        "withdrawal_reserved": format(withdrawal_reserved, "f"),
-        "total": format(total, "f"),
-        "locked": format(trading_reserved + withdrawal_reserved, "f"),
+        # Original numeric keys remain compatible with the existing Web/Android clients.
+        "available": float(available),
+        "trading_reserved": float(trading_reserved),
+        "withdrawal_reserved": float(withdrawal_reserved),
+        "total": float(total),
+        "locked": float(locked),
+        # These exact decimal strings and integer micro-USDT units are the authoritative
+        # representation for clients doing balances, reconciliation or round-trips.
+        "available_exact": format(available, "f"),
+        "trading_reserved_exact": format(trading_reserved, "f"),
+        "withdrawal_reserved_exact": format(withdrawal_reserved, "f"),
+        "total_exact": format(total, "f"),
+        "locked_exact": format(locked, "f"),
         "available_minor_units": int(available * scale),
         "trading_reserved_minor_units": int(trading_reserved * scale),
         "withdrawal_reserved_minor_units": int(withdrawal_reserved * scale),
         "total_minor_units": int(total * scale),
+        "locked_minor_units": int(locked * scale),
         "minor_units_scale": 1_000_000,
     }
 
@@ -631,8 +641,11 @@ async def ledger_statement(db, customer_id: int, currency: str = USDT, limit: in
     return [{
         "journal_id": j.id, "entry_type": j.entry_type, "reference_type": j.reference_type,
         "reference_id": j.reference_id, "account_code": line.account_code,
-        "debit": format(D(str(line.debit)), "f"),
-        "credit": format(D(str(line.credit)), "f"),
+        # Preserve legacy numeric fields while publishing exact forms for reconciliation.
+        "debit": float(line.debit),
+        "credit": float(line.credit),
+        "debit_exact": format(D(str(line.debit)), "f"),
+        "credit_exact": format(D(str(line.credit)), "f"),
         "debit_minor_units": int(D(str(line.debit)) * Decimal("1000000")),
         "credit_minor_units": int(D(str(line.credit)) * Decimal("1000000")),
         "minor_units_scale": 1_000_000,
