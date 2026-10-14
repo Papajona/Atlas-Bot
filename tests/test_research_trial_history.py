@@ -257,6 +257,7 @@ def test_trial_ledger_rejects_variants_missing_from_archive_manifest(tmp_path):
         "dataset_csv_sha256": provenance["normalized_csv_sha256"],
         "instrument": provenance["instrument"], "granularity": provenance["granularity"],
         "request_parameters": provenance["request_parameters"],
+        "evaluation_assumptions": provenance["evaluation_assumptions"],
         "variants": [{"variant_id": "base", "annualized_sharpe": 0.7}],
     }
     with ZipFile(archive, "w") as stream:
