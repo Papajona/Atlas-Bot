@@ -17,9 +17,14 @@ def _pairs(raw: str) -> dict[str, str]:
     return out
 
 
+def _ct_equal(left: object, right: object) -> bool:
+    """Compare textual credentials as UTF-8 bytes, including non-ASCII input."""
+    return hmac.compare_digest(str(left or "").encode("utf-8"), str(right or "").encode("utf-8"))
+
+
 def verify_release_operator(operator_id: str, token: str | None) -> bool:
     expected = _pairs(settings.withdrawal_release_tokens).get(operator_id)
-    return bool(expected and token and hmac.compare_digest(token, expected))
+    return bool(expected and token and _ct_equal(token, expected))
 
 
 
@@ -32,7 +37,7 @@ def release_separation_violation(operator_id: str, release_token: str | None, ap
     token = str(release_token or "")
     if token:
         for secret in _pairs(settings.withdrawal_approver_tokens).values():
-            if hmac.compare_digest(token, secret):
+            if _ct_equal(token, secret):
                 return "Release credential must be distinct from every approver credential"
     return None
 
@@ -43,10 +48,10 @@ def destination_fingerprint(destination: str, currency: str, network: str = '') 
 
 def destination_allowed(destination: str, currency: str, network: str = '') -> bool:
     if not settings.withdrawal_whitelist_enabled:
-        return False if settings.environment == 'production' else True
+        return False
     allowed = {x.strip().lower() for x in settings.withdrawal_destination_fingerprints.split(',') if x.strip()}
     if not allowed:
-        return settings.environment != 'production'
+        return False
     return destination_fingerprint(destination, currency, network).lower() in allowed
 
 
