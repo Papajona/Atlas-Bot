@@ -110,3 +110,31 @@ def test_invalid_oos_numeric_metrics_cannot_win_the_headline_rank():
     }
     assert [row["strategy"] for row in _rank_by_oos(rows, oos)] == ["finite", "nan", "missing"]
 
+
+def test_ai_market_review_never_promotes_in_sample_score_to_headline():
+    from app.research_engine import ai_market_review
+
+    research = {
+        "regime": {"regime": "RANGE", "annualized_realized_vol": 0.2},
+        "strategies": [
+            {"strategy": "trend", "research_score": 999.0, "sharpe": 9.0,
+             "max_drawdown": -0.01, "trades": 500, "total_return": 9.0},
+            {"strategy": "momentum", "research_score": 0.1, "sharpe": 0.1,
+             "max_drawdown": -0.10, "trades": 200, "total_return": 0.01},
+        ],
+        "research_order": ["momentum", "trend"],
+        "research_order_basis": "OOS_RETURN_THEN_SHARPE_NON_OK_LAST",
+        "universe_bias": "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY",
+        "validation": {"per_strategy_oos": {
+            "trend": {"status": "OK", "oos_total_return": -0.25, "sharpe": -0.4, "max_drawdown": -0.30, "folds": []},
+            "momentum": {"status": "OK", "oos_total_return": 0.12, "sharpe": 0.7, "max_drawdown": -0.08, "folds": []},
+        }},
+    }
+
+    brief = ai_market_review(research)
+    assert brief["top_strategy"] == "momentum"
+    assert brief["top_strategy_basis"] == "OUT_OF_SAMPLE_MEASUREMENT_ONLY"
+    assert brief["top_strategy_oos_status"] == "OK"
+    assert brief["universe_bias"] == research["universe_bias"]
+    assert "not promotion approval" in brief["observations"][0]
+
