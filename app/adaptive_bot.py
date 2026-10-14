@@ -19,8 +19,8 @@ import numpy as np
 class AdaptiveModelPolicy:
     max_age_hours: float = 24.0
     min_sharpe: float = 0.50
-    max_drawdown: float = -0.25
-    min_trades: int = 20
+    max_drawdown: float = -0.20
+    min_trades: int = 100
     min_total_return: float = 0.0
     max_champion_sharpe_drop: float = 0.10
     max_champion_drawdown_worsening: float = 0.05
@@ -35,7 +35,7 @@ class AdaptiveModelPolicy:
     # keeping daily retraining -- that trade-off (promotion latency vs. adaptation speed)
     # is a product decision, not something to hardcode here.
     consecutive_passes_required: int = 2
-    research_min_deflated_sharpe: float = 0.0
+    research_min_deflated_sharpe: float = 0.95
     research_require_cost_stress: bool = True
     research_cost_stress_multiplier: float = 2.0
 
