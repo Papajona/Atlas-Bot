@@ -49,6 +49,7 @@ def _apply_protective_halts(
     day_start = 1.0
     current_day = None
     halted_until = -1
+    hard_halt = False
     halted_bars = 0
     loss_event_times: list[int] = []
     previous_position = 0.0
@@ -60,7 +61,7 @@ def _apply_protective_halts(
             current_day = day
             day_start = equity
 
-        is_halted = i <= halted_until
+        is_halted = hard_halt or i <= halted_until
         active_position = 0.0 if is_halted else float(positions.iloc[i])
         if is_halted:
             halted_bars += 1
@@ -96,11 +97,12 @@ def _apply_protective_halts(
             and int(loss_event_threshold) > 0
             and len(loss_event_times) >= int(loss_event_threshold)
         )
-        if (
-            drawdown >= float(drawdown_limit)
-            or daily_loss >= float(daily_loss_limit)
-            or loss_cluster_trigger
-        ):
+        # Drawdown/daily-loss limits latch until operator reset; only a stop-loss
+        # cluster is a timed cooldown. Re-evaluating a breached hard limit as a
+        # fresh cooldown on every flat bar would silently keep extending it.
+        if drawdown >= float(drawdown_limit) or daily_loss >= float(daily_loss_limit):
+            hard_halt = True
+        elif not is_halted and loss_cluster_trigger:
             halted_until = max(halted_until, i + max(0, int(cooldown_bars)))
         previous_position = active_position
 
