@@ -8,6 +8,7 @@ permissions:
 jobs:
   python-quality-and-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: docker.io/library/postgres:15-alpine
@@ -27,6 +28,7 @@ jobs:
       BACKGROUND_RECONCILIATION_ENABLED: "false"
       ADMIN_TOKEN: test-admin-token-for-ci
       MULTIDICT_NO_EXTENSIONS: "1"
+      PYTEST_TEST_TIMEOUT_SECONDS: "120"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
