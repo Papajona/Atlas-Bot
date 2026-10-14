@@ -53,14 +53,15 @@ python scripts/evaluate_original_oanda_oos.py \
   --dataset-dir /secure/archive/original-oanda-dataset \
   --reference-manifest /secure/archive/original-reference-manifest.json \
   --trial-ledger /secure/archive/complete-trial-ledger.json \
+  --experiment-archive /secure/archive/complete-experiment-archive.zip \
   --expected-rows 1799 \
   --asset forex --folds 5 --min-train 800 \
   --output oanda-oos-evidence.json
 ```
 
-The trial ledger must be JSON with `schema_version: 1`, `complete: true`, `all_variants_included: true`, a non-empty `experiment_id`, and unique `variant_id` entries each carrying a finite `annualized_sharpe`. Those flags are an auditable assertion, not a substitute for retaining the actual experiment archive. Review and archive the dataset hashes, trial-ledger hash, complete output JSON, code SHA, walk-forward fold metrics, net costs, drawdown, trades, DSR, and cost-stress results. A failed gate means no model promotion. A passed research gate does not authorize live execution.
+The trial ledger must be JSON with `schema_version: 1`, `complete: true`, `all_variants_included: true`, a non-empty `experiment_id`, a 64-hex `experiment_archive_sha256` matching the **full experiment archive ZIP**, and unique `variant_id` entries each carrying a finite `annualized_sharpe`. The evaluation refuses to run if that archive is absent or its SHA-256 differs. Those flags are an auditable assertion, not a substitute for retaining the actual experiment archive. Review and archive the dataset hashes, trial-ledger hash, complete output JSON, code SHA, walk-forward fold metrics, net costs, drawdown, trades, DSR, and cost-stress results. A failed gate means no model promotion. A passed research gate does not authorize live execution.
 
-For a repeatable protected run, configure `ATLAS_OANDA_ARCHIVE_BUCKET`, `ATLAS_ORIGINAL_OANDA_REFERENCE_OBJECT` (under `trusted-reference/`), and `ATLAS_RESEARCH_TRIAL_LEDGER_OBJECT` (under `research-trials/`) as staging environment variables. Configure a separate least-privilege `GCP_STAGING_RESEARCH_SERVICE_ACCOUNT` secret through Workload Identity Federation. Use the `Original OANDA walk-forward release evidence` workflow from `main`, supply the exact durable archive prefix `oanda-practice/{run-id}-{capture-commit-sha}`, and retain the resulting evaluation artifact and GCS report even when the research gate fails. A missing reference manifest or complete trial ledger is a hard block. The workflow will not manufacture those inputs or reinterpret a new capture as the old dataset.
+For a repeatable protected run, configure `ATLAS_OANDA_ARCHIVE_BUCKET`, `ATLAS_ORIGINAL_OANDA_REFERENCE_OBJECT` (under `trusted-reference/`), `ATLAS_RESEARCH_TRIAL_LEDGER_OBJECT` (under `research-trials/`), and `ATLAS_RESEARCH_EXPERIMENT_ARCHIVE_OBJECT` (under `research-experiments/`, ZIP archive) as staging environment variables. Configure a separate least-privilege `GCP_STAGING_RESEARCH_SERVICE_ACCOUNT` secret through Workload Identity Federation. Use the `Original OANDA walk-forward release evidence` workflow from `main`, supply the exact durable archive prefix `oanda-practice/{run-id}-{capture-commit-sha}`, and retain the resulting evaluation artifact and GCS report even when the research gate fails. A missing reference manifest or complete trial ledger is a hard block. The workflow will not manufacture those inputs or reinterpret a new capture as the old dataset.
 
 ## Staging runtime database identity
 
