@@ -40,7 +40,9 @@ def test_oos_gate_missing_required_metrics_fails_closed():
     assert 'sharpe is not None and sharpe >= float(min_sharpe)' in source
     assert 'max_dd is not None and max_dd >= float(max_drawdown)' in source
     assert 'trades is not None and trades >= int(min_trades)' in source
-    assert '("oos_total_return" in oos or "total_return" in oos)' in source
+    assert 'raw_oos_return = oos.get("oos_total_return") if "oos_total_return" in oos else oos.get("total_return")' in source
+    assert '"missing_or_below_minimum_oos_total_return" in rejection_reasons' in source
+    assert '"missing_or_below_minimum_oos_sharpe" in rejection_reasons' in source
 
 
 def test_walk_forward_fold_returns_are_shifted():
