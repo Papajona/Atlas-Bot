@@ -14,7 +14,7 @@ A patch is not called verified merely because it was committed or compiled. Veri
 | Finding | Assessment | Patch / action | Verification status |
 |---|---|---|---|
 | `train_model` can crash when a validation fold omits a class passed to sklearn `log_loss` | Reproducible in the supplied audit; class alignment is a valid failure mode | `_aligned_log_loss` added to training path | The overall suite passed 857 tests on an earlier repair head, but exact-head verification must be read from the newest CI run. |
-| Triple-barrier timeouts become NaN/dropped labels and flat class is nearly absent | Material modeling/data-labeling concern; not a safe mechanical refactor | Deliberately left unpatched pending explicit label semantics and retraining | **Open.** Must add timeout/dead-zone tests, run chronological validation, retrain, and compare calibration/DSR before model promotion. |
+| Triple-barrier timeouts become NaN/dropped labels and flat class is nearly absent | Material modeling/data-labeling concern; labeling changes affect model behavior | Patched completed holding-window timeouts using terminal return and a volatility-scaled dead zone; incomplete terminal windows remain unlabeled; added regression test | **Code/test verification pending exact-head CI.** Retraining, chronological out-of-sample validation, calibration/DSR comparison, and paper-forward evidence remain open before promotion. |
 | HMAC `compare_digest(str, str)` raises for non-ASCII strings | Python's compare-digest text API requires ASCII; error handling should not turn malformed user input into a 500 | Shared constant-time text helper used at the reported call sites | Targeted reproduction was reported as passing; exact-head regression status remains tied to CI. |
 | Execution planner accepts NaN and may emit infinity to JSON | Non-finite numeric inputs and JSON NaN/Infinity are invalid boundary conditions | Reject non-finite price/quantity; serialize non-finite response values as null | Targeted JSON boundary reproduction reported; full endpoint/server test not claimed. |
 | Correlation exposure ignores positions without mark price | Can undercount exposure if a valid entry-price fallback exists | Fall back to average entry price in correlation risk calculation | Targeted scenario reported blocked; broader portfolio-risk regression still required. |
@@ -22,17 +22,19 @@ A patch is not called verified merely because it was committed or compiled. Veri
 | Cerebras default `llama3.1-8b` is deprecated | Needs provider catalogue evidence; do not infer all model IDs or endpoint availability from names | Changed defaults to a supported candidate only where checked in repository | Do not claim a live Cerebras inference pass unless the current CI provider log shows it. |
 | Gemini default `gemini-3.5-flash` / `gemini-3.6-flash` availability or quota | Model existence, retirement, quota, and inference success are separate claims | Repository defaults and deployment workflow now prefer `gemini-3.5-flash-lite`; provider gate has no quota waiver | A previous live probe successfully generated a response with this candidate. Latest exact-head gate must pass without waiver. |
 | Groq model/API behavior | Models-list HTTP 403 does not prove chat inference is broken; endpoint and operation must match intended use | Gate uses the repository checker; no claim based solely on models-list | Exact current checker logs decide pass/fail. |
-| Model pickle integrity optional for live | Hash adjacency alone is not a trusted signature boundary if the hash can be replaced with the model | Not silently changed in this patch set | **Open security review item:** require authenticated signature verification before loading any live model and test tampering. |
-| Withdrawal configuration permissive in staging | A staging flag must not become a path to real provider payouts | Not represented as fixed by the current model/provider patch | **Open:** inspect provider payout guards and add explicit tests proving staging cannot submit real payouts. |
-| Model metadata class labels disagree with encoded model classes | Could corrupt downstream interpretation if metadata is consumed as truth | Not yet changed without tracing all consumers | **Open:** inspect artifact creation/loading/serving and add a compatibility test before changing metadata. |
+| Model artifact integrity could be optional for staging/production | Hash adjacency alone is not a trusted signature boundary if the hash can be replaced with the model | Staging/production model verification now fails closed when independent artifact signature verification is not available, regardless of the old optional flag; regression coverage added | **Code/test verification pending exact-head CI.** Ensure production artifacts have a valid signature/manifest and test both valid and tampered artifacts. |
+| Withdrawal configuration permissive in staging | A staging flag must not become a path to real provider payouts | Withdrawals now default disabled and destination allow-list checks fail closed when disabled or empty | **Code/test verification pending exact-head CI.** A real staging/provider payout drill remains prohibited until explicitly authorized; verify no staging configuration can reach a real payout provider. |
+| Model metadata class labels disagree with encoded model classes | Could corrupt downstream interpretation if metadata is consumed as truth | Model metadata now records the actual encoded classes and explicit mapping | **Code/test verification pending exact-head CI.** Validate compatibility with every artifact consumer before promoting a newly trained model. |
 | Unknown symbols share `OTHER` correlation bucket | Can understate or distort correlation grouping | Not changed in this patch set | **Open:** define conservative unknown-symbol behavior and add mixed-asset exposure tests. |
 | Docker base image floating tag | Reproducibility/supply-chain concern | Dockerfile pins the observed `python:3.13-slim` SHA-256 digest; CI validates it and builds the image | Exact-head CI must pass the pin verification and container build. Dependency hashes are a separate issue. |
 | Android manifest lacks extraction/network policy | Needs manifest-specific threat model and app compatibility review | Existing Android source gate remains mandatory | Android debug build passed on a prior head; source gate failed on a prior head due to a stale provider-workflow assertion. Exact-head rerun is required. |
 
 ## Changes made in this repair branch
 
-- Training log-loss alignment helper.
-- HMAC-safe text comparison at reported call sites.
+- Training log-loss alignment helper and terminal-return/dead-zone labels for complete triple-barrier timeouts; incomplete terminal windows remain unlabeled.
+- HMAC-safe UTF-8 byte comparison at reported call sites.
+- Fail-closed staged/production model signature requirement; model metadata class mapping recorded explicitly.
+- Withdrawals default disabled and destination allow-list enforcement fails closed when disabled or empty.
 - Non-finite execution-planner input/output handling.
 - Correlation exposure fallback to average entry price.
 - Quantity-idempotency fallback test-loader correction.
@@ -61,8 +63,8 @@ For workflow runs on a repair head before the last test assertion update:
 4. Supabase production inspection previously reported revision `0047_strategy_outcome_lifecycle`, 57 public tables with RLS disabled, and 3 mutable-search-path functions. Migration `0049_public_schema_rls_lockdown` must be tested against a separate staging copy and actual server/client flows before rollout. No live DDL is authorized by this audit.
 5. Real backup restore and provider-to-ledger reconciliation are not proven by disposable CI smoke tests.
 6. Paper-only flags must remain enforced; no live trading, payout, customer funds, or mainnet custody is authorized.
-7. Research dataset provenance, label leakage, timeout-label redesign, chronological out-of-sample evaluation, DSR, and paper-forward evidence remain separate model-promotion gates.
-8. Dependency lockfile hash verification, model signature verification, Android network/data-extraction policy review, unknown-symbol correlation treatment, and staging withdrawal guards require their own focused tests.
+7. Research dataset provenance, label leakage, chronological out-of-sample evaluation, DSR, retraining after timeout-label changes, and paper-forward evidence remain separate model-promotion gates.
+8. Dependency lockfile hash verification, production artifact signature/fingerprint validation, Android network/data-extraction policy review, and unknown-symbol correlation treatment require their own focused tests.
 
 ## Previous activity retained
 
