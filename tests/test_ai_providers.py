@@ -6,10 +6,26 @@ def test_dual_ai_returns_both_provider_outputs(monkeypatch):
     monkeypatch.setattr(ap.settings, "cerebras_api_key", "")
 
     async def fake_gemini(prompt):
-        return {"provider": "gemini", "confidence": 0.8}
+        return {
+            "provider": "gemini",
+            "regime_assessment": "range",
+            "key_observations": ["price history is available"],
+            "data_quality_flags": [],
+            "strategy_watchlist": [],
+            "confidence": 0.8,
+            "research_only_summary": "research only",
+        }
 
     async def fake_groq(prompt):
-        return {"provider": "groq", "confidence": 0.7}
+        return {
+            "provider": "groq",
+            "regime_assessment": "range",
+            "key_observations": ["price history is available"],
+            "data_quality_flags": [],
+            "strategy_watchlist": [],
+            "confidence": 0.7,
+            "research_only_summary": "research only",
+        }
 
     monkeypatch.setattr(ap, "_gemini_json", fake_gemini)
     monkeypatch.setattr(ap, "_groq_json", fake_groq)
@@ -26,7 +42,15 @@ def test_dual_ai_degrades_per_provider(monkeypatch):
         raise ap.AIProviderError("Gemini unavailable")
 
     async def fake_groq(prompt):
-        return {"provider": "groq"}
+        return {
+            "provider": "groq",
+            "regime_assessment": "range",
+            "key_observations": [],
+            "data_quality_flags": [],
+            "strategy_watchlist": [],
+            "confidence": 0.7,
+            "research_only_summary": "research only",
+        }
 
     monkeypatch.setattr(ap, "_gemini_json", fake_gemini)
     monkeypatch.setattr(ap, "_groq_json", fake_groq)
@@ -34,6 +58,31 @@ def test_dual_ai_degrades_per_provider(monkeypatch):
     out = asyncio.run(ap.dual_ai_research_review({}, {}))
     assert "gemini" in out["errors"]
     assert out["providers"]["groq"]["provider"] == "groq"
+    assert out["execution_authority"] is False
+
+
+def test_dual_ai_rejects_incomplete_research_schema_per_provider(monkeypatch):
+    import app.ai_providers as ap
+
+    async def incomplete(prompt):
+        return {"provider": "gemini", "confidence": 0.9}
+
+    async def valid(prompt):
+        return {
+            "regime_assessment": "range",
+            "key_observations": ["one observation"],
+            "data_quality_flags": [],
+            "strategy_watchlist": [],
+            "confidence": 0.9,
+            "research_only_summary": "research only",
+        }
+
+    monkeypatch.setattr(ap, "_gemini_json", incomplete)
+    monkeypatch.setattr(ap, "_groq_json", valid)
+    monkeypatch.setattr(ap.settings, "cerebras_api_key", "")
+    out = asyncio.run(ap.dual_ai_research_review({}, {}))
+    assert "gemini" in out["errors"]
+    assert out["providers"]["groq"]["regime_assessment"] == "range"
     assert out["execution_authority"] is False
 
 
