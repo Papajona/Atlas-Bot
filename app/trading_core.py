@@ -10,7 +10,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import balanced_accuracy_score, f1_score, log_loss
 from lightgbm import LGBMClassifier
 from .config import settings
-from .research_validation import deflated_sharpe_report, cost_breakeven_report
+from .research_validation import deflated_sharpe_report, cost_breakeven_report, purged_walk_forward_splits
 from .model_registry import sha256_file, artifact_signature, verify_artifact_signature
 
 
@@ -317,9 +317,26 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
     y = triple_barrier(aligned.close, X.vol_24, aligned.high, aligned.low, max_hold=profile.max_hold)
     valid = y.notna()
     X, aligned = X.loc[valid], aligned.loc[valid]
-    if len(X) < min_train + folds * (profile.max_hold + 20):
-        raise RuntimeError("Insufficient data for AI walk-forward backtest")
-    tscv = TimeSeriesSplit(n_splits=folds, gap=profile.max_hold)
+    # Use an explicitly expanding chronological split with a full label-horizon purge
+    # between every train/test boundary. sklearn.TimeSeriesSplit makes early training
+    # folds shorter than min_train, silently skipping them (for example, 1,799 bars
+    # with min_train=800 and five splits yields only three usable folds).
+    minimum_test_bars = 20
+    gap = int(profile.max_hold)
+    required_bars = int(min_train) + int(folds) * minimum_test_bars + (2 * int(folds) - 1) * gap
+    if folds < 2 or min_train < 1 or len(X) < required_bars:
+        raise RuntimeError("Insufficient data for requested purged AI walk-forward folds")
+    test_size = (len(X) - int(min_train) - (2 * int(folds) - 1) * gap) // int(folds)
+    split_specs = purged_walk_forward_splits(
+        len(X),
+        folds=int(folds),
+        min_train=int(min_train),
+        test_size=int(test_size),
+        purge=gap,
+        embargo=gap,
+    )
+    if len(split_specs) != int(folds) or any((fold.test_end - fold.test_start) < minimum_test_bars for fold in split_specs):
+        raise RuntimeError("Could not construct the requested number of non-empty purged OOS folds")
     scores = []
     fold_metrics = []
     oos_net_blocks: list[np.ndarray] = []
@@ -328,7 +345,9 @@ def ai_walk_forward_backtest(df: pd.DataFrame, asset: str = "crypto", folds: int
     oos_position_blocks: list[np.ndarray] = []
     oos_carry_blocks: list[np.ndarray] = []
     pred_signal = pd.Series(np.nan, index=X.index)
-    for tr, te in tscv.split(X):
+    for fold in split_specs:
+        tr = np.arange(fold.train_start, fold.train_end, dtype=int)
+        te = np.arange(fold.test_start, fold.test_end, dtype=int)
         if len(tr) < min_train or len(np.unique((y.iloc[tr] + 1).to_numpy())) < 2:
             continue
         m = LGBMClassifier(objective="multiclass", class_weight="balanced",
