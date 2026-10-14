@@ -112,3 +112,20 @@ def test_trial_ledger_requires_exact_experiment_archive_hash(tmp_path):
     }), encoding="utf-8")
     with pytest.raises(ValueError, match="does not match"):
         load_complete_trial_history(ledger, 1, archive)
+
+
+def test_oos_gate_adapter_preserves_fold_metrics_and_cost_stress():
+    from scripts.evaluate_original_oanda_oos import promotion_gate_metrics
+
+    folds = [{"total_return": 0.01}, {"total_return": 0.02}]
+    original = {"fold_metrics": folds, "cost_analysis": {"stress_ok": True}}
+    normalized = promotion_gate_metrics(original)
+    assert normalized["folds"] == folds
+    assert normalized["cost_stress_ok"] is True
+    assert original.get("folds") is None
+
+
+def test_oos_gate_adapter_fails_closed_when_cost_stress_is_missing():
+    from scripts.evaluate_original_oanda_oos import promotion_gate_metrics
+
+    assert promotion_gate_metrics({"fold_metrics": []})["cost_stress_ok"] is False
