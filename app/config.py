@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     # Live execution is fail-closed by default.
     paper_trading: bool = True
     live_trading_enabled: bool = False
-    customer_live_trading_enabled: bool = False  # Requires an isolated exchange/subaccount mapping per customer.
+    customer_live_trading_enabled: bool = False  # Startup rejects true until platform-owned Binance allocation is implemented and verified.
     # Customer-live execution is deliberately fixed to Binance Spot; research venue defaults are separate.
     customer_live_exchange: str = "binance"
     customer_live_market_type: str = "spot"
