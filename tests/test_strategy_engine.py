@@ -71,8 +71,8 @@ def test_paper_gate_and_live_shadow_signals():
     from app.research_engine import paper_candidates, live_strategy_signals
     df = sample_df(1800)
     research = {
-        "strategies": [{"strategy":"trend","sharpe":1.0,"max_drawdown":-0.10,"trades":40,"total_return":0.20}],
-        "validation": {"per_strategy_oos": {"trend": {"status":"OK","oos_total_return":0.10,"folds":[{"total_return":0.05},{"total_return":-0.01}]}}}
+        "strategies": [{"strategy":"trend","sharpe":1.0,"max_drawdown":-0.10,"trades":150,"total_return":0.20}],
+        "validation": {"per_strategy_oos": {"trend": {"status":"OK","oos_total_return":0.10,"folds":[{"total_return":0.05},{"total_return":0.04},{"total_return":-0.01},{"total_return":0.03},{"total_return":0.02}]}}}
     }
     candidates = paper_candidates(research)
     assert candidates
@@ -186,9 +186,10 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
     monkeypatch.setattr(model_registry.settings, "environment", "staging", raising=False)
     monkeypatch.setattr(model_registry.settings, "model_integrity_required_for_live", True, raising=False)
     monkeypatch.setattr(model_registry.settings, "model_signing_public_key", public_pem.decode(), raising=False)
-    wfo = {"sharpe": 1.0, "max_drawdown": -0.10, "trades": 40, "total_return": 0.20,
+    wfo = {"sharpe": 1.0, "max_drawdown": -0.10, "trades": 150, "total_return": 0.20,
            "folds": [{"total_return": 0.03}, {"total_return": 0.02}, {"total_return": 0.04}, {"total_return": 0.05}, {"total_return": 0.06}],
-           "cost_stress_ok": True, "status": "OK", "oos_total_return": 0.20, "deflated_sharpe": 1.0}
+           "cost_stress_ok": True, "status": "OK", "oos_total_return": 0.20, "deflated_sharpe": 0.97,
+           "trial_registry_complete": True}
 
     monkeypatch.setattr(adaptive_bot, "ai_walk_forward_backtest", lambda *a, **k: wfo)
     def fake_train(df, path, **kwargs):
