@@ -8,7 +8,7 @@ def test_staging_identity_preflight_fails_closed_on_rls_migration_blockers():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(
         encoding="utf-8"
     )
-    assert 'role in {"postgres", "supabase_admin", "supabase_auth_admin", "authenticator"}' in workflow
+    assert 'role in {"postgres", "service_role", "supabase_admin", "supabase_auth_admin", "authenticator", "anon", "authenticated"}' in workflow
     assert 'role has administrative privileges' in workflow
     assert 'if bypass_rls.lower() != "true"' in workflow
     assert 'if int(owned_count) > 0' in workflow
