@@ -267,7 +267,7 @@ def test_staging_identity_preflight_requires_a_distinct_project_and_runtime_iden
 def test_staging_preflight_runtime_role_is_non_owner_and_non_admin():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
     guard = (ROOT / "app" / "startup_guards.py").read_text(encoding="utf-8")
-    assert "owned_public_table_count" in workflow
+    assert "owned_count" in workflow
     assert "if int(owned_count) > 0" in workflow
     assert "c.relowner = r.oid" in guard
     assert "r.rolcreaterole AS can_create_roles" in guard
