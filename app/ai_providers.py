@@ -137,6 +137,28 @@ def _prompt(research: dict[str, Any], intelligence: dict[str, Any]) -> str:
     )
 
 
+def _validate_research_payload(value: dict[str, Any]) -> dict[str, Any]:
+    """Validate the fields declared by the research-review prompt before returning provider output."""
+    if not isinstance(value, dict):
+        raise AIProviderError("Research-review response must be a JSON object")
+    for field in ("regime_assessment", "research_only_summary"):
+        if not isinstance(value.get(field), str) or not value[field].strip():
+            raise AIProviderError(f"Research-review response requires non-empty string {field}")
+    for field in ("key_observations", "data_quality_flags", "strategy_watchlist"):
+        items = value.get(field)
+        if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
+            raise AIProviderError(f"Research-review response requires {field} to be an array of strings")
+    confidence = value.get("confidence")
+    if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence)) or not 0.0 <= float(confidence) <= 1.0):
+        raise AIProviderError("Research-review response requires finite confidence between 0 and 1")
+    return value
+
+
+async def _validated_research_call(call) -> dict[str, Any]:
+    return _validate_research_payload(await call)
+
+
 async def dual_ai_research_review(research: dict[str, Any], intelligence: dict[str, Any]) -> dict[str, Any]:
     """Run configured research providers independently and return auditable outputs.
 
@@ -144,9 +166,9 @@ async def dual_ai_research_review(research: dict[str, Any], intelligence: dict[s
     research opinion. None of these outputs has authority to execute orders.
     """
     prompt = _prompt(research, intelligence)
-    calls = [("gemini", _gemini_json(prompt)), ("groq", _groq_json(prompt))]
+    calls = [("gemini", _validated_research_call(_gemini_json(prompt))), ("groq", _validated_research_call(_groq_json(prompt)))]
     if settings.cerebras_api_key:
-        calls.append(("cerebras", _cerebras_json(prompt)))
+        calls.append(("cerebras", _validated_research_call(_cerebras_json(prompt))))
     results = await asyncio.gather(*(call for _, call in calls), return_exceptions=True)
     providers: dict[str, Any] = {}
     errors: dict[str, str] = {}
