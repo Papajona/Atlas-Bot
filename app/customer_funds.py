@@ -628,10 +628,16 @@ async def ledger_statement(db, customer_id: int, currency: str = USDT, limit: in
         LedgerJournalLine, LedgerJournalLine.journal_id == LedgerJournal.id
     ).where(LedgerJournalLine.customer_id == customer_id, LedgerJournal.currency == currency)
       .order_by(LedgerJournal.created_at.desc(), LedgerJournalLine.line_no).limit(limit))).all()
-    return [{"journal_id": j.id, "entry_type": j.entry_type, "reference_type": j.reference_type,
-             "reference_id": j.reference_id, "account_code": line.account_code,
-             "debit": float(line.debit), "credit": float(line.credit),
-             "created_at": j.created_at.isoformat() if j.created_at else None} for j, line in rows]
+    return [{
+        "journal_id": j.id, "entry_type": j.entry_type, "reference_type": j.reference_type,
+        "reference_id": j.reference_id, "account_code": line.account_code,
+        "debit": format(D(str(line.debit)), "f"),
+        "credit": format(D(str(line.credit)), "f"),
+        "debit_minor_units": int(D(str(line.debit)) * Decimal("1000000")),
+        "credit_minor_units": int(D(str(line.credit)) * Decimal("1000000")),
+        "minor_units_scale": 1_000_000,
+        "created_at": j.created_at.isoformat() if j.created_at else None,
+    } for j, line in rows]
 
 
 async def _invariant_snapshot(db, tol: Decimal):
