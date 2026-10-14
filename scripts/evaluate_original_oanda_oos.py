@@ -469,9 +469,6 @@ def main() -> int:
     parser.add_argument("--trial-ledger", required=True, help="Complete immutable JSON ledger of all tested variants and annualized Sharpe values")
     parser.add_argument("--experiment-archive", required=True, help="Full experiment archive whose SHA-256 is recorded in the trial ledger")
     parser.add_argument("--expected-rows", type=int, default=1799)
-    # This evaluator is the gate for one specific legacy research dataset. A user
-    # must not change the row-count input to bless an arbitrary fresh capture.
-    parser.add_argument("--allow-non-original-row-count", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--asset", choices=("crypto", "forex"), default="forex")
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--min-train", type=int, default=800)
@@ -487,7 +484,7 @@ def main() -> int:
     parser.add_argument("--min-trades", type=int, default=20)
     parser.add_argument("--output", default="oanda_oos_evaluation.json")
     args = parser.parse_args()
-    if args.expected_rows != 1799 and not args.allow_non_original_row_count:
+    if args.expected_rows != 1799:
         parser.error("The audited original OANDA research dataset must contain exactly 1799 completed candles")
     if args.expected_rows < 1 or args.folds < 2 or args.min_train < 1 or args.min_trades < 0:
         parser.error("expected rows/min-train/min-trades must be non-negative and folds must be at least 2")
