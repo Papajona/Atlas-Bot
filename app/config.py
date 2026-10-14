@@ -460,6 +460,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _production_security_requirements(self):
+        if self.binance_customer_subaccounts_enabled:
+            raise ValueError(
+                "Binance customer subaccounts are disabled by Atlas operating policy; "
+                "use the approved platform-owned account model instead."
+            )
         if self.customer_live_trading_enabled:
             raise ValueError(
                 "Customer live trading is blocked: the current execution path uses customer-specific "
