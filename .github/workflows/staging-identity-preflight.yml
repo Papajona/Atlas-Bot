@@ -192,7 +192,16 @@ jobs:
                  (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
                    WHERE n.nspname='public' AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner)=current_user),
                  (SELECT count(*) FROM pg_auth_members membership
-                   WHERE membership.member=(SELECT oid FROM pg_roles WHERE rolname=current_user));
+                   WHERE membership.member=(SELECT oid FROM pg_roles WHERE rolname=current_user)),
+                 has_schema_privilege(current_user, 'public', 'CREATE'),
+                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p')
+                     AND NOT (has_table_privilege(current_user,c.oid,'INSERT')
+                          AND has_table_privilege(current_user,c.oid,'UPDATE')
+                          AND has_table_privilege(current_user,c.oid,'DELETE'))),
+                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                   WHERE n.nspname='public' AND c.relkind='S'
+                     AND NOT has_sequence_privilege(current_user,c.oid,'USAGE'));
           """
           p = subprocess.run(
               ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", query],
@@ -202,16 +211,17 @@ jobs:
               print("BLOCKED: read-only database identity query failed; database output withheld")
               sys.exit(1)
           fields = p.stdout.strip().split("|")
-          if len(fields) != 17:
+          if len(fields) != 20:
               raise SystemExit("BLOCKED: unexpected identity query output")
           (db, role, login_role, revision, table_count, unprotected_count, is_superuser,
            can_create_roles, can_create_databases, can_replicate, bypass_rls, can_login,
            can_inherit, public_schema_usage, tables_missing_select, owned_count,
-           role_membership_count) = fields
+           role_membership_count, public_schema_create, tables_missing_dml,
+           sequences_missing_usage) = fields
           def is_true(value):
               # psql's default unaligned boolean representation is "t"/"f", not "true"/"false".
               return str(value).strip().lower() in {"t", "true", "1", "yes"}
-          print(f"Observed database={db}, current_role={role}, login_role={login_role}, revision={revision or 'missing'}, public_tables={table_count}, tables_without_rls={unprotected_count}, superuser={is_superuser}, create_role={can_create_roles}, create_database={can_create_databases}, replication={can_replicate}, bypass_rls={bypass_rls}, can_login={can_login}, inherit={can_inherit}, public_schema_usage={public_schema_usage}, tables_missing_select={tables_missing_select}, owned_public_tables={owned_count}, role_memberships={role_membership_count}")
+          print(f"Observed database={db}, current_role={role}, login_role={login_role}, revision={revision or 'missing'}, public_tables={table_count}, tables_without_rls={unprotected_count}, superuser={is_superuser}, create_role={can_create_roles}, create_database={can_create_databases}, replication={can_replicate}, bypass_rls={bypass_rls}, can_login={can_login}, inherit={can_inherit}, public_schema_usage={public_schema_usage}, tables_missing_select={tables_missing_select}, tables_missing_dml={tables_missing_dml}, sequences_missing_usage={sequences_missing_usage}, public_schema_create={public_schema_create}, owned_public_tables={owned_count}, role_memberships={role_membership_count}")
           if db != "postgres":
               raise SystemExit("BLOCKED: unexpected staging database name")
           if login_role != role:
@@ -238,11 +248,17 @@ jobs:
               raise SystemExit("BLOCKED: no table-specific RLS policies are installed; a reviewed trusted runtime role with BYPASSRLS is required for this backend-only access model")
           if int(tables_missing_select) > 0:
               raise SystemExit("BLOCKED: runtime role lacks direct SELECT privileges on one or more application tables")
+          if is_true(public_schema_create):
+              raise SystemExit("BLOCKED: runtime role must not have CREATE privilege on public schema")
+          if int(tables_missing_dml) > 0:
+              raise SystemExit("BLOCKED: runtime role lacks direct INSERT/UPDATE/DELETE on one or more application tables")
+          if int(sequences_missing_usage) > 0:
+              raise SystemExit("BLOCKED: runtime role lacks USAGE on one or more public identity/serial sequences")
           if int(owned_count) > 0:
               raise SystemExit("BLOCKED: runtime DB role owns public tables; use a non-owner runtime role with explicit grants")
           if int(role_membership_count) > 0:
               raise SystemExit("BLOCKED: runtime DB role inherits other PostgreSQL roles; grant only explicit privileges directly")
-          print("IDENTITY PASS: direct non-owner/non-admin login with NOINHERIT, explicit public-schema/table-read access, BYPASSRLS, and RLS enabled on all inventoried tables.")
+          print("IDENTITY PASS: direct non-owner/non-admin login with NOINHERIT, explicit table DML and sequence grants, no schema CREATE, BYPASSRLS, and RLS enabled on all inventoried tables.")
           print("PASS: read-only target identity and current migration revision were verified; no migration or write was executed")
           PY
           rm -f "$RUNNER_TEMP/atlas-staging-db-url"
