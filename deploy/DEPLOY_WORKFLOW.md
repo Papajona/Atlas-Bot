@@ -88,7 +88,7 @@ Each gets `secretAccessor` only on the secrets in the table above. Review the bu
 | `PROCESS_ROLE` | `api` / `worker` / `job` | decides which loops start |
 | `BACKGROUND_RECONCILIATION_ENABLED` | API script `false`; default `true` | the worker relies on the default `true` |
 | `ADAPTIVE_BOT_CONTROLLER_ENABLED` | `true` | worker starts bot and executor controllers |
-| `GEMINI_MODEL`, `GEMINI_STRATEGY_MODEL` | `gemini-3.6-flash` | `gemini-2.5-*` is scheduled for shutdown in Oct 2026; override via env at deploy |
+| `GEMINI_MODEL`, `GEMINI_STRATEGY_MODEL` | `gemini-3.5-flash-lite` | `gemini-2.5-*` is scheduled for shutdown in Oct 2026; override via env at deploy |
 | `GROQ_MODEL`, `GROQ_STRATEGY_MODEL` | `openai/gpt-oss-20b` | check with `python -m scripts.check_ai_models` before every deploy |
 | `RESEARCH_REQUIRE_COST_STRESS` / `RESEARCH_COST_STRESS_MULTIPLIER` | `true` / `2.0` | promotion needs a positive net edge at 2x costs |
 | `RESEARCH_MIN_DEFLATED_SHARPE` | `0.95` in production | production adaptive-model promotion fails closed below 0.95; development/staging may use a lower value for research |
@@ -232,7 +232,7 @@ and before each release (the verify script does).
 | Worker script never set `BACKUP_RECOVERY_URL` | production startup refused to boot: the worker pool crash-looped | variable now required and passed |
 | API script spliced the Gemini secret without a leading comma when Groq was unset | `--set-secrets` became `...atlas-trongrid-api-key:2GEMINI_API_KEY=...`: an invalid deploy command on the no-Groq path | `AI_SECRET_ARGS` always starts with a comma; both branches checked |
 | Worker had no way to receive a Groq key | every worker bot cycle ended `ai_safety_not_configured` (NO_TRADE) because the veto needs both providers | optional `SECRET_GROQ_REF` + Groq model env added; warns when unset |
-| `gemini-2.5-*` defaults | models scheduled for shutdown Oct 2026 | defaults `gemini-3.5-flash`, env-configurable; `scripts/check_ai_models.py` |
+| `gemini-2.5-*` defaults | models scheduled for shutdown Oct 2026 | defaults `gemini-3.5-flash-lite`, env-configurable; `scripts/check_ai_models.py` |
 | `DEPLOYMENT_ACCEPTANCE.md` stated `max=1, concurrency=1` and listed migrations after deploy | wrong numbers and order | corrected |
 | New real-ledger Postgres test not in the pre-flight script | concurrency of the actual ledger never exercised | added to `verify-live-money-runtime.sh` |
 
