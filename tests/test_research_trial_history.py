@@ -121,7 +121,7 @@ def test_trial_ledger_requires_exact_experiment_archive_hash(tmp_path):
         "variants": [{"variant_id": "base", "annualized_sharpe": 0.7}],
     }), encoding="utf-8")
     with pytest.raises(ValueError, match="does not match"):
-        load_complete_trial_history(ledger, 1, archive)
+        load_complete_trial_history(ledger, 1, archive, fake_provenance())
 
 
 def test_oos_gate_adapter_preserves_fold_metrics_and_cost_stress():
