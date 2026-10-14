@@ -177,3 +177,31 @@ def test_broker_cancel_all_retains_each_failure_and_continues_best_effort():
         },
     ]
     assert {item.get("id") for item in exchange.fetch_open_orders()} == {"timeout", ""}
+
+def test_broker_bulk_cancel_failure_falls_back_to_individual_cancellations():
+    class FakeExchange:
+        has = {"cancelAllOrders": True}
+
+        def __init__(self):
+            self.orders = [{"id": "o-1", "symbol": "BTC/USDT"}]
+
+        def cancel_all_orders(self):
+            raise TimeoutError("bulk cancel timed out after submission")
+
+        def fetch_open_orders(self):
+            return list(self.orders)
+
+        def cancel_order(self, order_id, symbol):
+            self.orders = [order for order in self.orders if order.get("id") != order_id]
+            return {"id": order_id, "symbol": symbol, "status": "closed"}
+
+    broker = Broker(BrokerConfig(exchange_id="binance", api_key="test-key", api_secret="test-secret"))
+    exchange = FakeExchange()
+    broker.client = exchange
+
+    canceled = broker.cancel_all_orders()
+
+    assert [item["id"] for item in canceled] == ["o-1"]
+    assert broker.last_cancel_errors[0]["error_type"] == "TimeoutError"
+    assert broker.last_cancel_errors[0]["error"] == "bulk cancel failed: bulk cancel timed out after submission"
+    assert exchange.fetch_open_orders() == []
