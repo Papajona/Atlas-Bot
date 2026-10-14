@@ -3267,6 +3267,8 @@ async def funding_webhook(
     if not _funding_signature_valid(raw, x_funding_signature, x_funding_timestamp):
         raise HTTPException(401, "Invalid funding webhook signature")
     payload = FundingWebhook.model_validate(json.loads(raw))
+    if payload.currency.strip().upper() != "USDT":
+        raise HTTPException(422, "Only USDT funding is supported by the customer trading ledger")
     funding_amount = Decimal(str(payload.amount))
     if not funding_amount.is_finite() or funding_amount <= 0:
         raise HTTPException(422, "Funding amount must be finite and positive")
