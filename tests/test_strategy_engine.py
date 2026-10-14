@@ -34,6 +34,20 @@ def test_strategy_backtest_is_lagged_and_finite():
     assert result["max_leverage"] <= 1.500001
 
 
+def test_next_open_ratio_uses_neutral_gross_multiple_on_terminal_bar():
+    from app.strategy_engine import next_open_returns
+
+    idx = pd.date_range("2026-01-01", periods=3, freq="h", tz="UTC")
+    frame = pd.DataFrame({"open": [100.0, 101.0, 102.0]}, index=idx)
+    gross_multiple = next_open_returns(frame)
+    net_return = gross_multiple - 1.0
+
+    assert np.isclose(gross_multiple.iloc[0], 1.01)
+    assert np.isclose(gross_multiple.iloc[1], 102.0 / 101.0)
+    assert np.isclose(gross_multiple.iloc[-1], 1.0)
+    assert np.isclose(net_return.iloc[-1], 0.0)
+
+
 
 def test_strategy_annualization_uses_bar_frequency():
     import numpy as np, pandas as pd

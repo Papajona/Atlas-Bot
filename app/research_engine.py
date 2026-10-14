@@ -9,7 +9,6 @@ from .strategy_engine import StrategyConfig, strategy_signals, risk_scaled_posit
 from .trading_core import ai_walk_forward_backtest
 from .strategy_evidence import evidence_for
 from .research_validation import monte_carlo_bootstrap, parameter_plateau_score, cost_breakeven_report
-from .trading_core import PROFILES
 from .config import settings
 from .research_validation import (validate_ohlcv_frame, bootstrap_mean_ci,
                                   multiple_testing_sharpe_adjustment, cost_sensitivity,
@@ -51,6 +50,9 @@ def _apply_protective_halts(
     halted_until = -1
     hard_halt = False
     halted_bars = 0
+    hard_halt_reason: str | None = None
+    hard_halt_triggered_at: int | None = None
+    cooldown_triggers = 0
     loss_event_times: list[int] = []
     previous_position = 0.0
 
@@ -100,10 +102,20 @@ def _apply_protective_halts(
         # Drawdown/daily-loss limits latch until operator reset; only a stop-loss
         # cluster is a timed cooldown. Re-evaluating a breached hard limit as a
         # fresh cooldown on every flat bar would silently keep extending it.
-        if drawdown >= float(drawdown_limit) or daily_loss >= float(daily_loss_limit):
+        hard_limit_reason = (
+            "DRAWDOWN" if drawdown >= float(drawdown_limit)
+            else "DAILY_LOSS" if daily_loss >= float(daily_loss_limit)
+            else None
+        )
+        # A hard risk limit takes precedence over the timed loss-cluster cooldown.
+        # It latches permanently for this backtest; the cooldown must never mask it.
+        if hard_limit_reason is not None and not hard_halt:
             hard_halt = True
+            hard_halt_reason = hard_limit_reason
+            hard_halt_triggered_at = i
         elif not is_halted and loss_cluster_trigger:
             halted_until = max(halted_until, i + max(0, int(cooldown_bars)))
+            cooldown_triggers += 1
         previous_position = active_position
 
     protected_position = pd.Series(active_positions, index=positions.index, dtype=float)
@@ -113,6 +125,11 @@ def _apply_protective_halts(
         "halted_bars": halted_bars,
         "active_bars": int((protected_position != 0.0).sum()),
         "loss_events": len(loss_event_times),
+        "hard_halt": hard_halt,
+        "hard_halt_reason": hard_halt_reason,
+        "hard_halt_triggered_at": hard_halt_triggered_at,
+        "cooldown_until": halted_until,
+        "cooldown_triggers": cooldown_triggers,
     }
 
 
@@ -223,22 +240,34 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     for row in results:
         row["evidence"] = evidence_for(row["strategy"])
     validation_splits = purged_walk_forward_splits(len(df), folds=folds, min_train=min_train, purge=1, embargo=1)
-    ensemble_signal = strategy_signals(df, cfg, asset=asset)["ensemble"].fillna(0.0)
+    signal_frame = strategy_signals(df, cfg, asset=asset)
+    annualization_factor = float(signal_frame.attrs.get("annualization_factor", 252.0))
+    ensemble_signal = signal_frame["ensemble"].fillna(0.0)
     ensemble_pos = ensemble_signal.shift(1).fillna(0.0)
     gross = ensemble_pos * (next_open_returns(df) - 1.0)
     turnover = ensemble_pos.diff().abs().fillna(ensemble_pos.abs())
     sensitivity = cost_sensitivity(gross.to_numpy(), turnover.to_numpy())
     ci = bootstrap_mean_ci((gross - turnover * ((taker_bps + slippage_bps) / 10000.0)).to_numpy(), block_size=10)
     adjusted = multiple_testing_sharpe_adjustment([r.get("sharpe", 0.0) for r in results], trials=len(results))
-    oos = fixed_signal_walk_forward_oos(df, ensemble_signal,
-                                        costs_bps=taker_bps + slippage_bps, folds=folds, min_train=min_train)
+    cost_mult = float(getattr(settings, "research_cost_stress_multiplier", 2.0))
+    oos = fixed_signal_walk_forward_oos(
+        df, ensemble_signal, costs_bps=taker_bps + slippage_bps,
+        folds=folds, min_train=min_train,
+        annualization_factor=annualization_factor,
+        taker_bps=taker_bps, slippage_bps=slippage_bps,
+        cost_stress_multiplier=cost_mult,
+    )
     gross_net = ensemble_pos * (next_open_returns(df) - 1.0)
     regime_performance = regime_conditioned_performance(df, gross_net - turnover * ((taker_bps + slippage_bps) / 10000.0), asset=asset)
     per_strategy_oos = {}
     for component in components:
-        component_signal = strategy_signals(df, cfg, asset=asset)[component]
+        component_signal = signal_frame[component]
         per_strategy_oos[component] = fixed_signal_walk_forward_oos(
-            df, component_signal, costs_bps=taker_bps + slippage_bps, folds=folds, min_train=min_train
+            df, component_signal, costs_bps=taker_bps + slippage_bps,
+            folds=folds, min_train=min_train,
+            annualization_factor=annualization_factor,
+            taker_bps=taker_bps, slippage_bps=slippage_bps,
+            cost_stress_multiplier=cost_mult,
         )
     # Parameter-plateau check: small changes to the signal threshold should not destroy
     # the measured edge. A narrow single-point optimum is treated as fragile research.
@@ -282,21 +311,20 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     oos["trial_registry_complete"] = trial_registry_complete
     if dsr.get("status") == "OK":
         oos["deflated_sharpe"] = dsr["deflated_sharpe_ratio"]
-    cost_mult = float(getattr(settings, "research_cost_stress_multiplier", 2.0))
-    ens_cost = cost_breakeven_report(gross.to_numpy(), turnover.to_numpy(), taker_bps=taker_bps, slippage_bps=slippage_bps,
-                                     bars_per_year=PROFILES.get(asset, PROFILES["crypto"]).bars_per_year, stress_multiplier=cost_mult)
-    oos["cost_stress_ok"] = bool(ens_cost.get("stress_ok"))
-    oos["cost_analysis"] = ens_cost
-    # Each component is judged on its own net returns (main.py gates on per_strategy_oos[selected]), same trial count.
-    ann_bars = PROFILES.get(asset, PROFILES["crypto"]).bars_per_year
+    # Full-sample cost analysis is diagnostic only; the promotion gate consumes
+    # the OOS-only stress results attached by fixed_signal_walk_forward_oos.
+    ens_cost = cost_breakeven_report(
+        gross.to_numpy(), turnover.to_numpy(),
+        taker_bps=taker_bps, slippage_bps=slippage_bps,
+        bars_per_year=max(1, int(round(annualization_factor))),
+        stress_multiplier=cost_mult,
+    )
+    # Each component is judged on its own net returns (main.py gates on per_strategy_oos[selected]).
     for component in components:
-        sig = strategy_signals(df, cfg, asset=asset)[component].fillna(0.0)
-        component_pos = sig.shift(1).fillna(0.0)
-        net_c = (component_pos * (next_open_returns(df) - 1.0) - component_pos.diff().abs().fillna(component_pos.abs()) * ((taker_bps + slippage_bps) / 10000.0)).to_numpy()
         # Component Sharpe values cannot be deflated from prior labels alone either.
         comp_dsr = {
             "status": "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
-            "observations": int(np.isfinite(net_c).sum()),
+            "observations": int(per_strategy_oos[component].get("oos_bars", 0)),
             "trial_count_current_run": len(this_labels),
             "known_prior_trial_label_count": len(known_prior_labels),
             "trial_count_known_lower_bound": n_trials,
@@ -306,11 +334,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                 "re-evaluation are required before promotion-grade DSR can be computed."
             ),
         }
-        comp_cost = cost_breakeven_report((component_pos * (next_open_returns(df) - 1.0)).to_numpy(), component_pos.diff().abs().fillna(component_pos.abs()).to_numpy(),
-                                          taker_bps=taker_bps, slippage_bps=slippage_bps, bars_per_year=ann_bars, stress_multiplier=cost_mult)
         per_strategy_oos[component]["trial_registry_complete"] = trial_registry_complete
-        per_strategy_oos[component]["cost_stress_ok"] = bool(comp_cost.get("stress_ok"))
-        per_strategy_oos[component]["cost_analysis"] = comp_cost
         per_strategy_oos[component]["deflated_sharpe_detail"] = comp_dsr
         if comp_dsr.get("status") == "OK":
             per_strategy_oos[component]["deflated_sharpe"] = comp_dsr["deflated_sharpe_ratio"]
