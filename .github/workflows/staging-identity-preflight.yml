@@ -37,19 +37,51 @@ jobs:
         shell: bash
         env:
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          PRODUCTION_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}
           STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
           STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
+          STAGING_CLOUD_RUN_SERVICE: ${{ vars.ATLAS_STAGING_CLOUD_RUN_SERVICE }}
+          EXPECTED_RUNTIME_SERVICE_ACCOUNT: ${{ vars.ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT }}
           EXPECTED_RUNTIME_DB_ROLE: ${{ vars.ATLAS_STAGING_RUNTIME_DB_ROLE }}
         run: |
           set -euo pipefail
           : "${GCP_PROJECT_ID:?Missing protected GCP_PROJECT_ID secret}"
+          : "${GCP_REGION:?Missing protected GCP_REGION secret}"
+          : "${PRODUCTION_SUPABASE_PROJECT_REF:?Set ATLAS_PRODUCTION_SUPABASE_PROJECT_REF to the actual production project ref}"
           : "${STAGING_SUPABASE_PROJECT_REF:?Set staging environment variable ATLAS_STAGING_SUPABASE_PROJECT_REF}"
           : "${STAGING_DATABASE_SECRET:?Set staging environment variable ATLAS_STAGING_DATABASE_SECRET}"
+          : "${STAGING_CLOUD_RUN_SERVICE:?Set staging environment variable ATLAS_STAGING_CLOUD_RUN_SERVICE}"
+          : "${EXPECTED_RUNTIME_SERVICE_ACCOUNT:?Set staging environment variable ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT}"
           : "${EXPECTED_RUNTIME_DB_ROLE:?Set staging environment variable ATLAS_STAGING_RUNTIME_DB_ROLE}"
+          [[ "$PRODUCTION_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]] || { echo "BLOCKED: production project ref must be an explicit 20-character Supabase project ref"; exit 1; }
           [[ "$STAGING_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]] || { echo "BLOCKED: staging project ref must be an explicit 20-character Supabase project ref"; exit 1; }
+          [[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]] || { echo "BLOCKED: staging must use a different Supabase project from production"; exit 1; }
           [[ "$STAGING_DATABASE_SECRET" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "BLOCKED: invalid staging Secret Manager secret name"; exit 1; }
+          [[ "$STAGING_CLOUD_RUN_SERVICE" =~ ^[a-z][a-z0-9-]{0,48}$ ]] || { echo "BLOCKED: invalid staging Cloud Run service name"; exit 1; }
+          [[ "$EXPECTED_RUNTIME_SERVICE_ACCOUNT" =~ ^[a-zA-Z0-9._@-]+$ ]] || { echo "BLOCKED: invalid expected staging runtime service account"; exit 1; }
           [[ "$EXPECTED_RUNTIME_DB_ROLE" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || { echo "BLOCKED: invalid expected runtime database role"; exit 1; }
-          echo "Explicit staging identity configuration is present."
+          [[ "$EXPECTED_RUNTIME_DB_ROLE" != "postgres" ]] || { echo "BLOCKED: postgres is not an approved runtime database role"; exit 1; }
+          echo "Explicit isolated-staging identity configuration is present."
+
+      - name: Verify deployed staging Cloud Run runtime service account
+        shell: bash
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          STAGING_CLOUD_RUN_SERVICE: ${{ vars.ATLAS_STAGING_CLOUD_RUN_SERVICE }}
+          EXPECTED_RUNTIME_SERVICE_ACCOUNT: ${{ vars.ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          observed_sa="$(gcloud run services describe "$STAGING_CLOUD_RUN_SERVICE" \
+            --project="$GCP_PROJECT_ID" --region="$GCP_REGION" \
+            --format='value(spec.template.spec.serviceAccountName)')"
+          test -n "$observed_sa" || { echo "BLOCKED: staging Cloud Run service has no explicit runtime service account"; exit 1; }
+          if [ "$observed_sa" != "$EXPECTED_RUNTIME_SERVICE_ACCOUNT" ]; then
+            echo "BLOCKED: deployed staging service account differs from ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT"
+            exit 1
+          fi
+          echo "PASS: staging Cloud Run runtime service account matches the protected expected identity."
 
       - name: Read staging database secret without printing credentials
         shell: bash
@@ -116,7 +148,11 @@ jobs:
                    WHERE n.nspname='public' AND c.relkind IN ('r','p')),
                  (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
                    WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relrowsecurity),
-                 COALESCE((SELECT rolbypassrls OR rolsuper FROM pg_roles WHERE rolname=current_user), false),
+                 COALESCE((SELECT rolsuper FROM pg_roles WHERE rolname=current_user), false),
+                 COALESCE((SELECT rolcreaterole FROM pg_roles WHERE rolname=current_user), false),
+                 COALESCE((SELECT rolcreatedb FROM pg_roles WHERE rolname=current_user), false),
+                 COALESCE((SELECT rolreplication FROM pg_roles WHERE rolname=current_user), false),
+                 COALESCE((SELECT rolbypassrls FROM pg_roles WHERE rolname=current_user), false),
                  (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
                    WHERE n.nspname='public' AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner)=current_user AND c.relrowsecurity AND NOT c.relforcerowsecurity);
           """
@@ -128,23 +164,30 @@ jobs:
               print("BLOCKED: read-only database identity query failed; database output withheld")
               sys.exit(1)
           fields = p.stdout.strip().split("|")
-          if len(fields) != 8:
+          if len(fields) != 12:
               raise SystemExit("BLOCKED: unexpected identity query output")
-          db, role, login_role, revision, table_count, unprotected_count, bypass_rls, owned_count = fields
-          print(f"Observed database={db}, current_role={role}, login_role={login_role}, revision={revision or 'missing'}, public_tables={table_count}, tables_without_rls={unprotected_count}, role_bypasses_rls={bypass_rls}, rls_bypass_compatible_owned_tables={owned_count}")
+          (db, role, login_role, revision, table_count, unprotected_count, is_superuser,
+           can_create_roles, can_create_databases, can_replicate, bypass_rls, owned_count) = fields
+          print(f"Observed database={db}, current_role={role}, login_role={login_role}, revision={revision or 'missing'}, public_tables={table_count}, tables_without_rls={unprotected_count}, superuser={is_superuser}, create_role={can_create_roles}, create_database={can_create_databases}, replication={can_replicate}, bypass_rls={bypass_rls}, owned_public_tables={owned_count}")
           if db != "postgres":
               raise SystemExit("BLOCKED: unexpected staging database name")
           if role != expected_role:
               raise SystemExit("BLOCKED: connected database role does not match configured staging runtime role")
+          if role in {"postgres", "supabase_admin", "supabase_auth_admin", "authenticator"}:
+              raise SystemExit("BLOCKED: privileged or gateway database role is not approved for Cloud Run runtime")
+          if is_superuser.lower() == "true" or can_create_roles.lower() == "true" or can_create_databases.lower() == "true" or can_replicate.lower() == "true":
+              raise SystemExit("BLOCKED: runtime database role has administrative privileges")
           if not revision:
               raise SystemExit("BLOCKED: Alembic revision is missing or ambiguous")
           if int(table_count) == 0:
               raise SystemExit("BLOCKED: public schema table inventory is empty")
-          if bypass_rls.lower() != "true" and int(owned_count) != int(table_count):
-              raise SystemExit("BLOCKED: runtime role neither bypasses RLS nor owns every public table; review grants/policies before lockdown")
           if int(unprotected_count) > 0:
               raise SystemExit("BLOCKED: public tables without RLS remain; do not deploy until isolated staging migration tests pass")
-          print("IDENTITY PASS: RLS is enabled on all inventoried public tables. Migration readiness still requires separate access, ledger, upgrade/downgrade, and recovery tests.")
+          if bypass_rls.lower() != "true":
+              raise SystemExit("BLOCKED: no table-specific RLS policies are installed; a reviewed trusted runtime role with BYPASSRLS is required for this backend-only access model")
+          if int(owned_count) > 0:
+              raise SystemExit("BLOCKED: runtime DB role owns public tables; use a non-owner runtime role with explicit grants")
+          print("IDENTITY PASS: runtime role is non-owner/non-admin, public RLS is enabled on all inventoried tables, and access was checked on the isolated staging database.")
           print("PASS: read-only target identity and current migration revision were verified; no migration or write was executed")
           PY
           rm -f "$RUNNER_TEMP/atlas-staging-db-url"
