@@ -641,6 +641,25 @@ def _signed_funding_headers(secret: str, body: bytes) -> dict[str, str]:
     return {"x-funding-signature": signature, "x-funding-timestamp": timestamp}
 
 
+def test_funding_webhook_rejects_unsupported_currency_before_recording(monkeypatch):
+    from fastapi.testclient import TestClient
+    import app.main as main
+
+    secret = "unsupported-currency-secret"
+    monkeypatch.setattr(settings, "funding_webhook_secret", secret)
+    body = json.dumps({
+        "customer_auth_user_id": "auth-" + uuid.uuid4().hex,
+        "provider": "wire", "provider_reference": "ref-" + uuid.uuid4().hex,
+        "amount": 10.0, "currency": "USD", "status": "CONFIRMED",
+    }).encode()
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/internal/funding/webhook", content=body,
+            headers=_signed_funding_headers(secret, body),
+        )
+    assert response.status_code == 422, response.text
+
+
 def test_mismatched_funding_confirmation_is_rejected_without_credit(monkeypatch):
     from fastapi.testclient import TestClient
     import app.main as main
