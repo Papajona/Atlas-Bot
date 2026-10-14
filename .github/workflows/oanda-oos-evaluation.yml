@@ -35,6 +35,10 @@ jobs:
       EXPERIMENT_ARCHIVE_OBJECT: ${{ vars.ATLAS_RESEARCH_EXPERIMENT_ARCHIVE_OBJECT }}
       DATASET_PREFIX: ${{ inputs.dataset_archive_prefix }}
       EXPECTED_ROWS: ${{ inputs.expected_rows }}
+      RESEARCH_TAKER_BPS: ${{ vars.ATLAS_RESEARCH_TAKER_BPS }}
+      RESEARCH_SLIPPAGE_BPS: ${{ vars.ATLAS_RESEARCH_SLIPPAGE_BPS }}
+      RESEARCH_CARRY_BPS_PER_BAR: ${{ vars.ATLAS_RESEARCH_CARRY_BPS_PER_BAR }}
+      RESEARCH_MAX_HOLD_BARS: ${{ vars.ATLAS_RESEARCH_MAX_HOLD_BARS }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Validate immutable archive paths and explicit main dispatch
@@ -55,6 +59,19 @@ jobs:
             echo "BLOCKED: expected_rows must be a positive integer"
             exit 1
           }
+          : "${RESEARCH_TAKER_BPS:?Set approved ATLAS_RESEARCH_TAKER_BPS in staging}"
+          : "${RESEARCH_SLIPPAGE_BPS:?Set approved ATLAS_RESEARCH_SLIPPAGE_BPS in staging}"
+          : "${RESEARCH_CARRY_BPS_PER_BAR:?Set evidence-backed ATLAS_RESEARCH_CARRY_BPS_PER_BAR in staging}"
+          : "${RESEARCH_MAX_HOLD_BARS:?Set approved ATLAS_RESEARCH_MAX_HOLD_BARS in staging}"
+          python - <<'PY'
+          import math, os
+          for name in ("RESEARCH_TAKER_BPS", "RESEARCH_SLIPPAGE_BPS", "RESEARCH_CARRY_BPS_PER_BAR"):
+              value = float(os.environ[name])
+              if not math.isfinite(value) or value < 0:
+                  raise SystemExit(f"BLOCKED: {name} must be finite and non-negative")
+          if int(os.environ["RESEARCH_MAX_HOLD_BARS"]) < 1:
+              raise SystemExit("BLOCKED: RESEARCH_MAX_HOLD_BARS must be positive")
+          PY
           [[ "$REFERENCE_MANIFEST_OBJECT" =~ ^trusted-reference/[A-Za-z0-9._/-]+\.json$ && "$REFERENCE_MANIFEST_OBJECT" != *".."* ]] || {
             echo "BLOCKED: trusted reference object must be within trusted-reference/"
             exit 1
@@ -122,6 +139,10 @@ jobs:
             --experiment-archive "$RUNNER_TEMP/complete-experiment-archive.zip" \
             --expected-rows "$EXPECTED_ROWS" \
             --asset forex --folds 5 --min-train 800 \
+            --taker-bps "$RESEARCH_TAKER_BPS" \
+            --slippage-bps "$RESEARCH_SLIPPAGE_BPS" \
+            --carry-bps-per-bar "$RESEARCH_CARRY_BPS_PER_BAR" \
+            --max-hold-bars "$RESEARCH_MAX_HOLD_BARS" \
             --output "$RUNNER_TEMP/oanda-oos-evaluation.json"
       - name: Archive evaluation output even when a gate fails
         if: always()
