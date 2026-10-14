@@ -187,7 +187,10 @@ def test_customer_withdrawal_debits_trading_account_through_decimal():
     block = source[start:end]
     assert "amount_d = Decimal(str(req.amount))" in block
     assert "Decimal(str(trading_account.cash_equity))" in block
-    assert "quantize_money(trading_account.cash_equity - req.amount)" in block
+    assert "quantize_money(Decimal(str(trading_account.cash_equity)) - amount_d)" in block
+    assert "quantize_money(Decimal(str(trading_account.equity)) - amount_d)" in block
+    assert "quantize_money(Decimal(str(trading_account.peak_equity)) - amount_d)" in block
+    assert "quantize_money(Decimal(str(trading_account.daily_start_equity)) - amount_d)" in block
     assert "trading_account.cash_equity -= req.amount" not in block
 
 
