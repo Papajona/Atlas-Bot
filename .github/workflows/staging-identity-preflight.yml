@@ -185,7 +185,9 @@ jobs:
                  COALESCE((SELECT rolreplication FROM pg_roles WHERE rolname=current_user), false),
                  COALESCE((SELECT rolbypassrls FROM pg_roles WHERE rolname=current_user), false),
                  (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner)=current_user);
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner)=current_user),
+                 (SELECT count(*) FROM pg_auth_members membership
+                   WHERE membership.member=(SELECT oid FROM pg_roles WHERE rolname=current_user));
           """
           p = subprocess.run(
               ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", query],
@@ -195,11 +197,12 @@ jobs:
               print("BLOCKED: read-only database identity query failed; database output withheld")
               sys.exit(1)
           fields = p.stdout.strip().split("|")
-          if len(fields) != 12:
+          if len(fields) != 13:
               raise SystemExit("BLOCKED: unexpected identity query output")
           (db, role, login_role, revision, table_count, unprotected_count, is_superuser,
-           can_create_roles, can_create_databases, can_replicate, bypass_rls, owned_count) = fields
-          print(f"Observed database={db}, current_role={role}, login_role={login_role}, revision={revision or 'missing'}, public_tables={table_count}, tables_without_rls={unprotected_count}, superuser={is_superuser}, create_role={can_create_roles}, create_database={can_create_databases}, replication={can_replicate}, bypass_rls={bypass_rls}, owned_public_tables={owned_count}")
+           can_create_roles, can_create_databases, can_replicate, bypass_rls, owned_count,
+           role_membership_count) = fields
+          print(f"Observed database={db}, current_role={role}, login_role={login_role}, revision={revision or 'missing'}, public_tables={table_count}, tables_without_rls={unprotected_count}, superuser={is_superuser}, create_role={can_create_roles}, create_database={can_create_databases}, replication={can_replicate}, bypass_rls={bypass_rls}, owned_public_tables={owned_count}, role_memberships={role_membership_count}")
           if db != "postgres":
               raise SystemExit("BLOCKED: unexpected staging database name")
           if login_role != role:
@@ -220,6 +223,8 @@ jobs:
               raise SystemExit("BLOCKED: no table-specific RLS policies are installed; a reviewed trusted runtime role with BYPASSRLS is required for this backend-only access model")
           if int(owned_count) > 0:
               raise SystemExit("BLOCKED: runtime DB role owns public tables; use a non-owner runtime role with explicit grants")
+          if int(role_membership_count) > 0:
+              raise SystemExit("BLOCKED: runtime DB role inherits other PostgreSQL roles; grant only explicit privileges directly")
           print("IDENTITY PASS: runtime role is non-owner/non-admin, public RLS is enabled on all inventoried tables, and access was checked on the isolated staging database.")
           print("PASS: read-only target identity and current migration revision were verified; no migration or write was executed")
           PY
