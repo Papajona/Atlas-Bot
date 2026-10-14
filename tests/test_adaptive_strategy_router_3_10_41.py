@@ -111,3 +111,48 @@ def test_policy_walk_forward_includes_online_feedback_and_switch_controls():
     if result["status"] == "OK":
         assert result["router"] == "FULL_ADAPTIVE_POLICY_WALK_FORWARD"
         assert set(result["includes"]) >= {"regime", "online_outcome_feedback", "switch_hysteresis", "blending", "abstention"}
+
+def test_full_policy_walk_forward_executes_after_signal_bar(monkeypatch):
+    # Close moves down while executable opens rise. The old close[i] -> close[next_i]
+    # simulation lost money; a properly lagged open[i+1] -> open[next_i+1] result is positive.
+    from app import strategy_router as router
+
+    n = 80
+    idx = pd.date_range("2026-01-01", periods=n, freq="h", tz="UTC")
+    t = np.arange(n, dtype=float)
+    close = 200.0 - t
+    opens = 100.0 + t
+    frame = pd.DataFrame({
+        "open": opens,
+        "high": np.maximum(opens, close) + 1.0,
+        "low": np.minimum(opens, close) - 1.0,
+        "close": close,
+        "volume": np.full(n, 1_000_000.0),
+    }, index=idx)
+    monkeypatch.setattr(
+        router, "strategy_signals",
+        lambda df, cfg, asset="crypto": pd.DataFrame(
+            {"realized_vol": np.ones(len(df))}, index=df.index
+        ),
+    )
+    monkeypatch.setattr(
+        router, "classify_regime",
+        lambda df, asset="crypto": pd.Series("RANGE", index=df.index),
+    )
+    monkeypatch.setattr(router, "online_strategy_scores", lambda *a, **k: {})
+    monkeypatch.setattr(
+        router, "select_strategy",
+        lambda *a, **k: {
+            "status": "OK", "strategy": "trend", "signal": 1.0,
+            "action": "HOLD",
+        },
+    )
+
+    result = router.policy_walk_forward_backtest(
+        frame, StrategyConfig(target_vol_annual=1.0, max_leverage=1.0, signal_threshold=0.0),
+        folds=2, min_train=10, min_trades=0, decision_stride=1, costs_bps=0.0,
+    )
+    assert result["status"] == "OK"
+    assert result["total_return"] > 0.0
+    assert all(fold["total_return"] > 0.0 for fold in result["folds"])
+\n
