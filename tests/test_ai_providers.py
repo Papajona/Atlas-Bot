@@ -65,7 +65,12 @@ def test_trade_safety_review_flags_unconfigured_distinctly_from_vetoed(monkeypat
     assert out["configured"] is False
 
     async def fake_vetoed(prompt):
-        return {"safe": False, "reasons": ["risk too high"]}
+        return {
+            "safe": False,
+            "confidence": 0.95,
+            "reasons": ["risk too high"],
+            "data_quality_flags": [],
+        }
 
     monkeypatch.setattr(ap, "_gemini_json", fake_vetoed)
     monkeypatch.setattr(ap, "_groq_json", fake_vetoed)
