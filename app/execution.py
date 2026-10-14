@@ -1928,16 +1928,47 @@ async def emergency_stop(exchange: str | None = None):
             broker = OandaBroker(OandaConfig(settings.oanda_account_id, settings.oanda_api_token, settings.oanda_practice, settings.oanda_timeout_seconds))
             try:
                 orders = await asyncio.to_thread(broker.orders)
+                order_cancel_errors: list[dict[str, str]] = []
                 for order in orders:
                     order_id = str(order.get("id") or "")
                     state = str(order.get("state") or "").upper()
-                    if order_id and state in {"PENDING", "OPEN"}:
+                    if state not in {"PENDING", "OPEN"}:
+                        continue
+                    if not order_id:
+                        failure = {
+                            "scope": "platform_oanda_order_cancel",
+                            "error_type": "InvalidOpenOrder",
+                            "error": "Open OANDA order is missing its order id; refusing to guess cancellation scope",
+                        }
+                        failures.append(failure)
+                        order_cancel_errors.append(failure)
+                        continue
+                    try:
                         await asyncio.to_thread(broker.cancel_order, order_id)
                         canceled.append({"scope": "platform_oanda", "order_id": order_id})
+                    except Exception as exc:
+                        # Continue the halt sweep; the cancellation may have reached OANDA
+                        # before a timeout. Always re-fetch orders and positions below.
+                        failure = {
+                            "scope": "platform_oanda_order_cancel",
+                            "order_id": order_id,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc)[:1000],
+                        }
+                        order_cancel_errors.append(failure)
+                        warnings.append(failure)
+                        logging.getLogger(__name__).warning(
+                            "emergency_stop_oanda_cancel_failed order_id=%s error_type=%s error=%s",
+                            order_id, failure["error_type"], failure["error"], exc_info=True,
+                        )
                 remaining = await asyncio.to_thread(broker.orders)
                 still_open = [str(o.get("id") or "") for o in remaining if str(o.get("state") or "").upper() in {"PENDING", "OPEN"}]
                 if still_open:
-                    failures.append({"scope": "platform_oanda", "error": f"Open orders remain after cancellation: {still_open[:20]}"})
+                    failures.append({
+                        "scope": "platform_oanda",
+                        "error": f"Open orders remain after cancellation: {still_open[:20]}",
+                        "cancel_errors": order_cancel_errors[:50],
+                    })
                 positions = await asyncio.to_thread(broker.positions)
                 for position in positions or []:
                     instrument = str(position.get("instrument") or "")
