@@ -280,7 +280,10 @@ async def reserve_trading(db, customer_id: int, amount: float, *, reference_id: 
                        reference_id=reference_id, idempotency_key=idem))
     return fresh_ledger
 
-async def release_trading(db, customer_id: int, amount: float, *, reference_id: str, full_allocation: bool = False) -> CustomerLedgerAccount:
+async def release_trading(
+    db, customer_id: int, amount: float, *,
+    reference_id: str, full_allocation: bool = False,
+) -> CustomerLedgerAccount:
     # A fully released allocation must unwind the same upward-rounded amount
     # that reserve_trading() booked. Partial releases stay half-even to avoid
     # releasing more collateral than the requested partial amount.
