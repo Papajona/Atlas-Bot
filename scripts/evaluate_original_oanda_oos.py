@@ -166,7 +166,12 @@ def load_complete_trial_history(
 def promotion_gate_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     """Map walk-forward output fields to the explicit OOS promotion gate contract."""
     normalized = dict(metrics)
-    normalized["folds"] = list(metrics.get("fold_metrics") or [])
+    # ai_walk_forward_backtest currently emits "folds"; accept "fold_metrics"
+    # as a compatibility alias but never erase valid fold results from the actual output.
+    raw_folds = metrics.get("fold_metrics")
+    if raw_folds is None:
+        raw_folds = metrics.get("folds")
+    normalized["folds"] = list(raw_folds) if isinstance(raw_folds, (list, tuple)) else []
     cost = metrics.get("cost_analysis")
     normalized["cost_stress_ok"] = bool(isinstance(cost, dict) and cost.get("stress_ok") is True)
     return normalized
