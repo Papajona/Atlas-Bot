@@ -454,7 +454,7 @@ async def customer_balance(db, customer_id: int, currency: str = USDT, *, lock: 
     }
 
 
-def customer_balance_api(balance: dict) -> dict[str, str | int]:
+def customer_balance_api(balance: dict) -> dict[str, str | int | float]:
     """Serialize authoritative customer funds without converting them through binary float."""
     available = D(str(balance.get("available_exact", balance["available"])))
     trading_reserved = D(str(balance.get("trading_reserved_exact", balance["trading_reserved"])))
