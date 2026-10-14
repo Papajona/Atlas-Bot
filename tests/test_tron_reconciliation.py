@@ -42,3 +42,37 @@ def test_duplicate_contract_records_fail_closed():
 def test_malformed_provider_data_shape_fails_closed(payload):
     with pytest.raises(ValueError):
         parse_tron_usdt_balance(payload, CONTRACT)
+
+
+def test_custody_worker_uses_the_same_strict_balance_parser(monkeypatch):
+    import asyncio
+    from app import custody_reconciliation
+    from app.config import settings
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class Client:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def get(self, *args, **kwargs):
+            return Response(self.payload)
+
+    monkeypatch.setattr(settings, "usdt_trongrid_base_url", "https://provider.example")
+    monkeypatch.setattr(settings, "usdt_tron_usdt_contract", CONTRACT)
+    monkeypatch.setattr(settings, "usdt_trongrid_api_key", "unit-test-not-a-real-key")
+
+    valid = Client({"data": [record("1234567", decimals=6)]})
+    assert asyncio.run(custody_reconciliation._address_balance(valid, "TTestAddress")) == Decimal("1.234567")
+
+    invalid = Client({"data": [record("1234567", decimals=18)]})
+    with pytest.raises(ValueError, match="exactly 6"):
+        asyncio.run(custody_reconciliation._address_balance(invalid, "TTestAddress"))
