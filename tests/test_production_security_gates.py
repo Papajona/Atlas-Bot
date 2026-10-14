@@ -315,7 +315,7 @@ def test_production_deploy_checks_database_role_before_any_deployment():
     assert "BLOCKED: production runtime role must own no public tables and inherit no other roles" in block
     assert 'print("BLOCKED: read-only production database role check failed; database output withheld")' in block
     assert 'db_url_file="$RUNNER_TEMP/atlas-production-db-url"' in block
-    assert 'trap 'rm -f "$db_url_file"' EXIT' in block
+    assert "trap 'rm -f \"$db_url_file\"' EXIT" in block
 
 def test_production_deploy_requires_staging_identity_preflight():
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
