@@ -163,6 +163,15 @@ def load_complete_trial_history(
     }
 
 
+def promotion_gate_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Map walk-forward output fields to the explicit OOS promotion gate contract."""
+    normalized = dict(metrics)
+    normalized["folds"] = list(metrics.get("fold_metrics") or [])
+    cost = metrics.get("cost_analysis")
+    normalized["cost_stress_ok"] = bool(isinstance(cost, dict) and cost.get("stress_ok") is True)
+    return normalized
+
+
 def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     dataset_dir = Path(args.dataset_dir)
     reference_path = Path(args.reference_manifest)
@@ -204,7 +213,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     )
     metrics["status"] = "OK"
     gate = oos_promotion_gate(
-        metrics,
+        promotion_gate_metrics(metrics),
         min_dsr=0.95,
         require_cost_stress=True,
         min_folds=args.folds,
