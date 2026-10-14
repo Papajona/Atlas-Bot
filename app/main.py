@@ -3183,15 +3183,20 @@ async def approve_funding(funding_id: int, authorization: str | None = Header(de
             raise HTTPException(404, "Funding transaction not found")
         if str(funding.status or "").upper() != "PENDING_REVIEW":
             raise HTTPException(409, "Funding transaction is not pending review")
+        if str(funding.currency or "").upper() != "USDT":
+            raise HTTPException(409, "Only USDT funding is supported by the customer cash ledger")
+        # Match the customer-cash lock order used by automatic deposits and withdrawals.
+        await get_or_create_ledger(db, funding.customer_id, "USDT")
         wallet = (await db.execute(select(Wallet).where(Wallet.id == funding.wallet_id)
                                    .with_for_update())).scalar_one_or_none()
-        if not wallet or wallet.customer_id != funding.customer_id:
-            raise HTTPException(409, "Funding wallet/customer mismatch")
+        if not wallet or wallet.customer_id != funding.customer_id or wallet.currency.upper() != "USDT":
+            raise HTTPException(409, "Funding wallet/customer/currency mismatch")
         metadata = json.loads(funding.metadata_json or "{}")
         funding.status = "CONFIRMED"
         funding.confirmed_at = funding.confirmed_at or datetime.now(timezone.utc)
+        wallet.status = "ACTIVE"
         await post_deposit(db, customer_id=funding.customer_id, wallet_id=funding.wallet_id,
-                            amount=float(funding.amount), provider_reference=funding.provider_reference,
+                            amount=Decimal(str(funding.amount)), provider_reference=funding.provider_reference,
                             provider=funding.provider, metadata=metadata)
         await sync_wallet_from_ledger(db, funding.customer_id, "USDT")
         account = (await db.execute(select(TradingAccount).where(
@@ -3290,7 +3295,7 @@ async def funding_webhook(
             if not wallet or wallet.customer_id != existing.customer_id or wallet.currency.upper() != currency:
                 raise HTTPException(409, "Funding wallet/customer/currency mismatch; reconciliation required")
             if incoming == current:
-                return {"ok": True, "id": existing.id, "status": existing.status, "wallet_id": existing.id, "idempotent": True}
+                return {"ok": True, "id": existing.id, "status": existing.status, "wallet_id": existing.wallet_id, "idempotent": True}
             existing.metadata_json = json.dumps(payload.metadata, separators=(",", ":"))
             if incoming == "CONFIRMED":
                 existing.confirmed_at = existing.confirmed_at or datetime.now(timezone.utc)
