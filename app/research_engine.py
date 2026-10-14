@@ -486,14 +486,22 @@ def ai_market_review(research: dict, live_signal: dict | None = None) -> dict:
     ranked_oos = _rank_by_oos(rows, oos_by_strategy)
     measured = [row for row in ranked_oos if _has_valid_oos_measurement(oos_by_strategy.get(str(row.get("strategy") or ""), {}))]
     best = measured[0] if measured else None
+
+    def _finite_metric(strategy_name: str, metric_name: str, default: float = 0.0) -> float:
+        try:
+            value = float((oos_by_strategy.get(strategy_name) or {}).get(metric_name))
+            return value if np.isfinite(value) else default
+        except (TypeError, ValueError, OverflowError):
+            return default
+
     profitable_oos = [
         row for row in measured
-        if float((oos_by_strategy.get(str(row.get("strategy") or "")) or {}).get("oos_total_return", 0.0) or 0.0) > 0
-        and float((oos_by_strategy.get(str(row.get("strategy") or "")) or {}).get("sharpe") or 0.0) > 0
+        if _finite_metric(str(row.get("strategy") or ""), "oos_total_return") > 0
+        and _finite_metric(str(row.get("strategy") or ""), "sharpe") > 0
     ]
     drawdown_warnings = [
         str(row["strategy"]) for row in measured
-        if float((oos_by_strategy.get(str(row.get("strategy") or "")) or {}).get("max_drawdown") or 0.0) < -0.25
+        if _finite_metric(str(row.get("strategy") or ""), "max_drawdown") < -0.25
     ]
     summary = (
         f"Current regime classified as {regime.get('regime', 'UNKNOWN')}. "
@@ -503,8 +511,8 @@ def ai_market_review(research: dict, live_signal: dict | None = None) -> dict:
     observations = [
         (
             f"Highest measured out-of-sample result (not promotion approval): {best['strategy']} "
-            f"(net return {float(oos_by_strategy[best['strategy']].get('oos_total_return', 0.0)):.3f}, "
-            f"Sharpe {float(oos_by_strategy[best['strategy']].get('sharpe') or 0.0):.3f})."
+            f"(net return {_finite_metric(str(best['strategy']), 'oos_total_return'):.3f}, "
+            f"Sharpe {_finite_metric(str(best['strategy']), 'sharpe'):.3f})."
             if best else "No strategy has a valid out-of-sample measurement; no headline winner is reported."
         ),
         f"Current annualized realized volatility: {regime.get('annualized_realized_vol', 0):.3f}.",
