@@ -466,15 +466,6 @@ class Settings(BaseSettings):
                 "Binance credentials, not the approved platform-owned account allocation model. "
                 "Keep CUSTOMER_LIVE_TRADING_ENABLED=false until that model is implemented and verified."
             )
-        if self.customer_live_trading_enabled:
-            if self.paper_trading:
-                raise ValueError("CUSTOMER_LIVE_TRADING_ENABLED cannot be true while PAPER_TRADING=true")
-            if not self.live_trading_enabled:
-                raise ValueError("CUSTOMER_LIVE_TRADING_ENABLED requires LIVE_TRADING_ENABLED=true")
-            if str(self.customer_live_exchange).lower() != "binance":
-                raise ValueError("CUSTOMER_LIVE_EXCHANGE must be binance for customer live execution")
-            if str(self.customer_live_market_type).lower() != "spot":
-                raise ValueError("CUSTOMER_LIVE_MARKET_TYPE must be spot for customer live execution")
         if self.environment in {"staging", "production"}:
             if self.live_trading_enabled or self.customer_live_trading_enabled:
                 required = {"DISCIPLINE_ENABLED": self.discipline_enabled, "DISCIPLINE_ENFORCE_RISK_PER_TRADE": self.discipline_enforce_risk_per_trade, "EDGE_DECAY_HALT_ENABLED": self.edge_decay_halt_enabled, "REQUIRE_PROTECTIVE_STOP_FOR_LIVE": self.require_protective_stop_for_live}
