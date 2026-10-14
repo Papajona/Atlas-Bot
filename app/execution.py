@@ -671,10 +671,15 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
             realized = closing * (fill_price - position.average_entry_price) * direction
             position.quantity = old_qty + signed
             if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE" and abs(old_qty) > 0:
+                full_allocation_release = closing >= abs(old_qty)
                 released = position.reserved_capital * (closing / abs(old_qty))
                 position.reserved_capital = max(0.0, position.reserved_capital - released)
                 if released > 0:
-                    await release_trading(db, trade.customer_id, released, reference_id=f"trade:{trade.id}:close:{_qty_ref(new_filled)}")
+                    await release_trading(
+                        db, trade.customer_id, released,
+                        reference_id=f"trade:{trade.id}:close:{_qty_ref(new_filled)}",
+                        full_allocation=full_allocation_release,
+                    )
                     account_locked = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == trade.customer_id).with_for_update())).scalar_one_or_none()
                     if account_locked:
                         account_locked.reserved_margin = max(0.0, account_locked.reserved_margin - released)
@@ -874,7 +879,11 @@ async def _release_unneeded_order_reserve(db, trade: Trade) -> float:
     release = max(0.0, reserved - filled_cost)
     if release <= 0:
         return 0.0
-    await release_trading(db, trade.customer_id, release, reference_id=f"trade:{trade.id}:order-reserve-release")
+    await release_trading(
+        db, trade.customer_id, release,
+        reference_id=f"trade:{trade.id}:order-reserve-release",
+        full_allocation=(filled_cost == 0.0),
+    )
     account_locked = (await db.execute(select(TradingAccount).where(
         TradingAccount.customer_id == trade.customer_id
     ).with_for_update())).scalar_one_or_none()
