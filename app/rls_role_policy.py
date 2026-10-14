@@ -23,6 +23,7 @@ def require_rls_bypass_role(
     can_create_roles: bool = False,
     can_create_databases: bool = False,
     can_replicate: bool = False,
+    role_membership_count: int = 0,
 ) -> None:
     """Require a dedicated non-owner/non-admin server role for the backend-only DB path.
 
@@ -41,13 +42,14 @@ def require_rls_bypass_role(
         or can_create_roles
         or can_create_databases
         or can_replicate
+        or role_membership_count > 0
     )
     if invalid:
         raise RuntimeError(
             "Database role is not authorized to bypass row-level security with least privilege: "
             f"role={role_name!r}. Use a dedicated non-owner, non-admin runtime role with "
             "BYPASSRLS and explicit application-table grants; do not use postgres, a "
-            "Supabase gateway/service role, a table-owner role, or an administrative role."
+            "Supabase gateway/service role, a table-owner role, or an administrative role or a role with inherited memberships."
         )
 
 
