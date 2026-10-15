@@ -6383,8 +6383,12 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
     await require_role(claims, "OPERATIONS")
     path = model_file(req)
     try:
-        df = await asyncio.to_thread(market_data, req.model_copy(update={"days": 5}))
+        paper_req = req.model_copy(update={"days": 5})
+        df = await asyncio.to_thread(market_data, paper_req)
         sig = await asyncio.to_thread(predict_latest, df, path)
+        paper_context = await asyncio.to_thread(_server_paper_market_context, paper_req, df)
+        if paper_context is not None:
+            sig = {**sig, "paper_market_context": paper_context}
         price = float(df.close.iloc[-1])
         ts = sig["signal_timestamp"]
         if sig["signal"] == 0:
@@ -6420,6 +6424,15 @@ async def execute(req: ExecuteRequest, x_admin_token: str | None = Header(defaul
     if req.request_id:
         sig["request_id"] = req.request_id
     try:
+        if req.force_paper and req.asset == "crypto":
+            # Build simulation context only from server-fetched closed candles and a
+            # fresh server-side ticker. Client-supplied prices/volumes are not used as
+            # the basis for venue-normalized volume, spread or volatility.
+            paper_req = req.model_copy(update={"days": 5})
+            paper_df = await asyncio.to_thread(market_data, paper_req)
+            paper_context = await asyncio.to_thread(_server_paper_market_context, paper_req, paper_df)
+            if paper_context is not None:
+                sig["paper_market_context"] = paper_context
         return await execute_signal(req.symbol, req.side, req.quantity, req.price, sig, req.exchange,
                                     req.timeframe, signal_timestamp, req.force_paper,
                                     req.stop_loss_price, req.take_profit_price, req.strategy, req.asset, req.demo_forex)
