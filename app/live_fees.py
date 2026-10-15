@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Any
 from decimal import Decimal, localcontext
-import math
 
 EXACT, CONVERTED, ESTIMATED = "exact", "converted", "estimated"
 
@@ -79,14 +78,16 @@ def extract_order_fee_quote_decimal(
         if cost <= 0:
             # Negative provider values are maker rebates; do not credit them.
             continue
-        if cur == quote or (not cur and quote):
-            total += cost
-        elif cur == base:
-            total += cost * fill_price_d
-            quality = CONVERTED if quality == EXACT else quality
-        else:
-            note = f"fee currency {cur or '?'} cannot be priced in {quote or '?'}"
-            quality = ESTIMATED
+        with localcontext() as context:
+            context.prec = 50
+            if cur == quote or (not cur and quote):
+                total = total + cost
+            elif cur == base:
+                total = total + cost * fill_price_d
+                quality = CONVERTED if quality == EXACT else quality
+            else:
+                note = f"fee currency {cur or '?'} cannot be priced in {quote or '?'}"
+                quality = ESTIMATED
     if quality == ESTIMATED or not entries or malformed_fee_records:
         try:
             bps = Decimal(str(fallback_taker_bps))
