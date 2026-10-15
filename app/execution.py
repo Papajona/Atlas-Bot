@@ -1247,6 +1247,7 @@ async def advance_paper_orders(
                 last_processed_bar_timestamp=last_bar,
                 bars_waited=bars_waited,
                 latency_bars=settings.paper_fill_latency_bars,
+                ttl_bars=settings.paper_order_ttl_bars,
                 max_bar_volume_participation=settings.paper_max_bar_volume_participation,
                 queue_fill_probability=settings.paper_queue_fill_probability,
                 rejection_probability=settings.paper_rejection_probability,
@@ -1267,6 +1268,10 @@ async def advance_paper_orders(
                 trade.status = "REJECTED"
                 trade.remaining_quantity = 0.0
                 trade.error = "PAPER_SIMULATOR_REJECTED_REMAINDER"
+            elif event_type == "CANCELED":
+                trade.status = "CANCELED"
+                trade.remaining_quantity = 0.0
+                trade.error = "PAPER_SIMULATOR_TTL_EXPIRED"
             elif fill_quantity > 0.0:
                 asset = str(details.get("asset") or "crypto").lower()
                 profile = PROFILES.get(asset)
@@ -1312,8 +1317,12 @@ async def advance_paper_orders(
                             trade.remaining_quantity = max(0.0, float(event["remaining_quantity"]))
                             if trade.remaining_quantity <= max(1e-12, float(trade.requested_quantity or 0.0) * 1e-12):
                                 trade.remaining_quantity = 0.0
-                                trade.status = "SIMULATED"
-                                trade.error = ""
+                                if event_type == "PARTIAL_FILL_CANCELED_REMAINDER":
+                                    trade.status = "CANCELED"
+                                    trade.error = "PAPER_SIMULATOR_TTL_EXPIRED_AFTER_PARTIAL_FILL"
+                                else:
+                                    trade.status = "SIMULATED"
+                                    trade.error = ""
                             else:
                                 trade.status = "PARTIAL"
                                 trade.error = ""

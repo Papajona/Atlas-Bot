@@ -252,6 +252,7 @@ class Settings(BaseSettings):
     paper_market_impact_coefficient: float = 0.5
     paper_max_market_impact_bps: float = 250.0
     paper_fill_latency_bars: int = 1
+    paper_order_ttl_bars: int = 24
     paper_max_bar_volume_participation: float = 0.10
     paper_queue_fill_probability: float = 0.80
     paper_rejection_probability: float = 0.01
@@ -543,6 +544,11 @@ class Settings(BaseSettings):
             raise ValueError("PAPER_MAX_MARKET_IMPACT_BPS must be finite and > 0")
         if isinstance(self.paper_fill_latency_bars, bool) or self.paper_fill_latency_bars < 1:
             raise ValueError("PAPER_FILL_LATENCY_BARS must be an integer >= 1")
+        if (
+            isinstance(self.paper_order_ttl_bars, bool)
+            or self.paper_order_ttl_bars < self.paper_fill_latency_bars
+        ):
+            raise ValueError("PAPER_ORDER_TTL_BARS must be >= PAPER_FILL_LATENCY_BARS")
         if (
             not math.isfinite(self.paper_max_bar_volume_participation)
             or not 0 < self.paper_max_bar_volume_participation <= 1

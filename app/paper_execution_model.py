@@ -178,6 +178,7 @@ def simulate_paper_fill_step(
     last_processed_bar_timestamp: str | None,
     bars_waited: int = 0,
     latency_bars: int = 1,
+    ttl_bars: int = 24,
     max_bar_volume_participation: float = 0.10,
     queue_fill_probability: float = 0.80,
     rejection_probability: float = 0.01,
@@ -198,6 +199,8 @@ def simulate_paper_fill_step(
         raise ValueError("bars_waited must be a non-negative integer")
     if isinstance(latency_bars, bool) or int(latency_bars) < 1:
         raise ValueError("latency_bars must be an integer >= 1")
+    if isinstance(ttl_bars, bool) or int(ttl_bars) < int(latency_bars):
+        raise ValueError("ttl_bars must be an integer >= latency_bars")
     participation = _finite_number(
         max_bar_volume_participation, "max_bar_volume_participation", strict_minimum=True
     )
@@ -232,12 +235,14 @@ def simulate_paper_fill_step(
     if current_bar == str(last_processed_bar_timestamp or ""):
         return outcome("NO_NEW_BAR", timestamp=last_processed_bar_timestamp)
 
+    next_waited = int(bars_waited) + 1
     verified_crypto_volume = source == "ccxt_ohlcv" and asset == "crypto" and volume_unit == "base_asset"
     if not verified_crypto_volume or volume_value is None:
-        return outcome("WAITING_FOR_VERIFIED_LIQUIDITY")
+        if next_waited >= int(ttl_bars):
+            return outcome("CANCELED", remaining_after=0.0, waited=next_waited)
+        return outcome("WAITING_FOR_VERIFIED_LIQUIDITY", waited=next_waited)
 
     volume = _finite_number(volume_value, "bar_volume", strict_minimum=True)
-    next_waited = int(bars_waited) + 1
     if next_waited < int(latency_bars):
         return outcome("LATENCY_WAIT", waited=next_waited)
 
@@ -248,6 +253,8 @@ def simulate_paper_fill_step(
     if rejection_draw < reject_probability:
         return outcome("REJECTED", remaining_after=0.0, waited=next_waited)
     if queue_draw >= queue_probability:
+        if next_waited >= int(ttl_bars):
+            return outcome("CANCELED", remaining_after=0.0, waited=next_waited)
         return outcome("QUEUE_NO_FILL", waited=next_waited)
 
     capacity = volume * participation
@@ -257,6 +264,8 @@ def simulate_paper_fill_step(
             _finite_number(max_fill_quantity, "max_fill_quantity"),
         )
     if capacity <= 0.0:
+        if next_waited >= int(ttl_bars):
+            return outcome("CANCELED", remaining_after=0.0, waited=next_waited)
         return outcome("BAR_LIQUIDITY_EXHAUSTED", waited=next_waited)
 
     # Queue uncertainty reduces the available slice; each order/bar result stays
@@ -269,6 +278,12 @@ def simulate_paper_fill_step(
     event = "FILLED" if remaining_after <= max(1e-12, remaining * 1e-12) else "PARTIAL_FILL"
     if event == "FILLED":
         remaining_after = 0.0
+    elif next_waited >= int(ttl_bars):
+        # A final partial slice executes only that slice; the unfilled remainder expires.
+        return outcome(
+            "PARTIAL_FILL_CANCELED_REMAINDER", fill=fill_quantity,
+            remaining_after=0.0, waited=next_waited,
+        )
     return outcome(
         event, fill=fill_quantity, remaining_after=remaining_after, waited=next_waited
     )

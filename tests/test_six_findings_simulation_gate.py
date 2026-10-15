@@ -212,6 +212,32 @@ def test_selection_simulation_rejects_strong_in_sample_when_held_out_fails(monke
     assert candidates == []
 
 
+
+def test_paper_order_ttl_cancels_unfilled_and_partial_remainders():
+    from app.paper_execution_model import simulate_paper_fill_step
+
+    context = {
+        "source": "ccxt_ohlcv", "asset": "crypto", "bar_volume": 20.0,
+        "volume_unit": "base_asset", "realized_volatility_per_bar": 0.02,
+        "spread_bps": 4.0, "bar_timestamp": "bar-2",
+    }
+    missed_then_expired = simulate_paper_fill_step(
+        remaining_quantity=100.0, context=context, order_key="ttl-queue-miss",
+        last_processed_bar_timestamp="bar-1", latency_bars=1, ttl_bars=1,
+        queue_fill_probability=0.0, rejection_probability=0.0,
+    )
+    partial_then_expired = simulate_paper_fill_step(
+        remaining_quantity=100.0, context=context, order_key="ttl-partial",
+        last_processed_bar_timestamp="bar-1", latency_bars=1, ttl_bars=1,
+        queue_fill_probability=1.0, rejection_probability=0.0,
+    )
+    assert missed_then_expired["event"] == "CANCELED"
+    assert missed_then_expired["remaining_quantity"] == 0.0
+    assert partial_then_expired["event"] == "PARTIAL_FILL_CANCELED_REMAINDER"
+    assert 0 < partial_then_expired["fill_quantity"] <= 2.0
+    assert partial_then_expired["remaining_quantity"] == 0.0
+
+
 def test_customer_paper_simulation_remains_blocked_without_isolated_ledger():
     from app.execution import customer_paper_execution_blocked
 
