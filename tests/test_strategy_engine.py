@@ -248,7 +248,8 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True, "status": "OK", "oos_total_return": 0.20, "deflated_sharpe": 0.97,
            "trial_registry_complete": True,
-           "financing_cost_model_complete": True, "intrabar_stop_target_model_complete": True}
+           "financing_cost_model_complete": True, "intrabar_stop_target_model_complete": True,
+           "slippage_model_complete": True}
 
     monkeypatch.setattr(adaptive_bot.settings, "research_carry_bps_per_bar", 0.1)
     monkeypatch.setattr(adaptive_bot.settings, "research_carry_evidence_source", "fixture:venue-financing")
