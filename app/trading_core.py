@@ -339,7 +339,10 @@ def ai_walk_forward_backtest(
         configured_carry = carry_bps_per_bar
         if configured_carry is None and settings.research_carry_bps_per_bar is not None:
             configured_carry = settings.research_carry_bps_per_bar
-        carry_evidence_supplied = configured_carry is not None
+        carry_rate_configured = configured_carry is not None
+        carry_evidence_source = str(settings.research_carry_evidence_source or "").strip()
+        carry_evidence_id = str(settings.research_carry_evidence_id or "").strip()
+        carry_evidence_complete = carry_rate_configured and bool(carry_evidence_source) and bool(carry_evidence_id)
         carry_cost_bps = float(profile.carry_bps_per_bar if configured_carry is None else configured_carry)
         hold_horizon = int(raw_hold_horizon)
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
