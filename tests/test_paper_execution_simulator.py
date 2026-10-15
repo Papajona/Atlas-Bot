@@ -54,7 +54,7 @@ def simulate(context, *, order_id="paper-test", quantity=0.1, **overrides):
 
 def test_context_only_uses_crypto_base_volume_not_fx_tick_counts():
     df = candles()
-    with pytest.raises(PaperExecutionError, match="base-asset-volume"):
+    with pytest.raises(PaperExecutionError, match="base-asset volume"):
         build_paper_market_context(df, symbol="EUR_USD", timeframe="1h", asset="forex")
 
 
