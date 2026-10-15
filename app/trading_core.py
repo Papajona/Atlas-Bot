@@ -390,6 +390,7 @@ def ai_walk_forward_backtest(
     oos_turnover_blocks: list[np.ndarray] = []
     oos_position_blocks: list[np.ndarray] = []
     oos_carry_blocks: list[np.ndarray] = []
+    total_stop_exits = total_target_exits = total_gap_exits = total_ambiguous_bars = 0
     pred_signal = pd.Series(np.nan, index=X.index)
     for fold in split_specs:
         tr = np.arange(fold.train_start, fold.train_end, dtype=int)
@@ -434,6 +435,10 @@ def ai_walk_forward_backtest(
             cooldown_bars=settings.strategy_stoploss_guard_bars,
         )
         fold_position = execution["positions"].to_numpy(dtype=float)
+        total_stop_exits += int(execution["audit"]["stop_loss_exits"])
+        total_target_exits += int(execution["audit"]["take_profit_exits"])
+        total_gap_exits += int(execution["audit"]["gap_exits"])
+        total_ambiguous_bars += int(execution["audit"]["ambiguous_bars_filled_stop_first"])
         fold_gross = fold_position * execution["market_returns"].to_numpy(dtype=float)
         fold_turnover = execution["turnover"].to_numpy(dtype=float)
         fold_carry = np.abs(fold_position) * (carry_cost_bps / 10_000.0)
@@ -509,8 +514,10 @@ def ai_walk_forward_backtest(
         "execution_cost_model_complete": bool(carry_evidence_supplied),
         "execution_model": "OHLC_INTRABAR_ATR_STOP_TAKE_PROFIT_NEXT_OPEN",
         "execution_stop_target_audit": {
-            "stop_loss_exits": None,
-            "take_profit_exits": None,
+            "stop_loss_exits": int(total_stop_exits),
+            "take_profit_exits": int(total_target_exits),
+            "gap_exits": int(total_gap_exits),
+            "ambiguous_bars_filled_stop_first": int(total_ambiguous_bars),
             "carry_bps_per_bar": carry_cost_bps,
             "carry_rate_evidence_supplied": bool(carry_evidence_supplied),
         },
