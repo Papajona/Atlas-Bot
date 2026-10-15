@@ -105,6 +105,7 @@ def test_oos_gate_names_incomplete_trial_registry_as_a_blocker():
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True,
         "trial_registry_complete": False,
+        "slippage_model_complete": True,
     }
     report = oos_promotion_gate(evidence)
     assert report["passed"] is False
