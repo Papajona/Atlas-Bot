@@ -66,6 +66,8 @@ def fake_provenance():
             "taker_bps": 0.5,
             "slippage_bps": 0.5,
             "carry_bps_per_bar": 0.0,
+            "carry_evidence_source": "fixture:venue-schedule",
+            "carry_evidence_id": "fixture-rate-sheet-v1",
             "max_hold_bars": 24,
         },
         "request_parameters": {"price": "M", "from": "2020-01-01T00:00:00Z", "to": "2025-01-01T00:00:00Z"},
@@ -185,7 +187,12 @@ def test_oos_gate_adapter_preserves_fold_metrics_and_cost_stress():
     from scripts.evaluate_original_oanda_oos import promotion_gate_metrics
 
     folds = [{"total_return": 0.01}, {"total_return": 0.02}]
-    original = {"fold_metrics": folds, "cost_analysis": {"stress_ok": True}}
+    original = {
+        "fold_metrics": folds,
+        "cost_analysis": {"stress_ok": True},
+        "financing_cost_model_complete": True,
+        "intrabar_stop_target_model_complete": True,
+    }
     normalized = promotion_gate_metrics(original)
     assert normalized["folds"] == folds
     assert normalized["cost_stress_ok"] is True
@@ -209,6 +216,8 @@ def test_oos_gate_adapter_preserves_actual_walk_forward_backtest_fold_key():
     backtest_metrics = {
         "folds": emitted_folds,
         "cost_analysis": {"stress_ok": True},
+        "financing_cost_model_complete": True,
+        "intrabar_stop_target_model_complete": True,
     }
     normalized = promotion_gate_metrics(backtest_metrics)
     assert normalized["folds"] == emitted_folds
@@ -321,3 +330,15 @@ def test_walk_forward_rejects_fractional_and_coerced_annualization_or_horizon():
     for invalid in (10.5, 10.0, "10", True):
         with pytest.raises(ValueError, match="Invalid asset or walk-forward evaluation assumptions"):
             ai_walk_forward_backtest(pd.DataFrame(), max_hold_bars=invalid)
+
+
+def test_oos_gate_adapter_rejects_cost_report_without_financing_or_stop_target_evidence():
+    from scripts.evaluate_original_oanda_oos import promotion_gate_metrics
+
+    report = promotion_gate_metrics({
+        "fold_metrics": [{"total_return": 0.10}],
+        "cost_analysis": {"stress_ok": True},
+        "financing_cost_model_complete": False,
+        "intrabar_stop_target_model_complete": True,
+    })
+    assert report["cost_stress_ok"] is False
