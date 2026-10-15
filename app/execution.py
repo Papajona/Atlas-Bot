@@ -686,7 +686,11 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                             strategy=str(trade_context.get("strategy") or "unknown"),
                             entry_regime=str(trade_context.get("regime") or "UNKNOWN"),
                             entry_trade_id=trade.id,
-                            reserved_capital=(delta * fill_price if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE" else 0.0))
+                            reserved_capital=(
+                                Decimal(str(delta)) * Decimal(str(fill_price))
+                                if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE"
+                                else Decimal("0")
+                            ))
         db.add(position)
         # The episode row is created with the order, but its timestamps and fill
         # facts must be populated from the first actual fill, not order submission.
@@ -727,7 +731,10 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
             ) / total_abs_d
             position.quantity = old_qty + signed
             if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE":
-                position.reserved_capital += delta * fill_price
+                position.reserved_capital = (
+                    Decimal(str(position.reserved_capital or 0))
+                    + Decimal(str(delta)) * Decimal(str(fill_price))
+                )
         else:
             closing = min(abs(old_qty), abs(signed))
             direction = 1 if old_qty > 0 else -1
@@ -737,10 +744,15 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
             )
             realized = float(realized_decimal)
             position.quantity = old_qty + signed
-            if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE" and abs(old_qty) > 0:
-                full_allocation_release = closing >= abs(old_qty)
-                released = position.reserved_capital * (closing / abs(old_qty))
-                position.reserved_capital = max(0.0, position.reserved_capital - released)
+            if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE" and old_qty != 0:
+                old_qty_decimal = abs(Decimal(str(old_qty)))
+                full_allocation_release = closing_decimal >= old_qty_decimal
+                reserved_capital_decimal = Decimal(str(position.reserved_capital or 0))
+                released = (
+                    reserved_capital_decimal * closing_decimal / old_qty_decimal
+                    if old_qty_decimal > 0 else Decimal("0")
+                )
+                position.reserved_capital = max(Decimal("0"), reserved_capital_decimal - released)
                 if released > 0:
                     await release_trading(
                         db, trade.customer_id, released,
@@ -749,24 +761,26 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                     )
                     account_locked = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == trade.customer_id).with_for_update())).scalar_one_or_none()
                     if account_locked:
-                        account_locked.reserved_margin = max(0.0, account_locked.reserved_margin - released)
+                        account_locked.reserved_margin = max(
+                            Decimal("0"), Decimal(str(account_locked.reserved_margin or 0)) - released
+                        )
             if position.quantity != 0 and (old_qty * position.quantity < 0):
                 position.strategy = str(trade_context.get("strategy") or "unknown")
                 position.entry_regime = str(trade_context.get("regime") or "UNKNOWN")
                 position.entry_trade_id = trade.id
                 position.average_entry_price = fill_price
                 if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE":
-                    flip_cost = abs(position.quantity) * fill_price
+                    flip_cost = abs(Decimal(str(position.quantity))) * Decimal(str(fill_price))
                     try:
                         # The broker fill already happened: never let a reserve failure abort recording it.
                         # A savepoint keeps a failed reserve from leaving partial ledger state behind.
                         async with db.begin_nested():
                             await reserve_trading(db, trade.customer_id, flip_cost,
                                                   reference_id=f"trade:{trade.id}:flip:{_qty_ref(new_filled)}")
-                        position.reserved_capital += flip_cost
+                        position.reserved_capital = Decimal(str(position.reserved_capital or 0)) + flip_cost
                         account_locked = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == trade.customer_id).with_for_update())).scalar_one_or_none()
                         if account_locked:
-                            account_locked.reserved_margin += flip_cost
+                            account_locked.reserved_margin = Decimal(str(account_locked.reserved_margin or 0)) + flip_cost
                     except ValueError as exc:
                         trade.error = (str(trade.error or "") + " | FLIP_RESERVE_DEFICIT: " + str(exc))[:4000]
                         await open_incident(
