@@ -307,6 +307,11 @@ class RevenueEventRequest(BaseModel):
 
 
 
+
+class CustomerRiskProfileRequest(BaseModel):
+    daily_loss_limit_pct: float = Field(0.02, ge=0.001, le=0.15)
+
+
 class CustomerPilotRequest(BaseModel):
     action: str = Field(pattern="^(REQUEST|APPROVE|SUSPEND)$")
     stage: int = Field(default=1, ge=1, le=3)
