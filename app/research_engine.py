@@ -192,7 +192,14 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
         "average_leverage": _safe(protected.abs().mean()),
         "max_leverage": _safe(protected.abs().max()),
         "protected_active_bars": protection_audit["active_bars"],
-        "risk_halted_bars": protection_audit["halted_bars"],
+        "risk_halted_bars": protection_audit["risk_halted_bars"],
+        "stop_loss_exits": protection_audit["stop_loss_exits"],
+        "take_profit_exits": protection_audit["take_profit_exits"],
+        "gap_exits": protection_audit["gap_exits"],
+        "ambiguous_bars_filled_stop_first": protection_audit["ambiguous_bars_filled_stop_first"],
+        "carry_bps_per_bar": protection_audit["carry_bps_per_bar"],
+        "financing_cost_model_complete": protection_audit["financing_cost_model_complete"],
+        "intrabar_stop_target_model_complete": protection_audit["intrabar_stop_target_model_complete"],
         "transaction_cost_bps": float(taker_bps + slippage_bps),
         "annualization_factor": ann,
         "risk_protections": {
@@ -200,7 +207,7 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
             "daily_loss_halt": settings.strategy_daily_loss_halt,
             "loss_event_guard": settings.strategy_stoploss_guard_trades,
             "cooldown_bars": settings.strategy_stoploss_guard_bars,
-            "note": "A negative active-bar return is treated as a loss event; this is NOT an exact stop-loss fill detector.",
+            "note": "OHLC ATR stop and target exits use conservative stop-first handling when both barriers are touched; loss clusters are a separate portfolio halt heuristic.",
         },
     }
 
@@ -291,7 +298,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                 "data_quality": data_quality, "data_provenance": provenance,
                 "universe_bias": universe_bias, "strategies": [], "strategy_count": 0}
     components = ["trend", "momentum", "breakout", "mean_reversion", "ensemble"]
-    results = [_component_backtest(df, c, cfg, taker_bps, slippage_bps, asset) for c in components]
+    results = [_component_backtest(df, c, cfg, taker_bps, slippage_bps, asset, carry) for c in components]
     for row in results:
         row["evidence"] = evidence_for(row["strategy"])
     validation_splits = purged_walk_forward_splits(len(df), folds=folds, min_train=min_train, purge=1, embargo=1)
@@ -380,7 +387,12 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         taker_bps=taker_bps, slippage_bps=slippage_bps,
         bars_per_year=max(1, int(round(annualization_factor))),
         stress_multiplier=cost_mult,
+        fixed_cost_drag=None if carry is None else (ensemble_pos.abs() * (float(carry) / 10000.0)).to_numpy(),
     )
+    ens_cost["financing_cost_model_complete"] = carry is not None
+    ens_cost["intrabar_stop_target_model_complete"] = True
+    if carry is None:
+        ens_cost["note"] += " Carry rate was not supplied; this cost report is diagnostic only and is not financing-complete promotion evidence."
     # Each component is judged on its own net returns (main.py gates on per_strategy_oos[selected]).
     for component in components:
         # Component Sharpe values cannot be deflated from prior labels alone either.
@@ -421,6 +433,10 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "deflated_sharpe": dsr,
                         "trial_labels": sorted(this_labels),
                         "trial_registry_complete": trial_registry_complete,
+                        "financing_cost_model_complete": carry is not None,
+                        "intrabar_stop_target_model_complete": True,
+                        "execution_cost_model_complete": bool(carry is not None),
+                        "carry_bps_per_bar": carry,
                         "trial_registry_status": "COMPLETE" if trial_registry_complete else "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
                         "cumulative_trials": n_trials,
                         "cost_analysis": ens_cost,
