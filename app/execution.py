@@ -76,6 +76,18 @@ def _qty_ref(quantity: float | Decimal | int | None) -> str:
     return format(canonical, ".6f")
 
 
+def _exact_reserved_cash(price: Any, quantity: Any, max_slippage_bps: Any) -> Decimal:
+    """Calculate the customer cash reserve, including its slippage buffer, in Decimal."""
+    price_d = Decimal(str(price))
+    quantity_d = Decimal(str(quantity))
+    slippage_d = Decimal(str(max_slippage_bps or 0))
+    if not price_d.is_finite() or not quantity_d.is_finite() or not slippage_d.is_finite():
+        raise ValueError("reserve inputs must be finite")
+    if price_d <= 0 or quantity_d <= 0 or slippage_d < 0:
+        raise ValueError("reserve price and quantity must be positive; slippage bps must be non-negative")
+    return price_d * quantity_d * (Decimal("1") + slippage_d / Decimal("10000"))
+
+
 def _exact_realized_pnl(closing_quantity: Any, fill_price: Any, average_entry_price: Any, direction: int) -> Decimal:
     """Calculate a fill's realized P&L using Decimal before ledger posting."""
     if direction not in {-1, 1}:
@@ -1202,14 +1214,8 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 )
                 reducing = opposing_qty > 0 and quantity <= opposing_qty + 1e-9
                 if not reducing:
-                    reserve_buffer = max(
-                        Decimal("0"),
-                        Decimal(str(settings.max_slippage_bps or 0.0)),
-                    ) / Decimal("10000")
-                    reserved_cash = (
-                        Decimal(str(quote))
-                        * Decimal(str(quantity))
-                        * (Decimal("1") + reserve_buffer)
+                    reserved_cash = _exact_reserved_cash(
+                        quote, quantity, settings.max_slippage_bps
                     )
                     try:
                         await reserve_trading(db, customer_id, reserved_cash,
