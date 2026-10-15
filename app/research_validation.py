@@ -199,6 +199,22 @@ def fixed_signal_walk_forward_oos(
     ):
         return {"status": "INVALID_CONFIG", "reason": "invalid_cost_config", "folds": []}
 
+    # A precomputed signal with a different index can silently reindex to NaN and
+    # then be converted to flat positions. That masks alignment/data-window bugs and
+    # can make an evaluation appear valid despite signals being attached to the wrong
+    # bars. Require exact index identity before any warm-up NaNs are treated as flat.
+    if isinstance(signal, pd.Series) and not signal.index.equals(df.index):
+        return {
+            "status": "INVALID_DATA",
+            "reason": "signal_index_mismatch",
+            "folds": [],
+        }
+    if len(signal) != len(df):
+        return {
+            "status": "INVALID_DATA",
+            "reason": "signal_length_mismatch",
+            "folds": [],
+        }
     s = pd.Series(signal, index=df.index).astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
     position = s if positions_are_final else s.shift(1).fillna(0.0)
     if (bar_returns is not None or intrabar_exit is not None) and not positions_are_final:
