@@ -199,7 +199,7 @@ def fixed_signal_walk_forward_oos(
     turnover = position.diff().abs().fillna(position.abs())
     net = (gross - turnover * total_cost_bps / 10000.0).replace(
         [np.inf, -np.inf], np.nan
-    ).fillna(0.0)
+    ).fillna(0.0).clip(lower=-1.0)
 
     fold_rows = []
     oos_returns = []

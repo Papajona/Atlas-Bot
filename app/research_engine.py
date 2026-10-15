@@ -279,13 +279,13 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     validation_splits = purged_walk_forward_splits(len(df), folds=folds, min_train=min_train, purge=1, embargo=1)
     signal_frame = strategy_signals(df, cfg, asset=asset)
     annualization_factor = float(signal_frame.attrs.get("annualization_factor", 252.0))
-    _, _, _, bar_returns, ensemble_pos, _, _ = _protected_component_position(
+    _, _, _, bar_returns, ensemble_pos, ensemble_net, _ = _protected_component_position(
         df, "ensemble", cfg, taker_bps, slippage_bps, asset
     )
     gross = ensemble_pos * bar_returns
     turnover = ensemble_pos.diff().abs().fillna(ensemble_pos.abs())
     sensitivity = cost_sensitivity(gross.to_numpy(), turnover.to_numpy())
-    ci = bootstrap_mean_ci((gross - turnover * ((taker_bps + slippage_bps) / 10000.0)).to_numpy(), block_size=10)
+    ci = bootstrap_mean_ci(ensemble_net.to_numpy(), block_size=10)
     adjusted = multiple_testing_sharpe_adjustment([r.get("sharpe", 0.0) for r in results], trials=len(results))
     cost_mult = float(getattr(settings, "research_cost_stress_multiplier", 2.0))
     oos = fixed_signal_walk_forward_oos(
@@ -295,8 +295,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         taker_bps=taker_bps, slippage_bps=slippage_bps,
         cost_stress_multiplier=cost_mult, positions_are_final=True,
     )
-    gross_net = ensemble_pos * (next_open_returns(df) - 1.0)
-    regime_performance = regime_conditioned_performance(df, gross_net - turnover * ((taker_bps + slippage_bps) / 10000.0), asset=asset)
+    regime_performance = regime_conditioned_performance(df, ensemble_net, asset=asset)
     per_strategy_oos = {}
     for component in components:
         _, _, _, _, component_position, _, _ = _protected_component_position(
@@ -316,9 +315,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         vcfg=StrategyConfig(**{**asdict(cfg), "signal_threshold": float(cfg.signal_threshold*mult)})
         vr=_component_backtest(df,"ensemble",vcfg,taker_bps,slippage_bps,asset)
         variants.append({"multiplier":mult,"sharpe":vr.get("sharpe",0.0),"total_return":vr.get("total_return",0.0),"max_drawdown":vr.get("max_drawdown",0.0)})
-    robustness={"monte_carlo":monte_carlo_bootstrap((gross - turnover * ((taker_bps + slippage_bps) / 10000.0)).to_numpy(),trials=500),"parameter_plateau":parameter_plateau_score({"variants":variants},metric="sharpe",tolerance=0.20),"parameter_variants":variants}
+    robustness={"monte_carlo":monte_carlo_bootstrap(ensemble_net.to_numpy(),trials=500),"parameter_plateau":parameter_plateau_score({"variants":variants},metric="sharpe",tolerance=0.20),"parameter_variants":variants}
     # Formal DSR. Count every variant evaluated on this data: components + parameter variants (+ AI when included).
-    net_ensemble = (gross - turnover * ((taker_bps + slippage_bps) / 10000.0)).to_numpy()
+    net_ensemble = ensemble_net.to_numpy()
     # Persistent trial accounting: count DISTINCT configurations ever evaluated (label = strategy/variant + config fingerprint), not runs.
     # Re-running the same configs on one more day of data is not a new trial; changing any parameter or adding a strategy is.
     import hashlib
