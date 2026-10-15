@@ -315,6 +315,8 @@ async def _projected_exposure(db, symbol: str, price: float, quantity: float, si
     q = select(Position)
     if customer_id is not None:
         q = q.where(Position.customer_id == customer_id)
+    else:
+        q = q.where(Position.customer_id.is_(None))
     positions = (await db.execute(q)).scalars().all()
     signed_order = quantity if side == "buy" else -quantity
     total = 0.0
@@ -568,6 +570,8 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
         q = select(Position).where(Position.quantity != 0)
         if customer_id is not None:
             q = q.where(Position.customer_id == customer_id)
+        else:
+            q = q.where(Position.customer_id.is_(None))
         open_positions = (await db.execute(q)).scalars().all()
         max_open_position_limit = min(settings.max_open_positions, pilot_max_positions) if pilot_max_positions is not None else settings.max_open_positions
         if symbol not in {p.symbol for p in open_positions} and len(open_positions) >= max_open_position_limit:
