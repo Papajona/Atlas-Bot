@@ -146,8 +146,13 @@ class Broker:
         with self._read_lock:
             c = self._c()
             if not c.has.get("fetchPositions"):
-                return []
-            return c.fetch_positions(symbols)
+                # "Unsupported" is not the same as "flat". Returning [] lets callers
+                # falsely confirm an emergency stop or reconcile a missing position as zero.
+                raise RuntimeError(f"{self.config.exchange_id} adapter does not support authoritative open-position queries")
+            rows = c.fetch_positions(symbols)
+            if not isinstance(rows, list):
+                raise RuntimeError(f"{self.config.exchange_id} returned a malformed open-position response")
+            return rows
 
     def cancel_order(self, order_id: str, symbol: str) -> dict[str, Any]:
         with self._cancel_lock:
