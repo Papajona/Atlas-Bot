@@ -76,6 +76,29 @@ def _qty_ref(quantity: float | Decimal | int | None) -> str:
     return format(canonical, ".6f")
 
 
+def _verify_exchange_clock(broker: Any, *, local_time_ms: int | None = None, max_drift_ms: int = 1000) -> int:
+    """Fail closed if the venue clock cannot be checked or differs by more than 1 second."""
+    try:
+        server_time = broker.server_time()
+    except Exception as exc:
+        raise RiskBlocked("Exchange clock verification failed; live order submission blocked") from exc
+    if server_time is None or isinstance(server_time, bool):
+        raise RiskBlocked("Exchange does not provide an authoritative server clock; live order submission blocked")
+    try:
+        server_ms = int(server_time)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RiskBlocked("Exchange server clock returned an invalid timestamp; live order submission blocked") from exc
+    if server_ms <= 0:
+        raise RiskBlocked("Exchange server clock returned a non-positive timestamp; live order submission blocked")
+    local_ms = local_time_ms if local_time_ms is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
+    drift_ms = abs(server_ms - int(local_ms))
+    if drift_ms > max_drift_ms:
+        raise RiskBlocked(
+            f"Exchange clock drift exceeds safety limit ({drift_ms} ms > {max_drift_ms} ms); live order submission blocked"
+        )
+    return drift_ms
+
+
 def _live_submission_lock_ttl_seconds() -> int:
     return max(60, int(settings.exchange_timeout_ms / 1000) + 30)
 
@@ -1271,6 +1294,11 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                         practice_demo=(mode == "FOREX_DEMO"),
                     )
                 await _verify_live_lease(lease_token)
+                if mode == "LIVE" and asset not in {"forex", "commodity"}:
+                    # The exchange timestamp is checked inside the fenced submit section,
+                    # immediately before any order side effect. An unknown/unsupported
+                    # clock is not permission to submit.
+                    _verify_exchange_clock(broker)
                 await _mark_order_command(command.id, status="SUBMITTING", token=lease_token, attempts_increment=True)
                 if asset in {"forex", "commodity"}:
                     order = await asyncio.to_thread(
