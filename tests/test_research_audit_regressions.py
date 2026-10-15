@@ -42,3 +42,42 @@ def test_unparseable_exchange_fee_is_estimated_not_exact_zero():
     assert quality == ESTIMATED
     assert fee == 6.0
     assert "unparsable" in note
+
+
+
+def test_regime_router_uses_shared_risk_sized_positions(monkeypatch):
+    import numpy as np
+    from app import strategy_router
+    from app.strategy_engine import next_open_returns
+
+    cfg = StrategyConfig(
+        target_vol_annual=0.15,
+        max_leverage=1.5,
+        signal_threshold=0.25,
+    )
+    df = pd.DataFrame(
+        {"open": [100.0, 102.0, 101.0, 105.0]},
+        index=pd.RangeIndex(4),
+    )
+    signals = pd.DataFrame(
+        {
+            "trend": [0.10, 0.80, 0.20, 0.90],
+            "realized_vol": [0.05, 0.05, 0.05, 0.05],
+        },
+        index=df.index,
+    )
+    monkeypatch.setattr(
+        strategy_router,
+        "strategy_signals",
+        lambda frame, config, asset: signals,
+    )
+
+    actual = strategy_router._strategy_returns(
+        df, cfg, "trend", costs_bps=0.0, asset="crypto"
+    )
+    expected_positions = target_positions(
+        signals["trend"], signals["realized_vol"], cfg
+    ).shift(1).fillna(0.0)
+    expected = expected_positions * (next_open_returns(df) - 1.0)
+
+    np.testing.assert_allclose(actual.to_numpy(), expected.to_numpy())
