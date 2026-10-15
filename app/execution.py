@@ -28,7 +28,7 @@ from .audit_chain import record_audit
 from .live_fees import extract_order_fee_quote_decimal, ESTIMATED
 from .customer_funds import record_ledger_incident
 from .distributed import acquire_lock, release_lock
-from .paper_execution import PaperExecutionError, simulate_paper_order, validate_paper_context
+from .paper_execution import PaperExecutionError, build_paper_market_context, simulate_paper_order, validate_paper_context
 
 
 TERMINAL_STATUSES = {"FILLED", "CANCELED", "REJECTED", "FAILED", "SIMULATED"}
@@ -1312,8 +1312,25 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
         paper_context = None
         if mode == "PAPER":
             try:
+                paper_context = signal.get("paper_market_context")
+                if not paper_context:
+                    if asset != "crypto":
+                        raise PaperExecutionError(
+                            "No verified base-asset-volume execution context exists for this asset class"
+                        )
+                    # Fetch closed bars internally for admin/manual paper routes that do not
+                    # carry an OHLCV frame. Daily bars need a wider lookback than intraday bars.
+                    from .data import fetch_crypto
+                    context_days = 30 if timeframe == "1d" else 5
+                    context_df = await asyncio.to_thread(
+                        fetch_crypto, symbol, exchange, timeframe, context_days, closed_only=True
+                    )
+                    paper_context = build_paper_market_context(
+                        context_df, symbol=symbol, timeframe=timeframe, asset=asset
+                    )
+                    signal["paper_market_context"] = paper_context
                 paper_context = validate_paper_context(
-                    signal.get("paper_market_context"),
+                    paper_context,
                     symbol=symbol,
                     timeframe=timeframe,
                     signal_timestamp=signal_timestamp,
@@ -1322,6 +1339,10 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 )
             except PaperExecutionError as exc:
                 raise RiskBlocked(f"Paper execution blocked: {exc}") from exc
+            except Exception as exc:
+                raise RiskBlocked(
+                    f"Paper market context could not be verified; no simulated fill was created: {type(exc).__name__}"
+                ) from exc
 
         governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps, equity=risk_equity, risk_per_trade=settings.risk_per_trade)
         if governor.action != "ALLOW":
