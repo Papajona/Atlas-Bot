@@ -32,6 +32,13 @@ def test_meta_label_walk_forward_purges_and_embargoes_fold_boundaries():
     # the following test fold's first `horizon` rows once purge/embargo are applied --
     # verified indirectly: the function must still produce a usable OOS sample.
     assert result["oos_observations"] > 0
+    assert result["oos_precision"] is not None
+    assert result["oos_recall"] is not None
+    assert result["oos_filtered_win_rate"] is not None
+    assert result["oos_unfiltered_win_rate"] is not None
+    assert result["oos_win_rate_lift"] is not None
+    assert result["current_prediction_has_realized_outcome"] is False
+    assert result["current_prediction_evaluation"] == "UNLABELED_FORWARD_PREDICTION"
     X, y = build_meta_dataset(df, horizon=horizon)
     assert len(X) == len(y)
 
