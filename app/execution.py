@@ -901,7 +901,7 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 episode.status = "OPEN"
             episode.updated_at = utcnow()
 
-        position.mark_price = fill_price
+        position.mark_price = Decimal(str(fill_price))
         # Accumulate booked realized P&L in Decimal at the same six-decimal scale
         # used by the custodial ledger, preventing reporting from drifting away from
         # posted balances over repeated partial fills.
