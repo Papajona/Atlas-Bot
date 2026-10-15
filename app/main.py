@@ -5558,12 +5558,20 @@ async def withdrawal_proposal(withdrawal_id: int, x_admin_token: str | None = He
 async def reconcile_withdrawal(withdrawal_id: int, req: WithdrawalReconcileRequest, x_admin_token: str | None = Header(default=None), x_release_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
+    # Bind the release operator in the audit/body to the authenticated principal;
+    # a separate release token alone must not authorize a different named operator.
+    authenticated_operator = str(claims.get("sub") or claims.get("user_id") or "").strip()
+    if not authenticated_operator or not _constant_time_text_equal(authenticated_operator, str(req.operator_id or "").strip()):
+        raise HTTPException(403, "Release operator identity must match the authenticated user")
     if not verify_release_operator(req.operator_id, x_release_token):
         raise HTTPException(401, "Separate release-operator authentication required")
     async with SessionLocal() as db:
         w = (await db.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id).with_for_update())).scalar_one_or_none()
         if not w:
             raise HTTPException(404, "Withdrawal not found")
+        separation = release_separation_violation(req.operator_id, x_release_token, [w.first_approved_by, w.second_approved_by])
+        if separation:
+            raise HTTPException(409, separation)
         if w.status not in {"SUBMITTING", "SUBMITTED", "UNKNOWN"}:
             raise HTTPException(409, f"Withdrawal is {w.status} and cannot be reconciled")
         provider = get_payout_provider(w.provider or settings.payout_provider)
