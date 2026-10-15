@@ -171,10 +171,15 @@ def simulate_execution_aware_strategy(
     for i in range(n):
         timestamp = df.index[i]
         day = timestamp.tz_convert("UTC").date() if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None else timestamp.date()
-        if day != current_day:
+        day_changed = day != current_day
+        if day_changed:
             current_day = day
             day_start = equity
             daily_halt = False
+            # Daily-loss halts end at the UTC-day boundary. Do not carry the stale
+            # same-direction re-entry block into a new day; peak drawdown still latches.
+            if not hard_halt and halt_reason == "DAILY_LOSS":
+                blocked_sign = 0
 
         forced_flat = force_flat_next
         force_flat_next = False
@@ -183,7 +188,7 @@ def simulate_execution_aware_strategy(
         sign = 1 if requested > 0 else -1 if requested < 0 else 0
         if is_halted:
             halted_bars += 1
-            if active_sign:
+            if active_sign and not (forced_flat and day_changed and not hard_halt):
                 blocked_sign = active_sign
             active_sign = 0
             stop_price = target_price = None
