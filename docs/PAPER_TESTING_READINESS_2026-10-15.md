@@ -32,7 +32,7 @@ These values must come from a server-validated market-data path. They must not b
 
 ## Limitations that remain open
 
-1. **Paper market-data plumbing:** all staging/production paper call sites do not yet attach server-validated `paper_market_context`. Until each required path provides it, those orders fail closed rather than falling back to static slippage.
+1. **Paper market-data plumbing:** the platform `/api/execute` and `/api/paper/step` paths now attempt to build `paper_market_context` from server-fetched completed CCXT spot candles, a currently timestamped bid/ask ticker, and a listed active spot market. Non-spot/derivative, FX, and commodity contexts intentionally fail closed until instrument volume units are independently normalized. Customer paper execution remains blocked separately by the isolated-ledger guard.
 2. **Execution realism:** latency, order-book queue position, venue rejection probability, and retry/requote behaviour are not yet modeled. The new fill result is deliberately tagged `INCOMPLETE_EXECUTION_MODEL` and is not validation-grade.
 3. **Research model parity:** research backtests still use fixed slippage bps. They explicitly report `slippage_model_complete=false`, and the promotion gate blocks them until a volume/volatility-aware cost model is used in research too.
 4. **Customer paper-account isolation:** customer paper orders remain blocked until there is a segregated simulation ledger and per-customer/session positions, trades, and equity. Do not remove `customer_paper_execution_blocked` to bypass this gate.
