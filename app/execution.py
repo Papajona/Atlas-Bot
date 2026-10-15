@@ -1435,6 +1435,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     latency_max_ms=settings.paper_execution_latency_max_ms,
                     latency_impact_coefficient=settings.paper_latency_impact_coefficient,
                     evidence_source=settings.paper_execution_evidence_source,
+                    evidence_path=settings.paper_execution_evidence_path,
                     evidence_id=settings.paper_execution_evidence_id,
                 )
                 strict_paper = str(settings.environment).lower() in {"staging", "production"}
@@ -1482,6 +1483,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                                 latency_max_ms=settings.paper_execution_latency_max_ms,
                                 latency_impact_coefficient=settings.paper_latency_impact_coefficient,
                                 evidence_source=settings.paper_execution_evidence_source,
+                                evidence_path=settings.paper_execution_evidence_path,
                                 evidence_id=settings.paper_execution_evidence_id,
                             )
                         except PaperExecutionModelError as exc:
