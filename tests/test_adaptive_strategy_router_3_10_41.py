@@ -167,3 +167,49 @@ def test_full_policy_walk_forward_executes_after_signal_bar(monkeypatch):
     assert observed_counts[1] == 0
     assert observed_counts[2] > 0
 
+
+
+
+def test_router_walk_forward_scores_final_test_bar_using_full_frame_next_open(monkeypatch):
+    """The last test-bar return must use the next open outside the sliced fold."""
+    from types import SimpleNamespace
+    from app import strategy_router as router
+
+    idx = pd.date_range("2026-01-01", periods=7, freq="h", tz="UTC")
+    opens = np.array([100.0, 110.0, 121.0, 133.1, 146.41, 161.051, 177.1561])
+    close = opens.copy()
+    frame = pd.DataFrame({
+        "open": opens,
+        "high": np.maximum(opens, close) + 1.0,
+        "low": np.minimum(opens, close) - 1.0,
+        "close": close,
+        "volume": np.full(len(opens), 1000.0),
+    }, index=idx)
+
+    # Use one deterministic held-out fold so the final-bar execution boundary is
+    # the only behavior under test; training chooses the first strategy on ties.
+    monkeypatch.setattr(
+        router, "purged_walk_forward_splits",
+        lambda *args, **kwargs: [SimpleNamespace(test_start=3, test_end=5)],
+    )
+    monkeypatch.setattr(
+        router, "strategy_signals",
+        lambda df, cfg, asset="crypto": pd.DataFrame(
+            {name: np.ones(len(df)) for name in router.STRATEGIES}, index=df.index
+        ),
+    )
+    monkeypatch.setattr(
+        router, "classify_regime",
+        lambda df, asset="crypto": pd.Series(router.REGIMES[0], index=df.index),
+    )
+    monkeypatch.setattr(router, "regime_conditioned_strategy_performance", lambda *a, **k: {})
+    monkeypatch.setattr(router, "_score_metrics", lambda metrics, min_trades=20: 1.0)
+
+    result = router.router_walk_forward_backtest(
+        frame, StrategyConfig(signal_threshold=0.0, target_vol_annual=1.0, max_leverage=1.0),
+        folds=1, min_train=1, min_trades=0, costs_bps=0.0,
+    )
+    assert result["status"] == "OK"
+    # The position is active on fold bar 4 and earns open[5] / open[4] - 1.
+    # Computing next_open_returns on the fold slice would incorrectly score this as 0.
+    assert result["total_return"] > 0.09
