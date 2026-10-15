@@ -1234,7 +1234,30 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     sandbox=settings.broker_sandbox, market_type=settings.default_market_type,
                     timeout_ms=settings.exchange_timeout_ms,
                 ))
-            ticker = await asyncio.to_thread(broker.ticker, symbol)
+            try:
+                ticker = await asyncio.to_thread(broker.ticker, symbol)
+            except Exception as exc:
+                consume_alert = getattr(broker, "consume_market_data_circuit_alert", None)
+                if callable(consume_alert) and consume_alert():
+                    try:
+                        await open_incident(
+                            key=f"MARKET_DATA_CIRCUIT_OPEN:{str(exchange).lower()}",
+                            severity="HIGH",
+                            category="MARKET_DATA",
+                            summary="Repeated exchange quote failures opened the market-data circuit",
+                            detail={
+                                "exchange": str(exchange).lower(),
+                                "symbol": symbol,
+                                "error_type": type(exc).__name__,
+                            },
+                            customer_id=customer_id,
+                        )
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "market_data_circuit_incident_write_failed exchange=%s symbol=%s",
+                            exchange, symbol, exc_info=True,
+                        )
+                raise RiskBlocked("Live market data unavailable; order submission blocked") from exc
             bid = float(ticker.get("bid") or 0)
             ask = float(ticker.get("ask") or 0)
             quote = float(ask if side == "buy" and ask > 0 else
