@@ -1,6 +1,5 @@
 """End-to-end paper order through execute_signal: catches NameErrors and Decimal/float TypeErrors."""
 import asyncio
-import json
 import os
 import uuid
 
