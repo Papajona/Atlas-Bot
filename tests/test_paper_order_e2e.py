@@ -1,5 +1,6 @@
 """End-to-end paper order through execute_signal: catches NameErrors and Decimal/float TypeErrors."""
 import asyncio
+import json
 import os
 import uuid
 
@@ -31,9 +32,13 @@ def test_paper_buy_then_sell_round_trip():
         buy = await execution.execute_signal(sym, "buy", 0.01, 50000.0, {"score": 0.9}, "binance", "1h",
                                              f"{ts}-b", force_paper=True, stop_loss_price=49000.0, take_profit_price=52000.0)
         assert buy, buy
+        assert buy["paper_execution_model"]["status"] == "BASELINE_ONLY_MISSING_VERIFIED_IMPACT_INPUTS"
+        assert buy["paper_execution_model"]["calibration_status"] == "UNVALIDATED_HEURISTIC"
+        assert buy["average_fill_price"] > 50000.0
         sell = await execution.execute_signal(sym, "sell", 0.01, 50500.0, {"score": 0.9}, "binance", "1h",
                                               f"{ts}-s", force_paper=True, stop_loss_price=51500.0, take_profit_price=49000.0)
         assert sell, sell
+        assert sell["average_fill_price"] < 50500.0
         async with SessionLocal() as db:
             trades = (await db.execute(select(Trade).where(Trade.client_order_id.like("ait-%")))).scalars().all()
             assert trades
