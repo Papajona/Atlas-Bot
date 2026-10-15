@@ -29,6 +29,11 @@ def test_paper_buy_then_sell_round_trip():
 
     async def run():
         await init_db()
+        with pytest.raises(execution.RiskBlocked, match="No explicit paper execution cost profile"):
+            await execution.execute_signal(
+                "XAU_USD", "buy", 1.0, 2000.0, {"score": 0.9}, "oanda", "1h",
+                f"{ts}-commodity", force_paper=True, asset="commodity",
+            )
         buy = await execution.execute_signal(sym, "buy", 0.01, 50000.0, {"score": 0.9}, "binance", "1h",
                                              f"{ts}-b", force_paper=True, stop_loss_price=49000.0, take_profit_price=52000.0)
         assert buy, buy
