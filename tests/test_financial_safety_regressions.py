@@ -71,7 +71,7 @@ def test_funding_webhook_requires_fresh_timestamp_bound_signature():
 
 def test_customer_cash_reserve_does_not_treat_a_position_flip_as_reduce_only():
     source = _source("app/execution.py")
-    start = source.index("reserved_cash = 0.0")
+    start = source.index('reserved_cash = Decimal("0")')
     end = source.index('if mode == "PAPER":', start)
     block = source[start:end]
     assert "opposing_qty = sum(" in block
