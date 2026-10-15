@@ -1,0 +1,5 @@
+{
+  "fixture_only": true,
+  "purpose": "Synthetic CI-only source dataset; not venue observations",
+  "schema": "atlas-paper-calibration-source-fixture-v1"
+}
