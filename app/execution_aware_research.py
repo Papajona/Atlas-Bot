@@ -95,22 +95,23 @@ def simulate_execution_aware_strategy(
     must be computed from information available before open[i], usually signals.atr.shift(1).
     Stops and targets persist for the life of a trade. If both barriers are touched in a
     bar, stop wins. A gap through a barrier is filled at the observed open, not at a better
-    barrier price. A last bar with no next open earns no fabricated open-to-open return.
+    barrier price. The last bar is liquidated at its observed close when no next open exists.
     """
     if not isinstance(df.index, pd.DatetimeIndex) or df.index.tz is None:
         if drawdown_limit is not None or daily_loss_limit is not None:
             raise ValueError("UTC-aware DatetimeIndex is required for daily risk halts")
-    for name in ("open", "high", "low"):
+    for name in ("open", "high", "low", "close"):
         if name not in df.columns:
             raise ValueError(f"OHLC data missing required column {name!r}")
     opens = df["open"].to_numpy(dtype=float)
     highs = df["high"].to_numpy(dtype=float)
     lows = df["low"].to_numpy(dtype=float)
-    if not (np.isfinite(opens).all() and np.isfinite(highs).all() and np.isfinite(lows).all()):
+    closes = df["close"].to_numpy(dtype=float)
+    if not (np.isfinite(opens).all() and np.isfinite(highs).all() and np.isfinite(lows).all() and np.isfinite(closes).all()):
         raise ValueError("OHLC prices must be finite")
-    if (opens <= 0).any() or (lows <= 0).any() or (highs < lows).any():
+    if (opens <= 0).any() or (lows <= 0).any() or (closes <= 0).any() or (highs < lows).any():
         raise ValueError("OHLC prices must be positive and high must be at least low")
-    if (opens < lows).any() or (opens > highs).any():
+    if (opens < lows).any() or (opens > highs).any() or (closes < lows).any() or (closes > highs).any():
         raise ValueError("open prices must lie within each bar's low/high range")
 
     try:
@@ -149,7 +150,7 @@ def simulate_execution_aware_strategy(
     exit_mask = np.zeros(n, dtype=bool)
     turnover = np.zeros(n, dtype=float)
     net_returns = np.zeros(n, dtype=float)
-    stop_exits = take_exits = ambiguous_bars = gap_exits = 0
+    stop_exits = take_exits = ambiguous_bars = gap_exits = terminal_close_exits = 0
     active_sign = 0
     blocked_sign = 0
     stop_price: float | None = None
@@ -274,6 +275,12 @@ def simulate_execution_aware_strategy(
                     gap_exits += 1
                 else:
                     bar_return = next_open / opens[i] - 1.0
+            else:
+                # The end of an evaluated window is a liquidation boundary. Use
+                # its observed close rather than zero or a made-up future open.
+                bar_return = closes[i] / opens[i] - 1.0
+                exited = True
+                terminal_close_exits += 1
 
         actual_positions[i] = actual
         market_returns[i] = float(bar_return)
@@ -331,6 +338,7 @@ def simulate_execution_aware_strategy(
         "stop_loss_exits": stop_exits,
         "take_profit_exits": take_exits,
         "gap_exits": gap_exits,
+        "terminal_close_exits": terminal_close_exits,
         "ambiguous_bars_filled_stop_first": ambiguous_bars,
         "financing_cost_model_complete": carry is not None,
         "carry_bps_per_bar": carry,
