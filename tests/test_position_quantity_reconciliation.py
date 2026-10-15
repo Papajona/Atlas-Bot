@@ -14,6 +14,11 @@ def test_explicit_contract_quantity_wins_over_contract_size_multiplier():
     assert execution._position_amount_from_exchange_row(row) == 0.5
 
 
+def test_generic_amount_or_quantity_is_not_assumed_to_be_contract_units():
+    assert execution._position_amount_from_exchange_row({"symbol": "BTC/USDT:USDT", "amount": "0.5"}) is None
+    assert execution._position_amount_from_exchange_row({"symbol": "BTC/USDT:USDT", "quantity": "0.5"}) is None
+
+
 def test_zero_quantity_is_distinct_from_missing_quantity():
     assert execution._position_amount_from_exchange_row({"symbol": "BTC/USDT:USDT", "contracts": "0"}) == 0.0
     assert execution._position_amount_from_exchange_row({"symbol": "BTC/USDT:USDT"}) is None
