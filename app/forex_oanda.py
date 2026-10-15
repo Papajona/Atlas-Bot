@@ -268,12 +268,24 @@ class OandaBroker:
         except OandaError:
             # A definite lookup rejection may use the read-only history fallback below.
             pass
+        limit = min(max(int(count), 1), 500)
         data = self._request("GET", f"/v3/accounts/{self.config.account_id}/orders",
-                             params={"count": min(max(count, 1), 500)})
-        for order in data.get("orders") or []:
+                             params={"count": limit})
+        rows = data.get("orders")
+        if not isinstance(rows, list):
+            raise OandaError("OANDA returned a malformed order-history response")
+        for order in rows:
             ext = order.get("clientExtensions") or {}
             if str(ext.get("id") or "") == client_order_id:
                 return self.order(str(order.get("id")))
+        # A full page is not proof that the order is absent: older matching orders
+        # may be outside the provider's bounded history response. Preserve UNKNOWN
+        # rather than allowing a caller to treat the order as never submitted.
+        if len(rows) >= limit:
+            raise OandaUnknown(
+                f"OANDA order-history lookup reached its {limit}-record limit without finding "
+                f"client order ID {client_order_id}; absence is unverified"
+            )
         return None
 
     def account_changes(self, since_transaction_id: str) -> dict[str, Any]:
