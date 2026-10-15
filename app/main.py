@@ -2352,6 +2352,7 @@ def _server_paper_market_context(req: MarketRequest, df) -> dict[str, Any] | Non
                 "tradable_volume_units": tradable_volume_units,
                 "volume_units_source": "CCXT_UNIFIED_SPOT_BASE_VOLUME",
                 "volume_window_bars": int(len(volume)),
+                "bar_duration_ms": timeframe_ms,
                 "spread_bps": spread_bps,
                 "recent_volatility_bps": volatility_bps,
                 "reference_price": midpoint,
