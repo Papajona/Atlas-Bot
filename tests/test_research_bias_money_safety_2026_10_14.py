@@ -136,6 +136,9 @@ def test_oos_promotion_gate_requires_complete_trial_history_and_strong_evidence(
         "trades": 150,
         "deflated_sharpe": 0.97,
         "cost_stress_ok": True,
+        "financing_cost_model_complete": True,
+        "intrabar_stop_target_model_complete": True,
+        "execution_cost_model_complete": True,
         "trial_registry_complete": True,
     }
     assert oos_promotion_gate(strong)["passed"] is True
