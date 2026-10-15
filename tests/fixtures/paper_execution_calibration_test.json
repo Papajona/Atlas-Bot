@@ -1,5 +1,15 @@
 {
+  "schema": "atlas-paper-execution-calibration-v1",
   "fixture_only": true,
-  "purpose": "CI unit-test fixture only; not real venue calibration evidence",
-  "schema": "atlas-paper-calibration-fixture-v1"
+  "provenance_source": "synthetic-unit-test-data",
+  "calibration_method": "deterministic-unit-test-fixture-not-venue-calibration",
+  "dataset_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "observation_counts": {
+    "fills": 10,
+    "latency": 10,
+    "order_outcomes": 10
+  },
+  "supported_markets": [
+    "fakeexchange:BTC/USDT"
+  ]
 }
