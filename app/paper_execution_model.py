@@ -9,7 +9,9 @@ Queue position and order-book depth remain unmodelled; volume is a bar-level pro
 from __future__ import annotations
 
 import hashlib
+import hmac
 import math
+from pathlib import Path
 from collections.abc import Mapping
 from typing import Any
 
@@ -40,6 +42,24 @@ def _valid_evidence_id(value: Any) -> bool:
     if len(digest) != 64:
         return False
     return all(character in "0123456789abcdefABCDEF" for character in digest)
+
+
+def _calibration_evidence_matches(source: Any, path: Any, evidence_id: Any) -> bool:
+    """Verify that the configured calibration artifact actually matches its SHA-256 ID."""
+    source_value = str(source or "").strip()
+    path_value = str(path or "").strip()
+    raw_id = str(evidence_id or "").strip()
+    if not source_value or not path_value or not _valid_evidence_id(raw_id):
+        return False
+    expected = raw_id.removeprefix("sha256:").lower()
+    try:
+        evidence_path = Path(path_value)
+        if not evidence_path.is_file():
+            return False
+        actual = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    except (OSError, ValueError):
+        return False
+    return hmac.compare_digest(actual, expected)
 
 
 def _latency_from_quantiles(
@@ -73,12 +93,13 @@ def calibrated_model_available(
     latency_max_ms: Any,
     latency_impact_coefficient: Any,
     evidence_source: str,
+    evidence_path: str,
     evidence_id: str,
 ) -> bool:
     """Require every fill, rejection, and latency assumption plus its evidence identity."""
     if not isinstance(market_context, Mapping):
         return False
-    if not str(evidence_source or "").strip() or not _valid_evidence_id(evidence_id):
+    if not _calibration_evidence_matches(evidence_source, evidence_path, evidence_id):
         return False
     try:
         _finite(market_context.get("tradable_volume_units"), "tradable_volume_units", strictly_positive=True)
@@ -121,6 +142,7 @@ def estimate_paper_fill(
     latency_max_ms: Any,
     latency_impact_coefficient: Any,
     evidence_source: str,
+    evidence_path: str,
     evidence_id: str,
 ) -> dict[str, Any]:
     """Estimate a bar-volume-capped fill with calibrated latency/rejection assumptions.
@@ -136,11 +158,14 @@ def estimate_paper_fill(
         raise PaperExecutionModelError("paper_market_context must be an object")
     key = str(order_key or "").strip()
     source = str(evidence_source or "").strip()
+    evidence_path_value = str(evidence_path or "").strip()
     evidence = str(evidence_id or "").strip()
     if not key:
         raise PaperExecutionModelError("a stable order_key is required for reproducible simulation")
-    if not source or not _valid_evidence_id(evidence):
-        raise PaperExecutionModelError("calibration source and SHA-256 evidence ID are required")
+    if not _calibration_evidence_matches(source, evidence_path_value, evidence):
+        raise PaperExecutionModelError(
+            "calibration source, readable evidence artifact path, and matching SHA-256 evidence ID are required"
+        )
 
     quantity = _finite(requested_quantity, "requested_quantity", strictly_positive=True)
     price = _finite(reference_price, "reference_price", strictly_positive=True)
@@ -188,6 +213,7 @@ def estimate_paper_fill(
         "model": "VOLUME_PARTICIPATION_VOLATILITY_LATENCY_REJECTION_V2",
         "evidence_source": source,
         "evidence_id": evidence,
+        "evidence_path": evidence_path_value,
         "order_key_sha256": hashlib.sha256(key.encode("utf-8")).hexdigest(),
         "requested_quantity": quantity,
         "reference_price": price,
