@@ -1,0 +1,112 @@
+import numpy as np
+import pandas as pd
+import pytest
+
+from app.execution_aware_research import (
+    costed_execution_returns,
+    execution_turnover,
+    simulate_execution_aware_strategy,
+)
+
+
+def _ohlc(opens, highs, lows):
+    idx = pd.date_range("2026-01-01T00:00:00Z", periods=len(opens), freq="h")
+    return pd.DataFrame({
+        "open": opens,
+        "high": highs,
+        "low": lows,
+        "close": opens,
+        "volume": np.full(len(opens), 1000.0),
+    }, index=idx)
+
+
+def test_ambiguous_bar_uses_stop_before_target_and_charges_exit_once():
+    frame = _ohlc(
+        opens=[100.0, 100.0, 100.0],
+        highs=[102.0, 108.0, 102.0],
+        lows=[99.0, 94.0, 99.0],
+    )
+    positions = pd.Series([1.0, 1.0, 1.0], index=frame.index)
+    atr = pd.Series([2.0, 2.0, 2.0], index=frame.index)
+
+    result = simulate_execution_aware_strategy(
+        frame, positions, atr,
+        stop_atr=2.0, take_profit_atr=3.0,
+        transaction_cost_bps=10.0, carry_bps_per_bar=0.0,
+    )
+    assert result["audit"]["stop_loss_exits"] == 1
+    assert result["audit"]["take_profit_exits"] == 0
+    assert result["audit"]["ambiguous_bars_filled_stop_first"] == 1
+    assert result["market_returns"].iloc[1] == pytest.approx(-0.04)
+    # Position entry is charged on bar zero and the intrabar close on bar one.
+    assert result["turnover"].iloc[0] == pytest.approx(1.0)
+    assert result["turnover"].iloc[1] == pytest.approx(1.0)
+    assert result["positions"].iloc[2] == 0.0
+    assert result["audit"]["financing_cost_model_complete"] is True
+
+
+def test_short_target_gap_uses_next_observed_open_not_target_price():
+    frame = _ohlc(
+        opens=[100.0, 100.0, 93.0],
+        highs=[101.0, 103.0, 95.0],
+        lows=[99.0, 95.0, 92.0],
+    )
+    positions = pd.Series([-1.0, -1.0, -1.0], index=frame.index)
+    atr = pd.Series([2.0, 2.0, 2.0], index=frame.index)
+
+    result = simulate_execution_aware_strategy(
+        frame, positions, atr,
+        stop_atr=2.0, take_profit_atr=3.0,
+        transaction_cost_bps=0.0, carry_bps_per_bar=0.0,
+    )
+    assert result["audit"]["take_profit_exits"] == 1
+    assert result["audit"]["gap_exits"] == 1
+    assert result["market_returns"].iloc[1] == pytest.approx(93.0 / 100.0 - 1.0)
+    assert result["net_returns"].iloc[1] == pytest.approx(0.07)
+
+
+def test_missing_carry_is_not_marked_financing_complete():
+    frame = _ohlc(
+        opens=[100.0, 101.0],
+        highs=[101.0, 102.0],
+        lows=[99.0, 100.0],
+    )
+    positions = pd.Series([1.0, 1.0], index=frame.index)
+    atr = pd.Series([2.0, 2.0], index=frame.index)
+    result = simulate_execution_aware_strategy(
+        frame, positions, atr,
+        stop_atr=2.0, take_profit_atr=3.0,
+        transaction_cost_bps=0.0, carry_bps_per_bar=None,
+    )
+    assert result["audit"]["financing_cost_model_complete"] is False
+    assert result["audit"]["promotion_eligible_on_cost_model"] is False
+
+
+def test_cost_stress_includes_carry_and_exit_turnover():
+    index = pd.date_range("2026-01-01", periods=3, freq="h", tz="UTC")
+    positions = pd.Series([1.0, 1.0, 0.0], index=index)
+    exits = pd.Series([False, True, False], index=index)
+    market = pd.Series([0.0, 0.0, 0.0], index=index)
+
+    turnover = execution_turnover(positions, exits)
+    assert turnover.tolist() == pytest.approx([1.0, 1.0, 0.0])
+    net = costed_execution_returns(
+        positions, market,
+        transaction_cost_bps=10.0,
+        carry_bps_per_bar=2.0,
+        exit_mask=exits,
+        cost_multiplier=2.0,
+    )
+    assert net.tolist() == pytest.approx([-0.0024, -0.0024, 0.0])
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0])
+def test_invalid_transaction_costs_fail_closed(bad):
+    index = pd.date_range("2026-01-01", periods=1, freq="h", tz="UTC")
+    with pytest.raises(ValueError):
+        costed_execution_returns(
+            pd.Series([1.0], index=index),
+            pd.Series([0.0], index=index),
+            transaction_cost_bps=bad,
+            carry_bps_per_bar=0.0,
+        )
