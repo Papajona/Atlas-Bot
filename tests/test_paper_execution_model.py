@@ -1,4 +1,11 @@
+import hashlib
+from pathlib import Path
+
 import pytest
+
+TEST_EVIDENCE_PATH = Path(__file__).parent / "fixtures" / "paper_execution_calibration_test.json"
+TEST_EVIDENCE_ID = "sha256:" + hashlib.sha256(TEST_EVIDENCE_PATH.read_bytes()).hexdigest()
+
 
 from app.paper_execution_model import (
     PaperExecutionModelError,
@@ -28,7 +35,8 @@ def _calibration(**overrides):
         "latency_max_ms": 100.0,
         "latency_impact_coefficient": 0.5,
         "evidence_source": "venue-paper-fill-study",
-        "evidence_id": "sha256:" + ("a" * 64),
+        "evidence_path": str(TEST_EVIDENCE_PATH),
+        "evidence_id": TEST_EVIDENCE_ID,
         **overrides,
     }
 
@@ -77,7 +85,7 @@ def test_sell_slippage_is_adverse_and_model_evidence_is_mandatory():
     result = _estimate(1.0, side="sell")
     assert result["fill_price"] < 100.0
     assert result["evidence_source"] == "venue-paper-fill-study"
-    assert result["evidence_id"] == "sha256:" + ("a" * 64)
+    assert result["evidence_id"] == TEST_EVIDENCE_ID
 
 
 def test_latency_changes_adverse_cost_and_order_key_makes_result_reproducible():
@@ -136,6 +144,7 @@ def test_invalid_or_uncalibrated_model_inputs_fail_closed(context, calibration):
         latency_max_ms=inputs["latency_max_ms"],
         latency_impact_coefficient=inputs["latency_impact_coefficient"],
         evidence_source=inputs["evidence_source"],
+        evidence_path=inputs["evidence_path"],
         evidence_id=inputs["evidence_id"],
     ) is False
     with pytest.raises(PaperExecutionModelError):
@@ -182,5 +191,6 @@ def test_calibrated_model_availability_requires_every_latency_and_rejection_sett
         latency_max_ms=100,
         latency_impact_coefficient=0.5,
         evidence_source="venue-paper-fill-study",
-        evidence_id="sha256:" + ("a" * 64),
+        evidence_path=str(TEST_EVIDENCE_PATH),
+        evidence_id=TEST_EVIDENCE_ID,
     ) is False
