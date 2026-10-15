@@ -1591,9 +1591,15 @@ async def _continuous_risk_enforcement_loop():
     while True:
         try:
             breached = []
+            baseline_rolled = False
             async with SessionLocal() as db:
                 state = await db.get(AppState, 1)
+                today_utc = datetime.now(timezone.utc).date()
                 if state:
+                    if state.daily_start_date != today_utc:
+                        state.daily_start_date = today_utc
+                        state.daily_start_equity = state.equity
+                        baseline_rolled = True
                     peak = float(state.peak_equity or state.equity or 0.0)
                     daily_start = float(state.daily_start_equity or state.equity or 0.0)
                     equity = max(0.0, float(state.equity or 0.0))
@@ -1610,6 +1616,10 @@ async def _continuous_risk_enforcement_loop():
                         })
                 accounts = (await db.execute(select(TradingAccount).where(TradingAccount.status != "CLOSED"))).scalars().all()
                 for account in accounts:
+                    if account.daily_start_date != today_utc:
+                        account.daily_start_date = today_utc
+                        account.daily_start_equity = account.equity
+                        baseline_rolled = True
                     peak = float(account.peak_equity or account.equity or 0.0)
                     daily_start = float(account.daily_start_equity or account.equity or 0.0)
                     equity = max(0.0, float(account.equity or 0.0))
@@ -1623,7 +1633,7 @@ async def _continuous_risk_enforcement_loop():
                             "drawdown": drawdown,
                             "daily_loss": daily_loss,
                         })
-                if breached:
+                if breached or baseline_rolled:
                     await db.commit()
 
             if breached:
