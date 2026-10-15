@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from app.execution import _prepare_live_fee, _money_ref
 
 
-def test_cumulative_fee_uses_ledger_quantization_not_per-delta_rounding():
+def test_cumulative_fee_uses_ledger_quantization_not_per_delta_rounding():
     trade = SimpleNamespace(fee=Decimal("0"), symbol="BTC/USDT")
     first_delta, first_cumulative, quality, _ = _prepare_live_fee(
         trade, {"fee": {"currency": "USDT", "cost": "0.0000006"}}, 1.0, 1.0, 5.5
