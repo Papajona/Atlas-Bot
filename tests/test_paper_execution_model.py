@@ -1,5 +1,3 @@
-import math
-
 import pytest
 
 from app.paper_execution_model import (
