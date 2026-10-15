@@ -133,6 +133,8 @@ def test_repeated_quote_failures_open_circuit_without_more_provider_calls():
         with pytest.raises(ccxt.ExchangeNotAvailable):
             broker.ticker("BTC/USDT")
     assert broker._market_data_open_until > time.monotonic()
+    assert broker.consume_market_data_circuit_alert() is True
+    assert broker.consume_market_data_circuit_alert() is False
     with pytest.raises(RuntimeError, match="market-data circuit is open"):
         broker.ticker("BTC/USDT")
 
