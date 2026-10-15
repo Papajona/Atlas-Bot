@@ -81,9 +81,10 @@ def _calibration_evidence_matches(
         return False
     if artifact.get("schema") != "atlas-paper-execution-calibration-v1":
         return False
-    if artifact.get("fixture_only") is True and not allow_test_fixture:
+    fixture_only = artifact.get("fixture_only")
+    if not isinstance(fixture_only, bool):
         return False
-    if artifact.get("fixture_only") not in {True, False}:
+    if fixture_only and not allow_test_fixture:
         return False
     if not str(artifact.get("provenance_source") or "").strip():
         return False
