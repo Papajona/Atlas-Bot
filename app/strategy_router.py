@@ -317,7 +317,9 @@ def router_walk_forward_backtest(df: pd.DataFrame, cfg: StrategyConfig | None = 
             chosen_by_regime[regime] = ranked[0][0] if ranked else "ensemble"
         test = df.iloc[fold.test_start:fold.test_end]
         test_regimes = regimes.iloc[fold.test_start:fold.test_end]
-        test_ret = next_open_returns(test) - 1.0
+        # Keep the next-open return for the fold's final test bar. Slicing first
+        # makes that return look missing and silently replaces it with zero.
+        test_ret = (next_open_returns(df) - 1.0).iloc[fold.test_start:fold.test_end]
         selected = []
         for idx in test.index:
             regime = str(test_regimes.loc[idx])
