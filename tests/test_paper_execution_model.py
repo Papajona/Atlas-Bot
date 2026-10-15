@@ -39,6 +39,7 @@ def _calibration(**overrides):
         "evidence_source": "venue-paper-fill-study",
         "evidence_path": str(TEST_EVIDENCE_PATH),
         "evidence_id": TEST_EVIDENCE_ID,
+        "allow_test_fixture": True,
         **overrides,
     }
 
@@ -195,4 +196,5 @@ def test_calibrated_model_availability_requires_every_latency_and_rejection_sett
         evidence_source="venue-paper-fill-study",
         evidence_path=str(TEST_EVIDENCE_PATH),
         evidence_id=TEST_EVIDENCE_ID,
+        allow_test_fixture=True,
     ) is False
