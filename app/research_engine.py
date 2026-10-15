@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from .strategy_engine import StrategyConfig, strategy_signals, risk_scaled_position, target_positions, next_open_returns
+from .execution_aware_research import execution_turnover, simulate_execution_aware_strategy
 from .trading_core import ai_walk_forward_backtest
 from .strategy_evidence import evidence_for
 from .research_validation import monte_carlo_bootstrap, parameter_plateau_score, cost_breakeven_report
@@ -131,29 +132,44 @@ def _apply_protective_halts(
     }
 
 
-def _protected_component_position(df: pd.DataFrame, component: str, cfg: StrategyConfig,
-                                 taker_bps: float, slippage_bps: float,
-                                 asset: str = "crypto"):
-    """Return the exact risk-controlled position stream used by reported and OOS metrics."""
+def _protected_component_position(
+    df: pd.DataFrame,
+    component: str,
+    cfg: StrategyConfig,
+    taker_bps: float,
+    slippage_bps: float,
+    asset: str = "crypto",
+    carry_bps_per_bar: float | None = None,
+):
+    """Return one execution-aware, costed, risk-controlled stream for all research metrics."""
     signals = strategy_signals(df, cfg, asset=asset)
     raw = signals[component].fillna(0.0)
     requested = target_positions(raw, signals["realized_vol"], cfg).shift(1).fillna(0.0)
-    returns = (next_open_returns(df) - 1.0).fillna(0.0)
-    protected, net, audit = _apply_protective_halts(
-        requested, returns,
-        cost_rate=(taker_bps + slippage_bps) / 10_000.0,
+    carry = carry_bps_per_bar
+    if carry is None:
+        carry = settings.research_carry_bps_per_bar
+    execution = simulate_execution_aware_strategy(
+        df,
+        requested,
+        signals["atr"].shift(1),
+        stop_atr=cfg.stop_atr,
+        take_profit_atr=cfg.take_profit_atr,
+        transaction_cost_bps=float(taker_bps) + float(slippage_bps),
+        carry_bps_per_bar=carry,
         drawdown_limit=settings.strategy_drawdown_halt,
         daily_loss_limit=settings.strategy_daily_loss_halt,
         loss_event_threshold=settings.strategy_stoploss_guard_trades,
         cooldown_bars=settings.strategy_stoploss_guard_bars,
     )
-    return signals, raw, requested, returns, protected, net, audit
+    return (
+        signals, raw, requested, execution["market_returns"], execution["positions"],
+        execution["net_returns"], execution["audit"], execution["intrabar_exit"],
+    )
 
-
-def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, taker_bps: float, slippage_bps: float, asset: str = "crypto") -> dict:
+def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, taker_bps: float, slippage_bps: float, asset: str = "crypto", carry_bps_per_bar: float | None = None) -> dict:
     """Cost-aware component backtest with forward-looking risk protections."""
-    s, _, _, _, protected, protected_net, protection_audit = _protected_component_position(
-        df, component, cfg, taker_bps, slippage_bps, asset
+    s, _, _, _, protected, protected_net, protection_audit, _ = _protected_component_position(
+        df, component, cfg, taker_bps, slippage_bps, asset, carry_bps_per_bar
     )
     ann = float(s.attrs.get("annualization_factor", 252.0))
     active = protected != 0
@@ -254,8 +270,10 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                             include_ai: bool = True, asset: str = "crypto",
                             folds: int = 5, min_train: int = 800,
                             ai_threshold: float = 0.05,
-                            prior_trial_labels=None) -> dict:
+                            prior_trial_labels=None,
+                            carry_bps_per_bar: float | None = None) -> dict:
     cfg = cfg or StrategyConfig()
+    carry = carry_bps_per_bar if carry_bps_per_bar is not None else settings.research_carry_bps_per_bar
     data_quality = validate_ohlcv_frame(df)
     # The current established-coin allowlist is a live liquidity control, not a
     # historical point-in-time universe. Carry this limitation into every research result.
@@ -279,11 +297,13 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     validation_splits = purged_walk_forward_splits(len(df), folds=folds, min_train=min_train, purge=1, embargo=1)
     signal_frame = strategy_signals(df, cfg, asset=asset)
     annualization_factor = float(signal_frame.attrs.get("annualization_factor", 252.0))
-    _, _, _, bar_returns, ensemble_pos, ensemble_net, _ = _protected_component_position(
-        df, "ensemble", cfg, taker_bps, slippage_bps, asset
+    _, _, _, bar_returns, ensemble_pos, ensemble_net, ensemble_audit, ensemble_exits = _protected_component_position(
+        df, "ensemble", cfg, taker_bps, slippage_bps, asset, carry
     )
     gross = ensemble_pos * bar_returns
-    turnover = ensemble_pos.diff().abs().fillna(ensemble_pos.abs())
+    if carry is not None:
+        gross = gross - ensemble_pos.abs() * (float(carry) / 10000.0)
+    turnover = execution_turnover(ensemble_pos, ensemble_exits)
     sensitivity = cost_sensitivity(gross.to_numpy(), turnover.to_numpy())
     ci = bootstrap_mean_ci(ensemble_net.to_numpy(), block_size=10)
     adjusted = multiple_testing_sharpe_adjustment([r.get("sharpe", 0.0) for r in results], trials=len(results))
@@ -294,12 +314,13 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         annualization_factor=annualization_factor,
         taker_bps=taker_bps, slippage_bps=slippage_bps,
         cost_stress_multiplier=cost_mult, positions_are_final=True,
+        bar_returns=bar_returns, intrabar_exit=ensemble_exits, carry_bps_per_bar=carry,
     )
     regime_performance = regime_conditioned_performance(df, ensemble_net, asset=asset)
     per_strategy_oos = {}
     for component in components:
-        _, _, _, _, component_position, _, _ = _protected_component_position(
-            df, component, cfg, taker_bps, slippage_bps, asset
+        _, _, _, component_returns, component_position, _, _, component_exits = _protected_component_position(
+            df, component, cfg, taker_bps, slippage_bps, asset, carry
         )
         per_strategy_oos[component] = fixed_signal_walk_forward_oos(
             df, component_position, costs_bps=taker_bps + slippage_bps,
@@ -307,13 +328,15 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             annualization_factor=annualization_factor,
             taker_bps=taker_bps, slippage_bps=slippage_bps,
             cost_stress_multiplier=cost_mult, positions_are_final=True,
+            bar_returns=component_returns, intrabar_exit=component_exits,
+            carry_bps_per_bar=carry,
         )
     # Parameter-plateau check: small changes to the signal threshold should not destroy
     # the measured edge. A narrow single-point optimum is treated as fragile research.
     variants=[]
     for mult in (0.80,0.90,1.00,1.10,1.20):
         vcfg=StrategyConfig(**{**asdict(cfg), "signal_threshold": float(cfg.signal_threshold*mult)})
-        vr=_component_backtest(df,"ensemble",vcfg,taker_bps,slippage_bps,asset)
+        vr=_component_backtest(df,"ensemble",vcfg,taker_bps,slippage_bps,asset,carry)
         variants.append({"multiplier":mult,"sharpe":vr.get("sharpe",0.0),"total_return":vr.get("total_return",0.0),"max_drawdown":vr.get("max_drawdown",0.0)})
     robustness={"monte_carlo":monte_carlo_bootstrap(ensemble_net.to_numpy(),trials=500),"parameter_plateau":parameter_plateau_score({"variants":variants},metric="sharpe",tolerance=0.20),"parameter_variants":variants}
     # Formal DSR. Count every variant evaluated on this data: components + parameter variants (+ AI when included).
