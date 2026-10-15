@@ -228,3 +228,8 @@ def test_test_fixture_is_accepted_only_with_explicit_development_override():
     assert calibrated_model_available(
         _context(), **shared, allow_test_fixture=True
     ) is True
+
+
+def test_numeric_model_settings_cannot_drift_from_sha_pinned_calibration_parameters():
+    with pytest.raises(PaperExecutionModelError, match="calibration artifact"):
+        _estimate(1.0, calibration={"impact_coefficient": 0.7})
