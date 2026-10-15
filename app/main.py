@@ -18,6 +18,7 @@ from decimal import Decimal
 from contextvars import ContextVar
 from dataclasses import asdict
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta, timezone
 from .withdrawal_ids import next_customer_withdrawal_request_id
 from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocketDisconnect
