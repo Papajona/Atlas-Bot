@@ -1860,6 +1860,25 @@ def _position_side_from_exchange_row(row: dict[str, Any]) -> str:
     return raw if raw in {"long", "short"} else ""
 
 
+def _parse_oanda_position_units(position: Any, side: str) -> Decimal | None:
+    """Return an explicit OANDA long/short unit quantity; None means unverifiable."""
+    if not isinstance(position, dict):
+        return None
+    side_data = position.get(side)
+    if not isinstance(side_data, dict) or "units" not in side_data:
+        return None
+    raw = side_data.get("units")
+    if raw is None or str(raw).strip() == "":
+        return None
+    if str(raw).strip().upper() == "NONE":
+        return Decimal("0")
+    try:
+        units = Decimal(str(raw).strip())
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    return units if units.is_finite() else None
+
+
 async def _flatten_exchange_positions(broker: Any, scope: str, failures: list[dict[str, str]], canceled: list[dict[str, str]]) -> None:
     try:
         rows = await asyncio.to_thread(broker.fetch_positions)
@@ -2052,26 +2071,40 @@ async def emergency_stop(exchange: str | None = None):
                     })
                 positions = await asyncio.to_thread(broker.positions)
                 for position in positions or []:
-                    instrument = str(position.get("instrument") or "")
-                    long_units = str((position.get("long") or {}).get("units") or "NONE")
-                    short_units = str((position.get("short") or {}).get("units") or "NONE")
+                    if not isinstance(position, dict):
+                        failures.append({"scope": "platform_oanda", "error": "Malformed OANDA position row; cannot confirm exposure is flat"})
+                        continue
+                    instrument = str(position.get("instrument") or "").strip()
+                    long_value = _parse_oanda_position_units(position, "long")
+                    short_value = _parse_oanda_position_units(position, "short")
                     if not instrument:
                         failures.append({"scope": "platform_oanda", "error": "Open OANDA position has no instrument; refusing to guess"})
                         continue
+                    if long_value is None or short_value is None:
+                        failures.append({"scope": "platform_oanda", "symbol": instrument,
+                                         "error": "OANDA position units are missing or invalid; refusing to assume flat"})
+                        continue
+                    long_units = str(position["long"]["units"])
+                    short_units = str(position["short"]["units"])
                     try:
-                        if long_units not in {"NONE", "0", "0.0"} or short_units not in {"NONE", "0", "0.0"}:
+                        if long_value != 0 or short_value != 0:
                             await asyncio.to_thread(broker.close_position, instrument, long_units, short_units)
                             canceled.append({"scope": "platform_oanda", "position_symbol": instrument, "order_id": ""})
                     except Exception as exc:
                         failures.append({"scope": "platform_oanda", "symbol": instrument, "error": f"OANDA position close failed: {exc}"})
                 remaining_positions = await asyncio.to_thread(broker.positions)
-                unresolved_positions = [
-                    str(p.get("instrument") or "") for p in remaining_positions or []
-                    if str((p.get("long") or {}).get("units") or "0") not in {"0", "0.0", "NONE"}
-                    or str((p.get("short") or {}).get("units") or "0") not in {"0", "0.0", "NONE"}
-                ]
+                unresolved_positions = []
+                for position in remaining_positions or []:
+                    if not isinstance(position, dict):
+                        unresolved_positions.append("<malformed-position-row>")
+                        continue
+                    instrument = str(position.get("instrument") or "").strip()
+                    long_value = _parse_oanda_position_units(position, "long")
+                    short_value = _parse_oanda_position_units(position, "short")
+                    if not instrument or long_value is None or short_value is None or long_value != 0 or short_value != 0:
+                        unresolved_positions.append(instrument or "<missing-instrument>")
                 if unresolved_positions:
-                    failures.append({"scope": "platform_oanda", "error": f"OANDA positions remain after flatten: {unresolved_positions[:20]}"})
+                    failures.append({"scope": "platform_oanda", "error": f"OANDA positions remain or could not be verified after flatten: {unresolved_positions[:20]}"})
             except Exception as exc:
                 cancel_error = str(exc)
                 failures.append({"scope": "platform_oanda", "error": cancel_error})
