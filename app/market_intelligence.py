@@ -54,7 +54,7 @@ def _yahoo_bar_end(timestamp: pd.Timestamp, interval: str) -> pd.Timestamp:
     """Compute a provider bar's end from its explicit Yahoo interval string."""
     import re
 
-    match = re.fullmatch(r"(\\d+)(m|h|d|wk|mo|y)", str(interval or "").strip().lower())
+    match = re.fullmatch(r"(\d+)(m|h|d|wk|mo|y)", str(interval or "").strip().lower())
     if not match:
         raise MarketSourceError(f"Unsupported Yahoo interval for closed-bar validation: {interval!r}")
     amount = int(match.group(1))
