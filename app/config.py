@@ -132,6 +132,8 @@ class Settings(BaseSettings):
     research_slippage_bps: float = 2.0
     # No default: a missing instrument/venue financing assumption blocks research promotion.
     research_carry_bps_per_bar: float | None = None
+    research_carry_evidence_source: str = ""
+    research_carry_evidence_id: str = ""
     # Production research must identify the evidence behind the fee assumption; the
     # development default is intentionally not accepted as customer-execution evidence.
     research_fee_source: str = ""
