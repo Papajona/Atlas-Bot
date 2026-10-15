@@ -84,6 +84,14 @@ def test_paper_context_only_uses_ccxt_crypto_volume_as_base_asset_quantity():
     assert forex["source"] == "oanda_v20_mid"
 
 
+def test_paper_slippage_rejects_spreads_that_could_make_sell_fill_nonpositive():
+    with pytest.raises(ValueError, match="below 10000 bps"):
+        estimate_paper_slippage(
+            side="sell", quantity=1.0, base_slippage_bps=2.0,
+            context={**_context(), "spread_bps": 20_000.0},
+        )
+
+
 def test_paper_impact_is_capped_and_fill_price_is_adverse_for_both_sides():
     estimate = estimate_paper_slippage(
         side="buy", quantity=1_000_000.0, base_slippage_bps=2.0,
