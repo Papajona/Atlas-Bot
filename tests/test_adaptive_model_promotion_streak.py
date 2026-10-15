@@ -29,7 +29,10 @@ def _passing_wfo():
     folds = [{"total_return": 0.05}, {"total_return": 0.04}, {"total_return": 0.03},
               {"total_return": 0.02}, {"total_return": 0.06}]
     return {"sharpe": 1.2, "max_drawdown": -0.05, "trades": 150, "total_return": 0.10,
-            "folds": folds, "cost_stress_ok": True, "status": "OK", "oos_total_return": 0.10,
+            "folds": folds, "cost_stress_ok": True,
+        "financing_cost_model_complete": True,
+        "intrabar_stop_target_model_complete": True,
+        "execution_cost_model_complete": True, "status": "OK", "oos_total_return": 0.10,
             "deflated_sharpe": 0.97, "trial_registry_complete": True}
 
 
