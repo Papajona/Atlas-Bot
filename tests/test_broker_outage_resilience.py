@@ -125,3 +125,21 @@ def test_position_query_unsupported_is_not_reported_as_flat():
     broker.client = FakeClient()
     with pytest.raises(RuntimeError, match="does not support authoritative open-position queries"):
         broker.fetch_positions()
+
+def test_repeated_quote_failures_open_circuit_without_more_provider_calls():
+    broker = Broker(BrokerConfig("binance", "key", "secret"))
+    broker.client = FakeClient(fetch_ticker=ccxt.ExchangeNotAvailable("503"))
+    for _ in range(3):
+        with pytest.raises(ccxt.ExchangeNotAvailable):
+            broker.ticker("BTC/USDT")
+    assert broker._market_data_open_until > time.monotonic()
+    with pytest.raises(RuntimeError, match="market-data circuit is open"):
+        broker.ticker("BTC/USDT")
+
+
+def test_successful_quote_resets_market_data_failure_state():
+    broker = Broker(BrokerConfig("binance", "key", "secret"))
+    broker.client = FakeClient(fetch_ticker={"symbol": "BTC/USDT", "last": 100.0})
+    assert broker.ticker("BTC/USDT")["last"] == 100.0
+    assert broker._market_data_failure_count == 0
+    assert broker._market_data_open_until == 0.0
