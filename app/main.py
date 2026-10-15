@@ -6274,9 +6274,17 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
         stop = price * (1 - settings.stop_loss_pct) if side == "buy" else price * (1 + settings.stop_loss_pct)
         tp = price * (1 + settings.take_profit_pct) if side == "buy" else price * (1 - settings.take_profit_pct)
         from .paper_execution_model import paper_execution_context_from_ohlcv
+        paper_spread_bps = None
+        try:
+            paper_spread_bps = await asyncio.to_thread(_current_spread_bps, req)
+        except Exception as exc:
+            await _audit("PAPER_EXECUTION_SPREAD_UNAVAILABLE", {
+                "symbol": req.symbol, "exchange": req.exchange, "asset": req.asset,
+                "error_type": type(exc).__name__,
+            })
         paper_signal = dict(sig)
         paper_signal["paper_execution_context"] = paper_execution_context_from_ohlcv(
-            df, asset=req.asset,
+            df, asset=req.asset, spread_bps=paper_spread_bps,
         )
         result = await execute_signal(
             req.symbol, side, qty, price, paper_signal, req.exchange, req.timeframe, ts,
