@@ -40,6 +40,8 @@ def test_oanda_fetches_entire_historical_window_across_5000_candle_pages(monkeyp
             return None
 
     monkeypatch.setattr(data, "_attach_data_provenance", lambda frame, **kwargs: frame)
+    from app.config import settings
+    monkeypatch.setattr(settings, "oanda_practice", True)
     import app.forex_oanda as forex_oanda
     monkeypatch.setattr(forex_oanda, "OandaBroker", FakeOandaBroker)
 
