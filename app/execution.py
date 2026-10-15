@@ -1798,7 +1798,9 @@ def _position_amount_from_exchange_row(row: dict[str, Any]) -> float | None:
     if not isinstance(row, dict):
         return None
     info = row.get("info") if isinstance(row.get("info"), dict) else {}
-    for value in (row.get("contracts"), info.get("positionAmt"), row.get("amount"), row.get("quantity")):
+    values = (row.get("contracts"), info.get("positionAmt"), row.get("amount"), row.get("quantity"))
+    parsed_values: list[Decimal] = []
+    for value in values:
         if value is None:
             continue
         try:
@@ -1807,11 +1809,18 @@ def _position_amount_from_exchange_row(row: dict[str, Any]) -> float | None:
             return None
         if not exact.is_finite():
             return None
-        amount = float(abs(exact))
-        if amount == float("inf"):
-            return None
-        return amount
-    return None
+        parsed_values.append(abs(exact))
+    if not parsed_values:
+        return None
+    # These venue fields can use different positive units (e.g. contracts vs base units),
+    # but they cannot safely disagree about whether exposure exists at all.
+    presence = {value != 0 for value in parsed_values}
+    if len(presence) > 1:
+        return None
+    amount = float(parsed_values[0])
+    if amount == float("inf"):
+        return None
+    return amount
 
 
 def _position_side_from_exchange_row(row: dict[str, Any]) -> str:
@@ -1865,7 +1874,7 @@ async def _flatten_exchange_positions(broker: Any, scope: str, failures: list[di
             if not symbol or amount is None or amount > 0:
                 unresolved.append(symbol or "<missing-symbol>")
         if unresolved:
-            failures.append({"scope": scope, "error": f"Positions remain or could not be verified after reduce-only flatten: {unresolved[:20]}"})
+            failures.append({"scope": scope, "error": f"Positions remain after reduce-only flatten or could not be verified: {unresolved[:20]}"})
     except Exception as exc:
         failures.append({"scope": scope, "error": f"Unable to verify positions after flattening: {exc}"})
 
@@ -2104,7 +2113,7 @@ async def emergency_stop(exchange: str | None = None):
                     if unresolved_spot:
                         failures.append({
                             "scope": "platform_exchange_spot",
-                            "error": "Unflattened or unverifiable platform spot positions remain",
+                            "error": "Unflattened platform spot positions remain or are unverifiable",
                             "positions": unresolved_spot[:50],
                         })
 
