@@ -1310,6 +1310,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             except Exception as exc:
                 raise RiskBlocked(str(exc)) from exc
         paper_context = None
+        paper_simulation = None
         if mode == "PAPER":
             try:
                 paper_context = signal.get("paper_market_context")
@@ -1336,6 +1337,24 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     signal_timestamp=signal_timestamp,
                     price=quote,
                     max_reference_deviation_bps=settings.max_slippage_bps,
+                )
+                profile = PROFILES.get(asset)
+                if profile is None:
+                    raise PaperExecutionError(f"No evidenced paper cost profile exists for asset class {asset!r}")
+                paper_simulation = simulate_paper_order(
+                    order_id=cid,
+                    side=side,
+                    quantity=quantity,
+                    price=quote,
+                    base_slippage_bps=profile.slippage_bps,
+                    taker_fee_bps=profile.taker_bps,
+                    context=paper_context,
+                    max_volume_participation=settings.paper_fill_max_volume_participation,
+                    volatility_slippage_multiplier=settings.paper_volatility_slippage_multiplier,
+                    market_impact_bps=settings.paper_market_impact_bps,
+                    rejection_rate=settings.paper_execution_rejection_rate,
+                    latency_min_ms=settings.paper_execution_latency_min_ms,
+                    latency_max_ms=settings.paper_execution_latency_max_ms,
                 )
             except PaperExecutionError as exc:
                 raise RiskBlocked(f"Paper execution blocked: {exc}") from exc
@@ -1416,27 +1435,9 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                                 await reject_db.commit()
                         raise RiskBlocked(str(exc))
         if mode == "PAPER":
-            profile = PROFILES.get(asset)
-            if profile is None:
-                raise RiskBlocked(f"No evidenced paper cost profile exists for asset class {asset!r}")
-            try:
-                simulation = simulate_paper_order(
-                    order_id=cid,
-                    side=side,
-                    quantity=quantity,
-                    price=quote,
-                    base_slippage_bps=profile.slippage_bps,
-                    taker_fee_bps=profile.taker_bps,
-                    context=paper_context,
-                    max_volume_participation=settings.paper_fill_max_volume_participation,
-                    volatility_slippage_multiplier=settings.paper_volatility_slippage_multiplier,
-                    market_impact_bps=settings.paper_market_impact_bps,
-                    rejection_rate=settings.paper_execution_rejection_rate,
-                    latency_min_ms=settings.paper_execution_latency_min_ms,
-                    latency_max_ms=settings.paper_execution_latency_max_ms,
-                )
-            except PaperExecutionError as exc:
-                raise RiskBlocked(f"Paper execution simulation failed closed: {exc}") from exc
+            if paper_simulation is None:
+                raise RiskBlocked("Paper execution was not simulated during preflight")
+            simulation = paper_simulation
             # The elapsed delay and latency penalty are synthetic assumptions; no venue order book is present.
             await asyncio.sleep(float(simulation["latency_ms"]) / 1000.0)
             filled = float(simulation["filled_quantity"])
