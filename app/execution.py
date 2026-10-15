@@ -76,6 +76,20 @@ def _qty_ref(quantity: float | Decimal | int | None) -> str:
     return format(canonical, ".6f")
 
 
+def _exact_realized_pnl(closing_quantity: Any, fill_price: Any, average_entry_price: Any, direction: int) -> Decimal:
+    """Calculate a fill's realized P&L using Decimal before ledger posting."""
+    if direction not in {-1, 1}:
+        raise ValueError("realized P&L direction must be -1 or 1")
+    quantity_d = Decimal(str(closing_quantity))
+    fill_d = Decimal(str(fill_price))
+    entry_d = Decimal(str(average_entry_price))
+    if not quantity_d.is_finite() or not fill_d.is_finite() or not entry_d.is_finite():
+        raise ValueError("realized P&L inputs must be finite")
+    if quantity_d < 0 or fill_d <= 0 or entry_d <= 0:
+        raise ValueError("realized P&L inputs must have non-negative quantity and positive prices")
+    return quantity_d * (fill_d - entry_d) * Decimal(direction)
+
+
 def _verify_exchange_clock(broker: Any, *, local_time_ms: int | None = None, max_drift_ms: int = 1000) -> int:
     """Fail closed if the venue clock cannot be checked or differs by more than 1 second."""
     try:
@@ -644,6 +658,7 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         Position.entry_trade_id.in_(live_entry_ids),
     ).with_for_update()
     position = (await db.execute(position_query)).scalar_one_or_none()
+    realized_decimal = Decimal("0")
     realized = 0.0
     realized_strategy = str(getattr(position, "strategy", "") or trade_context.get("strategy") or "unknown") if position else str(trade_context.get("strategy") or "unknown")
     realized_regime = str(getattr(position, "entry_regime", "UNKNOWN") or trade_context.get("regime") or "UNKNOWN") if position else str(trade_context.get("regime") or "UNKNOWN")
@@ -683,17 +698,27 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
     else:
         old_qty = position.quantity
         if old_qty == 0 or (old_qty > 0 and signed > 0) or (old_qty < 0 and signed < 0):
-            total_abs = abs(old_qty) + abs(signed)
+            old_qty_d = Decimal(str(old_qty))
+            signed_d = Decimal(str(signed))
+            fill_price_d = Decimal(str(fill_price))
+            total_abs_d = abs(old_qty_d) + abs(signed_d)
+            if total_abs_d <= 0:
+                raise ValueError("cannot calculate a weighted entry price from zero quantity")
             position.average_entry_price = (
-                abs(old_qty) * position.average_entry_price + abs(signed) * fill_price
-            ) / total_abs
+                abs(old_qty_d) * Decimal(str(position.average_entry_price))
+                + abs(signed_d) * fill_price_d
+            ) / total_abs_d
             position.quantity = old_qty + signed
             if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE":
                 position.reserved_capital += delta * fill_price
         else:
             closing = min(abs(old_qty), abs(signed))
             direction = 1 if old_qty > 0 else -1
-            realized = closing * (fill_price - position.average_entry_price) * direction
+            closing_decimal = min(abs(Decimal(str(old_qty))), abs(Decimal(str(signed))))
+            realized_decimal = _exact_realized_pnl(
+                closing_decimal, fill_price, position.average_entry_price, direction
+            )
+            realized = float(realized_decimal)
             position.quantity = old_qty + signed
             if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE" and abs(old_qty) > 0:
                 full_allocation_release = closing >= abs(old_qty)
@@ -780,8 +805,8 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 else:
                     episode.entry_price = float(fill_price)
                 episode.entry_quantity = new_qty
-            if realized != 0.0:
-                episode.gross_pnl = quantize_money(float(episode.gross_pnl or 0.0) + float(realized))
+            if realized_decimal != 0:
+                episode.gross_pnl = quantize_money(float(episode.gross_pnl or 0.0) + float(realized_decimal))
                 episode.exit_price = float(fill_price)
                 episode.closing_trade_id = trade.id
                 episode.exit_at = utcnow()
@@ -817,10 +842,14 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         # through Decimal independently on every call before it touches the customer ledger --
         # but an unbounded position.realized_pnl is still a reporting-accuracy issue over a
         # long-lived position with many partial fills.
-        position.realized_pnl = quantize_money(position.realized_pnl + realized)
-        if realized and trade.customer_id is not None and str(trade.mode or "").upper() == "LIVE":
-            await settle_realized_pnl(db, customer_id=trade.customer_id, amount=realized, reference_id=f"trade:{trade.id}:realized:{_qty_ref(new_filled)}", strict=False)
-        if realized != 0.0:
+        position.realized_pnl = (
+            Decimal(str(position.realized_pnl or 0)) + realized_decimal
+        ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+        if realized_decimal != 0 and trade.customer_id is not None and str(trade.mode or "").upper() == "LIVE":
+            # Keep the exact Decimal result through the custodial-ledger boundary;
+            # do not round-trip the realized amount through a binary float first.
+            await settle_realized_pnl(db, customer_id=trade.customer_id, amount=realized_decimal, reference_id=f"trade:{trade.id}:realized:{_qty_ref(new_filled)}", strict=False)
+        if realized_decimal != 0:
             # Store observed outcome against the strategy that opened the position.
             # This avoids attributing a close to the strategy of the closing order.
             attribution_trade_id = int(entry_trade_id or trade.id)
@@ -833,15 +862,16 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
             entry_fee = float(entry_row.fee or 0.0) if entry_row else 0.0
             episode_entry_qty = float(episode.entry_quantity or 0.0) if 'episode' in locals() and episode is not None else 0.0
             allocated_entry_fee = entry_fee * (float(closing) / episode_entry_qty) if episode_entry_qty > 0 else 0.0
-            net_pnl = float(realized - closing_fee - allocated_entry_fee)
+            net_pnl_decimal = realized_decimal - Decimal(str(closing_fee)) - Decimal(str(allocated_entry_fee))
+            net_pnl = float(net_pnl_decimal)
             net_return_bps = float(net_pnl / notional * 10000.0) if notional > 0 else 0.0
             db.add(StrategyOutcome(
                 trade_id=attribution_trade_id, closing_trade_id=trade.id, customer_id=trade.customer_id,
                 bot_id=int(trade_context.get("bot_id")) if str(trade_context.get("bot_id", "")).isdigit() else None,
                 strategy=realized_strategy, regime=realized_regime, asset=str(trade_context.get("asset") or "crypto"),
                 symbol=trade.symbol, timeframe=trade.timeframe, side=trade.side,
-                realized_pnl=realized, fee=float(trade.fee or 0.0), return_bps=return_bps,
-                net_pnl=net_pnl, net_return_bps=net_return_bps,
+                realized_pnl=realized_decimal, fee=float(trade.fee or 0.0), return_bps=return_bps,
+                net_pnl=net_pnl_decimal, net_return_bps=net_return_bps,
                 lifecycle_status="CLOSED" if abs(float(position.quantity or 0.0)) < 1e-12 else "OPEN",
                 mode=trade.mode, sequence=sequence, model_version=str(trade_context.get("model_version") or ""),
                 metadata_json=json.dumps({"entry_trade_id": attribution_trade_id, "closing_trade_id": trade.id, "fill_price": fill_price, "entry_fee": entry_fee, "allocated_entry_fee": allocated_entry_fee, "net_pnl": net_pnl}, default=str),
@@ -852,7 +882,13 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 )).scalars().all()
                 for outcome in completed_outcomes:
                     outcome.lifecycle_status = "CLOSED"
-        position.unrealized_pnl = position.quantity * (position.mark_price - position.average_entry_price) if position.quantity else 0.0
+        if position.quantity:
+            position.unrealized_pnl = (
+                Decimal(str(position.quantity))
+                * (Decimal(str(position.mark_price)) - Decimal(str(position.average_entry_price)))
+            ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+        else:
+            position.unrealized_pnl = Decimal("0")
         position.updated_at = utcnow()
     trade.filled_quantity = new_filled
     trade.remaining_quantity = max(0.0, trade.requested_quantity - new_filled)
