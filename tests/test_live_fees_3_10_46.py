@@ -29,3 +29,21 @@ def test_extract_order_fee_quote(order, symbol, price, qty, expected, quality):
 def test_split_symbol():
     assert split_symbol("BTC/USDT:USDT") == ("BTC", "USDT")
     assert split_symbol("eth/usdt") == ("ETH", "USDT")
+
+
+def test_incomplete_fee_record_forces_conservative_estimate():
+    fee, quality, note = extract_order_fee_quote(
+        {
+            "fees": [
+                {"currency": "USDT", "cost": "0.10"},
+                {"currency": "BNB", "cost": None},
+            ]
+        },
+        "BTC/USDT",
+        100.0,
+        1.0,
+        fallback_taker_bps=10.0,
+    )
+    assert quality == ESTIMATED
+    assert fee >= 0.10
+    assert "no usable cost" in note
