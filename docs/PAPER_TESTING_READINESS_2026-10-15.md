@@ -37,7 +37,7 @@ The internal `paper_market_context` must include:
 - `recent_volatility_bps`: recent realized volatility in basis points;
 - `bar_duration_ms`: the duration of the candle used to estimate the recent volatility.
 
-These values must come from a server-validated market-data path. They must not be trusted if supplied unchecked by a client. The model coefficients, participation ceiling, rejection probability, latency quantiles and evidence identifiers must be calibrated and reviewed before staging use. The evidence path must point to a readable calibration artifact; the evidence ID must be its actual SHA-256 digest (with an optional `sha256:` prefix). Placeholder values or a CI fixture do not establish real venue calibration.
+These values must come from a server-validated market-data path. They must not be trusted if supplied unchecked by a client. The model coefficients, participation ceiling, rejection probability, latency quantiles and evidence identifiers must be calibrated and reviewed before staging use. The evidence path must point to a readable calibration artifact; the evidence ID must be its actual SHA-256 digest (with an optional `sha256:` prefix). The artifact must declare the required schema, provenance source, source-data digest, positive observation counts, and exact covered venue/symbol. Its calibrated parameter object must match the configured base slippage, participation, impact, rejection and latency values to a strict numeric tolerance. The configured evidence source must match the artifact's source identifier. Test-only fixtures are accepted only by an explicit development-only override, never by staging/production. Placeholder values or a CI fixture do not establish real venue calibration.
 
 ## Limitations that remain open
 
