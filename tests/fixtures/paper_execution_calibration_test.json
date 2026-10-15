@@ -1,0 +1,5 @@
+{
+  "fixture_only": true,
+  "purpose": "CI unit-test fixture only; not real venue calibration evidence",
+  "schema": "atlas-paper-calibration-fixture-v1"
+}
