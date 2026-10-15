@@ -154,3 +154,25 @@ def test_oos_financing_completeness_requires_traceable_source_and_evidence_id():
     assert complete["execution_cost_model_complete"] is True
     assert complete["carry_evidence_source"] == "fixture:venue-financing-schedule"
     assert complete["carry_evidence_id"] == "fixture-rate-sheet-v1"
+
+
+
+def test_last_evaluated_bar_liquidates_at_observed_close_and_charges_exit():
+    frame = _ohlc(
+        opens=[100.0],
+        highs=[104.0],
+        lows=[99.0],
+    )
+    frame["close"] = [103.0]
+    positions = pd.Series([1.0], index=frame.index)
+    atr = pd.Series([2.0], index=frame.index)
+    result = simulate_execution_aware_strategy(
+        frame, positions, atr,
+        stop_atr=2.0, take_profit_atr=3.0,
+        transaction_cost_bps=10.0, carry_bps_per_bar=0.0,
+    )
+    assert result["market_returns"].iloc[0] == pytest.approx(0.03)
+    assert result["turnover"].iloc[0] == pytest.approx(2.0)  # entry plus terminal liquidation
+    assert result["net_returns"].iloc[0] == pytest.approx(0.028)
+    assert result["audit"]["terminal_close_exits"] == 1
+    assert result["audit"]["final_equity"] == pytest.approx(1.028)
