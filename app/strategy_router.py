@@ -17,7 +17,7 @@ import math
 import numpy as np
 import pandas as pd
 
-from .strategy_engine import StrategyConfig, strategy_signals, next_open_returns
+from .strategy_engine import StrategyConfig, strategy_signals, next_open_returns, _annualization_factor
 from .research_validation import purged_walk_forward_splits
 
 STRATEGIES = ("trend", "momentum", "breakout", "mean_reversion", "ensemble")
@@ -29,7 +29,9 @@ def classify_regime(df: pd.DataFrame, *, asset: str = "crypto") -> pd.Series:
     c = df["close"].astype(float)
     fast = c.ewm(span=50, adjust=False).mean()
     slow = c.ewm(span=200, adjust=False).mean()
-    annual = 365.25 if str(asset).lower() == "crypto" else 252.0
+    # Annualize using the observed cadence; fixed daily constants understate
+    # intraday volatility and can suppress the HIGH_VOL regime on hourly bars.
+    annual = _annualization_factor(df.index, asset=asset)
     vol = c.pct_change().rolling(20).std() * np.sqrt(annual)
     trend_gap = (fast / slow - 1.0).abs()
     trend = (fast / slow - 1.0)
@@ -43,6 +45,7 @@ def classify_regime(df: pd.DataFrame, *, asset: str = "crypto") -> pd.Series:
     direction = np.sign(trend).replace(0, np.nan).ffill().fillna(0)
     direction_change = direction.diff().abs().fillna(0) > 1
     regime = regime.mask(direction_change & (vol < 0.60), "TRANSITION")
+    regime.attrs["annualization_factor"] = annual
     return regime
 
 
