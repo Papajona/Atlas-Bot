@@ -31,7 +31,8 @@ def test_paper_buy_then_sell_round_trip():
     from app.paper_execution import build_paper_market_context
 
     sym = f"BTC/USDT-{uuid.uuid4().hex[:8]}"
-    idx = pd.date_range("2026-01-01", periods=25, freq="h", tz="UTC")
+    start = pd.Timestamp.now(tz="UTC").floor("h") - pd.Timedelta(hours=24)
+    idx = pd.date_range(start, periods=25, freq="h")
     prices = np.full(25, 50000.0)
     candles = pd.DataFrame({
         "open": prices, "high": prices + 20.0, "low": prices - 20.0,
