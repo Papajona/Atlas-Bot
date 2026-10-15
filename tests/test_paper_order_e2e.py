@@ -1,12 +1,37 @@
 """End-to-end paper order through execute_signal: catches NameErrors and Decimal/float TypeErrors."""
 import asyncio
+import hashlib
+import json
 import os
 import uuid
+from pathlib import Path
 
 os.environ.setdefault("ENVIRONMENT", "development")
 
 import pytest
 from sqlalchemy import select
+
+
+
+def _configure_test_calibration(monkeypatch, directory, exchange, symbol):
+    from app.config import settings
+
+    evidence = {
+        "schema": "atlas-paper-execution-calibration-v1",
+        "fixture_only": True,
+        "provenance_source": "synthetic-unit-test-data",
+        "calibration_method": "deterministic-unit-test-fixture-not-venue-calibration",
+        "dataset_sha256": "a" * 64,
+        "observation_counts": {"fills": 10, "latency": 10, "order_outcomes": 10},
+        "supported_markets": [f"{exchange.lower()}:{symbol}".lower()],
+    }
+    artifact = Path(directory) / f"paper-calibration-{uuid.uuid4().hex}.json"
+    artifact.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+    digest = "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
+    monkeypatch.setattr(settings, "paper_execution_evidence_source", "synthetic-unit-test-fixture")
+    monkeypatch.setattr(settings, "paper_execution_evidence_path", str(artifact))
+    monkeypatch.setattr(settings, "paper_execution_evidence_id", digest)
+    return artifact, digest
 
 
 @pytest.fixture(autouse=True)
@@ -34,11 +59,12 @@ def encryption_key(monkeypatch):
     monkeypatch.setattr(settings, "paper_execution_evidence_id", calibration_id)
 
 
-def test_paper_buy_then_sell_round_trip():
+def test_paper_buy_then_sell_round_trip(monkeypatch, tmp_path):
     from app import execution
     from app.db import init_db, SessionLocal, Trade, Position, AuditLog
 
     sym = f"PAPERTEST-{uuid.uuid4().hex[:8]}/USDT"
+    _configure_test_calibration(monkeypatch, tmp_path, "binance", sym)
     ts = uuid.uuid4().hex  # unique signal timestamp => unique idempotent client order id
 
     async def run():
@@ -81,7 +107,7 @@ def test_paper_buy_then_sell_round_trip():
     asyncio.run(run())
 
 
-def test_calibrated_simulated_venue_rejection_books_no_position(monkeypatch):
+def test_calibrated_simulated_venue_rejection_books_no_position(monkeypatch, tmp_path):
     from app import execution
     from app.config import settings
     from app.db import init_db, SessionLocal, Trade, Position
@@ -89,6 +115,7 @@ def test_calibrated_simulated_venue_rejection_books_no_position(monkeypatch):
     monkeypatch.setattr(settings, "environment", "development")
     monkeypatch.setattr(settings, "paper_execution_rejection_probability", 1.0)
     sym = f"PAPERREJECT-{uuid.uuid4().hex[:8]}/USDT"
+    _configure_test_calibration(monkeypatch, tmp_path, "binance", sym)
     ts = uuid.uuid4().hex
     context = {
         "tradable_volume_units": 10.0,
