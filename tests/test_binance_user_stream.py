@@ -43,3 +43,20 @@ def test_partial_sell_creates_negative_base_exposure():
     e = partial_leg_exposure({"filled":0.4}, "SELL", "ETH", 1.0)
     assert e.quantity == -0.4
     assert neutralization_side(e) == "BUY"
+
+@pytest.mark.parametrize("field,bad_value", [
+    ("q", "not-a-number"),
+    ("z", "NaN"),
+    ("l", "Infinity"),
+    ("L", "-1"),
+    ("Z", "1e999"),
+])
+def test_parse_rejects_malformed_order_numerics(field, bad_value):
+    event = {
+        "e": "executionReport", "E": 1000, "s": "BTCUSDT", "i": 123,
+        "c": "atlas-bad-numeric", "X": "PARTIALLY_FILLED", "x": "TRADE",
+        "S": "BUY", "q": "1", "z": "0.4", "l": "0.4", "L": "100", "Z": "40",
+    }
+    event[field] = bad_value
+    with pytest.raises(BinanceUserStreamError):
+        parse_order_update(event)
