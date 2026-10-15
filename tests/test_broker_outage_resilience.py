@@ -81,8 +81,12 @@ def test_failed_market_metadata_load_is_cooled_down(monkeypatch):
     monkeypatch.setattr(ccxt, "binance", Exchange)
     broker = Broker(BrokerConfig("binance", "key", "secret", sandbox=False))
 
-    for _ in range(50):
-        with pytest.raises(ccxt.ExchangeNotAvailable):
+    # The first failure is the provider error; subsequent attempts must fail closed
+    # during cooldown without hammering market metadata again.
+    with pytest.raises(ccxt.ExchangeNotAvailable):
+        broker.ticker("BTC/USDT")
+    for _ in range(49):
+        with pytest.raises(RuntimeError, match="cooldown|circuit is open"):
             broker.ticker("BTC/USDT")
 
     assert calls["count"] <= 1
