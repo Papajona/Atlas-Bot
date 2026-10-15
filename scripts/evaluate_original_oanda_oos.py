@@ -371,6 +371,7 @@ def promotion_gate_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         and cost.get("stress_ok") is True
         and metrics.get("financing_cost_model_complete") is True
         and metrics.get("intrabar_stop_target_model_complete") is True
+        and metrics.get("execution_cost_model_complete") is True
     )
     return normalized
 
