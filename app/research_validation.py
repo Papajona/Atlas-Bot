@@ -417,6 +417,10 @@ def oos_promotion_gate(
     intrabar_stop_target_model_complete = oos.get("intrabar_stop_target_model_complete") is True
     execution_cost_model_complete = oos.get("execution_cost_model_complete") is True
     trial_registry_complete = oos.get("trial_registry_complete") is True
+    universe_bias = str(oos.get("universe_bias") or "")
+    survivorship_bias_blocked = universe_bias == "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
+    slippage_model_supplied = "slippage_model_complete" in oos
+    slippage_model_complete = oos.get("slippage_model_complete") is True if slippage_model_supplied else None
     status_ok = str(oos.get("status", "OK")) == "OK"
     enough_folds = len(returns) >= int(min_folds)
     total_return_ok = oos_total_return is not None and oos_total_return >= float(min_total_return)
@@ -457,6 +461,10 @@ def oos_promotion_gate(
         rejection_reasons.append("execution_cost_model_incomplete")
     if not trial_registry_complete:
         rejection_reasons.append("comparable_trial_registry_incomplete")
+    if survivorship_bias_blocked:
+        rejection_reasons.append("crypto_universe_survivorship_bias_not_resolved")
+    if slippage_model_supplied and not slippage_model_complete:
+        rejection_reasons.append("volume_volatility_aware_slippage_model_incomplete")
 
     passed = not rejection_reasons
     return {
@@ -496,6 +504,9 @@ def oos_promotion_gate(
         "execution_cost_model_complete": execution_cost_model_complete,
         "trial_registry_complete": trial_registry_complete,
         "trial_registry_ok": trial_registry_complete,
+        "universe_bias": universe_bias or None,
+        "survivorship_bias_blocked": survivorship_bias_blocked,
+        "slippage_model_complete": slippage_model_complete,
     }
 
 
