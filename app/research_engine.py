@@ -152,7 +152,7 @@ def _protected_component_position(df: pd.DataFrame, component: str, cfg: Strateg
 
 def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, taker_bps: float, slippage_bps: float, asset: str = "crypto") -> dict:
     """Cost-aware component backtest with forward-looking risk protections."""
-    s, raw, pos, ret, protected, protected_net, protection_audit = _protected_component_position(
+    s, _, _, _, protected, protected_net, protection_audit = _protected_component_position(
         df, component, cfg, taker_bps, slippage_bps, asset
     )
     ann = float(s.attrs.get("annualization_factor", 252.0))
@@ -279,7 +279,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     validation_splits = purged_walk_forward_splits(len(df), folds=folds, min_train=min_train, purge=1, embargo=1)
     signal_frame = strategy_signals(df, cfg, asset=asset)
     annualization_factor = float(signal_frame.attrs.get("annualization_factor", 252.0))
-    _, _, _, bar_returns, ensemble_pos, ensemble_net, _ = _protected_component_position(
+    _, _, _, bar_returns, ensemble_pos, _, _ = _protected_component_position(
         df, "ensemble", cfg, taker_bps, slippage_bps, asset
     )
     gross = ensemble_pos * bar_returns
