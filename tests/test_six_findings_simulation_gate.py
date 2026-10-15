@@ -15,9 +15,10 @@ os.environ.setdefault("ENVIRONMENT", "test")
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_survivorship_simulation_cannot_clear_universe_evidence_limit():
+def test_survivorship_simulation_cannot_clear_universe_evidence_limit(monkeypatch):
     from app.research_engine import paper_candidates
     from app.config import settings
+    monkeypatch.setattr(settings, "research_folds", 3)
 
     # A synthetic, deliberately strong strategy cannot invent missing delisted-asset history.
     research = {
@@ -98,8 +99,10 @@ def test_synthetic_low_liquidity_scenario_reproduces_perfect_fill_gap():
     assert "t.status = \"SIMULATED\"" in paper_block
 
 
-def test_selection_simulation_rejects_strong_in_sample_when_held_out_fails():
+def test_selection_simulation_rejects_strong_in_sample_when_held_out_fails(monkeypatch):
     from app.research_engine import paper_candidates
+    from app.config import settings
+    monkeypatch.setattr(settings, "research_folds", 3)
 
     research = {
         "strategies": [{
