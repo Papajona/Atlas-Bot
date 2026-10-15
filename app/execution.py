@@ -5,7 +5,7 @@ import json
 import os
 import uuid
 from datetime import date, datetime, timezone
-from decimal import Decimal, ROUND_HALF_EVEN
+from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 from typing import Any
 
 from sqlalchemy import select, func, or_
@@ -87,7 +87,9 @@ def _exact_realized_pnl(closing_quantity: Any, fill_price: Any, average_entry_pr
         raise ValueError("realized P&L inputs must be finite")
     if quantity_d < 0 or fill_d <= 0 or entry_d <= 0:
         raise ValueError("realized P&L inputs must have non-negative quantity and positive prices")
-    return quantity_d * (fill_d - entry_d) * Decimal(direction)
+    with localcontext() as context:
+        context.prec = 50
+        return quantity_d * (fill_d - entry_d) * Decimal(direction)
 
 
 def _verify_exchange_clock(broker: Any, *, local_time_ms: int | None = None, max_drift_ms: int = 1000) -> int:
