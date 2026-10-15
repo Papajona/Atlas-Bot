@@ -7,7 +7,6 @@ import app.data as data
 
 def test_oanda_fetches_entire_historical_window_across_5000_candle_pages(monkeypatch):
     calls = []
-    start_time = pd.Timestamp(datetime.now(timezone.utc)) - pd.Timedelta(days=220)
     expected_count = 220 * 24
 
     class FakeOandaBroker:
