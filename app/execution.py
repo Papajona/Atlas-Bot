@@ -732,14 +732,23 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         trade_context = json.loads(trade.reason or "{}")
     except Exception:
         trade_context = {}
-    live_entry_ids = select(Trade.id).where(Trade.mode == "LIVE")
+    execution_mode = str(trade.mode or "").upper()
+    same_mode_trade_ids = select(Trade.id).where(Trade.mode == execution_mode)
     position_query = select(Position).where(
         Position.symbol == trade.symbol,
         Position.exchange == trade.exchange,
         Position.customer_id == trade.customer_id,
-        Position.entry_trade_id.in_(live_entry_ids),
+        Position.entry_trade_id.in_(same_mode_trade_ids),
     ).with_for_update()
-    position = (await db.execute(position_query)).scalar_one_or_none()
+    matching_positions = (await db.execute(position_query)).scalars().all()
+    if len(matching_positions) > 1:
+        # Legacy paper execution could create one row per fill because it only queried
+        # LIVE positions. Do not choose or merge those exposures arbitrarily.
+        raise ValueError(
+            f"Multiple {execution_mode} positions exist for {trade.exchange}:{trade.symbol}; "
+            "manual reconciliation is required before another paper fill"
+        )
+    position = matching_positions[0] if matching_positions else None
     realized_decimal = Decimal("0")
     realized = 0.0
     realized_strategy = str(getattr(position, "strategy", "") or trade_context.get("strategy") or "unknown") if position else str(trade_context.get("strategy") or "unknown")
@@ -1506,20 +1515,46 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                             t.reason = json.dumps({**signal, "paper_execution": paper_execution}, default=str)
                             # Apply while the stored fill counter is still the prior
                             # cumulative quantity; setting it first would make the delta zero.
-                            await _apply_fill_to_position(db, t, filled_quantity, modeled_fill)
-                            # Any remainder is explicitly cancelled at the end of this
-                            # paper bar. It is never silently reported as filled.
-                            t.filled_quantity = filled_quantity
-                            t.remaining_quantity = 0.0
-                            t.updated_at = utcnow()
-                            if customer_id is not None and fee > 0:
-                                await settle_trading_fee(db, customer_id=customer_id, fee=fee, reference_id=f"trade:{trade_id}:fee", strict=False)
-                            if account is not None:
-                                account.cash_equity = max(0.0, account.cash_equity - fee)
+                            try:
+                                await _apply_fill_to_position(db, t, filled_quantity, modeled_fill)
+                            except Exception as exc:
+                                # No external order was sent. Roll back the simulated fill
+                                # and persist a rejected result instead of leaving PENDING
+                                # or fabricating a completed paper position.
+                                await db.rollback()
+                                t = await db.get(Trade, trade_id, with_for_update=True)
+                                reason = (
+                                    "Paper fill could not be recorded safely; no fill was booked. "
+                                    f"Reconciliation is required ({type(exc).__name__}: {exc})"
+                                )
+                                paper_rejection = {
+                                    **paper_execution,
+                                    "model_status": "REJECTED_PAPER_POSITION_INTEGRITY",
+                                    "reason": reason,
+                                    "validation_grade": "NOT_VALIDATION_GRADE",
+                                }
+                                if t is not None:
+                                    t.status = "REJECTED"
+                                    t.error = reason[:2000]
+                                    t.filled_quantity = 0.0
+                                    t.remaining_quantity = 0.0
+                                    t.reason = json.dumps({**signal, "paper_execution": paper_rejection}, default=str)
+                                    t.updated_at = utcnow()
+                                    await db.commit()
                             else:
-                                s = await _get_state_locked(db)
-                                s.cash_equity = max(0.0, s.cash_equity - fee)
-                            await db.commit()
+                                # Any remainder is explicitly cancelled at the end of this
+                                # paper bar. It is never silently reported as filled.
+                                t.filled_quantity = filled_quantity
+                                t.remaining_quantity = 0.0
+                                t.updated_at = utcnow()
+                                if customer_id is not None and fee > 0:
+                                    await settle_trading_fee(db, customer_id=customer_id, fee=fee, reference_id=f"trade:{trade_id}:fee", strict=False)
+                                if account is not None:
+                                    account.cash_equity = max(0.0, account.cash_equity - fee)
+                                else:
+                                    s = await _get_state_locked(db)
+                                    s.cash_equity = max(0.0, s.cash_equity - fee)
+                                await db.commit()
 
             if paper_rejection is not None:
                 await audit(
