@@ -30,18 +30,19 @@
     <p class="muted">A calm command center for signal, risk, execution, and treasury operations.</p>
   </div>
   
-  <div class="topbar-actions"><button class="icon-btn mobile-nav" onclick="document.body.classList.toggle('nav-open')">☰</button><div class="live-indicator"><span class="pulse-dot"></span><span id="mode">CONNECTING</span></div><button class="avatar">A</button></div>
+  <div class="topbar-actions"><button class="icon-btn mobile-nav" type="button" aria-label="Open admin navigation" aria-controls="sidebar" aria-expanded="false" onclick="toggleAdminNav()">☰</button><div class="live-indicator"><span class="pulse-dot"></span><span id="mode">CONNECTING</span></div><button class="avatar" type="button" aria-label="Administrator profile">A</button></div>
 </header>
 
 <main>
 <section id="overview" class="toolbar panel command-bar">
-  <div class="field"><label>Admin email</label><input id="adminEmail" type="email" autocomplete="username" placeholder="admin@example.com"></div>
-  <div class="field"><label>Admin password</label><input id="adminPassword" type="password" autocomplete="current-password" placeholder="Supabase Auth password"></div>
+  <div class="field"><label for="adminEmail">Admin email</label><input id="adminEmail" type="email" autocomplete="username" placeholder="admin@example.com"></div>
+  <div class="field"><label for="adminPassword">Admin password</label><input id="adminPassword" type="password" autocomplete="current-password" placeholder="Supabase Auth password"></div>
   <button onclick="adminLogin()">Sign in</button>
   <button onclick="adminEnroll()">Enroll Google Authenticator</button>
-  <div id="adminMfaBox" class="field" style="display:none"><label>Authenticator code</label><input id="adminMfaCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit code"></div>
+  <div id="adminMfaBox" class="field" style="display:none"><label for="adminMfaCode">Authenticator code</label><input id="adminMfaCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" aria-describedby="authState" placeholder="6-digit code"></div>
   <button id="adminMfaVerifyBtn" style="display:none" onclick="adminMfaVerify()">Verify Authenticator</button>
-  <span id="authState" class="muted">Production admin access requires Google Authenticator (TOTP).</span>
+  <span id="authState" class="muted" role="status" aria-live="polite" aria-atomic="true">Sign in to verify administrator access. Production requires Google Authenticator (TOTP).</span>
+  <div id="adminMfaEnrollment" class="mfa-enrollment" hidden><p>Scan this QR code with Google Authenticator, then enter the six-digit code above.</p><img id="adminMfaQr" alt="QR code for enrolling the administrator authenticator" width="240" height="240"><p><strong>Manual setup key</strong></p><code id="adminMfaSecret"></code></div>
 </section>
 
 <section class="grid cards kpi-grid">
@@ -73,7 +74,7 @@
     <button onclick="strategySignal()">Get strategy signal</button>
     <button onclick="paperStep()">Execute paper step</button>
   </div>
-  <div class="strategy-badges"><span class="tag">Trend</span><span class="tag">Momentum</span><span class="tag">Breakout</span><span class="tag">Mean reversion</span><span class="tag">Volatility target</span></div><pre id="output">Ready.</pre>
+  <div class="strategy-badges"><span class="tag">Trend</span><span class="tag">Momentum</span><span class="tag">Breakout</span><span class="tag">Mean reversion</span><span class="tag">Volatility target</span></div><pre id="output" role="region" aria-label="Admin action results" aria-live="polite" aria-atomic="false" tabindex="0">Sign in to load protected dashboard data.</pre>
 </div>
 
 <div class="panel risk-panel" id="risk">
@@ -110,7 +111,7 @@
     <label>Local signature<input id="releaseSignature" placeholder="Base64 Ed25519 signature (if required)"></label>
     <label>Filter<select id="wdFilter" onchange="loadWithdrawals()"><option>PENDING</option><option>PARTIALLY_APPROVED</option><option>APPROVED</option><option>SUBMITTED</option><option>UNKNOWN</option><option>REJECTED</option><option>ALL</option></select></label>
   </div>
-  <div class="table-wrap"><table><thead><tr><th>Request</th><th>Customer</th><th>Amount</th><th>Destination</th><th>Risk</th><th>Approvals</th><th>Status</th><th>Action</th></tr></thead><tbody id="withdrawals"></tbody></table></div>
+  <div class="table-wrap"><table><caption class="sr-only">Withdrawal approval queue and available actions</caption><thead><tr><th>Request</th><th>Customer</th><th>Amount</th><th>Destination</th><th>Risk</th><th>Approvals</th><th>Status</th><th>Action</th></tr></thead><tbody id="withdrawals" aria-live="polite" aria-relevant="additions text"></tbody></table></div>
 </section>
 
 <section class="panel" id="security">
@@ -121,11 +122,11 @@
     <label>Active<select id="roleActive"><option value="true">Yes</option><option value="false">No</option></select></label>
   </div>
   <div class="actions"><button onclick="saveRole()">Save role</button></div>
-  <div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Active</th><th>Created</th></tr></thead><tbody id="roles"></tbody></table></div>
+  <div class="table-wrap"><table><caption class="sr-only">Administrator role assignments</caption><thead><tr><th>User</th><th>Role</th><th>Active</th><th>Created</th></tr></thead><tbody id="roles" aria-live="polite" aria-relevant="additions text"></tbody></table></div>
 </section>
 <section class="panel" id="executions">
   <div class="section-head"><div><div class="eyebrow">ORDER LIFECYCLE</div><h2>Tracked executions</h2></div><button onclick="reconcile()">Reconcile broker</button></div>
-  <div class="table-wrap"><table><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Requested</th><th>Filled</th><th>Avg price</th><th>Mode</th><th>Status</th></tr></thead><tbody id="trades"></tbody></table></div>
+  <div class="table-wrap"><table><caption class="sr-only">Recent execution records</caption><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Requested</th><th>Filled</th><th>Avg price</th><th>Mode</th><th>Status</th></tr></thead><tbody id="trades" aria-live="polite" aria-relevant="additions text"></tbody></table></div>
 </section>
 </main>
 </div></div>
@@ -135,40 +136,200 @@ const $=id=>document.getElementById(id);
 function esc(v){return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;')}
 function token(){return sessionStorage.getItem('ait_admin_access_token')||''}
 function headers(){const h={'Content-Type':'application/json'};if(token())h['Authorization']='Bearer '+token();const legacy=sessionStorage.getItem('ait_admin_token')||'';if(!token()&&legacy)h['X-Admin-Token']=legacy;const at=sessionStorage.getItem('ait_approver_token')||$('approverToken')?.value||'';if(at)h['X-Approver-Token']=at;return h}
-async function api(path,opts={}){const r=await fetch(path,{...opts,headers:{...headers(),...(opts.headers||{})}});const text=await r.text();let j={};try{j=JSON.parse(text)}catch{}if(!r.ok)throw new Error(j.detail||text||'Request failed');return j}
+async function api(path,opts={}){
+  if (!dashboardReady && !path.startsWith('/api/admin/auth/')) {
+    throw new Error('Complete administrator sign-in and required MFA before accessing dashboard data.');
+  }
+  const response = await fetch(path,{...opts,headers:{...headers(),...(opts.headers||{})}});
+  const text = await response.text();
+  let data = {};
+  try { data = JSON.parse(text); } catch {}
+  if (response.status === 401) {
+    lockAdminDashboard('Administrator session expired or was rejected. Sign in again.');
+    throw new Error(data.detail || data.message || 'Administrator session expired.');
+  }
+  if (!response.ok) throw new Error(data.detail || text || 'Request failed');
+  return data;
+}
+const adminMfaRequired = {{ "true" if settings.admin_totp_required else "false" }};
+let dashboardReady = false;
+let dashboardRefreshTimer = null;
+let withdrawalRefreshTimer = null;
+
+function toggleAdminNav(){
+  const open = !document.body.classList.contains('nav-open');
+  document.body.classList.toggle('nav-open', open);
+  document.querySelector('.mobile-nav')?.setAttribute('aria-expanded', String(open));
+}
+function lockAdminDashboard(message, clearTokens = true){
+  dashboardReady = false;
+  document.body.classList.remove('admin-session-ready');
+  if (clearTokens) {
+    sessionStorage.removeItem('ait_admin_access_token');
+    sessionStorage.removeItem('ait_admin_refresh_token');
+    sessionStorage.removeItem('ait_admin_token');
+    sessionStorage.removeItem('ait_approver_token');
+    window.adminMfaFactorId = null;
+    window.adminMfaChallengeId = null;
+  }
+  if (dashboardRefreshTimer !== null) clearInterval(dashboardRefreshTimer);
+  if (withdrawalRefreshTimer !== null) clearInterval(withdrawalRefreshTimer);
+  dashboardRefreshTimer = null;
+  withdrawalRefreshTimer = null;
+  $('mode').textContent = 'SIGN IN REQUIRED';
+  if (message) $('authState').textContent = message;
+}
+function activateDashboard(){
+  if (!token()) {
+    lockAdminDashboard('Sign in again to access protected administrator data.');
+    return;
+  }
+  dashboardReady = true;
+  document.body.classList.add('admin-session-ready');
+  $('mode').textContent = 'VERIFIED ADMIN';
+  $('authState').textContent = 'Administrator session verified. Protected dashboard data is loading.';
+  refresh();
+  loadWithdrawals();
+  loadRoles();
+  loadMargin();
+  if (dashboardRefreshTimer === null) dashboardRefreshTimer = setInterval(() => {
+    if (dashboardReady) refresh();
+  }, 5000);
+  if (withdrawalRefreshTimer === null) withdrawalRefreshTimer = setInterval(() => {
+    if (dashboardReady) loadWithdrawals();
+  }, 10000);
+}
+async function beginAdminMfaChallenge(status){
+  if (!status?.enabled || !Array.isArray(status.factor_ids) || !status.factor_ids.length) {
+    $('authState').textContent = 'No verified authenticator is available. Enroll Google Authenticator to continue.';
+    return;
+  }
+  window.adminMfaFactorId = status.factor_ids[0];
+  const challenge = await api('/api/admin/auth/mfa/challenge', {
+    method: 'POST',
+    body: JSON.stringify({factor_id: window.adminMfaFactorId})
+  });
+  if (!challenge?.id) throw new Error('The authenticator challenge did not return an ID.');
+  window.adminMfaChallengeId = challenge.id;
+  $('adminMfaBox').style.display = 'block';
+  $('adminMfaVerifyBtn').style.display = 'inline-block';
+  $('authState').textContent = 'Enter the six-digit Google Authenticator code to unlock the administrator dashboard.';
+  $('adminMfaCode').focus();
+}
+async function resumeAdminSession(){
+  if (!token()) {
+    lockAdminDashboard('Sign in to verify administrator access. Production requires Google Authenticator (TOTP).');
+    return;
+  }
+  if (!adminMfaRequired) {
+    activateDashboard();
+    return;
+  }
+  try {
+    const status = await api('/api/admin/auth/mfa/status');
+    if (status.enabled && status.aal === 'aal2') {
+      activateDashboard();
+    } else if (status.enabled) {
+      await beginAdminMfaChallenge(status);
+    } else {
+      $('authState').textContent = 'Sign-in detected, but no verified authenticator exists. Enroll Google Authenticator; dashboard data remains locked until verification.';
+    }
+  } catch (error) {
+    lockAdminDashboard('The administrator session could not be verified. Sign in again. ' + error.message);
+  }
+}
 async function adminLogin(){
-  try{
-    const r=await fetch('/api/admin/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:$('adminEmail').value.trim(),password:$('adminPassword').value})});
-    const j=await r.json(); if(!r.ok) throw new Error(j.detail||j.message||'Administrator login failed');
-    sessionStorage.setItem('ait_admin_access_token',j.access_token);
-    if(j.refresh_token)sessionStorage.setItem('ait_admin_refresh_token',j.refresh_token);
-    if(j.totp_enrolled&&j.mfa_required){
-      const st=await api('/api/admin/auth/mfa/status'); window.adminMfaFactorId=st.factor_ids?.[0]||null;
-      if(!window.adminMfaFactorId)throw new Error('No verified Google Authenticator factor is available.');
-      const ch=await api('/api/admin/auth/mfa/challenge',{method:'POST',body:JSON.stringify({factor_id:window.adminMfaFactorId})});
-      window.adminMfaChallengeId=ch.id; $('adminMfaBox').style.display='block'; $('adminMfaVerifyBtn').style.display='inline-block'; $('authState').textContent='Enter the 6-digit Google Authenticator code.';
-    }else if(j.mfa_required){$('authState').textContent='Enroll Google Authenticator before administrator access is granted.';}else{refresh();loadWithdrawals();loadRoles()}
-  }catch(e){$('authState').textContent='Admin sign-in: '+e.message}
+  lockAdminDashboard('Signing in…', true);
+  try {
+    const response = await fetch('/api/admin/auth/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email: $('adminEmail').value.trim(), password: $('adminPassword').value})
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.detail || result.message || 'Administrator login failed');
+    if (!result.access_token) throw new Error('Authentication response did not contain an access token.');
+    sessionStorage.setItem('ait_admin_access_token', result.access_token);
+    if (result.refresh_token) sessionStorage.setItem('ait_admin_refresh_token', result.refresh_token);
+    if (!adminMfaRequired) {
+      activateDashboard();
+      return;
+    }
+    const status = await api('/api/admin/auth/mfa/status');
+    if (status.enabled && status.aal === 'aal2') {
+      activateDashboard();
+    } else if (status.enabled) {
+      await beginAdminMfaChallenge(status);
+    } else {
+      $('authState').textContent = 'Password accepted. Enroll Google Authenticator and verify its code before administrator data can load.';
+    }
+  } catch (error) {
+    lockAdminDashboard('Admin sign-in: ' + error.message);
+  }
 }
 async function adminEnroll(){
-  try{
-    if(!token())throw new Error('Sign in first.');
-    const d=await api('/api/admin/auth/mfa/enroll',{method:'POST',body:'{}'});
-    $('output').textContent='Scan this Google Authenticator QR code with your administrator device.\nManual secret: '+(d.totp?.secret||'unavailable');
-    if(d.totp?.qr_code){const w=window.open('','_blank','width=420,height=520');w.document.write('<title>Atlas Admin Authenticator</title><p>Scan with Google Authenticator, then return to Atlas.</p><img style="max-width:360px" src="data:image/svg+xml;charset=utf-8,'+encodeURIComponent(d.totp.qr_code)+'"><p>Manual secret: '+esc(d.totp.secret||'unavailable')+'</p>');}
-  }catch(e){$('authState').textContent='Authenticator enrollment: '+e.message}
+  try {
+    if (!token()) throw new Error('Sign in first.');
+    const enrollment = await api('/api/admin/auth/mfa/enroll', {method: 'POST', body: '{}'});
+    if (!enrollment?.id || !enrollment?.totp?.qr_code) {
+      throw new Error('The authenticator service did not return an enrollment ID and QR code.');
+    }
+    window.adminMfaFactorId = enrollment.id;
+    $('adminMfaQr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(enrollment.totp.qr_code);
+    $('adminMfaSecret').textContent = enrollment.totp.secret || 'No manual key provided';
+    $('adminMfaEnrollment').hidden = false;
+    const challenge = await api('/api/admin/auth/mfa/challenge', {
+      method: 'POST',
+      body: JSON.stringify({factor_id: window.adminMfaFactorId})
+    });
+    if (!challenge?.id) throw new Error('The enrollment challenge did not return an ID.');
+    window.adminMfaChallengeId = challenge.id;
+    $('adminMfaBox').style.display = 'block';
+    $('adminMfaVerifyBtn').style.display = 'inline-block';
+    $('authState').textContent = 'Scan the enrollment QR with Google Authenticator, then enter the six-digit code to verify it. Data remains locked.';
+    $('adminMfaCode').focus();
+  } catch (error) {
+    $('authState').textContent = 'Authenticator enrollment: ' + error.message;
+  }
 }
 async function adminMfaVerify(){
-  const code=$('adminMfaCode').value.trim();
-  if(!/^[0-9]{6}$/.test(code)){ $('authState').textContent='Enter the 6-digit Google Authenticator code.'; return }
-  try{
-    const d=await api('/api/admin/auth/mfa/verify',{method:'POST',body:JSON.stringify({factor_id:window.adminMfaFactorId,challenge_id:window.adminMfaChallengeId,code})});
-    if(d.access_token)sessionStorage.setItem('ait_admin_access_token',d.access_token);
-    window.adminMfaChallengeId=null; $('adminMfaBox').style.display='none'; $('adminMfaVerifyBtn').style.display='none'; $('adminMfaCode').value=''; $('authState').textContent='Administrator AAL2 session active.'; refresh(); loadWithdrawals(); loadRoles();
-  }catch(e){window.adminMfaChallengeId=null;$('authState').textContent='Authenticator verification: '+e.message}
+  const code = $('adminMfaCode').value.trim();
+  if (!/^[0-9]{6}$/.test(code)) {
+    $('authState').textContent = 'Enter the six-digit Google Authenticator code.';
+    $('adminMfaCode').focus();
+    return;
+  }
+  if (!window.adminMfaFactorId || !window.adminMfaChallengeId) {
+    $('authState').textContent = 'No active authenticator challenge. Sign in or restart authenticator enrollment.';
+    return;
+  }
+  try {
+    const result = await api('/api/admin/auth/mfa/verify', {
+      method: 'POST',
+      body: JSON.stringify({factor_id: window.adminMfaFactorId, challenge_id: window.adminMfaChallengeId, code})
+    });
+    if (result.access_token) sessionStorage.setItem('ait_admin_access_token', result.access_token);
+    if (result.refresh_token) sessionStorage.setItem('ait_admin_refresh_token', result.refresh_token);
+    const status = await api('/api/admin/auth/mfa/status');
+    if (!status.enabled || status.aal !== 'aal2') {
+      lockAdminDashboard('Authenticator response received, but the server did not confirm AAL2. Protected data remains locked.');
+      return;
+    }
+    window.adminMfaChallengeId = null;
+    $('adminMfaBox').style.display = 'none';
+    $('adminMfaVerifyBtn').style.display = 'none';
+    $('adminMfaCode').value = '';
+    $('adminMfaEnrollment').hidden = true;
+    $('adminMfaQr').removeAttribute('src');
+    $('adminMfaSecret').textContent = '';
+    activateDashboard();
+  } catch (error) {
+    $('authState').textContent = 'Authenticator verification: ' + error.message;
+  }
 }
 function req(){return {asset:$('asset').value,symbol:$('symbol').value.trim(),exchange:$('exchange').value.trim(),timeframe:$('tf').value,days:+$('days').value,folds:+$('folds').value,min_train:800}}
 async function loadWithdrawals(){
+  if (!dashboardReady) return;
   try{
     const [summary,rows]=await Promise.all([api('/api/admin/withdrawals/summary'),api('/api/admin/withdrawals?status='+encodeURIComponent($('wdFilter').value))]);
     $('wdPending').textContent=summary.pending_count;
@@ -204,17 +365,20 @@ async function rejectWithdrawal(id){
   try{const j=await api('/api/admin/withdrawals/'+id+'/reject',{method:'POST',body:JSON.stringify({admin_id:admin,reason})});$('output').textContent=JSON.stringify(j,null,2);loadWithdrawals()}catch(e){$('output').textContent='Rejection failed: '+e.message}
 }
 
-async function loadRoles(){try{const rows=await api('/api/admin/security/roles');$('roles').innerHTML=rows.map(r=>`<tr><td>${esc(r.auth_user_id)}</td><td>${esc(r.role)}</td><td>${r.active?'YES':'NO'}</td><td>${esc(r.created_at||'')}</td></tr>`).join('')||'<tr><td colspan="4">No database role assignments. Explicitly allowlisted admins bootstrap as ADMINISTRATOR until assigned.</td></tr>'}catch(e){$('roles').innerHTML='<tr><td colspan="4">Role management requires ADMINISTRATOR: '+esc(e.message)+'</td></tr>'}}
+async function loadRoles(){
+  if (!dashboardReady) return;try{const rows=await api('/api/admin/security/roles');$('roles').innerHTML=rows.map(r=>`<tr><td>${esc(r.auth_user_id)}</td><td>${esc(r.role)}</td><td>${r.active?'YES':'NO'}</td><td>${esc(r.created_at||'')}</td></tr>`).join('')||'<tr><td colspan="4">No database role assignments. Explicitly allowlisted admins bootstrap as ADMINISTRATOR until assigned.</td></tr>'}catch(e){$('roles').innerHTML='<tr><td colspan="4">Role management requires ADMINISTRATOR: '+esc(e.message)+'</td></tr>'}}
 async function saveRole(){const uid=$('roleUserId').value.trim();if(!uid){$('output').textContent='Enter a Supabase Auth user UUID.';return}try{const j=await api('/api/admin/security/roles',{method:'POST',body:JSON.stringify({auth_user_id:uid,role:$('roleName').value,active:$('roleActive').value==='true'})});$('output').textContent=JSON.stringify(j,null,2);loadRoles()}catch(e){$('output').textContent='Role update failed: '+e.message}}
-async function loadMargin(){try{const m=await api('/api/admin/billing/margin?months=1');$('marginRevenue').textContent='$'+Number(m.gross_subscription_revenue||0).toLocaleString(undefined,{maximumFractionDigits:2});$('marginCosts').textContent='$'+Number(m.operating_costs||0).toLocaleString(undefined,{maximumFractionDigits:2});$('marginRef').textContent='$'+Number(m.referral_commissions||0).toLocaleString(undefined,{maximumFractionDigits:2});$('marginPct').textContent=Number(m.contribution_margin_pct||0).toFixed(1)+'%';$('marginProfit').textContent='Contribution $'+Number(m.contribution_profit||0).toLocaleString(undefined,{maximumFractionDigits:2});}catch(e){$('output').textContent='Margin: '+e.message}}
-async function refresh(){try{const s=await api('/api/state');$('mode').textContent=s.mode;$('equity').textContent='$'+Number(s.equity).toLocaleString(undefined,{maximumFractionDigits:2});$('pnl').textContent=`Realized ${s.realized_pnl.toFixed(2)} · Unrealized ${s.unrealized_pnl.toFixed(2)}`;$('dd').textContent=(s.drawdown*100).toFixed(2)+'%';$('daily').textContent='Daily loss '+(s.daily_loss*100).toFixed(2)+'%';$('engine').textContent=s.live_enabled?'LIVE':'PAPER';$('live').textContent='Live switch '+(s.live_enabled?'ON':'OFF');$('kill').textContent=s.kill_switch?'HALTED':'ARMED';$('positions').textContent='Positions '+s.open_positions.length;let t=await api('/api/trades');$('trades').innerHTML=t.map(x=>`<tr><td>${esc(new Date(x.created_at).toLocaleString())}</td><td>${esc(x.symbol)}</td><td>${esc(x.side)}</td><td>${Number(x.requested_quantity).toFixed(6)}</td><td>${Number(x.filled_quantity).toFixed(6)}</td><td>${Number(x.average_fill_price||x.requested_price).toFixed(6)}</td><td>${esc(x.mode)}</td><td><span class="tag">${esc(x.status)}</span></td></tr>`).join('')}catch(e){$('output').textContent=e.message}}
-async function run(path,body=req()){ $('output').textContent='Working…';try{const j=await api(path,{method:'POST',body:JSON.stringify(body)});$('output').textContent=JSON.stringify(j,null,2);refresh()}catch(e){$('output').textContent='ERROR: '+e.message}}
+async function loadMargin(){
+  if (!dashboardReady) return;try{const m=await api('/api/admin/billing/margin?months=1');$('marginRevenue').textContent='$'+Number(m.gross_subscription_revenue||0).toLocaleString(undefined,{maximumFractionDigits:2});$('marginCosts').textContent='$'+Number(m.operating_costs||0).toLocaleString(undefined,{maximumFractionDigits:2});$('marginRef').textContent='$'+Number(m.referral_commissions||0).toLocaleString(undefined,{maximumFractionDigits:2});$('marginPct').textContent=Number(m.contribution_margin_pct||0).toFixed(1)+'%';$('marginProfit').textContent='Contribution $'+Number(m.contribution_profit||0).toLocaleString(undefined,{maximumFractionDigits:2});}catch(e){$('output').textContent='Margin: '+e.message}}
+async function refresh(){
+  if (!dashboardReady) return;try{const s=await api('/api/state');$('mode').textContent=s.mode;$('equity').textContent='$'+Number(s.equity).toLocaleString(undefined,{maximumFractionDigits:2});$('pnl').textContent=`Realized ${s.realized_pnl.toFixed(2)} · Unrealized ${s.unrealized_pnl.toFixed(2)}`;$('dd').textContent=(s.drawdown*100).toFixed(2)+'%';$('daily').textContent='Daily loss '+(s.daily_loss*100).toFixed(2)+'%';$('engine').textContent=s.live_enabled?'LIVE':'PAPER';$('live').textContent='Live switch '+(s.live_enabled?'ON':'OFF');$('kill').textContent=s.kill_switch?'HALTED':'ARMED';$('positions').textContent='Positions '+s.open_positions.length;let t=await api('/api/trades');$('trades').innerHTML=t.map(x=>`<tr><td>${esc(new Date(x.created_at).toLocaleString())}</td><td>${esc(x.symbol)}</td><td>${esc(x.side)}</td><td>${Number(x.requested_quantity).toFixed(6)}</td><td>${Number(x.filled_quantity).toFixed(6)}</td><td>${Number(x.average_fill_price||x.requested_price).toFixed(6)}</td><td>${esc(x.mode)}</td><td><span class="tag">${esc(x.status)}</span></td></tr>`).join('')}catch(e){$('output').textContent=e.message}}
+async function run(path,body=req()){ if(!dashboardReady){$('authState').textContent='Verify administrator sign-in and MFA before running actions.';return} $('output').textContent='Working…';try{const j=await api(path,{method:'POST',body:JSON.stringify(body)});$('output').textContent=JSON.stringify(j,null,2);refresh()}catch(e){$('output').textContent='ERROR: '+e.message}}
 function train(){run('/api/train')} function backtest(){run('/api/backtest')} function strategyBacktest(){run('/api/strategy/backtest')} function backtestAll(){run('/api/research/backtest-all')} function aiReview(){run('/api/research/review')} function paperSignals(){run('/api/research/paper-signals')} function signal(){run('/api/signal')} function strategySignal(){run('/api/strategy/signal')} function paperStep(){run('/api/paper/step')}
 async function reconcile(){run('/api/reconcile',req())}
-async function halt(){try{$('output').textContent=JSON.stringify(await api('/api/risk/kill',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent=e.message}}
-async function resetRisk(){try{$('output').textContent=JSON.stringify(await api('/api/risk/reset',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent=e.message}}
-async function disableLive(){try{$('output').textContent=JSON.stringify(await api('/api/live/disable',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent=e.message}}
-if(token())$('authState').textContent='Admin session present; verify Authenticator if prompted.';refresh();loadWithdrawals();loadRoles();loadMargin();setInterval(refresh,5000);setInterval(loadWithdrawals,10000)
+async function halt(){if(!dashboardReady)return;try{$('output').textContent=JSON.stringify(await api('/api/risk/kill',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent=e.message}}
+async function resetRisk(){if(!dashboardReady)return;try{$('output').textContent=JSON.stringify(await api('/api/risk/reset',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent=e.message}}
+async function disableLive(){if(!dashboardReady)return;try{$('output').textContent=JSON.stringify(await api('/api/live/disable',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent=e.message}}
+resumeAdminSession();
 </script>
 </body>
 </html>
