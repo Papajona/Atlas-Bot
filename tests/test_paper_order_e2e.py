@@ -11,8 +11,12 @@ from sqlalchemy import select
 
 @pytest.fixture(autouse=True)
 def encryption_key(monkeypatch):
+    import hashlib
+    from pathlib import Path
     from cryptography.fernet import Fernet
     from app.config import settings
+    calibration_artifact = Path(__file__).parent / "fixtures" / "paper_execution_calibration_test.json"
+    calibration_id = "sha256:" + hashlib.sha256(calibration_artifact.read_bytes()).hexdigest()
     monkeypatch.setattr(settings, "app_encryption_key", Fernet.generate_key().decode())
     monkeypatch.setattr(settings, "app_encryption_keys_json", "")
     monkeypatch.setattr(settings, "app_encryption_active_key_id", "v1")
