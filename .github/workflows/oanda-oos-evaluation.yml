@@ -38,6 +38,8 @@ jobs:
       RESEARCH_TAKER_BPS: ${{ vars.ATLAS_RESEARCH_TAKER_BPS }}
       RESEARCH_SLIPPAGE_BPS: ${{ vars.ATLAS_RESEARCH_SLIPPAGE_BPS }}
       RESEARCH_CARRY_BPS_PER_BAR: ${{ vars.ATLAS_RESEARCH_CARRY_BPS_PER_BAR }}
+      RESEARCH_CARRY_EVIDENCE_SOURCE: ${{ vars.ATLAS_RESEARCH_CARRY_EVIDENCE_SOURCE }}
+      RESEARCH_CARRY_EVIDENCE_ID: ${{ vars.ATLAS_RESEARCH_CARRY_EVIDENCE_ID }}
       RESEARCH_MAX_HOLD_BARS: ${{ vars.ATLAS_RESEARCH_MAX_HOLD_BARS }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -62,6 +64,8 @@ jobs:
           : "${RESEARCH_TAKER_BPS:?Set approved ATLAS_RESEARCH_TAKER_BPS in staging}"
           : "${RESEARCH_SLIPPAGE_BPS:?Set approved ATLAS_RESEARCH_SLIPPAGE_BPS in staging}"
           : "${RESEARCH_CARRY_BPS_PER_BAR:?Set evidence-backed ATLAS_RESEARCH_CARRY_BPS_PER_BAR in staging}"
+          : "${RESEARCH_CARRY_EVIDENCE_SOURCE:?Set traceable ATLAS_RESEARCH_CARRY_EVIDENCE_SOURCE in staging}"
+          : "${RESEARCH_CARRY_EVIDENCE_ID:?Set immutable ATLAS_RESEARCH_CARRY_EVIDENCE_ID in staging}"
           : "${RESEARCH_MAX_HOLD_BARS:?Set approved ATLAS_RESEARCH_MAX_HOLD_BARS in staging}"
           python - <<'PY'
           import math, os
@@ -129,6 +133,9 @@ jobs:
           PAYOUT_LIVE_ENABLED: "false"
           BROKER_SANDBOX: "true"
           GITHUB_SHA: ${{ github.sha }}
+          RESEARCH_CARRY_BPS_PER_BAR: ${{ vars.ATLAS_RESEARCH_CARRY_BPS_PER_BAR }}
+          RESEARCH_CARRY_EVIDENCE_SOURCE: ${{ vars.ATLAS_RESEARCH_CARRY_EVIDENCE_SOURCE }}
+          RESEARCH_CARRY_EVIDENCE_ID: ${{ vars.ATLAS_RESEARCH_CARRY_EVIDENCE_ID }}
         shell: bash
         run: |
           set -euo pipefail
@@ -142,6 +149,8 @@ jobs:
             --taker-bps "$RESEARCH_TAKER_BPS" \
             --slippage-bps "$RESEARCH_SLIPPAGE_BPS" \
             --carry-bps-per-bar "$RESEARCH_CARRY_BPS_PER_BAR" \
+            --carry-evidence-source "$RESEARCH_CARRY_EVIDENCE_SOURCE" \
+            --carry-evidence-id "$RESEARCH_CARRY_EVIDENCE_ID" \
             --max-hold-bars "$RESEARCH_MAX_HOLD_BARS" \
             --output "$RUNNER_TEMP/oanda-oos-evaluation.json"
       - name: Archive evaluation output even when a gate fails
