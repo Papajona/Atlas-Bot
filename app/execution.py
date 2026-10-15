@@ -2033,8 +2033,27 @@ async def emergency_stop(exchange: str | None = None):
                 orders = await asyncio.to_thread(broker.orders)
                 order_cancel_errors: list[dict[str, str]] = []
                 for order in orders:
+                    if not isinstance(order, dict):
+                        failure = {
+                            "scope": "platform_oanda_order_cancel",
+                            "error_type": "InvalidOpenOrder",
+                            "error": "OANDA returned a malformed order row; cannot confirm the order book is clear",
+                        }
+                        failures.append(failure)
+                        order_cancel_errors.append(failure)
+                        continue
                     order_id = str(order.get("id") or "")
                     state = str(order.get("state") or "").upper()
+                    if not state:
+                        failure = {
+                            "scope": "platform_oanda_order_cancel",
+                            "order_id": order_id,
+                            "error_type": "InvalidOpenOrder",
+                            "error": "OANDA order row lacks a state; refusing to treat it as non-open",
+                        }
+                        failures.append(failure)
+                        order_cancel_errors.append(failure)
+                        continue
                     if state not in {"PENDING", "OPEN"}:
                         continue
                     if not order_id:
@@ -2065,7 +2084,16 @@ async def emergency_stop(exchange: str | None = None):
                             order_id, failure["error_type"], failure["error"], exc_info=True,
                         )
                 remaining = await asyncio.to_thread(broker.orders)
-                still_open = [str(o.get("id") or "") for o in remaining if str(o.get("state") or "").upper() in {"PENDING", "OPEN"}]
+                still_open = []
+                for order in remaining:
+                    if not isinstance(order, dict):
+                        still_open.append("<malformed-order-row>")
+                        continue
+                    order_state = str(order.get("state") or "").upper()
+                    if not order_state:
+                        still_open.append(str(order.get("id") or "<missing-order-id>"))
+                    elif order_state in {"PENDING", "OPEN"}:
+                        still_open.append(str(order.get("id") or "<missing-order-id>"))
                 if still_open:
                     failures.append({
                         "scope": "platform_oanda",
