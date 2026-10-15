@@ -164,6 +164,12 @@ def test_stress_many_paper_orders_cannot_overconsume_one_bar_liquidity(monkeypat
             "price": 100.0,
             "context": context,
         }]
+        wrong_timeframe = await execution.advance_paper_orders([{
+            **snapshot[0], "timeframe": "15m",
+            "context": {**context, "bar_timestamp": "2026-10-15T11:45:00Z"},
+        }], max_orders=100)
+        assert wrong_timeframe["checked"] == 0
+        assert wrong_timeframe["updated"] == []
         first = await execution.advance_paper_orders(snapshot, max_orders=100)
         assert first["checked"] == order_count
         assert first["updated"]
