@@ -288,8 +288,19 @@ def estimate_paper_fill(
     evidence = str(evidence_id or "").strip()
     if not key:
         raise PaperExecutionModelError("a stable order_key is required for reproducible simulation")
+    expected_parameters = {
+        "base_slippage_bps": base_slippage_bps,
+        "max_participation_rate": max_participation_rate,
+        "impact_coefficient": impact_coefficient,
+        "rejection_probability": rejection_probability,
+        "latency_min_ms": latency_min_ms,
+        "latency_median_ms": latency_median_ms,
+        "latency_p95_ms": latency_p95_ms,
+        "latency_max_ms": latency_max_ms,
+        "latency_impact_coefficient": latency_impact_coefficient,
+    }
     if not _calibration_evidence_matches(
-        source, evidence_path_value, evidence, market_context,
+        source, evidence_path_value, evidence, market_context, expected_parameters,
         allow_test_fixture=allow_test_fixture,
     ):
         raise PaperExecutionModelError(
