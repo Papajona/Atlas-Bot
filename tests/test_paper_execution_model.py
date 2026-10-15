@@ -19,6 +19,9 @@ def _context(**overrides):
         "spread_bps": 4.0,
         "recent_volatility_bps": 200.0,
         "bar_duration_ms": 3_600_000,
+        "exchange": "fakeexchange",
+        "symbol": "BTC/USDT",
+        "market_type": "spot",
         **overrides,
     }
 
