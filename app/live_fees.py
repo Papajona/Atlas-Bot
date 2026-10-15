@@ -110,59 +110,6 @@ def extract_order_fee_quote_decimal(
 def extract_order_fee_quote(order: dict[str, Any], symbol: str, fill_price: float, filled: float, *,
                             fallback_taker_bps: float) -> tuple[float, str, str]:
     """Backward-compatible float wrapper; money-moving execution uses the Decimal variant."""
-    """Return (cumulative_fee_in_quote, quality, note).
-
-    quality is EXACT (fee already in the quote currency), CONVERTED (base-asset fee priced at the fill) or ESTIMATED
-    (no usable fee data, or a fee currency that cannot be priced here -> conservative taker-fee estimate).
-    A negative fee (maker rebate) is treated as zero: rebates are not credited to customers automatically.
-    """
-    if filled <= 0 or fill_price <= 0:
-        return 0.0, EXACT, ""
-    base, quote = split_symbol(symbol)
-    source_order = order or {}
-    entries = _fee_entries(source_order)
-    raw_fee_list = source_order.get("fees")
-    malformed_fee_records = (
-        isinstance(raw_fee_list, list)
-        and any(not isinstance(item, dict) or item.get("cost") is None for item in raw_fee_list)
-    )
-    total, quality, note = 0.0, EXACT, ""
-    if malformed_fee_records:
-        quality = ESTIMATED
-        note = "one or more exchange fee records have no usable cost"
-    for entry in entries:
-        try:
-            cost = float(entry.get("cost"))
-        except (TypeError, ValueError):
-            note = "exchange returned an unparsable fee cost"
-            quality = ESTIMATED
-            continue
-        cur = str(entry.get("currency") or "").upper()
-        if not math.isfinite(cost):
-            note = "exchange returned a non-finite fee cost"
-            quality = ESTIMATED
-            continue
-        if cost <= 0:
-            continue
-        if cur == quote or (not cur and quote):
-            total += cost
-        elif cur == base:
-            total += cost * fill_price
-            quality = CONVERTED if quality == EXACT else quality
-        else:
-            note = f"fee currency {cur or '?'} cannot be priced in {quote or '?'}"
-            quality = ESTIMATED
-    if quality == ESTIMATED or not entries or malformed_fee_records:
-        bps = float(fallback_taker_bps)
-        if not math.isfinite(bps) or bps < 0:
-            bps = 0.0
-            note = (note + "; " if note else "") + "invalid fallback fee rate"
-        est = filled * fill_price * (bps / 10_000.0)
-        if not math.isfinite(est):
-            return 0.0, ESTIMATED, "fee estimate is non-finite; manual reconciliation required"
-        if not entries:
-            note = "exchange returned no fee data"
-        return max(total, est), ESTIMATED, note
     fee, quality, note = extract_order_fee_quote_decimal(
         order, symbol, fill_price, filled, fallback_taker_bps=fallback_taker_bps
     )
