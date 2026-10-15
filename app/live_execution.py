@@ -11,6 +11,37 @@ class LiveExecutionBlocked(RuntimeError):
     pass
 
 
+def require_live_subscription_entitlement(subscription, *, now: datetime | None = None) -> None:
+    """Fail closed unless the newest subscription is current and explicitly entitled."""
+    if subscription is None:
+        raise LiveExecutionBlocked("Customer live-trading subscription is not active")
+
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+
+    status = str(getattr(subscription, "status", "") or "").strip().lower()
+    if status not in {"active", "trialing"}:
+        raise LiveExecutionBlocked("Customer live-trading subscription is not active")
+
+    period_end = getattr(subscription, "current_period_end", None)
+    if period_end is None:
+        raise LiveExecutionBlocked("Customer subscription period end is not configured")
+    if period_end.tzinfo is None:
+        period_end = period_end.replace(tzinfo=timezone.utc)
+    if period_end <= current_time:
+        raise LiveExecutionBlocked("Customer subscription period has expired")
+
+    if status == "trialing":
+        trial_end = getattr(subscription, "trial_end", None)
+        if trial_end is None:
+            raise LiveExecutionBlocked("Customer trial expiry is not configured")
+        if trial_end.tzinfo is None:
+            trial_end = trial_end.replace(tzinfo=timezone.utc)
+        if trial_end <= current_time:
+            raise LiveExecutionBlocked("Customer trial entitlement has expired")
+
+
 async def assert_live_system_enabled(
     db,
     *,
@@ -90,20 +121,17 @@ async def assert_live_system_enabled(
     if pilot_expires_at <= datetime.now(timezone.utc):
         raise LiveExecutionBlocked("Customer live pilot has expired")
 
+    # Lock and inspect the newest subscription regardless of status. Filtering
+    # inactive rows before selecting the newest can resurrect an older active
+    # subscription after a later cancellation or payment failure.
     sub = (await db.execute(
-        select(Subscription).where(
-            Subscription.customer_id == customer_id,
-            Subscription.status.in_(["trialing", "active", "past_due"]),
-        ).order_by(Subscription.created_at.desc()).limit(1)
+        select(Subscription)
+        .where(Subscription.customer_id == customer_id)
+        .order_by(Subscription.created_at.desc(), Subscription.id.desc())
+        .limit(1)
+        .with_for_update()
     )).scalar_one_or_none()
-    if not sub:
-        raise LiveExecutionBlocked("Customer live-trading subscription is not active")
-    if str(sub.status).lower() == "trialing" and getattr(sub, "trial_end", None) is not None:
-        trial_end = sub.trial_end
-        if trial_end.tzinfo is None:
-            trial_end = trial_end.replace(tzinfo=timezone.utc)
-        if trial_end <= datetime.now(timezone.utc):
-            raise LiveExecutionBlocked("Customer trial entitlement has expired")
+    require_live_subscription_entitlement(sub)
     plan = (await db.execute(select(Plan).where(Plan.code == sub.plan_code))).scalar_one_or_none()
     if not plan or not bool(plan.active) or not bool(plan.live_trading):
         raise LiveExecutionBlocked("Customer plan does not permit live trading")

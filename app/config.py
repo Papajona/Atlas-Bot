@@ -99,11 +99,12 @@ class Settings(BaseSettings):
     # Live execution is fail-closed by default.
     paper_trading: bool = True
     live_trading_enabled: bool = False
-    customer_live_trading_enabled: bool = False  # Requires an isolated exchange/subaccount mapping per customer.
+    customer_live_trading_enabled: bool = False  # Startup rejects true until platform-owned Binance allocation is implemented and verified.
     # Customer-live execution is deliberately fixed to Binance Spot; research venue defaults are separate.
     customer_live_exchange: str = "binance"
     customer_live_market_type: str = "spot"
-    binance_customer_subaccounts_enabled: bool = True
+    # Atlas does not provision Binance subaccounts by default; customer live trading remains disabled until the approved platform-account allocation model is implemented and verified.
+    binance_customer_subaccounts_enabled: bool = False
     binance_customer_universal_transfer_allowed: bool = False
     broker_sandbox: bool = True
     require_live_confirmation: bool = True
@@ -459,15 +460,17 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _production_security_requirements(self):
+        if self.binance_customer_subaccounts_enabled:
+            raise ValueError(
+                "Binance customer subaccounts are disabled by Atlas operating policy; "
+                "use the approved platform-owned account model instead."
+            )
         if self.customer_live_trading_enabled:
-            if self.paper_trading:
-                raise ValueError("CUSTOMER_LIVE_TRADING_ENABLED cannot be true while PAPER_TRADING=true")
-            if not self.live_trading_enabled:
-                raise ValueError("CUSTOMER_LIVE_TRADING_ENABLED requires LIVE_TRADING_ENABLED=true")
-            if str(self.customer_live_exchange).lower() != "binance":
-                raise ValueError("CUSTOMER_LIVE_EXCHANGE must be binance for customer live execution")
-            if str(self.customer_live_market_type).lower() != "spot":
-                raise ValueError("CUSTOMER_LIVE_MARKET_TYPE must be spot for customer live execution")
+            raise ValueError(
+                "Customer live trading is blocked: the current execution path uses customer-specific "
+                "Binance credentials, not the approved platform-owned account allocation model. "
+                "Keep CUSTOMER_LIVE_TRADING_ENABLED=false until that model is implemented and verified."
+            )
         if self.environment in {"staging", "production"}:
             if self.live_trading_enabled or self.customer_live_trading_enabled:
                 required = {"DISCIPLINE_ENABLED": self.discipline_enabled, "DISCIPLINE_ENFORCE_RISK_PER_TRADE": self.discipline_enforce_risk_per_trade, "EDGE_DECAY_HALT_ENABLED": self.edge_decay_halt_enabled, "REQUIRE_PROTECTIVE_STOP_FOR_LIVE": self.require_protective_stop_for_live}
