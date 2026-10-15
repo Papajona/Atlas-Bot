@@ -142,20 +142,25 @@ def fx_walk_forward_score(df: pd.DataFrame, cfg: FXModelConfig | None = None,
     if len(x) < train_bars + test_bars + 20:
         raise ValueError("Insufficient FX history for walk-forward validation")
     folds = []
+    close = x["close"]
     start = train_bars
     while start + test_bars <= len(x):
-        train = x.iloc[:start]
         test = x.iloc[start:start + test_bars]
-        # Parameters are fixed in this baseline; the train slice exists to enforce temporal separation.
-        sig = fx_model_signal(pd.concat([train.tail(max(cfg.long_lookback + 5, 260)), test]), cfg,
-                              execution_cost_bps=cost_bps)
-        # Use a simple sign of the score for the test period; shift one bar to prevent same-bar lookahead.
-        close = test["close"]
-        ret = close.pct_change().fillna(0.0)
-        direction = 1.0 if sig["score"] > 0 else -1.0 if sig["score"] < 0 else 0.0
-        net = direction * ret - (cost_bps / 10000.0) * (direction != 0)
+        net_returns: list[float] = []
+        # A signal for bar t may only use completed observations through t-1.
+        # Compute it independently at each step; never expose later test bars to
+        # the signal that earns the current bar's return.
+        for bar_index in range(start, start + test_bars):
+            history = x.iloc[:bar_index]
+            sig = fx_model_signal(history, cfg, execution_cost_bps=cost_bps)
+            direction = 1.0 if sig["score"] > 0 else -1.0 if sig["score"] < 0 else 0.0
+            bar_return = float(close.iloc[bar_index] / close.iloc[bar_index - 1] - 1.0)
+            net_returns.append(
+                direction * bar_return - (cost_bps / 10000.0 if direction != 0 else 0.0)
+            )
+        net = np.asarray(net_returns, dtype=float)
         folds.append({"start": str(test.index[0]), "end": str(test.index[-1]),
-                      "return": float((1 + net).prod() - 1),
+                      "return": float(np.prod(1 + net) - 1),
                       "vol": float(net.std(ddof=1) * math.sqrt(252)) if len(net) > 1 else 0.0})
         start += test_bars
     returns = np.array([f["return"] for f in folds], dtype=float)
