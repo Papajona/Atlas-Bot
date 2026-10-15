@@ -12,6 +12,7 @@ from lightgbm import LGBMClassifier
 from .config import settings
 from .research_validation import deflated_sharpe_report, cost_breakeven_report, purged_walk_forward_splits
 from .model_registry import sha256_file, artifact_signature, verify_artifact_signature
+from .execution_aware_research import simulate_execution_aware_strategy
 
 
 @dataclass(frozen=True)
@@ -335,7 +336,11 @@ def ai_walk_forward_backtest(
         annualization = int(raw_annualization)
         taker_cost_bps = float(profile.taker_bps if taker_bps is None else taker_bps)
         slippage_cost_bps = float(profile.slippage_bps if slippage_bps is None else slippage_bps)
-        carry_cost_bps = float(profile.carry_bps_per_bar if carry_bps_per_bar is None else carry_bps_per_bar)
+        configured_carry = carry_bps_per_bar
+        if configured_carry is None and settings.research_carry_bps_per_bar is not None:
+            configured_carry = settings.research_carry_bps_per_bar
+        carry_evidence_supplied = configured_carry is not None
+        carry_cost_bps = float(profile.carry_bps_per_bar if configured_carry is None else configured_carry)
         hold_horizon = int(raw_hold_horizon)
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise ValueError("Invalid asset or walk-forward evaluation assumptions") from exc
