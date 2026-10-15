@@ -126,6 +126,10 @@ def estimate_paper_slippage(
         status = "BASELINE_ONLY_MISSING_VERIFIED_IMPACT_INPUTS"
 
     total = base + half_spread + (impact if impact is not None else 0.0)
+    if not math.isfinite(total) or total >= 10_000.0:
+        # A sell-side fill at >=100% adverse slippage is zero/negative. Refuse this
+        # before an order row is created rather than leaving a pending paper trade.
+        raise ValueError("modeled slippage must be finite and below 10000 bps")
     return {
         "status": status,
         "calibration_status": "UNVALIDATED_HEURISTIC",
