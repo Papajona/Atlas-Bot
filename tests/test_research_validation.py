@@ -125,3 +125,20 @@ def test_regime_volatility_uses_observed_intraday_bar_cadence():
 
     assert all(row["annualization_factor"] > 8000 for row in hourly.values())
     assert all(300 <= row["annualization_factor"] <= 400 for row in daily.values())
+
+
+def test_oos_rejects_misaligned_signal_index_instead_of_silently_flattening():
+    df = frame(1000)
+    signal = pd.Series(0.5, index=df.index + pd.Timedelta(hours=1))
+    out = fixed_signal_walk_forward_oos(df, signal, costs_bps=7.5, folds=3, min_train=500)
+    assert out["status"] == "INVALID_DATA"
+    assert out["reason"] == "signal_index_mismatch"
+    assert out["folds"] == []
+
+
+def test_oos_rejects_signal_length_mismatch():
+    df = frame(1000)
+    signal = pd.Series(0.5, index=df.index[:-1])
+    out = fixed_signal_walk_forward_oos(df, signal, costs_bps=7.5, folds=3, min_train=500)
+    assert out["status"] == "INVALID_DATA"
+    assert out["reason"] == "signal_index_mismatch"
