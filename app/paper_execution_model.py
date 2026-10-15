@@ -135,6 +135,7 @@ def estimate_paper_slippage(
         "half_spread_bps": half_spread,
         "market_impact_bps": impact,
         "bar_volume_participation": participation,
+        "spread_inputs_complete": raw_spread is not None,
         "modeled_slippage_bps": total,
         "impact_inputs_complete": bool(impact_available),
         "volume_unit": volume_unit or None,
