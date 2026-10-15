@@ -524,9 +524,11 @@ async def _create_trade(symbol: str, timeframe: str, side: str, quantity: float,
                     decision_snapshot_json=json.dumps(signal, default=str),
                 ))
             except Exception:
-                # Trading execution must not fail because post-trade learning memory
-                # is unavailable. The immutable Trade remains the source of truth.
-                pass
+                # Learning telemetry is non-authoritative for execution, but record
+                # the failure rather than silently hiding it.
+                logging.getLogger(__name__).warning(
+                    "trade_learning_episode_insert_failed trade_id=%s", trade.id, exc_info=True
+                )
             await db.commit()
             await db.refresh(trade)
             return trade.id, True
@@ -1181,7 +1183,8 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                                         "symbol": symbol, "side": side, "quantity": quantity})
             return {"duplicate": False, "trade_id": trade_id, "mode": "PAPER", "status": "SIMULATED", "price": quote}
 
-        assert broker is not None
+        if broker is None:
+            raise RuntimeError("Live broker was not initialized after execution preflight")
         try:
             amount = await asyncio.to_thread(broker.normalize_amount, symbol, quantity)
             if amount <= 0:

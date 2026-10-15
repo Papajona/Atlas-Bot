@@ -147,13 +147,20 @@ def strategy_signals(df: pd.DataFrame, config: StrategyConfig | None = None, ass
     return out.replace([np.inf, -np.inf], np.nan)
 
 
-def risk_scaled_position(signal: float, realized_vol: float, config: StrategyConfig | None = None) -> float:
-    """Return the live/backtest-consistent volatility-targeted position."""
+def target_position(signal: float, realized_vol: float, config: StrategyConfig | None = None) -> float:
+    """Authoritative scalar position rule shared by live signal generation and research."""
     cfg = config or StrategyConfig()
     if not np.isfinite(signal) or not np.isfinite(realized_vol) or realized_vol <= 0:
         return 0.0
+    if abs(signal) < cfg.signal_threshold:
+        return 0.0
     leverage = min(cfg.target_vol_annual / realized_vol, cfg.max_leverage)
     return float(signal * leverage)
+
+
+def risk_scaled_position(signal: float, realized_vol: float, config: StrategyConfig | None = None) -> float:
+    """Backward-compatible name for the authoritative target-position rule."""
+    return target_position(signal, realized_vol, config)
 
 
 def target_positions(signal: pd.Series, realized_vol: pd.Series,
@@ -174,9 +181,7 @@ def strategy_signal(df: pd.DataFrame, config: StrategyConfig | None = None, asse
         raise RuntimeError("Insufficient market history for strategy ensemble")
     row = sig.iloc[-1]
     raw = float(row["ensemble"])
-    position = risk_scaled_position(raw, float(row["realized_vol"]), cfg)
-    if abs(raw) < cfg.signal_threshold:
-        position = 0.0
+    position = target_position(raw, float(row["realized_vol"]), cfg)
     price = float(df["close"].iloc[-1])
     atr = float(row["atr"])
     side = "buy" if position > 0 else ("sell" if position < 0 else "flat")
