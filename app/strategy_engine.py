@@ -278,6 +278,10 @@ def strategy_backtest(
     sharpe = float(net.mean() / vol_net * np.sqrt(ann)) if vol_net > 0 else 0.0
     active = pos != 0
     audit = execution["audit"]
+    carry_rate_configured = audit["carry_bps_per_bar"] is not None
+    carry_evidence_source = str(settings.research_carry_evidence_source or "").strip()
+    carry_evidence_id = str(settings.research_carry_evidence_id or "").strip()
+    carry_evidence_complete = carry_rate_configured and bool(carry_evidence_source) and bool(carry_evidence_id)
     return {
         "strategy": "trend_momentum_breakout_mean_reversion",
         "backtest_model": "next-open entries, OHLC intrabar ATR stop/target fills, conservative stop-first ambiguity, transaction costs and explicit per-bar carry",
@@ -298,9 +302,12 @@ def strategy_backtest(
         "gap_exits": audit["gap_exits"],
         "ambiguous_bars_filled_stop_first": audit["ambiguous_bars_filled_stop_first"],
         "carry_bps_per_bar": audit["carry_bps_per_bar"],
-        "financing_cost_model_complete": audit["financing_cost_model_complete"],
+        "carry_rate_configured": carry_rate_configured,
+        "carry_evidence_source": carry_evidence_source or None,
+        "carry_evidence_id": carry_evidence_id or None,
+        "financing_cost_model_complete": carry_evidence_complete,
         "intrabar_stop_target_model_complete": audit["intrabar_stop_target_model_complete"],
-        "promotion_eligible_on_cost_model": audit["promotion_eligible_on_cost_model"],
+        "promotion_eligible_on_cost_model": bool(audit["intrabar_stop_target_model_complete"] and carry_evidence_complete),
         "execution_audit": audit,
     }
 
