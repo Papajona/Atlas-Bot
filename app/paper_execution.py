@@ -85,6 +85,15 @@ def validate_paper_context(context: Any, *, symbol: str, timeframe: str, signal_
         raise PaperExecutionError("Context and decision timestamps must be valid ISO timestamps") from exc
     if as_of.tz is None or decision_at.tz is None or as_of > decision_at:
         raise PaperExecutionError("Context timestamp is naive or occurs after the decision")
+    now = pd.Timestamp.now(tz="UTC")
+    age_seconds = (now - as_of.tz_convert("UTC")).total_seconds()
+    if decision_at.tz_convert("UTC") > now + pd.Timedelta(seconds=60):
+        raise PaperExecutionError("Decision timestamp is too far in the future")
+    # OHLCV timestamps are candle-open times. Permit up to three bars for normal
+    # close-only feeds, but reject historical candles silently reused as live paper quotes.
+    bar_seconds_hint = _finite(context.get("bar_seconds"), "bar_seconds")
+    if age_seconds < -60 or age_seconds > max(600.0, 3.0 * bar_seconds_hint):
+        raise PaperExecutionError("Paper market context is stale or future-dated")
     last_close = _finite(context.get("last_close"), "last_close")
     med_volume = _finite(context.get("median_volume_units"), "median_volume_units")
     vol_bps = _finite(context.get("realized_vol_bps_per_bar"), "realized_vol_bps_per_bar")
