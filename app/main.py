@@ -4555,6 +4555,8 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
             or oos.get("trial_registry_complete") is not True
             or not isinstance(oos.get("deflated_sharpe"), (int, float))
             or not math.isfinite(float(oos.get("deflated_sharpe", float("nan"))))
+            or oos.get("financing_cost_model_complete") is not True
+            or oos.get("intrabar_stop_target_model_complete") is not True
         )
         gate["validation_available"] = not validation_unavailable
         if validation_unavailable:
