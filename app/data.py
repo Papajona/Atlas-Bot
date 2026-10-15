@@ -102,10 +102,37 @@ def fetch_crypto(symbol: str, exchange: str = "bybit", timeframe: str = "1h", da
             ex.close()
 
 
+def _normalize_yfinance_fx_symbol(symbol: str) -> str:
+    """Normalize a currency pair without treating commodity/index tickers as FX pairs."""
+    raw = str(symbol or "").strip().upper()
+    if raw.endswith("=X"):
+        pair = raw[:-2]
+    else:
+        pair = raw
+    pair = pair.replace("/", "").replace("_", "").replace("-", "")
+    if len(pair) != 6 or not pair.isalpha():
+        raise ValueError(
+            "Yahoo FX data requires a six-letter currency-pair symbol such as EURUSD or EUR_USD; "
+            "non-FX instruments must use their own verified adapter"
+        )
+    return pair + "=X"
+
+
 def fetch_forex(symbol: str = "EURUSD", timeframe: str = "1h", days: int = 365) -> pd.DataFrame:
+    """Fetch completed Yahoo Finance FX candles for supported timeframes only.
+
+    This is the FX fallback adapter, not a generic Yahoo symbol fetcher. Unsupported
+    timeframes are rejected instead of silently substituting hourly bars.
+    """
+    supported_intervals = {"1m", "5m", "15m", "30m", "1h", "1d"}
+    if timeframe not in supported_intervals:
+        raise ValueError(
+            f"Unsupported Yahoo Finance FX timeframe {timeframe!r}; "
+            "no implicit timeframe substitution is permitted"
+        )
+    yf_sym = _normalize_yfinance_fx_symbol(symbol)
     import yfinance as yf
-    yf_sym = symbol if "=X" in symbol else symbol + "=X"
-    interval = timeframe if timeframe in {"1m", "5m", "15m", "30m", "1h", "1d"} else "1h"
+    interval = timeframe
     period = f"{min(days, 720)}d" if interval != "1d" else f"{days}d"
     raw = yf.download(yf_sym, period=period, interval=interval, auto_adjust=False, progress=False)
     if raw.empty:
@@ -117,7 +144,7 @@ def fetch_forex(symbol: str = "EURUSD", timeframe: str = "1h", days: int = 365) 
     raw = raw[["open", "high", "low", "close", "volume"]].dropna()
     raw.index = pd.to_datetime(raw.index, utc=True)
     # Exclude a still-forming yfinance candle to prevent signals repainting.
-    interval_seconds = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "1d": 86400}.get(interval, 3600)
+    interval_seconds = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "1d": 86400}[interval]
     now = pd.Timestamp.now(tz="UTC")
     raw = raw.loc[(raw.index + pd.to_timedelta(interval_seconds, unit="s")) <= now]
     if raw.empty:
@@ -131,7 +158,6 @@ def fetch_forex(symbol: str = "EURUSD", timeframe: str = "1h", days: int = 365) 
         timeframe=timeframe,
         fetched_at=datetime.now(timezone.utc).isoformat(),
     )
-
 
 def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int = 365) -> pd.DataFrame:
     """Fetch completed OANDA v20 mid candles for the configured practice/demo account only."""
