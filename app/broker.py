@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from threading import RLock
 from typing import Any
 import hashlib
+import time
 
 
 @dataclass
@@ -24,7 +25,15 @@ class Broker:
     def __init__(self, config: BrokerConfig):
         self.config = config
         self.client = None
-        self._lock = RLock()
+        # Keep slow/hung order submissions from blocking risk-data reads or the
+        # emergency cancellation path. CCXT's request timeout remains the hard bound.
+        self._connect_lock = RLock()
+        self._order_lock = RLock()
+        self._read_lock = RLock()
+        self._cancel_lock = RLock()
+        self._connect_failure: Exception | None = None
+        self._connect_failure_until = 0.0
+        self._connect_failure_cooldown_seconds = 5.0
         # Per-call cancellation errors are consumed by emergency-stop reporting.
         self.last_cancel_errors: list[dict[str, str]] = []
 
@@ -38,9 +47,13 @@ class Broker:
             return cls._instances[key]
 
     def connect(self):
-        with self._lock:
+        with self._connect_lock:
             if self.client is not None:
                 return self.client
+            now = time.monotonic()
+            if self._connect_failure is not None and now < self._connect_failure_until:
+                failure = self._connect_failure
+                raise type(failure)(*failure.args) from failure
             if not self.config.api_key or not self.config.api_secret:
                 raise RuntimeError("Broker credentials are not configured")
             import ccxt
@@ -60,7 +73,16 @@ class Broker:
             # CCXT requires sandbox mode to be enabled before any other exchange call.
             if self.config.sandbox:
                 client.set_sandbox_mode(True)
-            client.load_markets()
+            try:
+                client.load_markets()
+            except Exception as exc:
+                # Do not hammer a down exchange by downloading market metadata on
+                # every incoming ticker/risk request. Cool down and fail closed.
+                self._connect_failure = exc
+                self._connect_failure_until = time.monotonic() + self._connect_failure_cooldown_seconds
+                raise
+            self._connect_failure = None
+            self._connect_failure_until = 0.0
             self.client = client
             return client
 
@@ -68,28 +90,28 @@ class Broker:
         return self.client or self.connect()
 
     def ticker(self, symbol: str) -> dict[str, Any]:
-        with self._lock:
+        with self._read_lock:
             return self._c().fetch_ticker(symbol)
 
     def market_info(self, symbol: str) -> dict[str, Any]:
-        with self._lock:
+        with self._read_lock:
             market = self._c().market(symbol)
             return market
 
     def normalize_amount(self, symbol: str, amount: float) -> float:
-        with self._lock:
+        with self._read_lock:
             c = self._c()
             return float(c.amount_to_precision(symbol, amount))
 
     def normalize_price(self, symbol: str, price: float) -> float:
-        with self._lock:
+        with self._read_lock:
             c = self._c()
             return float(c.price_to_precision(symbol, price))
 
     def market_order(self, symbol: str, side: str, amount: float, client_order_id: str,
                      stop_loss_price: float | None = None, take_profit_price: float | None = None,
                      reduce_only: bool = False) -> dict[str, Any]:
-        with self._lock:
+        with self._order_lock:
             c = self._c()
             params: dict[str, Any] = {"clientOrderId": client_order_id}
             if reduce_only:
@@ -102,33 +124,33 @@ class Broker:
             return c.create_order(symbol, "market", side, amount, None, params)
 
     def fetch_order(self, order_id: str, symbol: str) -> dict[str, Any]:
-        with self._lock:
+        with self._read_lock:
             return self._c().fetch_order(order_id, symbol)
 
     def fetch_open_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
-        with self._lock:
+        with self._read_lock:
             return self._c().fetch_open_orders(symbol) if symbol else self._c().fetch_open_orders()
 
     def fetch_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
-        with self._lock:
+        with self._read_lock:
             c = self._c()
             if not c.has.get("fetchOrders"):
                 return []
             return c.fetch_orders(symbol) if symbol else c.fetch_orders()
 
     def fetch_balance(self) -> dict[str, Any]:
-        with self._lock:
+        with self._read_lock:
             return self._c().fetch_balance()
 
     def fetch_positions(self, symbols: list[str] | None = None) -> list[dict[str, Any]]:
-        with self._lock:
+        with self._read_lock:
             c = self._c()
             if not c.has.get("fetchPositions"):
                 return []
             return c.fetch_positions(symbols)
 
     def cancel_order(self, order_id: str, symbol: str) -> dict[str, Any]:
-        with self._lock:
+        with self._cancel_lock:
             return self._c().cancel_order(order_id, symbol)
 
     def cancel_all_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
@@ -138,7 +160,7 @@ class Broker:
         may have accepted it before a timeout), nor is it silently discarded. Callers must
         re-fetch open orders and use that authoritative state before confirming a halt.
         """
-        with self._lock:
+        with self._cancel_lock:
             self.last_cancel_errors = []
             c = self._c()
             if c.has.get("cancelAllOrders"):
@@ -191,22 +213,21 @@ class Broker:
             return out
 
     def server_time(self) -> int | None:
-        with self._lock:
+        with self._read_lock:
             c = self._c()
             return c.fetch_time() if c.has.get("fetchTime") else None
 
     def feature_value(self, symbol: str, feature: str):
-        with self._lock:
+        with self._read_lock:
             c = self._c()
             return c.feature_value(symbol, "createOrder", feature)
 
     def supports_feature(self, symbol: str, feature: str) -> bool:
-        try:
-            return bool(self.feature_value(symbol, feature))
-        except Exception:
-            return False
+        # A false feature value means unsupported. Network/API errors must propagate:
+        # an outage is not evidence that the exchange lacks the feature.
+        return bool(self.feature_value(symbol, feature)
 
     def features(self, symbol: str) -> dict[str, Any]:
-        with self._lock:
+        with self._read_lock:
             c = self._c()
             return getattr(c, "features", {}) or {}
