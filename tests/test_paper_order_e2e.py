@@ -74,6 +74,9 @@ def test_paper_buy_then_sell_round_trip(monkeypatch, tmp_path):
             "spread_bps": 2.0,
             "recent_volatility_bps": 30.0,
             "bar_duration_ms": 3_600_000,
+            "exchange": "binance",
+            "symbol": sym,
+            "market_type": "spot",
         }
         buy = await execution.execute_signal(
             sym, "buy", 0.01, 50000.0,
@@ -122,6 +125,9 @@ def test_calibrated_simulated_venue_rejection_books_no_position(monkeypatch, tmp
         "spread_bps": 2.0,
         "recent_volatility_bps": 30.0,
         "bar_duration_ms": 3_600_000,
+        "exchange": "binance",
+        "symbol": sym,
+        "market_type": "spot",
     }
 
     async def run():
