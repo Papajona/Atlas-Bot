@@ -331,11 +331,34 @@ async def _projected_exposure(db, symbol: str, price: float, quantity: float, si
     return float(total)
 
 
+async def _has_unresolved_live_orders(
+    db,
+    *,
+    customer_id: int | None,
+    signal_id: str | None = None,
+) -> bool:
+    """Detect outstanding broker commands not yet finalized by authoritative reconciliation."""
+    statuses = ("PENDING", "OPEN", "PARTIAL", "UNKNOWN")
+    query = select(Trade.id).where(
+        Trade.mode == "LIVE",
+        Trade.status.in_(statuses),
+    )
+    if customer_id is None:
+        query = query.where(Trade.customer_id.is_(None))
+    else:
+        query = query.where(Trade.customer_id == customer_id)
+    # A retry of the same idempotent signal must reach duplicate-order handling
+    # rather than being rejected by its own still-open trade row.
+    if signal_id:
+        query = query.where(or_(Trade.signal_id != signal_id, Trade.signal_id.is_(None)))
+    return (await db.execute(query.limit(1))).scalar_one_or_none() is not None
+
+
 async def risk_gate(symbol: str, price: float, quantity: float, live: bool = False,
                     signal_timestamp: str | None = None, side: str = "buy",
                     customer_id: int | None = None, reservation_key: str | None = None,
                     stop_loss_price: float | None = None, take_profit_price: float | None = None,
-                    signal: dict | None = None):
+                    signal: dict | None = None, signal_id: str | None = None):
     if price <= 0 or quantity <= 0:
         raise RiskBlocked("Invalid price or quantity")
     async with SessionLocal() as db:
@@ -410,6 +433,17 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
         # flips into new exposure and must pass every new-entry control (limits, breakers, protective stop).
         opposing_total = sum(abs(p.quantity) for p in existing_positions if (p.quantity > 0 > signed) or (p.quantity < 0 < signed))
         reducing = opposing_total > 0 and quantity <= opposing_total + 1e-9
+
+        # Do not authorize another entry while the same account has an unresolved
+        # broker order whose exposure is not yet represented by authoritative fills.
+        # RiskGate is serialized by the AppState/customer row locks, so this check also
+        # prevents concurrent workers from stacking new exposure during an UNKNOWN timeout.
+        if live and not reducing and await _has_unresolved_live_orders(
+            db, customer_id=customer_id, signal_id=signal_id
+        ):
+            raise RiskBlocked(
+                "An unresolved live order exists for this account; reconcile it before adding exposure"
+            )
 
         if settings.discipline_enabled and not reducing:
             now = datetime.now(timezone.utc)
@@ -1241,7 +1275,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
         governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps, equity=risk_equity, risk_per_trade=settings.risk_per_trade)
         if governor.action != "ALLOW":
             raise RiskBlocked("Risk Governor blocked order: " + ",".join(governor.reasons))
-        await risk_gate(symbol, quote, quantity, live=live, signal_timestamp=signal_timestamp, side=side, customer_id=customer_id, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {})
+        await risk_gate(symbol, quote, quantity, live=live, signal_timestamp=signal_timestamp, side=side, customer_id=customer_id, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, signal_id=signal_id)
         trade_id, created = await _create_trade(
             symbol, timeframe, side, quantity, quote, exchange, mode, signal, signal_id, cid,
             stop_loss_price or 0.0, take_profit_price or 0.0, customer_id=customer_id, trading_account_id=trading_account_id,
