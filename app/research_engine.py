@@ -279,7 +279,6 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     validation_splits = purged_walk_forward_splits(len(df), folds=folds, min_train=min_train, purge=1, embargo=1)
     signal_frame = strategy_signals(df, cfg, asset=asset)
     annualization_factor = float(signal_frame.attrs.get("annualization_factor", 252.0))
-    ensemble_signal = signal_frame["ensemble"].fillna(0.0)
     _, _, _, bar_returns, ensemble_pos, ensemble_net, _ = _protected_component_position(
         df, "ensemble", cfg, taker_bps, slippage_bps, asset
     )
