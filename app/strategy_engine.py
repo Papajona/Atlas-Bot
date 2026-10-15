@@ -148,12 +148,23 @@ def strategy_signals(df: pd.DataFrame, config: StrategyConfig | None = None, ass
 
 
 def risk_scaled_position(signal: float, realized_vol: float, config: StrategyConfig | None = None) -> float:
-    """Convert an ensemble signal into a volatility-targeted leverage."""
+    """Return the live/backtest-consistent volatility-targeted position."""
     cfg = config or StrategyConfig()
     if not np.isfinite(signal) or not np.isfinite(realized_vol) or realized_vol <= 0:
         return 0.0
-    leverage = cfg.target_vol_annual / realized_vol
-    return float(np.clip(signal * leverage, -cfg.max_leverage, cfg.max_leverage))
+    leverage = min(cfg.target_vol_annual / realized_vol, cfg.max_leverage)
+    return float(signal * leverage)
+
+
+def target_positions(signal: pd.Series, realized_vol: pd.Series,
+                     config: StrategyConfig | None = None) -> pd.Series:
+    """Shared vectorized sizing and threshold policy used by live and research."""
+    cfg = config or StrategyConfig()
+    raw = pd.Series(signal).astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    vol = pd.Series(realized_vol, index=raw.index).astype(float).replace([np.inf, -np.inf], np.nan)
+    leverage = (cfg.target_vol_annual / vol.where(vol > 0)).clip(upper=cfg.max_leverage)
+    position = raw * leverage
+    return position.where(raw.abs() >= cfg.signal_threshold, 0.0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
 def strategy_signal(df: pd.DataFrame, config: StrategyConfig | None = None, asset: str = "crypto") -> dict:
@@ -231,10 +242,7 @@ def strategy_backtest(
     s = strategy_signals(df, cfg, asset=asset)
     # Shift positions one bar: signals formed on bar t execute on bar t+1.
     raw = s["ensemble"].fillna(0.0)
-    vol = s["realized_vol"]
-    lev = (cfg.target_vol_annual / vol.replace(0, np.nan)).clip(upper=cfg.max_leverage)
-    pos = (raw * lev).clip(-cfg.max_leverage, cfg.max_leverage)
-    pos = pos.where(raw.abs() >= cfg.signal_threshold, 0.0).shift(1).fillna(0.0)
+    pos = target_positions(raw, s["realized_vol"], cfg).shift(1).fillna(0.0)
 
     # Execute at the next bar's open. The position at bar t was formed from
     # information available through bar t-1, so its return is the open-to-open

@@ -49,6 +49,8 @@ def extract_order_fee_quote(order: dict[str, Any], symbol: str, fill_price: floa
         try:
             cost = float(entry.get("cost"))
         except (TypeError, ValueError):
+            note = "exchange returned an unparsable fee cost"
+            quality = ESTIMATED
             continue
         cur = str(entry.get("currency") or "").upper()
         if not math.isfinite(cost):

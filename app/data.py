@@ -116,6 +116,12 @@ def fetch_forex(symbol: str = "EURUSD", timeframe: str = "1h", days: int = 365) 
         raw.columns = [str(c).lower() for c in raw.columns]
     raw = raw[["open", "high", "low", "close", "volume"]].dropna()
     raw.index = pd.to_datetime(raw.index, utc=True)
+    # Exclude a still-forming yfinance candle to prevent signals repainting.
+    interval_seconds = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "1d": 86400}.get(interval, 3600)
+    now = pd.Timestamp.now(tz="UTC")
+    raw = raw.loc[(raw.index + pd.to_timedelta(interval_seconds, unit="s")) <= now]
+    if raw.empty:
+        raise RuntimeError("No completed FX candles returned after excluding the forming bar")
     cleaned = _validate_ohlcv(raw, timeframe, reject_gaps=False)
     return _attach_data_provenance(
         cleaned,
@@ -138,7 +144,8 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
         raise RuntimeError("OANDA live mode is disabled in AtlasRisk; use practice/demo for learning and backtesting")
     broker = OandaBroker(OandaConfig(settings.oanda_account_id, settings.oanda_api_token, True, settings.oanda_timeout_seconds))
     try:
-        count = min(5000, max(250, int(days * 24) if granularity == "H1" else int(days * 24 * 60 / max(1, int(timeframe[:-1])))))
+        bars_per_day = {"M1": 1440, "M5": 288, "M15": 96, "M30": 48, "H1": 24, "H4": 6, "D": 1}[granularity]
+        count = min(5000, max(1, int(days * bars_per_day)))
         candles = broker.candles(symbol, granularity, count=count)
     finally:
         broker.close()

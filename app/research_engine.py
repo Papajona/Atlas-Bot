@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pandas as pd
 
-from .strategy_engine import StrategyConfig, strategy_signals, risk_scaled_position, next_open_returns
+from .strategy_engine import StrategyConfig, strategy_signals, risk_scaled_position, target_positions, next_open_returns
 from .trading_core import ai_walk_forward_backtest
 from .strategy_evidence import evidence_for
 from .research_validation import monte_carlo_bootstrap, parameter_plateau_score, cost_breakeven_report
@@ -49,6 +49,7 @@ def _apply_protective_halts(
     current_day = None
     halted_until = -1
     hard_halt = False
+    daily_halt = False
     halted_bars = 0
     hard_halt_reason: str | None = None
     hard_halt_triggered_at: int | None = None
@@ -62,8 +63,9 @@ def _apply_protective_halts(
         if day != current_day:
             current_day = day
             day_start = equity
+            daily_halt = False
 
-        is_halted = hard_halt or i <= halted_until
+        is_halted = hard_halt or daily_halt or i <= halted_until
         active_position = 0.0 if is_halted else float(positions.iloc[i])
         if is_halted:
             halted_bars += 1
@@ -99,20 +101,16 @@ def _apply_protective_halts(
             and int(loss_event_threshold) > 0
             and len(loss_event_times) >= int(loss_event_threshold)
         )
-        # Drawdown/daily-loss limits latch until operator reset; only a stop-loss
-        # cluster is a timed cooldown. Re-evaluating a breached hard limit as a
-        # fresh cooldown on every flat bar would silently keep extending it.
-        hard_limit_reason = (
-            "DRAWDOWN" if drawdown >= float(drawdown_limit)
-            else "DAILY_LOSS" if daily_loss >= float(daily_loss_limit)
-            else None
-        )
-        # A hard risk limit takes precedence over the timed loss-cluster cooldown.
-        # It latches permanently for this backtest; the cooldown must never mask it.
-        if hard_limit_reason is not None and not hard_halt:
+        # Peak drawdown remains latched; daily loss clears at the next UTC date.
+        if drawdown >= float(drawdown_limit) and not hard_halt:
             hard_halt = True
-            hard_halt_reason = hard_limit_reason
+            hard_halt_reason = "DRAWDOWN"
             hard_halt_triggered_at = i
+        elif daily_loss >= float(daily_loss_limit) and not daily_halt:
+            daily_halt = True
+            if hard_halt_reason is None:
+                hard_halt_reason = "DAILY_LOSS"
+                hard_halt_triggered_at = i
         elif not is_halted and loss_cluster_trigger:
             halted_until = max(halted_until, i + max(0, int(cooldown_bars)))
             cooldown_triggers += 1
@@ -133,30 +131,31 @@ def _apply_protective_halts(
     }
 
 
-def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, taker_bps: float, slippage_bps: float, asset: str = "crypto") -> dict:
-    """Cost-aware component backtest with forward-looking risk protections.
-
-    Protections are applied using only information available at the end of the
-    completed bar: volatility cap, peak drawdown halt, daily-loss halt, and a
-    stop-loss cluster cooldown. This is deliberately conservative and avoids
-    treating an attractive raw backtest as production evidence.
-    """
-    s = strategy_signals(df, cfg, asset=asset)
-    raw = s[component].fillna(0.0)
-    vol = s["realized_vol"]
-    lev = (cfg.target_vol_annual / vol.replace(0, np.nan)).clip(upper=cfg.max_leverage)
-    pos = (raw * lev).clip(-cfg.max_leverage, cfg.max_leverage).shift(1).fillna(0.0)
-    ret = (next_open_returns(df) - 1.0).fillna(0.0)
-    ann = float(s.attrs.get("annualization_factor", 252.0))
-    protected, protected_net, protection_audit = _apply_protective_halts(
-        pos,
-        ret,
+def _protected_component_position(df: pd.DataFrame, component: str, cfg: StrategyConfig,
+                                 taker_bps: float, slippage_bps: float,
+                                 asset: str = "crypto"):
+    """Return the exact risk-controlled position stream used by reported and OOS metrics."""
+    signals = strategy_signals(df, cfg, asset=asset)
+    raw = signals[component].fillna(0.0)
+    requested = target_positions(raw, signals["realized_vol"], cfg).shift(1).fillna(0.0)
+    returns = (next_open_returns(df) - 1.0).fillna(0.0)
+    protected, net, audit = _apply_protective_halts(
+        requested, returns,
         cost_rate=(taker_bps + slippage_bps) / 10_000.0,
         drawdown_limit=settings.strategy_drawdown_halt,
         daily_loss_limit=settings.strategy_daily_loss_halt,
         loss_event_threshold=settings.strategy_stoploss_guard_trades,
         cooldown_bars=settings.strategy_stoploss_guard_bars,
     )
+    return signals, raw, requested, returns, protected, net, audit
+
+
+def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, taker_bps: float, slippage_bps: float, asset: str = "crypto") -> dict:
+    """Cost-aware component backtest with forward-looking risk protections."""
+    s, raw, pos, ret, protected, protected_net, protection_audit = _protected_component_position(
+        df, component, cfg, taker_bps, slippage_bps, asset
+    )
+    ann = float(s.attrs.get("annualization_factor", 252.0))
     active = protected != 0
     protected_equity = (1.0 + protected_net).cumprod()
     reported_equity = float(protected_equity.iloc[-1]) if len(protected_equity) else 1.0
@@ -281,31 +280,35 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     signal_frame = strategy_signals(df, cfg, asset=asset)
     annualization_factor = float(signal_frame.attrs.get("annualization_factor", 252.0))
     ensemble_signal = signal_frame["ensemble"].fillna(0.0)
-    ensemble_pos = ensemble_signal.shift(1).fillna(0.0)
-    gross = ensemble_pos * (next_open_returns(df) - 1.0)
+    _, _, _, bar_returns, ensemble_pos, ensemble_net, _ = _protected_component_position(
+        df, "ensemble", cfg, taker_bps, slippage_bps, asset
+    )
+    gross = ensemble_pos * bar_returns
     turnover = ensemble_pos.diff().abs().fillna(ensemble_pos.abs())
     sensitivity = cost_sensitivity(gross.to_numpy(), turnover.to_numpy())
     ci = bootstrap_mean_ci((gross - turnover * ((taker_bps + slippage_bps) / 10000.0)).to_numpy(), block_size=10)
     adjusted = multiple_testing_sharpe_adjustment([r.get("sharpe", 0.0) for r in results], trials=len(results))
     cost_mult = float(getattr(settings, "research_cost_stress_multiplier", 2.0))
     oos = fixed_signal_walk_forward_oos(
-        df, ensemble_signal, costs_bps=taker_bps + slippage_bps,
+        df, ensemble_pos, costs_bps=taker_bps + slippage_bps,
         folds=folds, min_train=min_train,
         annualization_factor=annualization_factor,
         taker_bps=taker_bps, slippage_bps=slippage_bps,
-        cost_stress_multiplier=cost_mult,
+        cost_stress_multiplier=cost_mult, positions_are_final=True,
     )
     gross_net = ensemble_pos * (next_open_returns(df) - 1.0)
     regime_performance = regime_conditioned_performance(df, gross_net - turnover * ((taker_bps + slippage_bps) / 10000.0), asset=asset)
     per_strategy_oos = {}
     for component in components:
-        component_signal = signal_frame[component]
+        _, _, _, _, component_position, _, _ = _protected_component_position(
+            df, component, cfg, taker_bps, slippage_bps, asset
+        )
         per_strategy_oos[component] = fixed_signal_walk_forward_oos(
-            df, component_signal, costs_bps=taker_bps + slippage_bps,
+            df, component_position, costs_bps=taker_bps + slippage_bps,
             folds=folds, min_train=min_train,
             annualization_factor=annualization_factor,
             taker_bps=taker_bps, slippage_bps=slippage_bps,
-            cost_stress_multiplier=cost_mult,
+            cost_stress_multiplier=cost_mult, positions_are_final=True,
         )
     # Parameter-plateau check: small changes to the signal threshold should not destroy
     # the measured edge. A narrow single-point optimum is treated as fragile research.

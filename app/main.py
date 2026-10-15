@@ -4540,19 +4540,30 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
         gate["oos_positive_fold_ratio"]=positive_ratio
         oos_gate=oos_promotion_gate(oos,min_dsr=settings.research_min_deflated_sharpe,require_cost_stress=settings.research_require_cost_stress,min_folds=settings.strategy_oos_min_folds,min_total_return=settings.research_min_oos_total_return,min_positive_fold_ratio=settings.research_min_oos_positive_fold_ratio,max_negative_fold_return=settings.strategy_oos_max_negative_fold_return,require_last_fold_positive=settings.strategy_oos_require_last_fold_positive,min_sharpe=settings.strategy_oos_min_sharpe,max_drawdown=settings.strategy_oos_max_drawdown,min_trades=settings.strategy_oos_min_trades)
         gate["oos_gate"]=oos_gate
+        validation_unavailable = (
+            oos.get("status") != "OK"
+            or oos.get("trial_registry_complete") is not True
+            or not isinstance(oos.get("deflated_sharpe"), (int, float))
+            or not math.isfinite(float(oos.get("deflated_sharpe", float("nan"))))
+        )
+        gate["validation_available"] = not validation_unavailable
+        if validation_unavailable:
+            gate["validation_unavailable_reason"] = "COMPLETE_COMPARABLE_TRIAL_HISTORY_AND_DEFLATED_SHARPE_REQUIRED"
         gate["robustness_monte_carlo"]=monte_carlo_bootstrap([float(x.get("total_return",0)) for x in (oos.get("folds") or [])],trials=500)
-        passed=(gate["sharpe"]>=settings.adaptive_min_sharpe and gate["max_drawdown"]>=-abs(settings.adaptive_max_drawdown) and gate["trades"]>=settings.adaptive_min_trades and gate["total_return"]>=settings.adaptive_min_total_return and oos_gate["passed"])
+        passed=(not validation_unavailable and gate["sharpe"]>=settings.adaptive_min_sharpe and gate["max_drawdown"]>=-abs(settings.adaptive_max_drawdown) and gate["trades"]>=settings.adaptive_min_trades and gate["total_return"]>=settings.adaptive_min_total_return and oos_gate["passed"])
     except Exception as exc:
-        result={"status":"ERROR","error":str(exc)}; gate={}; passed=False; oos={}
+        result={"status":"ERROR","error":str(exc)}; gate={"validation_available":False,"validation_unavailable_reason":"RESEARCH_VALIDATION_ERROR"}; passed=False; oos={}; validation_unavailable=True
     async with SessionLocal() as db:
         row=(await db.execute(select(StrategyCandidate).where(StrategyCandidate.id==candidate_id,StrategyCandidate.customer_id==profile.id).with_for_update())).scalar_one()
-        row.backtest_json=json.dumps(result,default=str); row.oos_json=json.dumps(oos,default=str); row.status="VALIDATED" if passed else "REJECTED"; row.live_approved=False
+        row.backtest_json=json.dumps(result,default=str); row.oos_json=json.dumps(oos,default=str)
+        status = "VALIDATED" if passed else ("VALIDATION_UNAVAILABLE" if validation_unavailable else "REJECTED")
+        row.status=status; row.live_approved=False
         # Keep an immutable history of every attempt; the candidate row only holds the latest.
         prior=(await db.execute(select(func.count(StrategyCandidateRun.id)).where(StrategyCandidateRun.candidate_id==candidate_id))).scalar_one()
         attempt=int(prior or 0)+1
         db.add(StrategyCandidateRun(candidate_id=candidate_id,attempt=attempt,backtest_json=json.dumps(result,default=str),oos_json=json.dumps(oos,default=str),gate_json=json.dumps(gate,default=str),passed=bool(passed)))
         await db.commit()
-    return {"candidate_id":candidate_id,"attempt":attempt,"status":"VALIDATED" if passed else "REJECTED","gate":gate,"oos":oos,"promotion_requires_explicit_live_approval":True,"validation_scope":"Atlas-supported strategy family; AI custom conditions remain a research specification unless separately compiled.","real_money_execution":False}
+    return {"candidate_id":candidate_id,"attempt":attempt,"status":status,"gate":gate,"oos":oos,"promotion_requires_explicit_live_approval":True,"validation_scope":"Atlas-supported strategy family; AI custom conditions remain a research specification unless separately compiled.","real_money_execution":False}
 
 @app.get("/api/customer/strategy-lab/candidates/{candidate_id}/runs")
 async def list_strategy_candidate_runs(candidate_id:int, authorization:str|None=Header(default=None)):

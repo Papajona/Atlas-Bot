@@ -160,6 +160,7 @@ def fixed_signal_walk_forward_oos(
     taker_bps: float | None = None,
     slippage_bps: float | None = None,
     cost_stress_multiplier: float = 2.0,
+    positions_are_final: bool = False,
 ) -> dict:
     """Evaluate a fixed signal only on forward test windows.
 
@@ -190,7 +191,7 @@ def fixed_signal_walk_forward_oos(
         return {"status": "INVALID_CONFIG", "reason": "invalid_cost_config", "folds": []}
 
     s = pd.Series(signal, index=df.index).astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    position = s.shift(1).fillna(0.0)
+    position = s if positions_are_final else s.shift(1).fillna(0.0)
     # next_open_returns returns a gross price ratio (neutral = 1.0); subtract 1
     # exactly once to derive the per-bar return used for P&L.
     ret = (next_open_returns(df) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
