@@ -5,6 +5,7 @@ import math
 import numpy as np
 import pandas as pd
 from .strategy_engine import next_open_returns
+from .execution_aware_research import costed_execution_returns, execution_turnover
 
 
 @dataclass(frozen=True)
@@ -161,12 +162,16 @@ def fixed_signal_walk_forward_oos(
     slippage_bps: float | None = None,
     cost_stress_multiplier: float = 2.0,
     positions_are_final: bool = False,
+    bar_returns: pd.Series | None = None,
+    intrabar_exit: pd.Series | None = None,
+    carry_bps_per_bar: float | None = None,
 ) -> dict:
-    """Evaluate a fixed signal only on forward test windows.
+    """Evaluate held-out returns with the same executable position/stop/carry stream.
 
-    Aggregate metrics are computed from held-out returns only. The annualization
-    factor is explicit because a Sharpe computed with the wrong bar frequency can
-    invert a promotion decision. No training-period return is included.
+    With bar_returns and intrabar_exit supplied, the stream comes from the OHLC execution
+    simulator and positions_are_final must be true. Without them the function remains a
+    legacy next-open diagnostic and reports intrabar parity as incomplete. Missing carry
+    is reported as incomplete evidence rather than silently certified as zero financing.
     """
     splits = purged_walk_forward_splits(len(df), folds=folds, min_train=min_train, purge=1, embargo=1)
     if not splits:
@@ -177,6 +182,7 @@ def fixed_signal_walk_forward_oos(
         effective_taker_bps = total_cost_bps if taker_bps is None else float(taker_bps)
         effective_slippage_bps = 0.0 if slippage_bps is None else float(slippage_bps)
         stress_multiplier = float(cost_stress_multiplier)
+        carry = None if carry_bps_per_bar is None else float(carry_bps_per_bar)
     except (TypeError, ValueError, OverflowError):
         return {"status": "INVALID_CONFIG", "reason": "invalid_numeric_config", "folds": []}
     if not math.isfinite(annualization) or annualization <= 0:
@@ -187,24 +193,34 @@ def fixed_signal_walk_forward_oos(
         or not math.isfinite(effective_slippage_bps) or effective_slippage_bps < 0
         or not math.isclose(effective_taker_bps + effective_slippage_bps, total_cost_bps, abs_tol=1e-8)
         or not math.isfinite(stress_multiplier) or stress_multiplier <= 0
+        or (carry is not None and (not math.isfinite(carry) or carry < 0))
     ):
         return {"status": "INVALID_CONFIG", "reason": "invalid_cost_config", "folds": []}
 
     s = pd.Series(signal, index=df.index).astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
     position = s if positions_are_final else s.shift(1).fillna(0.0)
-    # next_open_returns returns a gross price ratio (neutral = 1.0); subtract 1
-    # exactly once to derive the per-bar return used for P&L.
-    ret = (next_open_returns(df) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    if (bar_returns is not None or intrabar_exit is not None) and not positions_are_final:
+        return {"status": "INVALID_CONFIG", "reason": "execution_stream_requires_final_positions", "folds": []}
+    if bar_returns is None:
+        ret = (next_open_returns(df) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    else:
+        ret = pd.Series(bar_returns, index=df.index).astype(float).replace([np.inf, -np.inf], np.nan)
+        if ret.isna().any():
+            return {"status": "INVALID_DATA", "reason": "bar_returns_contains_missing_or_nonfinite_values", "folds": []}
+    exit_flags = None if intrabar_exit is None else pd.Series(intrabar_exit, index=df.index).fillna(False).astype(bool)
     gross = position * ret
-    turnover = position.diff().abs().fillna(position.abs())
-    net = (gross - turnover * total_cost_bps / 10000.0).replace(
-        [np.inf, -np.inf], np.nan
-    ).fillna(0.0).clip(lower=-1.0)
+    turnover = execution_turnover(position, exit_flags)
+    net = costed_execution_returns(
+        position, ret, transaction_cost_bps=total_cost_bps,
+        carry_bps_per_bar=carry, exit_mask=exit_flags,
+    ).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(lower=-1.0)
+    fixed_cost = position.abs() * (carry / 10_000.0) if carry is not None else None
 
     fold_rows = []
     oos_returns = []
     oos_gross_returns = []
     oos_turnover = []
+    oos_fixed_costs = []
     trades = 0
     for fold in splits:
         start, end = fold.test_start, fold.test_end
@@ -213,6 +229,8 @@ def fixed_signal_walk_forward_oos(
         oos_returns.append(x)
         oos_gross_returns.append(gross.iloc[start:end])
         oos_turnover.append(turnover.iloc[start:end])
+        if fixed_cost is not None:
+            oos_fixed_costs.append(fixed_cost.iloc[start:end])
         prior_p = p.shift(1).fillna(0.0)
         trade_starts = (p != 0.0) & ((prior_p == 0.0) | (np.sign(p) != np.sign(prior_p)))
         trades += int(trade_starts.sum())
@@ -241,6 +259,7 @@ def fixed_signal_walk_forward_oos(
     max_drawdown = float(np.min(equity / peak - 1.0)) if len(equity) else None
     all_oos_gross = pd.concat(oos_gross_returns) if oos_gross_returns else pd.Series(dtype=float)
     all_oos_turnover = pd.concat(oos_turnover) if oos_turnover else pd.Series(dtype=float)
+    all_fixed_cost = pd.concat(oos_fixed_costs) if oos_fixed_costs else None
     cost_analysis = cost_breakeven_report(
         all_oos_gross.to_numpy(dtype=float),
         all_oos_turnover.to_numpy(dtype=float),
@@ -248,7 +267,14 @@ def fixed_signal_walk_forward_oos(
         slippage_bps=effective_slippage_bps,
         bars_per_year=max(1, int(round(annualization))),
         stress_multiplier=stress_multiplier,
+        fixed_cost_drag=None if all_fixed_cost is None else all_fixed_cost.to_numpy(dtype=float),
     )
+    cost_analysis["financing_cost_model_complete"] = carry is not None
+    cost_analysis["intrabar_stop_target_model_complete"] = intrabar_exit is not None
+    if carry is None:
+        cost_analysis["note"] += " Carry rate was not supplied; this diagnostic is not financing-complete and is not promotion evidence."
+    cost_complete = carry is not None
+    execution_complete = intrabar_exit is not None
 
     return {
         "status": "OK",
@@ -256,8 +282,6 @@ def fixed_signal_walk_forward_oos(
         "oos_bars": int(len(values)),
         "oos_total_return": float(np.prod(1.0 + values) - 1.0),
         "oos_mean_return": mean_return,
-        # Use actual held-out bar returns for robustness resampling; fold aggregates
-        # are too few observations for a meaningful Monte Carlo check.
         "oos_return_sample": values[-5000:].tolist(),
         "sharpe": sharpe,
         "max_drawdown": max_drawdown,
@@ -266,6 +290,10 @@ def fixed_signal_walk_forward_oos(
         "costs_bps": total_cost_bps,
         "cost_stress_ok": cost_analysis.get("stress_ok") is True,
         "cost_analysis": cost_analysis,
+        "financing_cost_model_complete": cost_complete,
+        "intrabar_stop_target_model_complete": execution_complete,
+        "execution_cost_model_complete": bool(cost_complete and execution_complete),
+        "carry_bps_per_bar": carry,
     }
 
 
