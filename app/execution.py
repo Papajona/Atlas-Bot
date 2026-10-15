@@ -2006,19 +2006,34 @@ async def emergency_stop(exchange: str | None = None):
                            market_type=settings.default_market_type, timeout_ms=settings.exchange_timeout_ms)
         broker = Broker.get(cfg)
         try:
-            rows = await asyncio.to_thread(broker.cancel_all_orders)
-            for item in rows or []:
-                canceled.append({"scope": "platform_exchange", "order_id": str(item.get("id") or "")})
-            platform_cancel_errors = list(getattr(broker, "last_cancel_errors", []) or [])
+            platform_cancel_errors: list[dict[str, str]] = []
+            remaining = []
+            # Retry cancellation and re-read the exchange order book. Only an empty
+            # authoritative order-book read can confirm that cancellation succeeded.
+            for attempt in range(3):
+                rows = await asyncio.to_thread(broker.cancel_all_orders)
+                for item in rows or []:
+                    canceled.append({"scope": "platform_exchange", "order_id": str(item.get("id") or "")})
+                platform_cancel_errors.extend(list(getattr(broker, "last_cancel_errors", []) or []))
+                remaining = await asyncio.to_thread(broker.fetch_open_orders)
+                if not remaining:
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(0.25 * (attempt + 1))
             warnings.extend({"scope": "platform_exchange_order_cancel", **item} for item in platform_cancel_errors)
-            remaining = await asyncio.to_thread(broker.fetch_open_orders)
             if remaining:
-                failures.append({
+                failure = {
                     "scope": "platform_exchange",
-                    "error": f"Open orders remain after cancellation: {len(remaining)}",
+                    "error": f"Open orders remain after 3 cancellation attempts: {len(remaining)}",
                     "open_order_ids": [str(item.get("id") or "") for item in remaining[:50]],
                     "cancel_errors": platform_cancel_errors[:50],
-                })
+                }
+                failures.append(failure)
+                await open_incident(key="EMERGENCY_STOP_PLATFORM_ORDERS_REMAIN", severity="CRITICAL",
+                                    category="EMERGENCY_STOP",
+                                    summary="Emergency stop could not cancel all platform exchange orders",
+                                    detail=failure)
+                await audit("EMERGENCY_CANCEL_FAILED", failure)
             if _is_derivatives_market(broker):
                 await _flatten_exchange_positions(broker, "platform_exchange", failures, canceled)
             else:
@@ -2102,19 +2117,32 @@ async def emergency_stop(exchange: str | None = None):
                 broker = await asyncio.to_thread(
                     build_customer_binance_broker, account, timeout_ms=settings.exchange_timeout_ms, sandbox=False
                 )
-                rows = await asyncio.to_thread(broker.cancel_all_orders)
-                for item in rows or []:
-                    canceled.append({"scope": f"customer:{account.customer_id}", "order_id": str(item.get("id") or "")})
-                customer_cancel_errors = list(getattr(broker, "last_cancel_errors", []) or [])
+                customer_cancel_errors: list[dict[str, str]] = []
+                remaining = []
+                for attempt in range(3):
+                    rows = await asyncio.to_thread(broker.cancel_all_orders)
+                    for item in rows or []:
+                        canceled.append({"scope": f"customer:{account.customer_id}", "order_id": str(item.get("id") or "")})
+                    customer_cancel_errors.extend(list(getattr(broker, "last_cancel_errors", []) or []))
+                    remaining = await asyncio.to_thread(broker.fetch_open_orders)
+                    if not remaining:
+                        break
+                    if attempt < 2:
+                        await asyncio.sleep(0.25 * (attempt + 1))
                 warnings.extend({"scope": f"customer:{account.customer_id}_order_cancel", **item} for item in customer_cancel_errors)
-                remaining = await asyncio.to_thread(broker.fetch_open_orders)
                 if remaining:
-                    failures.append({
+                    failure = {
                         "scope": f"customer:{account.customer_id}",
-                        "error": f"Open orders remain after cancellation: {len(remaining)}",
+                        "error": f"Open orders remain after 3 cancellation attempts: {len(remaining)}",
                         "open_order_ids": [str(item.get("id") or "") for item in remaining[:50]],
                         "cancel_errors": customer_cancel_errors[:50],
-                    })
+                    }
+                    failures.append(failure)
+                    await open_incident(key=f"EMERGENCY_STOP_CUSTOMER_ORDERS_REMAIN:{account.customer_id}",
+                                        severity="CRITICAL", category="EMERGENCY_STOP",
+                                        summary="Emergency stop could not cancel all customer exchange orders",
+                                        detail=failure, customer_id=account.customer_id)
+                    await audit("EMERGENCY_CANCEL_FAILED", failure)
                 await _flatten_customer_spot_positions(account, broker, failures, canceled)
             except Exception as exc:
                 failure = {"scope": f"customer:{account.customer_id}", "error": str(exc)[:1000]}
