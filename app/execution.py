@@ -1524,13 +1524,23 @@ async def sync_live_account(exchange: str, symbols: list[str] | None = None) -> 
         s.peak_equity = max(s.peak_equity, equity)
         positions_seen = set()
         for raw in positions_raw or []:
-            symbol = raw.get("symbol")
+            if not isinstance(raw, dict):
+                raise RuntimeError("Exchange position reconciliation received a malformed row")
+            symbol = str(raw.get("symbol") or "").strip()
             contracts = raw.get("contracts")
+            info = raw.get("info") if isinstance(raw.get("info"), dict) else {}
             if contracts is None:
-                contracts = raw.get("info", {}).get("positionAmt")
-            if not symbol or contracts is None:
-                continue
-            qty = float(contracts)
+                contracts = info.get("positionAmt")
+            if not symbol:
+                raise RuntimeError("Exchange position reconciliation received a row without a symbol")
+            if contracts is None:
+                raise RuntimeError(f"Exchange position {symbol} has no explicit quantity; refusing to report reconciliation success")
+            try:
+                qty = float(contracts)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise RuntimeError(f"Exchange position {symbol} has an invalid quantity") from exc
+            if not Decimal(str(qty)).is_finite():
+                raise RuntimeError(f"Exchange position {symbol} has a non-finite quantity")
             if qty == 0:
                 continue
             side = str(raw.get("side") or "").lower()
@@ -1779,15 +1789,29 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
     return {"results": results, "account": account, "reconciliation": reconciliation_meta}
 
 
-def _position_amount_from_exchange_row(row: dict[str, Any]) -> float:
-    for key in ("contracts", "contractSize", "amount", "quantity"):
-        value = row.get(key)
-        if value is not None:
-            try:
-                return abs(float(value))
-            except (TypeError, ValueError):
-                continue
-    return 0.0
+def _position_amount_from_exchange_row(row: dict[str, Any]) -> float | None:
+    """Extract an explicit open-position quantity, never a contract-size multiplier.
+
+    None means the exchange row cannot be interpreted safely; zero means the provider
+    explicitly reported no exposure. Emergency-stop callers must distinguish those states.
+    """
+    if not isinstance(row, dict):
+        return None
+    info = row.get("info") if isinstance(row.get("info"), dict) else {}
+    for value in (row.get("contracts"), info.get("positionAmt"), row.get("amount"), row.get("quantity")):
+        if value is None:
+            continue
+        try:
+            exact = Decimal(str(value).strip())
+        except (TypeError, ValueError, ArithmeticError):
+            return None
+        if not exact.is_finite():
+            return None
+        amount = float(abs(exact))
+        if amount == float("inf"):
+            return None
+        return amount
+    return None
 
 
 def _position_side_from_exchange_row(row: dict[str, Any]) -> str:
@@ -1806,10 +1830,19 @@ async def _flatten_exchange_positions(broker: Any, scope: str, failures: list[di
         failures.append({"scope": scope, "error": f"Unable to read open positions for flattening: {exc}"})
         return
     for row in rows or []:
-        symbol = str(row.get("symbol") or "")
+        if not isinstance(row, dict):
+            failures.append({"scope": scope, "error": "Exchange returned a malformed position row; cannot confirm exposure is flat"})
+            continue
+        symbol = str(row.get("symbol") or "").strip()
         amount = _position_amount_from_exchange_row(row)
         side = _position_side_from_exchange_row(row)
-        if not symbol or amount <= 0:
+        if not symbol:
+            failures.append({"scope": scope, "error": "Exchange position row has no symbol; cannot confirm exposure is flat"})
+            continue
+        if amount is None:
+            failures.append({"scope": scope, "symbol": symbol, "error": "Open-position quantity is missing or invalid; refusing to assume flat or submit a guessed flatten quantity"})
+            continue
+        if amount <= 0:
             continue
         if side not in {"long", "short"}:
             failures.append({"scope": scope, "symbol": symbol, "error": "Open position has no unambiguous long/short side; refusing to submit a flattening order"})
@@ -1822,9 +1855,17 @@ async def _flatten_exchange_positions(broker: Any, scope: str, failures: list[di
             failures.append({"scope": scope, "symbol": symbol, "error": f"Reduce-only flatten failed: {exc}"})
     try:
         remaining = await asyncio.to_thread(broker.fetch_positions)
-        unresolved = [str(row.get("symbol") or "") for row in remaining or [] if str(row.get("symbol") or "") and _position_amount_from_exchange_row(row) > 0]
+        unresolved = []
+        for row in remaining or []:
+            if not isinstance(row, dict):
+                unresolved.append("<malformed-position-row>")
+                continue
+            symbol = str(row.get("symbol") or "").strip()
+            amount = _position_amount_from_exchange_row(row)
+            if not symbol or amount is None or amount > 0:
+                unresolved.append(symbol or "<missing-symbol>")
         if unresolved:
-            failures.append({"scope": scope, "error": f"Positions remain after reduce-only flatten: {unresolved[:20]}"})
+            failures.append({"scope": scope, "error": f"Positions remain or could not be verified after reduce-only flatten: {unresolved[:20]}"})
     except Exception as exc:
         failures.append({"scope": scope, "error": f"Unable to verify positions after flattening: {exc}"})
 
@@ -2050,20 +2091,20 @@ async def emergency_stop(exchange: str | None = None):
                 if spot_positions is not None:
                     unresolved_spot = []
                     for position in spot_positions or []:
-                        symbol = str(position.get("symbol") or position.get("info", {}).get("symbol") or "")
-                        contracts = position.get("contracts")
-                        if contracts is None:
-                            contracts = position.get("contractSize")
-                        try:
-                            exposure = float(contracts or 0.0)
-                        except (TypeError, ValueError):
-                            exposure = 0.0
-                        if symbol and exposure != 0.0:
+                        if not isinstance(position, dict):
+                            unresolved_spot.append({"symbol": "<malformed-position-row>", "quantity": "UNKNOWN"})
+                            continue
+                        info = position.get("info") if isinstance(position.get("info"), dict) else {}
+                        symbol = str(position.get("symbol") or info.get("symbol") or "").strip()
+                        exposure = _position_amount_from_exchange_row(position)
+                        if not symbol or exposure is None:
+                            unresolved_spot.append({"symbol": symbol or "<missing-symbol>", "quantity": "UNKNOWN"})
+                        elif exposure > 0:
                             unresolved_spot.append({"symbol": symbol, "quantity": exposure})
                     if unresolved_spot:
                         failures.append({
                             "scope": "platform_exchange_spot",
-                            "error": "Unflattened platform spot positions remain",
+                            "error": "Unflattened or unverifiable platform spot positions remain",
                             "positions": unresolved_spot[:50],
                         })
 
