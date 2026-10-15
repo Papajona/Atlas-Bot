@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 def _configure_test_calibration(monkeypatch, directory, exchange, symbol):
     from app.config import settings
-    from app.strategy_engine import PROFILES
+    from app.trading_core import PROFILES
 
     evidence = {
         "schema": "atlas-paper-execution-calibration-v1",
