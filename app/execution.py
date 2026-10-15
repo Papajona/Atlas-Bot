@@ -1598,7 +1598,7 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
                 order = next((o for o in opens if str(o.get("clientOrderId") or o.get("info", {}).get("clientOrderId") or "") == trade_client_order_id), None)
                 if order is None:
                     history = await asyncio.to_thread(broker.fetch_orders, symbol)
-                    order = next((o for o in history if str(o.get("clientOrderId") or o.get("info", {}).get("clientOrderId") or "") == client_order_id), None)
+                    order = next((o for o in history if str(o.get("clientOrderId") or o.get("info", {}).get("clientOrderId") or "") == trade_client_order_id), None)
             if order is None:
                 async with SessionLocal() as incident_db:
                     unresolved_trade = await incident_db.get(Trade, trade_id)
