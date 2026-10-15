@@ -280,7 +280,7 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
 
 def test_strategy_backtest_reports_next_open_execution_model():
     result = strategy_backtest(sample_df(), taker_bps=0, slippage_bps=0)
-    assert result["backtest_model"].startswith("next-open execution")
+    assert result["backtest_model"].startswith("Research backtest with next-open entries")
 
 
 def test_ai_walk_forward_trial_registry_requires_verified_archive(monkeypatch):
@@ -311,3 +311,22 @@ def test_ai_walk_forward_trial_registry_requires_verified_archive(monkeypatch):
     )
     assert verified["trial_registry_complete"] is True
     assert verified["trial_registry_evidence_verified"] is True
+
+
+def test_staging_adaptive_model_fails_closed_without_carry_evidence(tmp_path, monkeypatch):
+    from app import adaptive_bot
+
+    model_path = tmp_path / "model.joblib"
+    monkeypatch.setattr(adaptive_bot.settings, "environment", "staging", raising=False)
+    monkeypatch.setattr(adaptive_bot.settings, "research_carry_bps_per_bar", None, raising=False)
+    monkeypatch.setattr(adaptive_bot.settings, "research_carry_evidence_source", "", raising=False)
+    monkeypatch.setattr(adaptive_bot.settings, "research_carry_evidence_id", "", raising=False)
+
+    def unexpected_walk_forward(*args, **kwargs):
+        raise AssertionError("walk-forward/promotion must not run without carry evidence")
+
+    monkeypatch.setattr(adaptive_bot, "ai_walk_forward_backtest", unexpected_walk_forward)
+    result = adaptive_bot.ensure_adaptive_model(sample_df(900), str(model_path))
+    assert result["status"] == "VALIDATION_UNAVAILABLE"
+    assert result["financing_cost_model_complete"] is False
+    assert not model_path.exists()
