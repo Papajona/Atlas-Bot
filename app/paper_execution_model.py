@@ -44,22 +44,76 @@ def _valid_evidence_id(value: Any) -> bool:
     return all(character in "0123456789abcdefABCDEF" for character in digest)
 
 
-def _calibration_evidence_matches(source: Any, path: Any, evidence_id: Any) -> bool:
-    """Verify that the configured calibration artifact actually matches its SHA-256 ID."""
+def _calibration_evidence_matches(
+    source: Any,
+    path: Any,
+    evidence_id: Any,
+    market_context: Any,
+    *,
+    allow_test_fixture: bool = False,
+) -> bool:
+    """Verify the artifact hash, schema, source-data identity and supported market.
+
+    A matching SHA-256 digest proves file identity only; the artifact contract also
+    records provenance and the venue/symbols covered by the calibration.
+    """
     source_value = str(source or "").strip()
     path_value = str(path or "").strip()
     raw_id = str(evidence_id or "").strip()
     if not source_value or not path_value or not _valid_evidence_id(raw_id):
+        return False
+    if not isinstance(market_context, Mapping):
         return False
     expected = raw_id.removeprefix("sha256:").lower()
     try:
         evidence_path = Path(path_value)
         if not evidence_path.is_file():
             return False
-        actual = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
-    except (OSError, ValueError):
+        artifact_bytes = evidence_path.read_bytes()
+        actual = hashlib.sha256(artifact_bytes).hexdigest()
+        if not hmac.compare_digest(actual, expected):
+            return False
+        import json
+        artifact = json.loads(artifact_bytes.decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
         return False
-    return hmac.compare_digest(actual, expected)
+    if not isinstance(artifact, dict):
+        return False
+    if artifact.get("schema") != "atlas-paper-execution-calibration-v1":
+        return False
+    if artifact.get("fixture_only") is True and not allow_test_fixture:
+        return False
+    if artifact.get("fixture_only") not in {True, False}:
+        return False
+    if not str(artifact.get("provenance_source") or "").strip():
+        return False
+    if not str(artifact.get("calibration_method") or "").strip():
+        return False
+    dataset_hash = str(artifact.get("dataset_sha256") or "").strip().removeprefix("sha256:")
+    if len(dataset_hash) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in dataset_hash):
+        return False
+    counts = artifact.get("observation_counts")
+    if not isinstance(counts, dict):
+        return False
+    for name in ("fills", "latency", "order_outcomes"):
+        count = counts.get(name)
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            return False
+    supported = artifact.get("supported_markets")
+    if not isinstance(supported, list) or not supported:
+        return False
+    target_exchange = str(market_context.get("exchange") or "").strip().lower()
+    target_symbol = str(market_context.get("symbol") or "").strip()
+    target_type = str(market_context.get("market_type") or "").strip().lower()
+    if not target_exchange or not target_symbol or target_type != "spot":
+        return False
+    market_key = f"{target_exchange}:{target_symbol}".lower()
+    normalized_markets = {
+        str(item).strip().lower()
+        for item in supported
+        if isinstance(item, str) and str(item).strip()
+    }
+    return market_key in normalized_markets
 
 
 def _latency_from_quantiles(
@@ -95,11 +149,15 @@ def calibrated_model_available(
     evidence_source: str,
     evidence_path: str,
     evidence_id: str,
+    allow_test_fixture: bool = False,
 ) -> bool:
     """Require every fill, rejection, and latency assumption plus its evidence identity."""
     if not isinstance(market_context, Mapping):
         return False
-    if not _calibration_evidence_matches(evidence_source, evidence_path, evidence_id):
+    if not _calibration_evidence_matches(
+        evidence_source, evidence_path, evidence_id, market_context,
+        allow_test_fixture=allow_test_fixture,
+    ):
         return False
     try:
         _finite(market_context.get("tradable_volume_units"), "tradable_volume_units", strictly_positive=True)
@@ -144,6 +202,7 @@ def estimate_paper_fill(
     evidence_source: str,
     evidence_path: str,
     evidence_id: str,
+    allow_test_fixture: bool = False,
 ) -> dict[str, Any]:
     """Estimate a bar-volume-capped fill with calibrated latency/rejection assumptions.
 
@@ -162,9 +221,13 @@ def estimate_paper_fill(
     evidence = str(evidence_id or "").strip()
     if not key:
         raise PaperExecutionModelError("a stable order_key is required for reproducible simulation")
-    if not _calibration_evidence_matches(source, evidence_path_value, evidence):
+    if not _calibration_evidence_matches(
+        source, evidence_path_value, evidence, market_context,
+        allow_test_fixture=allow_test_fixture,
+    ):
         raise PaperExecutionModelError(
-            "calibration source, readable evidence artifact path, and matching SHA-256 evidence ID are required"
+            "calibration artifact must have a matching SHA-256 digest, the required schema/provenance, "
+            "positive calibration observation counts, and coverage for this active spot market"
         )
 
     quantity = _finite(requested_quantity, "requested_quantity", strictly_positive=True)
