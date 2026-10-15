@@ -4549,7 +4549,7 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
         gate["validation_available"] = not validation_unavailable
         if validation_unavailable:
             gate["validation_unavailable_reason"] = "COMPLETE_COMPARABLE_TRIAL_HISTORY_AND_DEFLATED_SHARPE_REQUIRED"
-        gate["robustness_monte_carlo"]=monte_carlo_bootstrap([float(x.get("total_return",0)) for x in (oos.get("folds") or [])],trials=500)
+        gate["robustness_monte_carlo"]=monte_carlo_bootstrap([float(x) for x in (oos.get("oos_return_sample") or [])],trials=500)
         passed=(not validation_unavailable and gate["sharpe"]>=settings.adaptive_min_sharpe and gate["max_drawdown"]>=-abs(settings.adaptive_max_drawdown) and gate["trades"]>=settings.adaptive_min_trades and gate["total_return"]>=settings.adaptive_min_total_return and oos_gate["passed"])
     except Exception as exc:
         result={"status":"ERROR","error":str(exc)}; gate={"validation_available":False,"validation_unavailable_reason":"RESEARCH_VALIDATION_ERROR"}; passed=False; oos={}; validation_unavailable=True

@@ -256,6 +256,9 @@ def fixed_signal_walk_forward_oos(
         "oos_bars": int(len(values)),
         "oos_total_return": float(np.prod(1.0 + values) - 1.0),
         "oos_mean_return": mean_return,
+        # Use actual held-out bar returns for robustness resampling; fold aggregates
+        # are too few observations for a meaningful Monte Carlo check.
+        "oos_return_sample": values[-5000:].tolist(),
         "sharpe": sharpe,
         "max_drawdown": max_drawdown,
         "trades": trades,
