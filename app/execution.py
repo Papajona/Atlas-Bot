@@ -26,6 +26,7 @@ from .research_validation import edge_decay_check
 from .ids import make_signal_id, client_order_id
 from .audit_chain import record_audit
 from .live_fees import extract_order_fee_quote_decimal, ESTIMATED
+from .paper_execution_model import estimate_paper_slippage, adverse_fill_price
 from .customer_funds import record_ledger_incident
 from .distributed import acquire_lock, release_lock
 
@@ -1187,6 +1188,11 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             if asset in {"forex", "commodity"} and forex_live and settings.oanda_practice:
                 raise RiskBlocked("OANDA practice mode is enabled; live Forex is locked")
             mode = "FOREX_DEMO" if forex_demo else ("LIVE" if live else "PAPER")
+            if mode == "PAPER" and asset not in PROFILES:
+                raise RiskBlocked(
+                    f"No explicit paper execution cost profile is configured for asset class {asset!r}; "
+                    "refusing to reuse another asset class's fee/slippage assumptions"
+                )
             trading_account_id = account.id if account is not None else None
             risk_equity = float(account.equity if account is not None else s.equity)
 
@@ -1311,6 +1317,21 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
         if governor.action != "ALLOW":
             raise RiskBlocked("Risk Governor blocked order: " + ",".join(governor.reasons))
         await risk_gate(symbol, quote, quantity, live=live, signal_timestamp=signal_timestamp, side=side, customer_id=customer_id, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, signal_id=signal_id)
+        paper_execution_model = None
+        if mode == "PAPER":
+            profile = PROFILES[asset]
+            paper_context = (signal or {}).get("paper_execution_context")
+            try:
+                paper_execution_model = estimate_paper_slippage(
+                    side=side,
+                    quantity=quantity,
+                    base_slippage_bps=profile.slippage_bps,
+                    context=paper_context if isinstance(paper_context, dict) else None,
+                    impact_coefficient=settings.paper_market_impact_coefficient,
+                    max_market_impact_bps=settings.paper_max_market_impact_bps,
+                )
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise RiskBlocked("Paper execution cost model rejected invalid market context") from exc
         trade_id, created = await _create_trade(
             symbol, timeframe, side, quantity, quote, exchange, mode, signal, signal_id, cid,
             stop_loss_price or 0.0, take_profit_price or 0.0, customer_id=customer_id, trading_account_id=trading_account_id,
@@ -1383,9 +1404,17 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 t = await db.get(Trade, trade_id)
                 if t.status == "SIMULATED":
                     return {"duplicate": True, "trade_id": t.id, "mode": t.mode, "status": t.status}
-                profile = PROFILES.get(asset, PROFILES["crypto"])
-                modeled_fill = quote * (1 + profile.slippage_bps / 10_000) if side == "buy" else quote * (1 - profile.slippage_bps / 10_000)
+                profile = PROFILES[asset]
+                if not isinstance(paper_execution_model, dict):
+                    raise RuntimeError("Paper slippage model was not initialized before trade creation")
+                modeled_fill = adverse_fill_price(
+                    quote, side, float(paper_execution_model["modeled_slippage_bps"])
+                )
                 fee = quantity * modeled_fill * (profile.taker_bps / 10_000)
+                t.reason = json.dumps(
+                    {**signal, "paper_execution_model": paper_execution_model},
+                    default=str,
+                )
                 t.status = "SIMULATED"
                 t.filled_quantity = quantity
                 t.remaining_quantity = 0
@@ -1402,9 +1431,22 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     s.cash_equity = max(0.0, s.cash_equity - fee)
                 await db.commit()
             await mark_paper_equity({symbol: quote}, customer_id=customer_id)
-            await audit("PAPER_ORDER", {"trade_id": trade_id, "signal_id": signal_id, "client_order_id": cid,
-                                        "symbol": symbol, "side": side, "quantity": quantity})
-            return {"duplicate": False, "trade_id": trade_id, "mode": "PAPER", "status": "SIMULATED", "price": quote}
+            await audit("PAPER_ORDER", {
+                "trade_id": trade_id, "signal_id": signal_id, "client_order_id": cid,
+                "symbol": symbol, "side": side, "quantity": quantity,
+                "reference_price": quote, "modeled_fill_price": modeled_fill,
+                "modeled_slippage_bps": paper_execution_model["modeled_slippage_bps"],
+                "impact_model_status": paper_execution_model["status"],
+                "impact_inputs_complete": paper_execution_model["impact_inputs_complete"],
+                "calibration_status": paper_execution_model["calibration_status"],
+            })
+            return {
+                "duplicate": False, "trade_id": trade_id, "mode": "PAPER",
+                "status": "SIMULATED", "price": quote,
+                "average_fill_price": modeled_fill,
+                "modeled_slippage_bps": paper_execution_model["modeled_slippage_bps"],
+                "paper_execution_model": paper_execution_model,
+            }
 
         if broker is None:
             raise RuntimeError("Live broker was not initialized after execution preflight")
