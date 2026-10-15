@@ -41,6 +41,7 @@ class Broker:
         self._market_data_failure_threshold = 3
         self._market_data_cooldown_seconds = 15.0
         self._market_data_open_until = 0.0
+        self._market_data_alert_pending = False
         # Per-call cancellation errors are consumed by emergency-stop reporting.
         self.last_cancel_errors: list[dict[str, str]] = []
 
@@ -113,6 +114,7 @@ class Broker:
                 if self._market_data_failure_count >= self._market_data_failure_threshold:
                     self._market_data_open_until = time.monotonic() + self._market_data_cooldown_seconds
                     self._market_data_failure_count = 0
+                    self._market_data_alert_pending = True
                     logging.getLogger(__name__).warning(
                         "market_data_circuit_open exchange=%s cooldown_seconds=%.1f error_type=%s",
                         self.config.exchange_id, self._market_data_cooldown_seconds, type(exc).__name__,
@@ -121,6 +123,13 @@ class Broker:
             self._market_data_failure_count = 0
             self._market_data_open_until = 0.0
             return quote
+
+    def consume_market_data_circuit_alert(self) -> bool:
+        """Consume the one-shot signal that the quote circuit has newly opened."""
+        with self._read_lock:
+            pending = bool(self._market_data_alert_pending)
+            self._market_data_alert_pending = False
+            return pending
 
     def market_info(self, symbol: str) -> dict[str, Any]:
         with self._read_lock:
