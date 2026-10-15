@@ -7,9 +7,10 @@ def sample_df(n=700):
     rng = np.random.default_rng(7)
     rets = 0.00015 + rng.normal(0, 0.002, n)
     close = 100 * np.exp(np.cumsum(rets))
-    high = close * (1 + np.abs(rng.normal(0, 0.0015, n)))
-    low = close * (1 - np.abs(rng.normal(0, 0.0015, n)))
     open_ = close * (1 + rng.normal(0, 0.0005, n))
+    # Synthetic OHLC must be structurally valid: high/low envelop both open and close.
+    high = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, 0.0015, n)))
+    low = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, 0.0015, n)))
     volume = rng.lognormal(10, 0.2, n)
     return pd.DataFrame({"open":open_, "high":high, "low":low, "close":close, "volume":volume}, index=idx)
 
