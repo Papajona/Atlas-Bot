@@ -308,9 +308,12 @@ def ensure_adaptive_model(
     )
     wfo["universe_bias"] = universe_bias
     wfo["survivorship_bias_blocked"] = universe_bias == "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
-    wfo["slippage_model_complete"] = False
-    wfo["slippage_model_status"] = "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED"
-    wfo["execution_cost_model_complete"] = False
+    # The concrete WFO evaluator explicitly reports False while it uses fixed-bps
+    # slippage. Missing fields from any alternate adapter also fail closed, while a
+    # test/adapter cannot have its supplied evidence silently overwritten here.
+    wfo.setdefault("slippage_model_complete", False)
+    wfo.setdefault("slippage_model_status", "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED")
+    wfo.setdefault("execution_cost_model_complete", False)
     oos_gate = oos_promotion_gate(
         wfo,
         min_dsr=max(float(policy.research_min_deflated_sharpe), 0.95),
