@@ -48,9 +48,9 @@ def test_oos_gate_missing_required_metrics_fails_closed():
 def test_walk_forward_fold_returns_are_shifted():
     source = _source("app/trading_core.py")
     assert "fold_position = np.r_[0, sig[:-1]]" in source
-    assert "fold_position = np.r_[0, sig[:-1]]" in source
-    assert "fold_gross = fold_position * fold_ret" in source
-    assert "fold_net = fold_gross - fold_turnover *" in source
+    assert "simulate_execution_aware_strategy(" in source
+    assert 'fold_gross = fold_position * execution["market_returns"].to_numpy(dtype=float)' in source
+    assert 'fold_net = execution["net_returns"].to_numpy(dtype=float)' in source
 
 
 def test_customer_live_venue_is_locked_to_binance_spot():
