@@ -27,6 +27,7 @@ The following paper-impact configuration is intentionally unset by default:
 - `PAPER_EXECUTION_LATENCY_MAX_MS`
 - `PAPER_LATENCY_IMPACT_COEFFICIENT`
 - `PAPER_EXECUTION_EVIDENCE_SOURCE`
+- `PAPER_EXECUTION_EVIDENCE_PATH`
 - `PAPER_EXECUTION_EVIDENCE_ID`
 
 The internal `paper_market_context` must include:
@@ -36,7 +37,7 @@ The internal `paper_market_context` must include:
 - `recent_volatility_bps`: recent realized volatility in basis points;
 - `bar_duration_ms`: the duration of the candle used to estimate the recent volatility.
 
-These values must come from a server-validated market-data path. They must not be trusted if supplied unchecked by a client. The model coefficients, participation ceiling, rejection probability, latency quantiles and evidence identifiers must be calibrated and reviewed before staging use. The evidence ID must be a SHA-256 digest of the exact calibration artifact (with an optional `sha256:` prefix). Placeholder values or a CI fixture do not establish a real venue calibration.
+These values must come from a server-validated market-data path. They must not be trusted if supplied unchecked by a client. The model coefficients, participation ceiling, rejection probability, latency quantiles and evidence identifiers must be calibrated and reviewed before staging use. The evidence path must point to a readable calibration artifact; the evidence ID must be its actual SHA-256 digest (with an optional `sha256:` prefix). Placeholder values or a CI fixture do not establish real venue calibration.
 
 ## Limitations that remain open
 
