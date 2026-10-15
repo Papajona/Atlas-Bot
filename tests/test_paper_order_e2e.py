@@ -19,6 +19,12 @@ def encryption_key(monkeypatch):
     monkeypatch.setattr(settings, "discipline_entry_cooldown_seconds", 0)
     monkeypatch.setattr(settings, "paper_impact_max_participation_rate", 0.10)
     monkeypatch.setattr(settings, "paper_impact_coefficient", 0.5)
+    monkeypatch.setattr(settings, "paper_execution_rejection_probability", 0.0)
+    monkeypatch.setattr(settings, "paper_execution_latency_min_ms", 10.0)
+    monkeypatch.setattr(settings, "paper_execution_latency_median_ms", 20.0)
+    monkeypatch.setattr(settings, "paper_execution_latency_p95_ms", 50.0)
+    monkeypatch.setattr(settings, "paper_execution_latency_max_ms", 100.0)
+    monkeypatch.setattr(settings, "paper_latency_impact_coefficient", 0.1)
     monkeypatch.setattr(settings, "paper_execution_evidence_source", "unit-test-calibration-fixture")
     monkeypatch.setattr(settings, "paper_execution_evidence_id", "sha256:test-fixture")
 
@@ -36,6 +42,7 @@ def test_paper_buy_then_sell_round_trip():
             "tradable_volume_units": 10.0,
             "spread_bps": 2.0,
             "recent_volatility_bps": 30.0,
+            "bar_duration_ms": 3_600_000,
         }
         buy = await execution.execute_signal(
             sym, "buy", 0.01, 50000.0,
