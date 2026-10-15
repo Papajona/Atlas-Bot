@@ -1325,13 +1325,15 @@ async def advance_paper_orders(
                             old_notional = float(trade.notional or 0.0)
                             old_fee = float(trade.fee or 0.0)
                             old_average = float(trade.average_fill_price or 0.0)
+                            # Include this fill's fee while realized-outcome accounting
+                            # runs inside _apply_fill_to_position.
+                            trade.fee = old_fee + fee
                             await _apply_fill_to_position(db, trade, new_filled, fill_price)
                             trade.average_fill_price = (
                                 (old_average * old_filled + fill_price * actual_delta) / new_filled
                                 if new_filled > 0 else 0.0
                             )
                             trade.notional = old_notional + actual_delta * fill_price
-                            trade.fee = old_fee + fee
                             trade.remaining_quantity = max(0.0, float(event["remaining_quantity"]))
                             if trade.remaining_quantity <= max(1e-12, float(trade.requested_quantity or 0.0) * 1e-12):
                                 trade.remaining_quantity = 0.0
