@@ -1147,9 +1147,12 @@ async def advance_paper_orders(
     """Advance platform-only paper orders from new completed market bars.
 
     This function never calls a broker and excludes customer trades. It applies one
-    aggregate bar-volume participation budget per exchange/symbol/bar to prevent many
-    simultaneous orders each claiming the same liquidity.
+    aggregate bar-volume participation budget per exchange/symbol/timeframe/bar and processes
+    all matching orders together. Truncating this set can let later retries spend the same
+    candle's liquidity twice. max_orders is retained for call compatibility.
     """
+    if isinstance(max_orders, bool) or int(max_orders) < 1:
+        raise ValueError("max_orders must be a positive integer")
     snapshots: dict[tuple[str, str, str], dict[str, Any]] = {}
     for item in market_snapshots:
         if not isinstance(item, dict):
@@ -1176,6 +1179,12 @@ async def advance_paper_orders(
     used_capacity: dict[tuple[str, str, str, str], float] = {}
     checked = 0
     async with SessionLocal() as db:
+        matching_markets = [
+            (Trade.exchange == item["exchange"])
+            & (Trade.symbol == item["symbol"])
+            & (Trade.timeframe == item["timeframe"])
+            for item in snapshots.values()
+        ]
         query = (
             select(Trade)
             .where(
@@ -1183,9 +1192,9 @@ async def advance_paper_orders(
                 Trade.customer_id.is_(None),
                 Trade.status.in_(["OPEN", "PARTIAL"]),
                 Trade.remaining_quantity > 0,
+                or_(*matching_markets),
             )
             .order_by(Trade.created_at, Trade.id)
-            .limit(max(1, min(int(max_orders), 1000)))
             .with_for_update()
         )
         trades = (await db.execute(query)).scalars().all()
