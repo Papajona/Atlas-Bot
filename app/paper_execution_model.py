@@ -49,6 +49,7 @@ def _calibration_evidence_matches(
     path: Any,
     evidence_id: Any,
     market_context: Any,
+    expected_parameters: Mapping[str, Any],
     *,
     allow_test_fixture: bool = False,
 ) -> bool:
@@ -114,7 +115,59 @@ def _calibration_evidence_matches(
         for item in supported
         if isinstance(item, str) and str(item).strip()
     }
-    return market_key in normalized_markets
+    if market_key not in normalized_markets:
+        return False
+
+    parameter_names = (
+        "base_slippage_bps",
+        "max_participation_rate",
+        "impact_coefficient",
+        "rejection_probability",
+        "latency_min_ms",
+        "latency_median_ms",
+        "latency_p95_ms",
+        "latency_max_ms",
+        "latency_impact_coefficient",
+    )
+    if set(expected_parameters) != set(parameter_names):
+        return False
+    try:
+        expected_values = {
+            name: _finite(expected_parameters[name], name)
+            for name in parameter_names
+        }
+    except PaperExecutionModelError:
+        return False
+
+    if fixture_only and allow_test_fixture:
+        parameter_sets = artifact.get("test_parameter_sets")
+        if not isinstance(parameter_sets, list) or not parameter_sets:
+            return False
+    else:
+        single_set = artifact.get("calibration_parameters")
+        if not isinstance(single_set, dict):
+            return False
+        parameter_sets = [single_set]
+
+    for candidate in parameter_sets:
+        if not isinstance(candidate, dict) or set(candidate) != set(parameter_names):
+            continue
+        try:
+            actual_values = {
+                name: _finite(candidate[name], f"artifact.{name}")
+                for name in parameter_names
+            }
+        except PaperExecutionModelError:
+            continue
+        if all(
+            math.isclose(
+                actual_values[name], expected_values[name],
+                rel_tol=1e-12, abs_tol=1e-12,
+            )
+            for name in parameter_names
+        ):
+            return True
+    return False
 
 
 def _latency_from_quantiles(
@@ -139,6 +192,7 @@ def _latency_from_quantiles(
 def calibrated_model_available(
     market_context: Any,
     *,
+    base_slippage_bps: Any,
     max_participation_rate: Any,
     impact_coefficient: Any,
     rejection_probability: Any,
@@ -155,12 +209,24 @@ def calibrated_model_available(
     """Require every fill, rejection, and latency assumption plus its evidence identity."""
     if not isinstance(market_context, Mapping):
         return False
+    expected_parameters = {
+        "base_slippage_bps": base_slippage_bps,
+        "max_participation_rate": max_participation_rate,
+        "impact_coefficient": impact_coefficient,
+        "rejection_probability": rejection_probability,
+        "latency_min_ms": latency_min_ms,
+        "latency_median_ms": latency_median_ms,
+        "latency_p95_ms": latency_p95_ms,
+        "latency_max_ms": latency_max_ms,
+        "latency_impact_coefficient": latency_impact_coefficient,
+    }
     if not _calibration_evidence_matches(
-        evidence_source, evidence_path, evidence_id, market_context,
+        evidence_source, evidence_path, evidence_id, market_context, expected_parameters,
         allow_test_fixture=allow_test_fixture,
     ):
         return False
     try:
+        _finite(base_slippage_bps, "base_slippage_bps", minimum=0.0)
         _finite(market_context.get("tradable_volume_units"), "tradable_volume_units", strictly_positive=True)
         _finite(market_context.get("spread_bps"), "spread_bps", minimum=0.0)
         _finite(market_context.get("recent_volatility_bps"), "recent_volatility_bps", minimum=0.0)
