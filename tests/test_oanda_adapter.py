@@ -215,3 +215,36 @@ def test_oanda_unknown_direct_lookup_is_not_hidden_by_history_fallback():
         broker.find_order_by_client_id("cid-unknown")
     assert len(calls) == 1
     assert calls[0].endswith("/orders/@cid-unknown")
+
+def test_oanda_saturated_order_history_does_not_claim_order_absent():
+    import pytest
+    from app.forex_oanda import OandaBroker, OandaConfig, OandaError, OandaUnknown
+
+    broker = OandaBroker.__new__(OandaBroker)
+    broker.config = OandaConfig("acct", "token", True)
+
+    def fake(method, path, **kwargs):
+        if "/orders/@" in path:
+            raise OandaError("client order lookup returned not found")
+        assert kwargs["params"] == {"count": 3}
+        return {"orders": [{"id": str(i), "clientExtensions": {"id": f"other-{i}"}} for i in range(3)]}
+
+    broker._request = fake
+    with pytest.raises(OandaUnknown, match="reached its 3-record limit"):
+        broker.find_order_by_client_id("cid-missing", count=3)
+
+
+def test_oanda_short_order_history_can_prove_no_matching_order_in_returned_page():
+    from app.forex_oanda import OandaBroker, OandaConfig, OandaError
+
+    broker = OandaBroker.__new__(OandaBroker)
+    broker.config = OandaConfig("acct", "token", True)
+
+    def fake(method, path, **kwargs):
+        if "/orders/@" in path:
+            raise OandaError("client order lookup returned not found")
+        return {"orders": [{"id": "1", "clientExtensions": {"id": "other"}}]}
+
+    broker._request = fake
+    assert broker.find_order_by_client_id("cid-missing", count=3) is None
+

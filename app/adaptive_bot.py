@@ -9,6 +9,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from .trading_core import train_model, ai_walk_forward_backtest, build_features, FEATURE_COLUMNS
+from .config import settings
 from .model_registry import backup_champion, verify_model_file
 from .research_validation import oos_promotion_gate
 
@@ -268,11 +269,34 @@ def ensure_adaptive_model(
             "feature_drift": compute_feature_drift(df, (existing or {}).get("feature_baseline")),
         }
 
+    # Staging/production model promotion requires an explicit instrument/venue carry
+    # assumption. A profile default is useful for diagnostics but is not cost evidence.
+    if str(settings.environment).lower() in {"staging", "production"} and (
+        settings.research_carry_bps_per_bar is None
+        or not str(settings.research_carry_evidence_source or "").strip()
+        or not str(settings.research_carry_evidence_id or "").strip()
+    ):
+        _write_json_atomic(_streak_path(model_path), {
+            "consecutive_passes": 0, "last_result": "VALIDATION_UNAVAILABLE",
+            "evaluated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        return {
+            "status": "VALIDATION_UNAVAILABLE",
+            "model_path": str(model_path),
+            "promotion": "RETAIN_CHAMPION" if model_path.exists() else "NO_MODEL",
+            "reason": "RESEARCH_CARRY_BPS_PER_BAR, RESEARCH_CARRY_EVIDENCE_SOURCE and RESEARCH_CARRY_EVIDENCE_ID are all required; profile defaults are not promotion evidence",
+            "financing_cost_model_complete": False,
+            "intrabar_stop_target_model_complete": False,
+            "policy": asdict(policy),
+            "feature_drift": compute_feature_drift(df, (existing or {}).get("feature_baseline")),
+        }
+
     # Run the exact same walk-forward evaluator used for research before training
     # a deployable candidate. This keeps model promotion tied to OOS evidence.
     wfo = ai_walk_forward_backtest(
         df, asset=asset, folds=folds, min_train=min_train, threshold=threshold,
-        cost_stress_multiplier=policy.research_cost_stress_multiplier
+        cost_stress_multiplier=policy.research_cost_stress_multiplier,
+        carry_bps_per_bar=settings.research_carry_bps_per_bar,
     )
     oos_gate = oos_promotion_gate(
         wfo,
@@ -287,12 +311,18 @@ def ensure_adaptive_model(
         max_drawdown=max(float(policy.max_drawdown), -0.20),
         min_trades=max(int(policy.min_trades), 100),
     )
+    execution_evidence_required = str(settings.environment).lower() in {"staging", "production"}
+    execution_evidence_complete = (
+        wfo.get("financing_cost_model_complete") is True
+        and wfo.get("intrabar_stop_target_model_complete") is True
+    )
     absolute_pass = (
         wfo.get("sharpe", 0.0) >= policy.min_sharpe
         and wfo.get("max_drawdown", -1.0) >= policy.max_drawdown
         and wfo.get("trades", 0) >= policy.min_trades
         and wfo.get("total_return", -1.0) > policy.min_total_return
         and oos_gate.get("passed", False)
+        and (execution_evidence_complete or not execution_evidence_required)
     )
     incumbent = (existing or {}).get("walk_forward_gate") or {}
     incumbent_exists = bool(existing and existing.get("status") == "CHAMPION" and incumbent)
@@ -317,6 +347,10 @@ def ensure_adaptive_model(
         "max_drawdown": float(wfo.get("max_drawdown", -1.0)),
         "trades": int(wfo.get("trades", 0)),
         "total_return": float(wfo.get("total_return", -1.0)),
+        "financing_cost_model_complete": wfo.get("financing_cost_model_complete") is True,
+        "intrabar_stop_target_model_complete": wfo.get("intrabar_stop_target_model_complete") is True,
+        "execution_evidence_required": execution_evidence_required,
+        "execution_evidence_complete": execution_evidence_complete,
         "oos_gate": oos_gate,
     }
 

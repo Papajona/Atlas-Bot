@@ -366,7 +366,13 @@ def promotion_gate_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         raw_folds = metrics.get("folds")
     normalized["folds"] = list(raw_folds) if isinstance(raw_folds, (list, tuple)) else []
     cost = metrics.get("cost_analysis")
-    normalized["cost_stress_ok"] = bool(isinstance(cost, dict) and cost.get("stress_ok") is True)
+    normalized["cost_stress_ok"] = bool(
+        isinstance(cost, dict)
+        and cost.get("stress_ok") is True
+        and metrics.get("financing_cost_model_complete") is True
+        and metrics.get("intrabar_stop_target_model_complete") is True
+        and metrics.get("execution_cost_model_complete") is True
+    )
     return normalized
 
 
@@ -388,10 +394,14 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("Approved taker/slippage/carry assumptions must be finite and non-negative")
     if args.max_hold_bars < 1:
         raise ValueError("max_hold_bars must be a positive integer")
+    if not str(args.carry_evidence_source or "").strip() or not str(args.carry_evidence_id or "").strip():
+        raise ValueError("A carry evidence source and evidence ID are required; numeric carry alone is not promotion evidence")
     evaluation_assumptions = {
         "bars_per_year": int(provenance["bars_per_year"]),
         **{key: float(value) for key, value in cost_values.items()},
         "max_hold_bars": int(args.max_hold_bars),
+        "carry_evidence_source": str(args.carry_evidence_source).strip(),
+        "carry_evidence_id": str(args.carry_evidence_id).strip(),
     }
     provenance["evaluation_assumptions"] = evaluation_assumptions
     trial_sharpes, trial_evidence = load_complete_trial_history(
@@ -423,6 +433,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         threshold=args.threshold,
         cost_stress_multiplier=args.cost_stress_multiplier,
         research_trial_sharpes=trial_sharpes,
+        research_trial_evidence_verified=True,  # only after manifest, archive, and every trial result are hash-verified above
         bars_per_year=evaluation_assumptions["bars_per_year"],
         taker_bps=evaluation_assumptions["taker_bps"],
         slippage_bps=evaluation_assumptions["slippage_bps"],
@@ -477,6 +488,8 @@ def main() -> int:
     parser.add_argument("--taker-bps", type=float, required=True, help="Approved target-venue taker/commission cost in bps per traded notional")
     parser.add_argument("--slippage-bps", type=float, required=True, help="Evidence-backed target-venue slippage assumption in bps")
     parser.add_argument("--carry-bps-per-bar", type=float, required=True, help="Evidence-backed per-bar financing/swap/carry drag in bps; do not assume zero without evidence")
+    parser.add_argument("--carry-evidence-source", required=True, help="Traceable source for the venue/instrument carry schedule; not a secret")
+    parser.add_argument("--carry-evidence-id", required=True, help="Immutable reference/version/hash for the carry schedule; not a secret")
     parser.add_argument("--max-hold-bars", type=int, required=True, help="Approved triple-barrier holding horizon expressed in this dataset's verified candle bars")
     parser.add_argument("--min-total-return", type=float, default=0.0)
     parser.add_argument("--min-sharpe", type=float, default=0.50)

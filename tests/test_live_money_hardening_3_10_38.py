@@ -10,7 +10,10 @@ def test_oos_promotion_gate_rejects_weak_last_fold_and_tail_loss():
     metrics = {
         'status': 'OK', 'oos_total_return': 0.20, 'sharpe': 0.8,
         'max_drawdown': -0.10, 'trades': 150, 'deflated_sharpe': 0.97,
-        'cost_stress_ok': True, 'trial_registry_complete': True,
+        'cost_stress_ok': True,
+        'financing_cost_model_complete': True,
+        'intrabar_stop_target_model_complete': True,
+        'execution_cost_model_complete': True, 'trial_registry_complete': True,
     }
     good = {**metrics, 'folds': [{'total_return': 0.03}, {'total_return': 0.02},
                                  {'total_return': 0.01}, {'total_return': 0.04},

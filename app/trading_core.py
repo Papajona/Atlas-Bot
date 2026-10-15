@@ -12,6 +12,7 @@ from lightgbm import LGBMClassifier
 from .config import settings
 from .research_validation import deflated_sharpe_report, cost_breakeven_report, purged_walk_forward_splits
 from .model_registry import sha256_file, artifact_signature, verify_artifact_signature
+from .execution_aware_research import simulate_execution_aware_strategy
 
 
 @dataclass(frozen=True)
@@ -318,6 +319,7 @@ def ai_walk_forward_backtest(
     slippage_bps: float | None = None,
     carry_bps_per_bar: float | None = None,
     max_hold_bars: int | None = None,
+    research_trial_evidence_verified: bool = False,
 ) -> dict:
     """Chronological OOS backtest using explicit annualization and execution-cost assumptions."""
     try:
@@ -335,7 +337,14 @@ def ai_walk_forward_backtest(
         annualization = int(raw_annualization)
         taker_cost_bps = float(profile.taker_bps if taker_bps is None else taker_bps)
         slippage_cost_bps = float(profile.slippage_bps if slippage_bps is None else slippage_bps)
-        carry_cost_bps = float(profile.carry_bps_per_bar if carry_bps_per_bar is None else carry_bps_per_bar)
+        configured_carry = carry_bps_per_bar
+        if configured_carry is None and settings.research_carry_bps_per_bar is not None:
+            configured_carry = settings.research_carry_bps_per_bar
+        carry_rate_configured = configured_carry is not None
+        carry_evidence_source = str(settings.research_carry_evidence_source or "").strip()
+        carry_evidence_id = str(settings.research_carry_evidence_id or "").strip()
+        carry_evidence_complete = carry_rate_configured and bool(carry_evidence_source) and bool(carry_evidence_id)
+        carry_cost_bps = float(profile.carry_bps_per_bar if configured_carry is None else configured_carry)
         hold_horizon = int(raw_hold_horizon)
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise ValueError("Invalid asset or walk-forward evaluation assumptions") from exc
@@ -384,6 +393,7 @@ def ai_walk_forward_backtest(
     oos_turnover_blocks: list[np.ndarray] = []
     oos_position_blocks: list[np.ndarray] = []
     oos_carry_blocks: list[np.ndarray] = []
+    total_stop_exits = total_target_exits = total_gap_exits = total_ambiguous_bars = 0
     pred_signal = pd.Series(np.nan, index=X.index)
     for fold in split_specs:
         tr = np.arange(fold.train_start, fold.train_end, dtype=int)
@@ -404,18 +414,38 @@ def ai_walk_forward_backtest(
         sig = np.where(score >= threshold, 1, np.where(score <= -threshold, -1, 0))
         pred_signal.iloc[te] = sig
         scores.extend(score.tolist())
-        fold_ret = aligned.close.iloc[te].pct_change().fillna(0).to_numpy()
-        # A signal generated from bar t can only earn the return beginning at t+1.
-        # Using sig[t] * return[t] would leak the realized bar return into OOS metrics.
+        # The model decision and ATR are shifted to use only the prior completed bar.
         fold_position = np.r_[0, sig[:-1]].astype(float)
-        fold_turnover = np.abs(np.diff(np.r_[0, fold_position])).astype(float)
-        # Flatten at the end of each test fold. Without this terminal exit cost, the
-        # reported OOS net returns overstate performance at each fold boundary.
-        if len(fold_turnover):
-            fold_turnover[-1] += abs(fold_position[-1])
-        fold_gross = fold_position * fold_ret
-        fold_carry = np.abs(fold_position) * (carry_cost_bps / 10_000)
-        fold_net = fold_gross - fold_turnover * ((taker_cost_bps + slippage_cost_bps) / 10_000) - fold_carry
+        tr = pd.concat([
+            (aligned["high"] - aligned["low"]).abs(),
+            (aligned["high"] - aligned["close"].shift(1)).abs(),
+            (aligned["low"] - aligned["close"].shift(1)).abs(),
+        ], axis=1).max(axis=1)
+        entry_atr = tr.rolling(14, min_periods=14).mean().shift(1)
+        fold_frame = aligned.iloc[te]
+        fold_targets = pd.Series(fold_position, index=fold_frame.index, dtype=float)
+        execution = simulate_execution_aware_strategy(
+            fold_frame,
+            fold_targets,
+            entry_atr.iloc[te],
+            stop_atr=float(settings.strategy_stop_atr),
+            take_profit_atr=float(settings.strategy_take_profit_atr),
+            transaction_cost_bps=taker_cost_bps + slippage_cost_bps,
+            carry_bps_per_bar=carry_cost_bps,
+            drawdown_limit=settings.strategy_drawdown_halt,
+            daily_loss_limit=settings.strategy_daily_loss_halt,
+            loss_event_threshold=settings.strategy_stoploss_guard_trades,
+            cooldown_bars=settings.strategy_stoploss_guard_bars,
+        )
+        fold_position = execution["positions"].to_numpy(dtype=float)
+        total_stop_exits += int(execution["audit"]["stop_loss_exits"])
+        total_target_exits += int(execution["audit"]["take_profit_exits"])
+        total_gap_exits += int(execution["audit"]["gap_exits"])
+        total_ambiguous_bars += int(execution["audit"]["ambiguous_bars_filled_stop_first"])
+        fold_gross = fold_position * execution["market_returns"].to_numpy(dtype=float)
+        fold_turnover = execution["turnover"].to_numpy(dtype=float)
+        fold_carry = np.abs(fold_position) * (carry_cost_bps / 10_000.0)
+        fold_net = execution["net_returns"].to_numpy(dtype=float)
         oos_net_blocks.append(np.asarray(fold_net, dtype=float))
         oos_gross_blocks.append(np.asarray(fold_gross, dtype=float))
         oos_turnover_blocks.append(np.asarray(fold_turnover, dtype=float))
@@ -480,19 +510,48 @@ def ai_walk_forward_backtest(
         "validation_signal_count": len(scores),
         "prediction_gap_policy": "NO_FORWARD_FILL_ACROSS_NON_TEST_WINDOWS",
         "folds": fold_metrics,
-        "cost_stress_ok": bool(cost_report.get("stress_ok")) if cost_report.get("status") == "OK" else False,
+        "cost_stress_ok": bool(cost_report.get("stress_ok")) and carry_evidence_complete if cost_report.get("status") == "OK" else False,
         "cost_stress_multiplier": float(stress_multiplier),
+        "carry_rate_configured": bool(carry_rate_configured),
+        "carry_evidence_source": carry_evidence_source or None,
+        "carry_evidence_id": carry_evidence_id or None,
+        "financing_cost_model_complete": bool(carry_evidence_complete),
+        "intrabar_stop_target_model_complete": True,
+        "execution_cost_model_complete": bool(carry_evidence_complete),
+        "execution_model": "OHLC_INTRABAR_ATR_STOP_TAKE_PROFIT_NEXT_OPEN",
+        "execution_stop_target_audit": {
+            "stop_loss_exits": int(total_stop_exits),
+            "take_profit_exits": int(total_target_exits),
+            "gap_exits": int(total_gap_exits),
+            "ambiguous_bars_filled_stop_first": int(total_ambiguous_bars),
+            "carry_bps_per_bar": carry_cost_bps,
+            "carry_rate_configured": bool(carry_rate_configured),
+            "carry_evidence_source": carry_evidence_source or None,
+            "carry_evidence_id": carry_evidence_id or None,
+            "carry_evidence_complete": bool(carry_evidence_complete),
+        },
         "research_assumptions": {
             "asset_profile": asset,
             "bars_per_year": annualization,
             "taker_bps": taker_cost_bps,
             "slippage_bps": slippage_cost_bps,
             "carry_bps_per_bar": carry_cost_bps,
+            "carry_rate_configured": bool(carry_rate_configured),
+            "carry_evidence_source": carry_evidence_source or None,
+            "carry_evidence_id": carry_evidence_id or None,
+            "carry_evidence_complete": bool(carry_evidence_complete),
             "max_hold_bars": hold_horizon,
+            "stop_atr": float(settings.strategy_stop_atr),
+            "take_profit_atr": float(settings.strategy_take_profit_atr),
         },
         "cost_analysis": cost_report,
         "research_trial_count": len(research_trial_sharpes) if research_trial_sharpes else 0,
-        "trial_registry_complete": bool(research_trial_sharpes) and dsr_report.get("status") == "OK",
+        "trial_registry_complete": (
+            research_trial_evidence_verified is True
+            and bool(research_trial_sharpes)
+            and dsr_report.get("status") == "OK"
+        ),
+        "trial_registry_evidence_verified": research_trial_evidence_verified is True,
         "research_trial_history_status": dsr_report.get("status"),
         "deflated_sharpe": dsr_report.get("deflated_sharpe_ratio") if dsr_report.get("status") == "OK" else None,
         "deflated_sharpe_status": dsr_report.get("status"),

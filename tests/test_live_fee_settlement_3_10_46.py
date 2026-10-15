@@ -74,7 +74,7 @@ def test_missing_fee_data_is_estimated_charged_and_flagged():
             d, c, q, n = execution._prepare_live_fee(t, {}, 0.1, 60000)
             await execution._post_live_fee(db, t, d, c, q, n)
             await db.commit()
-            assert d == pytest.approx(60000 * 0.1 * 5.5 / 10_000)
+            assert d == Decimal("3.300000")
             flagged = (await db.execute(select(Incident).where(Incident.incident_key == f"LIVE_FEE_ESTIMATED:{t.id}"))).scalar_one()
             assert flagged.severity == "HIGH"
     asyncio.run(with_database(check))

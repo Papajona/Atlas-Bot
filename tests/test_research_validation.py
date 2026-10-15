@@ -51,7 +51,10 @@ def test_oos_and_regime_metrics_are_forward_only_and_finite():
     assert isinstance(out["trades"], int) and out["trades"] >= 0
     assert out["annualization_factor"] == 252.0
     assert out["cost_analysis"]["observations"] == out["oos_bars"]
-    assert out["cost_stress_ok"] is (out["cost_analysis"].get("stress_ok") is True)
+    # Without a supplied carry schedule source and evidence ID, an otherwise green
+    # numerical cost report remains non-promotion-grade financing evidence.
+    assert out["cost_stress_ok"] is False
+    assert out["financing_cost_model_complete"] is False
     regimes = regime_conditioned_performance(df, pd.Series(0.001, index=df.index))
     assert regimes and all(np.isfinite(v["total_return"]) for v in regimes.values())
 
@@ -68,6 +71,9 @@ def test_oos_gate_reports_missing_metrics_and_never_promotes_them():
         "trades": 150,
         "deflated_sharpe": 0.97,
         "cost_stress_ok": True,
+        "financing_cost_model_complete": True,
+        "intrabar_stop_target_model_complete": True,
+        "execution_cost_model_complete": True,
         "trial_registry_complete": True,
     }
     missing_sharpe = dict(strong)
@@ -94,8 +100,28 @@ def test_oos_gate_names_incomplete_trial_registry_as_a_blocker():
         "trades": 120,
         "deflated_sharpe": 0.98,
         "cost_stress_ok": True,
+        "financing_cost_model_complete": True,
+        "intrabar_stop_target_model_complete": True,
+        "execution_cost_model_complete": True,
         "trial_registry_complete": False,
     }
     report = oos_promotion_gate(evidence)
     assert report["passed"] is False
     assert report["rejection_reasons"] == ["comparable_trial_registry_incomplete"]
+
+def test_regime_volatility_uses_observed_intraday_bar_cadence():
+    import pandas as pd
+    from app.research_validation import regime_conditioned_performance
+
+    hourly_index = pd.date_range("2024-01-01", periods=260, freq="h", tz="UTC")
+    daily_index = pd.date_range("2024-01-01", periods=260, freq="D", tz="UTC")
+    hourly_close = pd.Series(np.linspace(100.0, 110.0, len(hourly_index)), index=hourly_index)
+    daily_close = pd.Series(np.linspace(100.0, 110.0, len(daily_index)), index=daily_index)
+    hourly_df = pd.DataFrame({"close": hourly_close})
+    daily_df = pd.DataFrame({"close": daily_close})
+
+    hourly = regime_conditioned_performance(hourly_df, pd.Series(0.001, index=hourly_index), asset="crypto")
+    daily = regime_conditioned_performance(daily_df, pd.Series(0.001, index=daily_index), asset="crypto")
+
+    assert all(row["annualization_factor"] > 8000 for row in hourly.values())
+    assert all(300 <= row["annualization_factor"] <= 400 for row in daily.values())

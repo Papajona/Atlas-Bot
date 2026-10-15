@@ -52,7 +52,7 @@ def test_reservation_failure_terminalizes_precreated_trade():
 
 
 def test_duplicate_trade_returns_fill_for_executor_recovery():
-    duplicate = EXEC[EXEC.index('if not created:'):EXEC.index('reserved_cash = 0.0', EXEC.index('if not created:'))]
+    duplicate = EXEC[EXEC.index('if not created:'):EXEC.index('reserved_cash = Decimal("0")', EXEC.index('if not created:'))]
     assert '"filled": float(existing.filled_quantity or 0.0)' in duplicate
     assert '"remaining_quantity": float(existing.remaining_quantity or 0.0)' in duplicate
     assert '"average_fill_price": float(existing.average_fill_price or 0.0)' in duplicate
@@ -100,8 +100,9 @@ def test_execution_id_scope_separates_autonomous_bots_and_executors():
 def test_trade_persists_exact_cash_reserve_and_slippage_buffer():
     dbsrc = (ROOT / "app" / "db.py").read_text()
     src = (ROOT / "app" / "execution.py").read_text()
-    assert 'reserved_cash: Mapped[float]' in dbsrc
-    assert 'reserve_buffer = max(0.0, float(settings.max_slippage_bps or 0.0)) / 10_000.0' in src
+    assert 'reserved_cash: Mapped[float] = mapped_column(FinancialNumeric' in dbsrc
+    assert 'def _exact_reserved_cash(' in src
+    assert 'price_d * quantity_d * (Decimal("1") + slippage_d / Decimal("10000"))' in src
     assert 'reserved_trade.reserved_cash = reserved_cash' in src
 
 
@@ -138,7 +139,7 @@ def test_customer_live_reconciliation_is_not_tied_to_platform_default_exchange()
     main = (ROOT / "app" / "main.py").read_text()
     assert 'async def reconcile_customer_live_orders' in src
     assert 'Customer live reconciliation is only enabled for Binance isolation' in src
-    assert 'reconcile_customer_live_orders(customer_exchanges)' in main
+    assert 'await reconcile_customer_live_orders(selected)' in main
 
 
 def test_reconciliation_updates_order_command_state():

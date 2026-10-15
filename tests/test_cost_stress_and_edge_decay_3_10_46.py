@@ -47,6 +47,9 @@ def _oos(**extra):
         "trades": 150,
         "deflated_sharpe": 0.97,
         "cost_stress_ok": True,
+        "financing_cost_model_complete": True,
+        "intrabar_stop_target_model_complete": True,
+        "execution_cost_model_complete": True,
         "trial_registry_complete": True,
         **extra,
     }
@@ -107,3 +110,18 @@ def test_invalid_fixed_cost_drag_fails_closed():
     )
     assert report["status"] == "INVALID_COST_INPUT"
     assert report["stress_ok"] is False
+
+
+def test_gate_requires_financing_and_intrabar_execution_evidence():
+    passing = _oos()
+    assert oos_promotion_gate(passing)["passed"] is True
+    required = (
+        "financing_cost_model_complete",
+        "intrabar_stop_target_model_complete",
+        "execution_cost_model_complete",
+    )
+    for key in required:
+        without_evidence = {name: value for name, value in passing.items() if name != key}
+        report = oos_promotion_gate(without_evidence)
+        assert report["passed"] is False
+        assert key.removesuffix("_model_complete") in " ".join(report["rejection_reasons"])

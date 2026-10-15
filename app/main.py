@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 import httpx
 import logging
 import contextlib
@@ -1000,11 +1001,9 @@ async def _run_persisted_adaptive_bot_cycle(
         quantity *= max(0.0, min(1.0, settings.derivatives_elevated_size_multiplier))
     if quantity <= 0:
         return {"decision": "NO_TRADE", "stage": "risk_quantity"}
-    # Cross-asset correlation exposure cap. adjusted_group_exposure() was defined in
-    # correlation_risk.py and imported here but never actually called -- confirmed dead
-    # code in review. Scaled down (not a hard block), the same treatment already used for
-    # derivatives_context ELEVATED state a few lines above, so one correlated bot doesn't
-    # starve every other bot in the same risk group outright.
+    # Apply the portfolio correlation-group cap before submitting this candidate.
+    # This check scales the proposed quantity to remaining headroom; execute_signal()
+    # performs its own authoritative execution/risk-state checks before the broker call.
     async with SessionLocal() as db2:
         open_positions = (await db2.execute(select(Position).where(
             Position.customer_id == profile.id, Position.quantity != 0,
@@ -1481,7 +1480,69 @@ async def _usdt_tron_monitor_loop():
         await asyncio.sleep(poll_seconds)
 
 
+_reconciliation_failure_state: dict[str, dict[str, Any]] = {}
+
+
+async def _record_reconciliation_failure(scope: str, exc: Exception) -> int:
+    """Persist one CRITICAL incident after three consecutive failures per provider scope."""
+    key = str(scope or "").strip().lower()
+    state = _reconciliation_failure_state.setdefault(
+        key, {"consecutive_failures": 0, "episode": 0, "alerted": False, "last_error_type": ""}
+    )
+    if state["consecutive_failures"] == 0:
+        state["episode"] = int(state["episode"]) + 1
+        state["alerted"] = False
+    state["consecutive_failures"] = int(state["consecutive_failures"]) + 1
+    state["last_error_type"] = type(exc).__name__
+    count = int(state["consecutive_failures"])
+    if count >= 3 and not state["alerted"]:
+        try:
+            incident_id = await open_incident(
+                key=f"RECONCILIATION_PROVIDER_FAILURE:{key}:episode:{state['episode']}",
+                severity="CRITICAL",
+                category="RECONCILIATION",
+                summary=f"Repeated {key} reconciliation failures",
+                detail={
+                    "scope": key,
+                    "consecutive_failures": count,
+                    "error_type": type(exc).__name__,
+                    "episode": int(state["episode"]),
+                },
+            )
+            state["alerted"] = incident_id is not None
+        except Exception:
+            # Do not mark the alert delivered when persistence failed. The next failed
+            # poll retries incident creation; raw provider error text is not put in detail.
+            logger.exception("reconciliation_failure_incident_write_failed scope=%s", key)
+    return count
+
+
+async def _record_reconciliation_success(scope: str) -> None:
+    key = str(scope or "").strip().lower()
+    state = _reconciliation_failure_state.setdefault(
+        key, {"consecutive_failures": 0, "episode": 0, "alerted": False, "last_error_type": ""}
+    )
+    prior = int(state["consecutive_failures"])
+    if prior:
+        logger.warning(
+            "reconciliation_provider_recovered scope=%s previous_consecutive_failures=%s",
+            key, prior,
+        )
+        try:
+            await _safe_audit("RECONCILIATION_PROVIDER_RECOVERED", {
+                "scope": key,
+                "previous_consecutive_failures": prior,
+                "episode": int(state["episode"]),
+            })
+        except Exception:
+            logger.exception("reconciliation_recovery_audit_failed scope=%s", key)
+    state["consecutive_failures"] = 0
+    state["alerted"] = False
+    state["last_error_type"] = ""
+
+
 async def _reconciliation_loop():
+    """Reconcile providers independently; repeated failures raise durable incidents."""
     while True:
         await asyncio.sleep(max(15, settings.reconciliation_interval_seconds))
         should_crypto = settings.live_trading_enabled and bool(settings.exchange_api_key and settings.exchange_api_secret)
@@ -1490,24 +1551,33 @@ async def _reconciliation_loop():
         if not (should_crypto or should_oanda):
             _mark_worker_loop_success("reconciliation")
             continue
-        if should_crypto:
+
+        cycle_failures: list[tuple[str, Exception]] = []
+
+        async def run_scope(scope: str, operation) -> None:
             try:
-                await reconcile(settings.default_exchange, settings.default_symbol)
-                await sync_live_account(settings.default_exchange)
-            except Exception:
-                logger.exception("reconciliation_loop: crypto reconcile/equity sync failed (%s/%s)",
-                                  settings.default_exchange, settings.default_symbol)
-        if should_oanda:
-            try:
-                await reconcile("oanda")
-            except Exception:
-                logger.exception("reconciliation_loop: oanda reconcile failed")
-        if should_crypto:
-            try:
-                await enforce_platform_loss_limits()
-            except Exception:
-                logger.exception("reconciliation_loop: platform loss-limit enforcement failed")
-        try:
+                await operation()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                count = await _record_reconciliation_failure(scope, exc)
+                cycle_failures.append((scope, exc))
+                _mark_worker_loop_failure("reconciliation", exc)
+                logger.exception(
+                    "reconciliation_loop_scope_failed scope=%s consecutive_failures=%s",
+                    scope, count,
+                )
+            else:
+                await _record_reconciliation_success(scope)
+
+        async def reconcile_crypto_and_equity() -> None:
+            await reconcile(settings.default_exchange, settings.default_symbol)
+            await sync_live_account(settings.default_exchange)
+
+        async def enforce_loss_limits() -> None:
+            await enforce_platform_loss_limits()
+
+        async def reconcile_customers() -> None:
             async with SessionLocal() as db:
                 customer_exchanges = (await db.execute(
                     select(Trade.exchange).where(
@@ -1515,12 +1585,28 @@ async def _reconciliation_loop():
                         Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
                     ).distinct()
                 )).scalars().all()
-            customer_exchanges = [str(x) for x in customer_exchanges if str(x).strip().lower() == "binance"]
-            if customer_exchanges:
-                await reconcile_customer_live_orders(customer_exchanges)
+            selected = [
+                str(value) for value in customer_exchanges
+                if str(value).strip().lower() == "binance"
+            ]
+            if selected:
+                await reconcile_customer_live_orders(selected)
+
+        if should_crypto:
+            await run_scope("crypto", reconcile_crypto_and_equity)
+            await run_scope("platform-loss-limits", enforce_loss_limits)
+        if should_oanda:
+            await run_scope("oanda", lambda: reconcile("oanda"))
+        await run_scope("customer-live", reconcile_customers)
+
+        if cycle_failures:
+            failed_scopes = sorted({scope for scope, _ in cycle_failures})
+            _mark_worker_loop_failure(
+                "reconciliation",
+                RuntimeError("reconciliation failed for scopes: " + ", ".join(failed_scopes)),
+            )
+        else:
             _mark_worker_loop_success("reconciliation")
-        except Exception:
-            logger.exception("reconciliation_loop: customer live reconciliation failed")
 
 
 
@@ -1591,9 +1677,15 @@ async def _continuous_risk_enforcement_loop():
     while True:
         try:
             breached = []
+            baseline_rolled = False
             async with SessionLocal() as db:
                 state = await db.get(AppState, 1)
+                today_utc = datetime.now(timezone.utc).date()
                 if state:
+                    if state.daily_start_date != today_utc:
+                        state.daily_start_date = today_utc
+                        state.daily_start_equity = state.equity
+                        baseline_rolled = True
                     peak = float(state.peak_equity or state.equity or 0.0)
                     daily_start = float(state.daily_start_equity or state.equity or 0.0)
                     equity = max(0.0, float(state.equity or 0.0))
@@ -1610,6 +1702,10 @@ async def _continuous_risk_enforcement_loop():
                         })
                 accounts = (await db.execute(select(TradingAccount).where(TradingAccount.status != "CLOSED"))).scalars().all()
                 for account in accounts:
+                    if account.daily_start_date != today_utc:
+                        account.daily_start_date = today_utc
+                        account.daily_start_equity = account.equity
+                        baseline_rolled = True
                     peak = float(account.peak_equity or account.equity or 0.0)
                     daily_start = float(account.daily_start_equity or account.equity or 0.0)
                     equity = max(0.0, float(account.equity or 0.0))
@@ -1623,7 +1719,7 @@ async def _continuous_risk_enforcement_loop():
                             "drawdown": drawdown,
                             "daily_loss": daily_loss,
                         })
-                if breached:
+                if breached or baseline_rolled:
                     await db.commit()
 
             if breached:
@@ -4540,19 +4636,32 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
         gate["oos_positive_fold_ratio"]=positive_ratio
         oos_gate=oos_promotion_gate(oos,min_dsr=settings.research_min_deflated_sharpe,require_cost_stress=settings.research_require_cost_stress,min_folds=settings.strategy_oos_min_folds,min_total_return=settings.research_min_oos_total_return,min_positive_fold_ratio=settings.research_min_oos_positive_fold_ratio,max_negative_fold_return=settings.strategy_oos_max_negative_fold_return,require_last_fold_positive=settings.strategy_oos_require_last_fold_positive,min_sharpe=settings.strategy_oos_min_sharpe,max_drawdown=settings.strategy_oos_max_drawdown,min_trades=settings.strategy_oos_min_trades)
         gate["oos_gate"]=oos_gate
-        gate["robustness_monte_carlo"]=monte_carlo_bootstrap([float(x.get("total_return",0)) for x in (oos.get("folds") or [])],trials=500)
-        passed=(gate["sharpe"]>=settings.adaptive_min_sharpe and gate["max_drawdown"]>=-abs(settings.adaptive_max_drawdown) and gate["trades"]>=settings.adaptive_min_trades and gate["total_return"]>=settings.adaptive_min_total_return and oos_gate["passed"])
+        validation_unavailable = (
+            oos.get("status") != "OK"
+            or oos.get("trial_registry_complete") is not True
+            or not isinstance(oos.get("deflated_sharpe"), (int, float))
+            or not math.isfinite(float(oos.get("deflated_sharpe", float("nan"))))
+            or oos.get("financing_cost_model_complete") is not True
+            or oos.get("intrabar_stop_target_model_complete") is not True
+        )
+        gate["validation_available"] = not validation_unavailable
+        if validation_unavailable:
+            gate["validation_unavailable_reason"] = "COMPLETE_COMPARABLE_TRIAL_HISTORY_AND_DEFLATED_SHARPE_REQUIRED"
+        gate["robustness_monte_carlo"]=monte_carlo_bootstrap([float(x) for x in (oos.get("oos_return_sample") or [])],trials=500)
+        passed=(not validation_unavailable and gate["sharpe"]>=settings.adaptive_min_sharpe and gate["max_drawdown"]>=-abs(settings.adaptive_max_drawdown) and gate["trades"]>=settings.adaptive_min_trades and gate["total_return"]>=settings.adaptive_min_total_return and oos_gate["passed"])
     except Exception as exc:
-        result={"status":"ERROR","error":str(exc)}; gate={}; passed=False; oos={}
+        result={"status":"ERROR","error":str(exc)}; gate={"validation_available":False,"validation_unavailable_reason":"RESEARCH_VALIDATION_ERROR"}; passed=False; oos={}; validation_unavailable=True
     async with SessionLocal() as db:
         row=(await db.execute(select(StrategyCandidate).where(StrategyCandidate.id==candidate_id,StrategyCandidate.customer_id==profile.id).with_for_update())).scalar_one()
-        row.backtest_json=json.dumps(result,default=str); row.oos_json=json.dumps(oos,default=str); row.status="VALIDATED" if passed else "REJECTED"; row.live_approved=False
+        row.backtest_json=json.dumps(result,default=str); row.oos_json=json.dumps(oos,default=str)
+        status = "VALIDATED" if passed else ("VALIDATION_UNAVAILABLE" if validation_unavailable else "REJECTED")
+        row.status=status; row.live_approved=False
         # Keep an immutable history of every attempt; the candidate row only holds the latest.
         prior=(await db.execute(select(func.count(StrategyCandidateRun.id)).where(StrategyCandidateRun.candidate_id==candidate_id))).scalar_one()
         attempt=int(prior or 0)+1
         db.add(StrategyCandidateRun(candidate_id=candidate_id,attempt=attempt,backtest_json=json.dumps(result,default=str),oos_json=json.dumps(oos,default=str),gate_json=json.dumps(gate,default=str),passed=bool(passed)))
         await db.commit()
-    return {"candidate_id":candidate_id,"attempt":attempt,"status":"VALIDATED" if passed else "REJECTED","gate":gate,"oos":oos,"promotion_requires_explicit_live_approval":True,"validation_scope":"Atlas-supported strategy family; AI custom conditions remain a research specification unless separately compiled.","real_money_execution":False}
+    return {"candidate_id":candidate_id,"attempt":attempt,"status":status,"gate":gate,"oos":oos,"promotion_requires_explicit_live_approval":True,"validation_scope":"Atlas-supported strategy family; AI custom conditions remain a research specification unless separately compiled.","real_money_execution":False}
 
 @app.get("/api/customer/strategy-lab/candidates/{candidate_id}/runs")
 async def list_strategy_candidate_runs(candidate_id:int, authorization:str|None=Header(default=None)):
@@ -5537,12 +5646,20 @@ async def withdrawal_proposal(withdrawal_id: int, x_admin_token: str | None = He
 async def reconcile_withdrawal(withdrawal_id: int, req: WithdrawalReconcileRequest, x_admin_token: str | None = Header(default=None), x_release_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
+    # Bind the release operator in the audit/body to the authenticated principal;
+    # a separate release token alone must not authorize a different named operator.
+    authenticated_operator = str(claims.get("sub") or claims.get("user_id") or "").strip()
+    if not authenticated_operator or not _constant_time_text_equal(authenticated_operator, str(req.operator_id or "").strip()):
+        raise HTTPException(403, "Release operator identity must match the authenticated user")
     if not verify_release_operator(req.operator_id, x_release_token):
         raise HTTPException(401, "Separate release-operator authentication required")
     async with SessionLocal() as db:
         w = (await db.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id).with_for_update())).scalar_one_or_none()
         if not w:
             raise HTTPException(404, "Withdrawal not found")
+        separation = release_separation_violation(req.operator_id, x_release_token, [w.first_approved_by, w.second_approved_by])
+        if separation:
+            raise HTTPException(409, separation)
         if w.status not in {"SUBMITTING", "SUBMITTED", "UNKNOWN"}:
             raise HTTPException(409, f"Withdrawal is {w.status} and cannot be reconciled")
         provider = get_payout_provider(w.provider or settings.payout_provider)

@@ -53,7 +53,7 @@ def test_timeout_then_partial_then_full_fill_via_reconcile_is_exact_and_idempote
                 await execution._apply_broker_snapshot(db, t, snap)
                 await db.commit()
             assert t.status == "FILLED" and t.filled_quantity == pytest.approx(0.2)
-            assert t.fee == pytest.approx(6.6)
+            assert t.fee == Decimal("6.600000")
             ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
             assert ledger.available == Decimal("10000") - Decimal("6.6")      # fee charged once in total
             fee_journals = [j for j in (await db.execute(select(LedgerJournal))).scalars() if j.entry_type == "TRADING_FEE"]

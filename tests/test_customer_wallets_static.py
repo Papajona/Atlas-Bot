@@ -133,8 +133,8 @@ def test_terminal_order_states_release_only_unused_reserve():
     source = Path("app/execution.py").read_text()
     assert 'if t.status in {"FILLED", "CANCELED", "REJECTED"}:' in source
     assert 'await _release_unneeded_order_reserve(db, t)' in source
-    assert 'reserved = max(0.0, float(trade.reserved_cash or 0.0))' in source
-    assert 'filled_cost = max(0.0, float(trade.filled_quantity or 0.0) * float(trade.average_fill_price or trade.requested_price or 0.0))' in source
+    assert 'reserved = max(zero, Decimal(str(trade.reserved_cash or 0)))' in source
+    assert 'Decimal(str(trade.filled_quantity or 0)) * Decimal(str(filled_price))' in source
 
 
 def test_trading_fee_can_consume_trading_reserve_when_available_cash_is_zero():

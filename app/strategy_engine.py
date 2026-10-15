@@ -147,13 +147,31 @@ def strategy_signals(df: pd.DataFrame, config: StrategyConfig | None = None, ass
     return out.replace([np.inf, -np.inf], np.nan)
 
 
-def risk_scaled_position(signal: float, realized_vol: float, config: StrategyConfig | None = None) -> float:
-    """Convert an ensemble signal into a volatility-targeted leverage."""
+def target_position(signal: float, realized_vol: float, config: StrategyConfig | None = None) -> float:
+    """Authoritative scalar position rule shared by live signal generation and research."""
     cfg = config or StrategyConfig()
     if not np.isfinite(signal) or not np.isfinite(realized_vol) or realized_vol <= 0:
         return 0.0
-    leverage = cfg.target_vol_annual / realized_vol
-    return float(np.clip(signal * leverage, -cfg.max_leverage, cfg.max_leverage))
+    if abs(signal) < cfg.signal_threshold:
+        return 0.0
+    leverage = min(cfg.target_vol_annual / realized_vol, cfg.max_leverage)
+    return float(signal * leverage)
+
+
+def risk_scaled_position(signal: float, realized_vol: float, config: StrategyConfig | None = None) -> float:
+    """Backward-compatible name for the authoritative target-position rule."""
+    return target_position(signal, realized_vol, config)
+
+
+def target_positions(signal: pd.Series, realized_vol: pd.Series,
+                     config: StrategyConfig | None = None) -> pd.Series:
+    """Shared vectorized sizing and threshold policy used by live and research."""
+    cfg = config or StrategyConfig()
+    raw = pd.Series(signal).astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    vol = pd.Series(realized_vol, index=raw.index).astype(float).replace([np.inf, -np.inf], np.nan)
+    leverage = (cfg.target_vol_annual / vol.where(vol > 0)).clip(upper=cfg.max_leverage)
+    position = raw * leverage
+    return position.where(raw.abs() >= cfg.signal_threshold, 0.0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
 def strategy_signal(df: pd.DataFrame, config: StrategyConfig | None = None, asset: str = "crypto") -> dict:
@@ -163,9 +181,7 @@ def strategy_signal(df: pd.DataFrame, config: StrategyConfig | None = None, asse
         raise RuntimeError("Insufficient market history for strategy ensemble")
     row = sig.iloc[-1]
     raw = float(row["ensemble"])
-    position = risk_scaled_position(raw, float(row["realized_vol"]), cfg)
-    if abs(raw) < cfg.signal_threshold:
-        position = 0.0
+    position = target_position(raw, float(row["realized_vol"]), cfg)
     price = float(df["close"].iloc[-1])
     atr = float(row["atr"])
     side = "buy" if position > 0 else ("sell" if position < 0 else "flat")
@@ -226,24 +242,34 @@ def strategy_backtest(
     taker_bps: float = 5.5,
     slippage_bps: float = 2.0,
     asset: str = "crypto",
+    carry_bps_per_bar: float | None = None,
 ) -> dict:
-    cfg = config or StrategyConfig()
-    s = strategy_signals(df, cfg, asset=asset)
-    # Shift positions one bar: signals formed on bar t execute on bar t+1.
-    raw = s["ensemble"].fillna(0.0)
-    vol = s["realized_vol"]
-    lev = (cfg.target_vol_annual / vol.replace(0, np.nan)).clip(upper=cfg.max_leverage)
-    pos = (raw * lev).clip(-cfg.max_leverage, cfg.max_leverage)
-    pos = pos.where(raw.abs() >= cfg.signal_threshold, 0.0).shift(1).fillna(0.0)
+    """Research backtest with next-open entry, OHLC ATR exits and explicit carry.
 
-    # Execute at the next bar's open. The position at bar t was formed from
-    # information available through bar t-1, so its return is the open-to-open
-    # move from t to t+1. This avoids treating the signal-bar close as an
-    # executable fill.
-    ret = next_open_returns(df) - 1.0
-    turnover = pos.diff().abs().fillna(pos.abs())
-    costs = turnover * ((taker_bps + slippage_bps) / 10_000.0)
-    net = pos * ret - costs
+    Financing is marked incomplete when no evidence-backed carry rate is supplied;
+    zero carry must be passed explicitly and only when source evidence supports it.
+    """
+    from .execution_aware_research import simulate_execution_aware_strategy
+    from .config import settings
+
+    cfg = config or StrategyConfig()
+    if carry_bps_per_bar is None:
+        carry_bps_per_bar = settings.research_carry_bps_per_bar
+    signals = strategy_signals(df, cfg, asset=asset)
+    raw = signals["ensemble"].fillna(0.0)
+    # Signal and ATR both come from the preceding completed bar at execution open.
+    target = target_positions(raw, signals["realized_vol"], cfg).shift(1).fillna(0.0)
+    execution = simulate_execution_aware_strategy(
+        df,
+        target,
+        signals["atr"].shift(1),
+        stop_atr=cfg.stop_atr,
+        take_profit_atr=cfg.take_profit_atr,
+        transaction_cost_bps=float(taker_bps) + float(slippage_bps),
+        carry_bps_per_bar=carry_bps_per_bar,
+    )
+    pos = execution["positions"]
+    net = execution["net_returns"]
     equity = (1.0 + net).cumprod()
     peak = equity.cummax()
     drawdown = equity / peak - 1.0
@@ -251,23 +277,39 @@ def strategy_backtest(
     vol_net = float(net.std())
     sharpe = float(net.mean() / vol_net * np.sqrt(ann)) if vol_net > 0 else 0.0
     active = pos != 0
+    audit = execution["audit"]
+    carry_rate_configured = audit["carry_bps_per_bar"] is not None
+    carry_evidence_source = str(settings.research_carry_evidence_source or "").strip()
+    carry_evidence_id = str(settings.research_carry_evidence_id or "").strip()
+    carry_evidence_complete = carry_rate_configured and bool(carry_evidence_source) and bool(carry_evidence_id)
     return {
         "strategy": "trend_momentum_breakout_mean_reversion",
-        "backtest_model": "next-open execution with open-to-open returns and transaction costs; not intrabar stop-target execution",
+        "backtest_model": "next-open entries, OHLC intrabar ATR stop/target fills, conservative stop-first ambiguity, transaction costs and explicit per-bar carry",
         "asset_class": asset,
         "bars": int(len(df)),
-        "validated_bars": int(s[["ensemble", "atr", "realized_vol"]].notna().all(axis=1).sum()),
-        "total_return": float(equity.iloc[-1] - 1.0),
-        "max_drawdown": float(drawdown.min()),
+        "validated_bars": int(signals[["ensemble", "atr", "realized_vol"]].notna().all(axis=1).sum()),
+        "total_return": float(equity.iloc[-1] - 1.0) if len(equity) else 0.0,
+        "max_drawdown": float(drawdown.min()) if len(drawdown) else 0.0,
         "sharpe": sharpe,
         "trades": int(((pos != 0) & ((pos.shift(1).fillna(0.0) == 0.0) | (np.sign(pos) != np.sign(pos.shift(1).fillna(0.0))))).sum()),
         "hit_rate": float((net[active] > 0).mean()) if bool(active.any()) else 0.0,
-        "average_leverage": float(pos.abs().mean()),
-        "max_leverage": float(pos.abs().max()),
-        "transaction_cost_bps": float(taker_bps + slippage_bps),
+        "average_leverage": float(pos.abs().mean()) if len(pos) else 0.0,
+        "max_leverage": float(pos.abs().max()) if len(pos) else 0.0,
+        "transaction_cost_bps": float(taker_bps) + float(slippage_bps),
         "annualization_factor": float(ann),
+        "stop_loss_exits": audit["stop_loss_exits"],
+        "take_profit_exits": audit["take_profit_exits"],
+        "gap_exits": audit["gap_exits"],
+        "ambiguous_bars_filled_stop_first": audit["ambiguous_bars_filled_stop_first"],
+        "carry_bps_per_bar": audit["carry_bps_per_bar"],
+        "carry_rate_configured": carry_rate_configured,
+        "carry_evidence_source": carry_evidence_source or None,
+        "carry_evidence_id": carry_evidence_id or None,
+        "financing_cost_model_complete": carry_evidence_complete,
+        "intrabar_stop_target_model_complete": audit["intrabar_stop_target_model_complete"],
+        "promotion_eligible_on_cost_model": bool(audit["intrabar_stop_target_model_complete"] and carry_evidence_complete),
+        "execution_audit": audit,
     }
-
 
 def _rsi(close: pd.Series, n: int = 14) -> pd.Series:
     delta = close.diff()

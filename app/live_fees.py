@@ -8,7 +8,7 @@ must settle only the delta against what has already been charged.
 from __future__ import annotations
 
 from typing import Any
-import math
+from decimal import Decimal, localcontext
 
 EXACT, CONVERTED, ESTIMATED = "exact", "converted", "estimated"
 
@@ -32,48 +32,86 @@ def _fee_entries(order: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def extract_order_fee_quote(order: dict[str, Any], symbol: str, fill_price: float, filled: float, *,
-                            fallback_taker_bps: float) -> tuple[float, str, str]:
-    """Return (cumulative_fee_in_quote, quality, note).
-
-    quality is EXACT (fee already in the quote currency), CONVERTED (base-asset fee priced at the fill) or ESTIMATED
-    (no usable fee data, or a fee currency that cannot be priced here -> conservative taker-fee estimate).
-    A negative fee (maker rebate) is treated as zero: rebates are not credited to customers automatically.
-    """
-    if filled <= 0 or fill_price <= 0:
-        return 0.0, EXACT, ""
+def extract_order_fee_quote_decimal(
+    order: dict[str, Any],
+    symbol: str,
+    fill_price: Any,
+    filled: Any,
+    *,
+    fallback_taker_bps: Any,
+) -> tuple[Decimal, str, str]:
+    """Convert cumulative provider fees to quote currency with Decimal arithmetic."""
+    try:
+        fill_price_d = Decimal(str(fill_price))
+        filled_d = Decimal(str(filled))
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        raise ValueError("fill price and quantity must be valid decimal numbers") from exc
+    if not fill_price_d.is_finite() or not filled_d.is_finite():
+        raise ValueError("fill price and quantity must be finite")
+    if filled_d <= 0 or fill_price_d <= 0:
+        return Decimal("0"), EXACT, ""
     base, quote = split_symbol(symbol)
-    entries = _fee_entries(order or {})
-    total, quality, note = 0.0, EXACT, ""
+    source_order = order or {}
+    entries = _fee_entries(source_order)
+    raw_fee_list = source_order.get("fees")
+    malformed_fee_records = (
+        isinstance(raw_fee_list, list)
+        and any(not isinstance(item, dict) or item.get("cost") is None for item in raw_fee_list)
+    )
+    total = Decimal("0")
+    quality, note = EXACT, ""
+    if malformed_fee_records:
+        quality = ESTIMATED
+        note = "one or more exchange fee records have no usable cost"
     for entry in entries:
         try:
-            cost = float(entry.get("cost"))
-        except (TypeError, ValueError):
+            cost = Decimal(str(entry.get("cost")))
+        except (TypeError, ValueError, ArithmeticError):
+            note = "exchange returned an unparsable fee cost"
+            quality = ESTIMATED
             continue
         cur = str(entry.get("currency") or "").upper()
-        if not math.isfinite(cost):
+        if not cost.is_finite():
             note = "exchange returned a non-finite fee cost"
             quality = ESTIMATED
             continue
         if cost <= 0:
+            # Negative provider values are maker rebates; do not credit them.
             continue
-        if cur == quote or (not cur and quote):
-            total += cost
-        elif cur == base:
-            total += cost * fill_price
-            quality = CONVERTED if quality == EXACT else quality
-        else:
-            note = f"fee currency {cur or '?'} cannot be priced in {quote or '?'}"
-            quality = ESTIMATED
-    if quality == ESTIMATED or not entries:
-        bps = float(fallback_taker_bps)
-        if not math.isfinite(bps) or bps < 0:
-            bps = 0.0
+        with localcontext() as context:
+            context.prec = 50
+            if cur == quote or (not cur and quote):
+                total = total + cost
+            elif cur == base:
+                total = total + cost * fill_price_d
+                quality = CONVERTED if quality == EXACT else quality
+            else:
+                note = f"fee currency {cur or '?'} cannot be priced in {quote or '?'}"
+                quality = ESTIMATED
+    if quality == ESTIMATED or not entries or malformed_fee_records:
+        try:
+            bps = Decimal(str(fallback_taker_bps))
+        except (TypeError, ValueError, ArithmeticError):
+            bps = Decimal("0")
             note = (note + "; " if note else "") + "invalid fallback fee rate"
-        est = filled * fill_price * (bps / 10_000.0)
-        if not math.isfinite(est):
-            return 0.0, ESTIMATED, "fee estimate is non-finite; manual reconciliation required"
+        if not bps.is_finite() or bps < 0:
+            bps = Decimal("0")
+            note = (note + "; " if note else "") + "invalid fallback fee rate"
+        with localcontext() as context:
+            context.prec = 50
+            estimated = filled_d * fill_price_d * (bps / Decimal("10000"))
+        if not estimated.is_finite():
+            return Decimal("0"), ESTIMATED, "fee estimate is non-finite; manual reconciliation required"
         if not entries:
             note = "exchange returned no fee data"
-        return max(total, est), ESTIMATED, note
+        return max(total, estimated), ESTIMATED, note
     return total, quality, note
+
+
+def extract_order_fee_quote(order: dict[str, Any], symbol: str, fill_price: float, filled: float, *,
+                            fallback_taker_bps: float) -> tuple[float, str, str]:
+    """Backward-compatible float wrapper; money-moving execution uses the Decimal variant."""
+    fee, quality, note = extract_order_fee_quote_decimal(
+        order, symbol, fill_price, filled, fallback_taker_bps=fallback_taker_bps
+    )
+    return float(fee), quality, note

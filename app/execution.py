@@ -5,7 +5,7 @@ import json
 import os
 import uuid
 from datetime import date, datetime, timezone
-from decimal import Decimal, ROUND_HALF_EVEN
+from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 from typing import Any
 
 from sqlalchemy import select, func, or_
@@ -17,7 +17,7 @@ from .risk_governor import evaluate_trade
 from .forex_oanda import OandaBroker, OandaConfig
 from .config import settings
 from .db import (SessionLocal, OandaReconciliationState, AppState, TradingAccount, Trade, Position, CustomerBinanceAccount, StrategyOutcome, TradeLearningEpisode, OrderCommand,
-                  LiveExecutionLease, utcnow, quantize_money)
+                  LiveExecutionLease, utcnow)
 from .trading_core import PROFILES
 from .customer_funds import get_or_create_ledger, reserve_trading, release_trading, sync_wallet_from_ledger, settle_realized_pnl, settle_trading_fee, customer_balance
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
@@ -25,7 +25,7 @@ from .incidents import open_incident
 from .research_validation import edge_decay_check
 from .ids import make_signal_id, client_order_id
 from .audit_chain import record_audit
-from .live_fees import extract_order_fee_quote, ESTIMATED
+from .live_fees import extract_order_fee_quote_decimal, ESTIMATED
 from .customer_funds import record_ledger_incident
 from .distributed import acquire_lock, release_lock
 
@@ -74,6 +74,72 @@ def _qty_ref(quantity: float | Decimal | int | None) -> str:
     if canonical == 0:
         canonical = Decimal("0")
     return format(canonical, ".6f")
+
+
+def _money_ref(amount: float | Decimal | int | None) -> str:
+    """Canonical exact decimal for an idempotency reference, without quantity-scale rounding.
+
+    Ledger amounts quantize to six decimals, but fee deltas are cumulative across fills.
+    Rounding the cumulative fee to six decimals can collapse two separately chargeable
+    deltas to the same idempotency key. Preserve the finite Decimal value in the key.
+    """
+    value = Decimal("0") if amount is None else Decimal(str(amount))
+    if not value.is_finite():
+        raise ValueError("money idempotency references must be finite")
+    if value == 0:
+        value = Decimal("0")
+    return format(value.normalize(), "f")
+
+
+def _exact_reserved_cash(price: Any, quantity: Any, max_slippage_bps: Any) -> Decimal:
+    """Calculate the customer cash reserve, including its slippage buffer, in Decimal."""
+    price_d = Decimal(str(price))
+    quantity_d = Decimal(str(quantity))
+    slippage_d = Decimal(str(max_slippage_bps or 0))
+    if not price_d.is_finite() or not quantity_d.is_finite() or not slippage_d.is_finite():
+        raise ValueError("reserve inputs must be finite")
+    if price_d <= 0 or quantity_d <= 0 or slippage_d < 0:
+        raise ValueError("reserve price and quantity must be positive; slippage bps must be non-negative")
+    return price_d * quantity_d * (Decimal("1") + slippage_d / Decimal("10000"))
+
+
+def _exact_realized_pnl(closing_quantity: Any, fill_price: Any, average_entry_price: Any, direction: int) -> Decimal:
+    """Calculate a fill's realized P&L using Decimal before ledger posting."""
+    if direction not in {-1, 1}:
+        raise ValueError("realized P&L direction must be -1 or 1")
+    quantity_d = Decimal(str(closing_quantity))
+    fill_d = Decimal(str(fill_price))
+    entry_d = Decimal(str(average_entry_price))
+    if not quantity_d.is_finite() or not fill_d.is_finite() or not entry_d.is_finite():
+        raise ValueError("realized P&L inputs must be finite")
+    if quantity_d < 0 or fill_d <= 0 or entry_d <= 0:
+        raise ValueError("realized P&L inputs must have non-negative quantity and positive prices")
+    with localcontext() as context:
+        context.prec = 50
+        return quantity_d * (fill_d - entry_d) * Decimal(direction)
+
+
+def _verify_exchange_clock(broker: Any, *, local_time_ms: int | None = None, max_drift_ms: int = 1000) -> int:
+    """Fail closed if the venue clock cannot be checked or differs by more than 1 second."""
+    try:
+        server_time = broker.server_time()
+    except Exception as exc:
+        raise RiskBlocked("Exchange clock verification failed; live order submission blocked") from exc
+    if server_time is None or isinstance(server_time, bool):
+        raise RiskBlocked("Exchange does not provide an authoritative server clock; live order submission blocked")
+    try:
+        server_ms = int(server_time)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RiskBlocked("Exchange server clock returned an invalid timestamp; live order submission blocked") from exc
+    if server_ms <= 0:
+        raise RiskBlocked("Exchange server clock returned a non-positive timestamp; live order submission blocked")
+    local_ms = local_time_ms if local_time_ms is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
+    drift_ms = abs(server_ms - int(local_ms))
+    if drift_ms > max_drift_ms:
+        raise RiskBlocked(
+            f"Exchange clock drift exceeds safety limit ({drift_ms} ms > {max_drift_ms} ms); live order submission blocked"
+        )
+    return drift_ms
 
 
 def _live_submission_lock_ttl_seconds() -> int:
@@ -249,6 +315,8 @@ async def _projected_exposure(db, symbol: str, price: float, quantity: float, si
     q = select(Position)
     if customer_id is not None:
         q = q.where(Position.customer_id == customer_id)
+    else:
+        q = q.where(Position.customer_id.is_(None))
     positions = (await db.execute(q)).scalars().all()
     signed_order = quantity if side == "buy" else -quantity
     total = 0.0
@@ -265,11 +333,34 @@ async def _projected_exposure(db, symbol: str, price: float, quantity: float, si
     return float(total)
 
 
+async def _has_unresolved_live_orders(
+    db,
+    *,
+    customer_id: int | None,
+    signal_id: str | None = None,
+) -> bool:
+    """Detect outstanding broker commands not yet finalized by authoritative reconciliation."""
+    statuses = ("PENDING", "OPEN", "PARTIAL", "UNKNOWN")
+    query = select(Trade.id).where(
+        Trade.mode == "LIVE",
+        Trade.status.in_(statuses),
+    )
+    if customer_id is None:
+        query = query.where(Trade.customer_id.is_(None))
+    else:
+        query = query.where(Trade.customer_id == customer_id)
+    # A retry of the same idempotent signal must reach duplicate-order handling
+    # rather than being rejected by its own still-open trade row.
+    if signal_id:
+        query = query.where(or_(Trade.signal_id != signal_id, Trade.signal_id.is_(None)))
+    return (await db.execute(query.limit(1))).scalar_one_or_none() is not None
+
+
 async def risk_gate(symbol: str, price: float, quantity: float, live: bool = False,
                     signal_timestamp: str | None = None, side: str = "buy",
                     customer_id: int | None = None, reservation_key: str | None = None,
                     stop_loss_price: float | None = None, take_profit_price: float | None = None,
-                    signal: dict | None = None):
+                    signal: dict | None = None, signal_id: str | None = None):
     if price <= 0 or quantity <= 0:
         raise RiskBlocked("Invalid price or quantity")
     async with SessionLocal() as db:
@@ -315,8 +406,11 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
                 # An order larger than the opposing position flips into new exposure, so it is NOT exempt
                 # from the cash requirement (same strict test as account_reduce_only above).
                 reducing = account_reduce_only
-                required_cash = 0.0 if reducing else price * quantity
-                if float(ledger.available) + 1e-9 < required_cash:
+                required_cash = (
+                    Decimal("0") if reducing
+                    else Decimal(str(price)) * Decimal(str(quantity))
+                )
+                if Decimal(str(ledger.available)) + Decimal("0.00000001") < required_cash:
                     raise RiskBlocked("Order exceeds the customer's available funded USDT balance")
             today = _today_utc()
             if account.daily_start_date != today:
@@ -341,6 +435,17 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
         # flips into new exposure and must pass every new-entry control (limits, breakers, protective stop).
         opposing_total = sum(abs(p.quantity) for p in existing_positions if (p.quantity > 0 > signed) or (p.quantity < 0 < signed))
         reducing = opposing_total > 0 and quantity <= opposing_total + 1e-9
+
+        # Do not authorize another entry while the same account has an unresolved
+        # broker order whose exposure is not yet represented by authoritative fills.
+        # RiskGate is serialized by the AppState/customer row locks, so this check also
+        # prevents concurrent workers from stacking new exposure during an UNKNOWN timeout.
+        if live and not reducing and await _has_unresolved_live_orders(
+            db, customer_id=customer_id, signal_id=signal_id
+        ):
+            raise RiskBlocked(
+                "An unresolved live order exists for this account; reconcile it before adding exposure"
+            )
 
         if settings.discipline_enabled and not reducing:
             now = datetime.now(timezone.utc)
@@ -465,6 +570,8 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
         q = select(Position).where(Position.quantity != 0)
         if customer_id is not None:
             q = q.where(Position.customer_id == customer_id)
+        else:
+            q = q.where(Position.customer_id.is_(None))
         open_positions = (await db.execute(q)).scalars().all()
         max_open_position_limit = min(settings.max_open_positions, pilot_max_positions) if pilot_max_positions is not None else settings.max_open_positions
         if symbol not in {p.symbol for p in open_positions} and len(open_positions) >= max_open_position_limit:
@@ -524,9 +631,11 @@ async def _create_trade(symbol: str, timeframe: str, side: str, quantity: float,
                     decision_snapshot_json=json.dumps(signal, default=str),
                 ))
             except Exception:
-                # Trading execution must not fail because post-trade learning memory
-                # is unavailable. The immutable Trade remains the source of truth.
-                pass
+                # Learning telemetry is non-authoritative for execution, but record
+                # the failure rather than silently hiding it.
+                logging.getLogger(__name__).warning(
+                    "trade_learning_episode_insert_failed trade_id=%s", trade.id, exc_info=True
+                )
             await db.commit()
             await db.refresh(trade)
             return trade.id, True
@@ -545,25 +654,36 @@ def _is_derivatives_market(broker) -> bool:
 
 
 def _prepare_live_fee(trade: Trade, order: dict[str, Any], filled: float, fill_price: float, taker_bps: float | None = None):
-    """Set trade.fee to the cumulative broker fee (quote currency) and return (delta_to_settle, cumulative, quality, note).
+    """Set cumulative broker fees with Decimal and return the exact delta to settle.
 
-    Broker fees are cumulative per order, so only the increase over what was already charged is settled. A fee is never
-    lowered here (no automatic refunds); an estimate that later proves too high is left for manual reconciliation.
+    Broker fees are cumulative per order, so only the increase over what was already
+    charged is settled. A fee is never lowered here (no automatic refunds); an estimate
+    that later proves too high is left for manual reconciliation.
     """
-    prev = float(trade.fee or 0.0)
-    bps = float(taker_bps if taker_bps is not None else PROFILES["crypto"].taker_bps)
-    cum, quality, note = extract_order_fee_quote(order or {}, trade.symbol, fill_price, filled, fallback_taker_bps=bps)
+    prev = Decimal(str(trade.fee or 0)).quantize(
+        Decimal("0.000001"), rounding=ROUND_HALF_EVEN
+    )
+    bps = Decimal(str(taker_bps if taker_bps is not None else PROFILES["crypto"].taker_bps))
+    observed_cumulative, quality, note = extract_order_fee_quote_decimal(
+        order or {}, trade.symbol, fill_price, filled, fallback_taker_bps=bps
+    )
+    # Match ledger Numeric(38,6) booking semantics on the cumulative amount, not
+    # by rounding each raw delta independently. This avoids repeated sub-micro fees
+    # accumulating a different total in the trade row than in the ledger.
+    cum = max(observed_cumulative, prev).quantize(
+        Decimal("0.000001"), rounding=ROUND_HALF_EVEN
+    )
     cum = max(cum, prev)
     trade.fee = cum
-    return max(0.0, cum - prev), cum, quality, note
+    return max(Decimal("0"), cum - prev), cum, quality, note
 
 
-async def _post_live_fee(db, trade: Trade, delta: float, cumulative: float, quality: str, note: str) -> None:
+async def _post_live_fee(db, trade: Trade, delta: Decimal, cumulative: Decimal, quality: str, note: str) -> None:
     """Charge the fee delta to the customer ledger (idempotent) and flag estimated fees for review."""
     if trade.customer_id is None or delta <= 0:
         return
     await settle_trading_fee(db, customer_id=trade.customer_id, fee=delta,
-                             reference_id=f"trade:{trade.id}:fee:{_qty_ref(cumulative)}", strict=False)
+                             reference_id=f"trade:{trade.id}:fee:{_money_ref(cumulative)}", strict=False)
     if quality == ESTIMATED:
         await record_ledger_incident(
             db, key=f"LIVE_FEE_ESTIMATED:{trade.id}", severity="HIGH",
@@ -619,17 +739,22 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         Position.entry_trade_id.in_(live_entry_ids),
     ).with_for_update()
     position = (await db.execute(position_query)).scalar_one_or_none()
+    realized_decimal = Decimal("0")
     realized = 0.0
     realized_strategy = str(getattr(position, "strategy", "") or trade_context.get("strategy") or "unknown") if position else str(trade_context.get("strategy") or "unknown")
     realized_regime = str(getattr(position, "entry_regime", "UNKNOWN") or trade_context.get("regime") or "UNKNOWN") if position else str(trade_context.get("regime") or "UNKNOWN")
     entry_trade_id = getattr(position, "entry_trade_id", None) if position else trade.id
     if not position:
         position = Position(customer_id=trade.customer_id, trading_account_id=trade.trading_account_id, exchange=trade.exchange, symbol=trade.symbol, quantity=signed,
-                            average_entry_price=fill_price, mark_price=fill_price,
+                            average_entry_price=Decimal(str(fill_price)), mark_price=Decimal(str(fill_price)),
                             strategy=str(trade_context.get("strategy") or "unknown"),
                             entry_regime=str(trade_context.get("regime") or "UNKNOWN"),
                             entry_trade_id=trade.id,
-                            reserved_capital=(delta * fill_price if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE" else 0.0))
+                            reserved_capital=(
+                                Decimal(str(delta)) * Decimal(str(fill_price))
+                                if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE"
+                                else Decimal("0")
+                            ))
         db.add(position)
         # The episode row is created with the order, but its timestamps and fill
         # facts must be populated from the first actual fill, not order submission.
@@ -658,22 +783,45 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
     else:
         old_qty = position.quantity
         if old_qty == 0 or (old_qty > 0 and signed > 0) or (old_qty < 0 and signed < 0):
-            total_abs = abs(old_qty) + abs(signed)
+            old_qty_d = Decimal(str(old_qty))
+            signed_d = Decimal(str(signed))
+            fill_price_d = Decimal(str(fill_price))
+            total_abs_d = abs(old_qty_d) + abs(signed_d)
+            if total_abs_d <= 0:
+                raise ValueError("cannot calculate a weighted entry price from zero quantity")
             position.average_entry_price = (
-                abs(old_qty) * position.average_entry_price + abs(signed) * fill_price
-            ) / total_abs
+                abs(old_qty_d) * Decimal(str(position.average_entry_price))
+                + abs(signed_d) * fill_price_d
+            ) / total_abs_d
             position.quantity = old_qty + signed
             if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE":
-                position.reserved_capital += delta * fill_price
+                position.reserved_capital = (
+                    Decimal(str(position.reserved_capital or 0))
+                    + Decimal(str(delta)) * Decimal(str(fill_price))
+                )
         else:
             closing = min(abs(old_qty), abs(signed))
             direction = 1 if old_qty > 0 else -1
-            realized = closing * (fill_price - position.average_entry_price) * direction
+            closing_decimal = min(abs(Decimal(str(old_qty))), abs(Decimal(str(signed))))
+            realized_decimal = _exact_realized_pnl(
+                closing_decimal, fill_price, position.average_entry_price, direction
+            )
+            if trade.customer_id is not None and str(trade.mode or "").upper() == "LIVE":
+                # The custodial ledger posts to Numeric(38,6); quantize the realized
+                # amount once, here, so reported customer position P&L matches the
+                # exact amount that the ledger credits/debits for this fill.
+                realized_decimal = realized_decimal.quantize(Decimal("0.000001"), rounding=ROUND_HALF_EVEN)
+            realized = float(realized_decimal)
             position.quantity = old_qty + signed
-            if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE" and abs(old_qty) > 0:
-                full_allocation_release = closing >= abs(old_qty)
-                released = position.reserved_capital * (closing / abs(old_qty))
-                position.reserved_capital = max(0.0, position.reserved_capital - released)
+            if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE" and old_qty != 0:
+                old_qty_decimal = abs(Decimal(str(old_qty)))
+                full_allocation_release = closing_decimal >= old_qty_decimal
+                reserved_capital_decimal = Decimal(str(position.reserved_capital or 0))
+                released = (
+                    reserved_capital_decimal * closing_decimal / old_qty_decimal
+                    if old_qty_decimal > 0 else Decimal("0")
+                )
+                position.reserved_capital = max(Decimal("0"), reserved_capital_decimal - released)
                 if released > 0:
                     await release_trading(
                         db, trade.customer_id, released,
@@ -682,24 +830,26 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                     )
                     account_locked = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == trade.customer_id).with_for_update())).scalar_one_or_none()
                     if account_locked:
-                        account_locked.reserved_margin = max(0.0, account_locked.reserved_margin - released)
+                        account_locked.reserved_margin = max(
+                            Decimal("0"), Decimal(str(account_locked.reserved_margin or 0)) - released
+                        )
             if position.quantity != 0 and (old_qty * position.quantity < 0):
                 position.strategy = str(trade_context.get("strategy") or "unknown")
                 position.entry_regime = str(trade_context.get("regime") or "UNKNOWN")
                 position.entry_trade_id = trade.id
                 position.average_entry_price = fill_price
                 if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE":
-                    flip_cost = abs(position.quantity) * fill_price
+                    flip_cost = abs(Decimal(str(position.quantity))) * Decimal(str(fill_price))
                     try:
                         # The broker fill already happened: never let a reserve failure abort recording it.
                         # A savepoint keeps a failed reserve from leaving partial ledger state behind.
                         async with db.begin_nested():
                             await reserve_trading(db, trade.customer_id, flip_cost,
                                                   reference_id=f"trade:{trade.id}:flip:{_qty_ref(new_filled)}")
-                        position.reserved_capital += flip_cost
+                        position.reserved_capital = Decimal(str(position.reserved_capital or 0)) + flip_cost
                         account_locked = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == trade.customer_id).with_for_update())).scalar_one_or_none()
                         if account_locked:
-                            account_locked.reserved_margin += flip_cost
+                            account_locked.reserved_margin = Decimal(str(account_locked.reserved_margin or 0)) + flip_cost
                     except ValueError as exc:
                         trade.error = (str(trade.error or "") + " | FLIP_RESERVE_DEFICIT: " + str(exc))[:4000]
                         await open_incident(
@@ -755,8 +905,10 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 else:
                     episode.entry_price = float(fill_price)
                 episode.entry_quantity = new_qty
-            if realized != 0.0:
-                episode.gross_pnl = quantize_money(float(episode.gross_pnl or 0.0) + float(realized))
+            if realized_decimal != 0:
+                episode.gross_pnl = (
+                    Decimal(str(episode.gross_pnl or 0)) + realized_decimal
+                ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
                 episode.exit_price = float(fill_price)
                 episode.closing_trade_id = trade.id
                 episode.exit_at = utcnow()
@@ -771,13 +923,22 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                         )
                     ))
                 )).scalars().all()
-                total_fees = float(entry_trade.fee or 0.0) if entry_trade else 0.0
-                total_fees += sum(float(x.fee or 0.0) for x in close_rows if x.id != trade.id)
-                total_fees += float(trade.fee or 0.0)
+                total_fees = Decimal(str(entry_trade.fee or 0)) if entry_trade else Decimal("0")
+                total_fees += sum(
+                    (Decimal(str(row.fee or 0)) for row in close_rows if row.id != trade.id),
+                    Decimal("0"),
+                )
+                total_fees += Decimal(str(trade.fee or 0))
                 episode.total_fees = total_fees
-                episode.net_pnl = quantize_money(float(episode.gross_pnl or 0.0) - total_fees)
-                notional = abs(float(episode.entry_quantity or 0.0) * float(episode.entry_price or 0.0))
-                episode.return_bps = float(episode.net_pnl / notional * 10000.0) if notional > 0 else 0.0
+                episode.net_pnl = (
+                    Decimal(str(episode.gross_pnl or 0)) - total_fees
+                ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+                notional = abs(
+                    Decimal(str(episode.entry_quantity or 0)) * Decimal(str(episode.entry_price or 0))
+                )
+                episode.return_bps = float(
+                    Decimal(str(episode.net_pnl)) / notional * Decimal("10000")
+                ) if notional > 0 else 0.0
             if abs(float(position.quantity or 0.0)) < 1e-12:
                 episode.status = "COMPLETED"
                 episode.exit_price = float(fill_price)
@@ -786,40 +947,54 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 episode.status = "OPEN"
             episode.updated_at = utcnow()
 
-        position.mark_price = fill_price
-        # Bound float-drift on this running total across a position's lifetime. This doesn't
-        # affect fund safety on its own -- settle_realized_pnl() below converts `realized`
-        # through Decimal independently on every call before it touches the customer ledger --
-        # but an unbounded position.realized_pnl is still a reporting-accuracy issue over a
-        # long-lived position with many partial fills.
-        position.realized_pnl = quantize_money(position.realized_pnl + realized)
-        if realized and trade.customer_id is not None and str(trade.mode or "").upper() == "LIVE":
-            await settle_realized_pnl(db, customer_id=trade.customer_id, amount=realized, reference_id=f"trade:{trade.id}:realized:{_qty_ref(new_filled)}", strict=False)
-        if realized != 0.0:
+        position.mark_price = Decimal(str(fill_price))
+        # Accumulate booked realized P&L in Decimal at the same six-decimal scale
+        # used by the custodial ledger, preventing reporting from drifting away from
+        # posted balances over repeated partial fills.
+        position.realized_pnl = (
+            Decimal(str(position.realized_pnl or 0)) + realized_decimal
+        ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+        if realized_decimal != 0 and trade.customer_id is not None and str(trade.mode or "").upper() == "LIVE":
+            # Keep the exact Decimal result through the custodial-ledger boundary;
+            # do not round-trip the realized amount through a binary float first.
+            await settle_realized_pnl(db, customer_id=trade.customer_id, amount=realized_decimal, reference_id=f"trade:{trade.id}:realized:{_qty_ref(new_filled)}", strict=False)
+        if realized_decimal != 0:
             # Store observed outcome against the strategy that opened the position.
             # This avoids attributing a close to the strategy of the closing order.
             attribution_trade_id = int(entry_trade_id or trade.id)
             existing_count = await db.execute(select(func.count(StrategyOutcome.id)).where(StrategyOutcome.trade_id == attribution_trade_id))
             sequence = int(existing_count.scalar_one() or 0) + 1
-            notional = abs(float(delta * fill_price))
-            return_bps = float(realized / notional * 10000.0) if notional > 0 else 0.0
-            closing_fee = float(trade.fee or 0.0)
+            notional_decimal = abs(Decimal(str(delta)) * Decimal(str(fill_price)))
+            return_bps = float(
+                realized_decimal / notional_decimal * Decimal("10000")
+            ) if notional_decimal > 0 else 0.0
+            closing_fee_decimal = Decimal(str(trade.fee or 0))
             entry_row = await db.get(Trade, attribution_trade_id)
-            entry_fee = float(entry_row.fee or 0.0) if entry_row else 0.0
-            episode_entry_qty = float(episode.entry_quantity or 0.0) if 'episode' in locals() and episode is not None else 0.0
-            allocated_entry_fee = entry_fee * (float(closing) / episode_entry_qty) if episode_entry_qty > 0 else 0.0
-            net_pnl = float(realized - closing_fee - allocated_entry_fee)
-            net_return_bps = float(net_pnl / notional * 10000.0) if notional > 0 else 0.0
+            entry_fee_decimal = Decimal(str(entry_row.fee or 0)) if entry_row else Decimal("0")
+            episode_entry_qty = Decimal(str(episode.entry_quantity or 0)) if 'episode' in locals() and episode is not None else Decimal("0")
+            allocated_entry_fee_decimal = (
+                entry_fee_decimal * Decimal(str(closing)) / episode_entry_qty
+                if episode_entry_qty > 0 else Decimal("0")
+            )
+            net_pnl_decimal = realized_decimal - closing_fee_decimal - allocated_entry_fee_decimal
+            net_pnl = float(net_pnl_decimal)
+            net_return_bps = float(
+                net_pnl_decimal / notional_decimal * Decimal("10000")
+            ) if notional_decimal > 0 else 0.0
             db.add(StrategyOutcome(
                 trade_id=attribution_trade_id, closing_trade_id=trade.id, customer_id=trade.customer_id,
                 bot_id=int(trade_context.get("bot_id")) if str(trade_context.get("bot_id", "")).isdigit() else None,
                 strategy=realized_strategy, regime=realized_regime, asset=str(trade_context.get("asset") or "crypto"),
                 symbol=trade.symbol, timeframe=trade.timeframe, side=trade.side,
-                realized_pnl=realized, fee=float(trade.fee or 0.0), return_bps=return_bps,
-                net_pnl=net_pnl, net_return_bps=net_return_bps,
+                realized_pnl=realized_decimal, fee=closing_fee_decimal, return_bps=return_bps,
+                net_pnl=net_pnl_decimal, net_return_bps=net_return_bps,
                 lifecycle_status="CLOSED" if abs(float(position.quantity or 0.0)) < 1e-12 else "OPEN",
                 mode=trade.mode, sequence=sequence, model_version=str(trade_context.get("model_version") or ""),
-                metadata_json=json.dumps({"entry_trade_id": attribution_trade_id, "closing_trade_id": trade.id, "fill_price": fill_price, "entry_fee": entry_fee, "allocated_entry_fee": allocated_entry_fee, "net_pnl": net_pnl}, default=str),
+                metadata_json=json.dumps({
+                    "entry_trade_id": attribution_trade_id, "closing_trade_id": trade.id,
+                    "fill_price": str(fill_price), "entry_fee": str(entry_fee_decimal),
+                    "allocated_entry_fee": str(allocated_entry_fee_decimal), "net_pnl": str(net_pnl_decimal),
+                }, default=str),
             ))
             if abs(float(position.quantity or 0.0)) < 1e-12:
                 completed_outcomes = (await db.execute(
@@ -827,16 +1002,22 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 )).scalars().all()
                 for outcome in completed_outcomes:
                     outcome.lifecycle_status = "CLOSED"
-        position.unrealized_pnl = position.quantity * (position.mark_price - position.average_entry_price) if position.quantity else 0.0
+        if position.quantity:
+            position.unrealized_pnl = (
+                Decimal(str(position.quantity))
+                * (Decimal(str(position.mark_price)) - Decimal(str(position.average_entry_price)))
+            ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+        else:
+            position.unrealized_pnl = Decimal("0")
         position.updated_at = utcnow()
     trade.filled_quantity = new_filled
     trade.remaining_quantity = max(0.0, trade.requested_quantity - new_filled)
-    trade.average_fill_price = fill_price
-    trade.notional = new_filled * fill_price
+    trade.average_fill_price = Decimal(str(fill_price))
+    trade.notional = Decimal(str(new_filled)) * Decimal(str(fill_price))
     return realized
 
 
-async def _release_unneeded_order_reserve(db, trade: Trade) -> float:
+async def _release_unneeded_order_reserve(db, trade: Trade) -> Decimal:
     """Release only capital no longer backing a terminal customer order.
 
     The amount originally reserved is persisted on the Trade. This avoids reconstructing
@@ -846,24 +1027,36 @@ async def _release_unneeded_order_reserve(db, trade: Trade) -> float:
     customer's available balance and opens a critical incident if that cannot be done.
     """
     if trade.customer_id is None or not settings.customer_cash_only_trading:
-        return 0.0
-    reserved = max(0.0, float(trade.reserved_cash or 0.0))
-    if reserved <= 0:
-        legacy = max(0.0, float(trade.requested_quantity or 0.0) * float(trade.requested_price or 0.0))
-        reserved = legacy
-    filled_cost = max(0.0, float(trade.filled_quantity or 0.0) * float(trade.average_fill_price or trade.requested_price or 0.0))
-    if filled_cost > reserved + 1e-12:
+        return Decimal("0")
+    zero = Decimal("0")
+    tolerance = Decimal("0.000000000001")
+    reserved = max(zero, Decimal(str(trade.reserved_cash or 0)))
+    if reserved <= zero:
+        # Legacy rows did not persist the reserve; reconstruct only from the exact
+        # decimal representation of the stored quantity and price fields.
+        legacy = Decimal(str(trade.requested_quantity or 0)) * Decimal(str(trade.requested_price or 0))
+        reserved = max(zero, legacy)
+    filled_price = trade.average_fill_price or trade.requested_price or 0
+    filled_cost = max(
+        zero,
+        Decimal(str(trade.filled_quantity or 0)) * Decimal(str(filled_price)),
+    )
+    if filled_cost > reserved + tolerance:
         deficit = filled_cost - reserved
         try:
-            await reserve_trading(db, trade.customer_id, deficit,
-                                  reference_id=f"trade:{trade.id}:reserve-deficit:{_qty_ref(trade.filled_quantity)}")
+            await reserve_trading(
+                db, trade.customer_id, deficit,
+                reference_id=f"trade:{trade.id}:reserve-deficit:{_qty_ref(trade.filled_quantity)}",
+            )
             reserved += deficit
             trade.reserved_cash = reserved
             account_locked = (await db.execute(select(TradingAccount).where(
                 TradingAccount.customer_id == trade.customer_id
             ).with_for_update())).scalar_one_or_none()
             if account_locked:
-                account_locked.reserved_margin += deficit
+                account_locked.reserved_margin = max(
+                    zero, Decimal(str(account_locked.reserved_margin or 0)) + deficit
+                )
             await sync_wallet_from_ledger(db, trade.customer_id, "USDT")
         except ValueError as exc:
             trade.error = (str(trade.error or "") + " | RESERVE_DEFICIT: " + str(exc))[:4000]
@@ -872,23 +1065,29 @@ async def _release_unneeded_order_reserve(db, trade: Trade) -> float:
                 severity="CRITICAL",
                 category="LEDGER_RECONCILIATION",
                 summary="Filled trade exceeded reserved customer cash",
-                detail={"trade_id": trade.id, "customer_id": trade.customer_id, "reserved_cash": reserved, "filled_cost": filled_cost, "deficit": deficit, "error": str(exc)},
+                detail={
+                    "trade_id": trade.id, "customer_id": trade.customer_id,
+                    "reserved_cash": str(reserved), "filled_cost": str(filled_cost),
+                    "deficit": str(deficit), "error": str(exc),
+                },
                 customer_id=trade.customer_id,
             )
-            return 0.0
-    release = max(0.0, reserved - filled_cost)
-    if release <= 0:
-        return 0.0
+            return Decimal("0")
+    release = max(zero, reserved - filled_cost)
+    if release <= zero:
+        return Decimal("0")
     await release_trading(
         db, trade.customer_id, release,
         reference_id=f"trade:{trade.id}:order-reserve-release",
-        full_allocation=(filled_cost == 0.0),
+        full_allocation=(filled_cost == zero),
     )
     account_locked = (await db.execute(select(TradingAccount).where(
         TradingAccount.customer_id == trade.customer_id
     ).with_for_update())).scalar_one_or_none()
     if account_locked:
-        account_locked.reserved_margin = max(0.0, account_locked.reserved_margin - release)
+        account_locked.reserved_margin = max(
+            zero, Decimal(str(account_locked.reserved_margin or 0)) - release
+        )
     trade.reserved_cash = filled_cost
     await sync_wallet_from_ledger(db, trade.customer_id, "USDT")
     return release
@@ -1043,7 +1242,30 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     sandbox=settings.broker_sandbox, market_type=settings.default_market_type,
                     timeout_ms=settings.exchange_timeout_ms,
                 ))
-            ticker = await asyncio.to_thread(broker.ticker, symbol)
+            try:
+                ticker = await asyncio.to_thread(broker.ticker, symbol)
+            except Exception as exc:
+                consume_alert = getattr(broker, "consume_market_data_circuit_alert", None)
+                if callable(consume_alert) and consume_alert():
+                    try:
+                        await open_incident(
+                            key=f"MARKET_DATA_CIRCUIT_OPEN:{str(exchange).lower()}",
+                            severity="HIGH",
+                            category="MARKET_DATA",
+                            summary="Repeated exchange quote failures opened the market-data circuit",
+                            detail={
+                                "exchange": str(exchange).lower(),
+                                "symbol": symbol,
+                                "error_type": type(exc).__name__,
+                            },
+                            customer_id=customer_id,
+                        )
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "market_data_circuit_incident_write_failed exchange=%s symbol=%s",
+                            exchange, symbol, exc_info=True,
+                        )
+                raise RiskBlocked("Live market data unavailable; order submission blocked") from exc
             bid = float(ticker.get("bid") or 0)
             ask = float(ticker.get("ask") or 0)
             quote = float(ask if side == "buy" and ask > 0 else
@@ -1088,7 +1310,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
         governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps, equity=risk_equity, risk_per_trade=settings.risk_per_trade)
         if governor.action != "ALLOW":
             raise RiskBlocked("Risk Governor blocked order: " + ",".join(governor.reasons))
-        await risk_gate(symbol, quote, quantity, live=live, signal_timestamp=signal_timestamp, side=side, customer_id=customer_id, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {})
+        await risk_gate(symbol, quote, quantity, live=live, signal_timestamp=signal_timestamp, side=side, customer_id=customer_id, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, signal_id=signal_id)
         trade_id, created = await _create_trade(
             symbol, timeframe, side, quantity, quote, exchange, mode, signal, signal_id, cid,
             stop_loss_price or 0.0, take_profit_price or 0.0, customer_id=customer_id, trading_account_id=trading_account_id,
@@ -1103,7 +1325,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                         "filled": float(existing.filled_quantity or 0.0),
                         "remaining_quantity": float(existing.remaining_quantity or 0.0),
                         "average_fill_price": float(existing.average_fill_price or 0.0)}
-        reserved_cash = 0.0
+        reserved_cash = Decimal("0")
         command: OrderCommand | None = None
         if customer_id is not None and settings.customer_cash_only_trading and mode == "LIVE":
             async with SessionLocal() as db:
@@ -1118,8 +1340,9 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 )
                 reducing = opposing_qty > 0 and quantity <= opposing_qty + 1e-9
                 if not reducing:
-                    reserve_buffer = max(0.0, float(settings.max_slippage_bps or 0.0)) / 10_000.0
-                    reserved_cash = float(quote * quantity * (1.0 + reserve_buffer))
+                    reserved_cash = _exact_reserved_cash(
+                        quote, quantity, settings.max_slippage_bps
+                    )
                     try:
                         await reserve_trading(db, customer_id, reserved_cash,
                                               reference_id=f"trade:{trade_id}:open-reserve")
@@ -1128,7 +1351,9 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                             reserved_trade.reserved_cash = reserved_cash
                         account_locked = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == customer_id).with_for_update())).scalar_one_or_none()
                         if account_locked:
-                            account_locked.reserved_margin += reserved_cash
+                            account_locked.reserved_margin = (
+                                Decimal(str(account_locked.reserved_margin or 0)) + reserved_cash
+                            )
                             account_locked.cash_equity = max(0.0, account_locked.cash_equity)
                         await sync_wallet_from_ledger(db, customer_id, "USDT")
                         if mode == "LIVE":
@@ -1181,7 +1406,8 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                                         "symbol": symbol, "side": side, "quantity": quantity})
             return {"duplicate": False, "trade_id": trade_id, "mode": "PAPER", "status": "SIMULATED", "price": quote}
 
-        assert broker is not None
+        if broker is None:
+            raise RuntimeError("Live broker was not initialized after execution preflight")
         try:
             amount = await asyncio.to_thread(broker.normalize_amount, symbol, quantity)
             if amount <= 0:
@@ -1268,6 +1494,11 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                         practice_demo=(mode == "FOREX_DEMO"),
                     )
                 await _verify_live_lease(lease_token)
+                if mode == "LIVE" and asset not in {"forex", "commodity"}:
+                    # The exchange timestamp is checked inside the fenced submit section,
+                    # immediately before any order side effect. An unknown/unsupported
+                    # clock is not permission to submit.
+                    _verify_exchange_clock(broker)
                 await _mark_order_command(command.id, status="SUBMITTING", token=lease_token, attempts_increment=True)
                 if asset in {"forex", "commodity"}:
                     order = await asyncio.to_thread(
@@ -1521,13 +1752,23 @@ async def sync_live_account(exchange: str, symbols: list[str] | None = None) -> 
         s.peak_equity = max(s.peak_equity, equity)
         positions_seen = set()
         for raw in positions_raw or []:
-            symbol = raw.get("symbol")
+            if not isinstance(raw, dict):
+                raise RuntimeError("Exchange position reconciliation received a malformed row")
+            symbol = str(raw.get("symbol") or "").strip()
             contracts = raw.get("contracts")
+            info = raw.get("info") if isinstance(raw.get("info"), dict) else {}
             if contracts is None:
-                contracts = raw.get("info", {}).get("positionAmt")
-            if not symbol or contracts is None:
-                continue
-            qty = float(contracts)
+                contracts = info.get("positionAmt")
+            if not symbol:
+                raise RuntimeError("Exchange position reconciliation received a row without a symbol")
+            if contracts is None:
+                raise RuntimeError(f"Exchange position {symbol} has no explicit quantity; refusing to report reconciliation success")
+            try:
+                qty = float(contracts)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise RuntimeError(f"Exchange position {symbol} has an invalid quantity") from exc
+            if not Decimal(str(qty)).is_finite():
+                raise RuntimeError(f"Exchange position {symbol} has a non-finite quantity")
             if qty == 0:
                 continue
             side = str(raw.get("side") or "").lower()
@@ -1598,7 +1839,7 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
                 order = next((o for o in opens if str(o.get("clientOrderId") or o.get("info", {}).get("clientOrderId") or "") == trade_client_order_id), None)
                 if order is None:
                     history = await asyncio.to_thread(broker.fetch_orders, symbol)
-                    order = next((o for o in history if str(o.get("clientOrderId") or o.get("info", {}).get("clientOrderId") or "") == client_order_id), None)
+                    order = next((o for o in history if str(o.get("clientOrderId") or o.get("info", {}).get("clientOrderId") or "") == trade_client_order_id), None)
             if order is None:
                 async with SessionLocal() as incident_db:
                     unresolved_trade = await incident_db.get(Trade, trade_id)
@@ -1776,15 +2017,41 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
     return {"results": results, "account": account, "reconciliation": reconciliation_meta}
 
 
-def _position_amount_from_exchange_row(row: dict[str, Any]) -> float:
-    for key in ("contracts", "contractSize", "amount", "quantity"):
-        value = row.get(key)
-        if value is not None:
-            try:
-                return abs(float(value))
-            except (TypeError, ValueError):
-                continue
-    return 0.0
+def _position_amount_from_exchange_row(row: dict[str, Any]) -> float | None:
+    """Extract an explicit open-position quantity, never a contract-size multiplier.
+
+    None means the exchange row cannot be interpreted safely; zero means the provider
+    explicitly reported no exposure. Emergency-stop callers must distinguish those states.
+    """
+    if not isinstance(row, dict):
+        return None
+    info = row.get("info") if isinstance(row.get("info"), dict) else {}
+    # Only accept CCXT's normalized position contract count or the known Binance
+    # positionAmt field. Generic amount/quantity keys are venue-specific and may
+    # describe a different unit; guessing could submit an oversized reduce-only order.
+    values = (row.get("contracts"), info.get("positionAmt"))
+    parsed_values: list[Decimal] = []
+    for value in values:
+        if value is None:
+            continue
+        try:
+            exact = Decimal(str(value).strip())
+        except (TypeError, ValueError, ArithmeticError):
+            return None
+        if not exact.is_finite():
+            return None
+        parsed_values.append(abs(exact))
+    if not parsed_values:
+        return None
+    # These venue fields can use different positive units (e.g. contracts vs base units),
+    # but they cannot safely disagree about whether exposure exists at all.
+    presence = {value != 0 for value in parsed_values}
+    if len(presence) > 1:
+        return None
+    amount = float(parsed_values[0])
+    if amount == float("inf"):
+        return None
+    return amount
 
 
 def _position_side_from_exchange_row(row: dict[str, Any]) -> str:
@@ -1796,6 +2063,25 @@ def _position_side_from_exchange_row(row: dict[str, Any]) -> str:
     return raw if raw in {"long", "short"} else ""
 
 
+def _parse_oanda_position_units(position: Any, side: str) -> Decimal | None:
+    """Return an explicit OANDA long/short unit quantity; None means unverifiable."""
+    if not isinstance(position, dict):
+        return None
+    side_data = position.get(side)
+    if not isinstance(side_data, dict) or "units" not in side_data:
+        return None
+    raw = side_data.get("units")
+    if raw is None or str(raw).strip() == "":
+        return None
+    if str(raw).strip().upper() == "NONE":
+        return Decimal("0")
+    try:
+        units = Decimal(str(raw).strip())
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    return units if units.is_finite() else None
+
+
 async def _flatten_exchange_positions(broker: Any, scope: str, failures: list[dict[str, str]], canceled: list[dict[str, str]]) -> None:
     try:
         rows = await asyncio.to_thread(broker.fetch_positions)
@@ -1803,10 +2089,19 @@ async def _flatten_exchange_positions(broker: Any, scope: str, failures: list[di
         failures.append({"scope": scope, "error": f"Unable to read open positions for flattening: {exc}"})
         return
     for row in rows or []:
-        symbol = str(row.get("symbol") or "")
+        if not isinstance(row, dict):
+            failures.append({"scope": scope, "error": "Exchange returned a malformed position row; cannot confirm exposure is flat"})
+            continue
+        symbol = str(row.get("symbol") or "").strip()
         amount = _position_amount_from_exchange_row(row)
         side = _position_side_from_exchange_row(row)
-        if not symbol or amount <= 0:
+        if not symbol:
+            failures.append({"scope": scope, "error": "Exchange position row has no symbol; cannot confirm exposure is flat"})
+            continue
+        if amount is None:
+            failures.append({"scope": scope, "symbol": symbol, "error": "Open-position quantity is missing or invalid; refusing to assume flat or submit a guessed flatten quantity"})
+            continue
+        if amount <= 0:
             continue
         if side not in {"long", "short"}:
             failures.append({"scope": scope, "symbol": symbol, "error": "Open position has no unambiguous long/short side; refusing to submit a flattening order"})
@@ -1819,9 +2114,17 @@ async def _flatten_exchange_positions(broker: Any, scope: str, failures: list[di
             failures.append({"scope": scope, "symbol": symbol, "error": f"Reduce-only flatten failed: {exc}"})
     try:
         remaining = await asyncio.to_thread(broker.fetch_positions)
-        unresolved = [str(row.get("symbol") or "") for row in remaining or [] if str(row.get("symbol") or "") and _position_amount_from_exchange_row(row) > 0]
+        unresolved = []
+        for row in remaining or []:
+            if not isinstance(row, dict):
+                unresolved.append("<malformed-position-row>")
+                continue
+            symbol = str(row.get("symbol") or "").strip()
+            amount = _position_amount_from_exchange_row(row)
+            if not symbol or amount is None or amount > 0:
+                unresolved.append(symbol or "<missing-symbol>")
         if unresolved:
-            failures.append({"scope": scope, "error": f"Positions remain after reduce-only flatten: {unresolved[:20]}"})
+            failures.append({"scope": scope, "error": f"Positions remain after reduce-only flatten or could not be verified: {unresolved[:20]}"})
     except Exception as exc:
         failures.append({"scope": scope, "error": f"Unable to verify positions after flattening: {exc}"})
 
@@ -1930,8 +2233,27 @@ async def emergency_stop(exchange: str | None = None):
                 orders = await asyncio.to_thread(broker.orders)
                 order_cancel_errors: list[dict[str, str]] = []
                 for order in orders:
+                    if not isinstance(order, dict):
+                        failure = {
+                            "scope": "platform_oanda_order_cancel",
+                            "error_type": "InvalidOpenOrder",
+                            "error": "OANDA returned a malformed order row; cannot confirm the order book is clear",
+                        }
+                        failures.append(failure)
+                        order_cancel_errors.append(failure)
+                        continue
                     order_id = str(order.get("id") or "")
                     state = str(order.get("state") or "").upper()
+                    if not state:
+                        failure = {
+                            "scope": "platform_oanda_order_cancel",
+                            "order_id": order_id,
+                            "error_type": "InvalidOpenOrder",
+                            "error": "OANDA order row lacks a state; refusing to treat it as non-open",
+                        }
+                        failures.append(failure)
+                        order_cancel_errors.append(failure)
+                        continue
                     if state not in {"PENDING", "OPEN"}:
                         continue
                     if not order_id:
@@ -1962,7 +2284,16 @@ async def emergency_stop(exchange: str | None = None):
                             order_id, failure["error_type"], failure["error"], exc_info=True,
                         )
                 remaining = await asyncio.to_thread(broker.orders)
-                still_open = [str(o.get("id") or "") for o in remaining if str(o.get("state") or "").upper() in {"PENDING", "OPEN"}]
+                still_open = []
+                for order in remaining:
+                    if not isinstance(order, dict):
+                        still_open.append("<malformed-order-row>")
+                        continue
+                    order_state = str(order.get("state") or "").upper()
+                    if not order_state:
+                        still_open.append(str(order.get("id") or "<missing-order-id>"))
+                    elif order_state in {"PENDING", "OPEN"}:
+                        still_open.append(str(order.get("id") or "<missing-order-id>"))
                 if still_open:
                     failures.append({
                         "scope": "platform_oanda",
@@ -1971,26 +2302,40 @@ async def emergency_stop(exchange: str | None = None):
                     })
                 positions = await asyncio.to_thread(broker.positions)
                 for position in positions or []:
-                    instrument = str(position.get("instrument") or "")
-                    long_units = str((position.get("long") or {}).get("units") or "NONE")
-                    short_units = str((position.get("short") or {}).get("units") or "NONE")
+                    if not isinstance(position, dict):
+                        failures.append({"scope": "platform_oanda", "error": "Malformed OANDA position row; cannot confirm exposure is flat"})
+                        continue
+                    instrument = str(position.get("instrument") or "").strip()
+                    long_value = _parse_oanda_position_units(position, "long")
+                    short_value = _parse_oanda_position_units(position, "short")
                     if not instrument:
                         failures.append({"scope": "platform_oanda", "error": "Open OANDA position has no instrument; refusing to guess"})
                         continue
+                    if long_value is None or short_value is None:
+                        failures.append({"scope": "platform_oanda", "symbol": instrument,
+                                         "error": "OANDA position units are missing or invalid; refusing to assume flat"})
+                        continue
+                    long_units = str(position["long"]["units"])
+                    short_units = str(position["short"]["units"])
                     try:
-                        if long_units not in {"NONE", "0", "0.0"} or short_units not in {"NONE", "0", "0.0"}:
+                        if long_value != 0 or short_value != 0:
                             await asyncio.to_thread(broker.close_position, instrument, long_units, short_units)
                             canceled.append({"scope": "platform_oanda", "position_symbol": instrument, "order_id": ""})
                     except Exception as exc:
                         failures.append({"scope": "platform_oanda", "symbol": instrument, "error": f"OANDA position close failed: {exc}"})
                 remaining_positions = await asyncio.to_thread(broker.positions)
-                unresolved_positions = [
-                    str(p.get("instrument") or "") for p in remaining_positions or []
-                    if str((p.get("long") or {}).get("units") or "0") not in {"0", "0.0", "NONE"}
-                    or str((p.get("short") or {}).get("units") or "0") not in {"0", "0.0", "NONE"}
-                ]
+                unresolved_positions = []
+                for position in remaining_positions or []:
+                    if not isinstance(position, dict):
+                        unresolved_positions.append("<malformed-position-row>")
+                        continue
+                    instrument = str(position.get("instrument") or "").strip()
+                    long_value = _parse_oanda_position_units(position, "long")
+                    short_value = _parse_oanda_position_units(position, "short")
+                    if not instrument or long_value is None or short_value is None or long_value != 0 or short_value != 0:
+                        unresolved_positions.append(instrument or "<missing-instrument>")
                 if unresolved_positions:
-                    failures.append({"scope": "platform_oanda", "error": f"OANDA positions remain after flatten: {unresolved_positions[:20]}"})
+                    failures.append({"scope": "platform_oanda", "error": f"OANDA positions remain or could not be verified after flatten: {unresolved_positions[:20]}"})
             except Exception as exc:
                 cancel_error = str(exc)
                 failures.append({"scope": "platform_oanda", "error": cancel_error})
@@ -2006,19 +2351,34 @@ async def emergency_stop(exchange: str | None = None):
                            market_type=settings.default_market_type, timeout_ms=settings.exchange_timeout_ms)
         broker = Broker.get(cfg)
         try:
-            rows = await asyncio.to_thread(broker.cancel_all_orders)
-            for item in rows or []:
-                canceled.append({"scope": "platform_exchange", "order_id": str(item.get("id") or "")})
-            platform_cancel_errors = list(getattr(broker, "last_cancel_errors", []) or [])
+            platform_cancel_errors: list[dict[str, str]] = []
+            remaining = []
+            # Retry cancellation and re-read the exchange order book. Only an empty
+            # authoritative order-book read can confirm that cancellation succeeded.
+            for attempt in range(3):
+                rows = await asyncio.to_thread(broker.cancel_all_orders)
+                for item in rows or []:
+                    canceled.append({"scope": "platform_exchange", "order_id": str(item.get("id") or "")})
+                platform_cancel_errors.extend(list(getattr(broker, "last_cancel_errors", []) or []))
+                remaining = await asyncio.to_thread(broker.fetch_open_orders)
+                if not remaining:
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(0.25 * (attempt + 1))
             warnings.extend({"scope": "platform_exchange_order_cancel", **item} for item in platform_cancel_errors)
-            remaining = await asyncio.to_thread(broker.fetch_open_orders)
             if remaining:
-                failures.append({
+                failure = {
                     "scope": "platform_exchange",
-                    "error": f"Open orders remain after cancellation: {len(remaining)}",
+                    "error": f"Open orders remain after 3 cancellation attempts: {len(remaining)}",
                     "open_order_ids": [str(item.get("id") or "") for item in remaining[:50]],
                     "cancel_errors": platform_cancel_errors[:50],
-                })
+                }
+                failures.append(failure)
+                await open_incident(key="EMERGENCY_STOP_PLATFORM_ORDERS_REMAIN", severity="CRITICAL",
+                                    category="EMERGENCY_STOP",
+                                    summary="Emergency stop could not cancel all platform exchange orders",
+                                    detail=failure)
+                await audit("EMERGENCY_CANCEL_FAILED", failure)
             if _is_derivatives_market(broker):
                 await _flatten_exchange_positions(broker, "platform_exchange", failures, canceled)
             else:
@@ -2032,20 +2392,20 @@ async def emergency_stop(exchange: str | None = None):
                 if spot_positions is not None:
                     unresolved_spot = []
                     for position in spot_positions or []:
-                        symbol = str(position.get("symbol") or position.get("info", {}).get("symbol") or "")
-                        contracts = position.get("contracts")
-                        if contracts is None:
-                            contracts = position.get("contractSize")
-                        try:
-                            exposure = float(contracts or 0.0)
-                        except (TypeError, ValueError):
-                            exposure = 0.0
-                        if symbol and exposure != 0.0:
+                        if not isinstance(position, dict):
+                            unresolved_spot.append({"symbol": "<malformed-position-row>", "quantity": "UNKNOWN"})
+                            continue
+                        info = position.get("info") if isinstance(position.get("info"), dict) else {}
+                        symbol = str(position.get("symbol") or info.get("symbol") or "").strip()
+                        exposure = _position_amount_from_exchange_row(position)
+                        if not symbol or exposure is None:
+                            unresolved_spot.append({"symbol": symbol or "<missing-symbol>", "quantity": "UNKNOWN"})
+                        elif exposure > 0:
                             unresolved_spot.append({"symbol": symbol, "quantity": exposure})
                     if unresolved_spot:
                         failures.append({
                             "scope": "platform_exchange_spot",
-                            "error": "Unflattened platform spot positions remain",
+                            "error": "Unflattened platform spot positions remain or are unverifiable",
                             "positions": unresolved_spot[:50],
                         })
 
@@ -2102,19 +2462,32 @@ async def emergency_stop(exchange: str | None = None):
                 broker = await asyncio.to_thread(
                     build_customer_binance_broker, account, timeout_ms=settings.exchange_timeout_ms, sandbox=False
                 )
-                rows = await asyncio.to_thread(broker.cancel_all_orders)
-                for item in rows or []:
-                    canceled.append({"scope": f"customer:{account.customer_id}", "order_id": str(item.get("id") or "")})
-                customer_cancel_errors = list(getattr(broker, "last_cancel_errors", []) or [])
+                customer_cancel_errors: list[dict[str, str]] = []
+                remaining = []
+                for attempt in range(3):
+                    rows = await asyncio.to_thread(broker.cancel_all_orders)
+                    for item in rows or []:
+                        canceled.append({"scope": f"customer:{account.customer_id}", "order_id": str(item.get("id") or "")})
+                    customer_cancel_errors.extend(list(getattr(broker, "last_cancel_errors", []) or []))
+                    remaining = await asyncio.to_thread(broker.fetch_open_orders)
+                    if not remaining:
+                        break
+                    if attempt < 2:
+                        await asyncio.sleep(0.25 * (attempt + 1))
                 warnings.extend({"scope": f"customer:{account.customer_id}_order_cancel", **item} for item in customer_cancel_errors)
-                remaining = await asyncio.to_thread(broker.fetch_open_orders)
                 if remaining:
-                    failures.append({
+                    failure = {
                         "scope": f"customer:{account.customer_id}",
-                        "error": f"Open orders remain after cancellation: {len(remaining)}",
+                        "error": f"Open orders remain after 3 cancellation attempts: {len(remaining)}",
                         "open_order_ids": [str(item.get("id") or "") for item in remaining[:50]],
                         "cancel_errors": customer_cancel_errors[:50],
-                    })
+                    }
+                    failures.append(failure)
+                    await open_incident(key=f"EMERGENCY_STOP_CUSTOMER_ORDERS_REMAIN:{account.customer_id}",
+                                        severity="CRITICAL", category="EMERGENCY_STOP",
+                                        summary="Emergency stop could not cancel all customer exchange orders",
+                                        detail=failure, customer_id=account.customer_id)
+                    await audit("EMERGENCY_CANCEL_FAILED", failure)
                 await _flatten_customer_spot_positions(account, broker, failures, canceled)
             except Exception as exc:
                 failure = {"scope": f"customer:{account.customer_id}", "error": str(exc)[:1000]}

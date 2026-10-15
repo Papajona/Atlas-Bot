@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 import json
+import math
 
 
 class BinanceUserStreamError(RuntimeError):
@@ -29,11 +30,19 @@ class OrderUpdate:
         return self.status in {"FILLED", "CANCELED", "REJECTED", "EXPIRED", "EXPIRED_IN_MATCH"}
 
 
-def _float(value: Any) -> float:
-    try:
-        return float(value or 0)
-    except (TypeError, ValueError):
+def _float(value: Any, field: str, *, required: bool = False) -> float:
+    """Parse a provider quantity/price without converting malformed data into a fake zero."""
+    if value is None or value == "":
+        if required:
+            raise BinanceUserStreamError(f"Missing numeric field in Binance order update: {field}")
         return 0.0
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise BinanceUserStreamError(f"Invalid numeric field in Binance order update: {field}") from exc
+    if not math.isfinite(parsed) or parsed < 0:
+        raise BinanceUserStreamError(f"Non-finite or negative numeric field in Binance order update: {field}")
+    return parsed
 
 
 def parse_order_update(message: str | bytes | Mapping[str, Any]) -> OrderUpdate | None:
@@ -73,11 +82,11 @@ def parse_order_update(message: str | bytes | Mapping[str, Any]) -> OrderUpdate 
         status=status,
         execution_type=execution_type,
         side=side,
-        original_qty=_float(order.get("q") or order.get("origQty")),
-        executed_qty=_float(order.get("z") or order.get("executedQty")),
-        last_fill_qty=_float(order.get("l") or order.get("lastExecutedQty")),
-        last_fill_price=_float(order.get("L") or order.get("lastExecutedPrice")),
-        cumulative_quote_qty=_float(order.get("Z") or order.get("cummulativeQuoteQty")),
+        original_qty=_float(order.get("q") if order.get("q") not in (None, "") else order.get("origQty"), "original_qty", required=True),
+        executed_qty=_float(order.get("z") if order.get("z") not in (None, "") else order.get("executedQty"), "executed_qty", required=True),
+        last_fill_qty=_float(order.get("l") if order.get("l") is not None else order.get("lastExecutedQty"), "last_fill_qty"),
+        last_fill_price=_float(order.get("L") if order.get("L") is not None else order.get("lastExecutedPrice"), "last_fill_price"),
+        cumulative_quote_qty=_float(order.get("Z") if order.get("Z") is not None else order.get("cummulativeQuoteQty"), "cumulative_quote_qty"),
         event_time_ms=int(data.get("E") or order.get("T") or order.get("updateTime") or 0),
     )
 
@@ -121,6 +130,7 @@ class BinanceUserStreamSession:
     async def run(self, stop_event: Any) -> None:
         import asyncio
         import time
+        import random
         import websockets
 
         backoff = 1.0
@@ -157,5 +167,5 @@ class BinanceUserStreamSession:
                     break
                 if connected_at is not None and time.monotonic() - connected_at >= self.stable_seconds:
                     backoff = 1.0
-                await asyncio.sleep(min(backoff, self.max_backoff_seconds))
+                await asyncio.sleep(random.uniform(0.0, min(backoff, self.max_backoff_seconds)))
                 backoff = min(backoff * 2.0, self.max_backoff_seconds)

@@ -76,12 +76,34 @@ class OandaBroker:
             raise OandaError(f"No OANDA price for {instrument}")
         return prices[0]
 
-    def candles(self, instrument: str, granularity: str, count: int = 500) -> list[dict[str, Any]]:
-        data = self._request(
-            "GET", f"/v3/instruments/{instrument}/candles",
-            params={"granularity": granularity, "count": min(count, 5000), "price": "M"},
-        )
-        return data.get("candles") or []
+    def candles(
+        self,
+        instrument: str,
+        granularity: str,
+        count: int = 500,
+        *,
+        from_time: str | None = None,
+        to_time: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch one bounded page of completed or forming mid candles.
+
+        Callers doing historical-window retrieval must paginate with explicit time
+        bounds; count is capped at the OANDA endpoint maximum rather than silently
+        pretending a single page represents the full requested period.
+        """
+        limit = int(count)
+        if limit < 1:
+            raise OandaError("OANDA candle count must be positive")
+        params: dict[str, Any] = {"granularity": granularity, "count": min(limit, 5000), "price": "M"}
+        if from_time:
+            params["from"] = str(from_time)
+        if to_time:
+            params["to"] = str(to_time)
+        data = self._request("GET", f"/v3/instruments/{instrument}/candles", params=params)
+        candles = data.get("candles")
+        if not isinstance(candles, list):
+            raise OandaError("OANDA returned a malformed candles response")
+        return candles
 
     @staticmethod
     def _decimal_price(obj: dict[str, Any], side: str) -> float:
@@ -268,12 +290,24 @@ class OandaBroker:
         except OandaError:
             # A definite lookup rejection may use the read-only history fallback below.
             pass
+        limit = min(max(int(count), 1), 500)
         data = self._request("GET", f"/v3/accounts/{self.config.account_id}/orders",
-                             params={"count": min(max(count, 1), 500)})
-        for order in data.get("orders") or []:
+                             params={"count": limit})
+        rows = data.get("orders")
+        if not isinstance(rows, list):
+            raise OandaError("OANDA returned a malformed order-history response")
+        for order in rows:
             ext = order.get("clientExtensions") or {}
             if str(ext.get("id") or "") == client_order_id:
                 return self.order(str(order.get("id")))
+        # A full page is not proof that the order is absent: older matching orders
+        # may be outside the provider's bounded history response. Preserve UNKNOWN
+        # rather than allowing a caller to treat the order as never submitted.
+        if len(rows) >= limit:
+            raise OandaUnknown(
+                f"OANDA order-history lookup reached its {limit}-record limit without finding "
+                f"client order ID {client_order_id}; absence is unverified"
+            )
         return None
 
     def account_changes(self, since_transaction_id: str) -> dict[str, Any]:

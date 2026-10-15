@@ -116,6 +116,12 @@ def fetch_forex(symbol: str = "EURUSD", timeframe: str = "1h", days: int = 365) 
         raw.columns = [str(c).lower() for c in raw.columns]
     raw = raw[["open", "high", "low", "close", "volume"]].dropna()
     raw.index = pd.to_datetime(raw.index, utc=True)
+    # Exclude a still-forming yfinance candle to prevent signals repainting.
+    interval_seconds = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "1d": 86400}.get(interval, 3600)
+    now = pd.Timestamp.now(tz="UTC")
+    raw = raw.loc[(raw.index + pd.to_timedelta(interval_seconds, unit="s")) <= now]
+    if raw.empty:
+        raise RuntimeError("No completed FX candles returned after excluding the forming bar")
     cleaned = _validate_ohlcv(raw, timeframe, reject_gaps=False)
     return _attach_data_provenance(
         cleaned,
@@ -134,12 +140,66 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
     granularity = {"1m":"M1", "5m":"M5", "15m":"M15", "30m":"M30", "1h":"H1", "4h":"H4", "1d":"D"}.get(timeframe)
     if not granularity:
         raise RuntimeError(f"Unsupported OANDA timeframe: {timeframe}")
+    try:
+        day_value = float(days)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("OANDA historical window days must be a positive integer") from exc
+    if isinstance(days, bool) or not np.isfinite(day_value) or day_value < 1 or not day_value.is_integer():
+        raise ValueError("OANDA historical window days must be a positive integer")
+    days = int(day_value)
     if not settings.oanda_practice:
         raise RuntimeError("OANDA live mode is disabled in AtlasRisk; use practice/demo for learning and backtesting")
     broker = OandaBroker(OandaConfig(settings.oanda_account_id, settings.oanda_api_token, True, settings.oanda_timeout_seconds))
     try:
-        count = min(5000, max(250, int(days * 24) if granularity == "H1" else int(days * 24 * 60 / max(1, int(timeframe[:-1])))))
-        candles = broker.candles(symbol, granularity, count=count)
+        bars_per_day = {"M1": 1440, "M5": 288, "M15": 96, "M30": 48, "H1": 24, "H4": 6, "D": 1}[granularity]
+        page_size = 5000
+        expected_upper_bound = days * bars_per_day
+        max_pages = max(1, int(np.ceil(expected_upper_bound / page_size)) + 2)
+        end_time = datetime.now(timezone.utc)
+        cursor = end_time - pd.Timedelta(days=days)
+        candles = []
+        seen_timestamps: set[pd.Timestamp] = set()
+        granularity_delta = {
+            "M1": pd.Timedelta(minutes=1), "M5": pd.Timedelta(minutes=5),
+            "M15": pd.Timedelta(minutes=15), "M30": pd.Timedelta(minutes=30),
+            "H1": pd.Timedelta(hours=1), "H4": pd.Timedelta(hours=4),
+            "D": pd.Timedelta(days=1),
+        }[granularity]
+        for page_number in range(max_pages):
+            batch = broker.candles(
+                symbol,
+                granularity,
+                count=page_size,
+                from_time=cursor.isoformat(),
+                to_time=end_time.isoformat(),
+            )
+            if not batch:
+                break
+            timestamps = []
+            for item in batch:
+                if not isinstance(item, dict) or not item.get("time"):
+                    raise RuntimeError("OANDA candle page contained a malformed timestamp row")
+                timestamp = pd.Timestamp(item["time"])
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.tz_localize("UTC")
+                else:
+                    timestamp = timestamp.tz_convert("UTC")
+                if timestamp in seen_timestamps:
+                    raise RuntimeError(f"OANDA candle pagination returned duplicate timestamp {timestamp.isoformat()}")
+                seen_timestamps.add(timestamp)
+                timestamps.append(timestamp)
+            if timestamps != sorted(timestamps):
+                raise RuntimeError("OANDA candle page is not in chronological order")
+            candles.extend(batch)
+            last_timestamp = timestamps[-1]
+            next_cursor = last_timestamp + granularity_delta
+            if next_cursor <= cursor:
+                raise RuntimeError("OANDA candle pagination cursor did not advance")
+            cursor = next_cursor
+            if len(batch) < page_size or cursor >= end_time:
+                break
+        else:
+            raise RuntimeError(f"OANDA candle pagination exceeded safety bound of {max_pages} pages")
     finally:
         broker.close()
     rows = []
@@ -147,9 +207,12 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
         if not c.get("complete"):
             continue
         m = c.get("mid") or {}
-        rows.append([c.get("time"), float(m.get("o")), float(m.get("h")), float(m.get("l")), float(m.get("c")), float(c.get("volume") or 0)])
+        try:
+            rows.append([c.get("time"), float(m["o"]), float(m["h"]), float(m["l"]), float(m["c"]), float(c.get("volume") or 0)])
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise RuntimeError("OANDA returned a completed candle with malformed mid OHLCV values") from exc
     if not rows:
-        raise RuntimeError("No completed OANDA candles returned")
+        raise RuntimeError("No completed OANDA candles returned for requested time window")
     df = pd.DataFrame(rows, columns=["ts","open","high","low","close","volume"])
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
     cleaned = _validate_ohlcv(df.set_index("ts"), timeframe, reject_gaps=False)
