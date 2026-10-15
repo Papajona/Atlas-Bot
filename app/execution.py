@@ -1826,7 +1826,10 @@ def _position_amount_from_exchange_row(row: dict[str, Any]) -> float | None:
     if not isinstance(row, dict):
         return None
     info = row.get("info") if isinstance(row.get("info"), dict) else {}
-    values = (row.get("contracts"), info.get("positionAmt"), row.get("amount"), row.get("quantity"))
+    # Only accept CCXT's normalized position contract count or the known Binance
+    # positionAmt field. Generic amount/quantity keys are venue-specific and may
+    # describe a different unit; guessing could submit an oversized reduce-only order.
+    values = (row.get("contracts"), info.get("positionAmt"))
     parsed_values: list[Decimal] = []
     for value in values:
         if value is None:
