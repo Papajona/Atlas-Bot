@@ -6273,8 +6273,15 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
         qty = target_notional / price
         stop = price * (1 - settings.stop_loss_pct) if side == "buy" else price * (1 + settings.stop_loss_pct)
         tp = price * (1 + settings.take_profit_pct) if side == "buy" else price * (1 - settings.take_profit_pct)
-        result = await execute_signal(req.symbol, side, qty, price, sig, req.exchange, req.timeframe, ts,
-                                      force_paper=True, stop_loss_price=stop, take_profit_price=tp, asset=req.asset)
+        from .paper_execution_model import paper_execution_context_from_ohlcv
+        paper_signal = dict(sig)
+        paper_signal["paper_execution_context"] = paper_execution_context_from_ohlcv(
+            df, asset=req.asset,
+        )
+        result = await execute_signal(
+            req.symbol, side, qty, price, paper_signal, req.exchange, req.timeframe, ts,
+            force_paper=True, stop_loss_price=stop, take_profit_price=tp, asset=req.asset,
+        )
         equity_state = await mark_paper_equity({req.symbol: price})
         return {"mode": "PAPER", "side": side, "price": price, "quantity": qty, **sig,
                 "execution": result, "equity": equity_state}
