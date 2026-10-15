@@ -102,7 +102,7 @@ def test_paper_buy_then_sell_round_trip(monkeypatch):
 
 
 def test_stress_many_paper_orders_cannot_overconsume_one_bar_liquidity(monkeypatch):
-    """Integration stress: 50 simultaneous orders share one 2-unit synthetic bar budget."""
+    """Integration stress: 150 simultaneous orders share one 2-unit synthetic bar budget."""
     from app import execution
     from app.config import settings
     from app.db import init_db, SessionLocal, Trade
@@ -117,7 +117,7 @@ def test_stress_many_paper_orders_cannot_overconsume_one_bar_liquidity(monkeypat
     exchange = "stress-simulator"
     previous_bar = "2026-10-15T11:00:00Z"
     current_bar = "2026-10-15T12:00:00Z"
-    order_count = 50
+    order_count = 150
     requested_each = 100.0
     context = {
         "source": "ccxt_ohlcv", "asset": "crypto", "bar_volume": 20.0,
