@@ -1426,6 +1426,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 context = signal.get("paper_market_context")
                 calibrated = calibrated_model_available(
                     context,
+                    base_slippage_bps=profile.slippage_bps,
                     max_participation_rate=settings.paper_impact_max_participation_rate,
                     impact_coefficient=settings.paper_impact_coefficient,
                     rejection_probability=settings.paper_execution_rejection_probability,
