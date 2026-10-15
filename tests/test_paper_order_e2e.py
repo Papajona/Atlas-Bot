@@ -64,7 +64,9 @@ def test_paper_buy_then_sell_round_trip():
             assert all(t.status == "SIMULATED" for t in trades)
             assert all(isinstance(t.filled_quantity, float) and isinstance(t.requested_price, float) for t in trades)
             assert all(t.filled_quantity == t.requested_quantity for t in trades)
-            assert all("VOLUME_PARTICIPATION_VOLATILITY_V1" in (t.reason or "") for t in trades)
+            assert all("VOLUME_PARTICIPATION_VOLATILITY_LATENCY_REJECTION_V2" in (t.reason or "") for t in trades)
+            assert all("simulated_latency_ms" in (t.reason or "") for t in trades)
+            assert all("simulated_rejection" in (t.reason or "") for t in trades)
             positions = (await db.execute(select(Position).where(Position.symbol == sym, Position.exchange == "binance"))).scalars().all()
             assert len(positions) == 1
             assert abs(float(positions[0].quantity)) < 1e-12
