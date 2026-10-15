@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pandas as pd
 
-from .strategy_engine import StrategyConfig, strategy_signals, risk_scaled_position, target_positions, next_open_returns
+from .strategy_engine import StrategyConfig, strategy_signals, risk_scaled_position, target_positions
 from .execution_aware_research import execution_turnover, simulate_execution_aware_strategy
 from .trading_core import ai_walk_forward_backtest
 from .strategy_evidence import evidence_for
