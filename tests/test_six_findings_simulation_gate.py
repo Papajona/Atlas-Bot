@@ -213,6 +213,32 @@ def test_selection_simulation_rejects_strong_in_sample_when_held_out_fails(monke
 
 
 
+
+def test_bad_or_stale_bar_volume_fails_closed_without_creating_a_fill():
+    from app.paper_execution_model import simulate_paper_fill_step
+
+    context = {
+        "source": "ccxt_ohlcv", "asset": "crypto", "bar_volume": 0.0,
+        "volume_unit": "base_asset", "realized_volatility_per_bar": 0.02,
+        "spread_bps": 4.0, "bar_timestamp": "2026-10-15T13:00:00Z",
+    }
+    zero_volume = simulate_paper_fill_step(
+        remaining_quantity=5.0, context=context, order_key="zero-volume",
+        last_processed_bar_timestamp="2026-10-15T12:00:00Z",
+        queue_fill_probability=1.0, rejection_probability=0.0,
+    )
+    stale_bar = simulate_paper_fill_step(
+        remaining_quantity=5.0,
+        context={**context, "bar_volume": 100.0, "bar_timestamp": "2026-10-15T11:00:00Z"},
+        order_key="stale-bar", last_processed_bar_timestamp="2026-10-15T12:00:00Z",
+        queue_fill_probability=1.0, rejection_probability=0.0,
+    )
+    assert zero_volume["event"] == "WAITING_FOR_VERIFIED_LIQUIDITY"
+    assert zero_volume["fill_quantity"] == 0.0
+    assert stale_bar["event"] == "NO_NEW_BAR"
+    assert stale_bar["fill_quantity"] == 0.0
+
+
 def test_paper_order_ttl_cancels_unfilled_and_partial_remainders():
     from app.paper_execution_model import simulate_paper_fill_step
 

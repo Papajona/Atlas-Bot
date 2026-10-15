@@ -1268,10 +1268,22 @@ async def advance_paper_orders(
                 trade.status = "REJECTED"
                 trade.remaining_quantity = 0.0
                 trade.error = "PAPER_SIMULATOR_REJECTED_REMAINDER"
+                audit_events.append({
+                    "event": "PAPER_ORDER_REJECTED",
+                    "detail": {"trade_id": trade.id, "client_order_id": trade.client_order_id,
+                               "symbol": trade.symbol, "bar_timestamp": current_bar,
+                               "reason": trade.error},
+                })
             elif event_type == "CANCELED":
                 trade.status = "CANCELED"
                 trade.remaining_quantity = 0.0
                 trade.error = "PAPER_SIMULATOR_TTL_EXPIRED"
+                audit_events.append({
+                    "event": "PAPER_ORDER_CANCELED",
+                    "detail": {"trade_id": trade.id, "client_order_id": trade.client_order_id,
+                               "symbol": trade.symbol, "bar_timestamp": current_bar,
+                               "reason": trade.error},
+                })
             elif fill_quantity > 0.0:
                 asset = str(details.get("asset") or "crypto").lower()
                 profile = PROFILES.get(asset)

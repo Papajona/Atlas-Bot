@@ -234,6 +234,16 @@ def simulate_paper_fill_step(
         return outcome("WAITING_FOR_VERIFIED_LIQUIDITY", timestamp=last_processed_bar_timestamp)
     if current_bar == str(last_processed_bar_timestamp or ""):
         return outcome("NO_NEW_BAR", timestamp=last_processed_bar_timestamp)
+    previous_bar = str(last_processed_bar_timestamp or "").strip()
+    if previous_bar:
+        try:
+            current_time = pd.Timestamp(current_bar)
+            previous_time = pd.Timestamp(previous_bar)
+            if not pd.isna(current_time) and not pd.isna(previous_time) and current_time <= previous_time:
+                return outcome("NO_NEW_BAR", timestamp=last_processed_bar_timestamp)
+        except (TypeError, ValueError, OverflowError):
+            # Non-ISO synthetic labels remain valid for deterministic unit scenarios.
+            pass
 
     next_waited = int(bars_waited) + 1
     verified_crypto_volume = source == "ccxt_ohlcv" and asset == "crypto" and volume_unit == "base_asset"
@@ -242,7 +252,12 @@ def simulate_paper_fill_step(
             return outcome("CANCELED", remaining_after=0.0, waited=next_waited)
         return outcome("WAITING_FOR_VERIFIED_LIQUIDITY", waited=next_waited)
 
-    volume = _finite_number(volume_value, "bar_volume", strict_minimum=True)
+    try:
+        volume = _finite_number(volume_value, "bar_volume", strict_minimum=True)
+    except ValueError:
+        if next_waited >= int(ttl_bars):
+            return outcome("CANCELED", remaining_after=0.0, waited=next_waited)
+        return outcome("WAITING_FOR_VERIFIED_LIQUIDITY", waited=next_waited)
     if next_waited < int(latency_bars):
         return outcome("LATENCY_WAIT", waited=next_waited)
 
