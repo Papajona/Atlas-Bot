@@ -219,6 +219,7 @@ def test_oos_gate_adapter_preserves_actual_walk_forward_backtest_fold_key():
         "cost_analysis": {"stress_ok": True},
         "financing_cost_model_complete": True,
         "intrabar_stop_target_model_complete": True,
+        "execution_cost_model_complete": True,
     }
     normalized = promotion_gate_metrics(backtest_metrics)
     assert normalized["folds"] == emitted_folds
