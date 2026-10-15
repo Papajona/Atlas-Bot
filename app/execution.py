@@ -26,7 +26,7 @@ from .research_validation import edge_decay_check
 from .ids import make_signal_id, client_order_id
 from .audit_chain import record_audit
 from .live_fees import extract_order_fee_quote_decimal, ESTIMATED
-from .paper_execution_model import estimate_paper_slippage, adverse_fill_price
+from .paper_execution_model import estimate_paper_slippage, adverse_fill_price, simulate_paper_fill_step
 from .customer_funds import record_ledger_incident
 from .distributed import acquire_lock, release_lock
 
@@ -732,12 +732,12 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         trade_context = json.loads(trade.reason or "{}")
     except Exception:
         trade_context = {}
-    live_entry_ids = select(Trade.id).where(Trade.mode == "LIVE")
+    same_mode_entry_ids = select(Trade.id).where(Trade.mode == trade.mode)
     position_query = select(Position).where(
         Position.symbol == trade.symbol,
         Position.exchange == trade.exchange,
         Position.customer_id == trade.customer_id,
-        Position.entry_trade_id.in_(live_entry_ids),
+        Position.entry_trade_id.in_(same_mode_entry_ids),
     ).with_for_update()
     position = (await db.execute(position_query)).scalar_one_or_none()
     realized_decimal = Decimal("0")
@@ -1136,6 +1136,235 @@ async def mark_paper_equity(mark_prices: dict[str, float], customer_id: int | No
         return result
 
 
+
+
+async def advance_paper_orders(
+    market_snapshots: list[dict[str, Any]],
+    *,
+    max_orders: int = 100,
+) -> dict[str, Any]:
+    """Advance platform-only paper orders from new completed market bars.
+
+    This function never calls a broker and excludes customer trades. It applies one
+    aggregate bar-volume participation budget per exchange/symbol/bar to prevent many
+    simultaneous orders each claiming the same liquidity.
+    """
+    snapshots: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in market_snapshots:
+        if not isinstance(item, dict):
+            continue
+        exchange_key = str(item.get("exchange") or "").strip().lower()
+        symbol_key = str(item.get("symbol") or "").strip()
+        context = item.get("context")
+        if exchange_key and symbol_key and isinstance(context, dict):
+            try:
+                price = float(item.get("price"))
+            except (TypeError, ValueError, OverflowError):
+                price = float("nan")
+            snapshots[(exchange_key, symbol_key)] = {
+                "exchange": exchange_key, "symbol": symbol_key,
+                "context": context, "price": price,
+            }
+    if not snapshots:
+        return {"checked": 0, "updated": []}
+
+    updated: list[dict[str, Any]] = []
+    audit_events: list[dict[str, Any]] = []
+    mark_prices: dict[str, float] = {}
+    used_capacity: dict[tuple[str, str, str], float] = {}
+    checked = 0
+    async with SessionLocal() as db:
+        query = (
+            select(Trade)
+            .where(
+                Trade.mode == "PAPER",
+                Trade.customer_id.is_(None),
+                Trade.status.in_(["OPEN", "PARTIAL"]),
+                Trade.remaining_quantity > 0,
+            )
+            .order_by(Trade.created_at, Trade.id)
+            .limit(max(1, min(int(max_orders), 1000)))
+            .with_for_update()
+        )
+        trades = (await db.execute(query)).scalars().all()
+        for trade in trades:
+            snapshot = snapshots.get((str(trade.exchange or "").lower(), str(trade.symbol or "")))
+            if snapshot is None:
+                continue
+            checked += 1
+            context = snapshot["context"]
+            current_bar = str(context.get("bar_timestamp") or "").strip()
+            try:
+                details = json.loads(trade.reason or "{}")
+            except (TypeError, ValueError):
+                details = {}
+            if not isinstance(details, dict):
+                details = {}
+            state = details.get("paper_execution_state")
+            if not isinstance(state, dict):
+                state = {}
+            last_bar = str(state.get("last_processed_bar_timestamp") or "") or None
+            bars_waited = int(state.get("bars_waited") or 0)
+
+            # Orders lacking a submission-bar timestamp establish a baseline first;
+            # they cannot be filled on the first bar for which we happen to see them.
+            if not last_bar:
+                state["last_processed_bar_timestamp"] = current_bar or None
+                state["bars_waited"] = bars_waited
+                state["events"] = int(state.get("events") or 0)
+                state["last_event"] = "BASELINE_BAR_RECORDED"
+                details["paper_execution_state"] = state
+                trade.reason = json.dumps(details, default=str)
+                trade.updated_at = utcnow()
+                updated.append({
+                    "trade_id": trade.id, "status": trade.status,
+                    "event": "BASELINE_BAR_RECORDED", "filled": float(trade.filled_quantity or 0.0),
+                    "remaining_quantity": float(trade.remaining_quantity or 0.0),
+                })
+                continue
+
+            usage_key = (snapshot["exchange"], snapshot["symbol"], current_bar)
+            max_fill_for_order: float | None = None
+            try:
+                if (
+                    current_bar
+                    and str(context.get("source") or "").lower() == "ccxt_ohlcv"
+                    and str(context.get("asset") or "").lower() == "crypto"
+                    and str(context.get("volume_unit") or "").lower() == "base_asset"
+                    and context.get("bar_volume") is not None
+                ):
+                    bar_volume = float(context["bar_volume"])
+                    if math.isfinite(bar_volume) and bar_volume > 0:
+                        bar_cap = bar_volume * settings.paper_max_bar_volume_participation
+                        max_fill_for_order = max(0.0, bar_cap - used_capacity.get(usage_key, 0.0))
+            except (TypeError, ValueError, OverflowError):
+                max_fill_for_order = 0.0
+
+            event = simulate_paper_fill_step(
+                remaining_quantity=float(trade.remaining_quantity or 0.0),
+                context=context,
+                order_key=str(trade.client_order_id),
+                last_processed_bar_timestamp=last_bar,
+                bars_waited=bars_waited,
+                latency_bars=settings.paper_fill_latency_bars,
+                max_bar_volume_participation=settings.paper_max_bar_volume_participation,
+                queue_fill_probability=settings.paper_queue_fill_probability,
+                rejection_probability=settings.paper_rejection_probability,
+                max_fill_quantity=max_fill_for_order,
+            )
+            if event["event"] == "NO_NEW_BAR":
+                continue
+
+            state["last_processed_bar_timestamp"] = event["last_processed_bar_timestamp"]
+            state["bars_waited"] = int(event["bars_waited"])
+            state["events"] = int(state.get("events") or 0) + 1
+            state["last_event"] = event["event"]
+            details["paper_execution_state"] = state
+            fill_quantity = float(event["fill_quantity"])
+            event_type = str(event["event"])
+
+            if event_type == "REJECTED":
+                trade.status = "REJECTED"
+                trade.remaining_quantity = 0.0
+                trade.error = "PAPER_SIMULATOR_REJECTED_REMAINDER"
+            elif fill_quantity > 0.0:
+                asset = str(details.get("asset") or "crypto").lower()
+                profile = PROFILES.get(asset)
+                snapshot_price = float(snapshot["price"])
+                if profile is None or not math.isfinite(snapshot_price) or snapshot_price <= 0:
+                    state["last_event"] = "INVALID_PRICE_OR_ASSET_PROFILE"
+                    trade.error = "PAPER_FILL_BLOCKED_INVALID_PRICE_OR_ASSET_PROFILE"
+                    event_type = state["last_event"]
+                else:
+                    try:
+                        slip_model = estimate_paper_slippage(
+                            side=str(trade.side), quantity=fill_quantity,
+                            base_slippage_bps=profile.slippage_bps, context=context,
+                            impact_coefficient=settings.paper_market_impact_coefficient,
+                            max_market_impact_bps=settings.paper_max_market_impact_bps,
+                        )
+                        fill_price = adverse_fill_price(
+                            snapshot_price, str(trade.side), float(slip_model["modeled_slippage_bps"])
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        state["last_event"] = "COST_MODEL_REJECTED"
+                        trade.error = "PAPER_FILL_BLOCKED_COST_MODEL"
+                        event_type = state["last_event"]
+                    else:
+                        old_filled = float(trade.filled_quantity or 0.0)
+                        new_filled = min(
+                            float(trade.requested_quantity or trade.quantity or 0.0),
+                            old_filled + fill_quantity,
+                        )
+                        actual_delta = max(0.0, new_filled - old_filled)
+                        if actual_delta > 0.0:
+                            fee = actual_delta * fill_price * (profile.taker_bps / 10_000.0)
+                            old_notional = float(trade.notional or 0.0)
+                            old_fee = float(trade.fee or 0.0)
+                            old_average = float(trade.average_fill_price or 0.0)
+                            await _apply_fill_to_position(db, trade, new_filled, fill_price)
+                            trade.average_fill_price = (
+                                (old_average * old_filled + fill_price * actual_delta) / new_filled
+                                if new_filled > 0 else 0.0
+                            )
+                            trade.notional = old_notional + actual_delta * fill_price
+                            trade.fee = old_fee + fee
+                            trade.remaining_quantity = max(0.0, float(event["remaining_quantity"]))
+                            if trade.remaining_quantity <= max(1e-12, float(trade.requested_quantity or 0.0) * 1e-12):
+                                trade.remaining_quantity = 0.0
+                                trade.status = "SIMULATED"
+                                trade.error = ""
+                            else:
+                                trade.status = "PARTIAL"
+                                trade.error = ""
+                            state["last_fill_price"] = fill_price
+                            state["last_fill_quantity"] = actual_delta
+                            state["last_slippage_model"] = slip_model
+                            history = details.get("paper_fill_events")
+                            if not isinstance(history, list):
+                                history = []
+                            history.append({
+                                "bar_timestamp": current_bar, "fill_quantity": actual_delta,
+                                "fill_price": fill_price, "fee": fee, "event": event_type,
+                                "slippage_model": slip_model,
+                            })
+                            details["paper_fill_events"] = history[-100:]
+                            if fee > 0:
+                                state_row = await _get_state_locked(db)
+                                state_row.cash_equity = max(0.0, float(state_row.cash_equity or 0.0) - fee)
+                            used_capacity[usage_key] = used_capacity.get(usage_key, 0.0) + actual_delta
+                            mark_prices[snapshot["symbol"]] = snapshot_price
+                            audit_events.append({
+                                "event": "PAPER_FILL",
+                                "detail": {
+                                    "trade_id": trade.id, "client_order_id": trade.client_order_id,
+                                    "symbol": trade.symbol, "bar_timestamp": current_bar,
+                                    "fill_quantity": actual_delta, "cumulative_filled_quantity": new_filled,
+                                    "remaining_quantity": float(trade.remaining_quantity or 0.0),
+                                    "fill_price": fill_price, "fee": fee, "status": trade.status,
+                                    "slippage_model": slip_model,
+                                },
+                            })
+            else:
+                trade.remaining_quantity = max(0.0, float(trade.remaining_quantity or 0.0))
+
+            details["paper_execution_state"] = state
+            trade.reason = json.dumps(details, default=str)
+            trade.updated_at = utcnow()
+            updated.append({
+                "trade_id": trade.id, "status": trade.status, "event": event_type,
+                "filled": float(trade.filled_quantity or 0.0),
+                "remaining_quantity": float(trade.remaining_quantity or 0.0),
+            })
+        await db.commit()
+
+    for audit_item in audit_events:
+        await audit(audit_item["event"], audit_item["detail"])
+    if mark_prices:
+        await mark_paper_equity(mark_prices)
+    return {"checked": checked, "updated": updated}
+
+
 async def execute_signal(symbol: str, side: str, quantity: float, price: float, signal: dict[str, Any],
                          exchange: str, timeframe: str, signal_timestamp: str, force_paper: bool = False,
                          stop_loss_price: float | None = None, take_profit_price: float | None = None,
@@ -1319,133 +1548,58 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
         await risk_gate(symbol, quote, quantity, live=live, signal_timestamp=signal_timestamp, side=side, customer_id=customer_id, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, signal_id=signal_id)
         paper_execution_model = None
         if mode == "PAPER":
-            profile = PROFILES[asset]
-            paper_context = (signal or {}).get("paper_execution_context")
-            try:
-                paper_execution_model = estimate_paper_slippage(
-                    side=side,
-                    quantity=quantity,
-                    base_slippage_bps=profile.slippage_bps,
-                    context=paper_context if isinstance(paper_context, dict) else None,
-                    impact_coefficient=settings.paper_market_impact_coefficient,
-                    max_market_impact_bps=settings.paper_max_market_impact_bps,
-                )
-            except (TypeError, ValueError, OverflowError) as exc:
-                raise RiskBlocked("Paper execution cost model rejected invalid market context") from exc
-        trade_id, created = await _create_trade(
-            symbol, timeframe, side, quantity, quote, exchange, mode, signal, signal_id, cid,
-            stop_loss_price or 0.0, take_profit_price or 0.0, customer_id=customer_id, trading_account_id=trading_account_id,
-        )
-        if not created:
             async with SessionLocal() as db:
-                existing = await db.get(Trade, trade_id)
-                if existing and existing.mode == "LIVE":
-                    await _ensure_order_command(existing.id, customer_id=existing.customer_id, exchange=existing.exchange, symbol=existing.symbol, side=existing.side, quantity=float(existing.requested_quantity or 0), price=float(existing.requested_price or 0), stop_loss_price=float(existing.stop_loss_price or 0), take_profit_price=float(existing.take_profit_price or 0), client_order_id=existing.client_order_id)
-                return {"duplicate": True, "trade_id": existing.id, "mode": existing.mode, "status": existing.status,
-                        "broker_order_id": existing.broker_order_id, "client_order_id": existing.client_order_id,
-                        "filled": float(existing.filled_quantity or 0.0),
-                        "remaining_quantity": float(existing.remaining_quantity or 0.0),
-                        "average_fill_price": float(existing.average_fill_price or 0.0)}
-        reserved_cash = Decimal("0")
-        command: OrderCommand | None = None
-        if customer_id is not None and settings.customer_cash_only_trading and mode == "LIVE":
-            async with SessionLocal() as db:
-                qpos = select(Position).where(Position.customer_id == customer_id, Position.symbol == symbol, Position.quantity != 0).with_for_update()
-                positions_now = (await db.execute(qpos)).scalars().all()
-                signed_order = quantity if side == "buy" else -quantity
-                # Only a fully capped opposing-position order is reduce-only.
-                # An order larger than that position flips into new exposure and must reserve cash.
-                opposing_qty = sum(
-                    abs(p.quantity) for p in positions_now
-                    if (p.quantity > 0 > signed_order) or (p.quantity < 0 < signed_order)
-                )
-                reducing = opposing_qty > 0 and quantity <= opposing_qty + 1e-9
-                if not reducing:
-                    reserved_cash = _exact_reserved_cash(
-                        quote, quantity, settings.max_slippage_bps
-                    )
-                    try:
-                        await reserve_trading(db, customer_id, reserved_cash,
-                                              reference_id=f"trade:{trade_id}:open-reserve")
-                        reserved_trade = await db.get(Trade, trade_id, with_for_update=True)
-                        if reserved_trade:
-                            reserved_trade.reserved_cash = reserved_cash
-                        account_locked = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == customer_id).with_for_update())).scalar_one_or_none()
-                        if account_locked:
-                            account_locked.reserved_margin = (
-                                Decimal(str(account_locked.reserved_margin or 0)) + reserved_cash
-                            )
-                            account_locked.cash_equity = max(0.0, account_locked.cash_equity)
-                        await sync_wallet_from_ledger(db, customer_id, "USDT")
-                        if mode == "LIVE":
-                            command = await _ensure_order_command_in_session(
-                                db, trade_id, customer_id=customer_id, exchange=exchange, symbol=symbol, side=side,
-                                quantity=quantity, price=quote, stop_loss_price=float(stop_loss_price or 0),
-                                take_profit_price=float(take_profit_price or 0), client_order_id=cid,
-                            )
-                        await db.commit()
-                        if command is not None:
-                            await db.refresh(command)
-                    except ValueError as exc:
-                        # The trade row was created before the ledger reservation so a
-                        # successful risk pre-check cannot race into an orphaned PENDING
-                        # trade when another order consumes the customer's balance first.
-                        await db.rollback()
-                        async with SessionLocal() as reject_db:
-                            reject_trade = await reject_db.get(Trade, trade_id, with_for_update=True)
-                            if reject_trade and reject_trade.status not in TERMINAL_STATUSES:
-                                reject_trade.status = "REJECTED"
-                                reject_trade.error = str(exc)[:2000]
-                                reject_trade.updated_at = utcnow()
-                                await reject_db.commit()
-                        raise RiskBlocked(str(exc))
-        if mode == "PAPER":
-            async with SessionLocal() as db:
-                t = await db.get(Trade, trade_id)
-                if t.status == "SIMULATED":
-                    return {"duplicate": True, "trade_id": t.id, "mode": t.mode, "status": t.status}
-                profile = PROFILES[asset]
+                t = await db.get(Trade, trade_id, with_for_update=True)
+                if t.status in {"SIMULATED", "FILLED", "REJECTED", "CANCELED"}:
+                    return {
+                        "duplicate": True, "trade_id": t.id, "mode": t.mode,
+                        "status": t.status, "filled": float(t.filled_quantity or 0.0),
+                        "remaining_quantity": float(t.remaining_quantity or 0.0),
+                        "average_fill_price": float(t.average_fill_price or 0.0),
+                    }
                 if not isinstance(paper_execution_model, dict):
                     raise RuntimeError("Paper slippage model was not initialized before trade creation")
-                modeled_fill = adverse_fill_price(
-                    quote, side, float(paper_execution_model["modeled_slippage_bps"])
+                details = dict(signal)
+                context = details.get("paper_execution_context")
+                context = context if isinstance(context, dict) else {}
+                details["paper_execution_model"] = paper_execution_model
+                details["paper_execution_state"] = {
+                    "last_processed_bar_timestamp": str(context.get("bar_timestamp") or "") or None,
+                    "bars_waited": 0,
+                    "events": 0,
+                    "last_event": "ORDER_ACCEPTED",
+                }
+                details["paper_execution_notice"] = (
+                    "Accepted by the paper simulator; no fill is assumed at submission. "
+                    "Fills require new completed bars with verified CCXT crypto base-asset volume."
                 )
-                fee = quantity * modeled_fill * (profile.taker_bps / 10_000)
-                t.reason = json.dumps(
-                    {**signal, "paper_execution_model": paper_execution_model},
-                    default=str,
-                )
-                t.status = "SIMULATED"
-                t.filled_quantity = quantity
-                t.remaining_quantity = 0
-                t.average_fill_price = modeled_fill
-                t.notional = quantity * modeled_fill
-                t.fee = fee
-                await _apply_fill_to_position(db, t, quantity, modeled_fill)
-                if customer_id is not None and fee > 0:
-                    await settle_trading_fee(db, customer_id=customer_id, fee=fee, reference_id=f"trade:{trade_id}:fee", strict=False)
-                if account is not None:
-                    account.cash_equity = max(0.0, account.cash_equity - fee)
-                else:
-                    s = await _get_state_locked(db)
-                    s.cash_equity = max(0.0, s.cash_equity - fee)
+                t.reason = json.dumps(details, default=str)
+                t.status = "OPEN"
+                t.filled_quantity = 0.0
+                t.remaining_quantity = float(t.requested_quantity or quantity)
+                t.average_fill_price = 0.0
+                t.notional = 0.0
+                t.fee = 0.0
+                t.error = "PAPER_ORDER_ACCEPTED_WAITING_FOR_NEXT_VERIFIED_BAR"
+                t.updated_at = utcnow()
                 await db.commit()
-            await mark_paper_equity({symbol: quote}, customer_id=customer_id)
             await audit("PAPER_ORDER", {
                 "trade_id": trade_id, "signal_id": signal_id, "client_order_id": cid,
-                "symbol": symbol, "side": side, "quantity": quantity,
-                "reference_price": quote, "modeled_fill_price": modeled_fill,
-                "modeled_slippage_bps": paper_execution_model["modeled_slippage_bps"],
+                "symbol": symbol, "side": side, "requested_quantity": quantity,
+                "reference_price": quote, "filled_quantity": 0.0,
+                "remaining_quantity": quantity, "status": "OPEN",
                 "impact_model_status": paper_execution_model["status"],
-                "impact_inputs_complete": paper_execution_model["impact_inputs_complete"],
                 "calibration_status": paper_execution_model["calibration_status"],
+                "execution_simulator": "LATENCY_QUEUE_LIQUIDITY_REJECTION_V1",
             })
             return {
                 "duplicate": False, "trade_id": trade_id, "mode": "PAPER",
-                "status": "SIMULATED", "price": quote,
-                "average_fill_price": modeled_fill,
+                "status": "OPEN", "price": quote,
+                "filled": 0.0, "remaining_quantity": quantity,
+                "average_fill_price": 0.0,
                 "modeled_slippage_bps": paper_execution_model["modeled_slippage_bps"],
                 "paper_execution_model": paper_execution_model,
+                "paper_execution_notice": "Submitted only; no immediate fill was assumed.",
             }
 
         if broker is None:
