@@ -29,11 +29,17 @@ class OrderUpdate:
         return self.status in {"FILLED", "CANCELED", "REJECTED", "EXPIRED", "EXPIRED_IN_MATCH"}
 
 
-def _float(value: Any) -> float:
-    try:
-        return float(value or 0)
-    except (TypeError, ValueError):
+def _float(value: Any, field: str) -> float:
+    """Parse a provider quantity/price without converting malformed data into a fake zero."""
+    if value is None or value == "":
         return 0.0
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise BinanceUserStreamError(f"Invalid numeric field in Binance order update: {field}") from exc
+    if not __import__("math").isfinite(parsed) or parsed < 0:
+        raise BinanceUserStreamError(f"Non-finite or negative numeric field in Binance order update: {field}")
+    return parsed
 
 
 def parse_order_update(message: str | bytes | Mapping[str, Any]) -> OrderUpdate | None:
@@ -73,11 +79,11 @@ def parse_order_update(message: str | bytes | Mapping[str, Any]) -> OrderUpdate 
         status=status,
         execution_type=execution_type,
         side=side,
-        original_qty=_float(order.get("q") or order.get("origQty")),
-        executed_qty=_float(order.get("z") or order.get("executedQty")),
-        last_fill_qty=_float(order.get("l") or order.get("lastExecutedQty")),
-        last_fill_price=_float(order.get("L") or order.get("lastExecutedPrice")),
-        cumulative_quote_qty=_float(order.get("Z") or order.get("cummulativeQuoteQty")),
+        original_qty=_float(order.get("q") if order.get("q") is not None else order.get("origQty"), "original_qty"),
+        executed_qty=_float(order.get("z") if order.get("z") is not None else order.get("executedQty"), "executed_qty"),
+        last_fill_qty=_float(order.get("l") if order.get("l") is not None else order.get("lastExecutedQty"), "last_fill_qty"),
+        last_fill_price=_float(order.get("L") if order.get("L") is not None else order.get("lastExecutedPrice"), "last_fill_price"),
+        cumulative_quote_qty=_float(order.get("Z") if order.get("Z") is not None else order.get("cummulativeQuoteQty"), "cumulative_quote_qty"),
         event_time_ms=int(data.get("E") or order.get("T") or order.get("updateTime") or 0),
     )
 
