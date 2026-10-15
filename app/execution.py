@@ -1428,6 +1428,12 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     context,
                     max_participation_rate=settings.paper_impact_max_participation_rate,
                     impact_coefficient=settings.paper_impact_coefficient,
+                    rejection_probability=settings.paper_execution_rejection_probability,
+                    latency_min_ms=settings.paper_execution_latency_min_ms,
+                    latency_median_ms=settings.paper_execution_latency_median_ms,
+                    latency_p95_ms=settings.paper_execution_latency_p95_ms,
+                    latency_max_ms=settings.paper_execution_latency_max_ms,
+                    latency_impact_coefficient=settings.paper_latency_impact_coefficient,
                     evidence_source=settings.paper_execution_evidence_source,
                     evidence_id=settings.paper_execution_evidence_id,
                 )
@@ -1466,8 +1472,15 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                                 reference_price=quote,
                                 base_slippage_bps=profile.slippage_bps,
                                 market_context=context,
+                                order_key=cid,
                                 max_participation_rate=settings.paper_impact_max_participation_rate,
                                 impact_coefficient=settings.paper_impact_coefficient,
+                                rejection_probability=settings.paper_execution_rejection_probability,
+                                latency_min_ms=settings.paper_execution_latency_min_ms,
+                                latency_median_ms=settings.paper_execution_latency_median_ms,
+                                latency_p95_ms=settings.paper_execution_latency_p95_ms,
+                                latency_max_ms=settings.paper_execution_latency_max_ms,
+                                latency_impact_coefficient=settings.paper_latency_impact_coefficient,
                                 evidence_source=settings.paper_execution_evidence_source,
                                 evidence_id=settings.paper_execution_evidence_id,
                             )
@@ -1513,7 +1526,23 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                             ],
                         }
 
-                    if paper_rejection is None and paper_execution is not None:
+                    if paper_rejection is None and paper_execution is not None and paper_execution.get("simulated_rejection") is True:
+                        reason = "Calibrated paper execution model simulated a venue rejection; no quantity was filled."
+                        paper_rejection = {
+                            **paper_execution,
+                            "reason": reason,
+                            "model_status": "SIMULATED_VENUE_REJECTION",
+                            "validation_grade": "INCOMPLETE_EXECUTION_MODEL",
+                        }
+                        t.status = "REJECTED"
+                        t.error = reason
+                        t.filled_quantity = 0.0
+                        t.remaining_quantity = 0.0
+                        t.reason = json.dumps({**signal, "paper_execution": paper_rejection}, default=str)
+                        t.updated_at = utcnow()
+                        await db.commit()
+
+                    elif paper_rejection is None and paper_execution is not None:
                         filled_quantity = float(paper_execution["filled_quantity"])
                         cancelled_quantity = float(paper_execution.get("cancelled_quantity", 0.0))
                         modeled_fill = float(paper_execution["fill_price"])
