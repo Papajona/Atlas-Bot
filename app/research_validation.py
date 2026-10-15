@@ -4,7 +4,7 @@ from typing import Iterable
 import math
 import numpy as np
 import pandas as pd
-from .strategy_engine import next_open_returns
+from .strategy_engine import next_open_returns, _annualization_factor
 from .execution_aware_research import costed_execution_returns, execution_turnover
 
 
@@ -315,7 +315,9 @@ def regime_conditioned_performance(df: pd.DataFrame, returns: pd.Series, asset: 
     close = df["close"].astype(float)
     fast = close.ewm(span=50, adjust=False).mean()
     slow = close.ewm(span=200, adjust=False).mean()
-    annual_factor = 365.25 if str(asset).lower() == "crypto" else 252.0
+    # Use the observed bar cadence, matching the strategy feature/backtest engine.
+    # Daily constants materially understate annualized volatility for intraday bars.
+    annual_factor = _annualization_factor(df.index, asset=asset)
     vol = close.pct_change().rolling(20).std() * np.sqrt(annual_factor)
     regimes = pd.Series("RANGE", index=df.index)
     regimes = regimes.mask((fast > slow) & (vol < 0.60), "TREND_UP")
@@ -326,7 +328,8 @@ def regime_conditioned_performance(df: pd.DataFrame, returns: pd.Series, asset: 
     for name in sorted(regimes.dropna().unique()):
         x = r[regimes == name]
         out[str(name)] = {"bars": int(len(x)), "mean_return": float(x.mean()) if len(x) else 0.0,
-                          "total_return": float(np.prod(1 + x.to_numpy()) - 1) if len(x) else 0.0}
+                          "total_return": float(np.prod(1 + x.to_numpy()) - 1) if len(x) else 0.0,
+                          "annualization_factor": annual_factor}
     return out
 
 
