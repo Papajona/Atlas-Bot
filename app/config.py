@@ -1,4 +1,5 @@
 import os
+import math
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -43,6 +44,13 @@ class Settings(BaseSettings):
         if value < 1 or value > 2:
             raise ValueError("ML_THREADS must be between 1 and 2 for the deployed CPU budget")
         return value
+
+    @field_validator("research_carry_bps_per_bar")
+    @classmethod
+    def _validate_research_carry(cls, value: float | None) -> float | None:
+        if value is not None and (not math.isfinite(float(value)) or float(value) < 0):
+            raise ValueError("RESEARCH_CARRY_BPS_PER_BAR must be finite and non-negative when configured")
+        return None if value is None else float(value)
 
     # Real USDT funding (TRON / TRC-20). Production API receives only a public
     # account-level extended public key (xpub) for new deposit-address derivation.
@@ -122,6 +130,8 @@ class Settings(BaseSettings):
     research_yahoo_period: str = "3y"
     research_taker_bps: float = 5.5
     research_slippage_bps: float = 2.0
+    # No default: a missing instrument/venue financing assumption blocks research promotion.
+    research_carry_bps_per_bar: float | None = None
     # Production research must identify the evidence behind the fee assumption; the
     # development default is intentionally not accepted as customer-execution evidence.
     research_fee_source: str = ""
