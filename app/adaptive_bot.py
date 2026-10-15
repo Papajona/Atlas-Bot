@@ -298,6 +298,19 @@ def ensure_adaptive_model(
         cost_stress_multiplier=policy.research_cost_stress_multiplier,
         carry_bps_per_bar=settings.research_carry_bps_per_bar,
     )
+    # The adaptive promotion path evaluates a supplied frame directly rather than
+    # passing through backtest_all_strategies(). Preserve the crypto universe caveat
+    # on this path too, so a future slippage-model change cannot silently permit
+    # promotion from a current-survivors-only dataset.
+    universe_bias = (
+        "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
+        if str(asset).lower() == "crypto" else "NOT_APPLICABLE"
+    )
+    wfo["universe_bias"] = universe_bias
+    wfo["survivorship_bias_blocked"] = universe_bias == "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
+    wfo["slippage_model_complete"] = False
+    wfo["slippage_model_status"] = "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED"
+    wfo["execution_cost_model_complete"] = False
     oos_gate = oos_promotion_gate(
         wfo,
         min_dsr=max(float(policy.research_min_deflated_sharpe), 0.95),
