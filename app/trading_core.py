@@ -517,7 +517,11 @@ def ai_walk_forward_backtest(
         "carry_evidence_id": carry_evidence_id or None,
         "financing_cost_model_complete": bool(carry_evidence_complete),
         "intrabar_stop_target_model_complete": True,
-        "execution_cost_model_complete": bool(carry_evidence_complete),
+        # This AI WFO path still charges a fixed bps slippage assumption; documented
+        # financing alone does not make the execution-cost model complete.
+        "slippage_model_complete": False,
+        "slippage_model_status": "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED",
+        "execution_cost_model_complete": False,
         "execution_model": "OHLC_INTRABAR_ATR_STOP_TAKE_PROFIT_NEXT_OPEN",
         "execution_stop_target_audit": {
             "stop_loss_exits": int(total_stop_exits),
