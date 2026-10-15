@@ -1211,6 +1211,31 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
         broker = None
         quote = price
         spread_bps = None
+        if not live:
+            # The current quote midpoint may only override a client/reference price
+            # when the market context carries the marker written by the server-side
+            # CCXT spot context builder. Other payloads cannot use an arbitrary
+            # reference_price field to influence sizing or the simulated fill.
+            paper_context = signal.get("paper_market_context")
+            if isinstance(paper_context, dict) and paper_context.get("context_source") == "server_ccxt_closed_spot_ohlcv_and_ticker":
+                try:
+                    context_bid = float(paper_context.get("bid"))
+                    context_ask = float(paper_context.get("ask"))
+                    context_mid = float(paper_context.get("reference_price"))
+                    context_spread = float(paper_context.get("spread_bps"))
+                    context_age = float(paper_context.get("quote_age_seconds"))
+                    context_hash = str(paper_context.get("ohlcv_sha256") or "")
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise RiskBlocked("Server paper market context is malformed") from exc
+                if (
+                    not all(math.isfinite(value) for value in (context_bid, context_ask, context_mid, context_spread, context_age))
+                    or context_bid <= 0 or context_ask < context_bid or context_mid <= 0
+                    or not context_hash or context_age < -1.0 or context_age > 5.0
+                    or not math.isclose(context_mid, (context_bid + context_ask) / 2.0, rel_tol=1e-10, abs_tol=1e-10)
+                ):
+                    raise RiskBlocked("Server paper market context failed integrity/freshness checks")
+                quote = context_mid
+                spread_bps = context_spread
         if live:
             # Customer live trading requires a verified isolated exchange/subaccount adapter.
             # Customer crypto execution must resolve only the customer's verified venue mapping.
