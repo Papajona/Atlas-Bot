@@ -60,3 +60,14 @@ def test_parse_rejects_malformed_order_numerics(field, bad_value):
     event[field] = bad_value
     with pytest.raises(BinanceUserStreamError):
         parse_order_update(event)
+
+@pytest.mark.parametrize("field", ["q", "z"])
+def test_parse_rejects_missing_required_order_quantities(field):
+    event = {
+        "e": "executionReport", "E": 1000, "s": "BTCUSDT", "i": 123,
+        "c": "atlas-missing-numeric", "X": "PARTIALLY_FILLED", "x": "TRADE",
+        "S": "BUY", "q": "1", "z": "0.4", "l": "0.4", "L": "100", "Z": "40",
+    }
+    event.pop(field)
+    with pytest.raises(BinanceUserStreamError):
+        parse_order_update(event)
