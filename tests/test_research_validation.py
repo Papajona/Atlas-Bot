@@ -71,6 +71,9 @@ def test_oos_gate_reports_missing_metrics_and_never_promotes_them():
         "trades": 150,
         "deflated_sharpe": 0.97,
         "cost_stress_ok": True,
+        "financing_cost_model_complete": True,
+        "intrabar_stop_target_model_complete": True,
+        "execution_cost_model_complete": True,
         "trial_registry_complete": True,
     }
     missing_sharpe = dict(strong)
@@ -97,6 +100,9 @@ def test_oos_gate_names_incomplete_trial_registry_as_a_blocker():
         "trades": 120,
         "deflated_sharpe": 0.98,
         "cost_stress_ok": True,
+        "financing_cost_model_complete": True,
+        "intrabar_stop_target_model_complete": True,
+        "execution_cost_model_complete": True,
         "trial_registry_complete": False,
     }
     report = oos_promotion_gate(evidence)
