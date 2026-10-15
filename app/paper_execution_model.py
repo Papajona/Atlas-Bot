@@ -33,6 +33,15 @@ def _finite(value: Any, name: str, *, minimum: float | None = None,
     return number
 
 
+def _valid_evidence_id(value: Any) -> bool:
+    """Require a SHA-256 digest that can pin the exact calibration artifact."""
+    raw = str(value or "").strip()
+    digest = raw.removeprefix("sha256:")
+    if len(digest) != 64:
+        return False
+    return all(character in "0123456789abcdefABCDEF" for character in digest)
+
+
 def _latency_from_quantiles(
     uniform_draw: float,
     *,
@@ -69,7 +78,7 @@ def calibrated_model_available(
     """Require every fill, rejection, and latency assumption plus its evidence identity."""
     if not isinstance(market_context, Mapping):
         return False
-    if not str(evidence_source or "").strip() or not str(evidence_id or "").strip():
+    if not str(evidence_source or "").strip() or not _valid_evidence_id(evidence_id):
         return False
     try:
         _finite(market_context.get("tradable_volume_units"), "tradable_volume_units", strictly_positive=True)
@@ -130,8 +139,8 @@ def estimate_paper_fill(
     evidence = str(evidence_id or "").strip()
     if not key:
         raise PaperExecutionModelError("a stable order_key is required for reproducible simulation")
-    if not source or not evidence:
-        raise PaperExecutionModelError("traceable paper execution calibration evidence is required")
+    if not source or not _valid_evidence_id(evidence):
+        raise PaperExecutionModelError("calibration source and SHA-256 evidence ID are required")
 
     quantity = _finite(requested_quantity, "requested_quantity", strictly_positive=True)
     price = _finite(reference_price, "reference_price", strictly_positive=True)
