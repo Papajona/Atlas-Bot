@@ -660,10 +660,18 @@ def _prepare_live_fee(trade: Trade, order: dict[str, Any], filled: float, fill_p
     charged is settled. A fee is never lowered here (no automatic refunds); an estimate
     that later proves too high is left for manual reconciliation.
     """
-    prev = Decimal(str(trade.fee or 0))
+    prev = Decimal(str(trade.fee or 0)).quantize(
+        Decimal("0.000001"), rounding=ROUND_HALF_EVEN
+    )
     bps = Decimal(str(taker_bps if taker_bps is not None else PROFILES["crypto"].taker_bps))
-    cum, quality, note = extract_order_fee_quote_decimal(
+    observed_cumulative, quality, note = extract_order_fee_quote_decimal(
         order or {}, trade.symbol, fill_price, filled, fallback_taker_bps=bps
+    )
+    # Match ledger Numeric(38,6) booking semantics on the cumulative amount, not
+    # by rounding each raw delta independently. This avoids repeated sub-micro fees
+    # accumulating a different total in the trade row than in the ledger.
+    cum = max(observed_cumulative, prev).quantize(
+        Decimal("0.000001"), rounding=ROUND_HALF_EVEN
     )
     cum = max(cum, prev)
     trade.fee = cum
