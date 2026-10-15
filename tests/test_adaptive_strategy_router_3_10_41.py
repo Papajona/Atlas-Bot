@@ -213,3 +213,12 @@ def test_router_walk_forward_scores_final_test_bar_using_full_frame_next_open(mo
     # The position is active on fold bar 4 and earns open[5] / open[4] - 1.
     # Computing next_open_returns on the fold slice would incorrectly score this as 0.
     assert result["total_return"] > 0.09
+
+
+def test_regime_classifier_annualization_tracks_hourly_and_daily_cadence():
+    hourly = classify_regime(_df(260), asset="crypto")
+    daily_df = _df(260).iloc[::24].copy()
+    daily_df.index = pd.date_range("2022-01-01", periods=len(daily_df), freq="D", tz="UTC")
+    daily = classify_regime(daily_df, asset="crypto")
+    assert hourly.attrs["annualization_factor"] > 8000
+    assert 300 <= daily.attrs["annualization_factor"] <= 400
