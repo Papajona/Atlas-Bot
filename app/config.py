@@ -248,9 +248,13 @@ class Settings(BaseSettings):
     max_open_positions: int = 3
     max_slippage_bps: float = 30.0
     max_spread_bps: float = 100.0
-    # Platform-only paper execution impact model; these assumptions are heuristic, not venue-calibrated.
+    # Platform-only paper execution assumptions; these values are simulation controls, not venue-calibrated facts.
     paper_market_impact_coefficient: float = 0.5
     paper_max_market_impact_bps: float = 250.0
+    paper_fill_latency_bars: int = 1
+    paper_max_bar_volume_participation: float = 0.10
+    paper_queue_fill_probability: float = 0.80
+    paper_rejection_probability: float = 0.01
     # Edge-decay halt: block NEW entries when the last N closed-trade net returns are significantly below zero.
     edge_decay_halt_enabled: bool = True
     edge_decay_window_trades: int = 100
@@ -537,6 +541,17 @@ class Settings(BaseSettings):
             raise ValueError("PAPER_MARKET_IMPACT_COEFFICIENT must be finite and >= 0")
         if not math.isfinite(self.paper_max_market_impact_bps) or self.paper_max_market_impact_bps <= 0:
             raise ValueError("PAPER_MAX_MARKET_IMPACT_BPS must be finite and > 0")
+        if isinstance(self.paper_fill_latency_bars, bool) or self.paper_fill_latency_bars < 1:
+            raise ValueError("PAPER_FILL_LATENCY_BARS must be an integer >= 1")
+        if (
+            not math.isfinite(self.paper_max_bar_volume_participation)
+            or not 0 < self.paper_max_bar_volume_participation <= 1
+        ):
+            raise ValueError("PAPER_MAX_BAR_VOLUME_PARTICIPATION must be finite and in (0, 1]")
+        if not math.isfinite(self.paper_queue_fill_probability) or not 0 <= self.paper_queue_fill_probability <= 1:
+            raise ValueError("PAPER_QUEUE_FILL_PROBABILITY must be finite and in [0, 1]")
+        if not math.isfinite(self.paper_rejection_probability) or not 0 <= self.paper_rejection_probability <= 1:
+            raise ValueError("PAPER_REJECTION_PROBABILITY must be finite and in [0, 1]")
         if not 0 <= self.max_order_error_rate_5m <= 1:
             raise ValueError("MAX_ORDER_ERROR_RATE_5M must be between 0 and 1")
         if self.execution_health_window_orders < 1:
