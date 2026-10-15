@@ -121,6 +121,7 @@ class BinanceUserStreamSession:
     async def run(self, stop_event: Any) -> None:
         import asyncio
         import time
+        import random
         import websockets
 
         backoff = 1.0
@@ -157,5 +158,5 @@ class BinanceUserStreamSession:
                     break
                 if connected_at is not None and time.monotonic() - connected_at >= self.stable_seconds:
                     backoff = 1.0
-                await asyncio.sleep(min(backoff, self.max_backoff_seconds))
+                await asyncio.sleep(random.uniform(0.0, min(backoff, self.max_backoff_seconds)))
                 backoff = min(backoff * 2.0, self.max_backoff_seconds)
