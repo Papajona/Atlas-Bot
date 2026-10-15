@@ -2,6 +2,7 @@
   "schema": "atlas-paper-execution-calibration-v1",
   "fixture_only": true,
   "provenance_source": "synthetic-unit-test-data",
+  "evidence_source": "venue-paper-fill-study",
   "calibration_method": "deterministic-unit-test-fixture-not-venue-calibration",
   "dataset_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "observation_counts": {
