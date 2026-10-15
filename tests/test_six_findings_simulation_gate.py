@@ -76,28 +76,112 @@ def test_synthetic_slippage_stress_is_monotonic_but_never_claims_calibration():
     assert volatile["calibration_status"] == "UNVALIDATED_HEURISTIC"
 
 
-def test_synthetic_low_liquidity_scenario_reproduces_perfect_fill_gap():
-    """Audit diagnostic: passes only while this known implementation gap is present.
+def test_synthetic_low_liquidity_scenario_now_produces_partial_fills_without_reusing_a_bar():
+    from app.paper_execution_model import simulate_paper_fill_step
 
-    For 100 requested units and 20 units of bar volume, a 10% simulated participation
-    cap permits at most 2 units. The production paper path currently records all 100.
-    This confirms the gap; it is not evidence that the execution simulator is fixed.
-    """
-    source = (ROOT / "app" / "execution.py").read_text(encoding="utf-8")
-    execute_body = source.split("async def execute_signal", 1)[1]
-    assert 'if mode == "PAPER":' in execute_body
-    paper_block = execute_body.split('if mode == "PAPER":', 1)[1].split("if broker is None:", 1)[0]
+    context = {
+        "source": "ccxt_ohlcv", "asset": "crypto", "bar_volume": 20.0,
+        "volume_unit": "base_asset", "realized_volatility_per_bar": 0.02,
+        "spread_bps": 6.0, "bar_timestamp": "2026-10-15T12:00:00Z",
+    }
+    fill = simulate_paper_fill_step(
+        remaining_quantity=100.0, context=context, order_key="stress-order-001",
+        last_processed_bar_timestamp="2026-10-15T11:00:00Z", bars_waited=0,
+        latency_bars=1, max_bar_volume_participation=0.10,
+        queue_fill_probability=1.0, rejection_probability=0.0,
+    )
+    repeated = simulate_paper_fill_step(
+        remaining_quantity=fill["remaining_quantity"], context=context,
+        order_key="stress-order-001",
+        last_processed_bar_timestamp=fill["last_processed_bar_timestamp"],
+        bars_waited=fill["bars_waited"], latency_bars=1,
+        max_bar_volume_participation=0.10,
+        queue_fill_probability=1.0, rejection_probability=0.0,
+    )
 
-    requested = 100.0
-    synthetic_bar_volume = 20.0
-    synthetic_participation_cap = 0.10
-    simulated_liquidity_limited_fill = min(requested, synthetic_bar_volume * synthetic_participation_cap)
-    current_paper_path_fills = requested if "t.filled_quantity = quantity" in paper_block else None
+    assert fill["event"] == "PARTIAL_FILL"
+    assert 0.0 < fill["fill_quantity"] <= 2.0
+    assert fill["remaining_quantity"] == pytest.approx(100.0 - fill["fill_quantity"])
+    assert fill["remaining_quantity"] > 98.0
+    assert repeated["event"] == "NO_NEW_BAR"
+    assert repeated["fill_quantity"] == 0.0
 
-    assert simulated_liquidity_limited_fill == pytest.approx(2.0)
-    assert current_paper_path_fills == pytest.approx(100.0)
-    assert "t.remaining_quantity = 0" in paper_block
-    assert "t.status = \"SIMULATED\"" in paper_block
+
+def test_stress_orders_share_one_bar_liquidity_budget():
+    from app.paper_execution_model import simulate_paper_fill_step
+
+    bar_volume = 20.0
+    bar_participation = 0.10
+    aggregate_cap = bar_volume * bar_participation
+    used = 0.0
+    context = {
+        "source": "ccxt_ohlcv", "asset": "crypto", "bar_volume": bar_volume,
+        "volume_unit": "base_asset", "realized_volatility_per_bar": 0.03,
+        "spread_bps": 5.0, "bar_timestamp": "2026-10-15T13:00:00Z",
+    }
+    fills = []
+    for index in range(500):
+        available = max(0.0, aggregate_cap - used)
+        result = simulate_paper_fill_step(
+            remaining_quantity=100.0, context=context, order_key=f"stress-{index:04d}",
+            last_processed_bar_timestamp="2026-10-15T12:00:00Z", bars_waited=0,
+            latency_bars=1, max_bar_volume_participation=bar_participation,
+            queue_fill_probability=1.0, rejection_probability=0.0,
+            max_fill_quantity=available,
+        )
+        used += result["fill_quantity"]
+        fills.append(result["fill_quantity"])
+    assert any(fill > 0 for fill in fills)
+    assert used <= aggregate_cap + 1e-12
+    assert used <= 2.0 + 1e-12
+
+
+def test_fill_simulator_models_latency_queue_misses_rejections_and_unverified_volume():
+    from app.paper_execution_model import simulate_paper_fill_step
+
+    base = {
+        "source": "ccxt_ohlcv", "asset": "crypto", "bar_volume": 100.0,
+        "volume_unit": "base_asset", "realized_volatility_per_bar": 0.02,
+        "spread_bps": 4.0,
+    }
+    latency = simulate_paper_fill_step(
+        remaining_quantity=10.0,
+        context={**base, "bar_timestamp": "bar-2"},
+        order_key="latency-order", last_processed_bar_timestamp="bar-1",
+        bars_waited=0, latency_bars=2, queue_fill_probability=1.0,
+        rejection_probability=0.0,
+    )
+    assert latency["event"] == "LATENCY_WAIT" and latency["fill_quantity"] == 0.0
+
+    no_queue = simulate_paper_fill_step(
+        remaining_quantity=10.0,
+        context={**base, "bar_timestamp": "bar-3"},
+        order_key="no-queue-order", last_processed_bar_timestamp="bar-2",
+        bars_waited=0, latency_bars=1, queue_fill_probability=0.0,
+        rejection_probability=0.0,
+    )
+    assert no_queue["event"] == "QUEUE_NO_FILL" and no_queue["fill_quantity"] == 0.0
+
+    rejected = simulate_paper_fill_step(
+        remaining_quantity=10.0,
+        context={**base, "bar_timestamp": "bar-4"},
+        order_key="rejected-order", last_processed_bar_timestamp="bar-3",
+        bars_waited=0, latency_bars=1, queue_fill_probability=1.0,
+        rejection_probability=1.0,
+    )
+    assert rejected["event"] == "REJECTED"
+    assert rejected["remaining_quantity"] == 0.0
+
+    unverified = simulate_paper_fill_step(
+        remaining_quantity=10.0,
+        context={**base, "source": "oanda_v20_mid", "asset": "forex",
+                 "volume_unit": "tick_count", "bar_timestamp": "bar-5"},
+        order_key="unverified-order", last_processed_bar_timestamp="bar-4",
+        bars_waited=0, latency_bars=1, queue_fill_probability=1.0,
+        rejection_probability=0.0,
+    )
+    assert unverified["event"] == "WAITING_FOR_VERIFIED_LIQUIDITY"
+    assert unverified["fill_quantity"] == 0.0
 
 
 def test_selection_simulation_rejects_strong_in_sample_when_held_out_fails(monkeypatch):
