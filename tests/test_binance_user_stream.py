@@ -1,6 +1,6 @@
 import pytest
 from app.binance_user_stream import parse_order_update, build_signed_subscription, BinanceUserStreamError
-from app.binance_arb_reconcile import Exposure, neutralization_side, partial_leg_exposure
+from app.binance_arb_reconcile import neutralization_side, partial_leg_exposure
 
 
 def test_parse_spot_execution_report():
