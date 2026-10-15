@@ -299,7 +299,7 @@ def fixed_signal_walk_forward_oos(
         "trades": trades,
         "annualization_factor": annualization,
         "costs_bps": total_cost_bps,
-        "cost_stress_ok": cost_analysis.get("stress_ok") is True,
+        "cost_stress_ok": cost_analysis.get("stress_ok") is True and cost_complete,
         "cost_analysis": cost_analysis,
         "financing_cost_model_complete": cost_complete,
         "carry_rate_configured": carry_configured,
