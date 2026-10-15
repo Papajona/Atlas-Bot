@@ -250,8 +250,11 @@ def strategy_backtest(
     zero carry must be passed explicitly and only when source evidence supports it.
     """
     from .execution_aware_research import simulate_execution_aware_strategy
+    from .config import settings
 
     cfg = config or StrategyConfig()
+    if carry_bps_per_bar is None:
+        carry_bps_per_bar = settings.research_carry_bps_per_bar
     signals = strategy_signals(df, cfg, asset=asset)
     raw = signals["ensemble"].fillna(0.0)
     # Signal and ATR both come from the preceding completed bar at execution open.
