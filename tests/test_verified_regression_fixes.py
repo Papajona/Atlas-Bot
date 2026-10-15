@@ -58,7 +58,14 @@ def test_execute_request_rejects_non_finite_floats(field):
 
 def test_strategy_backtest_ignores_optional_session_nans_and_counts_entries(monkeypatch):
     idx = pd.date_range("2025-01-01", periods=7, freq="h", tz="UTC")
-    frame = pd.DataFrame({"open": [100, 101, 102, 103, 104, 103, 102]}, index=idx)
+    opens = np.asarray([100, 101, 102, 103, 104, 103, 102], dtype=float)
+    frame = pd.DataFrame({
+        "open": opens,
+        "high": opens + 1.0,
+        "low": opens - 1.0,
+        "close": opens,
+        "volume": np.full(len(opens), 100.0),
+    }, index=idx)
     signals = pd.DataFrame({
         "ensemble": [1, 1, 1, 0, 0, -1, -1],
         "atr": [1.0] * 7,
