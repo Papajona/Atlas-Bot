@@ -198,7 +198,14 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
         "gap_exits": protection_audit["gap_exits"],
         "ambiguous_bars_filled_stop_first": protection_audit["ambiguous_bars_filled_stop_first"],
         "carry_bps_per_bar": protection_audit["carry_bps_per_bar"],
-        "financing_cost_model_complete": protection_audit["financing_cost_model_complete"],
+        "carry_rate_configured": protection_audit["carry_bps_per_bar"] is not None,
+        "carry_evidence_source": str(settings.research_carry_evidence_source or "").strip() or None,
+        "carry_evidence_id": str(settings.research_carry_evidence_id or "").strip() or None,
+        "financing_cost_model_complete": (
+            protection_audit["carry_bps_per_bar"] is not None
+            and bool(str(settings.research_carry_evidence_source or "").strip())
+            and bool(str(settings.research_carry_evidence_id or "").strip())
+        ),
         "intrabar_stop_target_model_complete": protection_audit["intrabar_stop_target_model_complete"],
         "transaction_cost_bps": float(taker_bps + slippage_bps),
         "annualization_factor": ann,
@@ -281,6 +288,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                             carry_bps_per_bar: float | None = None) -> dict:
     cfg = cfg or StrategyConfig()
     carry = carry_bps_per_bar if carry_bps_per_bar is not None else settings.research_carry_bps_per_bar
+    carry_evidence_source = str(settings.research_carry_evidence_source or "").strip()
+    carry_evidence_id = str(settings.research_carry_evidence_id or "").strip()
+    carry_evidence_complete = carry is not None and bool(carry_evidence_source) and bool(carry_evidence_id)
     data_quality = validate_ohlcv_frame(df)
     # The current established-coin allowlist is a live liquidity control, not a
     # historical point-in-time universe. Carry this limitation into every research result.
@@ -321,6 +331,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         taker_bps=taker_bps, slippage_bps=slippage_bps,
         cost_stress_multiplier=cost_mult, positions_are_final=True,
         bar_returns=bar_returns, intrabar_exit=ensemble_exits, carry_bps_per_bar=carry,
+        carry_evidence_source=carry_evidence_source, carry_evidence_id=carry_evidence_id,
     )
     regime_performance = regime_conditioned_performance(df, ensemble_net, asset=asset)
     per_strategy_oos = {}
@@ -336,6 +347,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             cost_stress_multiplier=cost_mult, positions_are_final=True,
             bar_returns=component_returns, intrabar_exit=component_exits,
             carry_bps_per_bar=carry,
+            carry_evidence_source=carry_evidence_source, carry_evidence_id=carry_evidence_id,
         )
     # Parameter-plateau check: small changes to the signal threshold should not destroy
     # the measured edge. A narrow single-point optimum is treated as fragile research.
@@ -388,10 +400,13 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         stress_multiplier=cost_mult,
         fixed_cost_drag=None if carry is None else (ensemble_pos.abs() * (float(carry) / 10000.0)).to_numpy(),
     )
-    ens_cost["financing_cost_model_complete"] = carry is not None
+    ens_cost["carry_rate_configured"] = carry is not None
+    ens_cost["carry_evidence_source_present"] = bool(carry_evidence_source)
+    ens_cost["carry_evidence_id_present"] = bool(carry_evidence_id)
+    ens_cost["financing_cost_model_complete"] = carry_evidence_complete
     ens_cost["intrabar_stop_target_model_complete"] = True
-    if carry is None:
-        ens_cost["note"] += " Carry rate was not supplied; this cost report is diagnostic only and is not financing-complete promotion evidence."
+    if not carry_evidence_complete:
+        ens_cost["note"] += " Financing promotion evidence requires a configured carry rate and traceable carry source/evidence ID."
     # Each component is judged on its own net returns (main.py gates on per_strategy_oos[selected]).
     for component in components:
         # Component Sharpe values cannot be deflated from prior labels alone either.
@@ -432,9 +447,12 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "deflated_sharpe": dsr,
                         "trial_labels": sorted(this_labels),
                         "trial_registry_complete": trial_registry_complete,
-                        "financing_cost_model_complete": carry is not None,
+                        "financing_cost_model_complete": carry_evidence_complete,
+                        "carry_rate_configured": carry is not None,
+                        "carry_evidence_source": carry_evidence_source or None,
+                        "carry_evidence_id": carry_evidence_id or None,
                         "intrabar_stop_target_model_complete": True,
-                        "execution_cost_model_complete": bool(carry is not None),
+                        "execution_cost_model_complete": bool(carry_evidence_complete),
                         "carry_bps_per_bar": carry,
                         "trial_registry_status": "COMPLETE" if trial_registry_complete else "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
                         "cumulative_trials": n_trials,
