@@ -194,3 +194,26 @@ def test_oos_promotion_gate_blocks_explicitly_incomplete_slippage_model():
     assert report["passed"] is False
     assert report["slippage_model_complete"] is False
     assert "volume_volatility_aware_slippage_model_incomplete" in report["rejection_reasons"]
+
+
+def test_oos_promotion_gate_blocks_missing_slippage_completeness_evidence():
+    from app.research_validation import oos_promotion_gate
+
+    evidence = {
+        "status": "OK",
+        "folds": [{"total_return": value} for value in (0.03, 0.02, 0.01, 0.04, 0.02, 0.01)],
+        "oos_total_return": 0.12,
+        "sharpe": 0.8,
+        "max_drawdown": -0.10,
+        "trades": 150,
+        "deflated_sharpe": 0.97,
+        "cost_stress_ok": True,
+        "financing_cost_model_complete": True,
+        "intrabar_stop_target_model_complete": True,
+        "execution_cost_model_complete": True,
+        "trial_registry_complete": True,
+    }
+    report = oos_promotion_gate(evidence)
+    assert report["passed"] is False
+    assert report["slippage_model_complete"] is False
+    assert "volume_volatility_aware_slippage_model_incomplete" in report["rejection_reasons"]
