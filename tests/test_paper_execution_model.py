@@ -1,5 +1,3 @@
-import math
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -82,6 +80,8 @@ def test_paper_context_only_uses_ccxt_crypto_volume_as_base_asset_quantity():
     assert forex["volume_unit"] is None
     assert forex["bar_volume"] is None
     assert forex["realized_volatility_per_bar"] is not None
+    # Price-count volume from the OANDA adapter is not fungible with base-asset quantity.
+    assert forex["source"] == "oanda_v20_mid"
 
 
 def test_paper_impact_is_capped_and_fill_price_is_adverse_for_both_sides():
