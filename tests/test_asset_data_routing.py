@@ -14,9 +14,10 @@ def test_yahoo_fx_symbol_normalization_only_accepts_currency_pairs():
     assert _normalize_yfinance_fx_symbol("EUR_USD") == "EURUSD=X"
     assert _normalize_yfinance_fx_symbol("EUR/USD") == "EURUSD=X"
     assert _normalize_yfinance_fx_symbol("EURUSD=X") == "EURUSD=X"
+    assert _normalize_yfinance_fx_symbol("EUR_USD=X") == "EURUSD=X"
     assert _normalize_yfinance_fx_symbol("gbpusd") == "GBPUSD=X"
 
-    for symbol in ("XAU_USD", "GC=F", "CL=F", "SPY", "", "EUR_USD=X"):
+    for symbol in ("XAU_USD", "GC=F", "CL=F", "SPY", ""):
         with pytest.raises(ValueError, match="six-letter currency-pair"):
             _normalize_yfinance_fx_symbol(symbol)
 
