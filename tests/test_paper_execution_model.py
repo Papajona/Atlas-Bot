@@ -12,6 +12,7 @@ from app.paper_execution_model import (
 def _context(*, volume=1000.0, volatility=0.01):
     return {
         "source": "ccxt_ohlcv",
+        "asset": "crypto",
         "bar_volume": volume,
         "volume_unit": "base_asset",
         "realized_volatility_per_bar": volatility,
@@ -38,6 +39,16 @@ def test_paper_slippage_increases_with_order_size_and_realized_volatility():
     assert large["market_impact_bps"] > small["market_impact_bps"]
     assert volatile["market_impact_bps"] > large["market_impact_bps"]
     assert large["modeled_slippage_bps"] > small["modeled_slippage_bps"]
+
+
+def test_paper_slippage_rejects_claimed_base_volume_from_untrusted_source():
+    forged_context = _context()
+    forged_context["source"] = "oanda_v20_mid"
+    result = estimate_paper_slippage(
+        side="buy", quantity=5.0, base_slippage_bps=2.0, context=forged_context
+    )
+    assert result["status"] == "BASELINE_ONLY_MISSING_VERIFIED_IMPACT_INPUTS"
+    assert result["market_impact_bps"] is None
 
 
 def test_paper_slippage_marks_missing_or_untrusted_volume_as_baseline_only():
