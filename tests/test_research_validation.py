@@ -102,3 +102,20 @@ def test_oos_gate_names_incomplete_trial_registry_as_a_blocker():
     report = oos_promotion_gate(evidence)
     assert report["passed"] is False
     assert report["rejection_reasons"] == ["comparable_trial_registry_incomplete"]
+
+def test_regime_volatility_uses_observed_intraday_bar_cadence():
+    import pandas as pd
+    from app.research_validation import regime_conditioned_performance
+
+    hourly_index = pd.date_range("2024-01-01", periods=260, freq="h", tz="UTC")
+    daily_index = pd.date_range("2024-01-01", periods=260, freq="D", tz="UTC")
+    hourly_close = pd.Series(np.linspace(100.0, 110.0, len(hourly_index)), index=hourly_index)
+    daily_close = pd.Series(np.linspace(100.0, 110.0, len(daily_index)), index=daily_index)
+    hourly_df = pd.DataFrame({"close": hourly_close})
+    daily_df = pd.DataFrame({"close": daily_close})
+
+    hourly = regime_conditioned_performance(hourly_df, pd.Series(0.001, index=hourly_index), asset="crypto")
+    daily = regime_conditioned_performance(daily_df, pd.Series(0.001, index=daily_index), asset="crypto")
+
+    assert all(row["annualization_factor"] > 8000 for row in hourly.values())
+    assert all(300 <= row["annualization_factor"] <= 400 for row in daily.values())
