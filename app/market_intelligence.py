@@ -50,13 +50,42 @@ def _normalize_ohlcv(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.dropna(subset=required).sort_index()
 
 
+def _yahoo_bar_end(timestamp: pd.Timestamp, interval: str) -> pd.Timestamp:
+    """Compute a provider bar's end from its explicit Yahoo interval string."""
+    import re
+
+    match = re.fullmatch(r"(\\d+)(m|h|d|wk|mo|y)", str(interval or "").strip().lower())
+    if not match:
+        raise MarketSourceError(f"Unsupported Yahoo interval for closed-bar validation: {interval!r}")
+    amount = int(match.group(1))
+    unit = match.group(2)
+    if amount <= 0:
+        raise MarketSourceError(f"Invalid Yahoo interval: {interval!r}")
+    if unit == "mo":
+        return timestamp + pd.DateOffset(months=amount)
+    if unit == "y":
+        return timestamp + pd.DateOffset(years=amount)
+    seconds_per_unit = {"m": 60, "h": 3600, "d": 86400, "wk": 7 * 86400}[unit]
+    return timestamp + pd.Timedelta(seconds=amount * seconds_per_unit)
+
+
 def yahoo_history(symbol: str, period: str = "3y", interval: str = "1d") -> pd.DataFrame:
-    """Historical reference data. Never use Yahoo as the execution price source."""
+    """Historical reference data with any still-forming trailing bar excluded."""
     import yfinance as yf
-    fetched_at = datetime.now(timezone.utc).isoformat()
+
+    fetched_at_dt = datetime.now(timezone.utc)
+    fetched_at = fetched_at_dt.isoformat()
     frame = yf.download(symbol, period=period, interval=interval, auto_adjust=False, progress=False, threads=False)
     normalized = _normalize_ohlcv(frame)
-    return _attach_data_provenance(
+    dropped_timestamp = None
+    if not normalized.empty:
+        latest_timestamp = pd.Timestamp(normalized.index[-1])
+        if _yahoo_bar_end(latest_timestamp, interval) > pd.Timestamp(fetched_at_dt):
+            dropped_timestamp = latest_timestamp.isoformat()
+            normalized = normalized.iloc[:-1].copy()
+    if normalized.empty:
+        raise MarketSourceError("No completed Yahoo Finance bars remain after excluding the forming bar")
+    result = _attach_data_provenance(
         normalized,
         source="yahoo_finance",
         symbol=symbol,
@@ -64,6 +93,11 @@ def yahoo_history(symbol: str, period: str = "3y", interval: str = "1d") -> pd.D
         timeframe=interval,
         fetched_at=fetched_at,
     )
+    provenance = dict(result.attrs.get("data_provenance") or {})
+    provenance["forming_bar_excluded"] = dropped_timestamp is not None
+    provenance["excluded_forming_bar_timestamp_utc"] = dropped_timestamp
+    result.attrs["data_provenance"] = provenance
+    return result
 
 
 def _parse_feed_date(value: str | None) -> str | None:
