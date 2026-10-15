@@ -432,6 +432,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         threshold=args.threshold,
         cost_stress_multiplier=args.cost_stress_multiplier,
         research_trial_sharpes=trial_sharpes,
+        research_trial_evidence_verified=True,  # only after manifest, archive, and every trial result are hash-verified above
         bars_per_year=evaluation_assumptions["bars_per_year"],
         taker_bps=evaluation_assumptions["taker_bps"],
         slippage_bps=evaluation_assumptions["slippage_bps"],
