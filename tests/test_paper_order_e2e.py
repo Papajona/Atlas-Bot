@@ -26,7 +26,7 @@ def encryption_key(monkeypatch):
     monkeypatch.setattr(settings, "paper_execution_latency_max_ms", 100.0)
     monkeypatch.setattr(settings, "paper_latency_impact_coefficient", 0.1)
     monkeypatch.setattr(settings, "paper_execution_evidence_source", "unit-test-calibration-fixture")
-    monkeypatch.setattr(settings, "paper_execution_evidence_id", "sha256:test-fixture")
+    monkeypatch.setattr(settings, "paper_execution_evidence_id", "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 
 
 def test_paper_buy_then_sell_round_trip():
