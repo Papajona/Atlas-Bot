@@ -75,6 +75,7 @@ def test_oos_gate_reports_missing_metrics_and_never_promotes_them():
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True,
         "trial_registry_complete": True,
+        "slippage_model_complete": True,
     }
     missing_sharpe = dict(strong)
     missing_sharpe.pop("sharpe")
