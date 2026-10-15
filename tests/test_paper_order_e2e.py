@@ -36,7 +36,7 @@ def test_paper_buy_then_sell_round_trip():
         buy = await execution.execute_signal(
             sym, "buy", 0.01, 50000.0,
             {"score": 0.9, "paper_execution_context": {
-                "source": "ccxt_ohlcv", "bar_volume": 1000.0,
+                "source": "ccxt_ohlcv", "asset": "crypto", "bar_volume": 1000.0,
                 "volume_unit": "base_asset", "realized_volatility_per_bar": 0.01,
                 "spread_bps": 4.0,
             }},
