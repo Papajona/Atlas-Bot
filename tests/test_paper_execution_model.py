@@ -176,14 +176,16 @@ def test_missing_bar_duration_and_order_key_are_rejected():
     with pytest.raises(PaperExecutionModelError, match="bar_duration_ms"):
         _estimate(1.0, context={"bar_duration_ms": None})
     with pytest.raises(PaperExecutionModelError, match="order_key"):
+        inputs = _calibration()
+        base_slippage_bps = inputs.pop("base_slippage_bps")
         estimate_paper_fill(
             order_key="",
             side="buy",
             requested_quantity=1.0,
             reference_price=100.0,
-            base_slippage_bps=2.0,
+            base_slippage_bps=base_slippage_bps,
             market_context=_context(),
-            **_calibration(),
+            **inputs,
         )
 
 
