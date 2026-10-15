@@ -134,6 +134,13 @@ class Settings(BaseSettings):
     # Market context volume is normalized to the instrument's order-quantity units.
     paper_impact_max_participation_rate: float | None = None
     paper_impact_coefficient: float | None = None
+    # These assumptions remain unset until traceable venue observations are supplied.
+    paper_execution_rejection_probability: float | None = None
+    paper_execution_latency_min_ms: float | None = None
+    paper_execution_latency_median_ms: float | None = None
+    paper_execution_latency_p95_ms: float | None = None
+    paper_execution_latency_max_ms: float | None = None
+    paper_latency_impact_coefficient: float | None = None
     paper_execution_evidence_source: str = ""
     paper_execution_evidence_id: str = ""
     # No default: a missing instrument/venue financing assumption blocks research promotion.
