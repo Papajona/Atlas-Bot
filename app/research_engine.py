@@ -308,10 +308,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         df, "ensemble", cfg, taker_bps, slippage_bps, asset, carry
     )
     gross = ensemble_pos * bar_returns
-    if carry is not None:
-        gross = gross - ensemble_pos.abs() * (float(carry) / 10000.0)
     turnover = execution_turnover(ensemble_pos, ensemble_exits)
-    sensitivity = cost_sensitivity(gross.to_numpy(), turnover.to_numpy())
+    gross_after_carry = gross if carry is None else gross - ensemble_pos.abs() * (float(carry) / 10000.0)
+    sensitivity = cost_sensitivity(gross_after_carry.to_numpy(), turnover.to_numpy())
     ci = bootstrap_mean_ci(ensemble_net.to_numpy(), block_size=10)
     adjusted = multiple_testing_sharpe_adjustment([r.get("sharpe", 0.0) for r in results], trials=len(results))
     cost_mult = float(getattr(settings, "research_cost_stress_multiplier", 2.0))
