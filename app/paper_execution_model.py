@@ -6,6 +6,7 @@ recent per-bar return volatility estimate. Missing inputs are reported explicitl
 """
 from __future__ import annotations
 
+import hashlib
 import math
 from typing import Any
 
@@ -167,3 +168,107 @@ def adverse_fill_price(reference_price: float, side: str, slippage_bps: float) -
     if not math.isfinite(result) or result <= 0:
         raise ValueError("modeled paper fill price is non-positive or non-finite")
     return result
+
+
+def simulate_paper_fill_step(
+    *,
+    remaining_quantity: float,
+    context: dict[str, Any] | None,
+    order_key: str,
+    last_processed_bar_timestamp: str | None,
+    bars_waited: int = 0,
+    latency_bars: int = 1,
+    max_bar_volume_participation: float = 0.10,
+    queue_fill_probability: float = 0.80,
+    rejection_probability: float = 0.01,
+    max_fill_quantity: float | None = None,
+) -> dict[str, Any]:
+    """Advance one deterministic paper-order event using a *new* completed bar.
+
+    This is deliberately conservative: only CCXT crypto OHLCV volume identified as
+    base-asset units is accepted as liquidity. Unverified sources (including FX/OTC
+    candle counts) do not fill. A deterministic order/bar hash approximates queue
+    uncertainty and venue rejection reproducibly; it is not a calibrated exchange
+    matching engine.
+    """
+    remaining = _finite_number(remaining_quantity, "remaining_quantity")
+    if not str(order_key or "").strip():
+        raise ValueError("order_key is required for deterministic paper fill simulation")
+    if isinstance(bars_waited, bool) or int(bars_waited) < 0:
+        raise ValueError("bars_waited must be a non-negative integer")
+    if isinstance(latency_bars, bool) or int(latency_bars) < 1:
+        raise ValueError("latency_bars must be an integer >= 1")
+    participation = _finite_number(
+        max_bar_volume_participation, "max_bar_volume_participation", strict_minimum=True
+    )
+    if participation > 1.0:
+        raise ValueError("max_bar_volume_participation must be <= 1")
+    queue_probability = _finite_number(queue_fill_probability, "queue_fill_probability")
+    reject_probability = _finite_number(rejection_probability, "rejection_probability")
+    if queue_probability > 1.0 or reject_probability > 1.0:
+        raise ValueError("queue and rejection probabilities must be <= 1")
+
+    inputs = context if isinstance(context, dict) else {}
+    current_bar = str(inputs.get("bar_timestamp") or "").strip()
+    source = str(inputs.get("source") or "").strip().lower()
+    asset = str(inputs.get("asset") or "").strip().lower()
+    volume_unit = str(inputs.get("volume_unit") or "").strip().lower()
+    volume_value = inputs.get("bar_volume")
+
+    def outcome(event: str, *, fill: float = 0.0, remaining_after: float = remaining,
+                waited: int = int(bars_waited), timestamp: str | None = current_bar) -> dict[str, Any]:
+        return {
+            "event": event,
+            "fill_quantity": fill,
+            "remaining_quantity": remaining_after,
+            "bars_waited": waited,
+            "last_processed_bar_timestamp": timestamp,
+        }
+
+    if remaining <= 0.0:
+        return outcome("ALREADY_FILLED", remaining_after=0.0)
+    if not current_bar:
+        return outcome("WAITING_FOR_VERIFIED_LIQUIDITY", timestamp=last_processed_bar_timestamp)
+    if current_bar == str(last_processed_bar_timestamp or ""):
+        return outcome("NO_NEW_BAR", timestamp=last_processed_bar_timestamp)
+
+    verified_crypto_volume = source == "ccxt_ohlcv" and asset == "crypto" and volume_unit == "base_asset"
+    if not verified_crypto_volume or volume_value is None:
+        return outcome("WAITING_FOR_VERIFIED_LIQUIDITY")
+
+    volume = _finite_number(volume_value, "bar_volume", strict_minimum=True)
+    next_waited = int(bars_waited) + 1
+    if next_waited < int(latency_bars):
+        return outcome("LATENCY_WAIT", waited=next_waited)
+
+    digest = hashlib.sha256(f"{order_key}|{current_bar}".encode("utf-8")).digest()
+    rejection_draw = int.from_bytes(digest[0:8], "big") / float(2**64)
+    queue_draw = int.from_bytes(digest[8:16], "big") / float(2**64)
+    fraction_draw = int.from_bytes(digest[16:24], "big") / float(2**64)
+    if rejection_draw < reject_probability:
+        return outcome("REJECTED", remaining_after=0.0, waited=next_waited)
+    if queue_draw >= queue_probability:
+        return outcome("QUEUE_NO_FILL", waited=next_waited)
+
+    capacity = volume * participation
+    if max_fill_quantity is not None:
+        capacity = min(
+            capacity,
+            _finite_number(max_fill_quantity, "max_fill_quantity"),
+        )
+    if capacity <= 0.0:
+        return outcome("BAR_LIQUIDITY_EXHAUSTED", waited=next_waited)
+
+    # Queue uncertainty reduces the available slice; each order/bar result stays
+    # reproducible for retries and the same bar cannot be consumed twice.
+    queue_factor = 0.5 + 0.5 * fraction_draw
+    fill_quantity = min(remaining, capacity * queue_factor)
+    if not math.isfinite(fill_quantity) or fill_quantity <= 0.0:
+        return outcome("BAR_LIQUIDITY_EXHAUSTED", waited=next_waited)
+    remaining_after = max(0.0, remaining - fill_quantity)
+    event = "FILLED" if remaining_after <= max(1e-12, remaining * 1e-12) else "PARTIAL_FILL"
+    if event == "FILLED":
+        remaining_after = 0.0
+    return outcome(
+        event, fill=fill_quantity, remaining_after=remaining_after, waited=next_waited
+    )
