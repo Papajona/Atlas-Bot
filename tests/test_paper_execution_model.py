@@ -198,3 +198,24 @@ def test_calibrated_model_availability_requires_every_latency_and_rejection_sett
         evidence_id=TEST_EVIDENCE_ID,
         allow_test_fixture=True,
     ) is False
+
+
+def test_test_fixture_is_accepted_only_with_explicit_development_override():
+    calibration = _calibration()
+    shared = {
+        "max_participation_rate": calibration["max_participation_rate"],
+        "impact_coefficient": calibration["impact_coefficient"],
+        "rejection_probability": calibration["rejection_probability"],
+        "latency_min_ms": calibration["latency_min_ms"],
+        "latency_median_ms": calibration["latency_median_ms"],
+        "latency_p95_ms": calibration["latency_p95_ms"],
+        "latency_max_ms": calibration["latency_max_ms"],
+        "latency_impact_coefficient": calibration["latency_impact_coefficient"],
+        "evidence_source": calibration["evidence_source"],
+        "evidence_path": calibration["evidence_path"],
+        "evidence_id": calibration["evidence_id"],
+    }
+    assert calibrated_model_available(_context(), **shared) is False
+    assert calibrated_model_available(
+        _context(), **shared, allow_test_fixture=True
+    ) is True
