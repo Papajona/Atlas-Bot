@@ -47,6 +47,9 @@ def _oos(**extra):
         "trades": 150,
         "deflated_sharpe": 0.97,
         "cost_stress_ok": True,
+        "financing_cost_model_complete": True,
+        "intrabar_stop_target_model_complete": True,
+        "execution_cost_model_complete": True,
         "trial_registry_complete": True,
         **extra,
     }
