@@ -53,3 +53,21 @@ def test_main_source_exposes_fx_model_endpoint():
     from pathlib import Path
     source = Path("app/main.py").read_text()
     assert '/api/research/fx-model' in source
+
+
+def test_fx_walk_forward_signals_are_strictly_sequential(monkeypatch):
+    import app.fx_engine as engine
+
+    x = _trend(500)
+    observed = []
+
+    def sequential_signal(history, cfg=None, fundamentals=None, execution_cost_bps=None):
+        observed.append(history.index[-1])
+        return {"score": 1.0, "execution_authority": False, "mode": "RESEARCH_ONLY"}
+
+    monkeypatch.setattr(engine, "fx_model_signal", sequential_signal)
+    result = fx_walk_forward_score(x, train_bars=300, test_bars=100)
+    assert result["fold_count"] == 2
+    expected = [x.index[i - 1] for i in range(300, 400)]
+    expected += [x.index[i - 1] for i in range(400, 500)]
+    assert observed == expected
