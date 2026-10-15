@@ -1481,7 +1481,69 @@ async def _usdt_tron_monitor_loop():
         await asyncio.sleep(poll_seconds)
 
 
+_reconciliation_failure_state: dict[str, dict[str, Any]] = {}
+
+
+async def _record_reconciliation_failure(scope: str, exc: Exception) -> int:
+    """Persist one CRITICAL incident after three consecutive failures per provider scope."""
+    key = str(scope or "").strip().lower()
+    state = _reconciliation_failure_state.setdefault(
+        key, {"consecutive_failures": 0, "episode": 0, "alerted": False, "last_error_type": ""}
+    )
+    if state["consecutive_failures"] == 0:
+        state["episode"] = int(state["episode"]) + 1
+        state["alerted"] = False
+    state["consecutive_failures"] = int(state["consecutive_failures"]) + 1
+    state["last_error_type"] = type(exc).__name__
+    count = int(state["consecutive_failures"])
+    if count >= 3 and not state["alerted"]:
+        try:
+            incident_id = await open_incident(
+                key=f"RECONCILIATION_PROVIDER_FAILURE:{key}:episode:{state['episode']}",
+                severity="CRITICAL",
+                category="RECONCILIATION",
+                summary=f"Repeated {key} reconciliation failures",
+                detail={
+                    "scope": key,
+                    "consecutive_failures": count,
+                    "error_type": type(exc).__name__,
+                    "episode": int(state["episode"]),
+                },
+            )
+            state["alerted"] = incident_id is not None
+        except Exception:
+            # Do not mark the alert delivered when persistence failed. The next failed
+            # poll retries incident creation; raw provider error text is not put in detail.
+            logger.exception("reconciliation_failure_incident_write_failed scope=%s", key)
+    return count
+
+
+async def _record_reconciliation_success(scope: str) -> None:
+    key = str(scope or "").strip().lower()
+    state = _reconciliation_failure_state.setdefault(
+        key, {"consecutive_failures": 0, "episode": 0, "alerted": False, "last_error_type": ""}
+    )
+    prior = int(state["consecutive_failures"])
+    if prior:
+        logger.warning(
+            "reconciliation_provider_recovered scope=%s previous_consecutive_failures=%s",
+            key, prior,
+        )
+        try:
+            await _safe_audit("RECONCILIATION_PROVIDER_RECOVERED", {
+                "scope": key,
+                "previous_consecutive_failures": prior,
+                "episode": int(state["episode"]),
+            })
+        except Exception:
+            logger.exception("reconciliation_recovery_audit_failed scope=%s", key)
+    state["consecutive_failures"] = 0
+    state["alerted"] = False
+    state["last_error_type"] = ""
+
+
 async def _reconciliation_loop():
+    """Reconcile providers independently; repeated failures raise durable incidents."""
     while True:
         await asyncio.sleep(max(15, settings.reconciliation_interval_seconds))
         should_crypto = settings.live_trading_enabled and bool(settings.exchange_api_key and settings.exchange_api_secret)
@@ -1490,24 +1552,33 @@ async def _reconciliation_loop():
         if not (should_crypto or should_oanda):
             _mark_worker_loop_success("reconciliation")
             continue
-        if should_crypto:
+
+        cycle_failures: list[tuple[str, Exception]] = []
+
+        async def run_scope(scope: str, operation) -> None:
             try:
-                await reconcile(settings.default_exchange, settings.default_symbol)
-                await sync_live_account(settings.default_exchange)
-            except Exception:
-                logger.exception("reconciliation_loop: crypto reconcile/equity sync failed (%s/%s)",
-                                  settings.default_exchange, settings.default_symbol)
-        if should_oanda:
-            try:
-                await reconcile("oanda")
-            except Exception:
-                logger.exception("reconciliation_loop: oanda reconcile failed")
-        if should_crypto:
-            try:
-                await enforce_platform_loss_limits()
-            except Exception:
-                logger.exception("reconciliation_loop: platform loss-limit enforcement failed")
-        try:
+                await operation()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                count = await _record_reconciliation_failure(scope, exc)
+                cycle_failures.append((scope, exc))
+                _mark_worker_loop_failure("reconciliation", exc)
+                logger.exception(
+                    "reconciliation_loop_scope_failed scope=%s consecutive_failures=%s",
+                    scope, count,
+                )
+            else:
+                await _record_reconciliation_success(scope)
+
+        async def reconcile_crypto_and_equity() -> None:
+            await reconcile(settings.default_exchange, settings.default_symbol)
+            await sync_live_account(settings.default_exchange)
+
+        async def enforce_loss_limits() -> None:
+            await enforce_platform_loss_limits()
+
+        async def reconcile_customers() -> None:
             async with SessionLocal() as db:
                 customer_exchanges = (await db.execute(
                     select(Trade.exchange).where(
@@ -1515,12 +1586,28 @@ async def _reconciliation_loop():
                         Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
                     ).distinct()
                 )).scalars().all()
-            customer_exchanges = [str(x) for x in customer_exchanges if str(x).strip().lower() == "binance"]
-            if customer_exchanges:
-                await reconcile_customer_live_orders(customer_exchanges)
+            selected = [
+                str(value) for value in customer_exchanges
+                if str(value).strip().lower() == "binance"
+            ]
+            if selected:
+                await reconcile_customer_live_orders(selected)
+
+        if should_crypto:
+            await run_scope("crypto", reconcile_crypto_and_equity)
+            await run_scope("platform-loss-limits", enforce_loss_limits)
+        if should_oanda:
+            await run_scope("oanda", lambda: reconcile("oanda"))
+        await run_scope("customer-live", reconcile_customers)
+
+        if cycle_failures:
+            failed_scopes = sorted({scope for scope, _ in cycle_failures})
+            _mark_worker_loop_failure(
+                "reconciliation",
+                RuntimeError("reconciliation failed for scopes: " + ", ".join(failed_scopes)),
+            )
+        else:
             _mark_worker_loop_success("reconciliation")
-        except Exception:
-            logger.exception("reconciliation_loop: customer live reconciliation failed")
 
 
 
