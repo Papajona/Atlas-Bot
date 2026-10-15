@@ -225,7 +225,7 @@ class Broker:
     def supports_feature(self, symbol: str, feature: str) -> bool:
         # A false feature value means unsupported. Network/API errors must propagate:
         # an outage is not evidence that the exchange lacks the feature.
-        return bool(self.feature_value(symbol, feature)
+        return bool(self.feature_value(symbol, feature))
 
     def features(self, symbol: str) -> dict[str, Any]:
         with self._read_lock:
