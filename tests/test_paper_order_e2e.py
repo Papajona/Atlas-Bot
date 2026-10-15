@@ -21,6 +21,7 @@ def _configure_test_calibration(monkeypatch, directory, exchange, symbol):
         "schema": "atlas-paper-execution-calibration-v1",
         "fixture_only": True,
         "provenance_source": "synthetic-unit-test-data",
+        "evidence_source": "synthetic-unit-test-fixture",
         "calibration_method": "deterministic-unit-test-fixture-not-venue-calibration",
         "dataset_sha256": "a" * 64,
         "observation_counts": {"fills": 10, "latency": 10, "order_outcomes": 10},
