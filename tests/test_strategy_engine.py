@@ -281,7 +281,7 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
 
 def test_strategy_backtest_reports_next_open_execution_model():
     result = strategy_backtest(sample_df(), taker_bps=0, slippage_bps=0)
-    assert result["backtest_model"].startswith("Research backtest with next-open entries")
+    assert result["backtest_model"].startswith("next-open entries, OHLC intrabar ATR stop/target fills")
 
 
 def test_ai_walk_forward_trial_registry_requires_verified_archive(monkeypatch):
