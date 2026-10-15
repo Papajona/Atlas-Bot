@@ -6284,7 +6284,7 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
         # Advance older orders first. A new signal submitted below cannot fill on its
         # submission bar, and repeated requests for the same closed bar are idempotent.
         order_updates = await advance_paper_orders([{
-            "exchange": req.exchange, "symbol": req.symbol,
+            "exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe,
             "price": price, "context": paper_context,
         }])
         sig = await asyncio.to_thread(predict_latest, df, path)
