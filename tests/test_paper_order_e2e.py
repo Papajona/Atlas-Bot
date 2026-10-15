@@ -58,7 +58,7 @@ def test_paper_buy_then_sell_round_trip(monkeypatch):
         assert buy["paper_execution_model"]["impact_inputs_complete"] is True
         assert buy["paper_execution_model"]["spread_inputs_complete"] is True
         first_step = await execution.advance_paper_orders([{
-            "exchange": "binance", "symbol": sym, "price": 50000.0,
+            "exchange": "binance", "symbol": sym, "timeframe": "1h", "price": 50000.0,
             "context": {**buy_context, "bar_timestamp": f"bar-buy-{ts}-1"},
         }])
         assert first_step["updated"]
@@ -83,7 +83,7 @@ def test_paper_buy_then_sell_round_trip(monkeypatch):
         assert sell, sell
         assert sell["status"] == "OPEN" and sell["filled"] == 0.0
         await execution.advance_paper_orders([{
-            "exchange": "binance", "symbol": sym, "price": 50500.0,
+            "exchange": "binance", "symbol": sym, "timeframe": "1h", "price": 50500.0,
             "context": {**sell_context, "bar_timestamp": f"bar-sell-{ts}-1"},
         }])
         async with SessionLocal() as db:
@@ -160,6 +160,7 @@ def test_stress_many_paper_orders_cannot_overconsume_one_bar_liquidity(monkeypat
         snapshot = [{
             "exchange": exchange,
             "symbol": symbol,
+            "timeframe": "1h",
             "price": 100.0,
             "context": context,
         }]
