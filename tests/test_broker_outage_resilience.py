@@ -118,3 +118,10 @@ def test_user_stream_reconnect_uses_jitter(monkeypatch):
 
     assert len(sleeps) >= 8
     assert len(set(sleeps[:5])) == 5
+
+
+def test_position_query_unsupported_is_not_reported_as_flat():
+    broker = Broker(BrokerConfig("binance", "key", "secret"))
+    broker.client = FakeClient()
+    with pytest.raises(RuntimeError, match="does not support authoritative open-position queries"):
+        broker.fetch_positions()
