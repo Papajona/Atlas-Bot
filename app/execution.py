@@ -1437,6 +1437,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     evidence_source=settings.paper_execution_evidence_source,
                     evidence_path=settings.paper_execution_evidence_path,
                     evidence_id=settings.paper_execution_evidence_id,
+                    allow_test_fixture=str(settings.environment).lower() == "development",
                 )
                 strict_paper = str(settings.environment).lower() in {"staging", "production"}
 
@@ -1485,6 +1486,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                                 evidence_source=settings.paper_execution_evidence_source,
                                 evidence_path=settings.paper_execution_evidence_path,
                                 evidence_id=settings.paper_execution_evidence_id,
+                                allow_test_fixture=str(settings.environment).lower() == "development",
                             )
                         except PaperExecutionModelError as exc:
                             reason = f"Paper execution model rejected invalid inputs: {exc}"
