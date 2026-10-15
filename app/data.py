@@ -110,6 +110,10 @@ def _normalize_yfinance_fx_symbol(symbol: str) -> str:
     else:
         pair = raw
     pair = pair.replace("/", "").replace("_", "").replace("-", "")
+    if len(pair) == 6 and pair[:3] in {"XAU", "XAG", "XPT", "XPD"}:
+        raise ValueError(
+            "Precious-metal symbols are commodity instruments and cannot use the Yahoo FX adapter"
+        )
     if len(pair) != 6 or not pair.isalpha():
         raise ValueError(
             "Yahoo FX data requires a six-letter currency-pair symbol such as EURUSD or EUR_USD; "
