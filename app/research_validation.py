@@ -165,6 +165,8 @@ def fixed_signal_walk_forward_oos(
     bar_returns: pd.Series | None = None,
     intrabar_exit: pd.Series | None = None,
     carry_bps_per_bar: float | None = None,
+    carry_evidence_source: str | None = None,
+    carry_evidence_id: str | None = None,
 ) -> dict:
     """Evaluate held-out returns with the same executable position/stop/carry stream.
 
@@ -269,12 +271,21 @@ def fixed_signal_walk_forward_oos(
         stress_multiplier=stress_multiplier,
         fixed_cost_drag=None if all_fixed_cost is None else all_fixed_cost.to_numpy(dtype=float),
     )
-    cost_analysis["financing_cost_model_complete"] = carry is not None
-    cost_analysis["intrabar_stop_target_model_complete"] = intrabar_exit is not None
-    if carry is None:
-        cost_analysis["note"] += " Carry rate was not supplied; this diagnostic is not financing-complete and is not promotion evidence."
-    cost_complete = carry is not None
+    evidence_source = str(carry_evidence_source or "").strip()
+    evidence_id = str(carry_evidence_id or "").strip()
+    carry_configured = carry is not None
+    cost_complete = carry_configured and bool(evidence_source) and bool(evidence_id)
     execution_complete = intrabar_exit is not None
+    cost_analysis["carry_rate_configured"] = carry_configured
+    cost_analysis["carry_evidence_source_present"] = bool(evidence_source)
+    cost_analysis["carry_evidence_id_present"] = bool(evidence_id)
+    cost_analysis["financing_cost_model_complete"] = cost_complete
+    cost_analysis["intrabar_stop_target_model_complete"] = execution_complete
+    if not cost_complete:
+        cost_analysis["note"] += (
+            " Financing promotion evidence requires a configured per-bar carry value plus "
+            "a traceable RESEARCH_CARRY_EVIDENCE_SOURCE and RESEARCH_CARRY_EVIDENCE_ID."
+        )
 
     return {
         "status": "OK",
@@ -291,6 +302,9 @@ def fixed_signal_walk_forward_oos(
         "cost_stress_ok": cost_analysis.get("stress_ok") is True,
         "cost_analysis": cost_analysis,
         "financing_cost_model_complete": cost_complete,
+        "carry_rate_configured": carry_configured,
+        "carry_evidence_source": evidence_source or None,
+        "carry_evidence_id": evidence_id or None,
         "intrabar_stop_target_model_complete": execution_complete,
         "execution_cost_model_complete": bool(cost_complete and execution_complete),
         "carry_bps_per_bar": carry,
