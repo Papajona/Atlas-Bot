@@ -319,6 +319,7 @@ def ai_walk_forward_backtest(
     slippage_bps: float | None = None,
     carry_bps_per_bar: float | None = None,
     max_hold_bars: int | None = None,
+    research_trial_evidence_verified: bool = False,
 ) -> dict:
     """Chronological OOS backtest using explicit annualization and execution-cost assumptions."""
     try:
@@ -535,14 +536,19 @@ def ai_walk_forward_backtest(
             "taker_bps": taker_cost_bps,
             "slippage_bps": slippage_cost_bps,
             "carry_bps_per_bar": carry_cost_bps,
-            "carry_rate_evidence_supplied": bool(carry_evidence_supplied),
+            "carry_rate_configured": bool(carry_rate_configured),
             "max_hold_bars": hold_horizon,
             "stop_atr": float(settings.strategy_stop_atr),
             "take_profit_atr": float(settings.strategy_take_profit_atr),
         },
         "cost_analysis": cost_report,
         "research_trial_count": len(research_trial_sharpes) if research_trial_sharpes else 0,
-        "trial_registry_complete": bool(research_trial_sharpes) and dsr_report.get("status") == "OK",
+        "trial_registry_complete": (
+            research_trial_evidence_verified is True
+            and bool(research_trial_sharpes)
+            and dsr_report.get("status") == "OK"
+        ),
+        "trial_registry_evidence_verified": research_trial_evidence_verified is True,
         "research_trial_history_status": dsr_report.get("status"),
         "deflated_sharpe": dsr_report.get("deflated_sharpe_ratio") if dsr_report.get("status") == "OK" else None,
         "deflated_sharpe_status": dsr_report.get("status"),
