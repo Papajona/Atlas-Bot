@@ -97,6 +97,20 @@ def _calibration_evidence_matches(
     dataset_hash = str(artifact.get("dataset_sha256") or "").strip().removeprefix("sha256:")
     if len(dataset_hash) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in dataset_hash):
         return False
+    dataset_relative = Path(str(artifact.get("dataset_path") or "").strip())
+    # Keep calibration datasets colocated with the evidence bundle. Do not accept
+    # absolute paths or traversal outside the bundle directory.
+    if not str(dataset_relative) or dataset_relative.is_absolute() or ".." in dataset_relative.parts:
+        return False
+    try:
+        dataset_file = evidence_path.parent / dataset_relative
+        if not dataset_file.is_file():
+            return False
+        actual_dataset_hash = hashlib.sha256(dataset_file.read_bytes()).hexdigest()
+    except OSError:
+        return False
+    if not hmac.compare_digest(actual_dataset_hash, dataset_hash.lower()):
+        return False
     counts = artifact.get("observation_counts")
     if not isinstance(counts, dict):
         return False
