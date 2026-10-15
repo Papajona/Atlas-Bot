@@ -354,8 +354,11 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
                 # An order larger than the opposing position flips into new exposure, so it is NOT exempt
                 # from the cash requirement (same strict test as account_reduce_only above).
                 reducing = account_reduce_only
-                required_cash = 0.0 if reducing else price * quantity
-                if float(ledger.available) + 1e-9 < required_cash:
+                required_cash = (
+                    Decimal("0") if reducing
+                    else Decimal(str(price)) * Decimal(str(quantity))
+                )
+                if Decimal(str(ledger.available)) + Decimal("0.00000001") < required_cash:
                     raise RiskBlocked("Order exceeds the customer's available funded USDT balance")
             today = _today_utc()
             if account.daily_start_date != today:
@@ -899,7 +902,7 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
     return realized
 
 
-async def _release_unneeded_order_reserve(db, trade: Trade) -> float:
+async def _release_unneeded_order_reserve(db, trade: Trade) -> Decimal:
     """Release only capital no longer backing a terminal customer order.
 
     The amount originally reserved is persisted on the Trade. This avoids reconstructing
@@ -909,24 +912,36 @@ async def _release_unneeded_order_reserve(db, trade: Trade) -> float:
     customer's available balance and opens a critical incident if that cannot be done.
     """
     if trade.customer_id is None or not settings.customer_cash_only_trading:
-        return 0.0
-    reserved = max(0.0, float(trade.reserved_cash or 0.0))
-    if reserved <= 0:
-        legacy = max(0.0, float(trade.requested_quantity or 0.0) * float(trade.requested_price or 0.0))
-        reserved = legacy
-    filled_cost = max(0.0, float(trade.filled_quantity or 0.0) * float(trade.average_fill_price or trade.requested_price or 0.0))
-    if filled_cost > reserved + 1e-12:
+        return Decimal("0")
+    zero = Decimal("0")
+    tolerance = Decimal("0.000000000001")
+    reserved = max(zero, Decimal(str(trade.reserved_cash or 0)))
+    if reserved <= zero:
+        # Legacy rows did not persist the reserve; reconstruct only from the exact
+        # decimal representation of the stored quantity and price fields.
+        legacy = Decimal(str(trade.requested_quantity or 0)) * Decimal(str(trade.requested_price or 0))
+        reserved = max(zero, legacy)
+    filled_price = trade.average_fill_price or trade.requested_price or 0
+    filled_cost = max(
+        zero,
+        Decimal(str(trade.filled_quantity or 0)) * Decimal(str(filled_price)),
+    )
+    if filled_cost > reserved + tolerance:
         deficit = filled_cost - reserved
         try:
-            await reserve_trading(db, trade.customer_id, deficit,
-                                  reference_id=f"trade:{trade.id}:reserve-deficit:{_qty_ref(trade.filled_quantity)}")
+            await reserve_trading(
+                db, trade.customer_id, deficit,
+                reference_id=f"trade:{trade.id}:reserve-deficit:{_qty_ref(trade.filled_quantity)}",
+            )
             reserved += deficit
             trade.reserved_cash = reserved
             account_locked = (await db.execute(select(TradingAccount).where(
                 TradingAccount.customer_id == trade.customer_id
             ).with_for_update())).scalar_one_or_none()
             if account_locked:
-                account_locked.reserved_margin += deficit
+                account_locked.reserved_margin = max(
+                    zero, Decimal(str(account_locked.reserved_margin or 0)) + deficit
+                )
             await sync_wallet_from_ledger(db, trade.customer_id, "USDT")
         except ValueError as exc:
             trade.error = (str(trade.error or "") + " | RESERVE_DEFICIT: " + str(exc))[:4000]
@@ -935,23 +950,29 @@ async def _release_unneeded_order_reserve(db, trade: Trade) -> float:
                 severity="CRITICAL",
                 category="LEDGER_RECONCILIATION",
                 summary="Filled trade exceeded reserved customer cash",
-                detail={"trade_id": trade.id, "customer_id": trade.customer_id, "reserved_cash": reserved, "filled_cost": filled_cost, "deficit": deficit, "error": str(exc)},
+                detail={
+                    "trade_id": trade.id, "customer_id": trade.customer_id,
+                    "reserved_cash": str(reserved), "filled_cost": str(filled_cost),
+                    "deficit": str(deficit), "error": str(exc),
+                },
                 customer_id=trade.customer_id,
             )
-            return 0.0
-    release = max(0.0, reserved - filled_cost)
-    if release <= 0:
-        return 0.0
+            return Decimal("0")
+    release = max(zero, reserved - filled_cost)
+    if release <= zero:
+        return Decimal("0")
     await release_trading(
         db, trade.customer_id, release,
         reference_id=f"trade:{trade.id}:order-reserve-release",
-        full_allocation=(filled_cost == 0.0),
+        full_allocation=(filled_cost == zero),
     )
     account_locked = (await db.execute(select(TradingAccount).where(
         TradingAccount.customer_id == trade.customer_id
     ).with_for_update())).scalar_one_or_none()
     if account_locked:
-        account_locked.reserved_margin = max(0.0, account_locked.reserved_margin - release)
+        account_locked.reserved_margin = max(
+            zero, Decimal(str(account_locked.reserved_margin or 0)) - release
+        )
     trade.reserved_cash = filled_cost
     await sync_wallet_from_ledger(db, trade.customer_id, "USDT")
     return release
@@ -1166,7 +1187,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                         "filled": float(existing.filled_quantity or 0.0),
                         "remaining_quantity": float(existing.remaining_quantity or 0.0),
                         "average_fill_price": float(existing.average_fill_price or 0.0)}
-        reserved_cash = 0.0
+        reserved_cash = Decimal("0")
         command: OrderCommand | None = None
         if customer_id is not None and settings.customer_cash_only_trading and mode == "LIVE":
             async with SessionLocal() as db:
@@ -1181,8 +1202,15 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 )
                 reducing = opposing_qty > 0 and quantity <= opposing_qty + 1e-9
                 if not reducing:
-                    reserve_buffer = max(0.0, float(settings.max_slippage_bps or 0.0)) / 10_000.0
-                    reserved_cash = float(quote * quantity * (1.0 + reserve_buffer))
+                    reserve_buffer = max(
+                        Decimal("0"),
+                        Decimal(str(settings.max_slippage_bps or 0.0)),
+                    ) / Decimal("10000")
+                    reserved_cash = (
+                        Decimal(str(quote))
+                        * Decimal(str(quantity))
+                        * (Decimal("1") + reserve_buffer)
+                    )
                     try:
                         await reserve_trading(db, customer_id, reserved_cash,
                                               reference_id=f"trade:{trade_id}:open-reserve")
@@ -1191,7 +1219,9 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                             reserved_trade.reserved_cash = reserved_cash
                         account_locked = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == customer_id).with_for_update())).scalar_one_or_none()
                         if account_locked:
-                            account_locked.reserved_margin += reserved_cash
+                            account_locked.reserved_margin = (
+                                Decimal(str(account_locked.reserved_margin or 0)) + reserved_cash
+                            )
                             account_locked.cash_equity = max(0.0, account_locked.cash_equity)
                         await sync_wallet_from_ledger(db, customer_id, "USDT")
                         if mode == "LIVE":
