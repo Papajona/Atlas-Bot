@@ -11,7 +11,8 @@ from app.paper_execution import (
 
 
 def candles(*, volume=100.0, noisy=False, n=25):
-    index = pd.date_range("2026-01-01", periods=n, freq="h", tz="UTC")
+    start = pd.Timestamp.now(tz="UTC").floor("h") - pd.Timedelta(hours=n - 1)
+    index = pd.date_range(start, periods=n, freq="h")
     if noisy:
         changes = np.asarray([0.012, -0.009, 0.015, -0.013, 0.008] * 5, dtype=float)
         close = 100.0 * np.cumprod(1.0 + changes[:n])
@@ -80,6 +81,16 @@ def test_context_fails_closed_on_later_timestamp_or_bad_reference_price():
         validate_paper_context(
             context, symbol="BTC/USDT", timeframe="1h",
             signal_timestamp=df.index[-1].isoformat(), price=context["last_close"] * 1.02,
+        )
+
+
+def test_stale_context_is_rejected_even_when_its_decision_timestamp_matches():
+    _, context = make_context()
+    context["as_of"] = "2026-01-01T00:00:00+00:00"
+    with pytest.raises(PaperExecutionError, match="stale or future-dated"):
+        validate_paper_context(
+            context, symbol="BTC/USDT", timeframe="1h",
+            signal_timestamp=context["as_of"], price=context["last_close"],
         )
 
 
