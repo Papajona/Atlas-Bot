@@ -40,7 +40,7 @@ from .strategy_ai import generate_strategy_draft
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates, live_strategy_signals
 from .research_validation import oos_promotion_gate, monte_carlo_bootstrap
 from .daily_research import run_daily_research, latest_macro_context
-from .execution import execute_signal, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits, customer_paper_execution_blocked
+from .execution import execute_signal, advance_paper_orders, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits, customer_paper_execution_blocked
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
 from .payout import get_payout_provider, PayoutError, PayoutUnknown, PayoutNotFound
 from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, release_separation_violation, verify_release_operator
@@ -6267,19 +6267,7 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
     path = model_file(req)
     try:
         df = await asyncio.to_thread(market_data, req.model_copy(update={"days": 5}))
-        sig = await asyncio.to_thread(predict_latest, df, path)
         price = float(df.close.iloc[-1])
-        ts = sig["signal_timestamp"]
-        if sig["signal"] == 0:
-            return {"mode": "PAPER", "side": "flat", "price": price, **sig}
-        side = "buy" if sig["signal"] > 0 else "sell"
-        async with SessionLocal() as db:
-            s = await db.get(AppState, 1)
-            equity = max(0.0, s.equity)
-        target_notional = min(equity * settings.risk_per_trade, settings.max_notional_usd)
-        qty = target_notional / price
-        stop = price * (1 - settings.stop_loss_pct) if side == "buy" else price * (1 + settings.stop_loss_pct)
-        tp = price * (1 + settings.take_profit_pct) if side == "buy" else price * (1 - settings.take_profit_pct)
         from .paper_execution_model import paper_execution_context_from_ohlcv
         paper_spread_bps = None
         try:
@@ -6289,17 +6277,43 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
                 "symbol": req.symbol, "exchange": req.exchange, "asset": req.asset,
                 "error_type": type(exc).__name__,
             })
-        paper_signal = dict(sig)
-        paper_signal["paper_execution_context"] = paper_execution_context_from_ohlcv(
+        paper_context = paper_execution_context_from_ohlcv(
             df, asset=req.asset, spread_bps=paper_spread_bps,
         )
+
+        # Advance older orders first. A new signal submitted below cannot fill on its
+        # submission bar, and repeated requests for the same closed bar are idempotent.
+        order_updates = await advance_paper_orders([{
+            "exchange": req.exchange, "symbol": req.symbol,
+            "price": price, "context": paper_context,
+        }])
+        sig = await asyncio.to_thread(predict_latest, df, path)
+        ts = sig["signal_timestamp"]
+        if sig["signal"] == 0:
+            equity_state = await mark_paper_equity({req.symbol: price})
+            return {
+                "mode": "PAPER", "side": "flat", "price": price, **sig,
+                "pending_order_updates": order_updates, "equity": equity_state,
+            }
+        side = "buy" if sig["signal"] > 0 else "sell"
+        async with SessionLocal() as db:
+            s = await db.get(AppState, 1)
+            equity = max(0.0, s.equity)
+        target_notional = min(equity * settings.risk_per_trade, settings.max_notional_usd)
+        qty = target_notional / price
+        stop = price * (1 - settings.stop_loss_pct) if side == "buy" else price * (1 + settings.stop_loss_pct)
+        tp = price * (1 + settings.take_profit_pct) if side == "buy" else price * (1 - settings.take_profit_pct)
+        paper_signal = dict(sig)
+        paper_signal["paper_execution_context"] = paper_context
         result = await execute_signal(
             req.symbol, side, qty, price, paper_signal, req.exchange, req.timeframe, ts,
             force_paper=True, stop_loss_price=stop, take_profit_price=tp, asset=req.asset,
         )
         equity_state = await mark_paper_equity({req.symbol: price})
-        return {"mode": "PAPER", "side": side, "price": price, "quantity": qty, **sig,
-                "execution": result, "equity": equity_state}
+        return {
+            "mode": "PAPER", "side": side, "price": price, "quantity": qty, **sig,
+            "execution": result, "pending_order_updates": order_updates, "equity": equity_state,
+        }
     except RiskBlocked as e:
         raise _safe_http_error(409, e, "Operation could not be completed") from e
     except Exception as e:
