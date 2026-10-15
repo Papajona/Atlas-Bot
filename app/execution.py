@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 import asyncio
 import json
+import math
 import os
 import uuid
 from datetime import date, datetime, timezone
@@ -1206,8 +1207,6 @@ async def advance_paper_orders(
             last_bar = str(state.get("last_processed_bar_timestamp") or "") or None
             bars_waited = int(state.get("bars_waited") or 0)
 
-            # Orders lacking a submission-bar timestamp establish a baseline first;
-            # they cannot be filled on the first bar for which we happen to see them.
             if not last_bar:
                 state["last_processed_bar_timestamp"] = current_bar or None
                 state["bars_waited"] = bars_waited
@@ -1569,6 +1568,87 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
         await risk_gate(symbol, quote, quantity, live=live, signal_timestamp=signal_timestamp, side=side, customer_id=customer_id, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, signal_id=signal_id)
         paper_execution_model = None
         if mode == "PAPER":
+            profile = PROFILES[asset]
+            paper_context = (signal or {}).get("paper_execution_context")
+            try:
+                paper_execution_model = estimate_paper_slippage(
+                    side=side,
+                    quantity=quantity,
+                    base_slippage_bps=profile.slippage_bps,
+                    context=paper_context if isinstance(paper_context, dict) else None,
+                    impact_coefficient=settings.paper_market_impact_coefficient,
+                    max_market_impact_bps=settings.paper_max_market_impact_bps,
+                )
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise RiskBlocked("Paper execution cost model rejected invalid market context") from exc
+        trade_id, created = await _create_trade(
+            symbol, timeframe, side, quantity, quote, exchange, mode, signal, signal_id, cid,
+            stop_loss_price or 0.0, take_profit_price or 0.0, customer_id=customer_id, trading_account_id=trading_account_id,
+        )
+        if not created:
+            async with SessionLocal() as db:
+                existing = await db.get(Trade, trade_id)
+                if existing and existing.mode == "LIVE":
+                    await _ensure_order_command(existing.id, customer_id=existing.customer_id, exchange=existing.exchange, symbol=existing.symbol, side=existing.side, quantity=float(existing.requested_quantity or 0), price=float(existing.requested_price or 0), stop_loss_price=float(existing.stop_loss_price or 0), take_profit_price=float(existing.take_profit_price or 0), client_order_id=existing.client_order_id)
+                return {"duplicate": True, "trade_id": existing.id, "mode": existing.mode, "status": existing.status,
+                        "broker_order_id": existing.broker_order_id, "client_order_id": existing.client_order_id,
+                        "filled": float(existing.filled_quantity or 0.0),
+                        "remaining_quantity": float(existing.remaining_quantity or 0.0),
+                        "average_fill_price": float(existing.average_fill_price or 0.0)}
+        reserved_cash = Decimal("0")
+        command: OrderCommand | None = None
+        if customer_id is not None and settings.customer_cash_only_trading and mode == "LIVE":
+            async with SessionLocal() as db:
+                qpos = select(Position).where(Position.customer_id == customer_id, Position.symbol == symbol, Position.quantity != 0).with_for_update()
+                positions_now = (await db.execute(qpos)).scalars().all()
+                signed_order = quantity if side == "buy" else -quantity
+                # Only a fully capped opposing-position order is reduce-only.
+                # An order larger than that position flips into new exposure and must reserve cash.
+                opposing_qty = sum(
+                    abs(p.quantity) for p in positions_now
+                    if (p.quantity > 0 > signed_order) or (p.quantity < 0 < signed_order)
+                )
+                reducing = opposing_qty > 0 and quantity <= opposing_qty + 1e-9
+                if not reducing:
+                    reserved_cash = _exact_reserved_cash(
+                        quote, quantity, settings.max_slippage_bps
+                    )
+                    try:
+                        await reserve_trading(db, customer_id, reserved_cash,
+                                              reference_id=f"trade:{trade_id}:open-reserve")
+                        reserved_trade = await db.get(Trade, trade_id, with_for_update=True)
+                        if reserved_trade:
+                            reserved_trade.reserved_cash = reserved_cash
+                        account_locked = (await db.execute(select(TradingAccount).where(TradingAccount.customer_id == customer_id).with_for_update())).scalar_one_or_none()
+                        if account_locked:
+                            account_locked.reserved_margin = (
+                                Decimal(str(account_locked.reserved_margin or 0)) + reserved_cash
+                            )
+                            account_locked.cash_equity = max(0.0, account_locked.cash_equity)
+                        await sync_wallet_from_ledger(db, customer_id, "USDT")
+                        if mode == "LIVE":
+                            command = await _ensure_order_command_in_session(
+                                db, trade_id, customer_id=customer_id, exchange=exchange, symbol=symbol, side=side,
+                                quantity=quantity, price=quote, stop_loss_price=float(stop_loss_price or 0),
+                                take_profit_price=float(take_profit_price or 0), client_order_id=cid,
+                            )
+                        await db.commit()
+                        if command is not None:
+                            await db.refresh(command)
+                    except ValueError as exc:
+                        # The trade row was created before the ledger reservation so a
+                        # successful risk pre-check cannot race into an orphaned PENDING
+                        # trade when another order consumes the customer's balance first.
+                        await db.rollback()
+                        async with SessionLocal() as reject_db:
+                            reject_trade = await reject_db.get(Trade, trade_id, with_for_update=True)
+                            if reject_trade and reject_trade.status not in TERMINAL_STATUSES:
+                                reject_trade.status = "REJECTED"
+                                reject_trade.error = str(exc)[:2000]
+                                reject_trade.updated_at = utcnow()
+                                await reject_db.commit()
+                        raise RiskBlocked(str(exc))
+        if mode == "PAPER":
             async with SessionLocal() as db:
                 t = await db.get(Trade, trade_id, with_for_update=True)
                 if t.status in {"SIMULATED", "FILLED", "REJECTED", "CANCELED"}:
@@ -1611,7 +1691,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 "remaining_quantity": quantity, "status": "OPEN",
                 "impact_model_status": paper_execution_model["status"],
                 "calibration_status": paper_execution_model["calibration_status"],
-                "execution_simulator": "LATENCY_QUEUE_LIQUIDITY_REJECTION_V1",
+                "execution_simulator": "LATENCY_QUEUE_LIQUIDITY_REJECTION_TTL_V1",
             })
             return {
                 "duplicate": False, "trade_id": trade_id, "mode": "PAPER",
