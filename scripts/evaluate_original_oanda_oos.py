@@ -26,7 +26,6 @@ if str(REPOSITORY_ROOT) not in sys.path:
 import pandas as pd
 
 from app.research_validation import oos_promotion_gate
-from app.config import settings
 from app.trading_core import ai_walk_forward_backtest
 from scripts.verify_oanda_research_dataset import verify_dataset
 
