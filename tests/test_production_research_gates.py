@@ -21,8 +21,8 @@ def test_research_backtests_use_shared_next_open_execution_model():
     validation = (ROOT / "app" / "research_validation.py").read_text(encoding="utf-8")
     router = (ROOT / "app" / "strategy_router.py").read_text(encoding="utf-8")
     strategy = (ROOT / "app" / "strategy_engine.py").read_text(encoding="utf-8")
-    assert "next_open_returns" in research
-    assert "next_open_returns" in validation
+    assert "simulate_execution_aware_strategy" in research
+    assert "costed_execution_returns" in validation
     assert "next_open_returns" in router
     assert "def next_open_returns" in strategy
     assert 'df["close"].pct_change()' not in research
