@@ -138,7 +138,7 @@ def test_oos_rejects_misaligned_signal_index_instead_of_silently_flattening():
 
 def test_oos_rejects_signal_length_mismatch():
     df = frame(1000)
-    signal = pd.Series(0.5, index=df.index[:-1])
+    signal = np.full(len(df) - 1, 0.5)
     out = fixed_signal_walk_forward_oos(df, signal, costs_bps=7.5, folds=3, min_train=500)
     assert out["status"] == "INVALID_DATA"
-    assert out["reason"] == "signal_index_mismatch"
+    assert out["reason"] == "signal_length_mismatch"
