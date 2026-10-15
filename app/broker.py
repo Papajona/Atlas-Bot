@@ -61,7 +61,14 @@ class Broker:
             now = time.monotonic()
             if self._connect_failure is not None and now < self._connect_failure_until:
                 failure = self._connect_failure
-                raise type(failure)(*failure.args) from failure
+                remaining = max(0.0, self._connect_failure_until - now)
+                # Expose the active cooldown distinctly from a fresh provider failure.
+                # Preserve the original exception as the cause for diagnostics, while
+                # preventing callers from mistaking this cached failure for a new request.
+                raise RuntimeError(
+                    f"{self.config.exchange_id} broker connection is in cooldown for "
+                    f"{remaining:.1f}s after market metadata load failure"
+                ) from failure
             if not self.config.api_key or not self.config.api_secret:
                 raise RuntimeError("Broker credentials are not configured")
             import ccxt
