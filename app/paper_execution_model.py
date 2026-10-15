@@ -109,7 +109,15 @@ def estimate_paper_slippage(
     volume = inputs.get("bar_volume")
     volatility = inputs.get("realized_volatility_per_bar")
     volume_unit = str(inputs.get("volume_unit") or "").strip().lower()
-    impact_available = volume is not None and volatility is not None and volume_unit == "base_asset"
+    volume_source = str(inputs.get("source") or "").strip().lower()
+    context_asset = str(inputs.get("asset") or "").strip().lower()
+    # Independent check at the estimator boundary: caller-supplied volume labels
+    # alone are not enough to turn an arbitrary provider's volume field into
+    # executable base-asset liquidity.
+    impact_available = (
+        volume is not None and volatility is not None and volume_unit == "base_asset"
+        and volume_source == "ccxt_ohlcv" and context_asset == "crypto"
+    )
 
     if impact_available:
         base_volume = _finite_number(volume, "bar_volume", strict_minimum=True)
