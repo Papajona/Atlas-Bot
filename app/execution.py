@@ -1150,20 +1150,21 @@ async def advance_paper_orders(
     aggregate bar-volume participation budget per exchange/symbol/bar to prevent many
     simultaneous orders each claiming the same liquidity.
     """
-    snapshots: dict[tuple[str, str], dict[str, Any]] = {}
+    snapshots: dict[tuple[str, str, str], dict[str, Any]] = {}
     for item in market_snapshots:
         if not isinstance(item, dict):
             continue
         exchange_key = str(item.get("exchange") or "").strip().lower()
         symbol_key = str(item.get("symbol") or "").strip()
+        timeframe_key = str(item.get("timeframe") or "").strip().lower()
         context = item.get("context")
-        if exchange_key and symbol_key and isinstance(context, dict):
+        if exchange_key and symbol_key and timeframe_key and isinstance(context, dict):
             try:
                 price = float(item.get("price"))
             except (TypeError, ValueError, OverflowError):
                 price = float("nan")
-            snapshots[(exchange_key, symbol_key)] = {
-                "exchange": exchange_key, "symbol": symbol_key,
+            snapshots[(exchange_key, symbol_key, timeframe_key)] = {
+                "exchange": exchange_key, "symbol": symbol_key, "timeframe": timeframe_key,
                 "context": context, "price": price,
             }
     if not snapshots:
@@ -1172,7 +1173,7 @@ async def advance_paper_orders(
     updated: list[dict[str, Any]] = []
     audit_events: list[dict[str, Any]] = []
     mark_prices: dict[str, float] = {}
-    used_capacity: dict[tuple[str, str, str], float] = {}
+    used_capacity: dict[tuple[str, str, str, str], float] = {}
     checked = 0
     async with SessionLocal() as db:
         query = (
@@ -1189,7 +1190,11 @@ async def advance_paper_orders(
         )
         trades = (await db.execute(query)).scalars().all()
         for trade in trades:
-            snapshot = snapshots.get((str(trade.exchange or "").lower(), str(trade.symbol or "")))
+            snapshot = snapshots.get((
+                str(trade.exchange or "").lower(),
+                str(trade.symbol or ""),
+                str(trade.timeframe or "").strip().lower(),
+            ))
             if snapshot is None:
                 continue
             checked += 1
@@ -1222,7 +1227,7 @@ async def advance_paper_orders(
                 })
                 continue
 
-            usage_key = (snapshot["exchange"], snapshot["symbol"], current_bar)
+            usage_key = (snapshot["exchange"], snapshot["symbol"], snapshot["timeframe"], current_bar)
             max_fill_for_order: float | None = None
             try:
                 if (
