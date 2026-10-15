@@ -142,6 +142,7 @@ class Settings(BaseSettings):
     paper_execution_latency_max_ms: float | None = None
     paper_latency_impact_coefficient: float | None = None
     paper_execution_evidence_source: str = ""
+    paper_execution_evidence_path: str = ""
     paper_execution_evidence_id: str = ""
     # No default: a missing instrument/venue financing assumption blocks research promotion.
     research_carry_bps_per_bar: float | None = None
