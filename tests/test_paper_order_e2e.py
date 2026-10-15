@@ -65,3 +65,32 @@ def test_paper_buy_then_sell_round_trip():
             assert audits
 
     asyncio.run(run())
+
+
+def test_staging_paper_order_is_rejected_without_calibrated_market_context(monkeypatch):
+    from app import execution
+    from app.config import settings
+    from app.db import init_db, SessionLocal, Trade, Position
+
+    monkeypatch.setattr(settings, "environment", "staging")
+    sym = f"PAPERBLOCK-{uuid.uuid4().hex[:8]}/USDT"
+    ts = uuid.uuid4().hex
+
+    async def run():
+        await init_db()
+        result = await execution.execute_signal(
+            sym, "buy", 0.01, 50000.0, {"score": 0.9},
+            "binance", "1h", f"{ts}-b", force_paper=True,
+            stop_loss_price=49000.0, take_profit_price=52000.0,
+        )
+        assert result["status"] == "REJECTED"
+        assert "normalized volume/volatility/spread context" in result["error"]
+        async with SessionLocal() as db:
+            trade = (await db.execute(select(Trade).where(Trade.id == result["trade_id"]))).scalar_one()
+            assert trade.status == "REJECTED"
+            assert trade.filled_quantity == 0.0
+            assert trade.remaining_quantity == 0.0
+            positions = (await db.execute(select(Position).where(Position.symbol == sym, Position.exchange == "binance"))).scalars().all()
+            assert positions == []
+
+    asyncio.run(run())
