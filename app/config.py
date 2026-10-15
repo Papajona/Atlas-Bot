@@ -248,6 +248,9 @@ class Settings(BaseSettings):
     max_open_positions: int = 3
     max_slippage_bps: float = 30.0
     max_spread_bps: float = 100.0
+    # Platform-only paper execution impact model; these assumptions are heuristic, not venue-calibrated.
+    paper_market_impact_coefficient: float = 0.5
+    paper_max_market_impact_bps: float = 250.0
     # Edge-decay halt: block NEW entries when the last N closed-trade net returns are significantly below zero.
     edge_decay_halt_enabled: bool = True
     edge_decay_window_trades: int = 100
@@ -530,6 +533,10 @@ class Settings(BaseSettings):
             raise ValueError("MAX_CONSECUTIVE_LOSSES must be >= 0")
         if self.max_order_latency_ms_p95 < 0:
             raise ValueError("MAX_ORDER_LATENCY_MS_P95 must be >= 0")
+        if not math.isfinite(self.paper_market_impact_coefficient) or self.paper_market_impact_coefficient < 0:
+            raise ValueError("PAPER_MARKET_IMPACT_COEFFICIENT must be finite and >= 0")
+        if not math.isfinite(self.paper_max_market_impact_bps) or self.paper_max_market_impact_bps <= 0:
+            raise ValueError("PAPER_MAX_MARKET_IMPACT_BPS must be finite and > 0")
         if not 0 <= self.max_order_error_rate_5m <= 1:
             raise ValueError("MAX_ORDER_ERROR_RATE_5M must be between 0 and 1")
         if self.execution_health_window_orders < 1:
