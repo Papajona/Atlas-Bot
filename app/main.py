@@ -2346,6 +2346,8 @@ def _server_paper_market_context(req: MarketRequest, df) -> dict[str, Any] | Non
             return {
                 "context_source": "server_ccxt_closed_spot_ohlcv_and_ticker",
                 "market_type": "spot",
+                "exchange": str(req.exchange).lower(),
+                "symbol": str(req.symbol),
                 "market_id": str(market.get("id") or ""),
                 "base_asset": str(market.get("base") or ""),
                 "quote_asset": str(market.get("quote") or ""),
