@@ -30,7 +30,7 @@ def test_paper_buy_then_sell_round_trip():
     from app.db import init_db, SessionLocal, Trade, Position, AuditLog
     from app.paper_execution import build_paper_market_context
 
-    sym = "BTC/USDT"
+    sym = f"BTC/USDT-{uuid.uuid4().hex[:8]}"
     idx = pd.date_range("2026-01-01", periods=25, freq="h", tz="UTC")
     prices = np.full(25, 50000.0)
     candles = pd.DataFrame({
@@ -58,7 +58,7 @@ def test_paper_buy_then_sell_round_trip():
         assert sell["status"] == "SIMULATED", sell
         assert sell["filled"] == pytest.approx(0.01)
         async with SessionLocal() as db:
-            trades = (await db.execute(select(Trade).where(Trade.client_order_id.like("ait-%")))).scalars().all()
+            trades = (await db.execute(select(Trade).where(Trade.symbol == sym, Trade.client_order_id.like("ait-%")))).scalars().all()
             assert len(trades) >= 2
             assert all(isinstance(t.filled_quantity, float) and isinstance(t.requested_price, float) for t in trades)
             paper_positions = (await db.execute(select(Position).where(
