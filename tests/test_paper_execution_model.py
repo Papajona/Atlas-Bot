@@ -28,7 +28,7 @@ def _calibration(**overrides):
         "latency_max_ms": 100.0,
         "latency_impact_coefficient": 0.5,
         "evidence_source": "venue-paper-fill-study",
-        "evidence_id": "sha256:calibration-fixture",
+        "evidence_id": "sha256:" + ("a" * 64),
         **overrides,
     }
 
@@ -77,7 +77,7 @@ def test_sell_slippage_is_adverse_and_model_evidence_is_mandatory():
     result = _estimate(1.0, side="sell")
     assert result["fill_price"] < 100.0
     assert result["evidence_source"] == "venue-paper-fill-study"
-    assert result["evidence_id"] == "sha256:calibration-fixture"
+    assert result["evidence_id"] == "sha256:" + ("a" * 64)
 
 
 def test_latency_changes_adverse_cost_and_order_key_makes_result_reproducible():
@@ -183,5 +183,5 @@ def test_calibrated_model_availability_requires_every_latency_and_rejection_sett
         latency_max_ms=100,
         latency_impact_coefficient=0.5,
         evidence_source="venue-paper-fill-study",
-        evidence_id="sha256:calibration-fixture",
+        evidence_id="sha256:" + ("a" * 64),
     ) is False
