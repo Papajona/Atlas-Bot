@@ -15,6 +15,7 @@ from sqlalchemy import select
 
 def _configure_test_calibration(monkeypatch, directory, exchange, symbol):
     from app.config import settings
+    from app.strategy_engine import PROFILES
 
     evidence = {
         "schema": "atlas-paper-execution-calibration-v1",
@@ -24,6 +25,17 @@ def _configure_test_calibration(monkeypatch, directory, exchange, symbol):
         "dataset_sha256": "a" * 64,
         "observation_counts": {"fills": 10, "latency": 10, "order_outcomes": 10},
         "supported_markets": [f"{exchange.lower()}:{symbol}".lower()],
+        "calibration_parameters": {
+            "base_slippage_bps": float(PROFILES["crypto"].slippage_bps),
+            "max_participation_rate": float(settings.paper_impact_max_participation_rate),
+            "impact_coefficient": float(settings.paper_impact_coefficient),
+            "rejection_probability": float(settings.paper_execution_rejection_probability),
+            "latency_min_ms": float(settings.paper_execution_latency_min_ms),
+            "latency_median_ms": float(settings.paper_execution_latency_median_ms),
+            "latency_p95_ms": float(settings.paper_execution_latency_p95_ms),
+            "latency_max_ms": float(settings.paper_execution_latency_max_ms),
+            "latency_impact_coefficient": float(settings.paper_latency_impact_coefficient),
+        },
     }
     artifact = Path(directory) / f"paper-calibration-{uuid.uuid4().hex}.json"
     artifact.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
