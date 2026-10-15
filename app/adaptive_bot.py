@@ -271,7 +271,11 @@ def ensure_adaptive_model(
 
     # Staging/production model promotion requires an explicit instrument/venue carry
     # assumption. A profile default is useful for diagnostics but is not cost evidence.
-    if str(settings.environment).lower() in {"staging", "production"} and settings.research_carry_bps_per_bar is None:
+    if str(settings.environment).lower() in {"staging", "production"} and (
+        settings.research_carry_bps_per_bar is None
+        or not str(settings.research_carry_evidence_source or "").strip()
+        or not str(settings.research_carry_evidence_id or "").strip()
+    ):
         _write_json_atomic(_streak_path(model_path), {
             "consecutive_passes": 0, "last_result": "VALIDATION_UNAVAILABLE",
             "evaluated_at": datetime.now(timezone.utc).isoformat(),
@@ -280,7 +284,7 @@ def ensure_adaptive_model(
             "status": "VALIDATION_UNAVAILABLE",
             "model_path": str(model_path),
             "promotion": "RETAIN_CHAMPION" if model_path.exists() else "NO_MODEL",
-            "reason": "RESEARCH_CARRY_BPS_PER_BAR must be configured from an evidenced product financing schedule",
+            "reason": "RESEARCH_CARRY_BPS_PER_BAR, RESEARCH_CARRY_EVIDENCE_SOURCE and RESEARCH_CARRY_EVIDENCE_ID are all required; profile defaults are not promotion evidence",
             "financing_cost_model_complete": False,
             "intrabar_stop_target_model_complete": False,
             "policy": asdict(policy),
