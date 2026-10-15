@@ -394,6 +394,12 @@ def oos_promotion_gate(
     dsr_ok = True if min_dsr is None else (dsr_value is not None and dsr_value >= float(min_dsr))
     stress_value = oos.get("cost_stress_ok")
     stress_ok = True if not require_cost_stress else stress_value is True
+    # These three fields are an explicit promotion contract, not optional hints from
+    # upstream callers. Without a traceable carry schedule and intrabar stop/target
+    # model, a plausible Sharpe or manually supplied cost_stress_ok=True is insufficient.
+    financing_cost_model_complete = oos.get("financing_cost_model_complete") is True
+    intrabar_stop_target_model_complete = oos.get("intrabar_stop_target_model_complete") is True
+    execution_cost_model_complete = oos.get("execution_cost_model_complete") is True
     trial_registry_complete = oos.get("trial_registry_complete") is True
     status_ok = str(oos.get("status", "OK")) == "OK"
     enough_folds = len(returns) >= int(min_folds)
@@ -427,6 +433,12 @@ def oos_promotion_gate(
         rejection_reasons.append("missing_or_below_minimum_deflated_sharpe")
     if not stress_ok:
         rejection_reasons.append("cost_stress_not_passed")
+    if not financing_cost_model_complete:
+        rejection_reasons.append("financing_cost_model_incomplete")
+    if not intrabar_stop_target_model_complete:
+        rejection_reasons.append("intrabar_stop_target_model_incomplete")
+    if not execution_cost_model_complete:
+        rejection_reasons.append("execution_cost_model_incomplete")
     if not trial_registry_complete:
         rejection_reasons.append("comparable_trial_registry_incomplete")
 
@@ -463,6 +475,9 @@ def oos_promotion_gate(
         "cost_stress_ok": stress_value,
         "require_cost_stress": require_cost_stress,
         "stress_ok": stress_ok,
+        "financing_cost_model_complete": financing_cost_model_complete,
+        "intrabar_stop_target_model_complete": intrabar_stop_target_model_complete,
+        "execution_cost_model_complete": execution_cost_model_complete,
         "trial_registry_complete": trial_registry_complete,
         "trial_registry_ok": trial_registry_complete,
     }
