@@ -25,7 +25,7 @@ from .incidents import open_incident
 from .research_validation import edge_decay_check
 from .ids import make_signal_id, client_order_id
 from .audit_chain import record_audit
-from .live_fees import extract_order_fee_quote, ESTIMATED
+from .live_fees import extract_order_fee_quote_decimal, ESTIMATED
 from .customer_funds import record_ledger_incident
 from .distributed import acquire_lock, release_lock
 
@@ -616,20 +616,23 @@ def _is_derivatives_market(broker) -> bool:
 
 
 def _prepare_live_fee(trade: Trade, order: dict[str, Any], filled: float, fill_price: float, taker_bps: float | None = None):
-    """Set trade.fee to the cumulative broker fee (quote currency) and return (delta_to_settle, cumulative, quality, note).
+    """Set cumulative broker fees with Decimal and return the exact delta to settle.
 
-    Broker fees are cumulative per order, so only the increase over what was already charged is settled. A fee is never
-    lowered here (no automatic refunds); an estimate that later proves too high is left for manual reconciliation.
+    Broker fees are cumulative per order, so only the increase over what was already
+    charged is settled. A fee is never lowered here (no automatic refunds); an estimate
+    that later proves too high is left for manual reconciliation.
     """
-    prev = float(trade.fee or 0.0)
-    bps = float(taker_bps if taker_bps is not None else PROFILES["crypto"].taker_bps)
-    cum, quality, note = extract_order_fee_quote(order or {}, trade.symbol, fill_price, filled, fallback_taker_bps=bps)
+    prev = Decimal(str(trade.fee or 0))
+    bps = Decimal(str(taker_bps if taker_bps is not None else PROFILES["crypto"].taker_bps))
+    cum, quality, note = extract_order_fee_quote_decimal(
+        order or {}, trade.symbol, fill_price, filled, fallback_taker_bps=bps
+    )
     cum = max(cum, prev)
     trade.fee = cum
-    return max(0.0, cum - prev), cum, quality, note
+    return max(Decimal("0"), cum - prev), cum, quality, note
 
 
-async def _post_live_fee(db, trade: Trade, delta: float, cumulative: float, quality: str, note: str) -> None:
+async def _post_live_fee(db, trade: Trade, delta: Decimal, cumulative: Decimal, quality: str, note: str) -> None:
     """Charge the fee delta to the customer ledger (idempotent) and flag estimated fees for review."""
     if trade.customer_id is None or delta <= 0:
         return
