@@ -97,10 +97,16 @@ def test_customer_live_crypto_never_uses_platform_credentials():
     assert 'elif customer_id is not None:' in source
 
 
-def test_customer_paper_fee_is_not_charged_to_platform_state():
+def test_platform_paper_fills_charge_only_platform_fees_and_customer_paper_stays_blocked():
     source = Path("app/execution.py").read_text()
-    assert "if account is not None:" in source
-    assert "account.cash_equity = max(0.0, account.cash_equity - fee)" in source
+    fill_processor = source.split("async def advance_paper_orders", 1)[1].split(
+        "async def execute_signal", 1
+    )[0]
+    execution_entry = source.split("async def execute_signal", 1)[1]
+    assert "Trade.customer_id.is_(None)" in fill_processor
+    assert "state_row.cash_equity = max(0.0, float(state_row.cash_equity or 0.0) - fee)" in fill_processor
+    assert 'raise RiskBlocked("Customer paper execution requires an isolated simulation ledger")' in execution_entry
+    assert "account.cash_equity = max(0.0, account.cash_equity - fee)" not in fill_processor
 
 
 def test_customer_bot_uses_adaptive_model_confirmation():
