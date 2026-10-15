@@ -17,7 +17,7 @@ import math
 import numpy as np
 import pandas as pd
 
-from .strategy_engine import StrategyConfig, strategy_signals, next_open_returns, _annualization_factor
+from .strategy_engine import StrategyConfig, strategy_signals, next_open_returns, _annualization_factor, target_positions
 from .research_validation import purged_walk_forward_splits
 
 STRATEGIES = ("trend", "momentum", "breakout", "mean_reversion", "ensemble")
@@ -52,11 +52,9 @@ def classify_regime(df: pd.DataFrame, *, asset: str = "crypto") -> pd.Series:
 def _strategy_returns(df: pd.DataFrame, cfg: StrategyConfig, strategy: str,
                       costs_bps: float, asset: str) -> pd.Series:
     s = strategy_signals(df, cfg, asset=asset)
-    raw = s[strategy].fillna(0.0)
-    vol = s["realized_vol"]
-    lev = (cfg.target_vol_annual / vol.replace(0, np.nan)).clip(upper=cfg.max_leverage)
-    pos = (raw * lev).clip(-cfg.max_leverage, cfg.max_leverage)
-    pos = pos.where(raw.abs() >= cfg.signal_threshold, 0.0).shift(1).fillna(0.0)
+    # Keep research sizing/threshold behavior identical to the authoritative live rule.
+    # The shift places a completed-bar signal onto the following executable bar.
+    pos = target_positions(s[strategy], s["realized_vol"], cfg).shift(1).fillna(0.0)
     ret = next_open_returns(df) - 1.0
     turnover = pos.diff().abs().fillna(pos.abs())
     return pos * ret - turnover * float(costs_bps) / 10000.0
@@ -91,8 +89,12 @@ def regime_conditioned_strategy_performance(df: pd.DataFrame, cfg: StrategyConfi
     result: dict[str, dict] = {}
     for strategy in STRATEGIES:
         returns = _strategy_returns(df, cfg, strategy, costs_bps, asset)
-        signal = strategy_signals(df, cfg, asset=asset)[strategy].fillna(0.0)
-        positions = signal.where(signal.abs() >= cfg.signal_threshold, 0.0).shift(1).fillna(0.0)
+        signal_frame = strategy_signals(df, cfg, asset=asset)
+        # Trade counts must use the same risk-scaled, thresholded executable stream
+        # as the reported net returns, not an unscaled raw-signal proxy.
+        positions = target_positions(
+            signal_frame[strategy], signal_frame["realized_vol"], cfg
+        ).shift(1).fillna(0.0)
         result[strategy] = {}
         for regime in sorted(set(regimes.dropna().astype(str))):
             mask = regimes == regime
