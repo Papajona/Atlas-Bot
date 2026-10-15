@@ -110,3 +110,47 @@ def test_invalid_transaction_costs_fail_closed(bad):
             transaction_cost_bps=bad,
             carry_bps_per_bar=0.0,
         )
+
+
+
+def test_oos_financing_completeness_requires_traceable_source_and_evidence_id():
+    from app.research_validation import fixed_signal_walk_forward_oos
+
+    n = 360
+    index = pd.date_range("2025-01-01", periods=n, freq="h", tz="UTC")
+    opens = 100.0 * np.power(1.001, np.arange(n, dtype=float))
+    frame = pd.DataFrame({
+        "open": opens,
+        "high": opens * 1.002,
+        "low": opens * 0.998,
+        "close": opens,
+        "volume": np.full(n, 1000.0),
+    }, index=index)
+    positions = pd.Series(0.5, index=index)
+    returns = pd.Series(0.002, index=index)
+    exits = pd.Series(False, index=index)
+
+    incomplete = fixed_signal_walk_forward_oos(
+        frame, positions, costs_bps=2.0, folds=3, min_train=100,
+        annualization_factor=8760.0, taker_bps=1.0, slippage_bps=1.0,
+        positions_are_final=True, bar_returns=returns, intrabar_exit=exits,
+        carry_bps_per_bar=2.0,
+    )
+    assert incomplete["status"] == "OK"
+    assert incomplete["carry_rate_configured"] is True
+    assert incomplete["financing_cost_model_complete"] is False
+    assert incomplete["execution_cost_model_complete"] is False
+    assert incomplete["cost_stress_ok"] is False
+
+    complete = fixed_signal_walk_forward_oos(
+        frame, positions, costs_bps=2.0, folds=3, min_train=100,
+        annualization_factor=8760.0, taker_bps=1.0, slippage_bps=1.0,
+        positions_are_final=True, bar_returns=returns, intrabar_exit=exits,
+        carry_bps_per_bar=2.0,
+        carry_evidence_source="fixture:venue-financing-schedule",
+        carry_evidence_id="fixture-rate-sheet-v1",
+    )
+    assert complete["financing_cost_model_complete"] is True
+    assert complete["execution_cost_model_complete"] is True
+    assert complete["carry_evidence_source"] == "fixture:venue-financing-schedule"
+    assert complete["carry_evidence_id"] == "fixture-rate-sheet-v1"
