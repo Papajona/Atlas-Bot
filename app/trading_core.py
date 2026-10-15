@@ -13,7 +13,6 @@ from .config import settings
 from .research_validation import deflated_sharpe_report, cost_breakeven_report, purged_walk_forward_splits
 from .model_registry import sha256_file, artifact_signature, verify_artifact_signature
 from .execution_aware_research import simulate_execution_aware_strategy
-from .execution_aware_research import simulate_execution_aware_strategy
 
 
 @dataclass(frozen=True)
