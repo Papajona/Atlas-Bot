@@ -28,6 +28,7 @@ def _context(**overrides):
 
 def _calibration(**overrides):
     return {
+        "base_slippage_bps": 2.0,
         "max_participation_rate": 0.10,
         "impact_coefficient": 0.5,
         "rejection_probability": 0.0,
@@ -45,14 +46,16 @@ def _calibration(**overrides):
 
 
 def _estimate(quantity, *, side="buy", order_key="order-0001", context=None, calibration=None):
+    inputs = _calibration(**(calibration or {}))
+    base_slippage_bps = inputs.pop("base_slippage_bps")
     return estimate_paper_fill(
         order_key=order_key,
         side=side,
         requested_quantity=quantity,
         reference_price=100.0,
-        base_slippage_bps=2.0,
+        base_slippage_bps=base_slippage_bps,
         market_context=_context(**(context or {})),
-        **_calibration(**(calibration or {})),
+        **inputs,
     )
 
 
@@ -138,6 +141,7 @@ def test_invalid_or_uncalibrated_model_inputs_fail_closed(context, calibration):
     inputs = _calibration(**calibration)
     assert calibrated_model_available(
         context,
+        base_slippage_bps=inputs["base_slippage_bps"],
         max_participation_rate=inputs["max_participation_rate"],
         impact_coefficient=inputs["impact_coefficient"],
         rejection_probability=inputs["rejection_probability"],
@@ -151,12 +155,13 @@ def test_invalid_or_uncalibrated_model_inputs_fail_closed(context, calibration):
         evidence_id=inputs["evidence_id"],
     ) is False
     with pytest.raises(PaperExecutionModelError):
+        base_slippage_bps = inputs.pop("base_slippage_bps")
         estimate_paper_fill(
             order_key="invalid-input",
             side="buy",
             requested_quantity=1.0,
             reference_price=100.0,
-            base_slippage_bps=2.0,
+            base_slippage_bps=base_slippage_bps,
             market_context=context,
             **inputs,
         )
@@ -185,6 +190,7 @@ def test_missing_bar_duration_and_order_key_are_rejected():
 def test_calibrated_model_availability_requires_every_latency_and_rejection_setting():
     assert calibrated_model_available(
         _context(),
+        base_slippage_bps=2.0,
         max_participation_rate=0.1,
         impact_coefficient=0.5,
         rejection_probability=None,
@@ -203,6 +209,7 @@ def test_calibrated_model_availability_requires_every_latency_and_rejection_sett
 def test_test_fixture_is_accepted_only_with_explicit_development_override():
     calibration = _calibration()
     shared = {
+        "base_slippage_bps": calibration["base_slippage_bps"],
         "max_participation_rate": calibration["max_participation_rate"],
         "impact_coefficient": calibration["impact_coefficient"],
         "rejection_probability": calibration["rejection_probability"],
