@@ -84,8 +84,9 @@ def test_synthetic_low_liquidity_scenario_reproduces_perfect_fill_gap():
     This confirms the gap; it is not evidence that the execution simulator is fixed.
     """
     source = (ROOT / "app" / "execution.py").read_text(encoding="utf-8")
-    assert 'if mode == "PAPER":' in source
-    paper_block = source.split('if mode == "PAPER":', 1)[1].split("if broker is None:", 1)[0]
+    execute_body = source.split("async def execute_signal", 1)[1]
+    assert 'if mode == "PAPER":' in execute_body
+    paper_block = execute_body.split('if mode == "PAPER":', 1)[1].split("if broker is None:", 1)[0]
 
     requested = 100.0
     synthetic_bar_volume = 20.0
