@@ -3,15 +3,14 @@ from pathlib import Path
 
 import pytest
 
-TEST_EVIDENCE_PATH = Path(__file__).parent / "fixtures" / "paper_execution_calibration_test.json"
-TEST_EVIDENCE_ID = "sha256:" + hashlib.sha256(TEST_EVIDENCE_PATH.read_bytes()).hexdigest()
-
-
 from app.paper_execution_model import (
     PaperExecutionModelError,
     calibrated_model_available,
     estimate_paper_fill,
 )
+
+TEST_EVIDENCE_PATH = Path(__file__).parent / "fixtures" / "paper_execution_calibration_test.json"
+TEST_EVIDENCE_ID = "sha256:" + hashlib.sha256(TEST_EVIDENCE_PATH.read_bytes()).hexdigest()
 
 
 def _context(**overrides):
