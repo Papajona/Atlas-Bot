@@ -76,6 +76,21 @@ def _qty_ref(quantity: float | Decimal | int | None) -> str:
     return format(canonical, ".6f")
 
 
+def _money_ref(amount: float | Decimal | int | None) -> str:
+    """Canonical exact decimal for an idempotency reference, without quantity-scale rounding.
+
+    Ledger amounts quantize to six decimals, but fee deltas are cumulative across fills.
+    Rounding the cumulative fee to six decimals can collapse two separately chargeable
+    deltas to the same idempotency key. Preserve the finite Decimal value in the key.
+    """
+    value = Decimal("0") if amount is None else Decimal(str(amount))
+    if not value.is_finite():
+        raise ValueError("money idempotency references must be finite")
+    if value == 0:
+        value = Decimal("0")
+    return format(value.normalize(), "f")
+
+
 def _exact_reserved_cash(price: Any, quantity: Any, max_slippage_bps: Any) -> Decimal:
     """Calculate the customer cash reserve, including its slippage buffer, in Decimal."""
     price_d = Decimal(str(price))
@@ -619,7 +634,7 @@ async def _post_live_fee(db, trade: Trade, delta: float, cumulative: float, qual
     if trade.customer_id is None or delta <= 0:
         return
     await settle_trading_fee(db, customer_id=trade.customer_id, fee=delta,
-                             reference_id=f"trade:{trade.id}:fee:{_qty_ref(cumulative)}", strict=False)
+                             reference_id=f"trade:{trade.id}:fee:{_money_ref(cumulative)}", strict=False)
     if quality == ESTIMATED:
         await record_ledger_incident(
             db, key=f"LIVE_FEE_ESTIMATED:{trade.id}", severity="HIGH",
