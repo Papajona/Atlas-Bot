@@ -242,21 +242,31 @@ def strategy_backtest(
     taker_bps: float = 5.5,
     slippage_bps: float = 2.0,
     asset: str = "crypto",
+    carry_bps_per_bar: float | None = None,
 ) -> dict:
-    cfg = config or StrategyConfig()
-    s = strategy_signals(df, cfg, asset=asset)
-    # Shift positions one bar: signals formed on bar t execute on bar t+1.
-    raw = s["ensemble"].fillna(0.0)
-    pos = target_positions(raw, s["realized_vol"], cfg).shift(1).fillna(0.0)
+    """Research backtest with next-open entry, OHLC ATR exits and explicit carry.
 
-    # Execute at the next bar's open. The position at bar t was formed from
-    # information available through bar t-1, so its return is the open-to-open
-    # move from t to t+1. This avoids treating the signal-bar close as an
-    # executable fill.
-    ret = next_open_returns(df) - 1.0
-    turnover = pos.diff().abs().fillna(pos.abs())
-    costs = turnover * ((taker_bps + slippage_bps) / 10_000.0)
-    net = pos * ret - costs
+    Financing is marked incomplete when no evidence-backed carry rate is supplied;
+    zero carry must be passed explicitly and only when source evidence supports it.
+    """
+    from .execution_aware_research import simulate_execution_aware_strategy
+
+    cfg = config or StrategyConfig()
+    signals = strategy_signals(df, cfg, asset=asset)
+    raw = signals["ensemble"].fillna(0.0)
+    # Signal and ATR both come from the preceding completed bar at execution open.
+    target = target_positions(raw, signals["realized_vol"], cfg).shift(1).fillna(0.0)
+    execution = simulate_execution_aware_strategy(
+        df,
+        target,
+        signals["atr"].shift(1),
+        stop_atr=cfg.stop_atr,
+        take_profit_atr=cfg.take_profit_atr,
+        transaction_cost_bps=float(taker_bps) + float(slippage_bps),
+        carry_bps_per_bar=carry_bps_per_bar,
+    )
+    pos = execution["positions"]
+    net = execution["net_returns"]
     equity = (1.0 + net).cumprod()
     peak = equity.cummax()
     drawdown = equity / peak - 1.0
@@ -264,23 +274,32 @@ def strategy_backtest(
     vol_net = float(net.std())
     sharpe = float(net.mean() / vol_net * np.sqrt(ann)) if vol_net > 0 else 0.0
     active = pos != 0
+    audit = execution["audit"]
     return {
         "strategy": "trend_momentum_breakout_mean_reversion",
-        "backtest_model": "next-open execution with open-to-open returns and transaction costs; not intrabar stop-target execution",
+        "backtest_model": "next-open entries, OHLC intrabar ATR stop/target fills, conservative stop-first ambiguity, transaction costs and explicit per-bar carry",
         "asset_class": asset,
         "bars": int(len(df)),
-        "validated_bars": int(s[["ensemble", "atr", "realized_vol"]].notna().all(axis=1).sum()),
-        "total_return": float(equity.iloc[-1] - 1.0),
-        "max_drawdown": float(drawdown.min()),
+        "validated_bars": int(signals[["ensemble", "atr", "realized_vol"]].notna().all(axis=1).sum()),
+        "total_return": float(equity.iloc[-1] - 1.0) if len(equity) else 0.0,
+        "max_drawdown": float(drawdown.min()) if len(drawdown) else 0.0,
         "sharpe": sharpe,
         "trades": int(((pos != 0) & ((pos.shift(1).fillna(0.0) == 0.0) | (np.sign(pos) != np.sign(pos.shift(1).fillna(0.0))))).sum()),
         "hit_rate": float((net[active] > 0).mean()) if bool(active.any()) else 0.0,
-        "average_leverage": float(pos.abs().mean()),
-        "max_leverage": float(pos.abs().max()),
-        "transaction_cost_bps": float(taker_bps + slippage_bps),
+        "average_leverage": float(pos.abs().mean()) if len(pos) else 0.0,
+        "max_leverage": float(pos.abs().max()) if len(pos) else 0.0,
+        "transaction_cost_bps": float(taker_bps) + float(slippage_bps),
         "annualization_factor": float(ann),
+        "stop_loss_exits": audit["stop_loss_exits"],
+        "take_profit_exits": audit["take_profit_exits"],
+        "gap_exits": audit["gap_exits"],
+        "ambiguous_bars_filled_stop_first": audit["ambiguous_bars_filled_stop_first"],
+        "carry_bps_per_bar": audit["carry_bps_per_bar"],
+        "financing_cost_model_complete": audit["financing_cost_model_complete"],
+        "intrabar_stop_target_model_complete": audit["intrabar_stop_target_model_complete"],
+        "promotion_eligible_on_cost_model": audit["promotion_eligible_on_cost_model"],
+        "execution_audit": audit,
     }
-
 
 def _rsi(close: pd.Series, n: int = 14) -> pd.Series:
     delta = close.diff()
