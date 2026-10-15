@@ -89,6 +89,9 @@ def _calibration_evidence_matches(
         return False
     if not str(artifact.get("provenance_source") or "").strip():
         return False
+    artifact_source = str(artifact.get("evidence_source") or "").strip()
+    if not artifact_source or not hmac.compare_digest(artifact_source, source_value):
+        return False
     if not str(artifact.get("calibration_method") or "").strip():
         return False
     dataset_hash = str(artifact.get("dataset_sha256") or "").strip().removeprefix("sha256:")
