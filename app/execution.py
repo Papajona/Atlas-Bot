@@ -1264,9 +1264,16 @@ async def advance_paper_orders(
             event_type = str(event["event"])
 
             if event_type == "REJECTED":
-                trade.status = "REJECTED"
+                # A rejected remainder after earlier partial fills is a canceled order,
+                # not an order with zero historical fills. Preserve the cumulative fill
+                # and distinguish the terminal outcome.
+                had_prior_fill = float(trade.filled_quantity or 0.0) > 0.0
+                trade.status = "CANCELED" if had_prior_fill else "REJECTED"
                 trade.remaining_quantity = 0.0
-                trade.error = "PAPER_SIMULATOR_REJECTED_REMAINDER"
+                trade.error = (
+                    "PAPER_SIMULATOR_REJECTED_REMAINDER_AFTER_PARTIAL_FILL"
+                    if had_prior_fill else "PAPER_SIMULATOR_REJECTED_REMAINDER"
+                )
                 audit_events.append({
                     "event": "PAPER_ORDER_REJECTED",
                     "detail": {"trade_id": trade.id, "client_order_id": trade.client_order_id,
