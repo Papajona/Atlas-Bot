@@ -140,13 +140,17 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
     granularity = {"1m":"M1", "5m":"M5", "15m":"M15", "30m":"M30", "1h":"H1", "4h":"H4", "1d":"D"}.get(timeframe)
     if not granularity:
         raise RuntimeError(f"Unsupported OANDA timeframe: {timeframe}")
+    try:
+        day_value = float(days)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("OANDA historical window days must be a positive integer") from exc
+    if isinstance(days, bool) or not np.isfinite(day_value) or day_value < 1 or not day_value.is_integer():
+        raise ValueError("OANDA historical window days must be a positive integer")
+    days = int(day_value)
     if not settings.oanda_practice:
         raise RuntimeError("OANDA live mode is disabled in AtlasRisk; use practice/demo for learning and backtesting")
     broker = OandaBroker(OandaConfig(settings.oanda_account_id, settings.oanda_api_token, True, settings.oanda_timeout_seconds))
     try:
-        if isinstance(days, bool) or int(days) < 1:
-            raise ValueError("OANDA historical window days must be a positive integer")
-        days = int(days)
         bars_per_day = {"M1": 1440, "M5": 288, "M15": 96, "M30": 48, "H1": 24, "H4": 6, "D": 1}[granularity]
         page_size = 5000
         expected_upper_bound = days * bars_per_day
