@@ -51,7 +51,10 @@ def test_oos_and_regime_metrics_are_forward_only_and_finite():
     assert isinstance(out["trades"], int) and out["trades"] >= 0
     assert out["annualization_factor"] == 252.0
     assert out["cost_analysis"]["observations"] == out["oos_bars"]
-    assert out["cost_stress_ok"] is (out["cost_analysis"].get("stress_ok") is True)
+    # Without a supplied carry schedule source and evidence ID, an otherwise green
+    # numerical cost report remains non-promotion-grade financing evidence.
+    assert out["cost_stress_ok"] is False
+    assert out["financing_cost_model_complete"] is False
     regimes = regime_conditioned_performance(df, pd.Series(0.001, index=df.index))
     assert regimes and all(np.isfinite(v["total_return"]) for v in regimes.values())
 
