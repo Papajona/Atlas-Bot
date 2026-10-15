@@ -34,6 +34,13 @@ class Broker:
         self._connect_failure: Exception | None = None
         self._connect_failure_until = 0.0
         self._connect_failure_cooldown_seconds = 5.0
+        # Market-data outages must stop producing request storms. This breaker
+        # only wraps quote reads; order/cancel/reconciliation calls remain usable
+        # so the emergency-stop path is never blocked by a quote-circuit state.
+        self._market_data_failure_count = 0
+        self._market_data_failure_threshold = 3
+        self._market_data_cooldown_seconds = 15.0
+        self._market_data_open_until = 0.0
         # Per-call cancellation errors are consumed by emergency-stop reporting.
         self.last_cancel_errors: list[dict[str, str]] = []
 
@@ -91,7 +98,29 @@ class Broker:
 
     def ticker(self, symbol: str) -> dict[str, Any]:
         with self._read_lock:
-            return self._c().fetch_ticker(symbol)
+            now = time.monotonic()
+            if now < self._market_data_open_until:
+                remaining = max(0.0, self._market_data_open_until - now)
+                raise RuntimeError(
+                    f"{self.config.exchange_id} market-data circuit is open for {remaining:.1f}s after repeated quote failures"
+                )
+            try:
+                quote = self._c().fetch_ticker(symbol)
+                if not isinstance(quote, dict) or not quote:
+                    raise RuntimeError("exchange returned an empty or malformed quote payload")
+            except Exception as exc:
+                self._market_data_failure_count += 1
+                if self._market_data_failure_count >= self._market_data_failure_threshold:
+                    self._market_data_open_until = time.monotonic() + self._market_data_cooldown_seconds
+                    self._market_data_failure_count = 0
+                    logging.getLogger(__name__).warning(
+                        "market_data_circuit_open exchange=%s cooldown_seconds=%.1f error_type=%s",
+                        self.config.exchange_id, self._market_data_cooldown_seconds, type(exc).__name__,
+                    )
+                raise
+            self._market_data_failure_count = 0
+            self._market_data_open_until = 0.0
+            return quote
 
     def market_info(self, symbol: str) -> dict[str, Any]:
         with self._read_lock:
