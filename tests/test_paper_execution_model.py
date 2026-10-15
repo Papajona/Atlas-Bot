@@ -120,6 +120,7 @@ def test_calibrated_venue_rejection_has_no_fill_and_cancels_entire_order():
         (_context(), {"latency_impact_coefficient": -0.1}),
         (_context(), {"evidence_source": ""}),
         (_context(), {"evidence_id": ""}),
+        (_context(), {"evidence_id": "not-a-sha256-digest"}),
     ],
 )
 def test_invalid_or_uncalibrated_model_inputs_fail_closed(context, calibration):
@@ -170,8 +171,6 @@ def test_missing_bar_duration_and_order_key_are_rejected():
 
 
 def test_calibrated_model_availability_requires_every_latency_and_rejection_setting():
-    calibration = _calibration()
-    del calibration["rejection_probability"]
     assert calibrated_model_available(
         _context(),
         max_participation_rate=0.1,
