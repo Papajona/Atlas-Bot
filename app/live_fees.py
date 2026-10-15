@@ -43,8 +43,17 @@ def extract_order_fee_quote(order: dict[str, Any], symbol: str, fill_price: floa
     if filled <= 0 or fill_price <= 0:
         return 0.0, EXACT, ""
     base, quote = split_symbol(symbol)
-    entries = _fee_entries(order or {})
+    source_order = order or {}
+    entries = _fee_entries(source_order)
+    raw_fee_list = source_order.get("fees")
+    malformed_fee_records = (
+        isinstance(raw_fee_list, list)
+        and any(not isinstance(item, dict) or item.get("cost") is None for item in raw_fee_list)
+    )
     total, quality, note = 0.0, EXACT, ""
+    if malformed_fee_records:
+        quality = ESTIMATED
+        note = "one or more exchange fee records have no usable cost"
     for entry in entries:
         try:
             cost = float(entry.get("cost"))
@@ -67,7 +76,7 @@ def extract_order_fee_quote(order: dict[str, Any], symbol: str, fill_price: floa
         else:
             note = f"fee currency {cur or '?'} cannot be priced in {quote or '?'}"
             quality = ESTIMATED
-    if quality == ESTIMATED or not entries:
+    if quality == ESTIMATED or not entries or malformed_fee_records:
         bps = float(fallback_taker_bps)
         if not math.isfinite(bps) or bps < 0:
             bps = 0.0
