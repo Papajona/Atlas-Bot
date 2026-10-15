@@ -19,6 +19,15 @@ def test_zero_quantity_is_distinct_from_missing_quantity():
     assert execution._position_amount_from_exchange_row({"symbol": "BTC/USDT:USDT"}) is None
 
 
+def test_conflicting_zero_and_nonzero_position_fields_are_unverifiable():
+    row = {
+        "symbol": "BTC/USDT:USDT",
+        "contracts": "0",
+        "info": {"positionAmt": "-0.25"},
+    }
+    assert execution._position_amount_from_exchange_row(row) is None
+
+
 def test_malformed_or_non_finite_quantity_does_not_fall_back_to_other_fields():
     assert execution._position_amount_from_exchange_row({
         "symbol": "BTC/USDT:USDT", "contracts": "NaN", "quantity": "0.5", "contractSize": 100
