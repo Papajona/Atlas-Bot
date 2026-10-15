@@ -1000,11 +1000,9 @@ async def _run_persisted_adaptive_bot_cycle(
         quantity *= max(0.0, min(1.0, settings.derivatives_elevated_size_multiplier))
     if quantity <= 0:
         return {"decision": "NO_TRADE", "stage": "risk_quantity"}
-    # Cross-asset correlation exposure cap. adjusted_group_exposure() was defined in
-    # correlation_risk.py and imported here but never actually called -- confirmed dead
-    # code in review. Scaled down (not a hard block), the same treatment already used for
-    # derivatives_context ELEVATED state a few lines above, so one correlated bot doesn't
-    # starve every other bot in the same risk group outright.
+    # Apply the portfolio correlation-group cap before submitting this candidate.
+    # This check scales the proposed quantity to remaining headroom; execute_signal()
+    # performs its own authoritative execution/risk-state checks before the broker call.
     async with SessionLocal() as db2:
         open_positions = (await db2.execute(select(Position).where(
             Position.customer_id == profile.id, Position.quantity != 0,
