@@ -213,7 +213,6 @@ def estimate_paper_fill(
         "model": "VOLUME_PARTICIPATION_VOLATILITY_LATENCY_REJECTION_V2",
         "evidence_source": source,
         "evidence_id": evidence,
-        "evidence_path": evidence_path_value,
         "order_key_sha256": hashlib.sha256(key.encode("utf-8")).hexdigest(),
         "requested_quantity": quantity,
         "reference_price": price,
