@@ -33,7 +33,8 @@ def _passing_wfo():
         "financing_cost_model_complete": True,
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True, "status": "OK", "oos_total_return": 0.10,
-            "deflated_sharpe": 0.97, "trial_registry_complete": True}
+            "deflated_sharpe": 0.97, "trial_registry_complete": True,
+            "slippage_model_complete": True}
 
 
 def _failing_wfo():
