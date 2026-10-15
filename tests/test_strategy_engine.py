@@ -200,7 +200,13 @@ def test_ai_walk_forward_aggregate_metrics_only_use_held_out_bars(monkeypatch):
         "taker_bps": 0.8,
         "slippage_bps": 1.2,
         "carry_bps_per_bar": 0.1,
+        "carry_rate_configured": True,
+        "carry_evidence_source": None,
+        "carry_evidence_id": None,
+        "carry_evidence_complete": False,
         "max_hold_bars": 10,
+        "stop_atr": trading_core.settings.strategy_stop_atr,
+        "take_profit_atr": trading_core.settings.strategy_take_profit_atr,
     }
     assert result["research_trial_history_status"] == "MISSING_TRIAL_HISTORY"
 
@@ -237,8 +243,12 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
     wfo = {"sharpe": 1.0, "max_drawdown": -0.10, "trades": 150, "total_return": 0.20,
            "folds": [{"total_return": 0.03}, {"total_return": 0.02}, {"total_return": 0.04}, {"total_return": 0.05}, {"total_return": 0.06}],
            "cost_stress_ok": True, "status": "OK", "oos_total_return": 0.20, "deflated_sharpe": 0.97,
-           "trial_registry_complete": True}
+           "trial_registry_complete": True,
+           "financing_cost_model_complete": True, "intrabar_stop_target_model_complete": True}
 
+    monkeypatch.setattr(adaptive_bot.settings, "research_carry_bps_per_bar", 0.1)
+    monkeypatch.setattr(adaptive_bot.settings, "research_carry_evidence_source", "fixture:venue-financing")
+    monkeypatch.setattr(adaptive_bot.settings, "research_carry_evidence_id", "fixture-rate-sheet-v1")
     monkeypatch.setattr(adaptive_bot, "ai_walk_forward_backtest", lambda *a, **k: wfo)
     def fake_train(df, path, **kwargs):
         pathlib.Path(path).write_bytes(b"model-bytes")
@@ -271,3 +281,33 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
 def test_strategy_backtest_reports_next_open_execution_model():
     result = strategy_backtest(sample_df(), taker_bps=0, slippage_bps=0)
     assert result["backtest_model"].startswith("next-open execution")
+
+
+def test_ai_walk_forward_trial_registry_requires_verified_archive(monkeypatch):
+    from app import trading_core
+
+    _install_fast_walk_forward_model(monkeypatch)
+    monkeypatch.setattr(
+        trading_core,
+        "_research_trial_dsr_report",
+        lambda *args, **kwargs: {"status": "OK", "deflated_sharpe_ratio": 0.97},
+    )
+    frame = sample_df(1800)
+    variants = [0.2, 0.3, -0.1]
+
+    unverified = trading_core.ai_walk_forward_backtest(
+        frame, asset="crypto", folds=3, min_train=500,
+        research_trial_sharpes=variants, bars_per_year=252,
+        carry_bps_per_bar=0.1,
+    )
+    assert unverified["deflated_sharpe_status"] == "OK"
+    assert unverified["trial_registry_complete"] is False
+    assert unverified["trial_registry_evidence_verified"] is False
+
+    verified = trading_core.ai_walk_forward_backtest(
+        frame, asset="crypto", folds=3, min_train=500,
+        research_trial_sharpes=variants, bars_per_year=252,
+        carry_bps_per_bar=0.1, research_trial_evidence_verified=True,
+    )
+    assert verified["trial_registry_complete"] is True
+    assert verified["trial_registry_evidence_verified"] is True
