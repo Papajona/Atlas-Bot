@@ -127,3 +127,31 @@ def test_financing_requires_verified_effective_instrument_rate_and_audit_provena
             notional=D("3600"), rate=rate, instrument="EUR_USD",
             at=dt(2), calendar_days=3, direction="long"
         )
+
+
+
+def test_delisting_uses_evidenced_last_trade_or_settlement_not_forced_zero():
+    from app.multi_asset_paper import resolve_delisting_mark
+    mark = resolve_delisting_mark(
+        last_trade_price=D("12.50"), last_trade_at=dt(2), delisting_at=dt(3),
+        evidence_id="sha256:last-trade",
+    )
+    assert mark.price == D("12.50")
+    assert mark.method == "LAST_TRADE_PROXY_NOT_REALIZED_CASH"
+    settled = resolve_delisting_mark(
+        last_trade_price=D("12.50"), last_trade_at=dt(2), delisting_at=dt(3),
+        evidence_id="sha256:last-trade", settlement_price=D("8.25"),
+        settlement_evidence_id="sha256:settlement",
+    )
+    assert settled.price == D("8.25")
+    assert settled.method == "VERIFIED_SETTLEMENT"
+    with pytest.raises(PaperModelInputError, match="settlement evidence"):
+        resolve_delisting_mark(
+            last_trade_price=D("12.50"), last_trade_at=dt(2), delisting_at=dt(3),
+            evidence_id="sha256:last-trade", settlement_price=D("8.25"),
+        )
+    with pytest.raises(PaperModelInputError, match="after delisting"):
+        resolve_delisting_mark(
+            last_trade_price=D("12.50"), last_trade_at=dt(4), delisting_at=dt(3),
+            evidence_id="sha256:last-trade",
+        )
