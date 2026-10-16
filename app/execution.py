@@ -1183,7 +1183,7 @@ async def advance_platform_paper_orders(
     markets can age/cancel paper orders but cannot fill them using OTC or unknown volume.
     This model is a deterministic simulator, not an exchange matching engine.
     """
-    if df is None or len(df) < 2 or "close" not in getattr(df, "columns", ()):
+    if df is None or len(df) < 2 or not {"open", "high", "low", "close", "volume"}.issubset(set(getattr(df, "columns", ()))):
         return {"status": "INSUFFICIENT_DATA", "orders_seen": 0, "fills": 0}
     try:
         bar_at = _paper_utc(df.index[-1])
@@ -1210,9 +1210,16 @@ async def advance_platform_paper_orders(
             or (now - fetched_at).total_seconds() > max(60, int(settings.stale_data_minutes) * 60)
         ):
             return {"status": "DATA_PROVENANCE_INVALID", "orders_seen": 0, "fills": 0}
+        open_price = float(df["open"].iloc[-1])
+        high_price = float(df["high"].iloc[-1])
+        low_price = float(df["low"].iloc[-1])
         close_price = float(df["close"].iloc[-1])
-        bar_volume = float(df["volume"].iloc[-1]) if "volume" in df.columns else 0.0
-        if not math.isfinite(close_price) or close_price <= 0:
+        bar_volume = float(df["volume"].iloc[-1])
+        if (
+            not all(math.isfinite(value) and value > 0 for value in (open_price, high_price, low_price, close_price))
+            or high_price < max(open_price, close_price, low_price)
+            or low_price > min(open_price, close_price, high_price)
+        ):
             return {"status": "INVALID_BAR_PRICE", "orders_seen": 0, "fills": 0}
         if not math.isfinite(bar_volume) or bar_volume < 0:
             bar_volume = 0.0
@@ -1246,7 +1253,9 @@ async def advance_platform_paper_orders(
     impact_coefficient = max(0.0, float(settings.paper_market_impact_coefficient))
 
     counts = {"attempts": 0, "fills": 0, "partial_fills": 0, "queue_misses": 0,
-              "rejected": 0, "expired": 0, "waiting_for_liquidity": 0}
+              "rejected": 0, "expired": 0, "waiting_for_liquidity": 0,
+              "stop_triggers": 0, "take_profit_triggers": 0,
+              "ambiguous_stop_priority": 0, "protective_exit_orders_created": 0}
     audit_events: list[dict] = []
     async with SessionLocal() as db:
         # The application kill switch stops all new simulated fills too; do not advance
@@ -1275,12 +1284,8 @@ async def advance_platform_paper_orders(
             .order_by(Trade.created_at, Trade.id)
             .with_for_update()
         )).all()
-        if not pairs:
-            return {
-                "status": "NO_OPEN_ORDERS", "bar_at": bar_at.isoformat(),
-                "orders_seen": 0, "fills": 0, "liquidity_verified": verified_liquidity,
-            }
-
+        # Even when no entry orders are pending, existing platform positions must
+        # be checked for stop-loss/take-profit triggers on each new completed bar.
         bar_state = (await db.execute(
             select(PaperBarState).where(PaperBarState.bar_key == bar_key).with_for_update()
         )).scalar_one_or_none()
