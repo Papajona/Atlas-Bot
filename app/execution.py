@@ -1754,32 +1754,62 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                                 await reject_db.commit()
                         raise RiskBlocked(str(exc))
         if mode == "PAPER":
+            if paper_submission_bar_at is None:
+                raise RiskBlocked("Paper order has no validated submission-bar identity")
             async with SessionLocal() as db:
-                t = await db.get(Trade, trade_id)
-                if t.status == "SIMULATED":
-                    return {"duplicate": True, "trade_id": t.id, "mode": t.mode, "status": t.status}
-                profile = PROFILES.get(asset, PROFILES["crypto"])
-                modeled_fill = quote * (1 + profile.slippage_bps / 10_000) if side == "buy" else quote * (1 - profile.slippage_bps / 10_000)
-                fee = quantity * modeled_fill * (profile.taker_bps / 10_000)
-                t.status = "SIMULATED"
-                t.filled_quantity = quantity
-                t.remaining_quantity = 0
-                t.average_fill_price = modeled_fill
-                t.notional = quantity * modeled_fill
-                t.fee = fee
-                await _apply_fill_to_position(db, t, quantity, modeled_fill)
-                if customer_id is not None and fee > 0:
-                    await settle_trading_fee(db, customer_id=customer_id, fee=fee, reference_id=f"trade:{trade_id}:fee", strict=False)
-                if account is not None:
-                    account.cash_equity = max(0.0, account.cash_equity - fee)
-                else:
-                    s = await _get_state_locked(db)
-                    s.cash_equity = max(0.0, s.cash_equity - fee)
+                t = await db.get(Trade, trade_id, with_for_update=True)
+                if t is None:
+                    raise RuntimeError("New paper order record disappeared before submission")
+                existing_state = (await db.execute(
+                    select(PaperOrderState).where(PaperOrderState.trade_id == trade_id).with_for_update()
+                )).scalar_one_or_none()
+                if existing_state is not None or t.status in TERMINAL_STATUSES:
+                    return {
+                        "duplicate": True,
+                        "trade_id": t.id,
+                        "mode": t.mode,
+                        "status": t.status,
+                        "filled_quantity": float(t.filled_quantity or 0.0),
+                        "remaining_quantity": float(t.remaining_quantity or 0.0),
+                    }
+                t.status = "OPEN"
+                t.filled_quantity = 0.0
+                t.remaining_quantity = float(t.requested_quantity or quantity)
+                t.average_fill_price = 0.0
+                t.notional = 0.0
+                t.fee = 0.0
+                t.error = ""
+                db.add(PaperOrderState(
+                    trade_id=trade_id,
+                    exchange=exchange,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    submitted_bar_at=paper_submission_bar_at,
+                    last_processed_bar_at=None,
+                    bars_elapsed=0,
+                    status="OPEN",
+                ))
                 await db.commit()
-            await mark_paper_equity({symbol: quote}, customer_id=customer_id)
-            await audit("PAPER_ORDER", {"trade_id": trade_id, "signal_id": signal_id, "client_order_id": cid,
-                                        "symbol": symbol, "side": side, "quantity": quantity})
-            return {"duplicate": False, "trade_id": trade_id, "mode": "PAPER", "status": "SIMULATED", "price": quote}
+            await audit("PAPER_ORDER_SUBMITTED", {
+                "trade_id": trade_id,
+                "signal_id": signal_id,
+                "client_order_id": cid,
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "submitted_bar_at": paper_submission_bar_at.isoformat(),
+                "fill_policy": "LATER_COMPLETED_BARS_ONLY",
+            })
+            return {
+                "duplicate": False,
+                "trade_id": trade_id,
+                "mode": "PAPER",
+                "status": "OPEN",
+                "filled_quantity": 0.0,
+                "remaining_quantity": float(t.remaining_quantity or quantity),
+                "submitted_bar_at": paper_submission_bar_at.isoformat(),
+                "fill_policy": "LATER_COMPLETED_BARS_ONLY",
+            }
 
         if broker is None:
             raise RuntimeError("Live broker was not initialized after execution preflight")
