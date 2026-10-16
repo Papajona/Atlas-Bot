@@ -9,6 +9,7 @@ import pytest
 from app.config import settings
 from app.customer_paper_ledger import (
     CustomerPaperIdempotencyConflict,
+    _tenant_policy_expression_is_exact,
     _validated_paper_journal,
     get_customer_paper_balances,
     post_customer_paper_journal,
@@ -155,3 +156,18 @@ def test_isolated_customer_paper_ledger_posting_replay_and_tenant_isolation(monk
         assert await get_customer_paper_balances(customer_id=91002) == []
 
     asyncio.run(run())
+
+
+def test_customer_paper_rls_preflight_accepts_only_exact_tenant_predicate():
+    exact = (
+        "(customer_id = NULLIF(current_setting('app.customer_id'::text, true), "
+        "''::text)::bigint)"
+    )
+    assert _tenant_policy_expression_is_exact(exact) is True
+    assert _tenant_policy_expression_is_exact(
+        exact[:-1] + " OR true)"
+    ) is False
+    assert _tenant_policy_expression_is_exact(
+        "(customer_id = NULLIF(current_setting('app.other_id'::text, true), ''::text)::bigint)"
+    ) is False
+    assert _tenant_policy_expression_is_exact("") is False
