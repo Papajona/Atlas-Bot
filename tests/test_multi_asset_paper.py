@@ -155,3 +155,46 @@ def test_delisting_uses_evidenced_last_trade_or_settlement_not_forced_zero():
             last_trade_price=D("12.50"), last_trade_at=dt(4), delisting_at=dt(3),
             evidence_id="sha256:last-trade",
         )
+
+
+def test_new_york_rollover_is_dst_aware_and_requires_aware_timestamps():
+    from app.multi_asset_paper import is_ny_rollover_window
+    # 17:00 New York is 22:00 UTC in winter and 21:00 UTC in summer.
+    assert is_ny_rollover_window(datetime(2025, 1, 15, 22, 0, tzinfo=UTC))
+    assert is_ny_rollover_window(datetime(2025, 7, 15, 21, 0, tzinfo=UTC))
+    assert not is_ny_rollover_window(datetime(2025, 7, 15, 22, 0, tzinfo=UTC))
+    with pytest.raises(PaperModelInputError, match="timezone-aware"):
+        is_ny_rollover_window(datetime(2025, 7, 15, 21, 0))
+
+
+def test_triple_financing_weekday_must_be_explicit_and_cost_profile_is_evidence_gated():
+    from app.multi_asset_paper import financing_calendar_days, InstrumentCostProfile
+    from datetime import date
+    # 2025-01-08 is Wednesday. No default triple day is assumed.
+    assert financing_calendar_days(trade_date=date(2025, 1, 8), calendar_days=1,
+                                   triple_day_weekday=None) == 1
+    assert financing_calendar_days(trade_date=date(2025, 1, 8), calendar_days=1,
+                                   triple_day_weekday=2) == 3
+    profile = InstrumentCostProfile(
+        instrument="XAU_USD", venue="OANDA", market_type="commodity",
+        half_spread_bps=D("1.2"), taker_fee_bps=D("0"),
+        impact_coefficient=D("0.5"), max_impact_bps=D("50"),
+        effective_at=dt(1), source="verified broker schedule",
+        evidence_id="sha256:cost-schedule", verified=True,
+    )
+    assert profile.validate(instrument="XAU_USD", venue="OANDA", at=dt(2)) is profile
+    with pytest.raises(PaperModelInputError, match="not verified"):
+        InstrumentCostProfile(
+            instrument="XAU_USD", venue="OANDA", market_type="commodity",
+            half_spread_bps=D("1.2"), taker_fee_bps=D("0"),
+            impact_coefficient=D("0.5"), max_impact_bps=D("50"),
+            effective_at=dt(1), source="placeholder",
+            evidence_id="placeholder", verified=False,
+        ).validate(instrument="XAU_USD", venue="OANDA", at=dt(2))
+
+
+def test_unsupported_training_asset_does_not_fall_back_to_crypto_profile():
+    import pandas as pd
+    from app.trading_core import train_model
+    with pytest.raises(ValueError, match="No validated training cost/annualization profile"):
+        train_model(pd.DataFrame(), "unused-model-path", asset="commodity")
