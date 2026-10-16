@@ -16,7 +16,9 @@ def test_security_headers_use_actual_environment():
     assert 'str(settings.environment).lower() == "production"' in s
 
 def test_referral_ui_handlers_exist():
-    s=(ROOT/"app/templates/customer.html").read_text()
+    html=(ROOT/"app/templates/customer.html").read_text()
+    js=(ROOT/"app/static/customer-dashboard.js").read_text()
+    s=html+js
     assert 'async function createReferralCode()' in s
     assert 'async function claimReferral()' in s
 
