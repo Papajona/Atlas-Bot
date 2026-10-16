@@ -119,6 +119,7 @@ def test_oos_gate_requires_traceable_venue_execution_cost_calibration():
         **strong,
         "execution_cost_calibration_status": "VERIFIED",
         "execution_cost_calibration_evidence_id": "fixture:venue-cost-calibration",
+        "slippage_model_complete": True,
     }
     assert oos_promotion_gate(verified_fixture)["passed"] is True
 
