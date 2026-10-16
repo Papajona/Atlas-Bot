@@ -148,12 +148,12 @@ def _aligned_log_loss(y_true, probabilities: np.ndarray, model_classes) -> float
 
 
 def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: int = 5, asset: str = "crypto") -> dict:
-    X = build_features(df)
-    aligned = df.reindex(X.index)
-    # Never silently price an unsupported asset class with crypto assumptions.
+    # Fail before touching data: unsupported assets must not inherit crypto assumptions.
     if asset not in PROFILES:
         raise ValueError(f"No validated training cost/annualization profile for asset={asset!r}")
     profile = PROFILES[asset]
+    X = build_features(df)
+    aligned = df.reindex(X.index)
     y = triple_barrier(aligned["close"], X["vol_24"], aligned["high"], aligned["low"], max_hold=profile.max_hold)
     mask = y.notna()
     X, y = X.loc[mask], y.loc[mask]
