@@ -52,8 +52,8 @@ def test_polling_waits_for_mfa_verified_session_and_identity_is_token_bound():
     assert "function actorId()" in js
     assert "$('adminId').value=id;$('releaseId').value=id" in js
     assert "ait_admin_mfa_verified')==='true'" in js
-    assert "setInterval(()=>{if(loggedIn())refresh()},5000)" in js
-    assert "setInterval(()=>{if(loggedIn())loadWithdrawals()},10000)" in js
+    assert "setInterval(()=>{if(loggedIn())refresh()},15000)" in js
+    assert "setInterval(()=>{if(loggedIn())loadWithdrawals()},20000)" in js
     assert "function adminLogout()" in js
     assert "$('adminLogoutBtn').hidden=true" in js
 
@@ -84,3 +84,14 @@ def test_dashboard_does_not_claim_production_hardening_without_release_evidence(
     assert "ADMIN OPERATIONS · FAIL-CLOSED CONTROLS" in html
     assert ".table-wrap { width:100%; max-width:100%; overflow-x:auto; }" in css
     assert ".workspace, main, .grid, .grid > *, .panel, .command-bar, .table-wrap { min-width:0; }" in css
+
+
+def test_admin_polling_budget_is_below_shared_per_ip_rate_limit():
+    js = _js()
+    assert "setInterval(()=>{if(loggedIn())refresh()},15000)" in js
+    assert "setInterval(()=>{if(loggedIn())loadWithdrawals()},20000)" in js
+    # refresh requests state+trades (2 requests every 15 s); queue refresh requests
+    # summary+rows (2 requests every 20 s): 8 + 6 = 14 requests/minute/tab.
+    requests_per_minute_per_tab = (2 * 60 / 15) + (2 * 60 / 20)
+    assert requests_per_minute_per_tab <= 15
+    assert requests_per_minute_per_tab * 3 < 120
