@@ -14,6 +14,9 @@ class MarketRequest(BaseModel):
     exchange: str = "binance"
     timeframe: str = "1h"
     days: int = Field(default=365, ge=30, le=1500)
+
+
+class ResearchMarketRequest(MarketRequest):
     # Optional signed evidence is verified against server-configured trust roots;
     # it is never trusted merely because an API caller supplied it.
     point_in_time_universe_manifest: dict[str, Any] | None = Field(default=None, repr=False)
