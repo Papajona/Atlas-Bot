@@ -36,11 +36,31 @@ def _tenant_policy_expression_is_exact(expression: Any) -> bool:
     of an app.customer_id substring is unsafe. The caller also requires exactly one
     policy per table and checks its command, name and role.
     """
-    normalized = re.sub(r"\s+", "", str(expression or "")).strip("()").casefold()
+    normalized = re.sub(r"\\s+", "", str(expression or "")).strip("()").casefold()
     return re.fullmatch(
-        r"customer_id=nullif\(current_setting\('app\.customer_id'(?:::text)?,true\),''(?:::text)?\)::bigint",
+        r"customer_id=nullif\\(current_setting\\('app\\.customer_id'(?:::text)?,true\\),''(?:::text)?\\)::bigint",
         normalized,
     ) is not None
+
+
+def _tenant_policy_roles_are_exact(value: Any, expected_role: str) -> bool:
+    """Compare pg_policies.roles safely across driver array representations."""
+    if isinstance(value, str):
+        raw = value.strip()
+        if not (raw.startswith("{") and raw.endswith("}")):
+            return False
+        body = raw[1:-1]
+        # This schema permits only the single simple role name provisioned by the
+        # reviewed SQL runbook; commas or empty values must fail closed.
+        if not body or "," in body:
+            return False
+        roles = {body.strip('"').casefold()}
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        roles = {str(item).casefold() for item in value}
+    else:
+        return False
+    return roles == {str(expected_role).casefold()}
+
 
 
 def _postgres_url(value: str) -> URL:
@@ -186,10 +206,10 @@ async def preflight_isolated_customer_paper_ledger(
             for table in ("accounts", "journals", "journal_lines"):
                 candidates = policy_by_table.get(table, [])
                 row = candidates[0] if len(candidates) == 1 else None
-                policy_roles = {
-                    str(value).casefold()
-                    for value in (row["roles"] if row is not None else [])
-                }
+                policy_roles_exact = (
+                    row is not None
+                    and _tenant_policy_roles_are_exact(row["roles"], str(role_name))
+                )
                 if (
                     row is None
                     or str(row["policyname"]) != "customer_paper_tenant"
@@ -197,7 +217,7 @@ async def preflight_isolated_customer_paper_ledger(
                     or not bool(row["permissive"])
                     or not _tenant_policy_expression_is_exact(row["qual"])
                     or not _tenant_policy_expression_is_exact(row["with_check"])
-                    or policy_roles != {str(role_name).casefold()}
+                    or not policy_roles_exact
                 ):
                     insecure_paper.append(f"customer_paper.{table}:TENANT_POLICY_MISSING_OR_WIDENED")
             if insecure_paper:
