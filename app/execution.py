@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import math
 import asyncio
 import json
 import os
@@ -28,6 +29,7 @@ from .audit_chain import record_audit
 from .live_fees import extract_order_fee_quote_decimal, ESTIMATED
 from .customer_funds import record_ledger_incident
 from .distributed import acquire_lock, release_lock
+from .paper_execution_model import PaperExecutionModelError, calibrated_model_available, estimate_paper_fill
 
 
 TERMINAL_STATUSES = {"FILLED", "CANCELED", "REJECTED", "FAILED", "SIMULATED"}
@@ -731,14 +733,23 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         trade_context = json.loads(trade.reason or "{}")
     except Exception:
         trade_context = {}
-    live_entry_ids = select(Trade.id).where(Trade.mode == "LIVE")
+    execution_mode = str(trade.mode or "").upper()
+    same_mode_trade_ids = select(Trade.id).where(Trade.mode == execution_mode)
     position_query = select(Position).where(
         Position.symbol == trade.symbol,
         Position.exchange == trade.exchange,
         Position.customer_id == trade.customer_id,
-        Position.entry_trade_id.in_(live_entry_ids),
+        Position.entry_trade_id.in_(same_mode_trade_ids),
     ).with_for_update()
-    position = (await db.execute(position_query)).scalar_one_or_none()
+    matching_positions = (await db.execute(position_query)).scalars().all()
+    if len(matching_positions) > 1:
+        # Legacy paper execution could create one row per fill because it only queried
+        # LIVE positions. Do not choose or merge those exposures arbitrarily.
+        raise ValueError(
+            f"Multiple {execution_mode} positions exist for {trade.exchange}:{trade.symbol}; "
+            "manual reconciliation is required before another paper fill"
+        )
+    position = matching_positions[0] if matching_positions else None
     realized_decimal = Decimal("0")
     realized = 0.0
     realized_strategy = str(getattr(position, "strategy", "") or trade_context.get("strategy") or "unknown") if position else str(trade_context.get("strategy") or "unknown")
@@ -1200,6 +1211,31 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
         broker = None
         quote = price
         spread_bps = None
+        if not live:
+            # The current quote midpoint may only override a client/reference price
+            # when the market context carries the marker written by the server-side
+            # CCXT spot context builder. Other payloads cannot use an arbitrary
+            # reference_price field to influence sizing or the simulated fill.
+            paper_context = signal.get("paper_market_context")
+            if isinstance(paper_context, dict) and paper_context.get("context_source") == "server_ccxt_closed_spot_ohlcv_and_ticker":
+                try:
+                    context_bid = float(paper_context.get("bid"))
+                    context_ask = float(paper_context.get("ask"))
+                    context_mid = float(paper_context.get("reference_price"))
+                    context_spread = float(paper_context.get("spread_bps"))
+                    context_age = float(paper_context.get("quote_age_seconds"))
+                    context_hash = str(paper_context.get("ohlcv_sha256") or "")
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise RiskBlocked("Server paper market context is malformed") from exc
+                if (
+                    not all(math.isfinite(value) for value in (context_bid, context_ask, context_mid, context_spread, context_age))
+                    or context_bid <= 0 or context_ask < context_bid or context_mid <= 0
+                    or not context_hash or context_age < -1.0 or context_age > 5.0
+                    or not math.isclose(context_mid, (context_bid + context_ask) / 2.0, rel_tol=1e-10, abs_tol=1e-10)
+                ):
+                    raise RiskBlocked("Server paper market context failed integrity/freshness checks")
+                quote = context_mid
+                spread_bps = context_spread
         if live:
             # Customer live trading requires a verified isolated exchange/subaccount adapter.
             # Customer crypto execution must resolve only the customer's verified venue mapping.
@@ -1379,32 +1415,248 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                                 await reject_db.commit()
                         raise RiskBlocked(str(exc))
         if mode == "PAPER":
+            paper_rejection = None
+            paper_execution = None
             async with SessionLocal() as db:
                 t = await db.get(Trade, trade_id)
                 if t.status == "SIMULATED":
                     return {"duplicate": True, "trade_id": t.id, "mode": t.mode, "status": t.status}
                 profile = PROFILES.get(asset, PROFILES["crypto"])
-                modeled_fill = quote * (1 + profile.slippage_bps / 10_000) if side == "buy" else quote * (1 - profile.slippage_bps / 10_000)
-                fee = quantity * modeled_fill * (profile.taker_bps / 10_000)
-                t.status = "SIMULATED"
-                t.filled_quantity = quantity
-                t.remaining_quantity = 0
-                t.average_fill_price = modeled_fill
-                t.notional = quantity * modeled_fill
-                t.fee = fee
-                await _apply_fill_to_position(db, t, quantity, modeled_fill)
-                if customer_id is not None and fee > 0:
-                    await settle_trading_fee(db, customer_id=customer_id, fee=fee, reference_id=f"trade:{trade_id}:fee", strict=False)
-                if account is not None:
-                    account.cash_equity = max(0.0, account.cash_equity - fee)
+                context_provided = signal.get("paper_market_context") is not None
+                context = signal.get("paper_market_context")
+                calibrated = calibrated_model_available(
+                    context,
+                    base_slippage_bps=profile.slippage_bps,
+                    max_participation_rate=settings.paper_impact_max_participation_rate,
+                    impact_coefficient=settings.paper_impact_coefficient,
+                    rejection_probability=settings.paper_execution_rejection_probability,
+                    latency_min_ms=settings.paper_execution_latency_min_ms,
+                    latency_median_ms=settings.paper_execution_latency_median_ms,
+                    latency_p95_ms=settings.paper_execution_latency_p95_ms,
+                    latency_max_ms=settings.paper_execution_latency_max_ms,
+                    latency_impact_coefficient=settings.paper_latency_impact_coefficient,
+                    evidence_source=settings.paper_execution_evidence_source,
+                    evidence_path=settings.paper_execution_evidence_path,
+                    evidence_id=settings.paper_execution_evidence_id,
+                    allow_test_fixture=str(settings.environment).lower() == "development",
+                )
+                strict_paper = str(settings.environment).lower() in {"staging", "production"}
+
+                if not calibrated and (strict_paper or context_provided):
+                    if context_provided:
+                        reason = (
+                            "Paper market context is incomplete or has no traceable calibration evidence; "
+                            "the order was rejected rather than silently using a fixed-slippage fallback."
+                        )
+                    else:
+                        reason = (
+                            "Paper execution in staging/production requires normalized volume/volatility/spread "
+                            "context and traceable calibration evidence."
+                        )
+                    paper_rejection = {
+                        "model": "VOLUME_PARTICIPATION_VOLATILITY_V1",
+                        "model_status": "REJECTED_INCOMPLETE_CONTEXT_OR_EVIDENCE",
+                        "reason": reason,
+                        "validation_grade": "NOT_VALIDATION_GRADE",
+                    }
+                    t.status = "REJECTED"
+                    t.error = reason
+                    t.filled_quantity = 0.0
+                    t.remaining_quantity = 0.0
+                    t.reason = json.dumps({**signal, "paper_execution": paper_rejection}, default=str)
+                    t.updated_at = utcnow()
+                    await db.commit()
                 else:
-                    s = await _get_state_locked(db)
-                    s.cash_equity = max(0.0, s.cash_equity - fee)
-                await db.commit()
+                    if calibrated:
+                        try:
+                            paper_execution = estimate_paper_fill(
+                                side=side,
+                                requested_quantity=quantity,
+                                reference_price=quote,
+                                base_slippage_bps=profile.slippage_bps,
+                                market_context=context,
+                                order_key=cid,
+                                max_participation_rate=settings.paper_impact_max_participation_rate,
+                                impact_coefficient=settings.paper_impact_coefficient,
+                                rejection_probability=settings.paper_execution_rejection_probability,
+                                latency_min_ms=settings.paper_execution_latency_min_ms,
+                                latency_median_ms=settings.paper_execution_latency_median_ms,
+                                latency_p95_ms=settings.paper_execution_latency_p95_ms,
+                                latency_max_ms=settings.paper_execution_latency_max_ms,
+                                latency_impact_coefficient=settings.paper_latency_impact_coefficient,
+                                evidence_source=settings.paper_execution_evidence_source,
+                                evidence_path=settings.paper_execution_evidence_path,
+                                evidence_id=settings.paper_execution_evidence_id,
+                                allow_test_fixture=str(settings.environment).lower() == "development",
+                            )
+                        except PaperExecutionModelError as exc:
+                            reason = f"Paper execution model rejected invalid inputs: {exc}"
+                            paper_rejection = {
+                                "model": "VOLUME_PARTICIPATION_VOLATILITY_V1",
+                                "model_status": "REJECTED_INVALID_INPUT",
+                                "reason": reason,
+                                "validation_grade": "NOT_VALIDATION_GRADE",
+                            }
+                            t.status = "REJECTED"
+                            t.error = reason
+                            t.filled_quantity = 0.0
+                            t.remaining_quantity = 0.0
+                            t.reason = json.dumps({**signal, "paper_execution": paper_rejection}, default=str)
+                            t.updated_at = utcnow()
+                            await db.commit()
+                    else:
+                        # Local development may still exercise the legacy path, but this
+                        # fallback is deliberately labelled and is not validation-grade.
+                        legacy_fill = quote * (
+                            1 + profile.slippage_bps / 10_000
+                        ) if side == "buy" else quote * (
+                            1 - profile.slippage_bps / 10_000
+                        )
+                        paper_execution = {
+                            "model": "STATIC_PROFILE_FALLBACK",
+                            "model_status": "LEGACY_STATIC_FALLBACK_NOT_VALIDATION_GRADE",
+                            "requested_quantity": float(quantity),
+                            "filled_quantity": float(quantity),
+                            "cancelled_quantity": 0.0,
+                            "reference_price": float(quote),
+                            "fill_price": float(legacy_fill),
+                            "base_slippage_bps": float(profile.slippage_bps),
+                            "validation_grade": "NOT_VALIDATION_GRADE",
+                            "model_limitations": [
+                                "fixed_slippage",
+                                "full_fill_assumption",
+                                "market_impact_not_modelled",
+                                "latency_and_queue_position_not_modelled",
+                                "venue_rejection_probability_not_modelled",
+                            ],
+                        }
+
+                    if paper_rejection is None and paper_execution is not None and paper_execution.get("simulated_rejection") is True:
+                        reason = "Calibrated paper execution model simulated a venue rejection; no quantity was filled."
+                        paper_rejection = {
+                            **paper_execution,
+                            "reason": reason,
+                            "model_status": "SIMULATED_VENUE_REJECTION",
+                            "validation_grade": "INCOMPLETE_EXECUTION_MODEL",
+                        }
+                        t.status = "REJECTED"
+                        t.error = reason
+                        t.filled_quantity = 0.0
+                        t.remaining_quantity = 0.0
+                        t.reason = json.dumps({**signal, "paper_execution": paper_rejection}, default=str)
+                        t.updated_at = utcnow()
+                        await db.commit()
+
+                    elif paper_rejection is None and paper_execution is not None:
+                        filled_quantity = float(paper_execution["filled_quantity"])
+                        cancelled_quantity = float(paper_execution.get("cancelled_quantity", 0.0))
+                        modeled_fill = float(paper_execution["fill_price"])
+                        if (
+                            not math.isfinite(filled_quantity)
+                            or filled_quantity <= 0
+                            or filled_quantity > float(quantity)
+                            or not math.isfinite(cancelled_quantity)
+                            or cancelled_quantity < 0
+                            or not math.isclose(
+                                filled_quantity + cancelled_quantity,
+                                float(quantity),
+                                rel_tol=1e-9,
+                                abs_tol=1e-12,
+                            )
+                        ):
+                            reason = "Paper execution model returned an invalid fill quantity"
+                            paper_rejection = {
+                                **paper_execution,
+                                "model_status": "REJECTED_INVALID_FILL_QUANTITY",
+                                "reason": reason,
+                                "validation_grade": "NOT_VALIDATION_GRADE",
+                            }
+                            t.status = "REJECTED"
+                            t.error = reason
+                            t.filled_quantity = 0.0
+                            t.remaining_quantity = 0.0
+                            t.reason = json.dumps({**signal, "paper_execution": paper_rejection}, default=str)
+                            t.updated_at = utcnow()
+                            await db.commit()
+                        else:
+                            fee = filled_quantity * modeled_fill * (profile.taker_bps / 10_000)
+                            t.status = "SIMULATED"
+                            t.average_fill_price = modeled_fill
+                            t.notional = filled_quantity * modeled_fill
+                            t.fee = fee
+                            t.reason = json.dumps({**signal, "paper_execution": paper_execution}, default=str)
+                            # Apply while the stored fill counter is still the prior
+                            # cumulative quantity; setting it first would make the delta zero.
+                            try:
+                                await _apply_fill_to_position(db, t, filled_quantity, modeled_fill)
+                            except Exception as exc:
+                                # No external order was sent. Roll back the simulated fill
+                                # and persist a rejected result instead of leaving PENDING
+                                # or fabricating a completed paper position.
+                                await db.rollback()
+                                t = await db.get(Trade, trade_id, with_for_update=True)
+                                reason = (
+                                    "Paper fill could not be recorded safely; no fill was booked. "
+                                    f"Reconciliation is required ({type(exc).__name__}: {exc})"
+                                )
+                                paper_rejection = {
+                                    **paper_execution,
+                                    "model_status": "REJECTED_PAPER_POSITION_INTEGRITY",
+                                    "reason": reason,
+                                    "validation_grade": "NOT_VALIDATION_GRADE",
+                                }
+                                if t is not None:
+                                    t.status = "REJECTED"
+                                    t.error = reason[:2000]
+                                    t.filled_quantity = 0.0
+                                    t.remaining_quantity = 0.0
+                                    t.reason = json.dumps({**signal, "paper_execution": paper_rejection}, default=str)
+                                    t.updated_at = utcnow()
+                                    await db.commit()
+                            else:
+                                # Any remainder is explicitly cancelled at the end of this
+                                # paper bar. It is never silently reported as filled.
+                                t.filled_quantity = filled_quantity
+                                t.remaining_quantity = 0.0
+                                t.updated_at = utcnow()
+                                if customer_id is not None and fee > 0:
+                                    await settle_trading_fee(db, customer_id=customer_id, fee=fee, reference_id=f"trade:{trade_id}:fee", strict=False)
+                                if account is not None:
+                                    account.cash_equity = max(0.0, account.cash_equity - fee)
+                                else:
+                                    s = await _get_state_locked(db)
+                                    s.cash_equity = max(0.0, s.cash_equity - fee)
+                                await db.commit()
+
+            if paper_rejection is not None:
+                await audit(
+                    "PAPER_ORDER_REJECTED",
+                    {"trade_id": trade_id, "signal_id": signal_id, "client_order_id": cid,
+                     "symbol": symbol, "side": side, "quantity": quantity,
+                     "paper_execution": paper_rejection},
+                )
+                return {
+                    "duplicate": False, "trade_id": trade_id, "mode": "PAPER",
+                    "status": "REJECTED", "error": paper_rejection.get("reason"),
+                    "paper_execution": paper_rejection,
+                }
+
             await mark_paper_equity({symbol: quote}, customer_id=customer_id)
-            await audit("PAPER_ORDER", {"trade_id": trade_id, "signal_id": signal_id, "client_order_id": cid,
-                                        "symbol": symbol, "side": side, "quantity": quantity})
-            return {"duplicate": False, "trade_id": trade_id, "mode": "PAPER", "status": "SIMULATED", "price": quote}
+            await audit("PAPER_ORDER", {
+                "trade_id": trade_id, "signal_id": signal_id, "client_order_id": cid,
+                "symbol": symbol, "side": side, "requested_quantity": quantity,
+                "filled_quantity": paper_execution.get("filled_quantity"),
+                "cancelled_quantity": paper_execution.get("cancelled_quantity", 0.0),
+                "paper_execution": paper_execution,
+            })
+            return {
+                "duplicate": False, "trade_id": trade_id, "mode": "PAPER",
+                "status": "SIMULATED", "price": paper_execution.get("fill_price"),
+                "filled_quantity": paper_execution.get("filled_quantity"),
+                "cancelled_quantity": paper_execution.get("cancelled_quantity", 0.0),
+                "paper_execution": paper_execution,
+                "validation_grade": paper_execution.get("validation_grade", "NOT_VALIDATION_GRADE"),
+            }
 
         if broker is None:
             raise RuntimeError("Live broker was not initialized after execution preflight")

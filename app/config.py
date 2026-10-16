@@ -130,6 +130,20 @@ class Settings(BaseSettings):
     research_yahoo_period: str = "3y"
     research_taker_bps: float = 5.5
     research_slippage_bps: float = 2.0
+    # Paper impact inputs are intentionally unset until venue-calibrated evidence is supplied.
+    # Market context volume is normalized to the instrument's order-quantity units.
+    paper_impact_max_participation_rate: float | None = None
+    paper_impact_coefficient: float | None = None
+    # These assumptions remain unset until traceable venue observations are supplied.
+    paper_execution_rejection_probability: float | None = None
+    paper_execution_latency_min_ms: float | None = None
+    paper_execution_latency_median_ms: float | None = None
+    paper_execution_latency_p95_ms: float | None = None
+    paper_execution_latency_max_ms: float | None = None
+    paper_latency_impact_coefficient: float | None = None
+    paper_execution_evidence_source: str = ""
+    paper_execution_evidence_path: str = ""
+    paper_execution_evidence_id: str = ""
     # No default: a missing instrument/venue financing assumption blocks research promotion.
     research_carry_bps_per_bar: float | None = None
     research_carry_evidence_source: str = ""

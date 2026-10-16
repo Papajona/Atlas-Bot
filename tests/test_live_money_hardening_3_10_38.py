@@ -14,6 +14,7 @@ def test_oos_promotion_gate_rejects_weak_last_fold_and_tail_loss():
         'financing_cost_model_complete': True,
         'intrabar_stop_target_model_complete': True,
         'execution_cost_model_complete': True, 'trial_registry_complete': True,
+        'slippage_model_complete': True,
     }
     good = {**metrics, 'folds': [{'total_return': 0.03}, {'total_return': 0.02},
                                  {'total_return': 0.01}, {'total_return': 0.04},

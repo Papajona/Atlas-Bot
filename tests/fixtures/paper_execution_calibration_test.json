@@ -1,0 +1,63 @@
+{
+  "schema": "atlas-paper-execution-calibration-v1",
+  "fixture_only": true,
+  "provenance_source": "synthetic-unit-test-data",
+  "evidence_source": "venue-paper-fill-study",
+  "calibration_method": "deterministic-unit-test-fixture-not-venue-calibration",
+  "dataset_sha256": "a7e47ab2f08afd9fb70ba4ab8fa93fa5cb7eb52d99f57dcc5ca7cf2baa1f0edd",
+  "observation_counts": {
+    "fills": 10,
+    "latency": 10,
+    "order_outcomes": 10
+  },
+  "supported_markets": [
+    "fakeexchange:BTC/USDT"
+  ],
+  "test_parameter_sets": [
+    {
+      "base_slippage_bps": 2,
+      "max_participation_rate": 0.1,
+      "impact_coefficient": 0.5,
+      "rejection_probability": 0,
+      "latency_min_ms": 10,
+      "latency_median_ms": 20,
+      "latency_p95_ms": 50,
+      "latency_max_ms": 100,
+      "latency_impact_coefficient": 0.5
+    },
+    {
+      "base_slippage_bps": 2,
+      "max_participation_rate": 0.1,
+      "impact_coefficient": 0.5,
+      "rejection_probability": 0,
+      "latency_min_ms": 10,
+      "latency_median_ms": 20,
+      "latency_p95_ms": 50,
+      "latency_max_ms": 100,
+      "latency_impact_coefficient": 0
+    },
+    {
+      "base_slippage_bps": 2,
+      "max_participation_rate": 0.1,
+      "impact_coefficient": 0.5,
+      "rejection_probability": 0,
+      "latency_min_ms": 10,
+      "latency_median_ms": 20,
+      "latency_p95_ms": 50,
+      "latency_max_ms": 100,
+      "latency_impact_coefficient": 2
+    },
+    {
+      "base_slippage_bps": 2,
+      "max_participation_rate": 0.1,
+      "impact_coefficient": 0.5,
+      "rejection_probability": 1,
+      "latency_min_ms": 10,
+      "latency_median_ms": 20,
+      "latency_p95_ms": 50,
+      "latency_max_ms": 100,
+      "latency_impact_coefficient": 0.5
+    }
+  ],
+  "dataset_path": "paper_calibration_dataset_test.json"
+}

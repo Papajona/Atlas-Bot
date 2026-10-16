@@ -51,6 +51,7 @@ def _oos(**extra):
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True,
         "trial_registry_complete": True,
+        "slippage_model_complete": True,
         **extra,
     }
 

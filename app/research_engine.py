@@ -349,6 +349,17 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             carry_bps_per_bar=carry,
             carry_evidence_source=carry_evidence_source, carry_evidence_id=carry_evidence_id,
         )
+    # The current research engine still uses a fixed per-bar slippage bps input. Do
+    # not treat that as a volume/volatility-aware execution model, even when the fee
+    # and financing assumptions are otherwise documented.
+    for oos_result in [oos, *per_strategy_oos.values()]:
+        oos_result["universe_bias"] = universe_bias
+        oos_result["survivorship_bias_blocked"] = (
+            universe_bias == "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
+        )
+        oos_result["slippage_model_complete"] = False
+        oos_result["slippage_model_status"] = "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED"
+        oos_result["execution_cost_model_complete"] = False
     # Parameter-plateau check: small changes to the signal threshold should not destroy
     # the measured edge. A narrow single-point optimum is treated as fragile research.
     variants=[]
@@ -432,6 +443,14 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             ai_result = ai_walk_forward_backtest(df, asset, folds, min_train, ai_threshold)
         except Exception as exc:
             ai_result = {"strategy": "ai_walk_forward", "status": "INSUFFICIENT_DATA", "error": str(exc)}
+        if isinstance(ai_result, dict):
+            ai_result["universe_bias"] = universe_bias
+            ai_result["survivorship_bias_blocked"] = (
+                universe_bias == "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
+            )
+            ai_result["slippage_model_complete"] = False
+            ai_result["slippage_model_status"] = "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED"
+            ai_result["execution_cost_model_complete"] = False
     in_sample_ranked = _rank_for_research(results.copy())
     # Headline order is based on held-out metrics; invalid OOS results always rank last.
     oos_ranked = _rank_by_oos(results.copy(), per_strategy_oos)
@@ -452,7 +471,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "carry_evidence_source": carry_evidence_source or None,
                         "carry_evidence_id": carry_evidence_id or None,
                         "intrabar_stop_target_model_complete": True,
-                        "execution_cost_model_complete": bool(carry_evidence_complete),
+                        "execution_cost_model_complete": False,
+                        "slippage_model_complete": False,
+                        "slippage_model_status": "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED",
                         "carry_bps_per_bar": carry,
                         "trial_registry_status": "COMPLETE" if trial_registry_complete else "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
                         "cumulative_trials": n_trials,

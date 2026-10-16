@@ -251,7 +251,8 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True, "status": "OK", "oos_total_return": 0.20, "deflated_sharpe": 0.97,
            "trial_registry_complete": True,
-           "financing_cost_model_complete": True, "intrabar_stop_target_model_complete": True}
+           "financing_cost_model_complete": True, "intrabar_stop_target_model_complete": True,
+           "slippage_model_complete": True}
 
     monkeypatch.setattr(adaptive_bot.settings, "research_carry_bps_per_bar", 0.1)
     monkeypatch.setattr(adaptive_bot.settings, "research_carry_evidence_source", "fixture:venue-financing")
@@ -272,14 +273,14 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
         return {**candidate_result, "model_sha256": digest}
     monkeypatch.setattr(adaptive_bot, "train_model", fake_train)
 
-    out = adaptive_bot.ensure_adaptive_model(object(), str(model_path), policy=adaptive_bot.AdaptiveModelPolicy(min_trades=1))
+    out = adaptive_bot.ensure_adaptive_model(object(), str(model_path), asset="forex", policy=adaptive_bot.AdaptiveModelPolicy(min_trades=1))
     assert out["status"] == "CHALLENGER_PASSED_AWAITING_CONFIRMATION"  # consecutive-pass gate: first pass doesn't promote yet
     assert not model_path.exists()
     streak = pathlib.Path(str(model_path) + ".candidate_streak.json")
     value = json.loads(streak.read_text())
     value["evaluated_at"] = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=21)).isoformat()
     streak.write_text(json.dumps(value))
-    out = adaptive_bot.ensure_adaptive_model(object(), str(model_path), policy=adaptive_bot.AdaptiveModelPolicy(min_trades=1))
+    out = adaptive_bot.ensure_adaptive_model(object(), str(model_path), asset="forex", policy=adaptive_bot.AdaptiveModelPolicy(min_trades=1))
     assert out["status"] == "CHAMPION_PROMOTED"
     assert model_path.exists()
     assert json.loads(pathlib.Path(str(model_path)+".meta.json").read_text())["model_sha256"] == hashlib.sha256(b"model-bytes").hexdigest()

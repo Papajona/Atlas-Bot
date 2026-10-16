@@ -75,6 +75,7 @@ def test_oos_gate_reports_missing_metrics_and_never_promotes_them():
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True,
         "trial_registry_complete": True,
+        "slippage_model_complete": True,
     }
     missing_sharpe = dict(strong)
     missing_sharpe.pop("sharpe")
@@ -104,6 +105,7 @@ def test_oos_gate_names_incomplete_trial_registry_as_a_blocker():
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True,
         "trial_registry_complete": False,
+        "slippage_model_complete": True,
     }
     report = oos_promotion_gate(evidence)
     assert report["passed"] is False
@@ -142,3 +144,76 @@ def test_oos_rejects_signal_length_mismatch():
     out = fixed_signal_walk_forward_oos(df, signal, costs_bps=7.5, folds=3, min_train=500)
     assert out["status"] == "INVALID_DATA"
     assert out["reason"] == "signal_length_mismatch"
+
+
+def test_oos_promotion_gate_blocks_known_survivor_only_crypto_universe():
+    from app.research_validation import oos_promotion_gate
+
+    strong = {
+        "status": "OK",
+        "folds": [{"total_return": value} for value in (0.03, 0.02, 0.01, 0.04, 0.02, 0.01)],
+        "oos_total_return": 0.12,
+        "sharpe": 0.8,
+        "max_drawdown": -0.10,
+        "trades": 150,
+        "deflated_sharpe": 0.97,
+        "cost_stress_ok": True,
+        "financing_cost_model_complete": True,
+        "intrabar_stop_target_model_complete": True,
+        "execution_cost_model_complete": True,
+        "trial_registry_complete": True,
+        "slippage_model_complete": True,
+        "universe_bias": "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY",
+    }
+    report = oos_promotion_gate(strong)
+    assert report["passed"] is False
+    assert report["survivorship_bias_blocked"] is True
+    assert "crypto_universe_survivorship_bias_not_resolved" in report["rejection_reasons"]
+
+
+def test_oos_promotion_gate_blocks_explicitly_incomplete_slippage_model():
+    from app.research_validation import oos_promotion_gate
+
+    strong = {
+        "status": "OK",
+        "folds": [{"total_return": 0.03}] * 6,
+        "oos_total_return": 0.18,
+        "sharpe": 1.0,
+        "max_drawdown": -0.05,
+        "trades": 120,
+        "deflated_sharpe": 0.98,
+        "cost_stress_ok": True,
+        "financing_cost_model_complete": True,
+        "intrabar_stop_target_model_complete": True,
+        "execution_cost_model_complete": True,
+        "trial_registry_complete": True,
+        "slippage_model_complete": False,
+        "slippage_model_status": "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED",
+    }
+    report = oos_promotion_gate(strong)
+    assert report["passed"] is False
+    assert report["slippage_model_complete"] is False
+    assert "volume_volatility_aware_slippage_model_incomplete" in report["rejection_reasons"]
+
+
+def test_oos_promotion_gate_blocks_missing_slippage_completeness_evidence():
+    from app.research_validation import oos_promotion_gate
+
+    evidence = {
+        "status": "OK",
+        "folds": [{"total_return": value} for value in (0.03, 0.02, 0.01, 0.04, 0.02, 0.01)],
+        "oos_total_return": 0.12,
+        "sharpe": 0.8,
+        "max_drawdown": -0.10,
+        "trades": 150,
+        "deflated_sharpe": 0.97,
+        "cost_stress_ok": True,
+        "financing_cost_model_complete": True,
+        "intrabar_stop_target_model_complete": True,
+        "execution_cost_model_complete": True,
+        "trial_registry_complete": True,
+    }
+    report = oos_promotion_gate(evidence)
+    assert report["passed"] is False
+    assert report["slippage_model_complete"] is False
+    assert "volume_volatility_aware_slippage_model_incomplete" in report["rejection_reasons"]
