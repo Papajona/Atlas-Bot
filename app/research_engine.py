@@ -502,33 +502,108 @@ def paper_candidates(
     min_oos_total_return: float | None = None,
     min_oos_positive_fold_ratio: float | None = None,
 ) -> list[dict]:
-    """Select paper candidates using both historical and forward-only evidence.
+    """Select paper-shadow candidates using held-out metrics only.
 
-    In-sample metrics alone are never sufficient. The OOS gate is intentionally
-    simple and transparent; it is not a guarantee of future performance.
+    Full-sample metrics are retained as labeled diagnostics but never influence
+    selection. Candidates are observations for paper/shadow research only; this
+    function is not a model-promotion gate and does not authorize execution.
     """
     min_sharpe = settings.adaptive_min_sharpe if min_sharpe is None else float(min_sharpe)
     max_drawdown = settings.adaptive_max_drawdown if max_drawdown is None else float(max_drawdown)
     min_trades = settings.adaptive_min_trades if min_trades is None else int(min_trades)
     min_oos_total_return = settings.research_min_oos_total_return if min_oos_total_return is None else float(min_oos_total_return)
     min_oos_positive_fold_ratio = settings.research_min_oos_positive_fold_ratio if min_oos_positive_fold_ratio is None else float(min_oos_positive_fold_ratio)
+    required_folds = max(2, int(settings.research_folds))
+
+    def finite_metric(value):
+        if value is None or isinstance(value, (bool, np.bool_)):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if math.isfinite(number) else None
+
     candidates = []
-    oos_all = research.get("validation", {}).get("per_strategy_oos", {})
+    validation = research.get("validation")
+    if not isinstance(validation, dict):
+        return candidates
+    oos_all = validation.get("per_strategy_oos")
+    if not isinstance(oos_all, dict):
+        return candidates
+    universe_bias = (
+        research.get("universe_bias")
+        or (research.get("data_quality") or {}).get("universe_bias", "UNKNOWN")
+    )
     for row in research.get("strategies", []):
-        name = row.get("strategy")
-        oos = oos_all.get(name, {})
-        folds = oos.get("folds", []) or []
-        positive_ratio = (sum(1 for f in folds if float(f.get("total_return", 0.0)) > 0) / len(folds)) if folds else 0.0
-        if (row.get("sharpe", 0.0) >= min_sharpe and
-                row.get("max_drawdown", 0.0) >= max_drawdown and
-                row.get("trades", 0) >= min_trades and
-                row.get("total_return", 0.0) > 0 and
-                oos.get("status") == "OK" and
-                float(oos.get("oos_total_return", -1.0)) >= min_oos_total_return and
-                positive_ratio >= min_oos_positive_fold_ratio):
-            candidates.append({"strategy": name, "reason": "in_sample_and_forward_gate_passed",
-                               "metrics": row, "oos": oos,
-                               "oos_positive_fold_ratio": positive_ratio})
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("strategy") or "")
+        if not name:
+            continue
+        oos = oos_all.get(name)
+        if not isinstance(oos, dict) or oos.get("status") != "OK":
+            continue
+
+        oos_sharpe = finite_metric(oos.get("sharpe"))
+        oos_drawdown = finite_metric(oos.get("max_drawdown"))
+        oos_trades_value = finite_metric(oos.get("trades"))
+        oos_return = finite_metric(oos.get("oos_total_return"))
+        raw_folds = oos.get("folds")
+        if not isinstance(raw_folds, (list, tuple)) or len(raw_folds) < required_folds:
+            continue
+        fold_returns = []
+        fold_metrics_valid = True
+        for fold in raw_folds:
+            if not isinstance(fold, dict):
+                fold_metrics_valid = False
+                break
+            value = finite_metric(fold.get("total_return"))
+            if value is None:
+                fold_metrics_valid = False
+                break
+            fold_returns.append(value)
+        if not fold_metrics_valid or len(fold_returns) != len(raw_folds):
+            continue
+        if (oos_sharpe is None or oos_drawdown is None or oos_trades_value is None
+                or not oos_trades_value.is_integer() or oos_trades_value < 0
+                or oos_return is None):
+            continue
+
+        positive_ratio = sum(value > 0 for value in fold_returns) / len(fold_returns)
+        if not (
+            oos_sharpe >= min_sharpe
+            and oos_drawdown >= max_drawdown
+            and int(oos_trades_value) >= min_trades
+            and oos_return >= min_oos_total_return
+            and positive_ratio >= min_oos_positive_fold_ratio
+        ):
+            continue
+
+        candidates.append({
+            "strategy": name,
+            "reason": "oos_metrics_gate_passed",
+            "selection_basis": "OUT_OF_SAMPLE_ONLY",
+            "promotion_eligible": False,
+            "universe_bias": universe_bias,
+            # Keep the common metric names but source them only from held-out bars.
+            "metrics": {
+                "strategy": name,
+                "sharpe": oos_sharpe,
+                "max_drawdown": oos_drawdown,
+                "trades": int(oos_trades_value),
+                "total_return": oos_return,
+                "metric_basis": "OUT_OF_SAMPLE",
+            },
+            "in_sample_diagnostics": row,
+            "oos": oos,
+            "oos_positive_fold_ratio": positive_ratio,
+            "evidence_limitations": [
+                "Paper-shadow candidate only; not model-promotion or execution approval.",
+                "Complete comparable trial-performance history and promotion-grade DSR remain required separately.",
+                f"Research universe limitation: {universe_bias}.",
+            ],
+        })
     return candidates
 
 
