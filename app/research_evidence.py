@@ -164,7 +164,15 @@ def validate_crypto_universe_manifest(document, trusted_public_keys, *, venue: s
                 raise ValueError
             name = str(row.get("symbol") or "").strip()
             listed = _time(row.get("listed_at"))
-            delisted = _time(row.get("delisted_at")) if row.get("delisted_at") else None
+            raw_delisted = row.get("delisted_at")
+            if raw_delisted is None:
+                delisted = None
+            elif isinstance(raw_delisted, str) and raw_delisted.strip():
+                delisted = _time(raw_delisted)
+                if delisted is None:
+                    raise ValueError
+            else:
+                raise ValueError
             if not name or name in symbols or listed is None or (delisted and delisted < listed):
                 raise ValueError
             if listed > end or (delisted and delisted < start):
