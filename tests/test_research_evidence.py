@@ -191,3 +191,28 @@ def test_research_evidence_source_uris_reject_fixtures_and_local_placeholders():
             for kind in required
         ]
         assert _sources_ok(sources, required) is False, bad_uri
+
+
+def test_crypto_universe_rejects_malformed_delisting_timestamp():
+    start, end = _window()
+    instruments = [
+        {"symbol": "BTC/USDT", "listed_at": "2017-01-01T00:00:00Z", "delisted_at": None},
+        {"symbol": "OLD/USDT", "listed_at": "2020-01-01T00:00:00Z",
+         "delisted_at": "not-a-timestamp"},
+    ]
+    doc = {
+        "evidence_type": "crypto_point_in_time_universe", "evidence_id": "test-invalid-delisting-v1",
+        "venue": "binance", "market_type": "spot", "coverage_start": start, "coverage_end": end,
+        "membership_policy": "POINT_IN_TIME", "coverage_complete": True,
+        "includes_delisted": True, "includes_failed_assets": True,
+        "sources": [_source(k) for k in ("listing_history", "delisting_history", "failed_assets")],
+        "instruments": instruments,
+        "instruments_sha256": canonical_sha256(sorted(instruments, key=lambda row: row["symbol"].casefold())),
+    }
+    signed, keys = _sign(doc)
+    result = validate_crypto_universe_manifest(
+        signed, keys, venue="binance", market_type="spot", coverage_start=start,
+        coverage_end=end, symbol="BTC/USDT",
+    )
+    assert result["universe_verified"] is False
+    assert result["reason"] == "UNIVERSE_INSTRUMENT_TIMELINE_INVALID"
