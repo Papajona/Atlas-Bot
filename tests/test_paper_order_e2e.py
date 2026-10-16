@@ -230,6 +230,7 @@ def test_paper_protective_stop_triggers_on_completed_bar_and_fills_later(monkeyp
     async def run():
         await init_db()
         async with SessionLocal() as db:
+            await execution._get_state_locked(db)
             entry = Trade(
                 signal_id=f"seed-stop-{uuid.uuid4().hex}",
                 client_order_id=f"seed-stop-{uuid.uuid4().hex}",
