@@ -820,6 +820,22 @@ def paper_candidates(
         oos = oos_all.get(name, {})
         if not isinstance(oos, dict):
             continue
+        # The strategy-level OOS metrics must reference the same independently
+        # verified artifacts as the enclosing report. Do not let a valid top-level
+        # archive mask stale or forged per-strategy provenance.
+        if (
+            oos.get("execution_cost_calibration_status") != "VERIFIED"
+            or oos.get("execution_cost_calibration_evidence_id") != verified_costs.get("evidence_id")
+            or oos.get("execution_cost_model_complete") is not True
+            or (
+                asset_class == "crypto"
+                and (
+                    oos.get("universe_bias") != "POINT_IN_TIME_VERIFIED"
+                    or oos.get("survivorship_bias_blocked") is True
+                )
+            )
+        ):
+            continue
         gate = oos_promotion_gate(
             oos,
             min_dsr=0.95,
