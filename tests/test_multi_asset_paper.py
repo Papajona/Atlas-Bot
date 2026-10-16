@@ -59,7 +59,8 @@ def test_listing_dates_and_numeric_inputs_fail_closed():
     rows = [CoinListing("BAD", dt(3), delisted_at=dt(2))]
     with pytest.raises(PaperModelInputError, match="delisting precedes listing"):
         point_in_time_coin_universe(
-            rows, dt(2), coverage_start=dt(1), coverage_end=dt(4), coverage_verified=True
+            rows, dt(2), coverage_start=dt(1), coverage_end=dt(4),
+            coverage_verified=True, coverage_evidence_id="synthetic-test-evidence"
         )
     with pytest.raises(PaperModelInputError, match="invalid mid"):
         estimate_execution_price(
