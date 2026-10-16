@@ -517,3 +517,120 @@ def test_paper_simulator_stress_shared_capacity_idempotency_and_fee_accounting(m
             assert sum(Decimal(str(event.fee or 0.0)) for event in events) == fee_total
 
     asyncio.run(run())
+
+
+def test_existing_position_stop_triggers_when_another_order_fills_same_bar(monkeypatch):
+    """A fill elsewhere in the order loop must not suppress an existing position's stop."""
+    import asyncio
+    import json
+    import pandas as pd
+    from sqlalchemy import select
+    from app import execution
+    from app.config import settings
+    from app.db import init_db, SessionLocal, Trade, Position, PaperOrderState, PaperFillEvent
+
+    symbol = f"STOP-STRESS-{uuid.uuid4().hex[:10]}"
+    now = pd.Timestamp.now(tz="UTC")
+    current_floor = now.floor("5min")
+    trigger_bar = current_floor - pd.Timedelta(minutes=10)
+    submitted_bar = trigger_bar - pd.Timedelta(minutes=5)
+    monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
+    monkeypatch.setattr(settings, "paper_rejection_probability", 0.0)
+    monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.10)
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 24)
+
+    async def run():
+        await init_db()
+        async with SessionLocal() as db:
+            state = await execution._get_state_locked(db)
+            state.kill_switch = False
+            state.cash_equity = 10000.0
+            entry = Trade(
+                signal_id=f"stop-stress-entry-{uuid.uuid4().hex}",
+                client_order_id=f"stop-stress-entry-{uuid.uuid4().hex}",
+                exchange="binance", symbol=symbol, timeframe="5m", side="buy",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=1.0,
+                remaining_quantity=0.0, requested_price=100.0, average_fill_price=100.0,
+                fee=0.0, notional=100.0, mode="PAPER", status="FILLED",
+                reason=json.dumps({"strategy": "stop-stress", "asset": "crypto"}),
+                stop_loss_price=95.0, take_profit_price=110.0,
+            )
+            db.add(entry)
+            await db.flush()
+            db.add(Position(
+                customer_id=None, trading_account_id=None, exchange="binance",
+                symbol=symbol, quantity=1.0, average_entry_price=100.0,
+                mark_price=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
+                reserved_capital=0.0, strategy="stop-stress", entry_regime="UNKNOWN",
+                entry_trade_id=entry.id,
+            ))
+            pending = Trade(
+                signal_id=f"stop-stress-pending-{uuid.uuid4().hex}",
+                client_order_id=f"stop-stress-pending-{uuid.uuid4().hex}",
+                exchange="binance", symbol=symbol, timeframe="5m", side="buy",
+                quantity=0.5, requested_quantity=0.5, filled_quantity=0.0,
+                remaining_quantity=0.5, requested_price=100.0, average_fill_price=0.0,
+                fee=0.0, notional=0.0, mode="PAPER", status="OPEN",
+                reason=json.dumps({"strategy": "stop-stress-pending", "asset": "crypto"}),
+                stop_loss_price=90.0, take_profit_price=120.0,
+            )
+            db.add(pending)
+            await db.flush()
+            db.add(PaperOrderState(
+                trade_id=pending.id, exchange="binance", symbol=symbol, timeframe="5m",
+                submitted_bar_at=submitted_bar.to_pydatetime(), last_processed_bar_at=None,
+                bars_elapsed=0, status="OPEN",
+            ))
+            pending_id = pending.id
+            entry_id = entry.id
+            await db.commit()
+
+        index = pd.DatetimeIndex([
+            trigger_bar - pd.Timedelta(minutes=10),
+            submitted_bar,
+            trigger_bar,
+        ])
+        df = pd.DataFrame({
+            "open": [100.0, 99.0, 94.0],
+            "high": [101.0, 100.0, 96.0],
+            "low": [99.0, 98.0, 90.0],
+            "close": [100.0, 99.0, 92.0],
+            "volume": [100.0, 100.0, 100.0],
+        }, index=index)
+        df.attrs["data_provenance"] = {
+            "source": "ccxt_ohlcv", "symbol": symbol, "exchange": "binance", "timeframe": "5m",
+            "fetched_at_utc": pd.Timestamp.now(tz="UTC").isoformat(), "row_count": len(df),
+            "sha256": "f" * 64, "asset_class": "crypto", "market_type": "spot",
+            "volume_unit": "base_asset", "volume_unit_verified": True,
+        }
+
+        result = await execution.advance_platform_paper_orders(
+            df, exchange="binance", symbol=symbol, timeframe="5m", asset="crypto"
+        )
+        assert result["fills"] == 1
+        assert result["stop_triggers"] == 1
+        assert result["protective_exit_orders_created"] == 1
+
+        async with SessionLocal() as db:
+            pending_after = await db.get(Trade, pending_id)
+            assert pending_after.status == "FILLED"
+            position = (await db.execute(select(Position).where(
+                Position.symbol == symbol, Position.exchange == "binance",
+                Position.customer_id.is_(None),
+            ))).scalar_one()
+            assert position.quantity == pytest.approx(1.5)
+            exit_trade = (await db.execute(select(Trade).where(
+                Trade.symbol == symbol, Trade.side == "sell", Trade.mode == "PAPER",
+                Trade.id != entry_id,
+            ))).scalar_one()
+            assert exit_trade.status == "OPEN"
+            assert exit_trade.filled_quantity == 0.0
+            assert exit_trade.remaining_quantity == pytest.approx(1.5)
+            trigger_event = (await db.execute(select(PaperFillEvent).where(
+                PaperFillEvent.trade_id == exit_trade.id,
+            ))).scalars().all()
+            assert len(trigger_event) == 1
+            assert trigger_event[0].outcome == "STOP_TRIGGERED"
+
+    asyncio.run(run())
