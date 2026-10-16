@@ -8,6 +8,7 @@ import math
 import re
 from datetime import datetime, timezone
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -96,6 +97,29 @@ def _time(value: Any) -> datetime | None:
         return None
 
 
+def _source_uri_is_retrievable(value: Any) -> bool:
+    """Reject fixture/local placeholders; evidence must point to a retrievable artifact."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        parsed = urlsplit(value.strip())
+    except ValueError:
+        return False
+    scheme = parsed.scheme.casefold()
+    if scheme not in {"https", "gs", "s3"}:
+        return False
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    path = parsed.path.strip("/")
+    if not host or not path:
+        return False
+    if scheme == "https" and (
+        host in {"localhost", "example.com", "example.org", "example.net"}
+        or host.endswith((".localhost", ".local", ".example", ".invalid", ".test"))
+    ):
+        return False
+    return True
+
+
 def _sources_ok(sources: Any, required: set[str]) -> bool:
     if not isinstance(sources, list):
         return False
@@ -104,7 +128,7 @@ def _sources_ok(sources: Any, required: set[str]) -> bool:
         if not isinstance(source, Mapping):
             continue
         kind, uri, digest = source.get("source_type"), source.get("uri"), source.get("sha256")
-        if isinstance(kind, str) and isinstance(uri, str) and uri.strip() and _sha(digest):
+        if isinstance(kind, str) and _source_uri_is_retrievable(uri) and _sha(digest):
             found.add(kind.strip().lower())
     return required.issubset(found)
 
