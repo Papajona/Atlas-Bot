@@ -56,11 +56,80 @@ def test_higher_timeframe_mapping_applies_source_lag():
     # The 02:00 source value is not available at 02:00 itself under the conservative rule.
     assert out.loc["2025-01-01 02:00+00:00"]==10.0
 
-def test_oos_gate_requires_forward_evidence():
+def test_paper_candidates_use_complete_oos_metrics_and_ignore_full_sample_scores(monkeypatch):
+    from app import research_engine
     from app.research_engine import paper_candidates
-    row={"strategy":"trend","sharpe":1.0,"max_drawdown":-0.1,"trades":150,"total_return":0.2}
-    passing_folds=[{"total_return":0.05},{"total_return":0.04},{"total_return":-0.01},{"total_return":0.03},{"total_return":0.02}]
-    base={"strategies":[row],"validation":{"per_strategy_oos":{"trend":{"status":"OK","oos_total_return":0.1,"folds":passing_folds}}}}
-    assert paper_candidates(base)
-    bad={"strategies":[row],"validation":{"per_strategy_oos":{"trend":{"status":"OK","oos_total_return":-0.1,"folds":[{"total_return":0.05},{"total_return":-0.2}]}}}}
-    assert paper_candidates(bad)==[]
+
+    monkeypatch.setattr(research_engine.settings, "research_folds", 5)
+    # In-sample/full-frame metrics are deliberately poor. They must not influence
+    # paper-candidate selection when the required held-out metrics pass.
+    row = {"strategy": "trend", "sharpe": -3.0, "max_drawdown": -0.90,
+           "trades": 0, "total_return": -0.80}
+    passing_folds = [
+        {"total_return": 0.05}, {"total_return": 0.04}, {"total_return": -0.01},
+        {"total_return": 0.03}, {"total_return": 0.02},
+    ]
+    oos = {
+        "status": "OK", "oos_total_return": 0.10, "sharpe": 0.9,
+        "max_drawdown": -0.12, "trades": 150, "folds": passing_folds,
+    }
+    research = {
+        "universe_bias": "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY",
+        "strategies": [row], "validation": {"per_strategy_oos": {"trend": oos}},
+    }
+
+    candidates = paper_candidates(research)
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate["reason"] == "oos_metrics_gate_passed"
+    assert candidate["selection_basis"] == "OUT_OF_SAMPLE_ONLY"
+    assert candidate["promotion_eligible"] is False
+    assert candidate["metrics"]["sharpe"] == 0.9
+    assert candidate["metrics"]["total_return"] == 0.10
+    assert candidate["metrics"]["metric_basis"] == "OUT_OF_SAMPLE"
+    assert candidate["in_sample_diagnostics"] is row
+    assert candidate["universe_bias"] == "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
+    assert candidate["evidence_limitations"]
+
+
+def test_paper_candidates_reject_strong_in_sample_result_when_oos_metrics_fail(monkeypatch):
+    from app import research_engine
+    from app.research_engine import paper_candidates
+
+    monkeypatch.setattr(research_engine.settings, "research_folds", 5)
+    row = {"strategy": "trend", "sharpe": 2.0, "max_drawdown": -0.05,
+           "trades": 500, "total_return": 1.2}
+    oos = {
+        "status": "OK", "oos_total_return": 0.10, "sharpe": -0.4,
+        "max_drawdown": -0.60, "trades": 10,
+        "folds": [{"total_return": 0.05}, {"total_return": 0.04},
+                  {"total_return": -0.01}, {"total_return": 0.03},
+                  {"total_return": 0.02}],
+    }
+    research = {"strategies": [row], "validation": {"per_strategy_oos": {"trend": oos}}}
+    assert paper_candidates(research) == []
+
+
+def test_paper_candidates_fail_closed_on_missing_or_malformed_oos_metrics(monkeypatch):
+    from app import research_engine
+    from app.research_engine import paper_candidates
+
+    monkeypatch.setattr(research_engine.settings, "research_folds", 5)
+    row = {"strategy": "trend", "sharpe": 5.0, "max_drawdown": -0.01,
+           "trades": 500, "total_return": 5.0}
+    cases = [
+        {"status": "OK", "oos_total_return": 1.0, "sharpe": 1.0,
+         "max_drawdown": -0.1, "trades": 200, "folds": [{"total_return": 0.1}] * 4},
+        {"status": "OK", "oos_total_return": 1.0, "max_drawdown": -0.1,
+         "trades": 200, "folds": [{"total_return": 0.1}] * 5},
+        {"status": "OK", "oos_total_return": 1.0, "sharpe": float("nan"),
+         "max_drawdown": -0.1, "trades": 200, "folds": [{"total_return": 0.1}] * 5},
+        {"status": "OK", "oos_total_return": 1.0, "sharpe": 1.0,
+         "max_drawdown": -0.1, "trades": 200,
+         "folds": [{"total_return": 0.1}, {"total_return": 0.1},
+                   {"total_return": float("inf")}, {"total_return": 0.1},
+                   {"total_return": 0.1}]},
+    ]
+    for oos in cases:
+        research = {"strategies": [row], "validation": {"per_strategy_oos": {"trend": oos}}}
+        assert paper_candidates(research) == []
