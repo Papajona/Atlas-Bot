@@ -519,7 +519,8 @@ def ai_walk_forward_backtest(
         "carry_evidence_source": carry_evidence_source or None,
         "carry_evidence_id": carry_evidence_id or None,
         "financing_cost_model_complete": bool(carry_evidence_complete),
-        "intrabar_stop_target_model_complete": True,
+        # OHLC bars cannot establish whether stop loss or take profit was hit first intrabar.
+        "intrabar_stop_target_model_complete": False,
         # This AI WFO path still charges a fixed bps slippage assumption; documented
         # financing alone does not make the execution-cost model complete.
         "slippage_model_complete": False,
