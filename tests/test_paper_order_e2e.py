@@ -1,4 +1,4 @@
-"""Regression tests preventing unsupported legacy paper execution from recording fills."""
+"""Regression tests for the persistent bar-driven platform paper execution path."""
 import asyncio
 import os
 import uuid
