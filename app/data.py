@@ -89,7 +89,7 @@ def fetch_crypto(symbol: str, exchange: str = "bybit", timeframe: str = "1h", da
             cutoff = pd.Timestamp(datetime.fromtimestamp((now_ms - tf_ms) / 1000, tz=timezone.utc))
             df = df[df.index <= cutoff]
         cleaned = _validate_ohlcv(df, timeframe)
-        return _attach_data_provenance(
+        verified = _attach_data_provenance(
             cleaned,
             source="ccxt_ohlcv",
             symbol=symbol,
@@ -97,6 +97,18 @@ def fetch_crypto(symbol: str, exchange: str = "bybit", timeframe: str = "1h", da
             timeframe=timeframe,
             fetched_at=datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).isoformat(),
         )
+        # CCXT spot OHLCV volumes are eligible for the paper simulator only when loaded
+        # market metadata explicitly identifies a non-contract spot market. Contract,
+        # swap, future, option and unknown-market volumes must never be treated as base units.
+        market = (ex.markets or {}).get(symbol, {}) or {}
+        verified_spot = market.get("spot") is True and market.get("contract") is False
+        verified.attrs["data_provenance"].update({
+            "asset_class": "crypto",
+            "market_type": "spot" if verified_spot else "derivative_or_unknown",
+            "volume_unit": "base_asset" if verified_spot else "unknown",
+            "volume_unit_verified": bool(verified_spot),
+        })
+        return verified
     finally:
         if hasattr(ex, "close") and callable(ex.close):
             ex.close()
@@ -120,6 +132,7 @@ def _normalize_yfinance_fx_symbol(symbol: str) -> str:
             "non-FX instruments must use their own verified adapter"
         )
     return pair + "=X"
+
 
 
 def fetch_forex(symbol: str = "EURUSD", timeframe: str = "1h", days: int = 365) -> pd.DataFrame:
