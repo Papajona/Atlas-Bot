@@ -608,25 +608,29 @@ def test_existing_position_stop_triggers_when_another_order_fills_same_bar(monke
         result = await execution.advance_platform_paper_orders(
             df, exchange="binance", symbol=symbol, timeframe="5m", asset="crypto"
         )
-        assert result["fills"] == 1
+        # Stop trigger has priority; do not infer entry-fill-before-stop from OHLC.
+        assert result["fills"] == 0
+        assert result["attempts"] == 1
         assert result["stop_triggers"] == 1
         assert result["protective_exit_orders_created"] == 1
 
         async with SessionLocal() as db:
             pending_after = await db.get(Trade, pending_id)
-            assert pending_after.status == "FILLED"
+            assert pending_after.status == "OPEN"
+            assert pending_after.filled_quantity == 0.0
+            assert pending_after.remaining_quantity == pytest.approx(0.5)
             position = (await db.execute(select(Position).where(
                 Position.symbol == symbol, Position.exchange == "binance",
                 Position.customer_id.is_(None),
             ))).scalar_one()
-            assert position.quantity == pytest.approx(1.5)
+            assert position.quantity == pytest.approx(1.0)
             exit_trade = (await db.execute(select(Trade).where(
                 Trade.symbol == symbol, Trade.side == "sell", Trade.mode == "PAPER",
                 Trade.id != entry_id,
             ))).scalar_one()
             assert exit_trade.status == "OPEN"
             assert exit_trade.filled_quantity == 0.0
-            assert exit_trade.remaining_quantity == pytest.approx(1.5)
+            assert exit_trade.remaining_quantity == pytest.approx(1.0)
             trigger_event = (await db.execute(select(PaperFillEvent).where(
                 PaperFillEvent.trade_id == exit_trade.id,
             ))).scalars().all()
