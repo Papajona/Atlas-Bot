@@ -8,6 +8,82 @@ from zoneinfo import ZoneInfo
 class PaperModelInputError(ValueError):
     pass
 
+
+def deterministic_uniform(*, order_key: str, event: str, seed: str = "atlas-paper-v1") -> Decimal:
+    """Stable pseudo-random value in [0, 1) for reproducible paper events.
+
+    Never use this for security, live order routing, or cryptographic decisions.
+    Distinct event labels make queue/rejection/latency draws independent by design.
+    """
+    import hashlib
+    if not isinstance(order_key, str) or not order_key.strip():
+        raise PaperModelInputError("order_key is required")
+    if not isinstance(event, str) or not event.strip():
+        raise PaperModelInputError("event is required")
+    if not isinstance(seed, str) or not seed:
+        raise PaperModelInputError("seed is required")
+    digest = hashlib.sha256(f"{seed}|{order_key}|{event}".encode("utf-8")).digest()
+    integer = int.from_bytes(digest[:8], "big")
+    return Decimal(integer) / Decimal(2**64)
+
+
+def deterministic_delay_bars(*, order_key: str, minimum: int, maximum: int, seed: str = "atlas-paper-v1") -> int:
+    """Choose an inclusive integer delay reproducibly for the given order key."""
+    if (not isinstance(minimum, int) or isinstance(minimum, bool)
+            or not isinstance(maximum, int) or isinstance(maximum, bool)
+            or minimum < 0 or maximum < minimum):
+        raise PaperModelInputError("invalid delay bounds")
+    span = maximum - minimum + 1
+    u = deterministic_uniform(order_key=order_key, event="delay", seed=seed)
+    return minimum + min(span - 1, int(u * span))
+
+
+@dataclass(frozen=True)
+class VerifiedFinancingRate:
+    """Instrument-specific financing rate with explicit provenance and effective time.
+
+    Rates are fractions per annum, not percentages. Placeholder/unverified rates
+    are rejected so synthetic defaults cannot masquerade as broker terms.
+    """
+    instrument: str
+    long_annual_rate: Decimal
+    short_annual_rate: Decimal
+    effective_at: datetime
+    verified_at: datetime
+    source: str
+    evidence_id: str
+    day_count_basis: int = 360
+    verified: bool = False
+
+    def validate(self, *, instrument: str, at: datetime) -> "VerifiedFinancingRate":
+        _aware(at, "financing timestamp")
+        _aware(self.effective_at, "rate effective_at")
+        _aware(self.verified_at, "rate verified_at")
+        if not self.verified:
+            raise PaperModelInputError("financing rate is not verified")
+        if self.instrument != instrument:
+            raise PaperModelInputError("financing instrument mismatch")
+        if self.effective_at > at:
+            raise PaperModelInputError("financing rate not yet effective")
+        if not self.source.strip() or not self.evidence_id.strip():
+            raise PaperModelInputError("financing rate provenance is required")
+        if not isinstance(self.day_count_basis, int) or isinstance(self.day_count_basis, bool) or self.day_count_basis <= 0:
+            raise PaperModelInputError("invalid financing day-count basis")
+        _decimal(self.long_annual_rate, "long annual rate")
+        _decimal(self.short_annual_rate, "short annual rate")
+        return self
+
+
+def verified_financing_cost(*, notional: Decimal, rate: VerifiedFinancingRate, instrument: str,
+                            at: datetime, calendar_days: int, direction: str) -> Decimal:
+    """Calculate financing only from an effective, evidence-backed instrument rate."""
+    rate.validate(instrument=instrument, at=at)
+    if direction not in ("long", "short"):
+        raise PaperModelInputError("invalid financing direction")
+    annual_rate = rate.long_annual_rate if direction == "long" else rate.short_annual_rate
+    return carry_cost(notional=notional, annual_rate=annual_rate, calendar_days=calendar_days,
+                      day_count_basis=rate.day_count_basis, direction="long")
+
 def _decimal(x, name: str) -> Decimal:
     try:
         value = Decimal(str(x))
