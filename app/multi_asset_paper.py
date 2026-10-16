@@ -81,6 +81,8 @@ def verified_financing_cost(*, notional: Decimal, rate: VerifiedFinancingRate, i
     if direction not in ("long", "short"):
         raise PaperModelInputError("invalid financing direction")
     annual_rate = rate.long_annual_rate if direction == "long" else rate.short_annual_rate
+    # Broker financing rates are signed: positive means charged, negative means
+    # credited. Do not invert short-side financing merely because the position is short.
     return carry_cost(notional=notional, annual_rate=annual_rate, calendar_days=calendar_days,
                       day_count_basis=rate.day_count_basis, direction="long")
 
@@ -245,6 +247,73 @@ class SessionCalendar:
         if not within_session:
             return False
         return session_date.weekday() in self.weekdays and session_date not in self.holidays
+
+def is_ny_rollover_window(instant: datetime, *, window_minutes: int = 5) -> bool:
+    """Identify a configurable window around 17:00 America/New_York, DST-aware."""
+    _aware(instant, "rollover timestamp")
+    if not isinstance(window_minutes, int) or isinstance(window_minutes, bool) or not 0 <= window_minutes <= 60:
+        raise PaperModelInputError("rollover window must be an integer from 0 to 60 minutes")
+    local = instant.astimezone(ZoneInfo("America/New_York"))
+    minute_of_day = local.hour * 60 + local.minute
+    rollover_minute = 17 * 60
+    delta = abs(minute_of_day - rollover_minute)
+    delta = min(delta, 24 * 60 - delta)
+    return delta <= window_minutes
+
+
+def financing_calendar_days(*, trade_date: date, calendar_days: int,
+                            triple_day_weekday: int | None,
+                            triple_multiplier: int = 3) -> int:
+    """Return chargeable days for a broker-documented triple-rollover weekday.
+
+    Callers must pass the instrument-specific weekday from verified product terms;
+    this helper deliberately has no assumed Wednesday default.
+    """
+    if (not isinstance(trade_date, date) or isinstance(trade_date, datetime)
+            or not isinstance(calendar_days, int) or isinstance(calendar_days, bool)
+            or calendar_days < 0 or triple_day_weekday not in (None, 0, 1, 2, 3, 4, 5, 6)
+            or not isinstance(triple_multiplier, int) or isinstance(triple_multiplier, bool)
+            or triple_multiplier < 1):
+        raise PaperModelInputError("invalid financing calendar inputs")
+    if triple_day_weekday is not None and trade_date.weekday() == triple_day_weekday:
+        return calendar_days * triple_multiplier
+    return calendar_days
+
+
+@dataclass(frozen=True)
+class InstrumentCostProfile:
+    instrument: str
+    venue: str
+    market_type: str
+    half_spread_bps: Decimal
+    taker_fee_bps: Decimal
+    impact_coefficient: Decimal
+    max_impact_bps: Decimal
+    effective_at: datetime
+    source: str
+    evidence_id: str
+    verified: bool = False
+
+    def validate(self, *, instrument: str, venue: str, at: datetime) -> "InstrumentCostProfile":
+        _aware(at, "cost profile timestamp")
+        _aware(self.effective_at, "cost profile effective_at")
+        if not self.verified:
+            raise PaperModelInputError("instrument cost profile is not verified")
+        if self.instrument != instrument or self.venue != venue:
+            raise PaperModelInputError("instrument cost profile context mismatch")
+        if self.effective_at > at:
+            raise PaperModelInputError("instrument cost profile not yet effective")
+        if self.market_type not in ("spot", "forex", "commodity", "future"):
+            raise PaperModelInputError("invalid cost profile market type")
+        if not self.source.strip() or not self.evidence_id.strip():
+            raise PaperModelInputError("instrument cost profile provenance required")
+        for value, name in ((self.half_spread_bps, "half spread"),
+                            (self.taker_fee_bps, "taker fee"),
+                            (self.impact_coefficient, "impact coefficient"),
+                            (self.max_impact_bps, "max impact")):
+            _pos(value, name, True)
+        return self
+
 
 @dataclass(frozen=True)
 class ContractSpec:
