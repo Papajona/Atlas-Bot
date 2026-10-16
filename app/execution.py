@@ -1334,6 +1334,43 @@ async def advance_platform_paper_orders(
                 "liquidity_verified": verified_liquidity,
             }
 
+
+        # Inspect positions as they existed before this bar's simulated fills.
+        # If an existing stop/target was touched, do not also execute ordinary
+        # entries at the same bar close: OHLC cannot establish their intrabar order.
+        preexisting_positions = (await db.execute(
+            select(Position, Trade)
+            .join(Trade, Trade.id == Position.entry_trade_id)
+            .where(
+                Position.customer_id.is_(None),
+                Position.exchange == exchange,
+                Position.symbol == symbol,
+                Position.quantity != 0,
+                Trade.mode == "PAPER",
+                Trade.customer_id.is_(None),
+            )
+            .order_by(Position.id)
+            .with_for_update()
+        )).all()
+        preexisting_protective_trigger = False
+        for existing_position, existing_entry_trade in preexisting_positions:
+            if existing_entry_trade.id in active_exit_entry_ids:
+                continue
+            existing_is_long = float(existing_position.quantity) > 0
+            existing_stop = float(existing_entry_trade.stop_loss_price or 0.0)
+            existing_target = float(existing_entry_trade.take_profit_price or 0.0)
+            existing_stop_hit = (
+                existing_stop > 0 and low_price <= existing_stop
+                if existing_is_long else existing_stop > 0 and high_price >= existing_stop
+            )
+            existing_target_hit = (
+                existing_target > 0 and high_price >= existing_target
+                if existing_is_long else existing_target > 0 and low_price <= existing_target
+            )
+            if existing_stop_hit or existing_target_hit:
+                preexisting_protective_trigger = True
+                break
+
         for trade, order_state in pairs:
             if trade.status not in {"OPEN", "PARTIAL"} or order_state.status not in {"OPEN", "PARTIAL"}:
                 continue
@@ -1384,7 +1421,10 @@ async def advance_platform_paper_orders(
             fee_decimal = Decimal("0")
             slippage_bps = 0.0
 
-            if order_state.bars_elapsed >= min_latency:
+            if preexisting_protective_trigger and not is_triggered_exit:
+                outcome = "WAIT_PROTECTIVE_TRIGGER"
+                reason = "existing position protective barrier touched on this bar; ordinary entry fills deferred"
+            elif order_state.bars_elapsed >= min_latency:
                 if not verified_liquidity or float(bar_state.capacity or 0.0) <= 0:
                     outcome = "WAIT_UNVERIFIED_LIQUIDITY" if not verified_liquidity else "WAIT_NO_CAPACITY"
                     reason = "verified crypto spot base-asset volume is required for a fill"
