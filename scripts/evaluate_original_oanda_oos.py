@@ -372,6 +372,8 @@ def promotion_gate_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         and metrics.get("financing_cost_model_complete") is True
         and metrics.get("intrabar_stop_target_model_complete") is True
         and metrics.get("execution_cost_model_complete") is True
+        and str(metrics.get("execution_cost_calibration_status") or "").strip().upper() == "VERIFIED"
+        and bool(str(metrics.get("execution_cost_calibration_evidence_id") or "").strip())
     )
     return normalized
 

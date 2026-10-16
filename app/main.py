@@ -39,9 +39,10 @@ from .entry_exit_engine import EntryExitConfig, start_bot_decision, gated_entry_
 from .ai_providers import dual_ai_trade_safety_review, AIProviderError
 from .strategy_ai import generate_strategy_draft
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates, live_strategy_signals
+from .research_trial_archive import archive_research_trials
 from .research_validation import oos_promotion_gate, monte_carlo_bootstrap
 from .daily_research import run_daily_research, latest_macro_context
-from .execution import execute_signal, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits, customer_paper_execution_blocked
+from .execution import execute_signal, advance_platform_paper_orders, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits, customer_paper_execution_blocked
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
 from .payout import get_payout_provider, PayoutError, PayoutUnknown, PayoutNotFound
 from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, release_separation_violation, verify_release_operator
@@ -58,7 +59,7 @@ from .model_registry import verify_model_file, rollback_champion
 from .correlation_risk import adjusted_group_exposure
 from .custody_signer import validate_signer_config
 from .custody_reconciliation import reconcile_usdt_custody
-from .meta_labeling import meta_label_gate
+from .meta_labeling import meta_label_gate, meta_label_walk_forward
 from .derivatives_context import fetch_public_derivatives_context
 from .multi_timeframe import multi_timeframe_signal
 from .grid_trading import build_grid, grid_profit_pct
@@ -130,6 +131,7 @@ def verify_local_signature(signature: str, digest: str) -> bool:
 from .monitoring import TelemetryMiddleware, metrics_response, logger
 from .schemas import (
     MarketRequest,
+    ResearchMarketRequest,
     CustomerBotStartRequest,
     SmartTradeRequest,
     DcaBotRequest,
@@ -2158,6 +2160,30 @@ def market_data(req, customer_id: int | None = None):
         "Commodity market data requires configured OANDA practice credentials and an explicitly "
         "supported OANDA instrument; the Yahoo FX fallback must not remap commodity symbols"
     )
+
+
+
+
+def _attach_research_evidence(df: pd.DataFrame, req: ResearchMarketRequest) -> pd.DataFrame:
+    """Attach caller-supplied signed artifacts without altering market provenance.
+
+    Research validators still verify Ed25519 signatures and bind each artifact to
+    the loaded frame's venue, market, symbol, timeframe, dataset and OOS sample.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("research evidence can only be attached to a pandas DataFrame")
+    result = df.copy(deep=False)
+    # Pandas exposes attrs as a mutable property; update the copied frame rather
+    # than assigning to the read-only property itself.
+    for field in (
+        "point_in_time_universe_manifest",
+        "execution_cost_calibration_evidence",
+        "trial_performance_archive",
+    ):
+        document = getattr(req, field, None)
+        if document is not None:
+            result.attrs[field] = document
+    return result
 
 
 
@@ -6168,10 +6194,11 @@ async def strategy_signal_api(req: MarketRequest, x_admin_token: str | None = He
 
 
 @app.post("/api/research/backtest-all")
-async def research_backtest_all(req: MarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+async def research_backtest_all(req: ResearchMarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     await auth(x_admin_token, authorization)
     try:
         df = await asyncio.to_thread(market_data, req)
+        df = _attach_research_evidence(df, req)
         cfg = StrategyConfig(
             signal_threshold=settings.strategy_signal_threshold,
             target_vol_annual=settings.strategy_target_vol_annual,
@@ -6181,6 +6208,7 @@ async def research_backtest_all(req: MarketRequest, x_admin_token: str | None = 
         )
         result = await asyncio.to_thread(backtest_all_strategies, df, cfg, include_ai=True, asset=req.asset, folds=req.folds, min_train=req.min_train)
         result.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
+        result["trial_archive_write"] = await archive_research_trials(result, req)
         await _audit("RESEARCH_BACKTEST_ALL", {"symbol": req.symbol, "asset": req.asset, "strategy_count": result["strategy_count"]})
         return result
     except Exception as e:
@@ -6188,10 +6216,11 @@ async def research_backtest_all(req: MarketRequest, x_admin_token: str | None = 
 
 
 @app.post("/api/research/paper-signals")
-async def research_paper_signals(req: MarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+async def research_paper_signals(req: ResearchMarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     await auth(x_admin_token, authorization)
     try:
         df = await asyncio.to_thread(market_data, req)
+        df = _attach_research_evidence(df, req)
         cfg = StrategyConfig(
             signal_threshold=settings.strategy_signal_threshold,
             target_vol_annual=settings.strategy_target_vol_annual,
@@ -6200,6 +6229,8 @@ async def research_paper_signals(req: MarketRequest, x_admin_token: str | None =
             take_profit_atr=settings.strategy_take_profit_atr,
         )
         research = await asyncio.to_thread(backtest_all_strategies, df, cfg, include_ai=True, asset=req.asset, folds=req.folds, min_train=req.min_train)
+        research.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
+        trial_archive_write = await archive_research_trials(research, req)
         candidates = paper_candidates(research)
         names = [x["strategy"] for x in candidates]
         signals = await asyncio.to_thread(live_strategy_signals, df, names, cfg, req.asset)
@@ -6209,6 +6240,7 @@ async def research_paper_signals(req: MarketRequest, x_admin_token: str | None =
             "candidates": names,
             "signals": signals,
             "real_money_execution": False,
+            "trial_archive_write": trial_archive_write,
             "message": "Strategies must remain in paper/shadow mode until separate production risk and deployment gates are passed.",
         }
     except Exception as e:
@@ -6216,10 +6248,11 @@ async def research_paper_signals(req: MarketRequest, x_admin_token: str | None =
 
 
 @app.post("/api/research/review")
-async def research_review(req: MarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+async def research_review(req: ResearchMarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     await auth(x_admin_token, authorization)
     try:
         df = await asyncio.to_thread(market_data, req)
+        df = _attach_research_evidence(df, req)
         cfg = StrategyConfig(
             signal_threshold=settings.strategy_signal_threshold,
             target_vol_annual=settings.strategy_target_vol_annual,
@@ -6228,9 +6261,12 @@ async def research_review(req: MarketRequest, x_admin_token: str | None = Header
             take_profit_atr=settings.strategy_take_profit_atr,
         )
         research = await asyncio.to_thread(backtest_all_strategies, df, cfg, include_ai=True, asset=req.asset, folds=req.folds, min_train=req.min_train)
+        research.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
+        trial_archive_write = await archive_research_trials(research, req)
         live = await asyncio.to_thread(strategy_signal, df, cfg, req.asset)
         review = await asyncio.to_thread(ai_market_review, research, live)
         review.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
+        review["trial_archive_write"] = trial_archive_write
         return review
     except Exception as e:
         raise _safe_http_error(400, e, "Invalid request") from e
@@ -6402,14 +6438,31 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
     try:
         paper_req = req.model_copy(update={"days": 5})
         df = await asyncio.to_thread(market_data, paper_req)
-        sig = await asyncio.to_thread(predict_latest, df, path)
         paper_context = await asyncio.to_thread(_server_paper_market_context, paper_req, df)
         if paper_context is not None:
             sig = {**sig, "paper_market_context": paper_context}
         price = float(df.close.iloc[-1])
+        paper_processing = await advance_platform_paper_orders(
+            df,
+            exchange=req.exchange,
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+            asset=req.asset,
+        )
+        if paper_processing.get("status") in {"STALE_BAR", "BAR_NOT_COMPLETE", "DATA_PROVENANCE_INVALID", "BAR_PROVENANCE_CONFLICT", "INVALID_BAR_PRICE"}:
+            raise RiskBlocked("Paper execution refused stale, incomplete, or unverified market data")
+        if int(paper_processing.get("protective_exit_orders_pending") or 0) > 0:
+            # Do not submit additional entries while any protective exit is pending or on
+            # the same bar that triggered one. The exit is eligible only on a later bar.
+            equity_state = await mark_paper_equity({req.symbol: price})
+            return {"mode": "PAPER", "side": "protective_exit_triggered", "price": price,
+                    "paper_order_processing": paper_processing, "equity": equity_state}
+        sig = await asyncio.to_thread(predict_latest, df, path)
         ts = sig["signal_timestamp"]
         if sig["signal"] == 0:
-            return {"mode": "PAPER", "side": "flat", "price": price, **sig}
+            equity_state = await mark_paper_equity({req.symbol: price})
+            return {"mode": "PAPER", "side": "flat", "price": price, **sig,
+                    "paper_order_processing": paper_processing, "equity": equity_state}
         side = "buy" if sig["signal"] > 0 else "sell"
         async with SessionLocal() as db:
             s = await db.get(AppState, 1)
@@ -6418,15 +6471,68 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
         qty = target_notional / price
         stop = price * (1 - settings.stop_loss_pct) if side == "buy" else price * (1 + settings.stop_loss_pct)
         tp = price * (1 + settings.take_profit_pct) if side == "buy" else price * (1 - settings.take_profit_pct)
-        result = await execute_signal(req.symbol, side, qty, price, sig, req.exchange, req.timeframe, ts,
+        submission_signal = dict(sig)
+        provenance = dict(df.attrs.get("data_provenance") or {})
+        submission_signal["_paper_execution_context"] = {
+            "bar_timestamp": df.index[-1].isoformat(),
+            "data_provenance": provenance,
+            "asset": req.asset,
+            "symbol": req.symbol,
+            "exchange": req.exchange,
+            "timeframe": req.timeframe,
+        }
+        result = await execute_signal(req.symbol, side, qty, price, submission_signal, req.exchange, req.timeframe, ts,
                                       force_paper=True, stop_loss_price=stop, take_profit_price=tp, asset=req.asset)
         equity_state = await mark_paper_equity({req.symbol: price})
         return {"mode": "PAPER", "side": side, "price": price, "quantity": qty, **sig,
-                "execution": result, "equity": equity_state}
+                "execution": result, "paper_order_processing": paper_processing, "equity": equity_state}
     except RiskBlocked as e:
         raise _safe_http_error(409, e, "Operation could not be completed") from e
     except Exception as e:
         raise _safe_http_error(400, e, "Invalid request") from e
+
+
+@app.post("/api/research/meta-label")
+async def meta_label_research_api(
+    req: MarketRequest,
+    x_admin_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    """Expose chronological OOS meta-filter diagnostics; this endpoint never authorizes execution."""
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "OPERATIONS")
+    try:
+        df = await asyncio.to_thread(market_data, req)
+        result = await asyncio.to_thread(
+            meta_label_walk_forward,
+            df,
+            horizon=3,
+            min_edge_bps=10.0,
+            folds=5,
+            threshold=0.55,
+        )
+        result["asset_class"] = req.asset
+        result["symbol"] = req.symbol
+        result["exchange"] = req.exchange
+        result["timeframe"] = req.timeframe
+        result["data_provenance"] = dict(getattr(df, "attrs", {}).get("data_provenance") or {})
+        result["execution_authority"] = False
+        result["evidence_note"] = (
+            "Out-of-sample meta-label metrics are diagnostic only. They do not bypass the "
+            "comparable-trial DSR, financing, execution-cost, or live-release gates."
+        )
+        await _audit("RESEARCH_META_LABEL_OOS", {
+            "asset": req.asset,
+            "symbol": req.symbol,
+            "exchange": req.exchange,
+            "timeframe": req.timeframe,
+            "status": result.get("status"),
+            "oos_observations": result.get("oos_observations", 0),
+            "execution_authority": False,
+        })
+        return result
+    except Exception as e:
+        raise _safe_http_error(400, e, "Meta-label research could not be completed") from e
 
 
 @app.post("/api/execute")

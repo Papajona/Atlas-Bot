@@ -350,7 +350,7 @@ def simulate_execution_aware_strategy(
         "final_equity": equity,
         "active_bars": int((position_series != 0).sum()),
         "net_returns_compounded": float(np.prod(1.0 + net_series.to_numpy()) if n else 1.0),
-        "intrabar_stop_target_model_complete": True,
+        "intrabar_stop_target_model_complete": False,  # OHLC cannot prove tick-level event order
         "promotion_eligible_on_cost_model": carry is not None,
     }
     compounded = float(np.prod(1.0 + net_series.to_numpy())) if n else 1.0

@@ -89,7 +89,7 @@ def fetch_crypto(symbol: str, exchange: str = "bybit", timeframe: str = "1h", da
             cutoff = pd.Timestamp(datetime.fromtimestamp((now_ms - tf_ms) / 1000, tz=timezone.utc))
             df = df[df.index <= cutoff]
         cleaned = _validate_ohlcv(df, timeframe)
-        return _attach_data_provenance(
+        verified = _attach_data_provenance(
             cleaned,
             source="ccxt_ohlcv",
             symbol=symbol,
@@ -97,9 +97,42 @@ def fetch_crypto(symbol: str, exchange: str = "bybit", timeframe: str = "1h", da
             timeframe=timeframe,
             fetched_at=datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).isoformat(),
         )
+        # CCXT spot OHLCV volumes are eligible for the paper simulator only when loaded
+        # market metadata explicitly identifies a non-contract spot market. Contract,
+        # swap, future, option and unknown-market volumes must never be treated as base units.
+        market = (ex.markets or {}).get(symbol, {}) or {}
+        verified_spot = market.get("spot") is True and market.get("contract") is False
+        verified.attrs["data_provenance"].update({
+            "asset_class": "crypto",
+            "market_type": "spot" if verified_spot else "derivative_or_unknown",
+            "volume_unit": "base_asset" if verified_spot else "unknown",
+            "volume_unit_verified": bool(verified_spot),
+        })
+        return verified
     finally:
         if hasattr(ex, "close") and callable(ex.close):
             ex.close()
+
+
+def _normalize_yfinance_fx_symbol(symbol: str) -> str:
+    """Normalize a currency pair without treating commodity/index tickers as FX pairs."""
+    raw = str(symbol or "").strip().upper()
+    if raw.endswith("=X"):
+        pair = raw[:-2]
+    else:
+        pair = raw
+    pair = pair.replace("/", "").replace("_", "").replace("-", "")
+    if len(pair) == 6 and pair[:3] in {"XAU", "XAG", "XPT", "XPD"}:
+        raise ValueError(
+            "Precious-metal symbols are commodity instruments and cannot use the Yahoo FX adapter"
+        )
+    if len(pair) != 6 or not pair.isalpha():
+        raise ValueError(
+            "Yahoo FX data requires a six-letter currency-pair symbol such as EURUSD or EUR_USD; "
+            "non-FX instruments must use their own verified adapter"
+        )
+    return pair + "=X"
+
 
 
 def _normalize_yfinance_fx_symbol(symbol: str) -> str:
@@ -186,7 +219,7 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
         expected_upper_bound = days * bars_per_day
         max_pages = max(1, int(np.ceil(expected_upper_bound / page_size)) + 2)
         end_time = datetime.now(timezone.utc)
-        requested_start = end_time - pd.Timedelta(days=days)
+        requested_start = pd.Timestamp(end_time - pd.Timedelta(days=days))
         cursor = requested_start
         candles = []
         seen_timestamps: set[pd.Timestamp] = set()
@@ -248,6 +281,11 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
         raise RuntimeError("No completed OANDA candles returned for requested time window")
     df = pd.DataFrame(rows, columns=["ts","open","high","low","close","volume"])
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    # The provider's count/from/to response is not authoritative for the exact
+    # requested half-open UTC interval; enforce it locally after pagination.
+    df = df.loc[(df["ts"] >= requested_start) & (df["ts"] < pd.Timestamp(end_time))].copy()
+    if df.empty:
+        raise RuntimeError("No completed OANDA candles returned inside the requested UTC time window")
     # The OANDA request uses from+count pagination, so enforce the caller's exact
     # half-open UTC window locally rather than trusting the provider to clip every page.
     df = df.loc[(df["ts"] >= requested_start) & (df["ts"] < end_time)].copy()
