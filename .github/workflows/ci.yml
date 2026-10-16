@@ -327,7 +327,10 @@ jobs:
             -h 127.0.0.1 -U atlas -d atlas_restore /tmp/atlas-ci.dump
           restored_head="$(PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -At \
             -h 127.0.0.1 -U atlas -d atlas_restore -c 'SELECT version_num FROM alembic_version')"
-          test "$restored_head" = "0049_public_schema_rls_lockdown"
+          test "$restored_head" = "0050_paper_execution_lifecycle"
+          restored_paper_tables="$(PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -At \
+            -h 127.0.0.1 -U atlas -d atlas_restore -c "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname IN ('paper_order_states', 'paper_bar_states', 'paper_fill_events')")"
+          test "$restored_paper_tables" = "3"
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -At \
             -h 127.0.0.1 -U atlas -d atlas_restore -c "
               SELECT CASE WHEN count(*) FILTER (WHERE NOT relrowsecurity) = 0
