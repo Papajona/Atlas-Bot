@@ -41,7 +41,7 @@ from .strategy_ai import generate_strategy_draft
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates, live_strategy_signals
 from .research_validation import oos_promotion_gate, monte_carlo_bootstrap
 from .daily_research import run_daily_research, latest_macro_context
-from .execution import execute_signal, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits, customer_paper_execution_blocked
+from .execution import execute_signal, advance_platform_paper_orders, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits, customer_paper_execution_blocked
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
 from .payout import get_payout_provider, PayoutError, PayoutUnknown, PayoutNotFound
 from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, release_separation_violation, verify_release_operator
@@ -6398,18 +6398,41 @@ async def strategy_backtest_api(req: MarketRequest, x_admin_token: str | None = 
 async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "OPERATIONS")
+    if not settings.paper_bar_execution_enabled:
+        raise HTTPException(409, "Bar-driven paper execution is disabled until explicitly enabled for staging verification")
     path = model_file(req)
     try:
         paper_req = req.model_copy(update={"days": 5})
         df = await asyncio.to_thread(market_data, paper_req)
-        sig = await asyncio.to_thread(predict_latest, df, path)
         paper_context = await asyncio.to_thread(_server_paper_market_context, paper_req, df)
-        if paper_context is not None:
-            sig = {**sig, "paper_market_context": paper_context}
+        paper_processing = await advance_platform_paper_orders(
+            df,
+            exchange=req.exchange,
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+            asset=req.asset,
+            market_context=paper_context,
+        )
+        if paper_processing.get("status") in {
+            "STALE_BAR", "BAR_NOT_COMPLETE", "DATA_PROVENANCE_INVALID",
+            "BAR_PROVENANCE_CONFLICT", "INVALID_BAR_PRICE",
+        }:
+            raise RiskBlocked("Paper execution refused stale, incomplete, conflicting, or unverified market data")
         price = float(df.close.iloc[-1])
+        if int(paper_processing.get("protective_exit_orders_pending") or 0) > 0:
+            equity_state = await mark_paper_equity({req.symbol: price})
+            return {
+                "mode": "PAPER", "side": "protective_exit_pending", "price": price,
+                "paper_order_processing": paper_processing, "equity": equity_state,
+            }
+        sig = await asyncio.to_thread(predict_latest, df, path)
         ts = sig["signal_timestamp"]
         if sig["signal"] == 0:
-            return {"mode": "PAPER", "side": "flat", "price": price, **sig}
+            equity_state = await mark_paper_equity({req.symbol: price})
+            return {
+                "mode": "PAPER", "side": "flat", "price": price, **sig,
+                "paper_order_processing": paper_processing, "equity": equity_state,
+            }
         side = "buy" if sig["signal"] > 0 else "sell"
         async with SessionLocal() as db:
             s = await db.get(AppState, 1)
@@ -6418,11 +6441,26 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
         qty = target_notional / price
         stop = price * (1 - settings.stop_loss_pct) if side == "buy" else price * (1 + settings.stop_loss_pct)
         tp = price * (1 + settings.take_profit_pct) if side == "buy" else price * (1 - settings.take_profit_pct)
-        result = await execute_signal(req.symbol, side, qty, price, sig, req.exchange, req.timeframe, ts,
-                                      force_paper=True, stop_loss_price=stop, take_profit_price=tp, asset=req.asset)
+        submission_signal = dict(sig)
+        submission_signal["_paper_execution_context"] = {
+            "bar_timestamp": df.index[-1].isoformat(),
+            "data_provenance": dict(df.attrs.get("data_provenance") or {}),
+            "asset": req.asset,
+            "symbol": req.symbol,
+            "exchange": req.exchange,
+            "timeframe": req.timeframe,
+        }
+        if paper_context is not None:
+            submission_signal["paper_market_context"] = paper_context
+        result = await execute_signal(
+            req.symbol, side, qty, price, submission_signal, req.exchange, req.timeframe, ts,
+            force_paper=True, stop_loss_price=stop, take_profit_price=tp, asset=req.asset,
+        )
         equity_state = await mark_paper_equity({req.symbol: price})
-        return {"mode": "PAPER", "side": side, "price": price, "quantity": qty, **sig,
-                "execution": result, "equity": equity_state}
+        return {
+            "mode": "PAPER", "side": side, "price": price, "quantity": qty, **sig,
+            "execution": result, "paper_order_processing": paper_processing, "equity": equity_state,
+        }
     except RiskBlocked as e:
         raise _safe_http_error(409, e, "Operation could not be completed") from e
     except Exception as e:
