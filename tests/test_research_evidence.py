@@ -21,7 +21,7 @@ def _sign(document):
 
 
 def _source(kind):
-    return {"source_type": kind, "uri": f"fixture://{kind}/source",
+    return {"source_type": kind, "uri": f"https://evidence-source.atlas-data.net/{kind}/source",
             "sha256": hashlib.sha256(kind.encode()).hexdigest()}
 
 
@@ -160,3 +160,30 @@ def test_market_request_bounds_signed_evidence_and_attaches_without_mutating_sou
 
     with pytest.raises(ValidationError, match="byte limit"):
         MarketRequest(point_in_time_universe_manifest={"payload": "x" * (5 * 1024 * 1024)})
+
+
+def test_research_evidence_source_uris_reject_fixtures_and_local_placeholders():
+    from app.research_evidence import _sources_ok
+
+    required = {"listing_history", "delisting_history", "failed_assets"}
+    valid = [_source(kind) for kind in required]
+    assert _sources_ok(valid, required)
+
+    for bad_uri in (
+        "fixture://listing_history/source",
+        "mock://listing_history/source",
+        "file:///tmp/listings.csv",
+        "https://localhost/listings.csv",
+        "https://provider.invalid/listings.csv",
+        "https://provider.test/listings.csv",
+        "https://example.org/listings.csv",
+    ):
+        sources = [
+            {
+                "source_type": kind,
+                "uri": bad_uri if kind == "listing_history" else _source(kind)["uri"],
+                "sha256": hashlib.sha256(kind.encode()).hexdigest(),
+            }
+            for kind in required
+        ]
+        assert _sources_ok(sources, required) is False, bad_uri
