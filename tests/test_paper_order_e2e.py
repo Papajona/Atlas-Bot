@@ -111,7 +111,7 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
 
         df1 = pd.DataFrame(
             {"open":[99.0,99.5,100.0,100.5], "high":[100.0,100.0,101.0,101.5],
-             "low":[98.0,99.0,99.5,100.0], "close":[99.0,99.5,100.0,101.0],
+             "low":[98.0,99.0,99.5,98.5], "close":[99.0,99.5,100.0,101.0],
              "volume":[1.0,1.0,1.0,1.0]},
             index=pd.DatetimeIndex([submit_bar-pd.Timedelta(minutes=10),
                                     submit_bar-pd.Timedelta(minutes=5), submit_bar, process_bar]),
@@ -126,6 +126,9 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
         assert result["liquidity_verified"] is True
         assert result["fills"] == 1
         assert result["partial_fills"] == 1
+        # The fill is modeled at bar close: do not trigger its stop from that bar's earlier low.
+        assert result["stop_triggers"] == 0
+        assert result["protective_exit_orders_created"] == 0
 
         async with SessionLocal() as db:
             trade = (await db.execute(select(Trade).where(
