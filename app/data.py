@@ -170,8 +170,10 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
                 symbol,
                 granularity,
                 count=page_size,
+                # OANDA documents that count must not be combined with both from and to: the
+                # window would also exceed the 5000-candle cap. Page forward with from + count
+                # only; the loop stops once the cursor reaches the requested end time.
                 from_time=cursor.isoformat(),
-                to_time=end_time.isoformat(),
             )
             if not batch:
                 break
