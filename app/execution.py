@@ -1888,6 +1888,40 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             if asset in {"forex", "commodity"} and forex_live and settings.oanda_practice:
                 raise RiskBlocked("OANDA practice mode is enabled; live Forex is locked")
             mode = "FOREX_DEMO" if forex_demo else ("LIVE" if live else "PAPER")
+            paper_bar_context = None
+            if mode == "PAPER" and settings.paper_bar_execution_enabled and customer_id is None:
+                if str(asset).lower() != "crypto":
+                    raise RiskBlocked("Bar-driven paper fills require verified crypto spot base-volume data")
+                paper_bar_context = signal.get("_paper_execution_context")
+                if not isinstance(paper_bar_context, dict):
+                    raise RiskBlocked("Bar-driven paper execution requires server-built completed-bar context")
+                provenance = paper_bar_context.get("data_provenance")
+                if not isinstance(provenance, dict):
+                    raise RiskBlocked("Bar-driven paper execution requires market-data provenance")
+                digest = str(provenance.get("sha256") or "")
+                if (
+                    provenance.get("source") != "ccxt_ohlcv"
+                    or str(provenance.get("symbol") or "") != str(symbol)
+                    or str(provenance.get("exchange") or "").lower() != str(exchange).lower()
+                    or str(provenance.get("timeframe") or "") != str(timeframe)
+                    or str(provenance.get("market_type") or "").lower() != "spot"
+                    or provenance.get("volume_unit") != "base_asset"
+                    or provenance.get("volume_unit_verified") is not True
+                    or len(digest) != 64
+                    or any(ch not in "0123456789abcdefABCDEF" for ch in digest)
+                    or str(paper_bar_context.get("asset") or "").lower() != "crypto"
+                    or str(paper_bar_context.get("symbol") or "") != str(symbol)
+                    or str(paper_bar_context.get("exchange") or "").lower() != str(exchange).lower()
+                    or str(paper_bar_context.get("timeframe") or "") != str(timeframe)
+                ):
+                    raise RiskBlocked("Bar-driven paper context failed spot/provenance integrity checks")
+                try:
+                    paper_bar_context = {
+                        **paper_bar_context,
+                        "bar_timestamp": _paper_utc(paper_bar_context.get("bar_timestamp")),
+                    }
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise RiskBlocked("Bar-driven paper context has an invalid bar timestamp") from exc
             trading_account_id = account.id if account is not None else None
             risk_equity = float(account.equity if account is not None else s.equity)
 
@@ -2104,6 +2138,65 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                                 reject_trade.updated_at = utcnow()
                                 await reject_db.commit()
                         raise RiskBlocked(str(exc))
+        if mode == "PAPER" and settings.paper_bar_execution_enabled and customer_id is None:
+            async with SessionLocal() as db:
+                t = await db.get(Trade, trade_id, with_for_update=True)
+                if t is None:
+                    raise RiskBlocked("New paper order record is unavailable")
+                existing_state = (await db.execute(
+                    select(PaperOrderState).where(PaperOrderState.trade_id == trade_id)
+                )).scalar_one_or_none()
+                if existing_state is not None:
+                    return {
+                        "duplicate": True, "trade_id": trade_id, "mode": "PAPER",
+                        "status": t.status, "filled_quantity": float(t.filled_quantity or 0.0),
+                        "remaining_quantity": float(t.remaining_quantity or 0.0),
+                    }
+                t.status = "OPEN"
+                t.filled_quantity = 0.0
+                t.remaining_quantity = float(quantity)
+                t.average_fill_price = 0.0
+                t.notional = 0.0
+                t.fee = 0.0
+                t.reason = json.dumps({
+                    **signal,
+                    "paper_execution": {
+                        "model": "PERSISTENT_COMPLETED_BAR_LIFECYCLE_V1",
+                        "model_status": "WAITING_FOR_COMPLETED_BAR",
+                        "validation_grade": "NOT_VALIDATION_GRADE",
+                        "note": "fills are processed on later completed bars only",
+                    },
+                }, default=str)
+                db.add(PaperOrderState(
+                    trade_id=trade_id,
+                    exchange=exchange,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    submitted_bar_at=paper_bar_context["bar_timestamp"],
+                    last_processed_bar_at=None,
+                    bars_elapsed=0,
+                    status="OPEN",
+                ))
+                await db.commit()
+            await audit(
+                "PAPER_ORDER_SUBMITTED",
+                {"trade_id": trade_id, "symbol": symbol, "exchange": exchange,
+                 "timeframe": timeframe, "status": "OPEN",
+                 "submitted_bar_at": paper_bar_context["bar_timestamp"].isoformat(),
+                 "fill_model": "PERSISTENT_COMPLETED_BAR_LIFECYCLE_V1"},
+                actor_id="paper-simulator",
+            )
+            return {
+                "duplicate": False, "trade_id": trade_id, "mode": "PAPER",
+                "status": "OPEN", "filled_quantity": 0.0,
+                "remaining_quantity": float(quantity), "average_fill_price": 0.0,
+                "paper_execution": {
+                    "model": "PERSISTENT_COMPLETED_BAR_LIFECYCLE_V1",
+                    "model_status": "WAITING_FOR_COMPLETED_BAR",
+                    "validation_grade": "NOT_VALIDATION_GRADE",
+                },
+            }
+
         if mode == "PAPER":
             paper_rejection = None
             paper_execution = None
