@@ -155,13 +155,7 @@ async function testAdminDashboard(browser, baseUrl) {
   assert.equal(lastRelease.body.operator_id, "admin-user-1");
   assert.equal(lastRelease.headers["x-release-token"], "test-release-token", "the release secret must be scoped to the release action");
 
-  const popupPromise = page.waitForEvent("popup");
-  await page.getByRole("button", { name: "Enroll Google Authenticator" }).click();
-  const popup = await popupPromise;
-  await popup.locator("img").waitFor();
-  await waitUntil(async () => popup.locator("img").evaluate(img => img.complete && img.naturalWidth > 0));
-  assert.equal(enrollCalls, 1, "enrollment action should be called once");
-  await popup.close();
+  assert.equal(await page.locator("#adminEnrollBtn").isHidden(), true, "an MFA-verified session must not start another enrollment flow");
 
   const startedQueueCalls = queueCalls;
   for (let i = 0; i < 12; i++) {
@@ -178,6 +172,76 @@ async function testAdminDashboard(browser, baseUrl) {
   assert.deepEqual(duplicateIds, [], "repeated refreshes must not create duplicate DOM IDs");
   assert.deepEqual(await page.evaluate(() => window.__cspViolations), [], "admin dashboard must have no CSP violations");
   assert.deepEqual(pageErrors, [], "admin browser flow must not throw JavaScript errors");
+  await page.close();
+}
+
+async function testAdminFirstTimeMfaEnrollment(browser, baseUrl) {
+  const page = await browser.newPage({ viewport: { width: 1365, height: 900 } });
+  const pageErrors = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  const beforeMfaToken = "e30." + Buffer.from(JSON.stringify({ sub: "admin-user-setup", aal: "aal1" })).toString("base64url") + ".test-signature";
+  const upgradedToken = "e30." + Buffer.from(JSON.stringify({ sub: "admin-user-setup", aal: "aal2", amr: [{ method: "totp" }] })).toString("base64url") + ".test-signature";
+  let enrollBody = null;
+  let challengeBody = null;
+  let verifyBody = null;
+  let challengeCalls = 0;
+  await page.route("**/api/**", async route => {
+    const req = route.request();
+    const url = new URL(req.url());
+    const p = url.pathname;
+    if (p === "/api/admin/auth/login" && req.method() === "POST") {
+      return json(route, { ok: true, access_token: beforeMfaToken, refresh_token: "test-refresh", mfa_required: true, totp_enrolled: false });
+    }
+    if (p === "/api/admin/auth/mfa/enroll" && req.method() === "POST") {
+      enrollBody = req.postDataJSON();
+      return json(route, { id: "new-factor-id", totp: { secret: "TEST-ONLY-SECRET", qr_code: '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100"><rect width="100" height="100" fill="#fff"/><rect x="10" y="10" width="28" height="28" fill="#000"/><rect x="62" y="10" width="28" height="28" fill="#000"/><rect x="10" y="62" width="28" height="28" fill="#000"/></svg>' } });
+    }
+    if (p === "/api/admin/auth/mfa/challenge" && req.method() === "POST") {
+      challengeCalls += 1;
+      challengeBody = req.postDataJSON();
+      return json(route, { id: "new-challenge-id" });
+    }
+    if (p === "/api/admin/auth/mfa/verify" && req.method() === "POST") {
+      verifyBody = req.postDataJSON();
+      return json(route, { access_token: upgradedToken, refresh_token: "upgraded-test-refresh", token_type: "bearer", expires_in: 300 });
+    }
+    if (p === "/api/state") return json(route, { mode: "PAPER", equity: 0, realized_pnl: 0, unrealized_pnl: 0, drawdown: 0, daily_loss: 0, live_enabled: false, kill_switch: false, open_positions: [] });
+    if (p === "/api/trades") return json(route, []);
+    if (p === "/api/admin/withdrawals/summary") return json(route, { pending_count: 0, pending_amount: 0, approved_count: 0, approved_amount: 0, in_flight_count: 0, rejected_count: 0 });
+    if (p === "/api/admin/withdrawals" && req.method() === "GET") return json(route, []);
+    if (p === "/api/admin/security/roles") return json(route, []);
+    if (p === "/api/admin/billing/margin") return json(route, { gross_subscription_revenue: 0, operating_costs: 0, referral_commissions: 0, contribution_margin_pct: 0, contribution_profit: 0 });
+    return json(route, {});
+  });
+
+  await page.goto(`${baseUrl}/admin`);
+  await page.locator("#adminEmail").fill("setup-admin@example.invalid");
+  await page.locator("#adminPassword").fill("mock-password");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await waitUntil(async () => (await page.locator("#authState").innerText()).includes("Enroll Google Authenticator"));
+  assert.equal(await page.locator("#adminEnrollBtn").isHidden(), false, "an unenrolled admin must be offered enrollment without entering the protected polling state");
+
+  const popupPromise = page.waitForEvent("popup");
+  await page.getByRole("button", { name: "Enroll Google Authenticator" }).click();
+  const popup = await popupPromise;
+  await popup.locator("img[alt='Authenticator enrollment QR code']").waitFor();
+  await waitUntil(async () => popup.locator("img").evaluate(img => img.complete && img.naturalWidth > 0));
+  await waitUntil(async () => (await page.locator("#authState").innerText()).includes("six-digit authenticator code"));
+  assert.equal(await page.locator("#adminMfaBox").isVisible(), true);
+  assert.equal(await page.locator("#adminMfaVerifyBtn").isVisible(), true);
+  assert.equal(enrollBody && Object.keys(enrollBody).length, 0, "enrollment request must not send arbitrary factor metadata from the browser");
+  assert.equal(challengeCalls, 1);
+  assert.deepEqual(challengeBody, { factor_id: "new-factor-id" });
+
+  await page.locator("#adminMfaCode").fill("123456");
+  await page.locator("#adminMfaVerifyBtn").click();
+  await waitUntil(async () => (await page.locator("#authState").innerText()).includes("Administrator AAL2 session active"));
+  assert.deepEqual(verifyBody, { factor_id: "new-factor-id", challenge_id: "new-challenge-id", code: "123456" });
+  assert.equal(await page.evaluate(() => sessionStorage.getItem("ait_admin_mfa_verified")), "true");
+  assert.equal(await page.evaluate(() => sessionStorage.getItem("ait_admin_access_token")), upgradedToken);
+  assert.equal(await page.locator("#adminEnrollBtn").isHidden(), true, "enrollment must be hidden once MFA is verified");
+  assert.deepEqual(pageErrors, [], "first-time admin enrollment flow must not throw browser JavaScript errors");
+  await popup.close();
   await page.close();
 }
 
@@ -301,6 +365,7 @@ async function testCustomerMfaOtpWithdrawalFlow(browser, baseUrl) {
   const browser = await chromium.launch({ headless: true });
   try {
     await testAdminDashboard(browser, baseUrl);
+    await testAdminFirstTimeMfaEnrollment(browser, baseUrl);
     await testCustomerValidationError(browser, baseUrl);
     await testCustomerMfaOtpWithdrawalFlow(browser, baseUrl);
     console.log("PASS: admin dashboard CSP, data-URI image, payout confirmation and 12x100-row refresh stress; customer validation and mocked login→MFA→OTP→withdrawal flow.");
