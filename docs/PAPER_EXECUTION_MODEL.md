@@ -16,7 +16,7 @@ Adverse cost estimates may combine profile slippage, half-spread and a bounded p
 
 ## Research and market-data gates
 
-- Crypto strategy candidates are blocked unless the research record carries explicit `VERIFIED_POINT_IN_TIME_UNIVERSE` evidence. A current established-coin allowlist is not a historical universe and omits delisted/failed assets.
+- Crypto strategy candidates are currently blocked. The code has no trusted point-in-time-universe loader/manifest validator, so even a caller-supplied `VERIFIED_POINT_IN_TIME_UNIVERSE` string is not accepted as proof. A current established-coin allowlist is not a historical universe and omits delisted/failed assets.
 - Promotion-grade Deflated Sharpe Ratio still requires a complete, comparable historical trial-performance archive measured on the same held-out samples.
 - Missing, malformed or unverified carry/financing evidence must continue to block promotion.
 - FX and commodity instruments require distinct venue/product-specific execution, calendar, precision, liquidity and financing evidence; crypto volume assumptions are not transferable.
