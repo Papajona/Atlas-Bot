@@ -657,10 +657,24 @@ def paper_candidates(
     elif asset_class not in {"forex", "commodity"} or universe_bias != "NOT_APPLICABLE":
         return []
     dsr = validation.get("deflated_sharpe") if isinstance(validation.get("deflated_sharpe"), dict) else {}
-    # Paper candidates still influence parameter selection. Do not publish a candidate
-    # until the same fail-closed promotion evidence exists: comparable trials, numerical
-    # DSR, stressed execution costs, financing/carry evidence and intrabar exit accounting.
-    if validation.get("trial_registry_complete") is not True or dsr.get("status") != "OK":
+    # The prospective DB registry is not a verified archive of all historical trials.
+    # A boolean in a report (including trial_registry_complete=True) is not proof that
+    # a signed, comparable archive was loaded and verified. No signed-archive verifier
+    # is wired into this candidate-selection path yet, so keep the gate closed until
+    # validation is backed by that verifier rather than synthetic report fields.
+    archive_evidence = validation.get("signed_comparable_trial_archive")
+    if (
+        not isinstance(archive_evidence, dict)
+        or archive_evidence.get("status") != "VERIFIED"
+        or archive_evidence.get("signature_verified") is not True
+        or not isinstance(archive_evidence.get("evidence_id"), str)
+        or not archive_evidence.get("evidence_id").strip()
+        or not isinstance(archive_evidence.get("sha256"), str)
+        or len(archive_evidence.get("sha256")) != 64
+        or any(ch not in "0123456789abcdefABCDEF" for ch in archive_evidence.get("sha256"))
+        or validation.get("trial_registry_complete") is not True
+        or dsr.get("status") != "OK"
+    ):
         return []
     candidates = []
     oos_all = validation.get("per_strategy_oos", {})
