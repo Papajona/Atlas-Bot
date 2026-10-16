@@ -7,7 +7,7 @@ Execution remains disabled until a reviewed staging preflight passes.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import json
 import re
@@ -194,5 +194,315 @@ async def preflight_isolated_customer_paper_ledger(
         # Connectivity/auth failures are never accepted as proof of isolation.
         return {"status": "BLOCKED", "reason": "PAPER_DATABASE_PREFLIGHT_ERROR",
                 "detail": type(exc).__name__}
+    finally:
+        await engine.dispose()
+
+
+PAPER_ACCOUNT_CODES = frozenset({
+    "PAPER_CASH", "PAPER_EQUITY", "PAPER_POSITION", "PAPER_FEES", "PAPER_PNL", "PAPER_CLEARING",
+})
+PAPER_EVENT_TYPES = frozenset({
+    "PAPER_SEED", "SIMULATED_FILL", "SIMULATED_FEE",
+    "SIMULATED_FUNDING", "SIMULATED_REALIZED_PNL", "RESET",
+})
+_CURRENCY_RE = re.compile(r"^[A-Z0-9]{2,12}$")
+_AMOUNT_QUANTUM = Decimal("0.000000000000000001")
+
+
+class CustomerPaperLedgerError(RuntimeError):
+    """Base exception for a blocked or invalid customer paper-ledger operation."""
+
+
+class CustomerPaperLedgerBlocked(CustomerPaperLedgerError):
+    """Raised when the isolated paper database does not pass its live preflight."""
+
+
+class CustomerPaperIdempotencyConflict(CustomerPaperLedgerError):
+    """Raised when an idempotency key is reused for a different paper journal."""
+
+
+def _validated_paper_journal(
+    *,
+    customer_id: int,
+    idempotency_key: str,
+    event_type: str,
+    currency: str,
+    lines: Sequence[Mapping[str, Any]],
+    reference: str,
+    metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if isinstance(customer_id, bool) or not isinstance(customer_id, int) or customer_id <= 0:
+        raise ValueError("customer_id must be a positive integer")
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 180:
+        raise ValueError("idempotency_key must contain 1 to 180 characters")
+    event = str(event_type or "").strip().upper()
+    if event not in PAPER_EVENT_TYPES:
+        raise ValueError("event_type is not an allowed customer paper-ledger event")
+    normalized_currency = str(currency or "").strip().upper()
+    if not _CURRENCY_RE.fullmatch(normalized_currency):
+        raise ValueError("currency must be 2 to 12 uppercase alphanumeric characters")
+    normalized_reference = str(reference or "").strip()
+    if len(normalized_reference) > 180:
+        raise ValueError("reference must not exceed 180 characters")
+    if not isinstance(lines, Sequence) or isinstance(lines, (str, bytes)) or len(lines) < 2:
+        raise ValueError("a balanced journal requires at least two lines")
+    if metadata is not None and not isinstance(metadata, Mapping):
+        raise ValueError("metadata must be a JSON-compatible mapping")
+    user_metadata = dict(metadata or {})
+    if "_paper_ledger_payload_sha256" in user_metadata:
+        raise ValueError("metadata uses a reserved ledger integrity field")
+
+    normalized_lines: list[dict[str, str]] = []
+    seen_codes: set[str] = set()
+    total = Decimal("0")
+    for line in lines:
+        if not isinstance(line, Mapping):
+            raise ValueError("each journal line must be a mapping")
+        account_code = str(line.get("account_code") or "").strip().upper()
+        if account_code not in PAPER_ACCOUNT_CODES:
+            raise ValueError("journal line uses an unsupported paper account code")
+        if account_code in seen_codes:
+            raise ValueError("a journal cannot contain duplicate account codes")
+        seen_codes.add(account_code)
+        raw_amount = line.get("signed_amount")
+        if isinstance(raw_amount, (bool, float)) or not isinstance(raw_amount, (str, int, Decimal)):
+            raise ValueError("signed_amount must be an exact decimal string, integer, or Decimal")
+        try:
+            amount = Decimal(str(raw_amount))
+            if not amount.is_finite():
+                raise ValueError("signed_amount must be finite")
+            with localcontext() as ctx:
+                ctx.prec = 50
+                quantized = amount.quantize(_AMOUNT_QUANTUM)
+        except (InvalidOperation, ValueError) as exc:
+            if isinstance(exc, ValueError):
+                raise
+            raise ValueError("signed_amount is outside numeric(38,18) precision") from exc
+        if quantized != amount or quantized == 0 or max(quantized.adjusted() + 1, 0) > 20:
+            raise ValueError("signed_amount must be nonzero and exactly representable as numeric(38,18)")
+        total += quantized
+        normalized_lines.append({"account_code": account_code, "signed_amount": format(quantized, "f")})
+    if total != 0:
+        raise ValueError("journal signed_amount values must sum exactly to zero")
+    try:
+        user_metadata_json = json.dumps(user_metadata, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("metadata must be JSON serializable and finite") from exc
+    payload = {
+        "customer_id": customer_id, "idempotency_key": key, "event_type": event,
+        "currency": normalized_currency, "reference": normalized_reference,
+        "lines": normalized_lines, "metadata": json.loads(user_metadata_json),
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    ).hexdigest()
+    return {
+        **payload,
+        "metadata_json": {**user_metadata, "_paper_ledger_payload_sha256": digest},
+        "payload_sha256": digest,
+    }
+
+
+def _paper_engine():
+    paper_url = settings.customer_paper_database_url
+    if not paper_url:
+        raise CustomerPaperLedgerBlocked("CUSTOMER_PAPER_DATABASE_URL is missing")
+    if "+asyncpg" not in paper_url:
+        try:
+            paper_url = _postgres_url(paper_url).render_as_string(hide_password=False)
+        except ValueError as exc:
+            raise CustomerPaperLedgerBlocked("customer paper database URL is invalid") from exc
+    return create_async_engine(
+        paper_url,
+        pool_pre_ping=True,
+        connect_args={"server_settings": {"statement_timeout": "10000"}},
+    )
+
+
+async def _assert_customer_paper_ready() -> dict[str, Any]:
+    result = await preflight_isolated_customer_paper_ledger(require_enabled=True)
+    if result.get("status") != "PASS":
+        raise CustomerPaperLedgerBlocked(
+            f"customer paper ledger blocked: {result.get('reason', 'UNKNOWN')} "
+            f"{result.get('detail', '')}".strip()
+        )
+    return result
+
+
+async def post_customer_paper_journal(
+    *,
+    customer_id: int,
+    idempotency_key: str,
+    event_type: str,
+    currency: str,
+    lines: Sequence[Mapping[str, Any]],
+    reference: str = "",
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Post an immutable balanced journal only to the separately credentialed paper DB.
+
+    Disabled/unconfigured operation fails closed. Each write reruns the isolation
+    preflight, sets tenant RLS context transaction-locally, and avoids all real-money
+    ledger sessions and tables.
+    """
+    payload = _validated_paper_journal(
+        customer_id=customer_id,
+        idempotency_key=idempotency_key,
+        event_type=event_type,
+        currency=currency,
+        lines=lines,
+        reference=reference,
+        metadata=metadata,
+    )
+    await _assert_customer_paper_ready()
+    engine = _paper_engine()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("SELECT set_config('app.customer_id', :customer_id, true)"),
+                {"customer_id": str(customer_id)},
+            )
+            row = (await conn.execute(text(
+                """
+                INSERT INTO customer_paper.journals
+                    (id, customer_id, idempotency_key, event_type, reference, metadata_json)
+                VALUES
+                    (:id, :customer_id, :idempotency_key, :event_type, :reference,
+                     CAST(:metadata_json AS jsonb))
+                ON CONFLICT (customer_id, idempotency_key) DO NOTHING
+                RETURNING id
+                """
+            ), {
+                "id": str(uuid.uuid4()),
+                "customer_id": payload["customer_id"],
+                "idempotency_key": payload["idempotency_key"],
+                "event_type": payload["event_type"],
+                "reference": payload["reference"],
+                "metadata_json": json.dumps(
+                    payload["metadata_json"], sort_keys=True, separators=(",", ":"), allow_nan=False
+                ),
+            })).first()
+            if row is None:
+                existing = (await conn.execute(text(
+                    """
+                    SELECT id, metadata_json, event_type, reference
+                    FROM customer_paper.journals
+                    WHERE customer_id = :customer_id AND idempotency_key = :idempotency_key
+                    """
+                ), {
+                    "customer_id": payload["customer_id"],
+                    "idempotency_key": payload["idempotency_key"],
+                })).mappings().first()
+                stored = existing["metadata_json"] if existing is not None else None
+                if isinstance(stored, str):
+                    try:
+                        stored = json.loads(stored)
+                    except ValueError:
+                        stored = None
+                stored_digest = stored.get("_paper_ledger_payload_sha256") if isinstance(stored, Mapping) else None
+                if (
+                    existing is None
+                    or stored_digest != payload["payload_sha256"]
+                    or str(existing["event_type"]) != payload["event_type"]
+                    or str(existing["reference"]) != payload["reference"]
+                ):
+                    raise CustomerPaperIdempotencyConflict(
+                        "idempotency key already exists for a different customer paper journal"
+                    )
+                return {
+                    "status": "REPLAYED",
+                    "journal_id": str(existing["id"]),
+                    "idempotency_key": payload["idempotency_key"],
+                    "payload_sha256": payload["payload_sha256"],
+                }
+
+            journal_id = str(row[0])
+            account_ids: dict[str, int] = {}
+            for line in payload["lines"]:
+                code = line["account_code"]
+                account_row = (await conn.execute(text(
+                    """
+                    INSERT INTO customer_paper.accounts
+                        (customer_id, currency, account_code)
+                    VALUES (:customer_id, :currency, :account_code)
+                    ON CONFLICT (customer_id, currency, account_code) DO NOTHING
+                    RETURNING id
+                    """
+                ), {
+                    "customer_id": payload["customer_id"],
+                    "currency": payload["currency"],
+                    "account_code": code,
+                })).first()
+                if account_row is None:
+                    account_row = (await conn.execute(text(
+                        """
+                        SELECT id FROM customer_paper.accounts
+                        WHERE customer_id=:customer_id AND currency=:currency AND account_code=:account_code
+                        """
+                    ), {
+                        "customer_id": payload["customer_id"],
+                        "currency": payload["currency"],
+                        "account_code": code,
+                    })).first()
+                if account_row is None:
+                    raise CustomerPaperLedgerBlocked("paper account insert/read failed under tenant policy")
+                account_ids[code] = int(account_row[0])
+
+            for line in payload["lines"]:
+                await conn.execute(text(
+                    """
+                    INSERT INTO customer_paper.journal_lines
+                        (journal_id, account_id, customer_id, currency, signed_amount)
+                    VALUES (:journal_id, :account_id, :customer_id, :currency, :signed_amount)
+                    """
+                ), {
+                    "journal_id": journal_id,
+                    "account_id": account_ids[line["account_code"]],
+                    "customer_id": payload["customer_id"],
+                    "currency": payload["currency"],
+                    "signed_amount": Decimal(line["signed_amount"]),
+                })
+        return {
+            "status": "APPENDED",
+            "journal_id": journal_id,
+            "idempotency_key": payload["idempotency_key"],
+            "payload_sha256": payload["payload_sha256"],
+        }
+    finally:
+        await engine.dispose()
+
+
+async def get_customer_paper_balances(*, customer_id: int) -> list[dict[str, str]]:
+    """Return exact per-account balances for only this customer in the paper ledger."""
+    if isinstance(customer_id, bool) or not isinstance(customer_id, int) or customer_id <= 0:
+        raise ValueError("customer_id must be a positive integer")
+    await _assert_customer_paper_ready()
+    engine = _paper_engine()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("SELECT set_config('app.customer_id', :customer_id, true)"),
+                {"customer_id": str(customer_id)},
+            )
+            rows = (await conn.execute(text(
+                """
+                SELECT a.currency, a.account_code, COALESCE(SUM(l.signed_amount), 0) AS balance
+                FROM customer_paper.accounts a
+                LEFT JOIN customer_paper.journal_lines l
+                  ON l.account_id = a.id AND l.customer_id = a.customer_id AND l.currency = a.currency
+                WHERE a.customer_id = :customer_id
+                GROUP BY a.currency, a.account_code
+                ORDER BY a.currency, a.account_code
+                """
+            ), {"customer_id": customer_id})).mappings().all()
+        return [
+            {
+                "currency": str(row["currency"]),
+                "account_code": str(row["account_code"]),
+                "balance": format(Decimal(row["balance"]), "f"),
+            }
+            for row in rows
+        ]
     finally:
         await engine.dispose()
