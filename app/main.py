@@ -57,7 +57,7 @@ from .model_registry import verify_model_file, rollback_champion
 from .correlation_risk import adjusted_group_exposure
 from .custody_signer import validate_signer_config
 from .custody_reconciliation import reconcile_usdt_custody
-from .meta_labeling import meta_label_gate
+from .meta_labeling import meta_label_gate, meta_label_walk_forward
 from .derivatives_context import fetch_public_derivatives_context
 from .multi_timeframe import multi_timeframe_signal
 from .grid_trading import build_grid, grid_profit_pct
@@ -6309,6 +6309,49 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
         raise _safe_http_error(409, e, "Operation could not be completed") from e
     except Exception as e:
         raise _safe_http_error(400, e, "Invalid request") from e
+
+
+@app.post("/api/research/meta-label")
+async def meta_label_research_api(
+    req: MarketRequest,
+    x_admin_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    """Expose chronological OOS meta-filter diagnostics; this endpoint never authorizes execution."""
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "OPERATIONS")
+    try:
+        df = await asyncio.to_thread(market_data, req)
+        result = await asyncio.to_thread(
+            meta_label_walk_forward,
+            df,
+            horizon=3,
+            min_edge_bps=10.0,
+            folds=5,
+            threshold=0.55,
+        )
+        result["asset_class"] = req.asset
+        result["symbol"] = req.symbol
+        result["exchange"] = req.exchange
+        result["timeframe"] = req.timeframe
+        result["data_provenance"] = dict(getattr(df, "attrs", {}).get("data_provenance") or {})
+        result["execution_authority"] = False
+        result["evidence_note"] = (
+            "Out-of-sample meta-label metrics are diagnostic only. They do not bypass the "
+            "comparable-trial DSR, financing, execution-cost, or live-release gates."
+        )
+        await _audit("RESEARCH_META_LABEL_OOS", {
+            "asset": req.asset,
+            "symbol": req.symbol,
+            "exchange": req.exchange,
+            "timeframe": req.timeframe,
+            "status": result.get("status"),
+            "oos_observations": result.get("oos_observations", 0),
+            "execution_authority": False,
+        })
+        return result
+    except Exception as e:
+        raise _safe_http_error(400, e, "Meta-label research could not be completed") from e
 
 
 @app.post("/api/execute")
