@@ -90,6 +90,46 @@ def test_oos_gate_reports_missing_metrics_and_never_promotes_them():
     assert "missing_or_below_minimum_oos_sharpe" in report["rejection_reasons"]
 
 
+
+def test_oos_gate_requires_traceable_venue_execution_cost_calibration():
+    from app.research_validation import oos_promotion_gate
+
+    strong = {
+        "status": "OK",
+        "folds": [{"total_return": value} for value in (0.03, 0.02, 0.01, 0.04, 0.02, 0.01)],
+        "oos_total_return": 0.12,
+        "sharpe": 0.8,
+        "max_drawdown": -0.10,
+        "trades": 150,
+        "deflated_sharpe": 0.97,
+        "cost_stress_ok": True,
+        "financing_cost_model_complete": True,
+        "intrabar_stop_target_model_complete": True,
+        "execution_cost_model_complete": True,
+        "trial_registry_complete": True,
+    }
+    missing = oos_promotion_gate(strong)
+    assert missing["passed"] is False
+    assert "venue_execution_cost_calibration_missing" in missing["rejection_reasons"]
+
+    # This pure-gate fixture describes the contract only. Production producers must
+    # obtain the evidence ID from a trusted venue-calibration archive, not a caller flag.
+    verified_fixture = {
+        **strong,
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_evidence_id": "fixture:venue-cost-calibration",
+    }
+    assert oos_promotion_gate(verified_fixture)["passed"] is True
+
+    for broken in (
+        {**verified_fixture, "execution_cost_calibration_status": "MISSING_VENUE_CALIBRATION_EVIDENCE"},
+        {**verified_fixture, "execution_cost_calibration_evidence_id": ""},
+        {**verified_fixture, "execution_cost_model_complete": False},
+    ):
+        result = oos_promotion_gate(broken)
+        assert result["passed"] is False
+        assert "venue_execution_cost_calibration_missing" in result["rejection_reasons"]
+
 def test_oos_gate_names_incomplete_trial_registry_as_a_blocker():
     from app.research_validation import oos_promotion_gate
 
