@@ -733,12 +733,17 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         trade_context = json.loads(trade.reason or "{}")
     except Exception:
         trade_context = {}
-    live_entry_ids = select(Trade.id).where(Trade.mode == "LIVE")
+    # Position ownership is mode/account scoped. Paper orders must update their own
+    # paper position rather than missing it because the entry trade is not LIVE.
+    compatible_entry_ids = select(Trade.id).where(
+        Trade.mode == trade.mode,
+        Trade.customer_id == trade.customer_id,
+    )
     position_query = select(Position).where(
         Position.symbol == trade.symbol,
         Position.exchange == trade.exchange,
         Position.customer_id == trade.customer_id,
-        Position.entry_trade_id.in_(live_entry_ids),
+        Position.entry_trade_id.in_(compatible_entry_ids),
     ).with_for_update()
     position = (await db.execute(position_query)).scalar_one_or_none()
     realized_decimal = Decimal("0")
