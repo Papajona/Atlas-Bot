@@ -352,3 +352,53 @@ def test_staging_adaptive_model_fails_closed_without_carry_evidence(tmp_path, mo
     assert result["status"] == "VALIDATION_UNAVAILABLE"
     assert result["financing_cost_model_complete"] is False
     assert not model_path.exists()
+
+
+def test_paper_candidates_use_oos_metrics_after_signed_archive_verification(monkeypatch):
+    # The cryptographic archive contract is tested in test_research_evidence.py.
+    # This unit test covers the downstream selector's use of the validator result.
+    from app.research_engine import paper_candidates
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "research_folds", 5)
+    research = {
+        "asset_class": "forex",
+        "universe_bias": "NOT_APPLICABLE",
+        "strategies": [{
+            "strategy": "trend", "sharpe": -99.0, "max_drawdown": -0.99,
+            "trades": 0, "total_return": -9.0,
+        }],
+        "validation": {
+            "trial_registry_complete": True,
+            "deflated_sharpe": {"status": "OK", "deflated_sharpe_ratio": 0.99},
+            "comparable_trial_archive": {
+                "verified": True, "trial_archive_verified": True,
+                "evidence_id": "test-signed-archive",
+                "evidence_sha256": "a" * 64,
+            },
+            "per_strategy_oos": {"trend": {
+                "status": "OK", "oos_total_return": 0.10, "sharpe": 0.9,
+                "max_drawdown": -0.10, "trades": 150, "deflated_sharpe": 0.99,
+                "cost_stress_ok": True, "financing_cost_model_complete": True,
+                "intrabar_stop_target_model_complete": True,
+                "execution_cost_model_complete": True,
+                "execution_cost_calibration_status": "VERIFIED",
+                "execution_cost_calibration_evidence_id": "test-cost-evidence",
+                "trial_registry_complete": True,
+                "folds": [
+                    {"total_return": 0.05}, {"total_return": 0.04},
+                    {"total_return": -0.01}, {"total_return": 0.03},
+                    {"total_return": 0.02},
+                ],
+            }},
+        },
+    }
+
+    candidates = paper_candidates(research)
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate["selection_basis"] == "OUT_OF_SAMPLE_ONLY"
+    assert candidate["metrics"]["metric_basis"] == "OUT_OF_SAMPLE"
+    assert candidate["metrics"]["sharpe"] == 0.9
+    assert candidate["metrics"]["total_return"] == 0.10
+    assert candidate["in_sample_diagnostics"]["sharpe"] == -99.0
