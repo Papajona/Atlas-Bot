@@ -519,7 +519,15 @@ def paper_candidates(
         if not isinstance(oos, dict):
             continue
         folds = oos.get("folds", []) or []
-        positive_ratio = (sum(1 for f in folds if isinstance(f, dict) and float(f.get("total_return", 0.0)) > 0) / len(folds)) if folds else 0.0
+        positive = 0
+        for fold in folds:
+            try:
+                fold_return = float(fold.get("total_return")) if isinstance(fold, dict) else float("nan")
+            except (TypeError, ValueError, OverflowError):
+                fold_return = float("nan")
+            if math.isfinite(fold_return) and fold_return > 0:
+                positive += 1
+        positive_ratio = positive / len(folds) if folds else 0.0
         gate = oos_promotion_gate(oos)
         if (gate.get("passed") is True
                 and row.get("sharpe", 0.0) >= min_sharpe
