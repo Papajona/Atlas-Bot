@@ -5761,6 +5761,9 @@ async def mark_withdrawal_not_sent(
 async def reject_withdrawal(withdrawal_id: int, req: WithdrawalDecision, x_admin_token: str | None = Header(default=None), x_approver_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
+    authenticated_approver = str(claims.get("sub") or claims.get("user_id") or "").strip()
+    if not authenticated_approver or not _constant_time_text_equal(authenticated_approver, str(req.admin_id or "").strip()):
+        raise HTTPException(403, "Approver identity must match the authenticated user")
     approver_auth(req.admin_id, x_approver_token, x_admin_token)
     if not settings.withdrawals_enabled:
         raise HTTPException(403, "Withdrawal administration is disabled")
