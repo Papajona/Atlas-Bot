@@ -150,6 +150,7 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
 
 def test_paper_simulator_refuses_unverified_fx_volume(monkeypatch):
     import pandas as pd
+    from sqlalchemy import select
     from app import execution
     from app.config import settings
     from app.db import init_db, SessionLocal, Trade, PaperOrderState
