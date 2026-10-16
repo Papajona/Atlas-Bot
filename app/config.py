@@ -45,6 +45,27 @@ class Settings(BaseSettings):
             raise ValueError("ML_THREADS must be between 1 and 2 for the deployed CPU budget")
         return value
 
+    @field_validator("paper_fill_latency_bars", "paper_order_ttl_bars")
+    @classmethod
+    def _validate_paper_bar_counts(cls, value: int) -> int:
+        if value < 1 or value > 10000:
+            raise ValueError("paper fill latency and order TTL must be between 1 and 10000 bars")
+        return value
+
+    @field_validator("paper_max_bar_volume_participation", "paper_queue_fill_probability", "paper_rejection_probability")
+    @classmethod
+    def _validate_paper_probabilities(cls, value: float) -> float:
+        if not math.isfinite(float(value)) or not 0.0 <= float(value) <= 1.0:
+            raise ValueError("paper participation and probabilities must be finite values between 0 and 1")
+        return float(value)
+
+    @field_validator("paper_market_impact_coefficient", "paper_max_market_impact_bps")
+    @classmethod
+    def _validate_paper_impact(cls, value: float) -> float:
+        if not math.isfinite(float(value)) or float(value) < 0.0:
+            raise ValueError("paper market impact settings must be finite and non-negative")
+        return float(value)
+
     @field_validator("research_carry_bps_per_bar")
     @classmethod
     def _validate_research_carry(cls, value: float | None) -> float | None:
