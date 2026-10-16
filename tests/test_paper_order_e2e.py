@@ -19,26 +19,25 @@ def encryption_key(monkeypatch):
     monkeypatch.setattr(settings, "discipline_entry_cooldown_seconds", 0)
 
 
-def test_paper_buy_then_sell_round_trip():
+def test_legacy_platform_paper_execution_fails_closed_without_bar_simulator():
+    """Never record a perfect instant fill while the bar-driven simulator is unavailable."""
     from app import execution
-    from app.db import init_db, SessionLocal, Trade, Position, AuditLog
+    from app.db import init_db, SessionLocal, Trade, Position
 
-    sym = f"BTC/USDT"
-    ts = uuid.uuid4().hex  # unique signal timestamp => unique idempotent client order id
+    sym = f"BLOCKED/{uuid.uuid4().hex[:12]}"
 
     async def run():
         await init_db()
-        buy = await execution.execute_signal(sym, "buy", 0.01, 50000.0, {"score": 0.9}, "binance", "1h",
-                                             f"{ts}-b", force_paper=True, stop_loss_price=49000.0, take_profit_price=52000.0)
-        assert buy, buy
-        sell = await execution.execute_signal(sym, "sell", 0.01, 50500.0, {"score": 0.9}, "binance", "1h",
-                                              f"{ts}-s", force_paper=True, stop_loss_price=51500.0, take_profit_price=49000.0)
-        assert sell, sell
+        with pytest.raises(execution.RiskBlocked, match="bar-driven paper simulator"):
+            await execution.execute_signal(
+                sym, "buy", 0.01, 50000.0, {"score": 0.9}, "binance", "1h",
+                uuid.uuid4().hex, force_paper=True,
+                stop_loss_price=49000.0, take_profit_price=52000.0,
+            )
         async with SessionLocal() as db:
-            trades = (await db.execute(select(Trade).where(Trade.client_order_id.like("ait-%")))).scalars().all()
-            assert trades
-            assert all(isinstance(t.filled_quantity, float) and isinstance(t.requested_price, float) for t in trades)
-            audits = (await db.execute(select(AuditLog).where(AuditLog.event == "PAPER_ORDER"))).scalars().all()
-            assert audits
+            trades = (await db.execute(select(Trade).where(Trade.symbol == sym))).scalars().all()
+            positions = (await db.execute(select(Position).where(Position.symbol == sym))).scalars().all()
+            assert trades == []
+            assert positions == []
 
     asyncio.run(run())
