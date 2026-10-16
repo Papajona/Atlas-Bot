@@ -75,8 +75,22 @@ def test_signed_cost_calibration_requires_real_venue_data_and_matching_model():
     assert validate_execution_cost_calibration(signed, keys, **args)["calibration_verified"] is False
     doc["synthetic_only"] = False
     signed, keys = _sign(doc)
-    assert validate_execution_cost_calibration(signed, keys, **args)["calibration_verified"] is True
-    assert validate_execution_cost_calibration(signed, keys, **{**args, "model_fingerprint": "b" * 64})["calibration_verified"] is False
+    # Even signed venue data is not accepted until reviewed limits are configured.
+    missing_limits = validate_execution_cost_calibration(signed, keys, **args)
+    assert missing_limits["calibration_verified"] is False
+    assert missing_limits["reason"] == "COST_CALIBRATION_ACCEPTANCE_THRESHOLDS_MISSING"
+    bounded_args = {**args, "max_spread_error_bps": 1.0, "max_slippage_error_bps": 1.0}
+    accepted = validate_execution_cost_calibration(signed, keys, **bounded_args)
+    assert accepted["calibration_verified"] is True
+    assert accepted["heldout_spread_error_bps"] == 0.2
+    too_tight = validate_execution_cost_calibration(
+        signed, keys, **{**args, "max_spread_error_bps": 0.1, "max_slippage_error_bps": 1.0}
+    )
+    assert too_tight["calibration_verified"] is False
+    assert too_tight["reason"] == "COST_CALIBRATION_ERROR_EXCEEDS_ACCEPTANCE_THRESHOLDS"
+    assert validate_execution_cost_calibration(
+        signed, keys, **{**bounded_args, "model_fingerprint": "b" * 64}
+    )["calibration_verified"] is False
 
 
 def test_trial_archive_must_cover_current_trials_and_a_single_oos_sample():
