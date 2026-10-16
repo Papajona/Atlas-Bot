@@ -72,7 +72,7 @@ def test_customer_paper_ledger_is_disabled_by_default(monkeypatch):
 )
 def test_isolated_customer_paper_ledger_posting_replay_and_tenant_isolation(monkeypatch):
     paper_url = os.environ["ATLAS_PAPER_TEST_DATABASE_URL"]
-    monkeypatch.setattr(settings, "database_url", os.environ["DATABASE_URL"])
+    monkeypatch.setattr(settings, "database_url", os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"])
     monkeypatch.setattr(settings, "customer_paper_database_url", paper_url)
     monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
 
