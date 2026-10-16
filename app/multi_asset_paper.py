@@ -138,6 +138,40 @@ def point_in_time_coin_universe(rows: Sequence[CoinListing], at: datetime, *, co
     return tuple(sorted(r.symbol for r in rows if r.listed_at <= at and (r.delisted_at is None or at < r.delisted_at) and (r.failed_at is None or at < r.failed_at)))
 
 @dataclass(frozen=True)
+class DelistingMark:
+    price: Decimal
+    timestamp: datetime
+    method: str
+    evidence_id: str
+
+
+def resolve_delisting_mark(*, last_trade_price: Decimal, last_trade_at: datetime,
+                           delisting_at: datetime, evidence_id: str,
+                           settlement_price: Decimal | None = None,
+                           settlement_evidence_id: str | None = None) -> DelistingMark:
+    """Resolve a delisting mark without inventing an automatic total-loss price.
+
+    Prefer a documented settlement price. Otherwise use the last evidenced trade
+    at or before delisting as a marked proxy, explicitly labelled as such; callers
+    must still apply liquidation costs and must not represent this proxy as cash
+    actually recovered from a venue.
+    """
+    last_price = _pos(last_trade_price, "last trade price")
+    _aware(last_trade_at, "last_trade_at")
+    _aware(delisting_at, "delisting_at")
+    if last_trade_at > delisting_at:
+        raise PaperModelInputError("last trade occurs after delisting")
+    if not isinstance(evidence_id, str) or not evidence_id.strip():
+        raise PaperModelInputError("last-trade evidence is required")
+    if settlement_price is not None:
+        settled = _pos(settlement_price, "settlement price")
+        if not isinstance(settlement_evidence_id, str) or not settlement_evidence_id.strip():
+            raise PaperModelInputError("settlement evidence is required")
+        return DelistingMark(settled, delisting_at, "VERIFIED_SETTLEMENT", settlement_evidence_id)
+    return DelistingMark(last_price, last_trade_at, "LAST_TRADE_PROXY_NOT_REALIZED_CASH", evidence_id)
+
+
+@dataclass(frozen=True)
 class SlippageInputs:
     mid_price: Decimal
     half_spread_bps: Decimal
