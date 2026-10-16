@@ -37,6 +37,8 @@ def test_ambiguous_bar_uses_stop_before_target_and_charges_exit_once():
     assert result["audit"]["stop_loss_exits"] == 1
     assert result["audit"]["take_profit_exits"] == 0
     assert result["audit"]["ambiguous_bars_filled_stop_first"] == 1
+    # Conservative OHLC stop-first handling does not prove tick-level event ordering.
+    assert result["audit"]["intrabar_stop_target_model_complete"] is False
     assert result["market_returns"].iloc[1] == pytest.approx(-0.04)
     # Position entry is charged on bar zero and the intrabar close on bar one.
     assert result["turnover"].iloc[0] == pytest.approx(1.0)
@@ -151,7 +153,10 @@ def test_oos_financing_completeness_requires_traceable_source_and_evidence_id():
         carry_evidence_id="fixture-rate-sheet-v1",
     )
     assert complete["financing_cost_model_complete"] is True
-    assert complete["execution_cost_model_complete"] is True
+    assert complete["intrabar_stop_target_model_complete"] is False
+    assert complete["execution_cost_model_complete"] is False
+    assert complete["execution_cost_calibration_status"] == "MISSING_VENUE_CALIBRATION_EVIDENCE"
+    assert complete["execution_cost_calibration_evidence_id"] is None
     assert complete["carry_evidence_source"] == "fixture:venue-financing-schedule"
     assert complete["carry_evidence_id"] == "fixture-rate-sheet-v1"
 
