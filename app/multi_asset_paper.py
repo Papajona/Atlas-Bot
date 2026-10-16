@@ -39,10 +39,24 @@ class CoinListing:
 
 def point_in_time_coin_universe(rows: Sequence[CoinListing], at: datetime, *, coverage_start: datetime, coverage_end: datetime, coverage_verified: bool) -> tuple[str,...]:
     if not coverage_verified: raise PaperModelInputError("historical universe coverage unverified")
-    if any(x.tzinfo is None for x in (at,coverage_start,coverage_end)) or not coverage_start <= at <= coverage_end or coverage_start >= coverage_end: raise PaperModelInputError("invalid coverage window")
+    at = _aware(at, "evaluation timestamp")
+    coverage_start = _aware(coverage_start, "coverage start")
+    coverage_end = _aware(coverage_end, "coverage end")
+    if coverage_start >= coverage_end or not coverage_start <= at <= coverage_end:
+        raise PaperModelInputError("invalid coverage window")
     seen=set()
     for r in rows:
-        if not r.symbol.strip() or r.listed_at.tzinfo is None or (r.delisted_at and r.delisted_at.tzinfo is None) or (r.failed_at and r.failed_at.tzinfo is None): raise PaperModelInputError("invalid listing record")
+        if not isinstance(r.symbol, str) or not r.symbol.strip():
+            raise PaperModelInputError("invalid listing symbol")
+        _aware(r.listed_at, "listed_at")
+        if r.delisted_at is not None:
+            _aware(r.delisted_at, "delisted_at")
+        if r.failed_at is not None:
+            _aware(r.failed_at, "failed_at")
+        if r.delisted_at is not None and r.delisted_at < r.listed_at:
+            raise PaperModelInputError("delisting precedes listing")
+        if r.failed_at is not None and r.failed_at < r.listed_at:
+            raise PaperModelInputError("failure precedes listing")
         if r.symbol in seen: raise PaperModelInputError("duplicate symbol")
         seen.add(r.symbol)
     return tuple(sorted(r.symbol for r in rows if r.listed_at <= at and (r.delisted_at is None or at < r.delisted_at) and (r.failed_at is None or at < r.failed_at)))
@@ -96,10 +110,28 @@ class SessionCalendar:
     close_time: time
     holidays: frozenset[date]=frozenset()
     def is_open(self, instant: datetime) -> bool:
-        if instant.tzinfo is None: raise PaperModelInputError("calendar timestamp must be aware")
-        local=instant.astimezone(ZoneInfo(self.timezone_name)); t=local.time().replace(tzinfo=None)
-        if local.date() in self.holidays or local.weekday() not in self.weekdays: return False
-        return self.open_time<=t<self.close_time if self.open_time<=self.close_time else (t>=self.open_time or t<self.close_time)
+        _aware(instant, "calendar timestamp")
+        try:
+            local = instant.astimezone(ZoneInfo(self.timezone_name))
+        except (KeyError, ValueError) as exc:
+            raise PaperModelInputError("unknown calendar timezone") from exc
+        local_time = local.time().replace(tzinfo=None)
+        if self.open_time <= self.close_time:
+            session_date = local.date()
+            within_session = self.open_time <= local_time < self.close_time
+        elif local_time >= self.open_time:
+            session_date = local.date()
+            within_session = True
+        elif local_time < self.close_time:
+            from datetime import timedelta
+            session_date = local.date() - timedelta(days=1)
+            within_session = True
+        else:
+            session_date = local.date()
+            within_session = False
+        if not within_session:
+            return False
+        return session_date.weekday() in self.weekdays and session_date not in self.holidays
 
 @dataclass(frozen=True)
 class ContractSpec:
@@ -111,9 +143,16 @@ class ContractSpec:
     maintenance_margin_rate: Decimal
 
 def required_margin(quantity: Decimal, price: Decimal, spec: ContractSpec, *, leverage: Decimal=Decimal("1")) -> Decimal:
-    qty=_pos(quantity,"quantity"); px=_pos(price,"price"); size=_pos(spec.contract_size,"contract size"); rate=_pos(spec.initial_margin_rate,"margin rate",True); lev=_pos(leverage,"leverage")
-    if rate>1: raise PaperModelInputError("margin rate must be fraction <= 1")
-    return qty*size*px*rate/lev
+    """Conservative margin: satisfy both the broker margin rate and leverage cap."""
+    qty = _pos(quantity, "quantity")
+    px = _pos(price, "price")
+    size = _pos(spec.contract_size, "contract size")
+    rate = _pos(spec.initial_margin_rate, "margin rate", True)
+    lev = _pos(leverage, "leverage")
+    if rate > 1:
+        raise PaperModelInputError("margin rate must be a fraction <= 1")
+    effective_rate = max(rate, Decimal("1") / lev)
+    return qty * size * px * effective_rate
 
 def carry_cost(*, notional: Decimal, annual_rate: Decimal, calendar_days: int, day_count_basis: int=360, direction: str="long") -> Decimal:
     n=_pos(notional,"notional"); rate=Decimal(annual_rate)
@@ -121,7 +160,13 @@ def carry_cost(*, notional: Decimal, annual_rate: Decimal, calendar_days: int, d
     return n*rate*Decimal(calendar_days)/Decimal(day_count_basis)*(1 if direction=="long" else -1)
 
 def active_contract(contracts: Sequence[tuple[datetime,str]], at: datetime) -> str:
-    if at.tzinfo is None or not contracts or any(t.tzinfo is None for t,_ in contracts): raise PaperModelInputError("aware timestamps and explicit rollover schedule required")
+    _aware(at, "rollover timestamp")
+    if not contracts:
+        raise PaperModelInputError("explicit rollover schedule required")
+    for timestamp, symbol in contracts:
+        _aware(timestamp, "rollover effective timestamp")
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise PaperModelInputError("invalid rollover contract symbol")
     ordered=sorted(contracts,key=lambda x:x[0])
     if len({t for t,_ in ordered})!=len(ordered) or any(not s for _,s in ordered): raise PaperModelInputError("invalid rollover schedule")
     eligible=[s for t,s in ordered if t<=at]
