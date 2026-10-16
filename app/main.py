@@ -2163,6 +2163,134 @@ def market_data(req, customer_id: int | None = None):
 
 
 
+def _server_paper_market_context(req: MarketRequest, df) -> dict[str, Any] | None:
+    """Build market context from server-fetched closed CCXT spot candles and a fresh ticker.
+
+    Never accept caller-supplied volume/spread/volatility for the paper fill model.
+    Until non-spot quantity normalization is independently verified, derivatives,
+    FX, and commodity contexts are intentionally unavailable from this helper.
+    """
+    try:
+        if getattr(req, "asset", None) != "crypto" or df is None or df.empty:
+            return None
+        provenance = dict(getattr(df, "attrs", {}).get("data_provenance") or {})
+        if (
+            provenance.get("source") != "ccxt_ohlcv"
+            or str(provenance.get("symbol") or "") != str(req.symbol)
+            or str(provenance.get("exchange") or "").lower() != str(req.exchange).lower()
+            or str(provenance.get("timeframe") or "") != str(req.timeframe)
+            or not provenance.get("sha256")
+        ):
+            return None
+        required = {"open", "high", "low", "close", "volume"}
+        if not required.issubset(set(df.columns)):
+            return None
+        if not df.index.is_unique or not df.index.is_monotonic_increasing or len(df) < 21:
+            return None
+
+        import ccxt
+        if req.exchange not in ccxt.exchanges:
+            return None
+        ex = getattr(ccxt, req.exchange)({
+            "enableRateLimit": True,
+            "timeout": int(settings.exchange_timeout_ms),
+        })
+        try:
+            markets = ex.load_markets()
+            market = markets.get(req.symbol)
+            # The OHLCV volume units for a generic derivative adapter can differ by
+            # venue/contract. This context is restricted to active spot markets, where
+            # CCXT's unified OHLCV volume is in base-asset units matching spot quantity.
+            if not isinstance(market, dict) or market.get("spot") is not True or market.get("active") is not True:
+                return None
+            if market.get("contract") is True:
+                return None
+
+            now_ms = int(ex.milliseconds())
+            timeframe_seconds = float(ex.parse_timeframe(req.timeframe))
+            if not math.isfinite(timeframe_seconds) or timeframe_seconds <= 0:
+                return None
+            timeframe_ms = int(timeframe_seconds * 1000)
+            last_bar_ms = int(pd.Timestamp(df.index[-1]).timestamp() * 1000)
+            if last_bar_ms + timeframe_ms > now_ms:
+                return None  # forming candle
+            max_bar_age_seconds = min(
+                float(settings.stale_data_minutes * 60),
+                max(60.0, timeframe_seconds * 3.5),
+            )
+            if (now_ms - last_bar_ms) / 1000.0 > max_bar_age_seconds:
+                return None
+
+            volume = pd.to_numeric(df["volume"], errors="coerce").tail(20)
+            close = pd.to_numeric(df["close"], errors="coerce").tail(21)
+            if volume.isna().any() or close.isna().any():
+                return None
+            if not np.isfinite(volume.to_numpy(dtype=float)).all() or not np.isfinite(close.to_numpy(dtype=float)).all():
+                return None
+            if (volume < 0).any() or (close <= 0).any():
+                return None
+            tradable_volume_units = float(volume.median())
+            if not math.isfinite(tradable_volume_units) or tradable_volume_units <= 0:
+                return None
+            returns = close.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+            if len(returns) < 10:
+                return None
+            volatility_bps = float(returns.std(ddof=1) * 10_000.0)
+            if not math.isfinite(volatility_bps) or volatility_bps < 0:
+                return None
+
+            ticker = ex.fetch_ticker(req.symbol)
+            bid = float(ticker.get("bid") or 0)
+            ask = float(ticker.get("ask") or 0)
+            quote_timestamp = ticker.get("timestamp")
+            if (
+                not math.isfinite(bid) or not math.isfinite(ask)
+                or bid <= 0 or ask <= 0 or ask < bid
+                or quote_timestamp is None
+            ):
+                return None
+            quote_age_seconds = (now_ms - int(quote_timestamp)) / 1000.0
+            if not math.isfinite(quote_age_seconds) or quote_age_seconds < -1.0 or quote_age_seconds > 5.0:
+                return None
+            midpoint = (bid + ask) / 2.0
+            spread_bps = (ask - bid) / midpoint * 10_000.0
+            if not math.isfinite(midpoint) or midpoint <= 0 or not math.isfinite(spread_bps) or spread_bps < 0:
+                return None
+            return {
+                "context_source": "server_ccxt_closed_spot_ohlcv_and_ticker",
+                "market_type": "spot",
+                "exchange": str(req.exchange).lower(),
+                "symbol": str(req.symbol),
+                "market_id": str(market.get("id") or ""),
+                "base_asset": str(market.get("base") or ""),
+                "quote_asset": str(market.get("quote") or ""),
+                "tradable_volume_units": tradable_volume_units,
+                "volume_units_source": "CCXT_UNIFIED_SPOT_BASE_VOLUME",
+                "volume_window_bars": int(len(volume)),
+                "bar_duration_ms": timeframe_ms,
+                "spread_bps": spread_bps,
+                "recent_volatility_bps": volatility_bps,
+                "reference_price": midpoint,
+                "bid": bid,
+                "ask": ask,
+                "quote_timestamp_utc": datetime.fromtimestamp(int(quote_timestamp) / 1000.0, tz=timezone.utc).isoformat(),
+                "quote_age_seconds": quote_age_seconds,
+                "last_completed_bar_timestamp_utc": pd.Timestamp(df.index[-1]).isoformat(),
+                "ohlcv_sha256": str(provenance["sha256"]),
+            }
+        finally:
+            if hasattr(ex, "close") and callable(ex.close):
+                ex.close()
+    except Exception as exc:
+        logging.getLogger(__name__).debug(
+            "paper_market_context_unavailable exchange=%s symbol=%s reason=%s",
+            getattr(req, "exchange", ""), getattr(req, "symbol", ""), type(exc).__name__,
+        )
+        return None
+
+
+
+
 def _attach_research_evidence(df: pd.DataFrame, req: ResearchMarketRequest) -> pd.DataFrame:
     """Attach caller-supplied signed artifacts without altering market provenance.
 
