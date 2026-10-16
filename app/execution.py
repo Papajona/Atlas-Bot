@@ -1551,7 +1551,19 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                         filled_quantity = float(paper_execution["filled_quantity"])
                         cancelled_quantity = float(paper_execution.get("cancelled_quantity", 0.0))
                         modeled_fill = float(paper_execution["fill_price"])
-                        if not math.isfinite(filled_quantity) or filled_quantity <= 0 or filled_quantity > float(quantity):
+                        if (
+                            not math.isfinite(filled_quantity)
+                            or filled_quantity <= 0
+                            or filled_quantity > float(quantity)
+                            or not math.isfinite(cancelled_quantity)
+                            or cancelled_quantity < 0
+                            or not math.isclose(
+                                filled_quantity + cancelled_quantity,
+                                float(quantity),
+                                rel_tol=1e-9,
+                                abs_tol=1e-12,
+                            )
+                        ):
                             reason = "Paper execution model returned an invalid fill quantity"
                             paper_rejection = {
                                 **paper_execution,
