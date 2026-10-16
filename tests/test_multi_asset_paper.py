@@ -77,3 +77,53 @@ def test_fill_and_carry_reject_invalid_timestamps_and_day_counts():
         carry_cost(notional=D("100"), annual_rate="bad", calendar_days=1)
     with pytest.raises(PaperModelInputError, match="invalid carry inputs"):
         carry_cost(notional=D("100"), annual_rate=D("0.1"), calendar_days=1.5)
+
+
+
+def test_randomized_paper_events_are_deterministic_and_event_scoped():
+    from app.multi_asset_paper import deterministic_uniform, deterministic_delay_bars
+    first = deterministic_uniform(order_key="order-123", event="queue")
+    assert first == deterministic_uniform(order_key="order-123", event="queue")
+    assert first != deterministic_uniform(order_key="order-123", event="rejection")
+    assert deterministic_delay_bars(order_key="order-123", minimum=1, maximum=4) == deterministic_delay_bars(
+        order_key="order-123", minimum=1, maximum=4
+    )
+    assert 1 <= deterministic_delay_bars(order_key="order-123", minimum=1, maximum=4) <= 4
+    with pytest.raises(PaperModelInputError, match="invalid delay bounds"):
+        deterministic_delay_bars(order_key="order-123", minimum=4, maximum=1)
+
+
+def test_financing_requires_verified_effective_instrument_rate_and_audit_provenance():
+    from app.multi_asset_paper import VerifiedFinancingRate, verified_financing_cost
+    rate = VerifiedFinancingRate(
+        instrument="XAU_USD",
+        long_annual_rate=D("0.05"),
+        short_annual_rate=D("0.02"),
+        effective_at=dt(1),
+        verified_at=dt(1),
+        source="broker rate statement",
+        evidence_id="sha256:example-evidence-digest",
+        day_count_basis=360,
+        verified=True,
+    )
+    assert verified_financing_cost(
+        notional=D("3600"), rate=rate, instrument="XAU_USD",
+        at=dt(2), calendar_days=3, direction="long"
+    ) == D("1.5")
+    assert verified_financing_cost(
+        notional=D("3600"), rate=rate, instrument="XAU_USD",
+        at=dt(2), calendar_days=3, direction="short"
+    ) == D("0.6")
+    with pytest.raises(PaperModelInputError, match="not verified"):
+        verified_financing_cost(
+            notional=D("3600"), rate=VerifiedFinancingRate(
+                instrument="XAU_USD", long_annual_rate=D("0.05"), short_annual_rate=D("0.02"),
+                effective_at=dt(1), verified_at=dt(1), source="placeholder",
+                evidence_id="placeholder", verified=False,
+            ), instrument="XAU_USD", at=dt(2), calendar_days=3, direction="long"
+        )
+    with pytest.raises(PaperModelInputError, match="instrument mismatch"):
+        verified_financing_cost(
+            notional=D("3600"), rate=rate, instrument="EUR_USD",
+            at=dt(2), calendar_days=3, direction="long"
+        )
