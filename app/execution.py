@@ -1590,7 +1590,7 @@ async def advance_platform_paper_orders(
                                 )
                                 fill_price = Decimal(str(reference_price * price_multiplier))
                                 reason = "development-only heuristic fill; unvalidated and not promotion evidence"
-                                                if fill_quantity <= Decimal("0"):
+                        if fill_quantity <= Decimal("0"):
                             fill_price = Decimal("0")
                         elif fill_price <= 0:
                             outcome = "INVALID_FILL_PRICE"
