@@ -73,6 +73,13 @@ class Settings(BaseSettings):
             raise ValueError("RESEARCH_CARRY_BPS_PER_BAR must be finite and non-negative when configured")
         return None if value is None else float(value)
 
+    @field_validator("research_cost_max_spread_mae_bps", "research_cost_max_slippage_mae_bps")
+    @classmethod
+    def _validate_research_cost_calibration_tolerance(cls, value: float | None) -> float | None:
+        if value is not None and (not math.isfinite(float(value)) or float(value) < 0):
+            raise ValueError("research cost calibration tolerances must be finite and non-negative")
+        return None if value is None else float(value)
+
     # Real USDT funding (TRON / TRC-20). Production API receives only a public
     # account-level extended public key (xpub) for new deposit-address derivation.
     # Private seeds never belong in the API runtime.
@@ -151,6 +158,9 @@ class Settings(BaseSettings):
     research_yahoo_period: str = "3y"
     research_taker_bps: float = 5.5
     research_slippage_bps: float = 2.0
+    # No default: calibration must meet independently configured, venue-reviewed error bounds.
+    research_cost_max_spread_mae_bps: float | None = None
+    research_cost_max_slippage_mae_bps: float | None = None
     # No default: a missing instrument/venue financing assumption blocks research promotion.
     research_carry_bps_per_bar: float | None = None
     research_carry_evidence_source: str = ""
