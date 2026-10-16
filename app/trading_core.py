@@ -517,7 +517,9 @@ def ai_walk_forward_backtest(
         "carry_evidence_id": carry_evidence_id or None,
         "financing_cost_model_complete": bool(carry_evidence_complete),
         "intrabar_stop_target_model_complete": True,
-        "execution_cost_model_complete": bool(carry_evidence_complete),
+        "execution_cost_model_complete": False,
+        "execution_cost_calibration_status": "MISSING_VENUE_CALIBRATION_EVIDENCE",
+        "execution_cost_calibration_evidence_id": None,
         "execution_model": "OHLC_INTRABAR_ATR_STOP_TAKE_PROFIT_NEXT_OPEN",
         "execution_stop_target_audit": {
             "stop_loss_exits": int(total_stop_exits),
