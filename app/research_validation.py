@@ -427,6 +427,9 @@ def oos_promotion_gate(
     execution_cost_calibration_status = str(oos.get("execution_cost_calibration_status") or "").strip().upper()
     execution_cost_calibration_evidence_id = str(oos.get("execution_cost_calibration_evidence_id") or "").strip()
     execution_cost_model_complete = oos.get("execution_cost_model_complete") is True
+    universe_bias = str(oos.get("universe_bias") or "")
+    survivorship_bias_blocked = universe_bias == "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
+    slippage_model_complete = oos.get("slippage_model_complete") is True
     execution_cost_calibration_ok = (
         execution_cost_calibration_status == "VERIFIED"
         and bool(execution_cost_calibration_evidence_id)
@@ -474,6 +477,10 @@ def oos_promotion_gate(
         rejection_reasons.append("execution_cost_model_incomplete")
     if not trial_registry_complete:
         rejection_reasons.append("comparable_trial_registry_incomplete")
+    if survivorship_bias_blocked:
+        rejection_reasons.append("crypto_universe_survivorship_bias_not_resolved")
+    if not slippage_model_complete:
+        rejection_reasons.append("volume_volatility_aware_slippage_model_incomplete")
 
     passed = not rejection_reasons
     return {
@@ -516,6 +523,9 @@ def oos_promotion_gate(
         "execution_cost_calibration_ok": execution_cost_calibration_ok,
         "trial_registry_complete": trial_registry_complete,
         "trial_registry_ok": trial_registry_complete,
+        "universe_bias": universe_bias or None,
+        "survivorship_bias_blocked": survivorship_bias_blocked,
+        "slippage_model_complete": slippage_model_complete,
     }
 
 
