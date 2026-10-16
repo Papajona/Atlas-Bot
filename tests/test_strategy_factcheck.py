@@ -60,7 +60,7 @@ def test_oos_gate_requires_forward_evidence():
     from app.research_engine import paper_candidates
     row={"strategy":"trend","sharpe":1.0,"max_drawdown":-0.1,"trades":150,"total_return":0.2}
     passing_folds=[{"total_return":0.05},{"total_return":0.04},{"total_return":-0.01},{"total_return":0.03},{"total_return":0.02}]
-    base={"universe_bias":"NOT_APPLICABLE","strategies":[row],"validation":{"per_strategy_oos":{"trend":{"status":"OK","oos_total_return":0.1,"folds":passing_folds}}}}
+    base={"asset_class":"forex","universe_bias":"NOT_APPLICABLE","strategies":[row],"validation":{"per_strategy_oos":{"trend":{"status":"OK","oos_total_return":0.1,"folds":passing_folds}}}}
     assert paper_candidates(base)
     bad={"strategies":[row],"validation":{"per_strategy_oos":{"trend":{"status":"OK","oos_total_return":-0.1,"folds":[{"total_return":0.05},{"total_return":-0.2}]}}}}
     assert paper_candidates(bad)==[]
