@@ -136,8 +136,13 @@ async def preflight_isolated_customer_paper_ledger(
             if str(read_only).lower() not in {"off", "false", "f"}:
                 # A global read-only connection is insufficient to verify order write grants.
                 return {"status": "BLOCKED", "reason": "PAPER_CONNECTION_IS_READ_ONLY"}
-            if bool(public_schema_usage) or bool(public_schema_create):
-                return {"status": "BLOCKED", "reason": "PAPER_ROLE_HAS_UNEXPECTED_PUBLIC_SCHEMA_ACCESS"}
+            # PostgreSQL commonly grants USAGE on the public schema to PUBLIC.
+            # This permits name resolution but grants no object privileges by itself;
+            # all relations/sequences in the primary database are checked below, and
+            # schema CREATE remains forbidden. Do not require a cluster-wide change to
+            # the default public USAGE grant simply to run the isolated paper ledger.
+            if bool(public_schema_create):
+                return {"status": "BLOCKED", "reason": "PAPER_ROLE_HAS_UNEXPECTED_PUBLIC_SCHEMA_CREATE"}
             table_rows = (await conn.execute(text(
                 """
                 SELECT n.nspname || '.' || c.relname AS table_name,
