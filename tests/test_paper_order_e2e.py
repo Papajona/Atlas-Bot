@@ -522,7 +522,7 @@ def test_paper_simulator_stress_shared_capacity_idempotency_and_fee_accounting(m
     asyncio.run(run())
 
 
-def test_existing_position_stop_triggers_when_another_order_fills_same_bar(monkeypatch):
+def test_existing_position_stop_preempts_same_bar_entry_fill(monkeypatch):
     """A fill elsewhere in the order loop must not suppress an existing position's stop."""
     import asyncio
     import json
