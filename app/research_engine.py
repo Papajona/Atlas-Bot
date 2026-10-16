@@ -406,7 +406,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     ens_cost["carry_evidence_id_present"] = bool(carry_evidence_id)
     ens_cost["financing_cost_model_complete"] = carry_evidence_complete
     ens_cost["intrabar_stop_target_model_complete"] = True
-    if not carry_evidence_complete:
+    ens_cost["execution_cost_model_complete"] = False
+    ens_cost["execution_cost_calibration_status"] = "MISSING_VENUE_CALIBRATION_EVIDENCE"
+    ens_cost["execution_cost_calibration_evidence_id"] = None    if not carry_evidence_complete:
         ens_cost["note"] += " Financing promotion evidence requires a configured carry rate and traceable carry source/evidence ID."
     # Each component is judged on its own net returns (main.py gates on per_strategy_oos[selected]).
     for component in components:
@@ -454,7 +456,10 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "carry_evidence_source": carry_evidence_source or None,
                         "carry_evidence_id": carry_evidence_id or None,
                         "intrabar_stop_target_model_complete": True,
-                        "execution_cost_model_complete": bool(carry_evidence_complete),
+                        # Configured cost stress is diagnostic; no venue-calibration archive is wired in.
+                        "execution_cost_model_complete": False,
+                        "execution_cost_calibration_status": "MISSING_VENUE_CALIBRATION_EVIDENCE",
+                        "execution_cost_calibration_evidence_id": None,
                         "carry_bps_per_bar": carry,
                         "trial_registry_status": "COMPLETE" if trial_registry_complete else "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
                         "cumulative_trials": n_trials,
