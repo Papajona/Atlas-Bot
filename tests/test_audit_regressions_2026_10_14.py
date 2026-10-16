@@ -161,9 +161,22 @@ def test_not_applicable_label_without_verified_noncrypto_asset_class_is_rejected
 
 
 def test_backtest_report_records_asset_class_for_candidate_gate():
+    import hashlib
+
     from app.research_engine import backtest_all_strategies
 
-    frame = pd.DataFrame({"close": [100.0]})
+    frame = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.0]},
+        index=pd.DatetimeIndex(["2026-01-01T00:00:00Z"]),
+    )
+    frame.attrs["data_provenance"] = {
+        "sha256": hashlib.sha256(frame.to_csv().encode("utf-8")).hexdigest(),
+        "source": "deterministic regression fixture",
+        "symbol": "BTCUSDT",
+        "exchange": "fixture-only",
+        "market_type": "spot",
+        "timeframe": "1d",
+    }
     result = backtest_all_strategies(frame, include_ai=False, asset="crypto")
     assert result["asset_class"] == "crypto"
     assert result["universe_bias"] == "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
