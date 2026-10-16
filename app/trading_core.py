@@ -148,9 +148,12 @@ def _aligned_log_loss(y_true, probabilities: np.ndarray, model_classes) -> float
 
 
 def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: int = 5, asset: str = "crypto") -> dict:
+    # Fail before touching data: unsupported assets must not inherit crypto assumptions.
+    if asset not in PROFILES:
+        raise ValueError(f"No validated training cost/annualization profile for asset={asset!r}")
+    profile = PROFILES[asset]
     X = build_features(df)
     aligned = df.reindex(X.index)
-    profile = PROFILES.get(asset, PROFILES["crypto"])
     y = triple_barrier(aligned["close"], X["vol_24"], aligned["high"], aligned["low"], max_hold=profile.max_hold)
     mask = y.notna()
     X, y = X.loc[mask], y.loc[mask]
@@ -516,8 +519,12 @@ def ai_walk_forward_backtest(
         "carry_evidence_source": carry_evidence_source or None,
         "carry_evidence_id": carry_evidence_id or None,
         "financing_cost_model_complete": bool(carry_evidence_complete),
-        "intrabar_stop_target_model_complete": True,
-        "execution_cost_model_complete": bool(carry_evidence_complete),
+        # OHLC stop-first handling is a conservative approximation, not tick-level
+        # event-order evidence. Do not let this backtest certify intrabar completeness.
+        "intrabar_stop_target_model_complete": False,
+        "execution_cost_model_complete": False,
+        "execution_cost_calibration_status": "MISSING_VENUE_CALIBRATION_EVIDENCE",
+        "execution_cost_calibration_evidence_id": None,
         "execution_model": "OHLC_INTRABAR_ATR_STOP_TAKE_PROFIT_NEXT_OPEN",
         "execution_stop_target_audit": {
             "stop_loss_exits": int(total_stop_exits),
