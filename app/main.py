@@ -130,6 +130,7 @@ def verify_local_signature(signature: str, digest: str) -> bool:
 from .monitoring import TelemetryMiddleware, metrics_response, logger
 from .schemas import (
     MarketRequest,
+    ResearchMarketRequest,
     CustomerBotStartRequest,
     SmartTradeRequest,
     DcaBotRequest,
@@ -2154,7 +2155,7 @@ def market_data(req, customer_id: int | None = None):
 
 
 
-def _attach_research_evidence(df: pd.DataFrame, req: MarketRequest) -> pd.DataFrame:
+def _attach_research_evidence(df: pd.DataFrame, req: ResearchMarketRequest) -> pd.DataFrame:
     """Attach caller-supplied signed artifacts without altering market provenance.
 
     Research validators still verify Ed25519 signatures and bind each artifact to
@@ -6051,7 +6052,7 @@ async def strategy_signal_api(req: MarketRequest, x_admin_token: str | None = He
 
 
 @app.post("/api/research/backtest-all")
-async def research_backtest_all(req: MarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+async def research_backtest_all(req: ResearchMarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     await auth(x_admin_token, authorization)
     try:
         df = await asyncio.to_thread(market_data, req)
@@ -6073,7 +6074,7 @@ async def research_backtest_all(req: MarketRequest, x_admin_token: str | None = 
 
 
 @app.post("/api/research/paper-signals")
-async def research_paper_signals(req: MarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+async def research_paper_signals(req: ResearchMarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     await auth(x_admin_token, authorization)
     try:
         df = await asyncio.to_thread(market_data, req)
@@ -6105,7 +6106,7 @@ async def research_paper_signals(req: MarketRequest, x_admin_token: str | None =
 
 
 @app.post("/api/research/review")
-async def research_review(req: MarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+async def research_review(req: ResearchMarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     await auth(x_admin_token, authorization)
     try:
         df = await asyncio.to_thread(market_data, req)
