@@ -26,3 +26,10 @@ main{max-width:1600px;padding:28px max(26px,4vw) 70px}.panel{background:linear-g
   .risk-grid { grid-template-columns:minmax(0,1fr); }
   .risk-grid > * { min-width:0; overflow-wrap:anywhere; }
 }
+
+@media(max-width:820px){
+  /* Keep the menu toggle reachable while the drawer is open. The previous
+     stacking order put the fixed sidebar above the topbar control. */
+  body.nav-open .topbar { z-index:40; }
+  .mobile-nav { position:relative; z-index:41; }
+}
