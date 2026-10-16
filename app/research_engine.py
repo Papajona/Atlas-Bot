@@ -637,107 +637,94 @@ def paper_candidates(
     min_oos_total_return: float | None = None,
     min_oos_positive_fold_ratio: float | None = None,
 ) -> list[dict]:
-    """Select paper-shadow candidates using held-out metrics only.
+    """Select paper candidates using both historical and forward-only evidence.
 
-    Full-sample metrics are retained as labeled diagnostics but never influence
-    selection. Candidates are observations for paper/shadow research only; this
-    function is not a model-promotion gate and does not authorize execution.
+    In-sample metrics alone are never sufficient. The OOS gate is intentionally
+    simple and transparent; it is not a guarantee of future performance.
     """
     min_sharpe = settings.adaptive_min_sharpe if min_sharpe is None else float(min_sharpe)
     max_drawdown = settings.adaptive_max_drawdown if max_drawdown is None else float(max_drawdown)
     min_trades = settings.adaptive_min_trades if min_trades is None else int(min_trades)
     min_oos_total_return = settings.research_min_oos_total_return if min_oos_total_return is None else float(min_oos_total_return)
     min_oos_positive_fold_ratio = settings.research_min_oos_positive_fold_ratio if min_oos_positive_fold_ratio is None else float(min_oos_positive_fold_ratio)
-    required_folds = max(2, int(settings.research_folds))
-
-    def finite_metric(value):
-        if value is None or isinstance(value, (bool, np.bool_)):
-            return None
-        try:
-            number = float(value)
-        except (TypeError, ValueError, OverflowError):
-            return None
-        return number if math.isfinite(number) else None
-
+    # Crypto candidates are only allowed when signed point-in-time universe evidence
+    # was validated by backtest_all_strategies for this exact run. A report field alone
+    # cannot bypass the evidence validator. Other asset classes must explicitly declare
+    # the universe requirement NOT_APPLICABLE.
+    universe_bias = research.get("universe_bias") or (research.get("data_quality") or {}).get("universe_bias", "UNKNOWN")
+    asset_class = str(research.get("asset_class") or "").strip().lower()
+    validation = research.get("validation") if isinstance(research.get("validation"), dict) else {}
+    universe_evidence = validation.get("crypto_universe_validation") if isinstance(validation.get("crypto_universe_validation"), dict) else {}
+    if asset_class == "crypto":
+        if universe_bias != "POINT_IN_TIME_VERIFIED" or universe_evidence.get("universe_verified") is not True or not universe_evidence.get("evidence_sha256"):
+            return []
+    elif asset_class not in {"forex", "commodity"} or universe_bias != "NOT_APPLICABLE":
+        return []
+    dsr = validation.get("deflated_sharpe") if isinstance(validation.get("deflated_sharpe"), dict) else {}
+    # The prospective DB registry is not a verified archive of all historical trials.
+    # A boolean in a report (including trial_registry_complete=True) is not proof that
+    # a signed, comparable archive was loaded and verified. No signed-archive verifier
+    # is wired into this candidate-selection path yet, so keep the gate closed until
+    # validation is backed by that verifier rather than synthetic report fields.
+    archive_evidence = validation.get("signed_comparable_trial_archive")
+    if (
+        not TRUSTED_SIGNED_TRIAL_ARCHIVE_VERIFIER_AVAILABLE
+        or not isinstance(archive_evidence, dict)
+        or archive_evidence.get("status") != "VERIFIED"
+        or archive_evidence.get("signature_verified") is not True
+        or not isinstance(archive_evidence.get("evidence_id"), str)
+        or not archive_evidence.get("evidence_id").strip()
+        or not isinstance(archive_evidence.get("sha256"), str)
+        or len(archive_evidence.get("sha256")) != 64
+        or any(ch not in "0123456789abcdefABCDEF" for ch in archive_evidence.get("sha256"))
+        or validation.get("trial_registry_complete") is not True
+        or dsr.get("status") != "OK"
+    ):
+        return []
     candidates = []
-    validation = research.get("validation")
-    if not isinstance(validation, dict):
-        return candidates
-    oos_all = validation.get("per_strategy_oos")
-    if not isinstance(oos_all, dict):
-        return candidates
-    universe_bias = (
-        research.get("universe_bias")
-        or (research.get("data_quality") or {}).get("universe_bias", "UNKNOWN")
-    )
+    oos_all = validation.get("per_strategy_oos", {})
     for row in research.get("strategies", []):
         if not isinstance(row, dict):
             continue
         name = str(row.get("strategy") or "")
         if not name:
             continue
-        oos = oos_all.get(name)
-        if not isinstance(oos, dict) or oos.get("status") != "OK":
+        oos = oos_all.get(name, {})
+        if not isinstance(oos, dict):
             continue
-
-        oos_sharpe = finite_metric(oos.get("sharpe"))
-        oos_drawdown = finite_metric(oos.get("max_drawdown"))
-        oos_trades_value = finite_metric(oos.get("trades"))
-        oos_return = finite_metric(oos.get("oos_total_return"))
-        raw_folds = oos.get("folds")
-        if not isinstance(raw_folds, (list, tuple)) or len(raw_folds) < required_folds:
+        gate = oos_promotion_gate(
+            oos,
+            min_dsr=0.95,
+            require_cost_stress=True,
+            min_folds=max(5, int(settings.research_folds)),
+            min_total_return=min_oos_total_return,
+            min_positive_fold_ratio=min_oos_positive_fold_ratio,
+            min_sharpe=min_sharpe,
+            max_drawdown=max_drawdown,
+            min_trades=min_trades,
+        )
+        if gate.get("passed") is not True:
             continue
-        fold_returns = []
-        fold_metrics_valid = True
-        for fold in raw_folds:
-            if not isinstance(fold, dict):
-                fold_metrics_valid = False
-                break
-            value = finite_metric(fold.get("total_return"))
-            if value is None:
-                fold_metrics_valid = False
-                break
-            fold_returns.append(value)
-        if not fold_metrics_valid or len(fold_returns) != len(raw_folds):
-            continue
-        if (oos_sharpe is None or oos_drawdown is None or oos_trades_value is None
-                or not oos_trades_value.is_integer() or oos_trades_value < 0
-                or oos_return is None):
-            continue
-
-        positive_ratio = sum(value > 0 for value in fold_returns) / len(fold_returns)
-        if not (
-            oos_sharpe >= min_sharpe
-            and oos_drawdown >= max_drawdown
-            and int(oos_trades_value) >= min_trades
-            and oos_return >= min_oos_total_return
-            and positive_ratio >= min_oos_positive_fold_ratio
-        ):
-            continue
-
+        # Selection metrics come only from held-out bars. Full-sample values are
+        # retained as diagnostics and cannot rescue a failed OOS gate.
+        oos_metrics = {
+            "strategy": name,
+            "sharpe": gate.get("sharpe"),
+            "max_drawdown": gate.get("max_drawdown"),
+            "trades": gate.get("trades"),
+            "total_return": gate.get("oos_total_return"),
+            "metric_basis": "OUT_OF_SAMPLE",
+        }
         candidates.append({
             "strategy": name,
-            "reason": "oos_metrics_gate_passed",
+            "reason": "full_oos_promotion_evidence_passed",
             "selection_basis": "OUT_OF_SAMPLE_ONLY",
-            "promotion_eligible": False,
-            "universe_bias": universe_bias,
-            # Keep the common metric names but source them only from held-out bars.
-            "metrics": {
-                "strategy": name,
-                "sharpe": oos_sharpe,
-                "max_drawdown": oos_drawdown,
-                "trades": int(oos_trades_value),
-                "total_return": oos_return,
-                "metric_basis": "OUT_OF_SAMPLE",
-            },
+            "promotion_eligible": True,
+            "metrics": oos_metrics,
             "in_sample_diagnostics": row,
             "oos": oos,
-            "oos_positive_fold_ratio": positive_ratio,
-            "evidence_limitations": [
-                "Paper-shadow candidate only; not model-promotion or execution approval.",
-                "Complete comparable trial-performance history and promotion-grade DSR remain required separately.",
-                f"Research universe limitation: {universe_bias}.",
-            ],
+            "oos_positive_fold_ratio": gate.get("positive_fold_ratio", 0.0),
+            "promotion_gate": gate,
         })
     return candidates
 
