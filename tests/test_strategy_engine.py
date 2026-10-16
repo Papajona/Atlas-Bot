@@ -90,6 +90,7 @@ def test_paper_gate_and_live_shadow_signals():
     from app.research_engine import paper_candidates, live_strategy_signals
     df = sample_df(1800)
     research = {
+        "universe_bias": "NOT_APPLICABLE",
         "strategies": [{"strategy":"trend","sharpe":1.0,"max_drawdown":-0.10,"trades":150,"total_return":0.20}],
         "validation": {"per_strategy_oos": {"trend": {"status":"OK","oos_total_return":0.10,"folds":[{"total_return":0.05},{"total_return":0.04},{"total_return":-0.01},{"total_return":0.03},{"total_return":0.02}]}}}
     }
