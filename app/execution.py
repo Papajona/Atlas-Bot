@@ -1785,6 +1785,41 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     or (now_utc - provenance_fetched_at).total_seconds() > max(60, int(settings.stale_data_minutes) * 60)
                 ):
                     raise RiskBlocked("Paper execution market bar or provenance is stale/incomplete")
+                active_timeframes = (await db.execute(
+                    select(PaperOrderState.timeframe)
+                    .join(Trade, Trade.id == PaperOrderState.trade_id)
+                    .where(
+                        Trade.customer_id.is_(None),
+                        Trade.mode == "PAPER",
+                        Trade.exchange == exchange,
+                        Trade.symbol == symbol,
+                        Trade.status.in_(("OPEN", "PARTIAL")),
+                        PaperOrderState.status.in_(("OPEN", "PARTIAL")),
+                    )
+                    .with_for_update()
+                )).scalars().all()
+                if any(value != timeframe for value in active_timeframes):
+                    raise RiskBlocked(
+                        "Only one active paper timeframe per instrument is supported; "
+                        "finish/cancel its existing orders before switching timeframes"
+                    )
+                position_timeframes = (await db.execute(
+                    select(Trade.timeframe)
+                    .join(Position, Position.entry_trade_id == Trade.id)
+                    .where(
+                        Position.customer_id.is_(None),
+                        Position.exchange == exchange,
+                        Position.symbol == symbol,
+                        Position.quantity != 0,
+                        Trade.customer_id.is_(None),
+                        Trade.mode == "PAPER",
+                    )
+                    .with_for_update()
+                )).scalars().all()
+                if any(value != timeframe for value in position_timeframes):
+                    raise RiskBlocked(
+                        "Only one active paper timeframe per instrument is supported while a position is open"
+                    )
             trading_account_id = account.id if account is not None else None
             risk_equity = float(account.equity if account is not None else s.equity)
 
