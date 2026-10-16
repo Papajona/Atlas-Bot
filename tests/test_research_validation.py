@@ -124,11 +124,17 @@ def test_oos_gate_requires_traceable_venue_execution_cost_calibration():
     for broken in (
         {**verified_fixture, "execution_cost_calibration_status": "MISSING_VENUE_CALIBRATION_EVIDENCE"},
         {**verified_fixture, "execution_cost_calibration_evidence_id": ""},
-        {**verified_fixture, "execution_cost_model_complete": False},
     ):
         result = oos_promotion_gate(broken)
         assert result["passed"] is False
         assert "venue_execution_cost_calibration_missing" in result["rejection_reasons"]
+
+    incomplete_model = oos_promotion_gate({
+        **verified_fixture,
+        "execution_cost_model_complete": False,
+    })
+    assert incomplete_model["passed"] is False
+    assert "execution_cost_model_incomplete" in incomplete_model["rejection_reasons"]
 
 def test_oos_gate_names_incomplete_trial_registry_as_a_blocker():
     from app.research_validation import oos_promotion_gate
