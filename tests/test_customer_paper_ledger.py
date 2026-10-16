@@ -164,6 +164,17 @@ def test_customer_paper_rls_preflight_accepts_only_exact_tenant_predicate():
         "''::text)::bigint)"
     )
     assert _tenant_policy_expression_is_exact(exact) is True
+    # PostgreSQL may render the cast input with redundant parentheses:
+    # customer_id = (NULLIF(...))::bigint. This is the same tenant predicate.
+    deparsed = (
+        "(customer_id = (NULLIF(current_setting('app.customer_id'::text, true), "
+        "''::text))::bigint)"
+    )
+    assert _tenant_policy_expression_is_exact(deparsed) is True
+    # Parentheses tolerance must not admit a widened predicate.
+    assert _tenant_policy_expression_is_exact(
+        deparsed[:-1] + " OR true)"
+    ) is False
     assert _tenant_policy_expression_is_exact(
         exact[:-1] + " OR true)"
     ) is False
