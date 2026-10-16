@@ -1,10 +1,12 @@
-name: Admin Dashboard Browser Verification
+name: Dashboard Browser and Stress Verification
 
 on:
   pull_request:
     paths:
       - "app/templates/dashboard.html"
       - "app/static/admin-dashboard.js"
+      - "app/static/customer-dashboard.js"
+      - "app/static/app.css"
       - "app/templates/customer.html"
       - "app/static/customer.css"
       - "app/static/customer-home.css"
