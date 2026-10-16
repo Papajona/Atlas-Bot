@@ -28,6 +28,8 @@ def test_reentry_block_is_not_cleared_on_later_days_after_an_earlier_daily_halt(
     assert (halted["positions"].iloc[120:] == 0).all()
 
 
-def test_daily_halt_still_allows_reentry_on_the_next_utc_day():
-    pos = _run(True)["positions"]
-    assert (pos.iloc[24:48] != 0).any()
+def test_daily_loss_halt_remains_latched_after_the_next_utc_day():
+    halted = _run(True)
+    pos = halted["positions"]
+    assert halted["audit"]["risk_halt_reason"] == "DAILY_LOSS"
+    assert (pos.iloc[24:] == 0).all()
