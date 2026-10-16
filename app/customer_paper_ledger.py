@@ -235,11 +235,19 @@ async def preflight_isolated_customer_paper_ledger(
                           AND n.nspname <> 'information_schema'
                         """
                     ), {"paper_role": role_name})).mappings().all()
+                    # PostgreSQL normally grants USAGE on the "public" schema to
+                    # PUBLIC. That alone does not grant table/function privileges and
+                    # would make every distinct paper role fail preflight by default.
+                    # Reject CREATE anywhere and USAGE on every non-public schema;
+                    # the checks below separately inspect all table/view and sequence
+                    # ACLs in the primary database.
                     schema_exposure = [
                         f"{row['nspname']}:{permission}"
                         for row in primary_schema_rows
                         for permission, value in (("USAGE", row["can_use"]), ("CREATE", row["can_create"]))
-                        if bool(value)
+                        if bool(value) and (
+                            permission == "CREATE" or str(row["nspname"]) != "public"
+                        )
                     ]
                     if schema_exposure:
                         return {
