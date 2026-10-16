@@ -295,6 +295,18 @@ async def preflight_isolated_customer_paper_ledger(
                         for permission in ("can_select", "can_use", "can_update"):
                             if bool(row[permission]):
                                 primary_exposure.append(f"{row['sequence_name']}:{permission}")
+                    primary_security_definer_rows = (await primary_conn.execute(text(
+                        """
+                        SELECT n.nspname || '.' || p.proname AS function_name
+                        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                        WHERE n.nspname NOT LIKE 'pg_%'
+                          AND n.nspname <> 'information_schema'
+                          AND p.prosecdef
+                          AND has_function_privilege(CAST(:paper_role AS name), p.oid, 'EXECUTE')
+                        """
+                    ), {"paper_role": role_name})).mappings().all()
+                    for row in primary_security_definer_rows:
+                        primary_exposure.append(f"{row['function_name']}:SECURITY_DEFINER_EXECUTE")
                     if primary_exposure:
                         return {
                             "status": "BLOCKED",
