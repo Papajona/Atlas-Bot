@@ -1399,20 +1399,19 @@ async def advance_platform_paper_orders(
                             state.cash_equity = max(0.0, float(state.cash_equity or 0.0) - float(fee_decimal))
                             bar_state.consumed = float(Decimal(str(bar_state.consumed or 0.0)) + fill_quantity)
                             remaining_after = Decimal(str(trade.remaining_quantity or 0.0))
+                            counts["fills"] += 1
                             if remaining_after <= Decimal("0.000000000001"):
                                 trade.remaining_quantity = 0.0
                                 trade.status = "FILLED"
                                 order_state.status = "FILLED"
                                 outcome = "FILLED"
                                 reason = "completed-bar fill; costs are unvalidated heuristics"
-                                counts["fills"] += 1
                             else:
                                 trade.status = "PARTIAL"
                                 order_state.status = "PARTIAL"
                                 outcome = "PARTIAL_FILL"
                                 reason = "partial fill bounded by aggregate verified bar-volume participation"
                                 counts["partial_fills"] += 1
-                            counts["fills"] += 0
                             audit_events.append({
                                 "trade_id": trade.id, "symbol": trade.symbol, "exchange": trade.exchange,
                                 "bar_at": bar_at.isoformat(), "quantity": str(fill_quantity),
