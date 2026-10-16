@@ -115,8 +115,9 @@ class CoinListing:
     delisted_at: datetime | None = None
     failed_at: datetime | None = None
 
-def point_in_time_coin_universe(rows: Sequence[CoinListing], at: datetime, *, coverage_start: datetime, coverage_end: datetime, coverage_verified: bool) -> tuple[str,...]:
-    if not coverage_verified: raise PaperModelInputError("historical universe coverage unverified")
+def point_in_time_coin_universe(rows: Sequence[CoinListing], at: datetime, *, coverage_start: datetime, coverage_end: datetime, coverage_verified: bool, coverage_evidence_id: str | None = None) -> tuple[str,...]:
+    if not coverage_verified or not isinstance(coverage_evidence_id, str) or not coverage_evidence_id.strip():
+        raise PaperModelInputError("historical universe coverage unverified or missing evidence identifier")
     at = _aware(at, "evaluation timestamp")
     coverage_start = _aware(coverage_start, "coverage start")
     coverage_end = _aware(coverage_end, "coverage end")
