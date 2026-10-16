@@ -50,10 +50,12 @@ def validate_database_url_pair(primary_url: str, paper_url: str) -> dict[str, An
     """Validate distinct server-side credentials/endpoints before any network access."""
     primary = _postgres_url(primary_url)
     paper = _postgres_url(paper_url)
-    if (primary.host.casefold(), primary.port or 5432, primary.database, primary.username) == (
-        paper.host.casefold(), paper.port or 5432, paper.database, paper.username
+    if (primary.host.casefold(), primary.port or 5432, primary.database) == (
+        paper.host.casefold(), paper.port or 5432, paper.database
     ):
-        raise ValueError("customer paper ledger must not reuse the primary database identity")
+        raise ValueError(
+            "customer paper ledger must use a separate PostgreSQL database; a different role alone is not isolation"
+        )
     if primary.username == paper.username:
         raise ValueError("customer paper ledger requires a distinct PostgreSQL runtime role")
     if primary.password == paper.password:
@@ -180,6 +182,66 @@ async def preflight_isolated_customer_paper_ledger(
             if exposed_real_tables:
                 return {"status": "BLOCKED", "reason": "PAPER_ROLE_HAS_REAL_MONEY_TABLE_PRIVILEGES",
                         "privileges": sorted(exposed_real_tables)}
+
+            # Inspect the actual primary database as the primary runtime role. Checking
+            # public tables only inside the paper database does not prove that the
+            # paper role lacks privileges on the real customer ledger in the primary DB.
+            primary_engine = create_async_engine(
+                _postgres_url(primary_value).render_as_string(hide_password=False),
+                pool_pre_ping=True,
+                connect_args={"server_settings": {"statement_timeout": "10000"}},
+            )
+            try:
+                async with primary_engine.connect() as primary_conn:
+                    primary_db, primary_role = (await primary_conn.exec_driver_sql(
+                        "SELECT current_database(), current_user"
+                    )).one()
+                    if primary_db != _postgres_url(primary_value).database:
+                        return {"status": "BLOCKED", "reason": "PRIMARY_DATABASE_IDENTITY_MISMATCH"}
+                    primary_public_create = bool((await primary_conn.execute(text(
+                        "SELECT has_schema_privilege(CAST(:paper_role AS name), 'public', 'CREATE')"
+                    ), {"paper_role": role_name})).scalar_one())
+                    if primary_public_create:
+                        return {
+                            "status": "BLOCKED",
+                            "reason": "PAPER_ROLE_CAN_CREATE_IN_PRIMARY_PUBLIC_SCHEMA",
+                        }
+                    primary_table_rows = (await primary_conn.execute(text(
+                        """
+                        SELECT n.nspname || '.' || c.relname AS table_name,
+                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'SELECT') AS can_select,
+                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'INSERT') AS can_insert,
+                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'UPDATE') AS can_update,
+                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'DELETE') AS can_delete,
+                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'TRUNCATE') AS can_truncate,
+                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'REFERENCES') AS can_reference,
+                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'TRIGGER') AS can_trigger
+                        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                        WHERE n.nspname NOT LIKE 'pg_%'
+                          AND n.nspname <> 'information_schema'
+                          AND c.relname = ANY(:real_tables)
+                          AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                        """
+                    ), {
+                        "paper_role": role_name,
+                        "real_tables": list(REAL_MONEY_TABLES),
+                    })).mappings().all()
+                    primary_exposure = []
+                    for row in primary_table_rows:
+                        for permission in (
+                            "can_select", "can_insert", "can_update", "can_delete",
+                            "can_truncate", "can_reference", "can_trigger",
+                        ):
+                            if bool(row[permission]):
+                                primary_exposure.append(f"{row['table_name']}:{permission}")
+                    if primary_exposure:
+                        return {
+                            "status": "BLOCKED",
+                            "reason": "PAPER_ROLE_HAS_PRIMARY_LEDGER_PRIVILEGES",
+                            "privileges": sorted(primary_exposure),
+                        }
+            finally:
+                await primary_engine.dispose()
             return {
                 "status": "PASS",
                 "reason": "ISOLATED_CUSTOMER_PAPER_DATABASE_PREFLIGHT_PASS",
