@@ -31,7 +31,7 @@ from .audit_chain import record_audit
 from .live_fees import extract_order_fee_quote_decimal, ESTIMATED
 from .customer_funds import record_ledger_incident
 from .distributed import acquire_lock, release_lock
-from .paper_execution_model import PaperExecutionModelError, calibrated_model_available, estimate_paper_fill
+from .paper_execution_model import calibrated_model_available, estimate_paper_fill
 
 
 TERMINAL_STATUSES = {"FILLED", "CANCELED", "REJECTED", "FAILED", "SIMULATED"}
