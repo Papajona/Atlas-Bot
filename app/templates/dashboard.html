@@ -38,7 +38,7 @@
   <div class="field"><label>Admin email</label><input id="adminEmail" type="email" autocomplete="username" placeholder="admin@example.com"></div>
   <div class="field"><label>Admin password</label><input id="adminPassword" type="password" autocomplete="current-password" placeholder="Supabase Auth password"></div>
   <button data-action="admin-login">Sign in</button>
-  <button data-action="admin-enroll">Enroll Google Authenticator</button>
+  <button id="adminEnrollBtn" data-action="admin-enroll">Enroll Google Authenticator</button>
   <div id="adminMfaBox" class="field" style="display:none"><label>Authenticator code</label><input id="adminMfaCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit code"></div>
   <button id="adminMfaVerifyBtn" style="display:none" data-action="admin-mfa-verify">Verify Authenticator</button><button id="adminLogoutBtn" data-action="admin-logout" type="button" hidden>Sign out</button>
   <span id="authState" class="muted">Production admin access requires Google Authenticator (TOTP).</span>
