@@ -132,3 +132,31 @@ def test_empty_or_untrusted_keyring_never_verifies():
         signed, {}, venue="binance", market_type="spot", coverage_start=start, coverage_end=end)
     assert result["universe_verified"] is False
     assert result["reason"] == "EVIDENCE_SIGNING_KEY_UNTRUSTED"
+
+
+def test_market_request_bounds_signed_evidence_and_attaches_without_mutating_source():
+    import pandas as pd
+    import pytest
+    from pydantic import ValidationError
+
+    from app.schemas import MarketRequest
+    from app.main import _attach_research_evidence
+
+    manifest = {
+        "evidence_type": "crypto_point_in_time_universe",
+        "evidence_id": "signed-fixture-only",
+        "attestation": {"algorithm": "Ed25519", "key_id": "fixture", "signature_base64": "not-trusted"},
+    }
+    request = MarketRequest(point_in_time_universe_manifest=manifest)
+    source = pd.DataFrame(
+        {"open": [10.0], "high": [11.0], "low": [9.0], "close": [10.0]},
+        index=pd.DatetimeIndex(["2026-01-01T00:00:00Z"]),
+    )
+    source.attrs["data_provenance"] = {"exchange": "fixture", "sha256": "a" * 64}
+    attached = _attach_research_evidence(source, request)
+    assert attached.attrs["point_in_time_universe_manifest"] == manifest
+    assert attached.attrs["data_provenance"] == source.attrs["data_provenance"]
+    assert "point_in_time_universe_manifest" not in source.attrs
+
+    with pytest.raises(ValidationError, match="byte limit"):
+        MarketRequest(point_in_time_universe_manifest={"payload": "x" * (5 * 1024 * 1024)})
