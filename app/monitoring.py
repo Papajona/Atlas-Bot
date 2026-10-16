@@ -16,13 +16,16 @@ DRAWDOWN = Gauge("trader_drawdown", "Current equity drawdown")
 OPEN_POSITIONS = Gauge("trader_open_positions", "Number of non-zero positions")
 
 
-# The dashboards use a data: SVG image for the MFA QR code. Inline scripts remain allowed
-# for compatibility until dashboard scripts and onclick handlers are moved to static files.
-# The remaining directives prevent object embedding, base-URL rewriting and framing.
+# The admin dashboard now uses a same-origin external script and delegated data-action handlers.
+# Keep inline scripts blocked on /admin. The customer dashboard still contains inline handlers
+# and therefore retains a compatibility policy until that separate page is migrated.
 CONTENT_SECURITY_POLICY = (
     "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
-    "script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; "
-    "frame-ancestors 'none'; form-action 'self'"
+    "script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+)
+COMPAT_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+    "script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
 )
 
 
@@ -43,9 +46,10 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
         if str(settings.environment).lower() == "production":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         if str(settings.environment).lower() in {"staging", "production"}:
-            # Keep CSP behavior identical in staging and production so policy-only defects
-            # (such as the blocked MFA QR data URL) are visible before release.
-            response.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
+            # Both environments enforce the same dashboard policy. Do not apply the stricter
+            # admin policy to the customer page until its inline event handlers are removed.
+            policy = CONTENT_SECURITY_POLICY if path in {"/admin", "/admin/"} else COMPAT_CONTENT_SECURITY_POLICY
+            response.headers["Content-Security-Policy"] = policy
         logger.info(json.dumps({"request_id": request_id, "method": request.method, "path": path,
                                 "status": response.status_code, "duration_ms": round(elapsed * 1000, 2)}))
         return response
