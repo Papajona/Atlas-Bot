@@ -2,14 +2,22 @@
 import pathlib
 import re
 
-PAGE = pathlib.Path(__file__).resolve().parents[1] / "app" / "templates" / "customer.html"
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+PAGE = ROOT / "app" / "templates" / "customer.html"
+JS = ROOT / "app" / "static" / "customer-dashboard.js"
 
 
 def _split():
     html = PAGE.read_text(encoding="utf-8")
-    start = html.index("<script>") + len("<script>")
-    end = html.rindex("</script>")
-    return html[:start], html[start:end]
+    js = JS.read_text(encoding="utf-8")
+    return html, js
+
+
+def test_customer_script_is_external_and_markup_has_no_inline_handlers():
+    html, _ = _split()
+    assert '<script src="/static/customer-dashboard.js" defer></script>' in html
+    assert not re.search(r"<script\s*>", html, re.I)
+    assert not re.search(r"\son(?:click|change|submit|input)\s*=", html, re.I)
 
 
 def test_every_wrapped_function_is_defined():
@@ -34,8 +42,8 @@ def test_required_bootstrap_functions_exist():
 
 
 def test_script_element_ids_exist_in_markup():
-    head, js = _split()
-    ids_in_html = set(re.findall(r'\bid="([^"]+)"', head))
+    html, js = _split()
+    ids_in_html = set(re.findall(r'\bid="([^"]+)"', html))
     wanted = set(re.findall(r"getElementById\(\s*['\"]([A-Za-z0-9_\-]+)['\"]\s*\)", js))
     missing = sorted(wanted - ids_in_html)
     assert not missing, f"script reads ids that are not in the markup: {missing}"
@@ -48,17 +56,17 @@ def test_scanner_table_uses_value_tokens_not_labels():
 
 
 def test_customer_home_copy_is_financially_precise():
-    head, _ = _split()
-    assert "Account equity" in head
-    assert "Open positions" in head
-    assert "Open P&amp;L" in head
-    assert "Realised P&amp;L &middot; 7 days" in head
-    assert "Create paper trade" in head
-    assert "Performance (7 days)" not in head
+    html, _ = _split()
+    assert "Account equity" in html
+    assert "Open positions" in html
+    assert "Open P&amp;L" in html
+    assert "Realised P&amp;L &middot; 7 days" in html
+    assert "Create paper trade" in html
+    assert "Performance (7 days)" not in html
 
 
 def test_home_chart_is_ledger_backed():
-    head, js = _split()
+    html, js = _split()
     assert "TRADE_SETTLEMENT" in js
     assert "TRADING_FEE" in js
-    assert 'aria-label="Seven day realised profit and loss chart"' in head
+    assert 'aria-label="Seven day realised profit and loss chart"' in html
