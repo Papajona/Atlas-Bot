@@ -2,6 +2,8 @@
 from __future__ import annotations
 from decimal import Decimal
 from datetime import datetime
+import json
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -12,6 +14,32 @@ class MarketRequest(BaseModel):
     exchange: str = "binance"
     timeframe: str = "1h"
     days: int = Field(default=365, ge=30, le=1500)
+    # Optional signed evidence is verified against server-configured trust roots;
+    # it is never trusted merely because an API caller supplied it.
+    point_in_time_universe_manifest: dict[str, Any] | None = Field(default=None, repr=False)
+    execution_cost_calibration_evidence: dict[str, Any] | None = Field(default=None, repr=False)
+    trial_performance_archive: dict[str, Any] | None = Field(default=None, repr=False)
+
+    @field_validator("point_in_time_universe_manifest", "execution_cost_calibration_evidence",
+                     "trial_performance_archive")
+    @classmethod
+    def _validate_signed_research_evidence_size(cls, value: dict[str, Any] | None, info):
+        if value is None:
+            return None
+        try:
+            size = len(json.dumps(
+                value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+            ).encode("utf-8"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("research evidence must be finite JSON data") from exc
+        limits = {
+            "point_in_time_universe_manifest": 5 * 1024 * 1024,
+            "execution_cost_calibration_evidence": 512 * 1024,
+            "trial_performance_archive": 4 * 1024 * 1024,
+        }
+        if size > limits[info.field_name]:
+            raise ValueError(f"{info.field_name} exceeds its {limits[info.field_name]} byte limit")
+        return value
 
 
 class TradingRequirementsRequest(BaseModel):
