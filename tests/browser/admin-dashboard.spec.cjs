@@ -257,6 +257,8 @@ async function testAdminFirstTimeMfaEnrollment(browser, baseUrl) {
 
 async function testCustomerValidationError(browser, baseUrl) {
   const page = await browser.newPage();
+  const pageErrors = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
   await page.addInitScript(() => {
     window.__cspViolations = [];
     window.addEventListener("securitypolicyviolation", event => window.__cspViolations.push(event.violatedDirective + ": " + event.blockedURI));
@@ -264,7 +266,7 @@ async function testCustomerValidationError(browser, baseUrl) {
   await page.route("**/api/**", async route => {
     const req = route.request();
     const url = new URL(req.url());
-    if (url.pathname === "/api/auth/login") {
+    if (url.pathname === "/api/auth/login" && req.method() === "POST") {
       return json(route, { detail: [
         { loc: ["body", "email"], msg: "field required", type: "missing" },
         { loc: ["body", "password"], msg: "field required", type: "missing" },
@@ -273,15 +275,21 @@ async function testCustomerValidationError(browser, baseUrl) {
     return json(route, {});
   });
   await page.goto(`${baseUrl}/customer`);
+  assert.equal(await page.locator("#submit").innerText(), "Create account");
   await page.locator("#toggle").click();
+  assert.equal(await page.locator("#submit").innerText(), "Sign in", "delegated toggle handler must switch the authentication mode");
   await page.locator("#email").fill("customer@example.invalid");
   await page.locator("#password").fill("not-a-real-password");
+  const loginResponse = page.waitForResponse(response => response.url().endsWith("/api/auth/login") && response.request().method() === "POST");
   await page.locator("#submit").click();
+  const response = await loginResponse;
+  assert.equal(response.status(), 422, "mocked login endpoint must exercise validation response");
   await waitUntil(async () => (await page.locator("#authOut").innerText()).includes("email: field required"));
   const output = await page.locator("#authOut").innerText();
   assert.match(output, /email: field required; password: field required/);
   assert.doesNotMatch(output, /\[object Object\]/);
   assert.deepEqual(await page.evaluate(() => window.__cspViolations), [], "customer validation page must run under strict script CSP without violations");
+  assert.deepEqual(pageErrors, [], "customer validation flow must not throw browser JavaScript errors");
   await page.close();
 }
 
