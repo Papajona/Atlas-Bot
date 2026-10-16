@@ -1540,9 +1540,11 @@ async def advance_platform_paper_orders(
                                     model_fill = None
                                     reason = f"calibrated paper model rejected bar context: {type(exc).__name__}"
                                     outcome = "WAIT_CALIBRATION_EVIDENCE"
+                                    fill_quantity = Decimal("0")
                                     counts["waiting_for_calibration"] += 1
                                 if model_fill is not None and model_fill.get("simulated_rejection") is True:
                                     outcome = "REJECTED_CALIBRATED"
+                                    fill_quantity = Decimal("0")
                                     reason = "calibrated model simulated venue rejection; no fill booked"
                                     trade.status = "REJECTED"
                                     trade.error = reason
@@ -1554,6 +1556,7 @@ async def advance_platform_paper_orders(
                                     elapsed_latency_ms = float(order_state.bars_elapsed) * float(timeframe_seconds) * 1000.0
                                     if elapsed_latency_ms < simulated_latency_ms:
                                         outcome = "WAIT_CALIBRATED_LATENCY"
+                                        fill_quantity = Decimal("0")
                                         reason = "calibrated simulated latency has not elapsed"
                                         counts["waiting_for_liquidity"] += 1
                                     else:
