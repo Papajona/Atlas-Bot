@@ -195,21 +195,26 @@ async def archive_research_trials(report: Mapping[str, Any], request: Any) -> di
                 existing = await db.get(ResearchTrialArchive, payload["trial_key"])
                 if existing is not None:
                     if not _same_immutable_row(existing, payload):
+                        # The outer transaction has not committed any new trial rows.
                         return {"status": "FAILED", "reason": "TRIAL_IDEMPOTENCY_CONFLICT",
-                                "trial_label": label, "inserted": inserted, "replayed": replayed}
+                                "trial_label": label, "inserted": 0, "replayed": 0}
                     replayed += 1
                     unverified += existing.archive_status != "VERIFIED"
                     continue
-                db.add(ResearchTrialArchive(**payload))
                 try:
-                    await db.flush()
+                    # Isolate a uniqueness race to this row. Rolling back the whole
+                    # session here silently discards earlier trial rows in this batch.
+                    async with db.begin_nested():
+                        db.add(ResearchTrialArchive(**payload))
+                        await db.flush()
                     inserted += 1
                 except IntegrityError:
-                    await db.rollback()
                     existing = await db.get(ResearchTrialArchive, payload["trial_key"])
                     if existing is None or not _same_immutable_row(existing, payload):
+                        # The surrounding transaction is abandoned on return, so do not
+                        # claim prior flushes were committed.
                         return {"status": "FAILED", "reason": "TRIAL_IDEMPOTENCY_CONFLICT",
-                                "trial_label": label, "inserted": inserted, "replayed": replayed}
+                                "trial_label": label, "inserted": 0, "replayed": 0}
                     replayed += 1
                     unverified += existing.archive_status != "VERIFIED"
             await db.commit()
