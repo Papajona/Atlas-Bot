@@ -1,50 +1,27 @@
-# Platform paper-execution cost and fill model
+# Platform paper-execution model — current verified status
 
-## Scope
+## Current status
 
-This is a deterministic, platform-only paper simulator. It submits no broker orders and does not change the live execution path. Customer paper execution remains blocked until a customer-isolated simulation ledger is implemented and tested.
+**Bar-driven paper execution is not yet implemented in the active execution path.** The previous documentation described delayed fills, partial fills, aggregate volume caps, queue outcomes, TTL and market-impact controls; inspection of the active `app/execution.py::execute_signal` path found none of those controls wired into order processing.
 
-A paper order is accepted as `OPEN` with zero filled quantity. It cannot fill on its submission bar. Only a later, new completed bar can advance it. The simulator accepts base-asset bar volume as liquidity only when the bar context has provenance `ccxt_ohlcv`, asset class `crypto`, and unit `base_asset`. OANDA/OTC candle counts and Yahoo Finance volume are not accepted as executable base-asset liquidity; such orders wait for verified data and ultimately expire under the configured time-to-live (TTL).
+The old branch immediately filled the requested quantity at a fixed profile slippage rate and marked it `SIMULATED`. That path has now been changed to fail closed with a `RiskBlocked` error before creating a trade or changing positions/equity. This is intentional: an unimplemented simulator must not produce misleading paper-forward results.
 
-## Fill lifecycle
+Customer paper execution remains separately blocked until a customer-isolated transactional simulation ledger is implemented and tested. Live trading, customer funds, withdrawals and mainnet custody remain outside the scope of any paper-execution change.
 
-On a later bar, the simulator applies the configured minimum bar latency, a deterministic order/bar hash to approximate queue misses and rejection, and a maximum aggregate participation budget for all matching orders on the same exchange/symbol/timeframe/bar. Partial fills preserve remaining quantity; a repeated bar cannot be consumed twice; orders that cannot complete within TTL have their remaining quantity canceled. The aggregate cap is tested under hundreds of synthetic orders, while the database integration test verifies that repeated processing of the same bar does not create additional fills.
+## Required simulator before re-enabling platform paper execution
 
-This is **not** an exchange matching engine. The queue and rejection outcomes are reproducible approximations, not fitted venue probabilities. Bar-based fills are priced using the completed bar's close plus an adverse slippage estimate; they do not reconstruct order-book queue priority, intrabar path, or exact execution time.
+A proper implementation must accept a new order as unfilled and only attempt fills on a later, unique, completed market bar. It must persist the bar/order idempotency key and lifecycle state; account for configured latency; allow partial fills; enforce aggregate participation limits only when source provenance and volume units are verified; apply deterministic, bounded queue/rejection and TTL handling; and never reuse the same bar to create additional fills.
 
-## Cost calculation
+Adverse cost estimates may combine profile slippage, half-spread and a bounded participation/volatility impact estimate. Until calibrated against held-out venue fills and instrument-specific liquidity units, all such values must be labelled unvalidated heuristics—not measured execution costs. OTC/OANDA candle counts and Yahoo volume must not be treated as executable crypto base-asset liquidity.
 
-When context is available, modeled adverse slippage is:
+## Research and market-data gates
 
-`base profile slippage + half the supplied spread + estimated market impact`
+- Crypto strategy candidates are blocked unless the research record carries explicit `VERIFIED_POINT_IN_TIME_UNIVERSE` evidence. A current established-coin allowlist is not a historical universe and omits delisted/failed assets.
+- Promotion-grade Deflated Sharpe Ratio still requires a complete, comparable historical trial-performance archive measured on the same held-out samples.
+- Missing, malformed or unverified carry/financing evidence must continue to block promotion.
+- FX and commodity instruments require distinct venue/product-specific execution, calendar, precision, liquidity and financing evidence; crypto volume assumptions are not transferable.
+- Synthetic tests and green CI jobs verify software behavior only. They do not calibrate fill assumptions or authorize live trading, deposits, withdrawals or customer-money movement.
 
-Market impact is a square-root participation heuristic:
+## Verification contract
 
-`coefficient × per-bar return volatility × sqrt(order quantity / observed bar volume) × 10,000`
-
-Impact is capped by `PAPER_MAX_MARKET_IMPACT_BPS`. Defaults are recorded in `.env.example`; they are simulation assumptions, **not venue-calibrated facts**. Every cost model result retains `calibration_status=UNVALIDATED_HEURISTIC`. Missing, malformed, stale or unverified liquidity must not be represented as verified execution liquidity.
-
-## Configuration controls
-
-- `PAPER_FILL_LATENCY_BARS`: number of new completed bars before fill attempts begin (default 1).
-- `PAPER_ORDER_TTL_BARS`: maximum number of fresh bars before remaining quantity expires (default 24).
-- `PAPER_MAX_BAR_VOLUME_PARTICIPATION`: maximum portion of verified bar volume that all matching orders can consume together (default 0.10).
-- `PAPER_QUEUE_FILL_PROBABILITY`: deterministic queue-pass threshold (default 0.80).
-- `PAPER_REJECTION_PROBABILITY`: deterministic rejection threshold (default 0.01).
-- `PAPER_MARKET_IMPACT_COEFFICIENT` and `PAPER_MAX_MARKET_IMPACT_BPS`: uncalibrated impact heuristic controls.
-
-Because outcomes derive from order/bar keys, retrying the same order on the same bar returns no new fill. Changing a probability or using a synthetic context for tests does not calibrate the model.
-
-## Known limitations and release gates
-
-- Venue-cost calibration still requires held-out observed fills, spreads, order sizes and reliable liquidity/volume units by instrument.
-- The bar-level fill model is only an approximation; exact queue position, cancellations and intrabar sequencing remain outside its proven scope.
-- Crypto research still lacks an authoritative point-in-time universe with delisted assets.
-- Promotion-grade Deflated Sharpe Ratio still requires a complete, comparable historical trial-performance archive.
-- FX/commodity fills do not use OANDA candle counts as liquidity and therefore remain non-fillable by this crypto-volume model; OANDA is practice/demo-only.
-- Customer paper execution remains blocked until a separate transactional simulation ledger passes account-isolation, idempotency, recovery and concurrency tests.
-- No simulator test, synthetic market data or green CI job authorizes live trading, deposits, withdrawals or customer-money movement.
-
-## Verification
-
-The simulation suite tests cost-model monotonicity, single-order low-liquidity partial fills, aggregate liquidity caps under 500 synthetic orders, new-bar idempotency, latency, queue misses, rejection, TTL, unverified FX/OTC volume, and end-to-end database order-state updates. The complete mandatory CI and PostgreSQL concurrency suite must pass on the exact final candidate commit before merge.
+Before the paper path is re-enabled, the active path—not just a disconnected model helper—must be covered by tests for partial fills, low and missing liquidity, aggregate caps across concurrent orders, bar/order idempotency, latency, queue misses, rejections, cancellation/TTL, restart recovery, and database concurrency. The complete mandatory CI and PostgreSQL concurrency suite must pass on the exact candidate commit. Customer paper must remain blocked until account isolation and transactional ledger tests also pass.
