@@ -210,7 +210,21 @@ def test_paper_candidates_require_comparable_trial_dsr_and_execution_evidence():
 
     research["validation"]["trial_registry_complete"] = True
     research["validation"]["deflated_sharpe"] = {"status":"OK","deflated_sharpe_ratio":0.99}
-    assert len(paper_candidates(research)) == 1
+    # Self-reported booleans and a numerical DSR do not prove that the complete
+    # historical trial universe was archived. No signed-archive verifier is wired
+    # into this path, so the candidate must remain blocked.
+    assert paper_candidates(research) == []
+
+    # Even a caller-supplied evidence-shaped object must not be enough unless the
+    # trusted verifier has actually supplied the signed archive result. This report
+    # has no such trusted result and therefore remains ineligible.
+    research["validation"]["signed_comparable_trial_archive"] = {
+        "status": "VERIFIED",
+        "signature_verified": True,
+        "evidence_id": "fixture:forged-claim",
+        "sha256": "a" * 64,
+    }
+    assert paper_candidates(research) == []
 
 def test_all_lightgbm_models_use_the_bounded_thread_setting():
     from app.config import settings
