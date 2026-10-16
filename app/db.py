@@ -215,6 +215,70 @@ class Trade(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class PaperOrderState(Base):
+    """Persistent lifecycle state for a platform-only bar-driven paper order."""
+    __tablename__ = "paper_order_states"
+    __table_args__ = (
+        UniqueConstraint("trade_id", name="uq_paper_order_state_trade"),
+        Index("ix_paper_order_state_market", "exchange", "symbol", "timeframe", "status"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_id: Mapped[int] = mapped_column(ForeignKey("trades.id", ondelete="CASCADE"), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(50), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(80), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(20), nullable=False)
+    submitted_bar_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_processed_bar_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    bars_elapsed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="OPEN")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class PaperBarState(Base):
+    """One immutable identity and aggregate liquidity budget per completed market bar."""
+    __tablename__ = "paper_bar_states"
+    __table_args__ = (
+        UniqueConstraint("exchange", "symbol", "timeframe", "bar_at", name="uq_paper_bar_market_time"),
+        Index("ix_paper_bar_market_time", "exchange", "symbol", "timeframe", "bar_at"),
+    )
+    bar_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    exchange: Mapped[str] = mapped_column(String(50), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(80), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(20), nullable=False)
+    bar_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    asset_class: Mapped[str] = mapped_column(String(20), nullable=False, default="unknown")
+    data_source: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    data_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    volume_unit: Mapped[str] = mapped_column(String(30), nullable=False, default="unknown")
+    bar_volume: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    capacity: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    consumed: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    close_price: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    return_volatility: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PaperFillEvent(Base):
+    """Exactly one persisted paper attempt per order and completed bar, including no-fill outcomes."""
+    __tablename__ = "paper_fill_events"
+    __table_args__ = (
+        UniqueConstraint("trade_id", "bar_key", name="uq_paper_fill_trade_bar"),
+        Index("ix_paper_fill_bar", "bar_key"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_id: Mapped[int] = mapped_column(ForeignKey("trades.id", ondelete="CASCADE"), nullable=False)
+    bar_key: Mapped[str] = mapped_column(ForeignKey("paper_bar_states.bar_key", ondelete="CASCADE"), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(30), nullable=False)
+    attempted_quantity: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    filled_quantity: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    fill_price: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    fee: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    slippage_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class OrderCommand(Base):
     __tablename__ = "order_commands"
     __table_args__ = (
@@ -1115,6 +1179,40 @@ class TradeReplayResult(Base):
     metadata_json: Mapped[str] = mapped_column(EncryptedText, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ResearchTrialArchive(Base):
+    """Append-only record of each new research trial and the evidence context used.
+
+    These records establish prospective experiment history. They do not replace the
+    separately signed comparable-trial archive required by the promotion gate.
+    """
+    __tablename__ = "research_trial_archive"
+    __table_args__ = (
+        Index("ix_research_trial_context_sample", "asset_class", "venue", "market_type", "symbol", "timeframe", "oos_sample_sha256"),
+        Index("ix_research_trial_created_at", "created_at"),
+    )
+    trial_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    trial_label: Mapped[str] = mapped_column(String(180), nullable=False)
+    asset_class: Mapped[str] = mapped_column(String(30), nullable=False, default="")
+    venue: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    market_type: Mapped[str] = mapped_column(String(30), nullable=False, default="")
+    symbol: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    timeframe: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    config_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    code_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    dataset_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    oos_sample_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    protocol_version: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    universe_evidence_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    cost_evidence_id: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    annualized_sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    oos_total_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_drawdown: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trades: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    results_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    archive_status: Mapped[str] = mapped_column(String(40), nullable=False, default="UNVERIFIED_MISSING_CONTEXT")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
 class ResearchRun(Base):

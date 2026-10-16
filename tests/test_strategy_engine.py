@@ -89,19 +89,29 @@ def test_all_strategy_research_and_ai_review():
 def test_paper_gate_and_live_shadow_signals():
     from app.research_engine import paper_candidates, live_strategy_signals
     df = sample_df(1800)
+    passing_folds = [{"total_return":0.05},{"total_return":0.04},{"total_return":-0.01},{"total_return":0.03},{"total_return":0.02}]
     research = {
+        "asset_class": "forex",
+        "universe_bias": "NOT_APPLICABLE",
         "strategies": [{"strategy":"trend","sharpe":1.0,"max_drawdown":-0.10,"trades":150,"total_return":0.20}],
-        "validation": {"per_strategy_oos": {"trend": {
-            "status":"OK","oos_total_return":0.10,"sharpe":0.8,"max_drawdown":-0.12,
-            "trades":150,"folds":[{"total_return":0.05},{"total_return":0.04},{"total_return":-0.01},{"total_return":0.03},{"total_return":0.02}]
-        }}}
+        "validation": {
+            "trial_registry_complete": True,
+            "deflated_sharpe": {"status":"OK","deflated_sharpe_ratio":0.99},
+            "per_strategy_oos": {"trend": {
+                "status":"OK","oos_total_return":0.10,"sharpe":0.9,"max_drawdown":-0.10,"trades":150,
+                "deflated_sharpe":0.99,"cost_stress_ok":True,"financing_cost_model_complete":True,
+                "intrabar_stop_target_model_complete":True,"execution_cost_model_complete":True,"execution_cost_calibration_status":"VERIFIED","execution_cost_calibration_evidence_id":"fixture:venue-cost-calibration",
+                "trial_registry_complete":True,"folds":passing_folds,
+            }},
+        },
     }
     candidates = paper_candidates(research)
-    assert candidates
+    # The trusted signed comparable-trial archive verifier is intentionally not
+    # integrated yet. Synthetic report fields must not bypass that fail-closed gate.
+    assert candidates == []
     names = [x["strategy"] for x in candidates]
     signals = live_strategy_signals(df, names)
-    assert signals and all(x["mode"] == "PAPER_SHADOW_ONLY" for x in signals)
-
+    assert signals == []
 
 def test_multi_timeframe_structure_and_risk_levels():
     from app.multi_timeframe import multi_timeframe_analysis, multi_timeframe_signal
@@ -188,6 +198,9 @@ def test_ai_walk_forward_aggregate_metrics_only_use_held_out_bars(monkeypatch):
     assert len(result["folds"]) == 4
     assert result["oos_bars"] == expected_oos
     assert 0 < expected_oos < result["bars"]
+    # OHLC-based stop/target simulation cannot prove the true intrabar event order.
+    assert result["intrabar_stop_target_model_complete"] is False
+    assert result["execution_stop_target_audit"]["ambiguous_bars_filled_stop_first"] >= 0
     assert captured == {
         "cost_return_count": expected_oos,
         "cost_turnover_count": expected_oos,
@@ -249,7 +262,9 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
            "cost_stress_ok": True,
         "financing_cost_model_complete": True,
         "intrabar_stop_target_model_complete": True,
-        "execution_cost_model_complete": True, "status": "OK", "oos_total_return": 0.20, "deflated_sharpe": 0.97,
+        "execution_cost_model_complete": True,
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_evidence_id": "fixture:venue-cost-calibration", "status": "OK", "oos_total_return": 0.20, "deflated_sharpe": 0.97,
            "trial_registry_complete": True,
            "financing_cost_model_complete": True, "intrabar_stop_target_model_complete": True}
 
