@@ -274,6 +274,15 @@ class Settings(BaseSettings):
     execution_health_window_orders: int = 20
     continuous_risk_check_interval_seconds: int = 5
 
+    # Platform-only paper execution. Fill controls are assumptions, never venue-calibrated facts.
+    paper_fill_latency_bars: int = 1
+    paper_order_ttl_bars: int = 24
+    paper_max_bar_volume_participation: float = 0.10
+    paper_queue_fill_probability: float = 0.80
+    paper_rejection_probability: float = 0.01
+    paper_market_impact_coefficient: float = 0.10
+    paper_max_market_impact_bps: float = 250.0
+
     # Research-backed multi-strategy engine. Paper-first and independently testable.
     strategy_engine_enabled: bool = True
     strategy_signal_threshold: float = 0.20
