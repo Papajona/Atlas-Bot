@@ -30,15 +30,46 @@ $paper_role_check$;
 
 CREATE SCHEMA IF NOT EXISTS customer_paper AUTHORIZATION CURRENT_USER;
 REVOKE ALL ON SCHEMA customer_paper FROM PUBLIC;
+-- Keep the runtime role confined to the explicitly granted customer_paper schema.
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
 
 CREATE TABLE IF NOT EXISTS customer_paper.accounts (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     customer_id bigint NOT NULL CHECK (customer_id > 0),
     currency varchar(12) NOT NULL CHECK (currency = upper(currency)),
+    account_code varchar(40) NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (customer_id, currency),
+    CONSTRAINT ck_customer_paper_account_code CHECK (
+        account_code = upper(account_code) AND account_code IN
+        ('PAPER_CASH', 'PAPER_EQUITY', 'PAPER_POSITION', 'PAPER_FEES', 'PAPER_PNL', 'PAPER_CLEARING')
+    ),
+    UNIQUE (customer_id, currency, account_code),
     UNIQUE (id, customer_id, currency)
 );
+
+-- Safely upgrade a previously provisioned paper DB: existing accounts become cash,
+-- and the composite key permits separate contra accounts for balanced journals.
+ALTER TABLE customer_paper.accounts
+    ADD COLUMN IF NOT EXISTS account_code varchar(40) NOT NULL DEFAULT 'PAPER_CASH';
+ALTER TABLE customer_paper.accounts
+    DROP CONSTRAINT IF EXISTS accounts_customer_id_currency_key;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_customer_paper_account_code
+    ON customer_paper.accounts (customer_id, currency, account_code);
+DO $paper_account_code_check$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ck_customer_paper_account_code'
+          AND conrelid = 'customer_paper.accounts'::regclass
+    ) THEN
+        ALTER TABLE customer_paper.accounts
+            ADD CONSTRAINT ck_customer_paper_account_code CHECK (
+                account_code = upper(account_code) AND account_code IN
+                ('PAPER_CASH', 'PAPER_EQUITY', 'PAPER_POSITION', 'PAPER_FEES', 'PAPER_PNL', 'PAPER_CLEARING')
+            );
+    END IF;
+END
+$paper_account_code_check$;
 
 CREATE TABLE IF NOT EXISTS customer_paper.journals (
     id uuid PRIMARY KEY,
