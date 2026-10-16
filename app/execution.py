@@ -1352,6 +1352,7 @@ async def advance_platform_paper_orders(
             .order_by(Position.id)
             .with_for_update()
         )).all()
+        preexisting_position_entry_ids = {entry.id for _, entry in preexisting_positions}
         preexisting_protective_trigger = False
         for existing_position, existing_entry_trade in preexisting_positions:
             if existing_entry_trade.id in active_exit_entry_ids:
@@ -1592,6 +1593,9 @@ async def advance_platform_paper_orders(
             .with_for_update()
         )).all()
         for position, entry_trade in positions:
+            # Do not use this candle's earlier high/low to trigger a position first filled at its close.
+            if entry_trade.id not in preexisting_position_entry_ids:
+                continue
             if entry_trade.id in active_exit_entry_ids:
                 continue
             long_position = float(position.quantity) > 0
