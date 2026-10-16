@@ -45,7 +45,6 @@ def test_legacy_platform_paper_execution_fails_closed_without_bar_simulator():
 
 def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_completed_bar(monkeypatch):
     import pandas as pd
-    from datetime import datetime, timezone
     from sqlalchemy import select
     from app import execution
     from app.config import settings
@@ -153,7 +152,7 @@ def test_paper_simulator_refuses_unverified_fx_volume(monkeypatch):
     from sqlalchemy import select
     from app import execution
     from app.config import settings
-    from app.db import init_db, SessionLocal, Trade, PaperOrderState
+    from app.db import init_db, SessionLocal, Trade
 
     symbol = f"FXPAPER-{uuid.uuid4().hex[:8]}"
     now = pd.Timestamp.now(tz="UTC")
