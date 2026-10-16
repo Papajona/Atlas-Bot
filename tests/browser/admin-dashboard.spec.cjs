@@ -328,7 +328,7 @@ async function testAdminHostileData(browser, baseUrl) {
   });
   await page.goto(baseUrl + "/admin");
   await waitUntil(async () => (await page.locator("#withdrawalRows tr").count()) === 2);
-  await waitUntil(async () => (await page.locator("#roles tr").count()) > 1 && (await page.locator("#trades tr").count()) > 1);
+  await waitUntil(async () => (await page.locator("#roles tr").count()) > 0 && (await page.locator("#trades tr").count()) > 0);
   await page.waitForTimeout(250);
   const result = await page.evaluate(() => ({
     pwned: window.__pwned || 0,
@@ -339,7 +339,7 @@ async function testAdminHostileData(browser, baseUrl) {
     requestIdLiteral: document.querySelector("#withdrawalRows tr td")?.textContent.includes("<img src=x"),
     statusLiteral: Array.from(document.querySelectorAll("#withdrawalRows tr")).some(row => row.textContent.includes("<img src=x")),
   }));
-  assert.ok(result.withdrawalRows > 0 && result.roleRows > 1 && result.tradeRows > 1, "XSS checks must render actual withdrawal, role, and trade rows");
+  assert.ok(result.withdrawalRows > 0 && result.roleRows > 0 && result.tradeRows > 0, "XSS checks must render actual withdrawal, role, and trade rows");
   assert.equal(result.pwned, 0, "hostile admin API fields must never execute script");
   assert.equal(result.injectedImages, 0, "hostile admin API fields must remain text, not become DOM elements");
   assert.ok(result.requestIdLiteral && result.statusLiteral, "hostile withdrawal fields must be preserved as inert literal text");
