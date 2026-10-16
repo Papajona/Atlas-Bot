@@ -2,16 +2,47 @@
 from __future__ import annotations
 from decimal import Decimal
 from datetime import datetime
+import json
+from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 
 class MarketRequest(BaseModel):
     asset: str = Field(default="crypto", pattern="^(crypto|forex|commodity)$")
-    symbol: str = "BTC/USDT:USDT"
+    symbol: str = "BTC/USDT"
     exchange: str = "binance"
     timeframe: str = "1h"
     days: int = Field(default=365, ge=30, le=1500)
+
+
+class ResearchMarketRequest(MarketRequest):
+    # Optional signed evidence is verified against server-configured trust roots;
+    # it is never trusted merely because an API caller supplied it.
+    point_in_time_universe_manifest: dict[str, Any] | None = Field(default=None, repr=False)
+    execution_cost_calibration_evidence: dict[str, Any] | None = Field(default=None, repr=False)
+    trial_performance_archive: dict[str, Any] | None = Field(default=None, repr=False)
+
+    @field_validator("point_in_time_universe_manifest", "execution_cost_calibration_evidence",
+                     "trial_performance_archive")
+    @classmethod
+    def _validate_signed_research_evidence_size(cls, value: dict[str, Any] | None, info: ValidationInfo):
+        if value is None:
+            return None
+        try:
+            size = len(json.dumps(
+                value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+            ).encode("utf-8"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("research evidence must be finite JSON data") from exc
+        limits = {
+            "point_in_time_universe_manifest": 5 * 1024 * 1024,
+            "execution_cost_calibration_evidence": 512 * 1024,
+            "trial_performance_archive": 4 * 1024 * 1024,
+        }
+        if size > limits[info.field_name]:
+            raise ValueError(f"{info.field_name} exceeds its {limits[info.field_name]} byte limit")
+        return value
 
 
 class TradingRequirementsRequest(BaseModel):
@@ -70,7 +101,7 @@ class StrategyLabRequest(BaseModel):
     name: str = Field(default="Atlas Candidate", min_length=2, max_length=120)
     prompt: str = Field(min_length=20, max_length=4000)
     asset: str = Field(default="crypto", pattern="^(crypto|forex|commodity)$")
-    symbol: str = Field(default="BTC/USDT:USDT", min_length=2, max_length=80)
+    symbol: str = Field(default="BTC/USDT", min_length=2, max_length=80)
     exchange: str = Field(default="binance", min_length=2, max_length=50)
     timeframe: str = Field(default="1h", pattern="^(5m|15m|30m|1h|4h|1d)$")
     days: int = Field(default=365, ge=60, le=1500)
