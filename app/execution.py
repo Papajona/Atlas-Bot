@@ -1455,6 +1455,9 @@ async def advance_platform_paper_orders(
             })
         await db.commit()
 
+    # Mark cash/equity immediately after a committed fill so downstream signal errors
+    # cannot leave the displayed portfolio stale after position mutations.
+    equity_state = await mark_paper_equity({symbol: close_price}) if counts["fills"] else None
     for item in audit_events:
         await audit("PAPER_FILL_EVENT", item, actor_id="paper-simulator")
     return {
@@ -1471,6 +1474,7 @@ async def advance_platform_paper_orders(
         "waiting_for_liquidity": counts["waiting_for_liquidity"],
         "liquidity_verified": verified_liquidity,
         "calibration_status": "UNVALIDATED_HEURISTIC",
+        "equity": equity_state,
     }
 
 
