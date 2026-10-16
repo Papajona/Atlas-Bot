@@ -8,11 +8,27 @@ from zoneinfo import ZoneInfo
 class PaperModelInputError(ValueError):
     pass
 
-def _pos(x, name, zero=False):
-    x=Decimal(x)
-    if not x.is_finite() or (x < 0 if zero else x <= 0):
+def _decimal(x, name: str) -> Decimal:
+    try:
+        value = Decimal(str(x))
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        raise PaperModelInputError(f"invalid {name}") from exc
+    if not value.is_finite():
         raise PaperModelInputError(f"invalid {name}")
-    return x
+    return value
+
+
+def _pos(x, name, zero=False):
+    value = _decimal(x, name)
+    if value < 0 if zero else value <= 0:
+        raise PaperModelInputError(f"invalid {name}")
+    return value
+
+
+def _aware(value: datetime, name: str) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise PaperModelInputError(f"{name} must be timezone-aware")
+    return value
 
 @dataclass(frozen=True)
 class CoinListing:
