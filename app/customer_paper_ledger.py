@@ -7,6 +7,7 @@ Execution remains disabled until a reviewed staging preflight passes.
 from __future__ import annotations
 
 from typing import Any
+from sqlalchemy import text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -87,7 +88,7 @@ async def preflight_isolated_customer_paper_ledger(
     engine = create_async_engine(
         paper_value if "+asyncpg" in paper_value else _postgres_url(paper_value).render_as_string(hide_password=False),
         pool_pre_ping=True,
-        connect_args={"server_settings": {"statement_timeout": "10000", "default_transaction_read_only": "on"}},
+        connect_args={"server_settings": {"statement_timeout": "10000"}},
     )
     try:
         async with engine.connect() as conn:
@@ -110,7 +111,7 @@ async def preflight_isolated_customer_paper_ledger(
             if str(read_only).lower() not in {"off", "false", "f"}:
                 # A global read-only connection is insufficient to verify order write grants.
                 return {"status": "BLOCKED", "reason": "PAPER_CONNECTION_IS_READ_ONLY"}
-            table_rows = (await conn.exec_driver_sql(
+            table_rows = (await conn.execute(text(
                 """
                 SELECT n.nspname || '.' || c.relname AS table_name,
                        c.relrowsecurity, c.relforcerowsecurity,
@@ -121,7 +122,7 @@ async def preflight_isolated_customer_paper_ledger(
                 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
                 WHERE (n.nspname='customer_paper' AND c.relname IN ('accounts','journals','journal_lines'))
                    OR (n.nspname='public' AND c.relname = ANY(:real_tables))
-                """,
+                """),
                 {"real_tables": list(REAL_MONEY_TABLES)},
             )).mappings().all()
             by_name = {str(row["table_name"]): row for row in table_rows}
@@ -136,10 +137,19 @@ async def preflight_isolated_customer_paper_ledger(
                     insecure_paper.append(f"{name}:RLS_NOT_FORCED")
                 if not bool(row["can_select"]) or not bool(row["can_insert"]):
                     insecure_paper.append(f"{name}:SELECT_OR_INSERT_MISSING")
-                if name.endswith(".accounts") and not bool(row["can_update"]):
-                    insecure_paper.append(f"{name}:UPDATE_MISSING")
+                if bool(row["can_update"]):
+                    insecure_paper.append(f"{name}:UPDATE_ALLOWED")
                 if bool(row["can_delete"]):
                     insecure_paper.append(f"{name}:DELETE_ALLOWED")
+            policy_rows = (await conn.execute(text(
+                "SELECT tablename, coalesce(qual,'') AS qual, coalesce(with_check,'') AS with_check "
+                "FROM pg_policies WHERE schemaname='customer_paper'"
+            ))).mappings().all()
+            policy_by_table = {str(row["tablename"]): row for row in policy_rows}
+            for table in ("accounts", "journals", "journal_lines"):
+                row = policy_by_table.get(table)
+                if row is None or "app.customer_id" not in str(row["qual"]) or "app.customer_id" not in str(row["with_check"]):
+                    insecure_paper.append(f"customer_paper.{table}:TENANT_POLICY_MISSING")
             if insecure_paper:
                 return {"status": "BLOCKED", "reason": "PAPER_SCHEMA_PRIVILEGES_UNSAFE",
                         "findings": insecure_paper}
