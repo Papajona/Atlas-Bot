@@ -48,6 +48,33 @@ Provision a **separate PostgreSQL database** and a dedicated non-superuser runti
 
 Run the isolated-ledger tests with disposable PostgreSQL databases configured as `ATLAS_PAPER_TEST_DATABASE_URL` and `ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL` (CI provisions these). A preflight pass verifies the checked DB identities, absence of application-schema/table/sequence access to the primary DB, paper table grants and tenant policies at that time; it does not prove the complete product flow has no alternate path into real balances. Staging sign-off requires recorded credentials/role inspection, negative attempts against real tables, paper order/fill/retry/crash-recovery tests, and before/after reconciliation demonstrating zero change to real ledger entries and balances.
 
+
+## 5. Candidate-selection enforcement
+
+The paper-signals candidate path re-verifies the original signed universe, execution-cost, and comparable-trial documents using the configured public-key trust root. A report flag, validation summary, evidence ID, or previously computed `VERIFIED` label by itself is not accepted. The raw documents must still match the current dataset hash, venue, market type, symbol, timeframe, execution-model fingerprint, OOS sample hash, protocol version, and all trial labels. Crypto candidates additionally need the full-run coverage window and a point-in-time universe document. The execution-cost archive must pass the configured server-side held-out error bounds. A tampered or mismatched document returns no candidates.
+
+The verification test `test_paper_candidates_reverify_original_signed_evidence` uses generated keys and synthetic source files solely to test acceptance/rejection logic. It is not external market evidence and must not be reused for deployment.
+
+## 6. Staging restore and customer-paper isolation proof
+
+The manual workflow `.github/workflows/staging-restore-audit.yml` runs only on `main` in the protected `staging` GitHub environment. It requires separate configured production/staging refs and retrieves two different GCP Secret Manager values:
+- `ATLAS_STAGING_DATABASE_SECRET`: the restored application staging database URL.
+- `ATLAS_STAGING_CUSTOMER_PAPER_DATABASE_SECRET`: the separately provisioned customer-paper PostgreSQL database URL.
+
+Both must resolve to the intended isolated staging environment; the customer-paper preflight checks the database name/identity, non-overlapping runtime role and credentials, RLS/tenant policies, no UPDATE/DELETE rights on paper-ledger tables, and no access to primary real-money tables/sequences. A missing secret, absent schema, wrong role, wrong project/database identity, or unsafe grants fails closed. A preflight PASS establishes database/schema/ACL invariants only; it does not replace order-to-journal integration, crash/retry recovery, tenant-negative tests, or before/after reconciliation against the real-money ledger.
+
+### Provider restore evidence format
+
+`RESTORE_EVIDENCE_URI` must identify the actual provider operation record in JSON (an HTTPS endpoint that returns the provider JSON, or a `gs://` object). The downloaded record must identify all of:
+- operation ID (`restore_operation_id`, `restoreOperationId`, `operation_id`, `operationId`, or `id`);
+- the immutable source backup reference (`backup_reference`, `backupReference`, `source_backup_id`, `sourceBackupId`, `backup_id`, or `backupId`);
+- target staging Supabase ref (`target_supabase_project_ref`, `target_project_ref`, `targetProjectRef`, or `restored_project_ref`);
+- successful terminal status (`COMPLETE`, `COMPLETED`, `SUCCEEDED`, `SUCCESS`, `DONE`, or `RESTORED`, case-insensitive).
+
+The workflow downloads that record, validates the exact operation/source/target/status, calculates its SHA-256 and passes the verified digest and target into `scripts/verify_staging_restore.py`. That audit also checks that `paper_order_states`, `paper_bar_states`, `paper_fill_events`, and `research_trial_archive` exist; a database with a manually changed Alembic revision but missing objects cannot pass. Provider JSON, verification output, database invariant report, and customer-paper preflight output are archived as workflow artifacts and to the configured evidence bucket when configured. A provider webpage that returns HTML, a free-form operator statement, or a CI-generated record is not provider-native restore proof.
+
+Do not invoke the workflow until the protected staging environment has the correct secrets/variables and an actual restore operation has been completed. This repository change does not create the missing staging database, backup/restore operation, GCP secret values, or real provider evidence. Customer paper trading remains disabled until the real staging preflight and the separate operational isolation drill have both passed.
+
 ## Promotion/release decision
 
 All four gates must be backed by reviewable source artifacts and passing tests on the exact commit. The signed docs, key IDs, raw source hashes, model fingerprints, trial archive IDs and PostgreSQL preflight/reconciliation outputs should be kept as release artifacts with immutable checksums. Test fixtures, CI synthetic values, prospective trial rows, or a green code suite are not substitutes. Keep customer paper execution disabled and all live trading, payouts, withdrawals and customer-fund movement disabled until separate release evidence and approvals are complete.
