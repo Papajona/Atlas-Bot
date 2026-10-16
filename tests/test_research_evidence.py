@@ -139,7 +139,7 @@ def test_market_request_bounds_signed_evidence_and_attaches_without_mutating_sou
     import pytest
     from pydantic import ValidationError
 
-    from app.schemas import MarketRequest
+    from app.schemas import ResearchMarketRequest
     from app.main import _attach_research_evidence
 
     manifest = {
@@ -147,7 +147,7 @@ def test_market_request_bounds_signed_evidence_and_attaches_without_mutating_sou
         "evidence_id": "signed-fixture-only",
         "attestation": {"algorithm": "Ed25519", "key_id": "fixture", "signature_base64": "not-trusted"},
     }
-    request = MarketRequest(point_in_time_universe_manifest=manifest)
+    request = ResearchMarketRequest(point_in_time_universe_manifest=manifest)
     source = pd.DataFrame(
         {"open": [10.0], "high": [11.0], "low": [9.0], "close": [10.0]},
         index=pd.DatetimeIndex(["2026-01-01T00:00:00Z"]),
@@ -159,7 +159,7 @@ def test_market_request_bounds_signed_evidence_and_attaches_without_mutating_sou
     assert "point_in_time_universe_manifest" not in source.attrs
 
     with pytest.raises(ValidationError, match="byte limit"):
-        MarketRequest(point_in_time_universe_manifest={"payload": "x" * (5 * 1024 * 1024)})
+        ResearchMarketRequest(point_in_time_universe_manifest={"payload": "x" * (5 * 1024 * 1024)})
 
 
 def test_research_evidence_source_uris_reject_fixtures_and_local_placeholders():
