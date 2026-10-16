@@ -4,7 +4,7 @@
   "provenance_source": "synthetic-unit-test-data",
   "evidence_source": "venue-paper-fill-study",
   "calibration_method": "deterministic-unit-test-fixture-not-venue-calibration",
-  "dataset_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "dataset_sha256": "a7e47ab2f08afd9fb70ba4ab8fa93fa5cb7eb52d99f57dcc5ca7cf2baa1f0edd",
   "observation_counts": {
     "fills": 10,
     "latency": 10,
@@ -58,5 +58,6 @@
       "latency_max_ms": 100,
       "latency_impact_coefficient": 0.5
     }
-  ]
+  ],
+  "dataset_path": "paper_calibration_dataset_test.json"
 }
