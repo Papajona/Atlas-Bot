@@ -17,9 +17,9 @@ The active lifecycle is persisted in `paper_order_states`, `paper_bar_states`, a
 
 ## Liquidity gate
 
-A bar contributes fillable liquidity only when all of these are true: the requested asset is crypto; data provenance source is `ccxt_ohlcv`; exchange market metadata explicitly identifies a spot market rather than a contract; the provenance marks volume as verified `base_asset`; and the observed bar volume is positive. Capacity is then `bar_volume × PAPER_MAX_BAR_VOLUME_PARTICIPATION`.
+A new platform paper order is accepted only when the requested asset is crypto and the server-bound market data comes from `ccxt_ohlcv`, explicitly identifies a non-contract spot market, marks volume as verified `base_asset`, and matches the exact symbol/exchange/timeframe submitted. Each bar must also have valid OHLCV and stable provenance. Capacity is `bar_volume × PAPER_MAX_BAR_VOLUME_PARTICIPATION`.
 
-Swap/futures/contract markets, unknown exchange metadata, Yahoo Finance volumes, and OANDA/OTC candle counts are **not** treated as executable base-asset liquidity. Orders against unverified liquidity remain unfilled and expire under TTL. The current OANDA FX/commodity path therefore does not get paper fills from this crypto spot-volume model.
+Swap/futures/contract markets, unknown exchange metadata, Yahoo Finance volumes, and OANDA/OTC candles are **not** treated as executable base-asset liquidity. New paper orders for FX, commodities, derivatives, or unknown markets are rejected before a Trade row is created. Any legacy or previously persisted order that lacks verified liquidity remains unfilled; ordinary entry/target orders expire under TTL, while a triggered stop-loss exit remains pending rather than pretending it was executed. FX/commodity data can still support research/practice paths, but this simulator does not claim their fills are realistic.
 
 ## Configuration controls
 
