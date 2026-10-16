@@ -13,6 +13,7 @@ The active lifecycle is persisted in `paper_order_states`, `paper_bar_states`, a
 - Deterministic SHA-256 outcomes model queue misses and rejections. Orders that cannot fill expire at the configured completed-bar TTL; any remaining quantity is canceled, while previously filled quantity and position remain recorded.
 - Fill prices use the completed bar close adjusted adversely by the asset profile's baseline slippage plus a bounded participation/volatility impact heuristic. Taker fees are charged per partial fill. Order average fill price is quantity weighted.
 - Queue/rejection probabilities and impact coefficients are **simulation assumptions, not venue-calibrated facts**. No order-book spread is currently modeled. This is not an exchange matching engine and does not reconstruct intrabar price paths or queue position.
+- Stop-loss/take-profit triggers are evaluated from completed-bar OHLC. If both levels are touched in one bar, stop-loss takes precedence. A trigger creates a persisted exit order that cannot fill until a later completed bar; it must still pass verified spot-volume and capacity checks. Stop-loss exits do not expire on TTL, and stop fills account for adverse opening gaps. This is a conservative bar-based heuristic, not tick-level stop execution.
 
 ## Liquidity gate
 
