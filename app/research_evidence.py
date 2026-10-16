@@ -160,7 +160,9 @@ def validate_crypto_universe_manifest(document, trusted_public_keys, *, venue: s
 
 def validate_execution_cost_calibration(document, trusted_public_keys, *, venue: str,
                                          market_type: str, symbol: str,
-                                         model_fingerprint: str) -> dict[str, Any]:
+                                         model_fingerprint: str,
+                                         max_spread_error_bps: float | None = None,
+                                         max_slippage_error_bps: float | None = None) -> dict[str, Any]:
     signed = verify_signed_document(document, trusted_public_keys,
                                     expected_type="venue_execution_cost_calibration")
     if not signed.get("verified"):
@@ -177,23 +179,52 @@ def validate_execution_cost_calibration(document, trusted_public_keys, *, venue:
     if not _sources_ok(doc.get("sources"), _COST_SOURCES):
         return {"verified": False, "calibration_verified": False,
                 "reason": "COST_CALIBRATION_SOURCE_MANIFEST_INCOMPLETE"}
+    # Error tolerances are policy inputs from reviewed deployment configuration,
+    # not values chosen by the evidence author. Missing bounds must fail closed.
+    if max_spread_error_bps is None or max_slippage_error_bps is None:
+        return {"verified": False, "calibration_verified": False,
+                "reason": "COST_CALIBRATION_ACCEPTANCE_THRESHOLDS_MISSING"}
     try:
-        orders, fills = int(doc.get("observed_order_count")), int(doc.get("observed_fill_count"))
+        spread_limit = float(max_spread_error_bps)
+        slippage_limit = float(max_slippage_error_bps)
+        raw_orders, raw_fills = doc.get("observed_order_count"), doc.get("observed_fill_count")
         heldout = doc.get("heldout_validation")
-        count = int(heldout.get("sample_count"))
+        raw_count = heldout.get("sample_count")
         spread_error = float(heldout.get("mean_absolute_spread_error_bps"))
         slippage_error = float(heldout.get("mean_absolute_slippage_error_bps"))
         start, end = _time(doc.get("validation_start")), _time(doc.get("validation_end"))
+        def exact_count(value):
+            if isinstance(value, bool):
+                return -1
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+                return int(value)
+            if isinstance(value, str) and value.strip().isdigit():
+                return int(value.strip())
+            return -1
+        orders, fills, count = exact_count(raw_orders), exact_count(raw_fills), exact_count(raw_count)
     except (ValueError, TypeError, OverflowError, AttributeError):
         return {"verified": False, "calibration_verified": False, "reason": "COST_CALIBRATION_METRICS_INVALID"}
+    if (not math.isfinite(spread_limit) or not math.isfinite(slippage_limit)
+            or spread_limit < 0 or slippage_limit < 0):
+        return {"verified": False, "calibration_verified": False,
+                "reason": "COST_CALIBRATION_ACCEPTANCE_THRESHOLDS_INVALID"}
     if (orders < 30 or fills < 30 or count < 30 or heldout.get("status") != "PASS"
             or not math.isfinite(spread_error) or not math.isfinite(slippage_error)
             or spread_error < 0 or slippage_error < 0 or not start or not end or start >= end):
         return {"verified": False, "calibration_verified": False,
                 "reason": "COST_CALIBRATION_HELDOUT_VALIDATION_INCOMPLETE"}
+    if spread_error > spread_limit or slippage_error > slippage_limit:
+        return {"verified": False, "calibration_verified": False,
+                "reason": "COST_CALIBRATION_ERROR_EXCEEDS_ACCEPTANCE_THRESHOLDS",
+                "spread_error_bps": spread_error, "spread_limit_bps": spread_limit,
+                "slippage_error_bps": slippage_error, "slippage_limit_bps": slippage_limit}
     return {**signed, "calibration_verified": True, "reason": "VENUE_CALIBRATION_VERIFIED",
             "observed_order_count": orders, "observed_fill_count": fills,
-            "heldout_sample_count": count, "model_fingerprint": model_fingerprint}
+            "heldout_sample_count": count, "model_fingerprint": model_fingerprint,
+            "heldout_spread_error_bps": spread_error, "heldout_slippage_error_bps": slippage_error,
+            "accepted_spread_error_bps": spread_limit, "accepted_slippage_error_bps": slippage_limit}
 
 
 def validate_comparable_trial_archive(document, trusted_public_keys, *, candidate_labels: set[str],
