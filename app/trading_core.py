@@ -519,7 +519,9 @@ def ai_walk_forward_backtest(
         "carry_evidence_source": carry_evidence_source or None,
         "carry_evidence_id": carry_evidence_id or None,
         "financing_cost_model_complete": bool(carry_evidence_complete),
-        "intrabar_stop_target_model_complete": True,
+        # OHLC stop-first handling is a conservative approximation, not tick-level
+        # event-order evidence. Do not let this backtest certify intrabar completeness.
+        "intrabar_stop_target_model_complete": False,
         "execution_cost_model_complete": False,
         "execution_cost_calibration_status": "MISSING_VENUE_CALIBRATION_EVIDENCE",
         "execution_cost_calibration_evidence_id": None,
