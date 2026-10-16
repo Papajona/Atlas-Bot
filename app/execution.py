@@ -1095,6 +1095,215 @@ async def _release_unneeded_order_reserve(db, trade: Trade) -> Decimal:
     return release
 
 
+
+async def advance_platform_paper_orders(
+    symbol: str,
+    exchange: str,
+    price: float,
+    context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Advance platform-only paper orders once per new completed market bar.
+
+    Customer paper execution is excluded until its isolated ledger exists. Only
+    verified CCXT crypto base-asset volume can produce fills; FX/OTC candle counts
+    and missing volume fail closed instead of being treated as executable liquidity.
+    """
+    normalized_symbol = str(symbol or "").strip()
+    normalized_exchange = str(exchange or "").strip().lower()
+    if not normalized_symbol or not normalized_exchange:
+        raise ValueError("paper-order advancement requires symbol and exchange")
+    current_context = context if isinstance(context, dict) else {}
+    current_timestamp = str(current_context.get("bar_timestamp") or "").strip()
+    if not current_timestamp:
+        return {"status": "NO_VERIFIED_BAR_TIMESTAMP", "checked": 0, "filled": 0, "partial_fill_events": 0, "rejected": 0}
+
+    lock_key = f"paper-order-advance:{normalized_exchange}:{normalized_symbol}"
+    if not await acquire_lock(lock_key, ttl_seconds=60):
+        return {"status": "LOCK_BUSY", "checked": 0, "filled": 0, "partial_fill_events": 0, "rejected": 0}
+
+    checked = filled_orders = rejected_orders = partial_fill_events = 0
+    try:
+        async with SessionLocal() as db:
+            query = (
+                select(Trade)
+                .where(
+                    Trade.customer_id.is_(None),
+                    Trade.mode == "PAPER",
+                    Trade.exchange == normalized_exchange,
+                    Trade.symbol == normalized_symbol,
+                    Trade.status.in_(["PENDING", "OPEN", "PARTIAL"]),
+                )
+                .order_by(Trade.created_at, Trade.id)
+                .with_for_update()
+            )
+            orders = (await db.execute(query)).scalars().all()
+            for trade in orders:
+                checked += 1
+                try:
+                    reason = json.loads(trade.reason or "{}")
+                except (TypeError, ValueError):
+                    reason = {}
+                if not isinstance(reason, dict):
+                    reason = {}
+                state = reason.get("paper_execution_state")
+                if not isinstance(state, dict):
+                    # Legacy pending orders have no watermark. Never retrospectively
+                    # fill them against the first bar encountered by this new engine.
+                    reason["paper_execution_state"] = {
+                        "last_processed_bar_timestamp": current_timestamp,
+                        "bars_waited": 0,
+                    }
+                    trade.reason = json.dumps(reason, default=str)
+                    trade.updated_at = utcnow()
+                    continue
+
+                last_timestamp = str(state.get("last_processed_bar_timestamp") or "")
+                try:
+                    bars_waited = int(state.get("bars_waited") or 0)
+                except (TypeError, ValueError):
+                    bars_waited = 0
+                if current_timestamp == last_timestamp:
+                    continue
+
+                asset = str(reason.get("asset") or "crypto").strip().lower()
+                profile = PROFILES.get(asset)
+                if profile is None:
+                    trade.status = "REJECTED"
+                    trade.error = "No explicit paper execution cost profile for asset class"
+                    state["last_processed_bar_timestamp"] = current_timestamp
+                    reason["paper_execution_state"] = state
+                    reason["paper_execution_event"] = {"event": "REJECTED_UNSUPPORTED_ASSET"}
+                    trade.reason = json.dumps(reason, default=str)
+                    trade.updated_at = utcnow()
+                    rejected_orders += 1
+                    continue
+
+                try:
+                    remaining = float(trade.remaining_quantity or 0.0)
+                    cost_model = estimate_paper_slippage(
+                        side=str(trade.side),
+                        quantity=remaining,
+                        base_slippage_bps=profile.slippage_bps,
+                        context=current_context,
+                        impact_coefficient=settings.paper_market_impact_coefficient,
+                        max_market_impact_bps=settings.paper_max_market_impact_bps,
+                    )
+                    event = simulate_paper_fill_step(
+                        remaining_quantity=remaining,
+                        context=current_context,
+                        order_key=str(trade.client_order_id),
+                        last_processed_bar_timestamp=last_timestamp,
+                        bars_waited=bars_waited,
+                        latency_bars=settings.paper_fill_latency_bars,
+                        max_bar_volume_participation=settings.paper_max_bar_volume_participation,
+                        queue_fill_probability=settings.paper_queue_fill_probability,
+                        rejection_probability=settings.paper_rejection_probability,
+                    )
+                except (TypeError, ValueError, OverflowError) as exc:
+                    state["last_processed_bar_timestamp"] = current_timestamp
+                    reason["paper_execution_state"] = state
+                    reason["paper_execution_event"] = {
+                        "event": "INVALID_CONTEXT_NO_FILL",
+                        "error_type": type(exc).__name__,
+                    }
+                    trade.reason = json.dumps(reason, default=str)
+                    trade.error = "Paper execution context rejected; awaiting a valid completed bar"
+                    trade.updated_at = utcnow()
+                    continue
+
+                state["last_processed_bar_timestamp"] = str(
+                    event.get("last_processed_bar_timestamp") or current_timestamp
+                )
+                state["bars_waited"] = int(event.get("bars_waited") or bars_waited)
+                reason["paper_execution_state"] = state
+                reason["paper_execution_model"] = cost_model
+                reason["paper_execution_event"] = event
+
+                if event["event"] == "REJECTED":
+                    trade.status = "REJECTED"
+                    trade.error = "Paper simulator produced a deterministic rejection event"
+                    trade.reason = json.dumps(reason, default=str)
+                    trade.updated_at = utcnow()
+                    rejected_orders += 1
+                    continue
+
+                fill_quantity = float(event.get("fill_quantity") or 0.0)
+                if fill_quantity > 0.0:
+                    remaining_before = float(trade.remaining_quantity or 0.0)
+                    if (not math.isfinite(fill_quantity) or fill_quantity <= 0.0
+                            or fill_quantity > remaining_before + 1e-12):
+                        raise RiskBlocked("Paper fill quantity exceeded outstanding order quantity")
+                    fill_price = adverse_fill_price(
+                        float(price), str(trade.side), float(cost_model["modeled_slippage_bps"])
+                    )
+                    prior_filled = float(trade.filled_quantity or 0.0)
+                    prior_notional = float(trade.notional or 0.0)
+                    prior_fee = Decimal(str(trade.fee or 0.0))
+                    new_filled = prior_filled + fill_quantity
+                    fill_notional = fill_quantity * fill_price
+                    cumulative_notional = prior_notional + fill_notional
+                    fee_delta = (
+                        Decimal(str(fill_notional))
+                        * Decimal(str(profile.taker_bps))
+                        / Decimal("10000")
+                    )
+                    await _apply_fill_to_position(db, trade, new_filled, fill_price)
+                    # The position consumes each incremental fill price. The order stores
+                    # the correct quantity-weighted average across all partial fills.
+                    trade.average_fill_price = cumulative_notional / new_filled
+                    trade.notional = cumulative_notional
+                    trade.fee = float(prior_fee + fee_delta)
+                    if (event["event"] == "FILLED"
+                            or float(trade.remaining_quantity or 0.0) <= max(1e-12, float(trade.requested_quantity or 0.0) * 1e-12)):
+                        trade.status = "FILLED"
+                        trade.remaining_quantity = 0.0
+                        trade.error = ""
+                        filled_orders += 1
+                    else:
+                        trade.status = "PARTIAL"
+                        partial_fill_events += 1
+                    state["last_fill_bar_timestamp"] = current_timestamp
+                    if fee_delta > 0:
+                        app_state = await _get_state_locked(db)
+                        app_state.cash_equity = max(0.0, float(app_state.cash_equity) - float(fee_delta))
+                else:
+                    trade.status = "OPEN"
+                    trade.error = (
+                        "Waiting for verified bar liquidity"
+                        if event["event"] == "WAITING_FOR_VERIFIED_LIQUIDITY"
+                        else ""
+                    )
+
+                reason["paper_execution_state"] = state
+                reason["paper_execution_model"] = cost_model
+                reason["paper_execution_event"] = event
+                trade.reason = json.dumps(reason, default=str)
+                trade.updated_at = utcnow()
+
+            await db.commit()
+
+        if filled_orders or partial_fill_events or rejected_orders:
+            await audit("PAPER_EXECUTION_STRESS_EVENT", {
+                "symbol": normalized_symbol,
+                "exchange": normalized_exchange,
+                "bar_timestamp": current_timestamp,
+                "checked": checked,
+                "filled_orders": filled_orders,
+                "partial_fill_events": partial_fill_events,
+                "rejected_orders": rejected_orders,
+            })
+        return {
+            "status": "OK",
+            "checked": checked,
+            "filled": filled_orders,
+            "partial_fill_events": partial_fill_events,
+            "rejected": rejected_orders,
+            "bar_timestamp": current_timestamp,
+        }
+    finally:
+        await release_lock(lock_key)
+
+
 async def mark_paper_equity(mark_prices: dict[str, float], customer_id: int | None = None):
     async with SessionLocal() as db:
         if customer_id is None:
