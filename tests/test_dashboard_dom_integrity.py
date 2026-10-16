@@ -3,8 +3,6 @@ import collections
 import re
 from pathlib import Path
 
-import pytest
-
 TEMPLATES = ["app/templates/dashboard.html", "app/templates/customer.html"]
 
 
@@ -15,8 +13,22 @@ def _split(path: str):
     if path == "app/templates/dashboard.html":
         js = Path("app/static/admin-dashboard.js").read_text(encoding="utf-8")
     else:
-        js = "\n".join(scripts)
+        js = Path("app/static/customer-dashboard.js").read_text(encoding="utf-8")
     return markup, js
+
+
+def test_customer_and_admin_scripts_are_external_and_not_inline():
+    for path, script in [
+        ("app/templates/dashboard.html", "admin-dashboard.js"),
+        ("app/templates/customer.html", "customer-dashboard.js"),
+    ]:
+        html = Path(path).read_text(encoding="utf-8")
+        assert f'<script src="/static/{script}" defer></script>' in html
+        assert not re.search(r"<script>(.*?)</script>", html, re.S)
+        assert not re.search(r"\son(?:click|change|submit|input)=", html, re.I)
+
+
+import pytest
 
 
 @pytest.mark.parametrize("path", TEMPLATES)
@@ -44,10 +56,3 @@ def test_withdrawal_rows_are_written_into_the_table_body_not_the_panel():
     markup, js = _split("app/templates/dashboard.html")
     assert '<tbody id="withdrawalRows">' in markup
     assert "$('withdrawalRows').innerHTML=" in js
-
-
-def test_admin_dashboard_script_is_external_and_has_no_inline_event_handlers():
-    html = Path("app/templates/dashboard.html").read_text(encoding="utf-8")
-    assert '<script src="/static/admin-dashboard.js" defer></script>' in html
-    assert not re.search(r"\son(?:click|change|submit|input)=", html, re.I)
-    assert not re.search(r"<script>(.*?)</script>", html, re.S)
