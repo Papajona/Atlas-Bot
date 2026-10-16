@@ -1523,17 +1523,45 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             if asset in {"forex", "commodity"} and forex_live and settings.oanda_practice:
                 raise RiskBlocked("OANDA practice mode is enabled; live Forex is locked")
             mode = "FOREX_DEMO" if forex_demo else ("LIVE" if live else "PAPER")
-            # Do not write unrealistically perfect paper fills to the trading ledger. The active
-            # legacy branch has no completed-bar lifecycle, latency, partial fills, or liquidity-aware
-            # impact model; claiming a fill here would contaminate paper-forward evidence. Until the
-            # bar-driven simulator is implemented and wired into the worker, fail closed before any
-            # Trade/Position/equity mutation. Live and OANDA practice paths are unaffected.
+            paper_submission_bar_at = None
             if mode == "PAPER":
-                raise RiskBlocked(
-                    "Platform paper execution is temporarily blocked: the legacy execution path "
-                    "does immediate full fills with fixed slippage. A bar-driven paper simulator "
-                    "must be integrated and verified before orders can be simulated."
-                )
+                # Only the server-side /api/paper/step route can submit a platform paper order.
+                # Direct calls without an identity-bound market-data context remain blocked.
+                paper_context = signal.get("_paper_execution_context")
+                if not isinstance(paper_context, dict):
+                    raise RiskBlocked(
+                        "Platform paper execution requires completed-bar simulator context; "
+                        "immediate full-fill paper execution is disabled."
+                    )
+                provenance = paper_context.get("data_provenance")
+                if not isinstance(provenance, dict):
+                    raise RiskBlocked("Paper execution requires market-data provenance")
+                data_sha = str(provenance.get("sha256") or "").lower()
+                if (
+                    paper_context.get("symbol") != symbol
+                    or paper_context.get("exchange") != exchange
+                    or paper_context.get("timeframe") != timeframe
+                    or str(paper_context.get("asset") or "").lower() != str(asset).lower()
+                    or len(data_sha) != 64
+                    or any(ch not in "0123456789abcdef" for ch in data_sha)
+                    or int(provenance.get("row_count") or 0) < 2
+                    or not str(provenance.get("source") or "")
+                ):
+                    raise RiskBlocked("Paper execution market-data identity/provenance is invalid")
+                try:
+                    paper_submission_bar_at = _paper_utc(paper_context.get("bar_timestamp"))
+                    provenance_fetched_at = _paper_utc(provenance.get("fetched_at_utc"))
+                    bar_close_at = paper_submission_bar_at + timedelta(seconds=_paper_timeframe_seconds(timeframe))
+                except (TypeError, ValueError, OverflowError, RiskBlocked) as exc:
+                    raise RiskBlocked("Paper execution requires a valid completed bar timestamp") from exc
+                now_utc = utcnow()
+                if (
+                    bar_close_at > now_utc
+                    or (now_utc - bar_close_at).total_seconds() > max(60, _paper_timeframe_seconds(timeframe) * 2)
+                    or (now_utc - provenance_fetched_at).total_seconds() < -30
+                    or (now_utc - provenance_fetched_at).total_seconds() > max(60, int(settings.stale_data_minutes) * 60)
+                ):
+                    raise RiskBlocked("Paper execution market bar or provenance is stale/incomplete")
             trading_account_id = account.id if account is not None else None
             risk_equity = float(account.equity if account is not None else s.equity)
 
