@@ -90,6 +90,39 @@ def test_invalid_crypto_research_result_exposes_survivorship_limitation():
     assert result["universe_bias"] == "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
     assert result["data_quality"]["universe_bias"] == result["universe_bias"]
 
+
+def test_survivor_only_crypto_universe_cannot_produce_paper_candidates():
+    from app.research_engine import paper_candidates
+
+    row = {"strategy": "trend", "sharpe": 2.0, "max_drawdown": -0.05,
+           "trades": 500, "total_return": 1.0}
+    folds = [{"total_return": 0.10}, {"total_return": 0.05},
+             {"total_return": -0.01}, {"total_return": 0.04},
+             {"total_return": 0.02}]
+    research = {
+        "universe_bias": "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY",
+        "strategies": [row],
+        "validation": {"per_strategy_oos": {
+            "trend": {"status": "OK", "oos_total_return": 0.10, "folds": folds}
+        }},
+    }
+    assert paper_candidates(research) == []
+
+
+def test_missing_universe_provenance_fails_closed_for_paper_candidates():
+    from app.research_engine import paper_candidates
+
+    row = {"strategy": "trend", "sharpe": 2.0, "max_drawdown": -0.05,
+           "trades": 500, "total_return": 1.0}
+    folds = [{"total_return": 0.10}] * 5
+    research = {
+        "strategies": [row],
+        "validation": {"per_strategy_oos": {
+            "trend": {"status": "OK", "oos_total_return": 0.10, "folds": folds}
+        }},
+    }
+    assert paper_candidates(research) == []
+
 def test_all_lightgbm_models_use_the_bounded_thread_setting():
     from app.config import settings
 
