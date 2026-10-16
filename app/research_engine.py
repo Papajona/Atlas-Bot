@@ -516,6 +516,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         cost_validation = validate_execution_cost_calibration(
             cost_document, evidence_keys, venue=research_venue, market_type=research_market_type,
             symbol=research_symbol, model_fingerprint=model_fingerprint,
+            max_spread_error_bps=settings.research_cost_max_spread_mae_bps,
+            max_slippage_error_bps=settings.research_cost_max_slippage_mae_bps,
         )
     else:
         cost_validation = {"verified": False, "calibration_verified": False,
