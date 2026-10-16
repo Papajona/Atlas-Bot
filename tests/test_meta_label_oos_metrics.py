@@ -65,3 +65,54 @@ def test_empty_oos_metrics_are_explicitly_unavailable():
     assert result["oos_filtered_win_rate"] is None
     assert result["oos_unfiltered_win_rate"] is None
     assert result["oos_win_rate_lift"] is None
+
+
+
+@pytest.mark.asyncio
+async def test_meta_label_research_route_exposes_diagnostics_without_execution_authority(monkeypatch):
+    import pandas as pd
+    import app.main as main
+    from app.schemas import MarketRequest
+
+    df = pd.DataFrame(
+        {"open":[100.0, 101.0], "high":[102.0, 103.0],
+         "low":[99.0, 100.0], "close":[101.0, 102.0], "volume":[10.0, 12.0]},
+        index=pd.date_range("2026-01-01", periods=2, freq="h", tz="UTC"),
+    )
+    df.attrs["data_provenance"] = {
+        "source":"synthetic_test", "symbol":"BTC/USDT", "exchange":"binance",
+        "timeframe":"1h", "row_count":2, "sha256":"a"*64,
+    }
+
+    async def fake_auth(*args, **kwargs):
+        return {"sub":"research-test"}
+
+    async def fake_require_role(*args, **kwargs):
+        return None
+
+    async def fake_audit(*args, **kwargs):
+        return None
+
+    def fake_meta_report(frame, **kwargs):
+        return {
+            "status":"OK", "oos_observations":100, "oos_precision":0.61,
+            "oos_recall":0.57, "oos_filtered_win_rate":0.60,
+            "oos_unfiltered_win_rate":0.51, "oos_win_rate_lift":0.09,
+            "execution_authority":True,
+        }
+
+    monkeypatch.setattr(main, "auth", fake_auth)
+    monkeypatch.setattr(main, "require_role", fake_require_role)
+    monkeypatch.setattr(main, "_audit", fake_audit)
+    monkeypatch.setattr(main, "market_data", lambda req: df)
+    monkeypatch.setattr(main, "meta_label_walk_forward", fake_meta_report)
+
+    result = await main.meta_label_research_api(MarketRequest(), None, None)
+    assert result["status"] == "OK"
+    assert result["oos_precision"] == pytest.approx(0.61)
+    assert result["oos_recall"] == pytest.approx(0.57)
+    assert result["oos_filtered_win_rate"] == pytest.approx(0.60)
+    assert result["oos_unfiltered_win_rate"] == pytest.approx(0.51)
+    assert result["oos_win_rate_lift"] == pytest.approx(0.09)
+    assert result["execution_authority"] is False
+    assert "do not bypass" in result["evidence_note"]
