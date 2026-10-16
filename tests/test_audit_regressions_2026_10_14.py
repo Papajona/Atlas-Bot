@@ -179,7 +179,7 @@ def test_paper_candidates_require_comparable_trial_dsr_and_execution_evidence():
         "status":"OK", "oos_total_return":0.12, "sharpe":0.9, "max_drawdown":-0.08,
         "trades":200, "folds":folds, "deflated_sharpe":0.99, "cost_stress_ok":True,
         "financing_cost_model_complete":True, "intrabar_stop_target_model_complete":True,
-        "execution_cost_model_complete":True, "trial_registry_complete":True,
+        "execution_cost_model_complete":True, "execution_cost_calibration_status":"VERIFIED", "execution_cost_calibration_evidence_id":"fixture:venue-cost-calibration", "trial_registry_complete":True,
     }
     research = {
         "asset_class":"forex", "universe_bias":"NOT_APPLICABLE", "strategies":[row],
