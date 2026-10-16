@@ -23,10 +23,6 @@ CONTENT_SECURITY_POLICY = (
     "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
     "script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
 )
-COMPAT_CONTENT_SECURITY_POLICY = (
-    "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
-    "script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
-)
 
 
 class TelemetryMiddleware(BaseHTTPMiddleware):
@@ -46,10 +42,9 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
         if str(settings.environment).lower() == "production":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         if str(settings.environment).lower() in {"staging", "production"}:
-            # Both environments enforce the same dashboard policy. Do not apply the stricter
-            # admin policy to the customer page until its inline event handlers are removed.
-            policy = CONTENT_SECURITY_POLICY if path in {"/admin", "/admin/"} else COMPAT_CONTENT_SECURITY_POLICY
-            response.headers["Content-Security-Policy"] = policy
+            # Both dashboards use same-origin external scripts and delegated event handlers;
+            # inline script execution is not required by either page.
+            response.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
         logger.info(json.dumps({"request_id": request_id, "method": request.method, "path": path,
                                 "status": response.status_code, "duration_ms": round(elapsed * 1000, 2)}))
         return response
