@@ -198,13 +198,27 @@ async def preflight_isolated_customer_paper_ledger(
                     )).one()
                     if primary_db != _postgres_url(primary_value).database:
                         return {"status": "BLOCKED", "reason": "PRIMARY_DATABASE_IDENTITY_MISMATCH"}
-                    primary_public_create = bool((await primary_conn.execute(text(
-                        "SELECT has_schema_privilege(CAST(:paper_role AS name), 'public', 'CREATE')"
-                    ), {"paper_role": role_name})).scalar_one())
-                    if primary_public_create:
+                    primary_schema_rows = (await primary_conn.execute(text(
+                        """
+                        SELECT n.nspname,
+                               has_schema_privilege(CAST(:paper_role AS name), n.oid, 'USAGE') AS can_use,
+                               has_schema_privilege(CAST(:paper_role AS name), n.oid, 'CREATE') AS can_create
+                        FROM pg_namespace n
+                        WHERE n.nspname NOT LIKE 'pg_%'
+                          AND n.nspname <> 'information_schema'
+                        """
+                    ), {"paper_role": role_name})).mappings().all()
+                    schema_exposure = [
+                        f"{row['nspname']}:{permission}"
+                        for row in primary_schema_rows
+                        for permission, value in (("USAGE", row["can_use"]), ("CREATE", row["can_create"]))
+                        if bool(value)
+                    ]
+                    if schema_exposure:
                         return {
                             "status": "BLOCKED",
-                            "reason": "PAPER_ROLE_CAN_CREATE_IN_PRIMARY_PUBLIC_SCHEMA",
+                            "reason": "PAPER_ROLE_HAS_PRIMARY_SCHEMA_ACCESS",
+                            "privileges": sorted(schema_exposure),
                         }
                     primary_table_rows = (await primary_conn.execute(text(
                         """
@@ -219,13 +233,9 @@ async def preflight_isolated_customer_paper_ledger(
                         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
-                          AND c.relname = ANY(:real_tables)
                           AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
                         """
-                    ), {
-                        "paper_role": role_name,
-                        "real_tables": list(REAL_MONEY_TABLES),
-                    })).mappings().all()
+                    ), {"paper_role": role_name})).mappings().all()
                     primary_exposure = []
                     for row in primary_table_rows:
                         for permission in (
@@ -234,10 +244,26 @@ async def preflight_isolated_customer_paper_ledger(
                         ):
                             if bool(row[permission]):
                                 primary_exposure.append(f"{row['table_name']}:{permission}")
+                    primary_sequence_rows = (await primary_conn.execute(text(
+                        """
+                        SELECT n.nspname || '.' || c.relname AS sequence_name,
+                               has_sequence_privilege(CAST(:paper_role AS name), c.oid, 'SELECT') AS can_select,
+                               has_sequence_privilege(CAST(:paper_role AS name), c.oid, 'USAGE') AS can_use,
+                               has_sequence_privilege(CAST(:paper_role AS name), c.oid, 'UPDATE') AS can_update
+                        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                        WHERE n.nspname NOT LIKE 'pg_%'
+                          AND n.nspname <> 'information_schema'
+                          AND c.relkind = 'S'
+                        """
+                    ), {"paper_role": role_name})).mappings().all()
+                    for row in primary_sequence_rows:
+                        for permission in ("can_select", "can_use", "can_update"):
+                            if bool(row[permission]):
+                                primary_exposure.append(f"{row['sequence_name']}:{permission}")
                     if primary_exposure:
                         return {
                             "status": "BLOCKED",
-                            "reason": "PAPER_ROLE_HAS_PRIMARY_LEDGER_PRIVILEGES",
+                            "reason": "PAPER_ROLE_HAS_PRIMARY_RELATION_PRIVILEGES",
                             "privileges": sorted(primary_exposure),
                         }
             finally:
