@@ -43,7 +43,10 @@ def test_android_webview_has_domain_allowlist():
     assert 'host.endsWith(".run.app")' not in src
 
 def test_customer_ui_no_direct_api_value_innerhtml():
-    src=(ROOT/"app/templates/customer.html").read_text()
+    html=(ROOT/"app/templates/customer.html").read_text()
+    js=(ROOT/"app/static/customer-dashboard.js").read_text()
+    src=html+"\n"+js
+    assert '<script src="/static/customer-dashboard.js" defer></script>' in html
     for line in src.splitlines():
         if 'innerHTML' in line and 'function esc' not in line:
             assert 'data:image' not in line or 'qr_code' not in line
@@ -61,8 +64,10 @@ def test_admin_security_helpers_exist_and_are_referenced():
 
 
 def test_customer_access_token_is_session_scoped():
-    src=(ROOT/"app/templates/customer.html").read_text()
-    token_section=src[src.index("const tokenKey"):src.index("// Atlas UI layer")]
+    html=(ROOT/"app/templates/customer.html").read_text()
+    js=(ROOT/"app/static/customer-dashboard.js").read_text()
+    assert '<script src="/static/customer-dashboard.js" defer></script>' in html
+    token_section=js[js.index("const tokenKey"):js.index("// Atlas UI layer")]
     assert "sessionStorage.getItem(tokenKey)" in token_section
     assert "sessionStorage.setItem(tokenKey" in token_section
     assert "localStorage.setItem(tokenKey" not in token_section
