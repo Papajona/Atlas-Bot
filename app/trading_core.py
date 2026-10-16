@@ -522,6 +522,8 @@ def ai_walk_forward_backtest(
         # OHLC stop-first handling is a conservative approximation, not tick-level
         # event-order evidence. Do not let this backtest certify intrabar completeness.
         "intrabar_stop_target_model_complete": False,
+        "slippage_model_complete": False,
+        "slippage_model_status": "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED",
         "execution_cost_model_complete": False,
         "execution_cost_calibration_status": "MISSING_VENUE_CALIBRATION_EVIDENCE",
         "execution_cost_calibration_evidence_id": None,
