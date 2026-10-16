@@ -215,6 +215,70 @@ class Trade(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class PaperOrderState(Base):
+    """Persistent lifecycle state for a platform-only bar-driven paper order."""
+    __tablename__ = "paper_order_states"
+    __table_args__ = (
+        UniqueConstraint("trade_id", name="uq_paper_order_state_trade"),
+        Index("ix_paper_order_state_market", "exchange", "symbol", "timeframe", "status"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_id: Mapped[int] = mapped_column(ForeignKey("trades.id", ondelete="CASCADE"), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(50), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(80), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(20), nullable=False)
+    submitted_bar_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_processed_bar_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    bars_elapsed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="OPEN")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class PaperBarState(Base):
+    """One immutable identity and aggregate liquidity budget per completed market bar."""
+    __tablename__ = "paper_bar_states"
+    __table_args__ = (
+        UniqueConstraint("exchange", "symbol", "timeframe", "bar_at", name="uq_paper_bar_market_time"),
+        Index("ix_paper_bar_market_time", "exchange", "symbol", "timeframe", "bar_at"),
+    )
+    bar_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    exchange: Mapped[str] = mapped_column(String(50), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(80), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(20), nullable=False)
+    bar_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    asset_class: Mapped[str] = mapped_column(String(20), nullable=False, default="unknown")
+    data_source: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    data_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    volume_unit: Mapped[str] = mapped_column(String(30), nullable=False, default="unknown")
+    bar_volume: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    capacity: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    consumed: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    close_price: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    return_volatility: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PaperFillEvent(Base):
+    """Exactly one persisted paper attempt per order and completed bar, including no-fill outcomes."""
+    __tablename__ = "paper_fill_events"
+    __table_args__ = (
+        UniqueConstraint("trade_id", "bar_key", name="uq_paper_fill_trade_bar"),
+        Index("ix_paper_fill_bar", "bar_key"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_id: Mapped[int] = mapped_column(ForeignKey("trades.id", ondelete="CASCADE"), nullable=False)
+    bar_key: Mapped[str] = mapped_column(ForeignKey("paper_bar_states.bar_key", ondelete="CASCADE"), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(30), nullable=False)
+    attempted_quantity: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    filled_quantity: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    fill_price: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    fee: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    slippage_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class OrderCommand(Base):
     __tablename__ = "order_commands"
     __table_args__ = (
