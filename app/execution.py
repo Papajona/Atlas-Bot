@@ -4,7 +4,6 @@ import math
 import asyncio
 import hashlib
 import json
-import math
 import os
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -31,7 +30,6 @@ from .audit_chain import record_audit
 from .live_fees import extract_order_fee_quote_decimal, ESTIMATED
 from .customer_funds import record_ledger_incident
 from .distributed import acquire_lock, release_lock
-from .paper_execution_model import calibrated_model_available, estimate_paper_fill
 
 
 TERMINAL_STATUSES = {"FILLED", "CANCELED", "REJECTED", "FAILED", "SIMULATED"}
@@ -2130,8 +2128,6 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
         if mode == "PAPER":
             if paper_submission_bar_at is None:
                 raise RiskBlocked("Paper order has no validated submission-bar identity")
-            paper_rejection = None
-            paper_execution = None
             async with SessionLocal() as db:
                 t = await db.get(Trade, trade_id, with_for_update=True)
                 if t is None:
