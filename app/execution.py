@@ -1422,9 +1422,11 @@ async def advance_platform_paper_orders(
             fee_decimal = Decimal("0")
             slippage_bps = 0.0
 
-            if preexisting_protective_trigger and not is_triggered_exit:
+            if (preexisting_protective_trigger or active_exit_entry_ids) and not is_triggered_exit:
                 outcome = "WAIT_PROTECTIVE_TRIGGER"
-                reason = "existing position protective barrier touched on this bar; ordinary entry fills deferred"
+                reason = (
+                    "protective exit is pending or an existing position barrier was touched; ordinary entry fills deferred"
+                )
             elif order_state.bars_elapsed >= min_latency:
                 if not verified_liquidity or float(bar_state.capacity or 0.0) <= 0:
                     outcome = "WAIT_UNVERIFIED_LIQUIDITY" if not verified_liquidity else "WAIT_NO_CAPACITY"
