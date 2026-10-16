@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 
 class MarketRequest(BaseModel):
     asset: str = Field(default="crypto", pattern="^(crypto|forex|commodity)$")
-    symbol: str = "BTC/USDT:USDT"
+    symbol: str = "BTC/USDT"
     exchange: str = "binance"
     timeframe: str = "1h"
     days: int = Field(default=365, ge=30, le=1500)
@@ -70,7 +70,7 @@ class StrategyLabRequest(BaseModel):
     name: str = Field(default="Atlas Candidate", min_length=2, max_length=120)
     prompt: str = Field(min_length=20, max_length=4000)
     asset: str = Field(default="crypto", pattern="^(crypto|forex|commodity)$")
-    symbol: str = Field(default="BTC/USDT:USDT", min_length=2, max_length=80)
+    symbol: str = Field(default="BTC/USDT", min_length=2, max_length=80)
     exchange: str = Field(default="binance", min_length=2, max_length=50)
     timeframe: str = Field(default="1h", pattern="^(5m|15m|30m|1h|4h|1d)$")
     days: int = Field(default=365, ge=60, le=1500)
