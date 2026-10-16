@@ -428,7 +428,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     ens_cost["carry_evidence_source_present"] = bool(carry_evidence_source)
     ens_cost["carry_evidence_id_present"] = bool(carry_evidence_id)
     ens_cost["financing_cost_model_complete"] = carry_evidence_complete
-    ens_cost["intrabar_stop_target_model_complete"] = True
+    # Ensemble cost diagnostics use OHLC bars, not verified tick-level event ordering.
+    ens_cost["intrabar_stop_target_model_complete"] = False
     ens_cost["execution_cost_model_complete"] = False
     ens_cost["execution_cost_calibration_status"] = "MISSING_VENUE_CALIBRATION_EVIDENCE"
     ens_cost["execution_cost_calibration_evidence_id"] = None
