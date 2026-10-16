@@ -90,7 +90,10 @@ class FillPlan:
 
 def plan_partial_fill(requested_quantity: Decimal, bar_volume: Decimal, participation_rate: Decimal, *, eligible_at: datetime, bar_at: datetime, minimum_fill: Decimal=Decimal("0")) -> FillPlan:
     requested=_pos(requested_quantity,"requested"); volume=_pos(bar_volume,"volume",True); rate=_pos(participation_rate,"participation"); minimum=_pos(minimum_fill,"minimum",True)
-    if rate>1 or eligible_at.tzinfo is None or bar_at.tzinfo is None: raise PaperModelInputError("invalid participation or timestamps")
+    if rate > 1:
+        raise PaperModelInputError("participation rate must be <= 1")
+    _aware(eligible_at, "eligible_at")
+    _aware(bar_at, "bar_at")
     if bar_at<eligible_at or volume==0: return FillPlan(requested,Decimal(0),requested,False)
     filled=min(requested,volume*rate)
     if filled<minimum: filled=Decimal(0)
@@ -155,9 +158,14 @@ def required_margin(quantity: Decimal, price: Decimal, spec: ContractSpec, *, le
     return qty * size * px * effective_rate
 
 def carry_cost(*, notional: Decimal, annual_rate: Decimal, calendar_days: int, day_count_basis: int=360, direction: str="long") -> Decimal:
-    n=_pos(notional,"notional"); rate=Decimal(annual_rate)
-    if not rate.is_finite() or calendar_days<0 or day_count_basis<=0 or direction not in ("long","short"): raise PaperModelInputError("invalid carry inputs")
-    return n*rate*Decimal(calendar_days)/Decimal(day_count_basis)*(1 if direction=="long" else -1)
+    n = _pos(notional, "notional")
+    rate = _decimal(annual_rate, "annual rate")
+    if (not isinstance(calendar_days, int) or isinstance(calendar_days, bool)
+            or not isinstance(day_count_basis, int) or isinstance(day_count_basis, bool)
+            or calendar_days < 0 or day_count_basis <= 0
+            or direction not in ("long", "short")):
+        raise PaperModelInputError("invalid carry inputs")
+    return n * rate * Decimal(calendar_days) / Decimal(day_count_basis) * (1 if direction == "long" else -1)
 
 def active_contract(contracts: Sequence[tuple[datetime,str]], at: datetime) -> str:
     _aware(at, "rollover timestamp")
