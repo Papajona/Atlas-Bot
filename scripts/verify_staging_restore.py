@@ -27,6 +27,16 @@ SELECT jsonb_build_object(
     SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='public' AND c.relkind IN ('r','p')
   ),
+  -- The Alembic marker alone is insufficient: a partial restore or manual version
+  -- edit must not pass while core paper lifecycle/research objects are absent.
+  'required_tables_missing', (
+    SELECT coalesce(jsonb_agg(required.table_name ORDER BY required.table_name), '[]'::jsonb)
+    FROM unnest(ARRAY[
+      'paper_order_states', 'paper_bar_states', 'paper_fill_events',
+      'research_trial_archive'
+    ]::text[]) AS required(table_name)
+    WHERE to_regclass(format('public.%I', required.table_name)) IS NULL
+  ),
   'tables_without_rls', (
     SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relrowsecurity
@@ -136,6 +146,19 @@ def read_database_uri(value: str, staging_ref: str, production_ref: str) -> tupl
     return env, parsed.hostname.lower()
 
 
+def required_table_failures(value: object) -> list[str]:
+    """Fail closed if restore SQL did not report required tables or found any missing."""
+    if not isinstance(value, list):
+        return ["required_tables_missing was not reported as a JSON array"]
+    failures = []
+    for table_name in value:
+        if not isinstance(table_name, str) or not table_name.strip():
+            failures.append("required_tables_missing contained a malformed table name")
+        else:
+            failures.append(f"required staging table missing: {table_name}")
+    return failures
+
+
 def truthy(value: object) -> bool:
     return value is True or str(value).strip().lower() in {"t", "true", "1", "yes"}
 
@@ -206,6 +229,7 @@ def audit(args: argparse.Namespace) -> dict:
         failures.append(f"restored database revision must be exactly {expected_revision}")
     if int(observed.get("public_table_count", 0)) < 1:
         failures.append("public schema has no tables")
+    failures.extend(required_table_failures(observed.get("required_tables_missing")))
     for key in ("tables_without_rls", "negative_customer_ledger_buckets", "unbalanced_or_empty_journals",
                 "invalid_journal_lines", "orphan_journal_lines", "duplicate_journal_idempotency_keys",
                 "negative_ledger_entries"):
