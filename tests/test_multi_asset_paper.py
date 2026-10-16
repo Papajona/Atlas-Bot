@@ -122,6 +122,16 @@ def test_financing_requires_verified_effective_instrument_rate_and_audit_provena
                 evidence_id="placeholder", verified=False,
             ), instrument="XAU_USD", at=dt(2), calendar_days=3, direction="long"
         )
+    future_verified = VerifiedFinancingRate(
+        instrument="XAU_USD", long_annual_rate=D("0.05"), short_annual_rate=D("0.02"),
+        effective_at=dt(1), verified_at=dt(3), source="broker schedule",
+        evidence_id="sha256:future-verification", verified=True,
+    )
+    with pytest.raises(PaperModelInputError, match="verified after evaluation timestamp"):
+        verified_financing_cost(
+            notional=D("3600"), rate=future_verified, instrument="XAU_USD",
+            at=dt(2), calendar_days=3, direction="long",
+        )
     with pytest.raises(PaperModelInputError, match="instrument mismatch"):
         verified_financing_cost(
             notional=D("3600"), rate=rate, instrument="EUR_USD",
