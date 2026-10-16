@@ -502,6 +502,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         universe_validation = {"verified": True, "universe_verified": True,
                                "reason": "NOT_APPLICABLE_TO_NON_CRYPTO_ASSET"}
         universe_bias = "NOT_APPLICABLE"
+    data_quality["universe_bias"] = universe_bias
 
     model_fingerprint = canonical_sha256({
         "model": "atlas-research-cost-v1",
@@ -589,10 +590,14 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "carry_evidence_source": carry_evidence_source or None,
                         "carry_evidence_id": carry_evidence_id or None,
                         "intrabar_stop_target_model_complete": True,
-                        # Configured cost stress is diagnostic; no venue-calibration archive is wired in.
-                        "execution_cost_model_complete": False,
-                        "execution_cost_calibration_status": "MISSING_VENUE_CALIBRATION_EVIDENCE",
-                        "execution_cost_calibration_evidence_id": None,
+                        "execution_cost_model_complete": calibration_ok,
+                        "execution_cost_calibration_status": calibration_status,
+                        "execution_cost_calibration_evidence_id": calibration_evidence_id,
+                        "execution_cost_calibration": cost_validation,
+                        "execution_cost_model_fingerprint": model_fingerprint,
+                        "crypto_universe_validation": universe_validation,
+                        "comparable_trial_archive": archive_validation,
+                        "oos_sample_sha256": sample_sha256 or None,
                         "carry_bps_per_bar": carry,
                         "trial_registry_status": "COMPLETE" if trial_registry_complete else "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
                         "cumulative_trials": n_trials,
@@ -631,18 +636,19 @@ def paper_candidates(
     min_trades = settings.adaptive_min_trades if min_trades is None else int(min_trades)
     min_oos_total_return = settings.research_min_oos_total_return if min_oos_total_return is None else float(min_oos_total_return)
     min_oos_positive_fold_ratio = settings.research_min_oos_positive_fold_ratio if min_oos_positive_fold_ratio is None else float(min_oos_positive_fold_ratio)
-    # A crypto allowlist of assets that survive today is not a historical point-in-time
-    # universe. No trusted point-in-time universe loader/manifest validator is implemented
-    # in this code path, so a caller-supplied "verified" string cannot substitute for evidence.
-    # Until that pipeline exists, only NOT_APPLICABLE data may produce candidates.
+    # Crypto candidates are only allowed when signed point-in-time universe evidence
+    # was validated by backtest_all_strategies for this exact run. A report field alone
+    # cannot bypass the evidence validator. Other asset classes must explicitly declare
+    # the universe requirement NOT_APPLICABLE.
     universe_bias = research.get("universe_bias") or (research.get("data_quality") or {}).get("universe_bias", "UNKNOWN")
     asset_class = str(research.get("asset_class") or "").strip().lower()
-    # The evidence comes from backtest_all_strategies' trusted report, not a free-standing
-    # label. Missing asset class is treated as unknown. Crypto cannot self-label its way
-    # around the point-in-time asset-universe requirement.
-    if asset_class not in {"forex", "commodity"} or universe_bias != "NOT_APPLICABLE":
-        return []
     validation = research.get("validation") if isinstance(research.get("validation"), dict) else {}
+    universe_evidence = validation.get("crypto_universe_validation") if isinstance(validation.get("crypto_universe_validation"), dict) else {}
+    if asset_class == "crypto":
+        if universe_bias != "POINT_IN_TIME_VERIFIED" or universe_evidence.get("universe_verified") is not True or not universe_evidence.get("evidence_sha256"):
+            return []
+    elif asset_class not in {"forex", "commodity"} or universe_bias != "NOT_APPLICABLE":
+        return []
     dsr = validation.get("deflated_sharpe") if isinstance(validation.get("deflated_sharpe"), dict) else {}
     # Paper candidates still influence parameter selection. Do not publish a candidate
     # until the same fail-closed promotion evidence exists: comparable trials, numerical
