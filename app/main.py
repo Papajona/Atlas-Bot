@@ -2154,6 +2154,28 @@ def market_data(req, customer_id: int | None = None):
 
 
 
+def _attach_research_evidence(df: pd.DataFrame, req: MarketRequest) -> pd.DataFrame:
+    """Attach caller-supplied signed artifacts without altering market provenance.
+
+    Research validators still verify Ed25519 signatures and bind each artifact to
+    the loaded frame's venue, market, symbol, timeframe, dataset and OOS sample.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("research evidence can only be attached to a pandas DataFrame")
+    result = df.copy(deep=False)
+    result.attrs = dict(getattr(df, "attrs", {}) or {})
+    for field in (
+        "point_in_time_universe_manifest",
+        "execution_cost_calibration_evidence",
+        "trial_performance_archive",
+    ):
+        document = getattr(req, field, None)
+        if document is not None:
+            result.attrs[field] = document
+    return result
+
+
+
 
 def _market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[bool, list[str]]:
     reasons: list[str] = []
@@ -6032,6 +6054,7 @@ async def research_backtest_all(req: MarketRequest, x_admin_token: str | None = 
     await auth(x_admin_token, authorization)
     try:
         df = await asyncio.to_thread(market_data, req)
+        df = _attach_research_evidence(df, req)
         cfg = StrategyConfig(
             signal_threshold=settings.strategy_signal_threshold,
             target_vol_annual=settings.strategy_target_vol_annual,
@@ -6053,6 +6076,7 @@ async def research_paper_signals(req: MarketRequest, x_admin_token: str | None =
     await auth(x_admin_token, authorization)
     try:
         df = await asyncio.to_thread(market_data, req)
+        df = _attach_research_evidence(df, req)
         cfg = StrategyConfig(
             signal_threshold=settings.strategy_signal_threshold,
             target_vol_annual=settings.strategy_target_vol_annual,
@@ -6084,6 +6108,7 @@ async def research_review(req: MarketRequest, x_admin_token: str | None = Header
     await auth(x_admin_token, authorization)
     try:
         df = await asyncio.to_thread(market_data, req)
+        df = _attach_research_evidence(df, req)
         cfg = StrategyConfig(
             signal_threshold=settings.strategy_signal_threshold,
             target_vol_annual=settings.strategy_target_vol_annual,
