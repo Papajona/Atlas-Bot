@@ -99,7 +99,8 @@ def _trial_specs(report: Mapping[str, Any]) -> list[tuple[str, dict[str, Any], s
 
 
 def _row_payload(report: Mapping[str, Any], context: Mapping[str, str],
-                 label: str, metrics: Mapping[str, Any], category: str) -> dict[str, Any]:
+                  label: str, metrics: Mapping[str, Any], category: str,
+                  evaluation_id: str) -> dict[str, Any]:
     validation = report.get("validation")
     validation = validation if isinstance(validation, Mapping) else {}
     config = report.get("config")
