@@ -1552,7 +1552,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     or len(data_sha) != 64
                     or any(ch not in "0123456789abcdef" for ch in data_sha)
                     or int(provenance.get("row_count") or 0) < 2
-                    or not str(provenance.get("source") or "")
+                    or str(provenance.get("source") or "") not in {"ccxt_ohlcv", "yfinance", "oanda_v20_mid"}
                 ):
                     raise RiskBlocked("Paper execution market-data identity/provenance is invalid")
                 try:
