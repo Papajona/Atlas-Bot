@@ -148,9 +148,12 @@ def _aligned_log_loss(y_true, probabilities: np.ndarray, model_classes) -> float
 
 
 def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: int = 5, asset: str = "crypto") -> dict:
+    asset_key = str(asset or "").strip().lower()
+    profile = PROFILES.get(asset_key)
+    if profile is None:
+        raise ValueError(f"No validated training cost/annualization profile for asset {asset!r}")
     X = build_features(df)
     aligned = df.reindex(X.index)
-    profile = PROFILES.get(asset, PROFILES["crypto"])
     y = triple_barrier(aligned["close"], X["vol_24"], aligned["high"], aligned["low"], max_hold=profile.max_hold)
     mask = y.notna()
     X, y = X.loc[mask], y.loc[mask]
@@ -217,7 +220,7 @@ def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: 
         "manifest_signature": manifest_signature,
         "training_start": X.index.min().isoformat(),
         "training_end": X.index.max().isoformat(),
-        "asset": asset,
+        "asset": asset_key,
         "max_hold": profile.max_hold,
     }
     meta_file.write_text(json.dumps(meta, indent=2))
