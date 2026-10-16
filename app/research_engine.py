@@ -655,8 +655,12 @@ def paper_candidates(
     min_oos_total_return: float | None = None,
     min_oos_positive_fold_ratio: float | None = None,
     *,
+    point_in_time_universe_manifest: dict | None = None,
+    execution_cost_calibration_evidence: dict | None = None,
     trial_archive_document: dict | None = None,
     trusted_public_keys: str | dict[str, str] | None = None,
+    universe_coverage_start: str | None = None,
+    universe_coverage_end: str | None = None,
 ) -> list[dict]:
     """Select paper-shadow candidates using held-out metrics only.
 
@@ -683,37 +687,91 @@ def paper_candidates(
     elif asset_class not in {"forex", "commodity"} or universe_bias != "NOT_APPLICABLE":
         return []
     dsr = validation.get("deflated_sharpe") if isinstance(validation.get("deflated_sharpe"), dict) else {}
-    # Re-verify the actual signed document at candidate selection time. Report
-    # booleans and archived validation summaries are not trust roots: callers must
-    # provide the original signed artifact, and the server rechecks its Ed25519
-    # signature, complete trial labels, dataset hash, held-out sample and protocol.
-    archive_summary = validation.get("comparable_trial_archive")
+    # Re-verify all original signed artifacts at candidate selection time. Report
+    # booleans and archived validation summaries are not trust roots: the source
+    # document must verify against the configured keyring and exact run context.
+    from .research_evidence import (
+        validate_comparable_trial_archive,
+        validate_crypto_universe_manifest,
+        validate_execution_cost_calibration,
+    )
+
     provenance = research.get("data_provenance")
     provenance = provenance if isinstance(provenance, dict) else {}
+    trusted_keys = settings.research_evidence_public_keys_json if trusted_public_keys is None else trusted_public_keys
+    venue = str(provenance.get("exchange") or research.get("exchange") or "").strip()
+    market_type = str(provenance.get("market_type") or "").strip()
+    symbol = str(provenance.get("symbol") or research.get("symbol") or "").strip()
+    timeframe = str(provenance.get("timeframe") or research.get("timeframe") or "").strip()
+    dataset_sha256 = str(provenance.get("sha256") or "").strip().lower()
     report_trials = validation.get("trial_labels")
     if not isinstance(report_trials, list) or not report_trials:
         return []
     expected_context = {
         "asset_class": asset_class,
-        "venue": str(provenance.get("exchange") or research.get("exchange") or "").strip().lower(),
-        "market_type": str(provenance.get("market_type") or "").strip().lower(),
-        "symbol": str(provenance.get("symbol") or research.get("symbol") or "").strip(),
-        "timeframe": str(provenance.get("timeframe") or research.get("timeframe") or "").strip(),
-        "dataset_sha256": str(provenance.get("sha256") or "").strip().lower(),
+        "venue": venue.lower(),
+        "market_type": market_type.lower(),
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "dataset_sha256": dataset_sha256,
         "oos_sample_sha256": str(validation.get("oos_sample_sha256") or "").strip().lower(),
         "protocol_version": "atlas-purged-walk-forward-v1",
     }
-    try:
-        from .research_evidence import validate_comparable_trial_archive
 
-        verified_archive = validate_comparable_trial_archive(
-            trial_archive_document,
-            trusted_public_keys,
-            candidate_labels={str(label) for label in report_trials},
-            expected_context=expected_context,
+    if asset_class == "crypto":
+        if not universe_coverage_start or not universe_coverage_end or not venue or not market_type or not symbol:
+            return []
+        verified_universe = validate_crypto_universe_manifest(
+            point_in_time_universe_manifest,
+            trusted_keys,
+            venue=venue,
+            market_type=market_type,
+            coverage_start=universe_coverage_start,
+            coverage_end=universe_coverage_end,
+            symbol=symbol,
         )
-    except (TypeError, ValueError, KeyError):
+        reported_universe = validation.get("crypto_universe_validation")
+        if (
+            verified_universe.get("universe_verified") is not True
+            or not isinstance(reported_universe, dict)
+            or reported_universe.get("universe_verified") is not True
+            or reported_universe.get("evidence_id") != verified_universe.get("evidence_id")
+            or reported_universe.get("evidence_sha256") != verified_universe.get("evidence_sha256")
+            or universe_bias != "POINT_IN_TIME_VERIFIED"
+        ):
+            return []
+
+    fingerprint = str(validation.get("execution_cost_model_fingerprint") or "").strip()
+    if not venue or not market_type or not symbol or not fingerprint:
         return []
+    verified_costs = validate_execution_cost_calibration(
+        execution_cost_calibration_evidence,
+        trusted_keys,
+        venue=venue,
+        market_type=market_type,
+        symbol=symbol,
+        model_fingerprint=fingerprint,
+        max_spread_error_bps=settings.research_cost_max_spread_mae_bps,
+        max_slippage_error_bps=settings.research_cost_max_slippage_mae_bps,
+    )
+    reported_costs = validation.get("execution_cost_calibration")
+    if (
+        verified_costs.get("calibration_verified") is not True
+        or not isinstance(reported_costs, dict)
+        or reported_costs.get("calibration_verified") is not True
+        or reported_costs.get("evidence_id") != verified_costs.get("evidence_id")
+        or reported_costs.get("evidence_sha256") != verified_costs.get("evidence_sha256")
+    ):
+        return []
+
+    verified_archive = validate_comparable_trial_archive(
+        trial_archive_document,
+        trusted_keys,
+        candidate_labels={str(label) for label in report_trials},
+        expected_context=expected_context,
+    )
+    archive_summary = validation.get("comparable_trial_archive")
+    dsr = validation.get("deflated_sharpe") if isinstance(validation.get("deflated_sharpe"), dict) else {}
     if (
         verified_archive.get("trial_archive_verified") is not True
         or not isinstance(archive_summary, dict)
