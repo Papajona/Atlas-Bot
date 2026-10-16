@@ -1687,6 +1687,7 @@ async def advance_platform_paper_orders(
         "take_profit_triggers": counts["take_profit_triggers"],
         "ambiguous_stop_priority": counts["ambiguous_stop_priority"],
         "protective_exit_orders_created": counts["protective_exit_orders_created"],
+        "protective_exit_orders_pending": len(active_exit_entry_ids) + counts["protective_exit_orders_created"],
         "liquidity_verified": verified_liquidity,
         "calibration_status": "UNVALIDATED_HEURISTIC",
         "equity": equity_state,
