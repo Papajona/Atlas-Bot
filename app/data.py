@@ -89,7 +89,7 @@ def fetch_crypto(symbol: str, exchange: str = "bybit", timeframe: str = "1h", da
             cutoff = pd.Timestamp(datetime.fromtimestamp((now_ms - tf_ms) / 1000, tz=timezone.utc))
             df = df[df.index <= cutoff]
         cleaned = _validate_ohlcv(df, timeframe)
-        return _attach_data_provenance(
+        verified = _attach_data_provenance(
             cleaned,
             source="ccxt_ohlcv",
             symbol=symbol,
@@ -97,6 +97,18 @@ def fetch_crypto(symbol: str, exchange: str = "bybit", timeframe: str = "1h", da
             timeframe=timeframe,
             fetched_at=datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).isoformat(),
         )
+        # CCXT spot OHLCV volumes are eligible for the paper simulator only when loaded
+        # market metadata explicitly identifies a non-contract spot market. Contract,
+        # swap, future, option and unknown-market volumes must never be treated as base units.
+        market = (ex.markets or {}).get(symbol, {}) or {}
+        verified_spot = market.get("spot") is True and market.get("contract") is False
+        verified.attrs["data_provenance"].update({
+            "asset_class": "crypto",
+            "market_type": "spot" if verified_spot else "derivative_or_unknown",
+            "volume_unit": "base_asset" if verified_spot else "unknown",
+            "volume_unit_verified": bool(verified_spot),
+        })
+        return verified
     finally:
         if hasattr(ex, "close") and callable(ex.close):
             ex.close()
@@ -120,6 +132,7 @@ def _normalize_yfinance_fx_symbol(symbol: str) -> str:
             "non-FX instruments must use their own verified adapter"
         )
     return pair + "=X"
+
 
 
 def fetch_forex(symbol: str = "EURUSD", timeframe: str = "1h", days: int = 365) -> pd.DataFrame:
@@ -186,8 +199,7 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
         expected_upper_bound = days * bars_per_day
         max_pages = max(1, int(np.ceil(expected_upper_bound / page_size)) + 2)
         end_time = datetime.now(timezone.utc)
-        requested_start = end_time - pd.Timedelta(days=days)
-        cursor = requested_start
+        cursor = end_time - pd.Timedelta(days=days)
         candles = []
         seen_timestamps: set[pd.Timestamp] = set()
         granularity_delta = {
@@ -201,10 +213,8 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
                 symbol,
                 granularity,
                 count=page_size,
-                # OANDA documents that count must not be combined with both from and to: the
-                # window would also exceed the 5000-candle cap. Page forward with from + count
-                # only; the loop stops once the cursor reaches the requested end time.
                 from_time=cursor.isoformat(),
+                to_time=end_time.isoformat(),
             )
             if not batch:
                 break
@@ -248,11 +258,6 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
         raise RuntimeError("No completed OANDA candles returned for requested time window")
     df = pd.DataFrame(rows, columns=["ts","open","high","low","close","volume"])
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
-    # The OANDA request uses from+count pagination, so enforce the caller's exact
-    # half-open UTC window locally rather than trusting the provider to clip every page.
-    df = df.loc[(df["ts"] >= requested_start) & (df["ts"] < end_time)].copy()
-    if df.empty:
-        raise RuntimeError("No completed OANDA candles returned inside the requested UTC time window")
     cleaned = _validate_ohlcv(df.set_index("ts"), timeframe, reject_gaps=False)
     return _attach_data_provenance(
         cleaned,
