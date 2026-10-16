@@ -408,7 +408,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     ens_cost["intrabar_stop_target_model_complete"] = True
     ens_cost["execution_cost_model_complete"] = False
     ens_cost["execution_cost_calibration_status"] = "MISSING_VENUE_CALIBRATION_EVIDENCE"
-    ens_cost["execution_cost_calibration_evidence_id"] = None    if not carry_evidence_complete:
+    ens_cost["execution_cost_calibration_evidence_id"] = None
+    if not carry_evidence_complete:
         ens_cost["note"] += " Financing promotion evidence requires a configured carry rate and traceable carry source/evidence ID."
     # Each component is judged on its own net returns (main.py gates on per_strategy_oos[selected]).
     for component in components:
