@@ -100,7 +100,7 @@ def test_paper_gate_and_live_shadow_signals():
             "per_strategy_oos": {"trend": {
                 "status":"OK","oos_total_return":0.10,"sharpe":0.9,"max_drawdown":-0.10,"trades":150,
                 "deflated_sharpe":0.99,"cost_stress_ok":True,"financing_cost_model_complete":True,
-                "intrabar_stop_target_model_complete":True,"execution_cost_model_complete":True,
+                "intrabar_stop_target_model_complete":True,"execution_cost_model_complete":True,"execution_cost_calibration_status":"VERIFIED","execution_cost_calibration_evidence_id":"fixture:venue-cost-calibration",
                 "trial_registry_complete":True,"folds":passing_folds,
             }},
         },
@@ -257,7 +257,9 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
            "cost_stress_ok": True,
         "financing_cost_model_complete": True,
         "intrabar_stop_target_model_complete": True,
-        "execution_cost_model_complete": True, "status": "OK", "oos_total_return": 0.20, "deflated_sharpe": 0.97,
+        "execution_cost_model_complete": True,
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_evidence_id": "fixture:venue-cost-calibration", "status": "OK", "oos_total_return": 0.20, "deflated_sharpe": 0.97,
            "trial_registry_complete": True,
            "financing_cost_model_complete": True, "intrabar_stop_target_model_complete": True}
 
