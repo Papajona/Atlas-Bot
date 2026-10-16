@@ -193,6 +193,8 @@ def test_oos_gate_adapter_preserves_fold_metrics_and_cost_stress():
         "financing_cost_model_complete": True,
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True,
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_evidence_id": "fixture:venue-cost-calibration",
     }
     normalized = promotion_gate_metrics(original)
     assert normalized["folds"] == folds
@@ -220,6 +222,8 @@ def test_oos_gate_adapter_preserves_actual_walk_forward_backtest_fold_key():
         "financing_cost_model_complete": True,
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True,
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_evidence_id": "fixture:venue-cost-calibration",
     }
     normalized = promotion_gate_metrics(backtest_metrics)
     assert normalized["folds"] == emitted_folds
