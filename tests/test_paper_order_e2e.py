@@ -28,6 +28,10 @@ def test_legacy_platform_paper_execution_fails_closed_without_bar_simulator():
 
     async def run():
         await init_db()
+        async with SessionLocal() as db:
+            state = await execution._get_state_locked(db)
+            state.kill_switch = False
+            await db.commit()
         with pytest.raises(execution.RiskBlocked, match="bar-driven paper simulator"):
             await execution.execute_signal(
                 sym, "buy", 0.01, 50000.0, {"score": 0.9}, "binance", "1h",
@@ -63,6 +67,10 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
 
     async def run():
         await init_db()
+        async with SessionLocal() as db:
+            state = await execution._get_state_locked(db)
+            state.kill_switch = False
+            await db.commit()
         df0 = pd.DataFrame(
             {"open":[99.0, 99.5, 100.0], "high":[100.0,100.0,101.0],
              "low":[98.0,99.0,99.5], "close":[99.0,99.5,100.0], "volume":[1.0,1.0,1.0]},
@@ -159,6 +167,10 @@ def test_platform_paper_submission_rejects_fx_and_unverified_derivatives():
 
     async def run():
         await init_db()
+        async with SessionLocal() as db:
+            state = await execution._get_state_locked(db)
+            state.kill_switch = False
+            await db.commit()
         fx_provenance = {
             "source":"oanda_v20_mid", "symbol":"EUR_USD", "exchange":"oanda", "timeframe":"5m",
             "fetched_at_utc":now.isoformat(), "row_count":3, "sha256":"c"*64,
@@ -224,7 +236,8 @@ def test_paper_protective_stop_triggers_on_completed_bar_and_fills_later(monkeyp
     async def run():
         await init_db()
         async with SessionLocal() as db:
-            await execution._get_state_locked(db)
+            state = await execution._get_state_locked(db)
+            state.kill_switch = False
             entry = Trade(
                 signal_id=f"seed-stop-{uuid.uuid4().hex}",
                 client_order_id=f"seed-stop-{uuid.uuid4().hex}",
