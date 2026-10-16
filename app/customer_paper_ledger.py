@@ -66,6 +66,31 @@ def _tenant_policy_roles_are_exact(value: Any, expected_role: str) -> bool:
 
 
 
+def _tenant_policy_validation_error(
+    policy: Mapping[str, Any] | None, expected_role: str
+) -> str | None:
+    """Validate every security-relevant pg_policies field and explain failures."""
+    if policy is None:
+        return "MISSING_OR_MULTIPLE_POLICIES"
+    failures = []
+    if str(policy.get("policyname") or "") != "customer_paper_tenant":
+        failures.append("NAME")
+    if str(policy.get("cmd") or "").upper() != "ALL":
+        failures.append("COMMAND")
+    # pg_policies.permissive is textual ("PERMISSIVE"/"RESTRICTIVE"), so
+    # bool("RESTRICTIVE") is true and is not a safe validation.
+    if str(policy.get("permissive") or "").upper() != "PERMISSIVE":
+        failures.append("NOT_PERMISSIVE")
+    if not _tenant_policy_expression_is_exact(policy.get("qual")):
+        failures.append("USING_EXPRESSION")
+    if not _tenant_policy_expression_is_exact(policy.get("with_check")):
+        failures.append("WITH_CHECK_EXPRESSION")
+    if not _tenant_policy_roles_are_exact(policy.get("roles"), expected_role):
+        failures.append("ROLE")
+    return ",".join(failures) or None
+
+
+
 def _postgres_url(value: str) -> URL:
     try:
         url = make_url(value)
@@ -209,20 +234,13 @@ async def preflight_isolated_customer_paper_ledger(
             for table in ("accounts", "journals", "journal_lines"):
                 candidates = policy_by_table.get(table, [])
                 row = candidates[0] if len(candidates) == 1 else None
-                policy_roles_exact = (
-                    row is not None
-                    and _tenant_policy_roles_are_exact(row["roles"], str(role_name))
-                )
-                if (
-                    row is None
-                    or str(row["policyname"]) != "customer_paper_tenant"
-                    or str(row["cmd"]).upper() != "ALL"
-                    or not bool(row["permissive"])
-                    or not _tenant_policy_expression_is_exact(row["qual"])
-                    or not _tenant_policy_expression_is_exact(row["with_check"])
-                    or not policy_roles_exact
-                ):
-                    insecure_paper.append(f"customer_paper.{table}:TENANT_POLICY_MISSING_OR_WIDENED")
+                policy_error = _tenant_policy_validation_error(row, str(role_name))
+                if len(candidates) != 1:
+                    policy_error = "MISSING" if not candidates else "MULTIPLE"
+                if policy_error:
+                    insecure_paper.append(
+                        f"customer_paper.{table}:TENANT_POLICY_INVALID_{policy_error}"
+                    )
             if insecure_paper:
                 return {"status": "BLOCKED", "reason": "PAPER_SCHEMA_PRIVILEGES_UNSAFE",
                         "findings": insecure_paper}
