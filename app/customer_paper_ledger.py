@@ -6,6 +6,12 @@ Execution remains disabled until a reviewed staging preflight passes.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from decimal import Decimal, InvalidOperation
+import hashlib
+import json
+import re
+import uuid
 from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import URL, make_url
@@ -99,9 +105,12 @@ async def preflight_isolated_customer_paper_ledger(
                 " FROM pg_roles WHERE rolname = current_user), "
                 "(SELECT rolinherit OR rolbypassrls FROM pg_roles WHERE rolname = current_user), "
                 "(SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member "
-                " WHERE r.rolname=current_user)"
+                " WHERE r.rolname=current_user), "
+                "has_schema_privilege(current_user, 'public', 'USAGE'), "
+                "has_schema_privilege(current_user, 'public', 'CREATE')"
             )).one()
-            db_name, role_name, read_only, elevated, unsafe_rls_role, memberships = identity
+            (db_name, role_name, read_only, elevated, unsafe_rls_role, memberships,
+             public_schema_usage, public_schema_create) = identity
             if db_name != _postgres_url(paper_value).database:
                 return {"status": "BLOCKED", "reason": "PAPER_DATABASE_IDENTITY_MISMATCH"}
             if role_name == _postgres_url(primary_value).username:
@@ -111,10 +120,12 @@ async def preflight_isolated_customer_paper_ledger(
             if str(read_only).lower() not in {"off", "false", "f"}:
                 # A global read-only connection is insufficient to verify order write grants.
                 return {"status": "BLOCKED", "reason": "PAPER_CONNECTION_IS_READ_ONLY"}
+            if bool(public_schema_usage) or bool(public_schema_create):
+                return {"status": "BLOCKED", "reason": "PAPER_ROLE_HAS_UNEXPECTED_PUBLIC_SCHEMA_ACCESS"}
             table_rows = (await conn.execute(text(
                 """
                 SELECT n.nspname || '.' || c.relname AS table_name,
-                       c.relrowsecurity, c.relforcerowsecurity,
+                       c.relkind, c.relrowsecurity, c.relforcerowsecurity,
                        has_table_privilege(current_user, c.oid, 'SELECT') AS can_select,
                        has_table_privilege(current_user, c.oid, 'INSERT') AS can_insert,
                        has_table_privilege(current_user, c.oid, 'UPDATE') AS can_update,
@@ -133,6 +144,8 @@ async def preflight_isolated_customer_paper_ledger(
             insecure_paper = []
             for name in PAPER_TABLES:
                 row = by_name[name]
+                if row["relkind"] not in {"r", "p"}:
+                    insecure_paper.append(f"{name}:NOT_A_TABLE")
                 if not bool(row["relrowsecurity"]) or not bool(row["relforcerowsecurity"]):
                     insecure_paper.append(f"{name}:RLS_NOT_FORCED")
                 if not bool(row["can_select"]) or not bool(row["can_insert"]):
@@ -142,13 +155,16 @@ async def preflight_isolated_customer_paper_ledger(
                 if bool(row["can_delete"]):
                     insecure_paper.append(f"{name}:DELETE_ALLOWED")
             policy_rows = (await conn.execute(text(
-                "SELECT tablename, coalesce(qual,'') AS qual, coalesce(with_check,'') AS with_check "
+                "SELECT tablename, coalesce(qual,'') AS qual, coalesce(with_check,'') AS with_check, roles "
                 "FROM pg_policies WHERE schemaname='customer_paper'"
             ))).mappings().all()
             policy_by_table = {str(row["tablename"]): row for row in policy_rows}
             for table in ("accounts", "journals", "journal_lines"):
                 row = policy_by_table.get(table)
-                if row is None or "app.customer_id" not in str(row["qual"]) or "app.customer_id" not in str(row["with_check"]):
+                policy_roles = {str(value).casefold() for value in (row["roles"] if row is not None else [])}
+                if (row is None or "app.customer_id" not in str(row["qual"])
+                        or "app.customer_id" not in str(row["with_check"])
+                        or str(role_name).casefold() not in policy_roles):
                     insecure_paper.append(f"customer_paper.{table}:TENANT_POLICY_MISSING")
             if insecure_paper:
                 return {"status": "BLOCKED", "reason": "PAPER_SCHEMA_PRIVILEGES_UNSAFE",
