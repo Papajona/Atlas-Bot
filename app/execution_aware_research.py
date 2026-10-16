@@ -174,12 +174,13 @@ def simulate_execution_aware_strategy(
         day = timestamp.tz_convert("UTC").date() if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None else timestamp.date()
         day_changed = day != current_day
         if day_changed:
+            was_daily_halted = daily_halt
             current_day = day
             day_start = equity
             daily_halt = False
-            # Daily-loss halts end at the UTC-day boundary. Do not carry the stale
-            # same-direction re-entry block into a new day; peak drawdown still latches.
-            if not hard_halt and halt_reason == "DAILY_LOSS":
+            # Clear the re-entry block only when a daily halt actually just ended.
+            # halt_reason is historical and can remain DAILY_LOSS for the rest of the run.
+            if was_daily_halted and not hard_halt:
                 blocked_sign = 0
 
         forced_flat = force_flat_next
