@@ -14,7 +14,7 @@ from .config import settings
 from .research_validation import (validate_ohlcv_frame, bootstrap_mean_ci,
                                   multiple_testing_sharpe_adjustment, cost_sensitivity,
                                   purged_walk_forward_splits, fixed_signal_walk_forward_oos,
-                                  regime_conditioned_performance)
+                                  regime_conditioned_performance, oos_promotion_gate)
 
 
 def _safe(x: float, default: float = 0.0) -> float:
@@ -504,23 +504,34 @@ def paper_candidates(
     # around the point-in-time asset-universe requirement.
     if asset_class not in {"forex", "commodity"} or universe_bias != "NOT_APPLICABLE":
         return []
+    validation = research.get("validation") if isinstance(research.get("validation"), dict) else {}
+    dsr = validation.get("deflated_sharpe") if isinstance(validation.get("deflated_sharpe"), dict) else {}
+    # Paper candidates still influence parameter selection. Do not publish a candidate
+    # until the same fail-closed promotion evidence exists: comparable trials, numerical
+    # DSR, stressed execution costs, financing/carry evidence and intrabar exit accounting.
+    if validation.get("trial_registry_complete") is not True or dsr.get("status") != "OK":
+        return []
     candidates = []
-    oos_all = research.get("validation", {}).get("per_strategy_oos", {})
+    oos_all = validation.get("per_strategy_oos", {})
     for row in research.get("strategies", []):
         name = row.get("strategy")
         oos = oos_all.get(name, {})
+        if not isinstance(oos, dict):
+            continue
         folds = oos.get("folds", []) or []
-        positive_ratio = (sum(1 for f in folds if float(f.get("total_return", 0.0)) > 0) / len(folds)) if folds else 0.0
-        if (row.get("sharpe", 0.0) >= min_sharpe and
-                row.get("max_drawdown", 0.0) >= max_drawdown and
-                row.get("trades", 0) >= min_trades and
-                row.get("total_return", 0.0) > 0 and
-                oos.get("status") == "OK" and
-                float(oos.get("oos_total_return", -1.0)) >= min_oos_total_return and
-                positive_ratio >= min_oos_positive_fold_ratio):
-            candidates.append({"strategy": name, "reason": "in_sample_and_forward_gate_passed",
+        positive_ratio = (sum(1 for f in folds if isinstance(f, dict) and float(f.get("total_return", 0.0)) > 0) / len(folds)) if folds else 0.0
+        gate = oos_promotion_gate(oos)
+        if (gate.get("passed") is True
+                and row.get("sharpe", 0.0) >= min_sharpe
+                and row.get("max_drawdown", 0.0) >= max_drawdown
+                and row.get("trades", 0) >= min_trades
+                and row.get("total_return", 0.0) > 0
+                and float(oos.get("oos_total_return", -1.0)) >= min_oos_total_return
+                and positive_ratio >= min_oos_positive_fold_ratio):
+            candidates.append({"strategy": name, "reason": "full_oos_promotion_evidence_passed",
                                "metrics": row, "oos": oos,
-                               "oos_positive_fold_ratio": positive_ratio})
+                               "oos_positive_fold_ratio": positive_ratio,
+                               "promotion_gate": gate})
     return candidates
 
 
