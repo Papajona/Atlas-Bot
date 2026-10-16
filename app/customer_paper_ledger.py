@@ -41,7 +41,7 @@ def _tenant_policy_expression_is_exact(expression: Any) -> bool:
     # bigint cast. Permit that equivalent rendering while keeping the predicate
     # grammar exact (no extra clauses, operators, or columns).
     return re.fullmatch(
-        r"customer_id=\(?nullif\(current_setting\('app\.customer_id'(?:::text)?,true\),''(?:::text)?\)?::bigint",
+        r"customer_id=\(?nullif\(current_setting\('app\.customer_id'(?:::text)?,true\),''(?:::text)?\)\)?::bigint",
         normalized,
     ) is not None
 
