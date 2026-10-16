@@ -1249,6 +1249,17 @@ async def advance_platform_paper_orders(
               "rejected": 0, "expired": 0, "waiting_for_liquidity": 0}
     audit_events: list[dict] = []
     async with SessionLocal() as db:
+        # The application kill switch stops all new simulated fills too; do not advance
+        # orders or consume a bar budget while an operator has halted execution.
+        state = await db.get(AppState, 1)
+        if state is None or state.kill_switch:
+            return {
+                "status": "HALTED_KILL_SWITCH",
+                "bar_at": bar_at.isoformat(),
+                "orders_seen": 0,
+                "fills": 0,
+                "liquidity_verified": verified_liquidity,
+            }
         pairs = (await db.execute(
             select(Trade, PaperOrderState)
             .join(PaperOrderState, PaperOrderState.trade_id == Trade.id)
