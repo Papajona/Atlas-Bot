@@ -217,6 +217,20 @@ def test_crypto_universe_rejects_malformed_delisting_timestamp():
     assert result["universe_verified"] is False
     assert result["reason"] == "UNIVERSE_INSTRUMENT_TIMELINE_INVALID"
 
+    failure_before_listing = [dict(row) for row in instruments]
+    failure_before_listing[1]["failed_at"] = "2019-12-31T00:00:00Z"
+    invalid_timeline_doc = {
+        **doc,
+        "instruments": failure_before_listing,
+        "instruments_sha256": canonical_sha256(sorted(
+            failure_before_listing, key=lambda row: row["symbol"].casefold()
+        )),
+    }
+    signed_invalid_timeline, keys = _sign(invalid_timeline_doc)
+    result = validate_crypto_universe_manifest(signed_invalid_timeline, keys, **args)
+    assert result["universe_verified"] is False
+    assert result["reason"] == "UNIVERSE_INSTRUMENT_TIMELINE_INVALID"
+
 
 
 def test_signed_universe_requires_per_instrument_failure_timeline():
