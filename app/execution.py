@@ -1534,136 +1534,126 @@ async def advance_platform_paper_orders(
         # Conservative protective-exit handling: stop-loss wins when a bar crosses
         # both stop and target. A triggered exit becomes a persisted order and cannot fill
         # on the bar that triggered it; verified liquidity is still required on later bars.
-        filled_event_on_bar = (await db.execute(
-            select(func.count(PaperFillEvent.id))
-            .join(Trade, Trade.id == PaperFillEvent.trade_id)
+        # Protective stops must be evaluated for already-open positions even when
+        # another order filled on this bar. Otherwise unrelated fills can suppress
+        # a stop trigger. Any generated exit remains OPEN and can fill only on a later bar.
+        positions = (await db.execute(
+            select(Position, Trade)
+            .join(Trade, Trade.id == Position.entry_trade_id)
             .where(
-                PaperFillEvent.bar_key == bar_key,
-                PaperFillEvent.filled_quantity > 0,
-                Trade.exchange == exchange,
-                Trade.symbol == symbol,
+                Position.customer_id.is_(None),
+                Position.exchange == exchange,
+                Position.symbol == symbol,
+                Position.quantity != 0,
                 Trade.mode == "PAPER",
                 Trade.customer_id.is_(None),
             )
-        )).scalar_one()
-        if counts["fills"] == 0 and int(filled_event_on_bar or 0) == 0:
-            positions = (await db.execute(
-                select(Position, Trade)
-                .join(Trade, Trade.id == Position.entry_trade_id)
-                .where(
-                    Position.customer_id.is_(None),
-                    Position.exchange == exchange,
-                    Position.symbol == symbol,
-                    Position.quantity != 0,
-                    Trade.mode == "PAPER",
-                    Trade.customer_id.is_(None),
+            .order_by(Position.id)
+            .with_for_update()
+        )).all()
+        for position, entry_trade in positions:
+            if entry_trade.id in active_exit_entry_ids:
+                continue
+            long_position = float(position.quantity) > 0
+            stop_level = float(entry_trade.stop_loss_price or 0.0)
+            target_level = float(entry_trade.take_profit_price or 0.0)
+            stop_hit = (
+                stop_level > 0 and low_price <= stop_level
+                if long_position else stop_level > 0 and high_price >= stop_level
+            )
+            target_hit = (
+                target_level > 0 and high_price >= target_level
+                if long_position else target_level > 0 and low_price <= target_level
+            )
+            if not stop_hit and not target_hit:
+                continue
+            trigger_type = "STOP_LOSS" if stop_hit else "TAKE_PROFIT"
+            trigger_level = stop_level if stop_hit else target_level
+            ambiguous = bool(stop_hit and target_hit)
+            exit_side = "sell" if long_position else "buy"
+            exit_quantity = abs(float(position.quantity))
+            signal_id = f"paper-exit-{entry_trade.id}-{bar_key}-{trigger_type.lower()}"
+            client_id = "paper-exit-" + hashlib.sha256(signal_id.encode("utf-8")).hexdigest()[:40]
+            existing_exit = (await db.execute(
+                select(Trade.id).where(
+                    (Trade.signal_id == signal_id) | (Trade.client_order_id == client_id)
                 )
-                .order_by(Position.id)
-                .with_for_update()
-            )).all()
-            for position, entry_trade in positions:
-                if entry_trade.id in active_exit_entry_ids:
-                    continue
-                long_position = float(position.quantity) > 0
-                stop_level = float(entry_trade.stop_loss_price or 0.0)
-                target_level = float(entry_trade.take_profit_price or 0.0)
-                stop_hit = (
-                    stop_level > 0 and low_price <= stop_level
-                    if long_position else stop_level > 0 and high_price >= stop_level
-                )
-                target_hit = (
-                    target_level > 0 and high_price >= target_level
-                    if long_position else target_level > 0 and low_price <= target_level
-                )
-                if not stop_hit and not target_hit:
-                    continue
-                trigger_type = "STOP_LOSS" if stop_hit else "TAKE_PROFIT"
-                trigger_level = stop_level if stop_hit else target_level
-                ambiguous = bool(stop_hit and target_hit)
-                exit_side = "sell" if long_position else "buy"
-                exit_quantity = abs(float(position.quantity))
-                signal_id = f"paper-exit-{entry_trade.id}-{bar_key}-{trigger_type.lower()}"
-                client_id = "paper-exit-" + hashlib.sha256(signal_id.encode("utf-8")).hexdigest()[:40]
-                existing_exit = (await db.execute(
-                    select(Trade.id).where(
-                        (Trade.signal_id == signal_id) | (Trade.client_order_id == client_id)
-                    )
-                )).first()
-                if existing_exit:
-                    continue
-                exit_meta = {
-                    "paper_exit_trigger": {
-                        "entry_trade_id": entry_trade.id,
-                        "trigger_type": trigger_type,
-                        "trigger_level": trigger_level,
-                        "triggered_bar_at": bar_at.isoformat(),
-                        "ambiguous_bar": ambiguous,
-                    },
-                    "exit_reason": "protective_stop" if trigger_type == "STOP_LOSS" else "take_profit",
-                }
-                exit_trade = Trade(
-                    signal_id=signal_id,
-                    client_order_id=client_id,
-                    exchange=exchange,
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    side=exit_side,
-                    quantity=exit_quantity,
-                    requested_quantity=exit_quantity,
-                    filled_quantity=0.0,
-                    remaining_quantity=exit_quantity,
-                    requested_price=trigger_level,
-                    average_fill_price=0.0,
-                    fee=0.0,
-                    notional=0.0,
-                    mode="PAPER",
-                    status="OPEN",
-                    reason=json.dumps(exit_meta, separators=(",", ":"), sort_keys=True),
-                    error="",
-                    stop_loss_price=0.0,
-                    take_profit_price=0.0,
-                )
-                db.add(exit_trade)
-                await db.flush()
-                db.add(PaperOrderState(
-                    trade_id=exit_trade.id,
-                    exchange=exchange,
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    submitted_bar_at=bar_at,
-                    last_processed_bar_at=None,
-                    bars_elapsed=0,
-                    status="OPEN",
-                ))
-                reason = (
-                    "stop-loss triggered; stop takes precedence over target touched on same bar"
-                    if ambiguous and trigger_type == "STOP_LOSS"
-                    else ("protective stop-loss triggered" if trigger_type == "STOP_LOSS" else "take-profit target triggered")
-                )
-                db.add(PaperFillEvent(
-                    trade_id=exit_trade.id,
-                    bar_key=bar_key,
-                    outcome="STOP_TRIGGERED" if trigger_type == "STOP_LOSS" else "TAKE_PROFIT_TRIGGERED",
-                    attempted_quantity=exit_quantity,
-                    filled_quantity=0.0,
-                    fill_price=0.0,
-                    fee=0.0,
-                    slippage_bps=0.0,
-                    reason=(reason + "; eligible for fill on later completed bars only")[:1000],
-                ))
-                counts["stop_triggers" if trigger_type == "STOP_LOSS" else "take_profit_triggers"] += 1
-                counts["ambiguous_stop_priority"] += int(ambiguous)
-                counts["protective_exit_orders_created"] += 1
-                audit_events.append({
-                    "trade_id": exit_trade.id,
+            )).first()
+            if existing_exit:
+                continue
+            exit_meta = {
+                "paper_exit_trigger": {
                     "entry_trade_id": entry_trade.id,
-                    "symbol": symbol,
-                    "bar_at": bar_at.isoformat(),
-                    "outcome": trigger_type + "_TRIGGERED",
+                    "trigger_type": trigger_type,
                     "trigger_level": trigger_level,
+                    "triggered_bar_at": bar_at.isoformat(),
                     "ambiguous_bar": ambiguous,
-                    "reason": reason,
-                })
+                },
+                "exit_reason": "protective_stop" if trigger_type == "STOP_LOSS" else "take_profit",
+            }
+            exit_trade = Trade(
+                signal_id=signal_id,
+                client_order_id=client_id,
+                exchange=exchange,
+                symbol=symbol,
+                timeframe=timeframe,
+                side=exit_side,
+                quantity=exit_quantity,
+                requested_quantity=exit_quantity,
+                filled_quantity=0.0,
+                remaining_quantity=exit_quantity,
+                requested_price=trigger_level,
+                average_fill_price=0.0,
+                fee=0.0,
+                notional=0.0,
+                mode="PAPER",
+                status="OPEN",
+                reason=json.dumps(exit_meta, separators=(",", ":"), sort_keys=True),
+                error="",
+                stop_loss_price=0.0,
+                take_profit_price=0.0,
+            )
+            db.add(exit_trade)
+            await db.flush()
+            db.add(PaperOrderState(
+                trade_id=exit_trade.id,
+                exchange=exchange,
+                symbol=symbol,
+                timeframe=timeframe,
+                submitted_bar_at=bar_at,
+                last_processed_bar_at=None,
+                bars_elapsed=0,
+                status="OPEN",
+            ))
+            reason = (
+                "stop-loss triggered; stop takes precedence over target touched on same bar"
+                if ambiguous and trigger_type == "STOP_LOSS"
+                else ("protective stop-loss triggered" if trigger_type == "STOP_LOSS" else "take-profit target triggered")
+            )
+            db.add(PaperFillEvent(
+                trade_id=exit_trade.id,
+                bar_key=bar_key,
+                outcome="STOP_TRIGGERED" if trigger_type == "STOP_LOSS" else "TAKE_PROFIT_TRIGGERED",
+                attempted_quantity=exit_quantity,
+                filled_quantity=0.0,
+                fill_price=0.0,
+                fee=0.0,
+                slippage_bps=0.0,
+                reason=(reason + "; eligible for fill on later completed bars only")[:1000],
+            ))
+            counts["stop_triggers" if trigger_type == "STOP_LOSS" else "take_profit_triggers"] += 1
+            counts["ambiguous_stop_priority"] += int(ambiguous)
+            counts["protective_exit_orders_created"] += 1
+            audit_events.append({
+                "trade_id": exit_trade.id,
+                "entry_trade_id": entry_trade.id,
+                "symbol": symbol,
+                "bar_at": bar_at.isoformat(),
+                "outcome": trigger_type + "_TRIGGERED",
+                "trigger_level": trigger_level,
+                "ambiguous_bar": ambiguous,
+                "reason": reason,
+            })
         await db.commit()
 
     # Mark cash/equity immediately after a committed fill so downstream signal errors
