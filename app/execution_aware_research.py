@@ -176,11 +176,9 @@ def simulate_execution_aware_strategy(
         if day_changed:
             current_day = day
             day_start = equity
-            daily_halt = False
-            # Daily-loss halts end at the UTC-day boundary. Do not carry the stale
-            # same-direction re-entry block into a new day; peak drawdown still latches.
-            if not hard_halt and halt_reason == "DAILY_LOSS":
-                blocked_sign = 0
+            # Daily accounting resets at UTC midnight, but a triggered risk halt remains
+            # latched for this simulation. Live/customer-account controls require manual
+            # intervention; research must not model automatic re-entry as safer behavior.
 
         forced_flat = force_flat_next
         force_flat_next = False
@@ -352,8 +350,7 @@ def simulate_execution_aware_strategy(
         "final_equity": equity,
         "active_bars": int((position_series != 0).sum()),
         "net_returns_compounded": float(np.prod(1.0 + net_series.to_numpy()) if n else 1.0),
-        # OHLC stop-first handling is conservative but cannot establish tick-level event order.
-        "intrabar_stop_target_model_complete": False,
+        "intrabar_stop_target_model_complete": False,  # OHLC cannot prove tick-level event order
         "promotion_eligible_on_cost_model": carry is not None,
     }
     compounded = float(np.prod(1.0 + net_series.to_numpy())) if n else 1.0
