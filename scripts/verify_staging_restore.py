@@ -178,6 +178,12 @@ def audit(args: argparse.Namespace) -> dict:
     evidence_url = urlparse(evidence)
     if evidence_url.scheme not in {"https", "gs"} or not evidence_url.netloc:
         raise ValueError("A provider restore-operation evidence URI (https:// or gs://) is required")
+    evidence_sha256 = str(args.restore_evidence_sha256 or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", evidence_sha256):
+        raise ValueError("The downloaded provider restore-operation record must have a verified SHA-256")
+    verified_target_ref = str(args.verified_target_project_ref or "").strip()
+    if verified_target_ref != os.environ.get("STAGING_SUPABASE_PROJECT_REF", ""):
+        raise ValueError("Provider restore-operation evidence was not verified against the configured staging project")
     proc = subprocess.run(
         ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", QUERY],
         capture_output=True, text=True, env=env, check=False,
@@ -246,6 +252,8 @@ def audit(args: argparse.Namespace) -> dict:
         "restore_operation_id": args.restore_operation_id,
         "backup_reference": args.backup_reference,
         "restore_evidence_uri": evidence,
+        "restore_evidence_sha256": evidence_sha256,
+        "verified_restore_target_project_ref": verified_target_ref,
         "production_supabase_ref": os.environ["PRODUCTION_SUPABASE_PROJECT_REF"],
         "staging_supabase_ref": os.environ["STAGING_SUPABASE_PROJECT_REF"],
         "staging_database_host": host,
@@ -264,6 +272,8 @@ def main() -> int:
     parser.add_argument("--restore-operation-id", required=True)
     parser.add_argument("--backup-reference", required=True, help="Provider backup ID or immutable backup object URI")
     parser.add_argument("--restore-evidence-uri", required=True, help="Provider restore operation evidence URL or immutable audit-log URI")
+    parser.add_argument("--restore-evidence-sha256", required=True, help="SHA-256 of the downloaded provider-native JSON restore record")
+    parser.add_argument("--verified-target-project-ref", required=True, help="Target ref verified from that provider record")
     parser.add_argument("--expected-runtime-role", required=True)
     parser.add_argument("--expected-revision", default="0051_research_trial_archive")
     parser.add_argument("--output", default="staging-restore-audit.json")
