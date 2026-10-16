@@ -2146,12 +2146,20 @@ def _assert_established_noncrypto(req):
 def market_data(req, customer_id: int | None = None):
     if req.asset == "crypto":
         return fetch_crypto(req.symbol, req.exchange, req.timeframe, req.days, closed_only=True)
+    if req.asset not in {"forex", "commodity"}:
+        raise RuntimeError(f"Unsupported market-data asset class: {req.asset!r}")
     symbol = _normalize_oanda_instrument(req.symbol)
     if customer_id is not None:
         raise RuntimeError("customer-scoped OANDA data must be loaded by the async customer controller")
     if settings.forex_broker == "oanda" and settings.oanda_account_id and settings.oanda_api_token:
         return fetch_forex_oanda(symbol, req.timeframe, req.days)
-    return fetch_forex(req.symbol, req.timeframe, req.days)
+    if req.asset == "forex":
+        return fetch_forex(req.symbol, req.timeframe, req.days)
+    raise RuntimeError(
+        "Commodity market data requires configured OANDA practice credentials and an explicitly "
+        "supported OANDA instrument; the Yahoo FX fallback must not remap commodity symbols"
+    )
+
 
 
 
