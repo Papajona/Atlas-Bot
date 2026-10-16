@@ -13,6 +13,7 @@ from app.customer_paper_ledger import (
     get_customer_paper_balances,
     post_customer_paper_journal,
     preflight_isolated_customer_paper_ledger,
+    validate_database_url_pair,
 )
 
 
@@ -21,6 +22,24 @@ def _seed_lines(amount: str = "100"):
         {"account_code": "PAPER_CASH", "signed_amount": amount},
         {"account_code": "PAPER_EQUITY", "signed_amount": str(-Decimal(amount))},
     ]
+
+
+def test_customer_paper_database_pair_rejects_same_database_even_with_separate_role():
+    primary = "postgresql+asyncpg://atlas_primary:primary_password@db.example:5432/atlas"
+    paper = "postgresql+asyncpg://atlas_paper:paper_password@db.example:5432/atlas"
+    with pytest.raises(ValueError, match="separate PostgreSQL database"):
+        validate_database_url_pair(primary, paper)
+
+
+def test_customer_paper_database_pair_allows_distinct_databases_on_same_server():
+    primary = "postgresql+asyncpg://atlas_primary:primary_password@db.example:5432/atlas"
+    paper = "postgresql+asyncpg://atlas_paper:paper_password@db.example:5432/atlas_paper"
+    pair = validate_database_url_pair(primary, paper)
+    assert pair["primary_database"] == "atlas"
+    assert pair["paper_database"] == "atlas_paper"
+    assert pair["same_server"] is True
+    assert pair["distinct_runtime_roles"] is True
+    assert pair["distinct_credentials"] is True
 
 
 def test_customer_paper_journal_validation_is_exact_and_balanced():
