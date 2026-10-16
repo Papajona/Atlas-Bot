@@ -1786,6 +1786,19 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     or (now_utc - provenance_fetched_at).total_seconds() > max(60, int(settings.stale_data_minutes) * 60)
                 ):
                     raise RiskBlocked("Paper execution market bar or provenance is stale/incomplete")
+                conflicting_active_modes = (await db.execute(
+                    select(Trade.mode).where(
+                        Trade.customer_id.is_(None),
+                        Trade.exchange == exchange,
+                        Trade.symbol == symbol,
+                        Trade.mode != "PAPER",
+                        Trade.status.in_(("PENDING", "OPEN", "PARTIAL", "SUBMITTING")),
+                    ).with_for_update()
+                )).scalars().all()
+                if conflicting_active_modes:
+                    raise RiskBlocked(
+                        "A non-paper order is active for this instrument; paper/live execution modes cannot overlap"
+                    )
                 active_timeframes = (await db.execute(
                     select(PaperOrderState.timeframe)
                     .join(Trade, Trade.id == PaperOrderState.trade_id)
@@ -1803,6 +1816,23 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     raise RiskBlocked(
                         "Only one active paper timeframe per instrument is supported; "
                         "finish/cancel its existing orders before switching timeframes"
+                    )
+                conflicting_position_modes = (await db.execute(
+                    select(Trade.mode)
+                    .join(Position, Position.entry_trade_id == Trade.id)
+                    .where(
+                        Position.customer_id.is_(None),
+                        Position.exchange == exchange,
+                        Position.symbol == symbol,
+                        Position.quantity != 0,
+                        Trade.customer_id.is_(None),
+                        Trade.mode != "PAPER",
+                    )
+                    .with_for_update()
+                )).scalars().all()
+                if conflicting_position_modes:
+                    raise RiskBlocked(
+                        "A non-paper position is open for this instrument; reconcile it before paper execution"
                     )
                 position_timeframes = (await db.execute(
                     select(Trade.timeframe)
