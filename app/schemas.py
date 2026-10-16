@@ -5,7 +5,7 @@ from datetime import datetime
 import json
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 
 class MarketRequest(BaseModel):
@@ -23,7 +23,7 @@ class MarketRequest(BaseModel):
     @field_validator("point_in_time_universe_manifest", "execution_cost_calibration_evidence",
                      "trial_performance_archive")
     @classmethod
-    def _validate_signed_research_evidence_size(cls, value: dict[str, Any] | None, info):
+    def _validate_signed_research_evidence_size(cls, value: dict[str, Any] | None, info: ValidationInfo):
         if value is None:
             return None
         try:
