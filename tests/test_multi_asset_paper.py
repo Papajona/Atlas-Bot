@@ -65,3 +65,15 @@ def test_listing_dates_and_numeric_inputs_fail_closed():
         estimate_execution_price(
             SlippageInputs("not-a-number", D("1"), D("1"), D("1"), D("1")), side="buy"
         )
+
+
+def test_fill_and_carry_reject_invalid_timestamps_and_day_counts():
+    with pytest.raises(PaperModelInputError, match="eligible_at must be timezone-aware"):
+        plan_partial_fill(
+            D("1"), D("1"), D("0.5"),
+            eligible_at=datetime(2025, 1, 1), bar_at=dt(2)
+        )
+    with pytest.raises(PaperModelInputError, match="invalid annual rate"):
+        carry_cost(notional=D("100"), annual_rate="bad", calendar_days=1)
+    with pytest.raises(PaperModelInputError, match="invalid carry inputs"):
+        carry_cost(notional=D("100"), annual_rate=D("0.1"), calendar_days=1.5)
