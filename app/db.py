@@ -1181,6 +1181,40 @@ class TradeReplayResult(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class ResearchTrialArchive(Base):
+    """Append-only record of each new research trial and the evidence context used.
+
+    These records establish prospective experiment history. They do not replace the
+    separately signed comparable-trial archive required by the promotion gate.
+    """
+    __tablename__ = "research_trial_archive"
+    __table_args__ = (
+        Index("ix_research_trial_context_sample", "asset_class", "venue", "market_type", "symbol", "timeframe", "oos_sample_sha256"),
+        Index("ix_research_trial_created_at", "created_at"),
+    )
+    trial_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    trial_label: Mapped[str] = mapped_column(String(180), nullable=False)
+    asset_class: Mapped[str] = mapped_column(String(30), nullable=False, default="")
+    venue: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    market_type: Mapped[str] = mapped_column(String(30), nullable=False, default="")
+    symbol: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    timeframe: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    config_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    code_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    dataset_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    oos_sample_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    protocol_version: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    universe_evidence_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    cost_evidence_id: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    annualized_sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    oos_total_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_drawdown: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trades: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    results_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    archive_status: Mapped[str] = mapped_column(String(40), nullable=False, default="UNVERIFIED_MISSING_CONTEXT")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
 class ResearchRun(Base):
     """One record per symbol per daily research cycle.
 
