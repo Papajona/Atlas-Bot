@@ -6233,8 +6233,12 @@ async def research_paper_signals(req: ResearchMarketRequest, x_admin_token: str 
         trial_archive_write = await archive_research_trials(research, req)
         candidates = paper_candidates(
             research,
+            point_in_time_universe_manifest=df.attrs.get("point_in_time_universe_manifest"),
+            execution_cost_calibration_evidence=df.attrs.get("execution_cost_calibration_evidence"),
             trial_archive_document=df.attrs.get("trial_performance_archive"),
             trusted_public_keys=settings.research_evidence_public_keys_json,
+            universe_coverage_start=df.index[0].isoformat() if len(df.index) else None,
+            universe_coverage_end=df.index[-1].isoformat() if len(df.index) else None,
         )
         names = [x["strategy"] for x in candidates]
         signals = await asyncio.to_thread(live_strategy_signals, df, names, cfg, req.asset)
