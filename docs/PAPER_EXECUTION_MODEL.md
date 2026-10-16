@@ -16,6 +16,7 @@ The active lifecycle is persisted in `paper_order_states`, `paper_bar_states`, a
 
 Research reports must keep `execution_cost_model_complete=false` and report `execution_cost_calibration_status=MISSING_VENUE_CALIBRATION_EVIDENCE` until a trusted, venue-specific calibration archive is implemented and independently verified. Configured fees, synthetic stress runs, carry-rate evidence, and deterministic impact coefficients do not satisfy this requirement. Promotion also requires a non-empty traceable `execution_cost_calibration_evidence_id`; the gate rejects a bare boolean claim.
 - Stop-loss/take-profit triggers are evaluated from completed-bar OHLC. If both levels are touched in one bar, stop-loss takes precedence. A trigger creates a persisted exit order that cannot fill until a later completed bar; it must still pass verified spot-volume and capacity checks. Stop-loss exits do not expire on TTL, and stop fills account for adverse opening gaps. This is a conservative bar-based heuristic, not tick-level stop execution.
+- Protective triggers are evaluated only for positions that existed before the current bar. If an existing position's stop/target is touched, ordinary entry fills are deferred for that bar because OHLC cannot establish intrabar event order. Ordinary entries also remain deferred while a protective exit is pending. This avoids both a missed stop when another order would otherwise fill and a look-ahead stop applied to a new close-time fill.
 
 ## Liquidity gate
 
