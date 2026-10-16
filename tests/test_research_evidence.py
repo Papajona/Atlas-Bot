@@ -139,8 +139,12 @@ def test_market_request_bounds_signed_evidence_and_attaches_without_mutating_sou
     import pytest
     from pydantic import ValidationError
 
-    from app.schemas import ResearchMarketRequest
+    from app.schemas import MarketRequest, ResearchMarketRequest
     from app.main import _attach_research_evidence
+
+    assert "point_in_time_universe_manifest" not in MarketRequest.model_fields
+    assert "execution_cost_calibration_evidence" not in MarketRequest.model_fields
+    assert "trial_performance_archive" not in MarketRequest.model_fields
 
     manifest = {
         "evidence_type": "crypto_point_in_time_universe",
