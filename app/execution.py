@@ -1343,6 +1343,15 @@ async def advance_platform_paper_orders(
                 if trade.remaining_quantity is not None
                 else float(trade.requested_quantity or 0.0) - float(trade.filled_quantity or 0.0),
             )
+            try:
+                trade_metadata = json.loads(trade.reason or "{}")
+                if not isinstance(trade_metadata, dict):
+                    trade_metadata = {}
+            except (TypeError, ValueError):
+                trade_metadata = {}
+            exit_trigger = trade_metadata.get("paper_exit_trigger")
+            is_triggered_exit = isinstance(exit_trigger, dict)
+            is_protective_stop_exit = is_triggered_exit and exit_trigger.get("trigger_type") == "STOP_LOSS"
             outcome = "WAIT_LATENCY"
             reason = "minimum completed-bar latency has not elapsed"
             fill_quantity = Decimal("0")
@@ -1355,7 +1364,7 @@ async def advance_platform_paper_orders(
                     outcome = "WAIT_UNVERIFIED_LIQUIDITY" if not verified_liquidity else "WAIT_NO_CAPACITY"
                     reason = "verified crypto spot base-asset volume is required for a fill"
                     counts["waiting_for_liquidity"] += 1
-                elif _paper_hash_fraction(f"{trade.client_order_id}|{bar_key}|REJECT") < rejection_probability:
+                elif not is_triggered_exit and _paper_hash_fraction(f"{trade.client_order_id}|{bar_key}|REJECT") < rejection_probability:
                     outcome = "REJECTED"
                     reason = "deterministic rejection heuristic; not venue-calibrated"
                     trade.status = "REJECTED"
@@ -1385,11 +1394,32 @@ async def advance_platform_paper_orders(
                         ) * 10_000.0
                         impact = min(max_impact_bps, max(0.0, impact))
                         slippage_bps = max(0.0, float(profile.slippage_bps) + impact)
+                        reference_price = close_price
+                        if is_triggered_exit:
+                            try:
+                                level = float(exit_trigger["trigger_level"])
+                                trigger_type = str(exit_trigger.get("trigger_type") or "")
+                                if not math.isfinite(level) or level <= 0:
+                                    raise ValueError("invalid persisted protective trigger level")
+                                if trigger_type == "STOP_LOSS":
+                                    # Model opening gaps adversely. A stop that was triggered on
+                                    # an earlier bar does not magically fill at its stop level.
+                                    reference_price = min(level, open_price) if trade.side == "sell" else max(level, open_price)
+                                elif trigger_type == "TAKE_PROFIT":
+                                    # Do not assume favorable price improvement beyond the target.
+                                    reference_price = level
+                                else:
+                                    raise ValueError("unknown protective exit trigger type")
+                            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                                outcome = "INVALID_EXIT_CONTEXT"
+                                reason = str(exc)[:200]
+                                fill_quantity = Decimal("0")
+                                reference_price = close_price
                         price_multiplier = (
                             1.0 + slippage_bps / 10_000.0
                             if trade.side == "buy" else 1.0 - slippage_bps / 10_000.0
                         )
-                        fill_price = Decimal(str(close_price * price_multiplier))
+                        fill_price = Decimal(str(reference_price * price_multiplier))
                         if fill_price <= 0:
                             outcome = "INVALID_FILL_PRICE"
                             reason = "adverse cost model produced a non-positive fill price"
@@ -1440,7 +1470,11 @@ async def advance_platform_paper_orders(
 
             # TTL counts only fresh completed bars after submission, including bars with
             # no trusted liquidity. Preserve a partial-fill record but cancel any remainder.
-            if trade.status in {"OPEN", "PARTIAL"} and order_state.bars_elapsed >= ttl_bars:
+            if (
+                trade.status in {"OPEN", "PARTIAL"}
+                and order_state.bars_elapsed >= ttl_bars
+                and not is_protective_stop_exit
+            ):
                 trade.status = "CANCELED"
                 trade.remaining_quantity = 0.0
                 order_state.status = "CANCELED"
