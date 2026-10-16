@@ -1,50 +1,54 @@
-# Platform paper-execution cost and fill model
+# Platform paper-execution model — implementation and evidence limits
 
-## Scope
+## Active path
 
-This is a deterministic, platform-only paper simulator. It submits no broker orders and does not change the live execution path. Customer paper execution remains blocked until a customer-isolated simulation ledger is implemented and tested.
+The operator route `POST /api/paper/step` submits platform-only paper orders and advances existing orders against market bars. A newly submitted order is persisted as `OPEN` with zero filled quantity. It cannot fill on its submission bar. A later, new completed bar can produce a fill attempt. `POST /api/execute` cannot bypass this lifecycle: paper execution without server-bound completed-bar and data-provenance context is rejected. A separate PostgreSQL customer-paper ledger schema, preflight and transactional journal API now exist, but customer paper execution remains blocked until the ledger is wired through the complete order/position/fill/fee/recovery path and a staging isolation drill passes.
 
-A paper order is accepted as `OPEN` with zero filled quantity. It cannot fill on its submission bar. Only a later, new completed bar can advance it. The simulator accepts base-asset bar volume as liquidity only when the bar context has provenance `ccxt_ohlcv`, asset class `crypto`, and unit `base_asset`. OANDA/OTC candle counts and Yahoo Finance volume are not accepted as executable base-asset liquidity; such orders wait for verified data and ultimately expire under the configured time-to-live (TTL).
+The active lifecycle is persisted in `paper_order_states`, `paper_bar_states`, and `paper_fill_events`. Database uniqueness constraints prevent duplicate order/bar attempts and duplicate exchange/symbol/timeframe/bar budgets. The executor locks pending orders and the shared bar budget in one transaction. Replaying the same bar does not create another fill or consume its volume twice. A repeated bar with conflicting provenance/price/volume is rejected rather than mixing capacity from one payload with prices from another. To avoid counting overlapping bar volumes more than once, only one active paper timeframe per instrument is allowed until a cross-timeframe liquidity allocator is implemented.
 
-## Fill lifecycle
+## Fill lifecycle and costs
 
-On a later bar, the simulator applies the configured minimum bar latency, a deterministic order/bar hash to approximate queue misses and rejection, and a maximum aggregate participation budget for all matching orders on the same exchange/symbol/timeframe/bar. Partial fills preserve remaining quantity; a repeated bar cannot be consumed twice; orders that cannot complete within TTL have their remaining quantity canceled. The aggregate cap is tested under hundreds of synthetic orders, while the database integration test verifies that repeated processing of the same bar does not create additional fills.
+- The simulator waits for the configured number of new completed bars, then evaluates each still-open order once on that bar.
+- A verified bar has one aggregate participation budget shared by all matching orders. A fill is capped by remaining order quantity and remaining bar capacity, so orders can partially fill across bars.
+- Deterministic SHA-256 outcomes model queue misses and rejections. Orders that cannot fill expire at the configured completed-bar TTL; any remaining quantity is canceled, while previously filled quantity and position remain recorded.
+- Fill prices use the completed bar close adjusted adversely by the asset profile's baseline slippage plus a bounded participation/volatility impact heuristic. Taker fees are charged per partial fill. Order average fill price is quantity weighted.
+- Queue/rejection probabilities and impact coefficients are **simulation assumptions, not venue-calibrated facts**. No order-book spread is currently modeled. This is not an exchange matching engine and does not reconstruct intrabar price paths or queue position.
 
-This is **not** an exchange matching engine. The queue and rejection outcomes are reproducible approximations, not fitted venue probabilities. Bar-based fills are priced using the completed bar's close plus an adverse slippage estimate; they do not reconstruct order-book queue priority, intrabar path, or exact execution time.
+Research reports must keep `execution_cost_model_complete=false` and report `execution_cost_calibration_status=MISSING_VENUE_CALIBRATION_EVIDENCE` until a trusted, venue-specific calibration artifact is supplied, signature-verified, bound to the exact venue/market/symbol/model fingerprint, and its held-out error is within independently configured `RESEARCH_COST_MAX_SPREAD_MAE_BPS` and `RESEARCH_COST_MAX_SLIPPAGE_MAE_BPS` limits. These two limits have no permissive defaults. Configured fees, synthetic stress runs, carry-rate evidence, deterministic impact coefficients, or testnet-only records do not satisfy this requirement. Promotion also requires a non-empty traceable `execution_cost_calibration_evidence_id`; the gate rejects a bare boolean claim.
+- Stop-loss/take-profit triggers are evaluated from completed-bar OHLC. If both levels are touched in one bar, stop-loss takes precedence. A trigger creates a persisted exit order that cannot fill until a later completed bar; it must still pass verified spot-volume and capacity checks. Stop-loss exits do not expire on TTL, and stop fills account for adverse opening gaps. This is a conservative bar-based heuristic, not tick-level stop execution.
+- Protective triggers are evaluated only for positions that existed before the current bar. If an existing position's stop/target is touched, ordinary entry fills are deferred for that bar because OHLC cannot establish intrabar event order. Ordinary entries also remain deferred while a protective exit is pending. This avoids both a missed stop when another order would otherwise fill and a look-ahead stop applied to a new close-time fill.
 
-## Cost calculation
+## Liquidity gate
 
-When context is available, modeled adverse slippage is:
+A new platform paper order is accepted only when the requested asset is crypto and the server-bound market data comes from `ccxt_ohlcv`, explicitly identifies a non-contract spot market, marks volume as verified `base_asset`, and matches the exact symbol/exchange/timeframe submitted. Each bar must also have valid OHLCV and stable provenance. Capacity is `bar_volume × PAPER_MAX_BAR_VOLUME_PARTICIPATION`.
 
-`base profile slippage + half the supplied spread + estimated market impact`
-
-Market impact is a square-root participation heuristic:
-
-`coefficient × per-bar return volatility × sqrt(order quantity / observed bar volume) × 10,000`
-
-Impact is capped by `PAPER_MAX_MARKET_IMPACT_BPS`. Defaults are recorded in `.env.example`; they are simulation assumptions, **not venue-calibrated facts**. Every cost model result retains `calibration_status=UNVALIDATED_HEURISTIC`. Missing, malformed, stale or unverified liquidity must not be represented as verified execution liquidity.
+Swap/futures/contract markets, unknown exchange metadata, Yahoo Finance volumes, and OANDA/OTC candles are **not** treated as executable base-asset liquidity. New paper orders for FX, commodities, derivatives, or unknown markets are rejected before a Trade row is created. Any legacy or previously persisted order that lacks verified liquidity remains unfilled; ordinary entry/target orders expire under TTL, while a triggered stop-loss exit remains pending rather than pretending it was executed. FX/commodity data can still support research/practice paths, but this simulator does not claim their fills are realistic.
 
 ## Configuration controls
 
-- `PAPER_FILL_LATENCY_BARS`: number of new completed bars before fill attempts begin (default 1).
-- `PAPER_ORDER_TTL_BARS`: maximum number of fresh bars before remaining quantity expires (default 24).
-- `PAPER_MAX_BAR_VOLUME_PARTICIPATION`: maximum portion of verified bar volume that all matching orders can consume together (default 0.10).
-- `PAPER_QUEUE_FILL_PROBABILITY`: deterministic queue-pass threshold (default 0.80).
-- `PAPER_REJECTION_PROBABILITY`: deterministic rejection threshold (default 0.01).
-- `PAPER_MARKET_IMPACT_COEFFICIENT` and `PAPER_MAX_MARKET_IMPACT_BPS`: uncalibrated impact heuristic controls.
+- `PAPER_FILL_LATENCY_BARS` (default 1): minimum number of new completed bars before a fill attempt.
+- `PAPER_ORDER_TTL_BARS` (default 24): maximum number of new completed bars before any remainder is canceled.
+- `PAPER_MAX_BAR_VOLUME_PARTICIPATION` (default 0.10): aggregate capacity as a fraction of verified bar volume.
+- `PAPER_QUEUE_FILL_PROBABILITY` (default 0.80): deterministic queue-pass heuristic.
+- `PAPER_REJECTION_PROBABILITY` (default 0.01): deterministic rejection heuristic.
+- `PAPER_MARKET_IMPACT_COEFFICIENT` (default 0.10) and `PAPER_MAX_MARKET_IMPACT_BPS` (default 250): bounded, uncalibrated impact estimate.
 
-Because outcomes derive from order/bar keys, retrying the same order on the same bar returns no new fill. Changing a probability or using a synthetic context for tests does not calibrate the model.
+## Additional fail-closed research helpers
 
-## Known limitations and release gates
+- Stable SHA-256-derived pseudo-random outcomes and delays are available for reproducible tests. They are simulation-only and must not be used for security or live execution.
+- The training entry point now rejects unsupported asset classes instead of silently applying the crypto profile. No generic commodity cost profile is invented; an instrument/venue-specific profile must be supplied and independently validated before commodity research can be promoted.
+- Point-in-time universe helper calls require a coverage evidence identifier in addition to a caller-supplied verified flag. That identifier is a traceability hook, not proof of authenticity; the signed manifest validator and underlying historical listing source remain authoritative.
+- A DST-aware helper identifies the 17:00 `America/New_York` rollover window. Triple-financing day is an explicit input with no assumed Wednesday default; only verified instrument-specific terms may configure it. These helpers do not, by themselves, model a complete broker calendar or apply rollover costs in the active execution path.
+- Delisting marks require evidence for the last trade; a documented settlement price requires its own evidence identifier. A last-trade mark is explicitly labelled a proxy, not realized cash recovery. This does not create historical listing data or prove that the venue allowed liquidation at that price.
+- Financing calculations now have an evidence-backed rate wrapper that rejects unverified rates, instrument mismatches, and rates not yet effective. It does not fetch or independently authenticate OANDA rates; the supplied evidence must be checked against the correct account, product, direction, and effective date.
+- These helpers are not a substitute for instrument-specific execution integration. Commodity orders remain blocked in the active platform simulator. FX/commodity sessions, the New York 5 p.m. rollover, holidays, Wednesday triple financing, contract-roll mechanics, margin calls, and forced liquidation are not claimed as fully implemented or broker-validated by these helpers.
 
-- Venue-cost calibration still requires held-out observed fills, spreads, order sizes and reliable liquidity/volume units by instrument.
-- The bar-level fill model is only an approximation; exact queue position, cancellations and intrabar sequencing remain outside its proven scope.
-- Crypto research still lacks an authoritative point-in-time universe with delisted assets.
-- Promotion-grade Deflated Sharpe Ratio still requires a complete, comparable historical trial-performance archive.
-- FX/commodity fills do not use OANDA candle counts as liquidity and therefore remain non-fillable by this crypto-volume model; OANDA is practice/demo-only.
-- Customer paper execution remains blocked until a separate transactional simulation ledger passes account-isolation, idempotency, recovery and concurrency tests.
-- No simulator test, synthetic market data or green CI job authorizes live trading, deposits, withdrawals or customer-money movement.
+## Still-open evidence gates
 
-## Verification
+- Crypto research candidates remain blocked unless a signed point-in-time universe manifest passes the validator for the exact venue, spot/market type, symbol and dataset date range. Current CCXT market listings are not historical membership evidence.
+- Promotion-grade Deflated Sharpe Ratio remains blocked without a complete signed comparable historical trial-performance archive covering all trials and the same held-out sample/protocol. The append-only application archive is prospective and records incomplete evidence as `UNVERIFIED`; it is not retroactive historical proof.
+- Missing, malformed or unverified financing/carry evidence continues to block promotion.
+- FX/commodities still lack verified venue/product-specific fill liquidity, complete market-calendar/rollover treatment and end-to-end instrument-specific financing/margin evidence.
+- The simulator cost model is behaviorally testable but not calibrated against held-out observed venue fills, spread, order sizes, and verified liquidity for each instrument. The machine-readable promotion state remains `MISSING_VENUE_CALIBRATION_EVIDENCE`. Authenticated research endpoints accept optional signed evidence documents, but submission alone never counts as verification. See `docs/RESEARCH_EVIDENCE_RUNBOOK.md`.
 
-The simulation suite tests cost-model monotonicity, single-order low-liquidity partial fills, aggregate liquidity caps under 500 synthetic orders, new-bar idempotency, latency, queue misses, rejection, TTL, unverified FX/OTC volume, and end-to-end database order-state updates. The complete mandatory CI and PostgreSQL concurrency suite must pass on the exact final candidate commit before merge.
+Synthetic tests and green CI verify software behavior only. They do not authorize live trading, deposits, withdrawals, custody of customer funds, or production launch. Live trading, payouts, and customer-money movement must remain disabled until their separate release evidence gates pass.

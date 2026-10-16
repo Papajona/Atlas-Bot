@@ -1,6 +1,6 @@
 import pytest
 
-from scripts.verify_staging_restore import read_database_uri, truthy
+from scripts.verify_staging_restore import read_database_uri, required_table_failures, truthy
 
 
 STAGING = "abcdefghijklmnopqrst"
@@ -33,3 +33,14 @@ def test_postgres_boolean_parser_accepts_actual_psql_output():
     assert truthy("true") is True
     assert truthy("f") is False
     assert truthy("false") is False
+
+
+
+def test_restore_audit_rejects_missing_required_schema_objects():
+    assert required_table_failures([]) == []
+    assert required_table_failures(["research_trial_archive"]) == [
+        "required staging table missing: research_trial_archive"
+    ]
+    assert required_table_failures(None) == [
+        "required_tables_missing was not reported as a JSON array"
+    ]
