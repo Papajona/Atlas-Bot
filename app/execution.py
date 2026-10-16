@@ -1760,17 +1760,32 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 if not isinstance(provenance, dict):
                     raise RiskBlocked("Paper execution requires market-data provenance")
                 data_sha = str(provenance.get("sha256") or "").lower()
+                if str(asset).lower() != "crypto":
+                    raise RiskBlocked(
+                        "Platform paper order execution is currently limited to verified crypto spot data; "
+                        "FX/commodity paper fills require a separate venue-specific execution model"
+                    )
                 if (
                     paper_context.get("symbol") != symbol
                     or paper_context.get("exchange") != exchange
                     or paper_context.get("timeframe") != timeframe
-                    or str(paper_context.get("asset") or "").lower() != str(asset).lower()
+                    or str(paper_context.get("asset") or "").lower() != "crypto"
+                    or str(provenance.get("source") or "") != "ccxt_ohlcv"
+                    or provenance.get("symbol") != symbol
+                    or provenance.get("exchange") != exchange
+                    or provenance.get("timeframe") != timeframe
+                    or provenance.get("asset_class") != "crypto"
+                    or provenance.get("market_type") != "spot"
+                    or provenance.get("volume_unit") != "base_asset"
+                    or provenance.get("volume_unit_verified") is not True
                     or len(data_sha) != 64
                     or any(ch not in "0123456789abcdef" for ch in data_sha)
                     or int(provenance.get("row_count") or 0) < 2
-                    or str(provenance.get("source") or "") not in {"ccxt_ohlcv", "yfinance", "oanda_v20_mid"}
                 ):
-                    raise RiskBlocked("Paper execution market-data identity/provenance is invalid")
+                    raise RiskBlocked(
+                        "Paper order requires matching provenance from a verified CCXT crypto spot market "
+                        "with base-asset volume; derivative/unknown volume is not executable liquidity"
+                    )
                 try:
                     paper_submission_bar_at = _paper_utc(paper_context.get("bar_timestamp"))
                     provenance_fetched_at = _paper_utc(provenance.get("fetched_at_utc"))
