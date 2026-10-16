@@ -196,6 +196,9 @@ def test_ai_walk_forward_aggregate_metrics_only_use_held_out_bars(monkeypatch):
     assert len(result["folds"]) == 4
     assert result["oos_bars"] == expected_oos
     assert 0 < expected_oos < result["bars"]
+    # OHLC-based stop/target simulation cannot prove the true intrabar event order.
+    assert result["intrabar_stop_target_model_complete"] is False
+    assert result["execution_stop_target_audit"]["ambiguous_bars_filled_stop_first"] >= 0
     assert captured == {
         "cost_return_count": expected_oos,
         "cost_turnover_count": expected_oos,
