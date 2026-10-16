@@ -1530,7 +1530,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 paper_context = signal.get("_paper_execution_context")
                 if not isinstance(paper_context, dict):
                     raise RiskBlocked(
-                        "Platform paper execution requires completed-bar simulator context; "
+                        "Platform paper execution requires bar-driven paper simulator context; "
                         "immediate full-fill paper execution is disabled."
                     )
                 provenance = paper_context.get("data_provenance")
