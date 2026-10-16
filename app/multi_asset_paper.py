@@ -65,6 +65,10 @@ class VerifiedFinancingRate:
             raise PaperModelInputError("financing instrument mismatch")
         if self.effective_at > at:
             raise PaperModelInputError("financing rate not yet effective")
+        # Historical evaluations may only use evidence that was already available
+        # at the evaluation timestamp; later verification would leak future knowledge.
+        if self.verified_at > at:
+            raise PaperModelInputError("financing rate was verified after evaluation timestamp")
         if not self.source.strip() or not self.evidence_id.strip():
             raise PaperModelInputError("financing rate provenance is required")
         if not isinstance(self.day_count_basis, int) or isinstance(self.day_count_basis, bool) or self.day_count_basis <= 0:
