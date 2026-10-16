@@ -57,6 +57,16 @@ def test_paper_buy_then_sell_round_trip(monkeypatch):
         assert buy["paper_execution_model"]["calibration_status"] == "UNVALIDATED_HEURISTIC"
         assert buy["paper_execution_model"]["impact_inputs_complete"] is True
         assert buy["paper_execution_model"]["spread_inputs_complete"] is True
+        same_bar = await execution.advance_paper_orders([{
+            "exchange": "binance", "symbol": sym, "timeframe": "1h", "price": 50000.0,
+            "context": buy_context,
+        }])
+        assert same_bar["updated"] == []
+        async with SessionLocal() as db:
+            same_bar_row = await db.get(Trade, buy["trade_id"])
+            assert same_bar_row.filled_quantity == pytest.approx(0.0)
+            assert same_bar_row.remaining_quantity == pytest.approx(0.01)
+
         first_step = await execution.advance_paper_orders([{
             "exchange": "binance", "symbol": sym, "timeframe": "1h", "price": 50000.0,
             "context": {**buy_context, "bar_timestamp": f"bar-buy-{ts}-1"},
