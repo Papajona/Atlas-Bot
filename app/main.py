@@ -1273,11 +1273,11 @@ async def _usdt_tron_monitor_loop():
             _mark_worker_loop_success("usdt-tron")
             headers = {"accept": "application/json", "TRON-PRO-API-KEY": settings.usdt_trongrid_api_key}
             gate = _RateGate(settings.usdt_tron_max_qps)
-            async def _pace(_request):
-                await gate.wait()
+            async def _pace(_request, _gate=gate):
+                await _gate.wait()
             scan_slots = asyncio.Semaphore(max(1, int(settings.usdt_tron_scan_concurrency)))
             async with httpx.AsyncClient(timeout=15.0, event_hooks={"request": [_pace]}) as client:
-                async def _scan_one(wallet):
+                async def _scan_one(wallet, _headers=_headers):
                     lock_key = f"tron-deposit-scan:{wallet.id}"
                     if not await acquire_lock(lock_key, ttl_seconds=max(120, poll_seconds + 120)):
                         return
@@ -1470,9 +1470,9 @@ async def _usdt_tron_monitor_loop():
                     finally:
                         await release_lock(lock_key)
 
-                async def _bounded(wallet):
-                    async with scan_slots:
-                        await _scan_one(wallet)
+                async def _bounded(wallet, _slots=scan_slots, _scan=_scan_one):
+                    async with _slots:
+                        await _scan(wallet)
                 await asyncio.gather(*(_bounded(w) for w in wallets))
         except asyncio.CancelledError:
             raise
