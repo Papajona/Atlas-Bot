@@ -4,7 +4,7 @@
 
 The operator route `POST /api/paper/step` submits platform-only paper orders and advances existing orders against market bars. A newly submitted order is persisted as `OPEN` with zero filled quantity. It cannot fill on its submission bar. A later, new completed bar can produce a fill attempt. `POST /api/execute` cannot bypass this lifecycle: paper execution without server-bound completed-bar and data-provenance context is rejected. Customer paper execution remains blocked until a customer-isolated transactional simulation ledger is implemented and tested.
 
-The active lifecycle is persisted in `paper_order_states`, `paper_bar_states`, and `paper_fill_events`. Database uniqueness constraints prevent duplicate order/bar attempts and duplicate exchange/symbol/timeframe/bar budgets. The executor locks pending orders and the shared bar budget in one transaction. Replaying the same bar does not create another fill or consume its volume twice.
+The active lifecycle is persisted in `paper_order_states`, `paper_bar_states`, and `paper_fill_events`. Database uniqueness constraints prevent duplicate order/bar attempts and duplicate exchange/symbol/timeframe/bar budgets. The executor locks pending orders and the shared bar budget in one transaction. Replaying the same bar does not create another fill or consume its volume twice. A repeated bar with conflicting provenance/price/volume is rejected rather than mixing capacity from one payload with prices from another. To avoid counting overlapping bar volumes more than once, only one active paper timeframe per instrument is allowed until a cross-timeframe liquidity allocator is implemented.
 
 ## Fill lifecycle and costs
 
