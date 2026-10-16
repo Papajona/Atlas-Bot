@@ -6270,9 +6270,9 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
         )
         if paper_processing.get("status") in {"STALE_BAR", "BAR_NOT_COMPLETE", "DATA_PROVENANCE_INVALID", "BAR_PROVENANCE_CONFLICT", "INVALID_BAR_PRICE"}:
             raise RiskBlocked("Paper execution refused stale, incomplete, or unverified market data")
-        if int(paper_processing.get("protective_exit_orders_created") or 0) > 0:
-            # Do not submit a new strategic entry from the same bar that triggered a stop
-            # or target. The exit is intentionally eligible only on a later completed bar.
+        if int(paper_processing.get("protective_exit_orders_pending") or 0) > 0:
+            # Do not submit additional entries while any protective exit is pending or on
+            # the same bar that triggered one. The exit is eligible only on a later bar.
             equity_state = await mark_paper_equity({req.symbol: price})
             return {"mode": "PAPER", "side": "protective_exit_triggered", "price": price,
                     "paper_order_processing": paper_processing, "equity": equity_state}
