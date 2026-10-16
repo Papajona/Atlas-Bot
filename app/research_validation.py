@@ -297,6 +297,10 @@ def fixed_signal_walk_forward_oos(
     cost_analysis["carry_evidence_id_present"] = bool(evidence_id)
     cost_analysis["financing_cost_model_complete"] = cost_complete
     cost_analysis["intrabar_stop_target_model_complete"] = execution_complete
+    # The configured fee/slippage stress is not proof of venue-calibrated execution costs.
+    cost_analysis["execution_cost_model_complete"] = False
+    cost_analysis["execution_cost_calibration_status"] = "MISSING_VENUE_CALIBRATION_EVIDENCE"
+    cost_analysis["execution_cost_calibration_evidence_id"] = None
     if not cost_complete:
         cost_analysis["note"] += (
             " Financing promotion evidence requires a configured per-bar carry value plus "
