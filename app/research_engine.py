@@ -11,6 +11,10 @@ from .trading_core import ai_walk_forward_backtest
 from .strategy_evidence import evidence_for
 from .research_validation import monte_carlo_bootstrap, parameter_plateau_score, cost_breakeven_report
 from .config import settings
+
+# Fail-closed release gate: no trusted signed comparable-trial archive verifier is
+# integrated into this code path yet. Do not enable from report fields or fixtures.
+TRUSTED_SIGNED_TRIAL_ARCHIVE_VERIFIER_AVAILABLE = False
 from .research_validation import (validate_ohlcv_frame, bootstrap_mean_ci,
                                   multiple_testing_sharpe_adjustment, cost_sensitivity,
                                   purged_walk_forward_splits, fixed_signal_walk_forward_oos,
@@ -664,7 +668,8 @@ def paper_candidates(
     # validation is backed by that verifier rather than synthetic report fields.
     archive_evidence = validation.get("signed_comparable_trial_archive")
     if (
-        not isinstance(archive_evidence, dict)
+        not TRUSTED_SIGNED_TRIAL_ARCHIVE_VERIFIER_AVAILABLE
+        or not isinstance(archive_evidence, dict)
         or archive_evidence.get("status") != "VERIFIED"
         or archive_evidence.get("signature_verified") is not True
         or not isinstance(archive_evidence.get("evidence_id"), str)
