@@ -6231,7 +6231,11 @@ async def research_paper_signals(req: ResearchMarketRequest, x_admin_token: str 
         research = await asyncio.to_thread(backtest_all_strategies, df, cfg, include_ai=True, asset=req.asset, folds=req.folds, min_train=req.min_train)
         research.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
         trial_archive_write = await archive_research_trials(research, req)
-        candidates = paper_candidates(research)
+        candidates = paper_candidates(
+            research,
+            trial_archive_document=df.attrs.get("trial_performance_archive"),
+            trusted_public_keys=settings.research_evidence_public_keys_json,
+        )
         names = [x["strategy"] for x in candidates]
         signals = await asyncio.to_thread(live_strategy_signals, df, names, cfg, req.asset)
         return {
