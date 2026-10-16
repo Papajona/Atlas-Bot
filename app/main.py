@@ -38,6 +38,7 @@ from .entry_exit_engine import EntryExitConfig, start_bot_decision, gated_entry_
 from .ai_providers import dual_ai_trade_safety_review, AIProviderError
 from .strategy_ai import generate_strategy_draft
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates, live_strategy_signals
+from .research_trial_archive import archive_research_trials
 from .research_validation import oos_promotion_gate, monte_carlo_bootstrap
 from .daily_research import run_daily_research, latest_macro_context
 from .execution import execute_signal, advance_platform_paper_orders, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits, customer_paper_execution_blocked
@@ -6040,6 +6041,7 @@ async def research_backtest_all(req: MarketRequest, x_admin_token: str | None = 
         )
         result = await asyncio.to_thread(backtest_all_strategies, df, cfg, include_ai=True, asset=req.asset, folds=req.folds, min_train=req.min_train)
         result.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
+        result["trial_archive_write"] = await archive_research_trials(result, req)
         await _audit("RESEARCH_BACKTEST_ALL", {"symbol": req.symbol, "asset": req.asset, "strategy_count": result["strategy_count"]})
         return result
     except Exception as e:
@@ -6059,6 +6061,8 @@ async def research_paper_signals(req: MarketRequest, x_admin_token: str | None =
             take_profit_atr=settings.strategy_take_profit_atr,
         )
         research = await asyncio.to_thread(backtest_all_strategies, df, cfg, include_ai=True, asset=req.asset, folds=req.folds, min_train=req.min_train)
+        research.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
+        trial_archive_write = await archive_research_trials(research, req)
         candidates = paper_candidates(research)
         names = [x["strategy"] for x in candidates]
         signals = await asyncio.to_thread(live_strategy_signals, df, names, cfg, req.asset)
@@ -6068,6 +6072,7 @@ async def research_paper_signals(req: MarketRequest, x_admin_token: str | None =
             "candidates": names,
             "signals": signals,
             "real_money_execution": False,
+            "trial_archive_write": trial_archive_write,
             "message": "Strategies must remain in paper/shadow mode until separate production risk and deployment gates are passed.",
         }
     except Exception as e:
@@ -6087,9 +6092,12 @@ async def research_review(req: MarketRequest, x_admin_token: str | None = Header
             take_profit_atr=settings.strategy_take_profit_atr,
         )
         research = await asyncio.to_thread(backtest_all_strategies, df, cfg, include_ai=True, asset=req.asset, folds=req.folds, min_train=req.min_train)
+        research.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
+        trial_archive_write = await archive_research_trials(research, req)
         live = await asyncio.to_thread(strategy_signal, df, cfg, req.asset)
         review = await asyncio.to_thread(ai_market_review, research, live)
         review.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
+        review["trial_archive_write"] = trial_archive_write
         return review
     except Exception as e:
         raise _safe_http_error(400, e, "Invalid request") from e
