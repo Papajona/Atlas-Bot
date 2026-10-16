@@ -200,8 +200,9 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
                 symbol,
                 granularity,
                 count=page_size,
+                # OANDA documents that count must not be combined with both from and to.
+                # Page forward from the current cursor; the loop stops at the requested end.
                 from_time=cursor.isoformat(),
-                to_time=end_time.isoformat(),
             )
             if not batch:
                 break
