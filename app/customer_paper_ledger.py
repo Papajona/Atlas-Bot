@@ -125,7 +125,7 @@ async def preflight_isolated_customer_paper_ledger(
             table_rows = (await conn.execute(text(
                 """
                 SELECT n.nspname || '.' || c.relname AS table_name,
-                       c.relkind, c.relrowsecurity, c.relforcerowsecurity,
+                       c.relkind::text AS relkind, c.relrowsecurity, c.relforcerowsecurity,
                        has_table_privilege(current_user, c.oid, 'SELECT') AS can_select,
                        has_table_privilege(current_user, c.oid, 'INSERT') AS can_insert,
                        has_table_privilege(current_user, c.oid, 'UPDATE') AS can_update,
