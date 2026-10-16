@@ -12,7 +12,6 @@ import math
 import os
 from typing import Any, Mapping
 
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from .db import ResearchTrialArchive, SessionLocal
