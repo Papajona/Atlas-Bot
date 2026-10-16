@@ -12,7 +12,7 @@ def dt(day): return datetime(2025,1,day,tzinfo=UTC)
 
 def test_point_in_time_universe_excludes_not_yet_listed_delisted_and_failed():
     rows=[CoinListing("A",dt(1)),CoinListing("B",dt(1),dt(3)),CoinListing("C",dt(1),failed_at=dt(2)),CoinListing("D",dt(3))]
-    assert point_in_time_coin_universe(rows,dt(2),coverage_start=dt(1),coverage_end=dt(4),coverage_verified=True)==("A","B")
+    assert point_in_time_coin_universe(rows,dt(2),coverage_start=dt(1),coverage_end=dt(4),coverage_verified=True,coverage_evidence_id="sha256:universe-manifest")==("A","B")
     with pytest.raises(PaperModelInputError):
         point_in_time_coin_universe(rows,dt(2),coverage_start=dt(1),coverage_end=dt(4),coverage_verified=False)
 
