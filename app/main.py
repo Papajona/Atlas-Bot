@@ -6439,8 +6439,6 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
         paper_req = req.model_copy(update={"days": 5})
         df = await asyncio.to_thread(market_data, paper_req)
         paper_context = await asyncio.to_thread(_server_paper_market_context, paper_req, df)
-        if paper_context is not None:
-            sig = {**sig, "paper_market_context": paper_context}
         price = float(df.close.iloc[-1])
         paper_processing = await advance_platform_paper_orders(
             df,
@@ -6458,6 +6456,8 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
             return {"mode": "PAPER", "side": "protective_exit_triggered", "price": price,
                     "paper_order_processing": paper_processing, "equity": equity_state}
         sig = await asyncio.to_thread(predict_latest, df, path)
+        if paper_context is not None:
+            sig = {**sig, "paper_market_context": paper_context}
         ts = sig["signal_timestamp"]
         if sig["signal"] == 0:
             equity_state = await mark_paper_equity({req.symbol: price})
