@@ -37,8 +37,11 @@ def _tenant_policy_expression_is_exact(expression: Any) -> bool:
     policy per table and checks its command, name and role.
     """
     normalized = re.sub(r"\s+", "", str(expression or "")).strip("()").casefold()
+    # PostgreSQL's pg_policies deparser may parenthesize NULLIF(...) before its
+    # bigint cast. Permit that equivalent rendering while keeping the predicate
+    # grammar exact (no extra clauses, operators, or columns).
     return re.fullmatch(
-        r"customer_id=nullif\(current_setting\('app\.customer_id'(?:::text)?,true\),''(?:::text)?\)::bigint",
+        r"customer_id=\(?nullif\(current_setting\('app\.customer_id'(?:::text)?,true\),''(?:::text)?\)?::bigint",
         normalized,
     ) is not None
 
