@@ -2163,7 +2163,8 @@ def _attach_research_evidence(df: pd.DataFrame, req: MarketRequest) -> pd.DataFr
     if not isinstance(df, pd.DataFrame):
         raise TypeError("research evidence can only be attached to a pandas DataFrame")
     result = df.copy(deep=False)
-    result.attrs = dict(getattr(df, "attrs", {}) or {})
+    # Pandas exposes attrs as a mutable property; update the copied frame rather
+    # than assigning to the read-only property itself.
     for field in (
         "point_in_time_universe_manifest",
         "execution_cost_calibration_evidence",
