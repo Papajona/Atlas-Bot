@@ -297,6 +297,167 @@ async function testCustomerValidationError(browser, baseUrl) {
   await page.close();
 }
 
+
+async function testAdminHostileData(browser, baseUrl) {
+  const page = await browser.newPage();
+  const pageErrors = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  const attack = '<img src=x onerror="window.__pwned=(window.__pwned||0)+1">';
+  await page.addInitScript(() => {
+    sessionStorage.setItem("ait_admin_access_token", "e30." + btoa(JSON.stringify({ sub: "xss-reviewer" })) + ".test");
+    sessionStorage.setItem("ait_admin_mfa_verified", "true");
+    window.__pwned = 0;
+    window.__cspViolations = [];
+    window.addEventListener("securitypolicyviolation", event => window.__cspViolations.push(event.violatedDirective + ": " + event.blockedURI));
+  });
+  const withdrawal = (overrides = {}) => ({
+    id: 7, request_id: attack, customer_id: 7, customer_email: attack, account_ref: "acct-7",
+    amount: 12.345678, currency: attack, destination_masked: attack, status: "PENDING",
+    risk_score: 0.5, risk_flags: [], required_approvals: 2, approval_count: 0, ...overrides,
+  });
+  await page.route("**/api/**", async route => {
+    const req = route.request();
+    const pathname = new URL(req.url()).pathname;
+    if (pathname === "/api/state") return json(route, { mode: "PAPER", equity: 1000, realized_pnl: 0, unrealized_pnl: 0, drawdown: 0, daily_loss: 0, live_enabled: false, kill_switch: false, open_positions: [] });
+    if (pathname === "/api/trades") return json(route, [{ created_at: new Date().toISOString(), symbol: attack, side: attack, requested_quantity: 1, filled_quantity: 1, requested_price: 1, average_fill_price: 1, status: attack }]);
+    if (pathname === "/api/admin/withdrawals/summary") return json(route, { pending_count: 2, pending_amount: 13.345678, approved_count: 0, approved_amount: 0, in_flight_count: 0, rejected_count: 0 });
+    if (pathname === "/api/admin/withdrawals" && req.method() === "GET") return json(route, [withdrawal(), withdrawal({ id: 8, request_id: "safe-id", customer_email: "safe@example.invalid", currency: "USDT", destination_masked: "Tmasked…end", status: attack })]);
+    if (pathname === "/api/admin/security/roles") return json(route, [{ auth_user_id: attack, role: attack, active: true, created_at: attack }]);
+    if (pathname === "/api/admin/billing/margin") return json(route, { gross_subscription_revenue: 0, operating_costs: 0, referral_commissions: 0, contribution_margin_pct: 0, contribution_profit: 0 });
+    return json(route, {});
+  });
+  await page.goto(baseUrl + "/admin");
+  await waitUntil(async () => (await page.locator("#withdrawalRows tr").count()) === 2);
+  await waitUntil(async () => (await page.locator("#roles tr").count()) > 1 && (await page.locator("#trades tr").count()) > 1);
+  await page.waitForTimeout(250);
+  const result = await page.evaluate(() => ({
+    pwned: window.__pwned || 0,
+    injectedImages: document.querySelectorAll('img[src="x"]').length,
+    withdrawalRows: document.querySelectorAll("#withdrawalRows tr").length,
+    roleRows: document.querySelectorAll("#roles tr").length,
+    tradeRows: document.querySelectorAll("#trades tr").length,
+    requestIdLiteral: document.querySelector("#withdrawalRows tr td")?.textContent.includes("<img src=x"),
+    statusLiteral: Array.from(document.querySelectorAll("#withdrawalRows tr")).some(row => row.textContent.includes("<img src=x")),
+  }));
+  assert.ok(result.withdrawalRows > 0 && result.roleRows > 1 && result.tradeRows > 1, "XSS checks must render actual withdrawal, role, and trade rows");
+  assert.equal(result.pwned, 0, "hostile admin API fields must never execute script");
+  assert.equal(result.injectedImages, 0, "hostile admin API fields must remain text, not become DOM elements");
+  assert.ok(result.requestIdLiteral && result.statusLiteral, "hostile withdrawal fields must be preserved as inert literal text");
+  assert.deepEqual(await page.evaluate(() => window.__cspViolations), [], "hostile admin field render must not violate CSP");
+  assert.deepEqual(pageErrors, [], "hostile admin data must not throw browser errors");
+  await page.close();
+}
+
+async function testLoggedOutAdminStopsPolling(browser, baseUrl) {
+  const page = await browser.newPage();
+  const pageErrors = [];
+  const requests = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  page.on("request", request => { if (new URL(request.url()).pathname.startsWith("/api/")) requests.push(request.url()); });
+  await page.route("**/api/**", route => json(route, { detail: "Not authenticated" }, 401));
+  await page.goto(baseUrl + "/admin");
+  await page.waitForTimeout(1200);
+  const settledRequestCount = requests.length;
+  await page.waitForTimeout(11000);
+  assert.equal(requests.length, settledRequestCount, "a logged-out admin tab must not continue issuing periodic API requests");
+  assert.ok(settledRequestCount <= 8, "only the initial page-load requests should occur without an admin session");
+  assert.deepEqual(pageErrors, [], "a logged-out admin page must not throw browser errors");
+  await page.close();
+}
+
+async function testCustomerMfaEnrollmentQr(browser, baseUrl) {
+  const page = await browser.newPage();
+  const pageErrors = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  await page.addInitScript(() => {
+    window.__cspViolations = [];
+    window.addEventListener("securitypolicyviolation", event => window.__cspViolations.push(event.violatedDirective + ": " + event.blockedURI));
+  });
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120"><rect width="120" height="120" fill="#fff"/><rect x="10" y="10" width="30" height="30" fill="#000"/><rect x="80" y="10" width="30" height="30" fill="#000"/><rect x="10" y="80" width="30" height="30" fill="#000"/></svg>';
+  await page.route("**/api/**", async route => {
+    const req = route.request();
+    const pathname = new URL(req.url()).pathname;
+    if (pathname === "/api/auth/login" && req.method() === "POST") return json(route, { access_token: "mock-customer-aal1-token" });
+    if (pathname === "/api/auth/mfa/status") return json(route, { enabled: false, aal: "aal1" });
+    if (pathname === "/api/auth/mfa/enroll" && req.method() === "POST") return json(route, { id: "mock-enroll-factor", totp: { qr_code: svg, secret: "TEST-ONLY-SECRET" } });
+    return json(route, {});
+  });
+  const response = await page.goto(baseUrl + "/customer");
+  assert.equal(response.status(), 200);
+  assert.match(response.headers()["content-security-policy"], /img-src 'self' data:/);
+  await page.locator("#toggle").click();
+  await page.locator("#email").fill("qr-test@example.invalid");
+  await page.locator("#password").fill("mock-password");
+  await page.locator("#submit").click();
+  await page.locator("#mfaQr img").waitFor();
+  await waitUntil(async () => page.locator("#mfaQr img").evaluate(img => img.complete && img.naturalWidth > 0));
+  assert.equal(await page.locator("#mfaBox").isVisible(), true, "first-time customer MFA enrollment must display the QR panel");
+  assert.equal(await page.locator("#mfaSecret").innerText(), "TEST-ONLY-SECRET", "manual-secret fallback must remain available");
+  assert.deepEqual(await page.evaluate(() => window.__cspViolations), [], "customer SVG data-URI QR must render under strict CSP without violations");
+  assert.deepEqual(pageErrors, [], "customer MFA enrollment QR flow must not throw browser JavaScript errors");
+  await page.close();
+}
+
+async function testCustomerHostileData(browser, baseUrl) {
+  const page = await browser.newPage();
+  const pageErrors = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  const attack = '<img src=x onerror="window.__pwned=(window.__pwned||0)+1">';
+  await page.addInitScript(() => {
+    sessionStorage.setItem("atlas_customer_access_token", "mock-customer-session");
+    window.__pwned = 0;
+    window.__cspViolations = [];
+    window.addEventListener("securitypolicyviolation", event => window.__cspViolations.push(event.violatedDirective + ": " + event.blockedURI));
+  });
+  await page.route("**/api/**", async route => {
+    const req = route.request();
+    const pathname = new URL(req.url()).pathname;
+    if (pathname === "/api/auth/mfa/status") return json(route, { enabled: true, aal: "aal2", factor_count: 1, factor_ids: ["f1"] });
+    if (pathname === "/api/customer/me") return json(route, { email: attack, status: attack });
+    if (pathname === "/api/customer/wallets") return json(route, [{ currency: attack, available_balance: "12.345678", wallet_type: attack, status: attack, network: attack }]);
+    if (pathname === "/api/customer/funding") return json(route, [{ currency: attack, amount: 5.5, provider: attack, status: attack }]);
+    if (pathname === "/api/customer/withdrawals") return json(route, [{ amount: "12.345678", currency: attack, network: attack, destination_masked: attack, status: attack, approval_count: 1, required_approvals: 2, rejection_reason: attack }]);
+    if (pathname === "/api/customer/ledger") return json(route, { entries: [{ id: 1, description: attack, memo: attack, account_code: "LIABILITY:CUSTOMER:TEST", account: attack, reference_id: attack, created_at: new Date().toISOString(), debit: "0", credit: "1", amount: "1", kind: attack, entry_type: attack, journal_id: 1, currency: attack }] });
+    if (pathname === "/api/customer/billing") return json(route, { plan: { name: attack, code: "free" }, subscription: { status: attack, interval: attack, plan_code: "free" }, referral: { code: attack, referred_count: 1 } });
+    if (pathname === "/api/plans") return json(route, [{ code: "free", name: attack, monthly: 0, features: [attack] }]);
+    if (pathname === "/api/customer/portfolio") return json(route, { positions: [{ symbol: attack, side: attack, quantity: 1, average_entry_price: 1, mark_price: 1, unrealized_pnl: 1 }], equity: 1, cash_equity: 1 });
+    if (pathname === "/api/customer/market-scanner") return json(route, { results: [{ symbol: attack, price: 1, signal: attack }] });
+    if (pathname === "/api/customer/usdt/deposit") return json(route, { deposits: [], address: attack, deposit_address: attack });
+    if (pathname === "/api/customer/strategy-lab/candidates") return json(route, []);
+    if (pathname === "/api/customer/executors") return json(route, []);
+    if (pathname === "/api/customer/dca-bots") return json(route, []);
+    if (pathname === "/api/customer/smart-trades") return json(route, []);
+    if (pathname === "/api/customer/bot") return json(route, []);
+    if (pathname === "/api/customer/referral/code") return json(route, { code: attack });
+    return json(route, {});
+  });
+  const response = await page.goto(baseUrl + "/customer");
+  assert.equal(response.status(), 200);
+  await page.locator("#account").waitFor({ state: "visible" });
+  await waitUntil(async () => (await page.locator("#wallets .card").count()) > 0 && (await page.locator("#funding .card").count()) > 0 && (await page.locator("#withdrawals .card").count()) > 0);
+  await waitUntil(async () => (await page.locator("#homeActivity li").count()) > 0 && (await page.locator("#homeWatch li").count()) > 0);
+  await page.waitForTimeout(250);
+  const result = await page.evaluate(() => ({
+    pwned: window.__pwned || 0,
+    injectedImages: document.querySelectorAll('img[src="x"]').length,
+    emailLiteral: document.getElementById("customerEmail").textContent.includes("<img src=x"),
+    walletCards: document.querySelectorAll("#wallets .card").length,
+    walletLiteral: document.querySelector("#wallets .card")?.textContent.includes("<img src=x"),
+    fundingCards: document.querySelectorAll("#funding .card").length,
+    withdrawalCards: document.querySelectorAll("#withdrawals .card").length,
+    withdrawalLiteral: document.querySelector("#withdrawals .card")?.textContent.includes("<img src=x"),
+    activityRows: document.querySelectorAll("#homeActivity li").length,
+    watchRows: document.querySelectorAll("#homeWatch li").length,
+  }));
+  assert.ok(result.walletCards > 0 && result.fundingCards > 0 && result.withdrawalCards > 0 && result.activityRows > 0 && result.watchRows > 0, "hostile customer fields must be checked only after real customer cards/activity/watch rows render");
+  assert.equal(result.pwned, 0, "hostile customer API fields must not execute script");
+  assert.equal(result.injectedImages, 0, "hostile customer API fields must remain text, not become DOM elements");
+  assert.ok(result.emailLiteral && result.walletLiteral && result.withdrawalLiteral, "customer identity, wallet, and withdrawal payloads must be preserved as inert literal text");
+  assert.deepEqual(await page.evaluate(() => window.__cspViolations), [], "hostile customer-data rendering must not violate CSP");
+  assert.deepEqual(pageErrors, [], "hostile customer API data must not throw browser JavaScript errors");
+  await page.close();
+}
+
 async function testCustomerMfaOtpWithdrawalFlow(browser, baseUrl) {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
   const pageErrors = [];
@@ -399,10 +560,14 @@ async function testCustomerMfaOtpWithdrawalFlow(browser, baseUrl) {
   const browser = await chromium.launch({ headless: true });
   try {
     await testAdminDashboard(browser, baseUrl);
+    await testAdminHostileData(browser, baseUrl);
+    await testLoggedOutAdminStopsPolling(browser, baseUrl);
     await testAdminFirstTimeMfaEnrollment(browser, baseUrl);
     await testCustomerValidationError(browser, baseUrl);
+    await testCustomerMfaEnrollmentQr(browser, baseUrl);
+    await testCustomerHostileData(browser, baseUrl);
     await testCustomerMfaOtpWithdrawalFlow(browser, baseUrl);
-    console.log("PASS: admin dashboard CSP, data-URI image, payout confirmation and 12x100-row refresh stress; customer validation and mocked login→MFA→OTP→withdrawal flow.");
+    console.log("PASS: supplied v27 hostile-data regressions, logged-out polling, admin/customer MFA QR under strict CSP, payout confirmation, 12x100-row refresh stress, and mocked customer MFA/OTP/withdrawal flow.");
   } finally {
     await browser.close();
     await new Promise(resolve => server.close(resolve));
