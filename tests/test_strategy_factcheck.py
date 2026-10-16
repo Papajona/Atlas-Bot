@@ -265,6 +265,28 @@ def test_paper_candidates_reverify_original_signed_evidence(monkeypatch):
         min_oos_total_return=0.0, min_oos_positive_fold_ratio=0.5,
     )
     assert [candidate["strategy"] for candidate in candidates] == ["trend"]
+    # A report-level calibrated status cannot hide stale per-strategy provenance.
+    original_cost_id = oos["execution_cost_calibration_evidence_id"]
+    oos["execution_cost_calibration_evidence_id"] = "different-evidence"
+    assert paper_candidates(
+        research, trial_archive_document=archive_doc, execution_cost_calibration_evidence=cost_doc,
+        point_in_time_universe_manifest=universe_doc, trusted_public_keys=trusted,
+        universe_coverage_start=start, universe_coverage_end=end,
+        min_sharpe=0.5, max_drawdown=-0.25, min_trades=20,
+        min_oos_total_return=0.0, min_oos_positive_fold_ratio=0.5,
+    ) == []
+    oos["execution_cost_calibration_evidence_id"] = original_cost_id
+    oos["universe_bias"] = "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
+    oos["survivorship_bias_blocked"] = True
+    assert paper_candidates(
+        research, trial_archive_document=archive_doc, execution_cost_calibration_evidence=cost_doc,
+        point_in_time_universe_manifest=universe_doc, trusted_public_keys=trusted,
+        universe_coverage_start=start, universe_coverage_end=end,
+        min_sharpe=0.5, max_drawdown=-0.25, min_trades=20,
+        min_oos_total_return=0.0, min_oos_positive_fold_ratio=0.5,
+    ) == []
+    oos["universe_bias"] = "POINT_IN_TIME_VERIFIED"
+    oos["survivorship_bias_blocked"] = False
     # Signature or context changes after report generation must stop candidacy.
     forged = dict(archive_doc, archive_complete=False)
     assert paper_candidates(
