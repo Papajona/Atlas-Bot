@@ -14,7 +14,6 @@ from .config import settings
 
 # Fail-closed release gate: no trusted signed comparable-trial archive verifier is
 # integrated into this code path yet. Do not enable from report fields or fixtures.
-TRUSTED_SIGNED_TRIAL_ARCHIVE_VERIFIER_AVAILABLE = False
 from .research_validation import (validate_ohlcv_frame, bootstrap_mean_ci,
                                   multiple_testing_sharpe_adjustment, cost_sensitivity,
                                   purged_walk_forward_splits, fixed_signal_walk_forward_oos,
@@ -666,17 +665,21 @@ def paper_candidates(
     # a signed, comparable archive was loaded and verified. No signed-archive verifier
     # is wired into this candidate-selection path yet, so keep the gate closed until
     # validation is backed by that verifier rather than synthetic report fields.
-    archive_evidence = validation.get("signed_comparable_trial_archive")
+    # This field is populated only by validate_comparable_trial_archive() in
+    # backtest_all_strategies, which verifies the Ed25519 signature, trusted key,
+    # completeness, matching held-out sample, protocol, context, and current labels.
+    # Do not accept raw caller-supplied booleans or a differently named status field.
+    archive_evidence = validation.get("comparable_trial_archive")
+    archive_digest = archive_evidence.get("evidence_sha256") if isinstance(archive_evidence, dict) else None
     if (
-        not TRUSTED_SIGNED_TRIAL_ARCHIVE_VERIFIER_AVAILABLE
-        or not isinstance(archive_evidence, dict)
-        or archive_evidence.get("status") != "VERIFIED"
-        or archive_evidence.get("signature_verified") is not True
+        not isinstance(archive_evidence, dict)
+        or archive_evidence.get("verified") is not True
+        or archive_evidence.get("trial_archive_verified") is not True
         or not isinstance(archive_evidence.get("evidence_id"), str)
         or not archive_evidence.get("evidence_id").strip()
-        or not isinstance(archive_evidence.get("sha256"), str)
-        or len(archive_evidence.get("sha256")) != 64
-        or any(ch not in "0123456789abcdefABCDEF" for ch in archive_evidence.get("sha256"))
+        or not isinstance(archive_digest, str)
+        or len(archive_digest) != 64
+        or any(ch not in "0123456789abcdefABCDEF" for ch in archive_digest)
         or validation.get("trial_registry_complete") is not True
         or dsr.get("status") != "OK"
     ):
