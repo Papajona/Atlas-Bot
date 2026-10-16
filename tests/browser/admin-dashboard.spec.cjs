@@ -264,7 +264,7 @@ async function testCustomerMfaOtpWithdrawalFlow(browser, baseUrl) {
   await page.locator("#mfaCode").fill("123456");
   await page.getByRole("button", { name: "Verify authenticator" }).click();
   await page.locator("#account").waitFor({ state: "visible", timeout: 10000 });
-  await page.locator('a[href="#wallet"]').click();
+  await page.locator('#sidebar a.nav-link[data-section="wallet"]').click();
   await page.locator("#wdAmount").fill("12.345678");
   await page.locator("#wdDestination").fill("TAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
   await page.getByRole("button", { name: "Send OTP" }).click();
