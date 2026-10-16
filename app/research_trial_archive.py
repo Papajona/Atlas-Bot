@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import uuid
 from typing import Any, Mapping
 
 from sqlalchemy.exc import IntegrityError
@@ -140,10 +141,16 @@ def _row_payload(report: Mapping[str, Any], context: Mapping[str, str],
         # The append-only DB registry is a prospective record. Only a signed external
         # archive may satisfy the historical-comparability / selection-bias promotion gate.
         status = "RECORDED_UNVERIFIED"
-    trial_key = canonical_sha256({
+    trial_identity = {
         "label": label, "config_sha256": config_sha, "code_sha256": code_sha,
         "dataset_sha256": dataset_sha, "oos_sample_sha256": sample_sha,
-    })
+    }
+    # A missing provenance fingerprint cannot identify an immutable experiment.
+    # Retain every incomplete attempt under its own evaluation ID rather than
+    # accidentally colliding with a later run that reuses its blank fingerprints.
+    if not required_context or not required_metrics:
+        trial_identity["evaluation_id"] = evaluation_id
+    trial_key = canonical_sha256(trial_identity)
     return {
         "trial_key": trial_key, "trial_label": label,
         "asset_class": context["asset_class"], "venue": context["venue"],
@@ -179,10 +186,11 @@ async def archive_research_trials(report: Mapping[str, Any], request: Any) -> di
         return {"status": "NOT_RECORDED", "reason": "TRIAL_LABELS_MISSING", "inserted": 0, "replayed": 0}
     context = _report_context(report, request)
     inserted = replayed = unverified = 0
+    evaluation_id = uuid.uuid4().hex
     try:
         async with SessionLocal() as db:
             for label, metrics, category in specs:
-                payload = _row_payload(report, context, label, metrics, category)
+                payload = _row_payload(report, context, label, metrics, category, evaluation_id)
                 existing = await db.get(ResearchTrialArchive, payload["trial_key"])
                 if existing is not None:
                     if not _same_immutable_row(existing, payload):
