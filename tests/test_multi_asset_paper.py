@@ -15,6 +15,12 @@ def test_point_in_time_universe_excludes_not_yet_listed_delisted_and_failed():
     assert point_in_time_coin_universe(rows,dt(2),coverage_start=dt(1),coverage_end=dt(4),coverage_verified=True,coverage_evidence_id="sha256:universe-manifest")==("A","B")
     with pytest.raises(PaperModelInputError):
         point_in_time_coin_universe(rows,dt(2),coverage_start=dt(1),coverage_end=dt(4),coverage_verified=False)
+    # Valid records still cannot be used without a traceable coverage evidence ID.
+    with pytest.raises(PaperModelInputError, match="coverage unverified or missing evidence identifier"):
+        point_in_time_coin_universe(
+            [CoinListing("E", dt(1))], dt(2), coverage_start=dt(1), coverage_end=dt(4),
+            coverage_verified=True,
+        )
 
 def test_slippage_increases_with_size_volatility_and_gap():
     base=SlippageInputs(D("100"),D("2"),D("10"),D("1"),D("100"))

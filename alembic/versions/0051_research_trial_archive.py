@@ -100,6 +100,12 @@ def upgrade():
 
 
 def downgrade():
-    # Preserve audit history and fail-safe posture. Table removal requires an explicit
-    # reviewed data-retention operation, not an automatic migration rollback.
-    pass
+    # A no-op downgrade would move Alembic's version marker backwards while leaving
+    # the archive table, trigger, and function in place; a subsequent upgrade would
+    # then fail at CREATE TABLE. Preserve both the audit rows and schema/version
+    # consistency by refusing implicit rollback. Retention/removal needs a separate,
+    # explicitly reviewed operation.
+    raise RuntimeError(
+        "0051_research_trial_archive is intentionally irreversible; "
+        "perform a reviewed research-archive retention operation before rollback"
+    )
