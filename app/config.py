@@ -248,6 +248,13 @@ class Settings(BaseSettings):
     max_open_positions: int = 3
     max_slippage_bps: float = 30.0
     max_spread_bps: float = 100.0
+    # Synthetic OHLCV paper fills are deterministic assumptions, not venue-calibrated data.
+    paper_fill_max_volume_participation: float = 0.01
+    paper_execution_rejection_rate: float = 0.01
+    paper_execution_latency_min_ms: int = 100
+    paper_execution_latency_max_ms: int = 500
+    paper_volatility_slippage_multiplier: float = 0.25
+    paper_market_impact_bps: float = 10.0
     # Edge-decay halt: block NEW entries when the last N closed-trade net returns are significantly below zero.
     edge_decay_halt_enabled: bool = True
     edge_decay_window_trades: int = 100

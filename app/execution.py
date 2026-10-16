@@ -28,6 +28,7 @@ from .audit_chain import record_audit
 from .live_fees import extract_order_fee_quote_decimal, ESTIMATED
 from .customer_funds import record_ledger_incident
 from .distributed import acquire_lock, release_lock
+from .paper_execution import PaperExecutionError, build_paper_market_context, simulate_paper_order, validate_paper_context
 
 
 TERMINAL_STATUSES = {"FILLED", "CANCELED", "REJECTED", "FAILED", "SIMULATED"}
@@ -731,13 +732,14 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         trade_context = json.loads(trade.reason or "{}")
     except Exception:
         trade_context = {}
-    live_entry_ids = select(Trade.id).where(Trade.mode == "LIVE")
+    # Position lifecycles must never cross LIVE, PAPER, or OANDA practice-demo modes.
+    entry_trade_ids = select(Trade.id).where(Trade.mode == str(trade.mode or "").upper())
     position_query = select(Position).where(
         Position.symbol == trade.symbol,
         Position.exchange == trade.exchange,
         Position.customer_id == trade.customer_id,
-        Position.entry_trade_id.in_(live_entry_ids),
-    ).with_for_update()
+        Position.entry_trade_id.in_(entry_trade_ids),
+    ).order_by(Position.updated_at.desc()).limit(1).with_for_update()
     position = (await db.execute(position_query)).scalar_one_or_none()
     realized_decimal = Decimal("0")
     realized = 0.0
@@ -1307,6 +1309,60 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     raise RiskBlocked("OANDA instrument is not tradeable for this account")
             except Exception as exc:
                 raise RiskBlocked(str(exc)) from exc
+        paper_context = None
+        paper_simulation = None
+        if mode == "PAPER":
+            try:
+                paper_context = signal.get("paper_market_context")
+                if not paper_context:
+                    if asset != "crypto":
+                        raise PaperExecutionError(
+                            "No verified base-asset-volume execution context exists for this asset class"
+                        )
+                    # Fetch closed bars internally for admin/manual paper routes that do not
+                    # carry an OHLCV frame. Daily bars need a wider lookback than intraday bars.
+                    from .data import fetch_crypto
+                    context_days = 30 if timeframe == "1d" else 5
+                    context_df = await asyncio.to_thread(
+                        fetch_crypto, symbol, exchange, timeframe, context_days, closed_only=True
+                    )
+                    paper_context = build_paper_market_context(
+                        context_df, symbol=symbol, timeframe=timeframe, asset=asset
+                    )
+                    signal["paper_market_context"] = paper_context
+                paper_context = validate_paper_context(
+                    paper_context,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    signal_timestamp=signal_timestamp,
+                    price=quote,
+                    max_reference_deviation_bps=settings.max_slippage_bps,
+                )
+                profile = PROFILES.get(asset)
+                if profile is None:
+                    raise PaperExecutionError(f"No evidenced paper cost profile exists for asset class {asset!r}")
+                paper_simulation = simulate_paper_order(
+                    order_id=cid,
+                    side=side,
+                    quantity=quantity,
+                    price=quote,
+                    base_slippage_bps=profile.slippage_bps,
+                    taker_fee_bps=profile.taker_bps,
+                    context=paper_context,
+                    max_volume_participation=settings.paper_fill_max_volume_participation,
+                    volatility_slippage_multiplier=settings.paper_volatility_slippage_multiplier,
+                    market_impact_bps=settings.paper_market_impact_bps,
+                    rejection_rate=settings.paper_execution_rejection_rate,
+                    latency_min_ms=settings.paper_execution_latency_min_ms,
+                    latency_max_ms=settings.paper_execution_latency_max_ms,
+                )
+            except PaperExecutionError as exc:
+                raise RiskBlocked(f"Paper execution blocked: {exc}") from exc
+            except Exception as exc:
+                raise RiskBlocked(
+                    f"Paper market context could not be verified; no simulated fill was created: {type(exc).__name__}"
+                ) from exc
+
         governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps, equity=risk_equity, risk_per_trade=settings.risk_per_trade)
         if governor.action != "ALLOW":
             raise RiskBlocked("Risk Governor blocked order: " + ",".join(governor.reasons))
@@ -1379,32 +1435,60 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                                 await reject_db.commit()
                         raise RiskBlocked(str(exc))
         if mode == "PAPER":
+            if paper_simulation is None:
+                raise RiskBlocked("Paper execution was not simulated during preflight")
+            simulation = paper_simulation
+            # The elapsed delay and latency penalty are synthetic assumptions; no venue order book is present.
+            await asyncio.sleep(float(simulation["latency_ms"]) / 1000.0)
+            filled = float(simulation["filled_quantity"])
+            modeled_fill = float(simulation["average_fill_price"])
+            fee = float(simulation["fee"])
             async with SessionLocal() as db:
-                t = await db.get(Trade, trade_id)
-                if t.status == "SIMULATED":
-                    return {"duplicate": True, "trade_id": t.id, "mode": t.mode, "status": t.status}
-                profile = PROFILES.get(asset, PROFILES["crypto"])
-                modeled_fill = quote * (1 + profile.slippage_bps / 10_000) if side == "buy" else quote * (1 - profile.slippage_bps / 10_000)
-                fee = quantity * modeled_fill * (profile.taker_bps / 10_000)
-                t.status = "SIMULATED"
-                t.filled_quantity = quantity
-                t.remaining_quantity = 0
-                t.average_fill_price = modeled_fill
-                t.notional = quantity * modeled_fill
+                t = await db.get(Trade, trade_id, with_for_update=True)
+                if t.status in TERMINAL_STATUSES:
+                    return {
+                        "duplicate": True, "trade_id": t.id, "mode": t.mode, "status": t.status,
+                        "filled": float(t.filled_quantity or 0.0),
+                        "remaining_quantity": float(t.remaining_quantity or 0.0),
+                        "average_fill_price": float(t.average_fill_price or 0.0),
+                    }
+                t.status = str(simulation["status"])
                 t.fee = fee
-                await _apply_fill_to_position(db, t, quantity, modeled_fill)
+                if filled > 0:
+                    # _apply_fill_to_position computes the delta against the persisted prior fill.
+                    # Do not pre-write filled_quantity: doing so makes its delta zero and drops the fill.
+                    await _apply_fill_to_position(db, t, filled, modeled_fill)
+                else:
+                    t.filled_quantity = 0.0
+                    t.remaining_quantity = float(simulation["remaining_quantity"])
+                    t.average_fill_price = 0.0
+                    t.notional = 0.0
                 if customer_id is not None and fee > 0:
                     await settle_trading_fee(db, customer_id=customer_id, fee=fee, reference_id=f"trade:{trade_id}:fee", strict=False)
-                if account is not None:
+                if account is not None and fee > 0:
                     account.cash_equity = max(0.0, account.cash_equity - fee)
-                else:
-                    s = await _get_state_locked(db)
-                    s.cash_equity = max(0.0, s.cash_equity - fee)
+                elif customer_id is None and fee > 0:
+                    state = await _get_state_locked(db)
+                    state.cash_equity = max(0.0, state.cash_equity - fee)
                 await db.commit()
             await mark_paper_equity({symbol: quote}, customer_id=customer_id)
-            await audit("PAPER_ORDER", {"trade_id": trade_id, "signal_id": signal_id, "client_order_id": cid,
-                                        "symbol": symbol, "side": side, "quantity": quantity})
-            return {"duplicate": False, "trade_id": trade_id, "mode": "PAPER", "status": "SIMULATED", "price": quote}
+            audit_detail = {
+                "trade_id": trade_id, "signal_id": signal_id, "client_order_id": cid,
+                "symbol": symbol, "side": side,
+                "requested_quantity": float(simulation["requested_quantity"]),
+                "filled_quantity": filled, "remaining_quantity": float(simulation["remaining_quantity"]),
+                "status": simulation["status"], "paper_fill_model": simulation,
+            }
+            await audit("PAPER_ORDER", audit_detail)
+            return {
+                "duplicate": False, "trade_id": trade_id, "mode": "PAPER",
+                "status": simulation["status"], "filled": filled,
+                "requested_quantity": float(simulation["requested_quantity"]),
+                "remaining_quantity": float(simulation["remaining_quantity"]),
+                "price": modeled_fill if filled > 0 else quote,
+                "reference_price": quote, "average_fill_price": modeled_fill,
+                "fee": fee, "paper_fill_model": simulation,
+            }
 
         if broker is None:
             raise RuntimeError("Live broker was not initialized after execution preflight")
