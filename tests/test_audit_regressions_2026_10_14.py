@@ -167,6 +167,10 @@ def test_backtest_report_records_asset_class_for_candidate_gate():
     result = backtest_all_strategies(frame, include_ai=False, asset="crypto")
     assert result["asset_class"] == "crypto"
     assert result["universe_bias"] == "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
+    assert result["validation"]["trial_registry_complete"] is False
+    assert result["validation"]["trial_registry_status"] == "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY"
+    assert result["validation"]["execution_cost_model_complete"] is False
+    assert result["validation"]["execution_cost_calibration_status"] == "MISSING_VENUE_CALIBRATION_EVIDENCE"
 
 
 def test_paper_candidates_require_comparable_trial_dsr_and_execution_evidence():
