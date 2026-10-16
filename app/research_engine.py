@@ -703,7 +703,6 @@ def paper_candidates(
         or dsr.get("status") != "OK"
     ):
         return []
-    required_folds = max(2, int(settings.research_folds))
 
     def finite_metric(value):
         if value is None or isinstance(value, (bool, np.bool_)):
