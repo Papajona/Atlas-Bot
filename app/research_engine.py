@@ -491,6 +491,12 @@ def paper_candidates(
     min_trades = settings.adaptive_min_trades if min_trades is None else int(min_trades)
     min_oos_total_return = settings.research_min_oos_total_return if min_oos_total_return is None else float(min_oos_total_return)
     min_oos_positive_fold_ratio = settings.research_min_oos_positive_fold_ratio if min_oos_positive_fold_ratio is None else float(min_oos_positive_fold_ratio)
+    # A crypto allowlist of assets that survive today is not a historical point-in-time
+    # universe. It can omit delisted/failed assets and bias results upward. Missing or
+    # incomplete universe evidence therefore cannot produce paper candidates.
+    universe_bias = research.get("universe_bias") or (research.get("data_quality") or {}).get("universe_bias", "UNKNOWN")
+    if universe_bias not in {"NOT_APPLICABLE", "VERIFIED_POINT_IN_TIME_UNIVERSE"}:
+        return []
     candidates = []
     oos_all = research.get("validation", {}).get("per_strategy_oos", {})
     for row in research.get("strategies", []):
