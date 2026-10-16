@@ -305,6 +305,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         data_quality["valid"] = False
     if not data_quality["valid"]:
         return {"research_version": "3.10.3-validation-v2", "status": "DATA_INVALID",
+                "asset_class": str(asset).lower(),
                 "data_quality": data_quality, "data_provenance": provenance,
                 "universe_bias": universe_bias, "strategies": [], "strategy_count": 0}
     components = ["trend", "momentum", "breakout", "mean_reversion", "ensemble"]
@@ -437,6 +438,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     oos_ranked = _rank_by_oos(results.copy(), per_strategy_oos)
     return {
         "research_version": "3.10.3-validation-v2",
+        "asset_class": str(asset).lower(),
         "data_quality": data_quality,
         "data_provenance": provenance,
         "universe_bias": universe_bias,
@@ -496,7 +498,11 @@ def paper_candidates(
     # in this code path, so a caller-supplied "verified" string cannot substitute for evidence.
     # Until that pipeline exists, only NOT_APPLICABLE data may produce candidates.
     universe_bias = research.get("universe_bias") or (research.get("data_quality") or {}).get("universe_bias", "UNKNOWN")
-    if universe_bias != "NOT_APPLICABLE":
+    asset_class = str(research.get("asset_class") or "").strip().lower()
+    # The evidence comes from backtest_all_strategies' trusted report, not a free-standing
+    # label. Missing asset class is treated as unknown. Crypto cannot self-label its way
+    # around the point-in-time asset-universe requirement.
+    if asset_class not in {"forex", "commodity"} or universe_bias != "NOT_APPLICABLE":
         return []
     candidates = []
     oos_all = research.get("validation", {}).get("per_strategy_oos", {})
