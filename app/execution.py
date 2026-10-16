@@ -1317,6 +1317,22 @@ async def advance_platform_paper_orders(
             )
             db.add(bar_state)
             await db.flush()
+        elif (
+            bar_state.data_source != source[:50]
+            or bar_state.data_sha256 != data_sha256
+            or bar_state.volume_unit != volume_unit[:30]
+            or abs(float(bar_state.bar_volume or 0.0) - bar_volume) > 1e-12
+            or abs(float(bar_state.close_price or 0.0) - close_price) > 1e-12
+        ):
+            # Never mix volume capacity from one payload with prices from another
+            # payload for the same logical market bar.
+            return {
+                "status": "BAR_PROVENANCE_CONFLICT",
+                "bar_at": bar_at.isoformat(),
+                "orders_seen": 0,
+                "fills": 0,
+                "liquidity_verified": verified_liquidity,
+            }
 
         for trade, order_state in pairs:
             if trade.status not in {"OPEN", "PARTIAL"} or order_state.status not in {"OPEN", "PARTIAL"}:
