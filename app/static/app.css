@@ -21,3 +21,8 @@ main{max-width:1600px;padding:28px max(26px,4vw) 70px}.panel{background:linear-g
   .command-bar > * { max-width:100%; overflow-wrap:anywhere; }
   .command-bar input, .command-bar select { min-width:0; max-width:100%; }
 }
+
+@media(max-width:820px){
+  .risk-grid { grid-template-columns:minmax(0,1fr); }
+  .risk-grid > * { min-width:0; overflow-wrap:anywhere; }
+}
