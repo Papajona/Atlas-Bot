@@ -14,7 +14,8 @@ from .config import settings
 from .research_validation import (validate_ohlcv_frame, bootstrap_mean_ci,
                                   multiple_testing_sharpe_adjustment, cost_sensitivity,
                                   purged_walk_forward_splits, fixed_signal_walk_forward_oos,
-                                  regime_conditioned_performance, oos_promotion_gate)
+                                  regime_conditioned_performance, oos_promotion_gate,
+                                  deflated_sharpe_report)
 
 
 def _safe(x: float, default: float = 0.0) -> float:
