@@ -433,7 +433,10 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     ens_cost["execution_cost_calibration_status"] = "MISSING_VENUE_CALIBRATION_EVIDENCE"
     ens_cost["execution_cost_calibration_evidence_id"] = None
     if not carry_evidence_complete:
-        ens_cost["note"] += " Financing promotion evidence requires a configured carry rate and traceable carry source/evidence ID."
+        ens_cost["note"] = (
+            str(ens_cost.get("note") or "")
+            + " Financing promotion evidence requires a configured carry rate and traceable carry source/evidence ID."
+        ).strip()
     # Each component is judged on its own net returns (main.py gates on per_strategy_oos[selected]).
     for component in components:
         # Component Sharpe values cannot be deflated from prior labels alone either.
