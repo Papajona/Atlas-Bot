@@ -16,6 +16,19 @@ DRAWDOWN = Gauge("trader_drawdown", "Current equity drawdown")
 OPEN_POSITIONS = Gauge("trader_open_positions", "Number of non-zero positions")
 
 
+# The admin dashboard now uses a same-origin external script and delegated data-action handlers.
+# Keep inline scripts blocked on /admin. The customer dashboard still contains inline handlers
+# and therefore retains a compatibility policy until that separate page is migrated.
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+    "script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+)
+COMPAT_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+    "script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+)
+
+
 class TelemetryMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
@@ -32,7 +45,17 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
         response.headers["Cache-Control"] = "no-store"
         if str(settings.environment).lower() == "production":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-            response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
+        if str(settings.environment).lower() in {"staging", "production"}:
+            # The customer portal (/) and admin console use external same-origin scripts.
+            # FastAPI's interactive API docs include inline bootstrap code, so retain a
+            # separate compatibility policy only for those documentation routes.
+            if path == "/" or path in {"/admin", "/admin/"}:
+                policy = CONTENT_SECURITY_POLICY
+            elif path == "/docs" or path.startswith("/docs/") or path == "/redoc" or path.startswith("/redoc/"):
+                policy = COMPAT_CONTENT_SECURITY_POLICY
+            else:
+                policy = CONTENT_SECURITY_POLICY
+            response.headers["Content-Security-Policy"] = policy
         logger.info(json.dumps({"request_id": request_id, "method": request.method, "path": path,
                                 "status": response.status_code, "duration_ms": round(elapsed * 1000, 2)}))
         return response

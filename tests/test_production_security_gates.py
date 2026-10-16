@@ -180,6 +180,8 @@ def test_tron_ambiguous_deposit_uses_one_persistent_incident_without_reopening_r
 def test_withdrawal_idempotency_key_is_payload_bound_and_sent_by_customer_ui():
     main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
     html = (ROOT / "app" / "templates" / "customer.html").read_text(encoding="utf-8")
+    customer_js = (ROOT / "app" / "static" / "customer-dashboard.js").read_text(encoding="utf-8")
+    html = html + customer_js
     start = main.index("async def customer_create_withdrawal(")
     end = main.index('@app.get("/api/customer/withdrawals")', start)
     block = main[start:end]

@@ -39,10 +39,12 @@ def test_major_asset_universe_and_customer_connection_exist():
 
 def test_customer_ui_exposes_fx_and_commodity_markets():
     html = Path("app/templates/customer.html").read_text(encoding="utf-8")
-    assert 'value="forex">Major FX' in html
-    assert 'value="commodity">Commodities' in html
-    assert "XAU_USD" in html
-    assert "EUR_USD" in html
+    script = Path("app/static/customer-dashboard.js").read_text(encoding="utf-8")
+    source = html + script
+    assert 'value="forex">Major FX' in source
+    assert 'value="commodity">Commodities' in source
+    assert "XAU_USD" in source
+    assert "EUR_USD" in source
 
 
 # OANDA practice execution has its own fail-closed gate; it must not be routed through

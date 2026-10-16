@@ -55,10 +55,13 @@ def test_withdrawal_list_supports_runtime_states_used_by_dashboard():
 
 def test_dashboard_escapes_untrusted_withdrawal_and_trade_fields():
     html = Path("app/templates/dashboard.html").read_text()
-    assert "function esc(v)" in html
-    assert "esc(x.request_id)" in html
-    assert "esc(x.destination_masked)" in html
-    assert "esc(x.symbol)" in html
+    js = Path("app/static/admin-dashboard.js").read_text()
+    assert '<script src="/static/admin-dashboard.js" defer></script>' in html
+    source = html + js
+    assert "function esc(v)" in source
+    assert "esc(x.request_id)" in source
+    assert "esc(x.destination_masked)" in source
+    assert "esc(x.symbol)" in source
 
 
 def test_customer_withdrawal_is_reserved_and_requires_admin():
