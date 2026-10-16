@@ -164,6 +164,11 @@ def validate_crypto_universe_manifest(document, trusted_public_keys, *, venue: s
                 raise ValueError
             name = str(row.get("symbol") or "").strip()
             listed = _time(row.get("listed_at"))
+            if "failed_at" not in row:
+                # A top-level claim that the manifest includes failed assets is not
+                # sufficient unless each instrument has an explicit failure timestamp
+                # or an explicit null stating no failure is known.
+                raise ValueError
             raw_delisted = row.get("delisted_at")
             if raw_delisted is None:
                 delisted = None
@@ -173,9 +178,21 @@ def validate_crypto_universe_manifest(document, trusted_public_keys, *, venue: s
                     raise ValueError
             else:
                 raise ValueError
-            if not name or name in symbols or listed is None or (delisted and delisted < listed):
+            raw_failed = row.get("failed_at")
+            if raw_failed is None:
+                failed = None
+            elif isinstance(raw_failed, str) and raw_failed.strip():
+                failed = _time(raw_failed)
+                if failed is None:
+                    raise ValueError
+            else:
                 raise ValueError
-            if listed > end or (delisted and delisted < start):
+            if (not name or name in symbols or listed is None
+                    or (delisted is not None and delisted < listed)
+                    or (failed is not None and failed < listed)):
+                raise ValueError
+            if (listed > end or (delisted is not None and delisted < start)
+                    or (failed is not None and failed < start)):
                 raise ValueError
             symbols.add(name)
     except (ValueError, TypeError):
