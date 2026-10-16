@@ -6,7 +6,7 @@ const { chromium } = require("playwright");
 
 const ROOT = process.cwd();
 const ADMIN_CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
-const CUSTOMER_CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
+const CUSTOMER_CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
 
 function send(res, status, type, body, headers = {}) {
   res.writeHead(status, { "content-type": type, "x-content-type-options": "nosniff", ...headers });
@@ -170,6 +170,16 @@ async function testAdminDashboard(browser, baseUrl) {
     return ids.filter((id, index) => ids.indexOf(id) !== index);
   });
   assert.deepEqual(duplicateIds, [], "repeated refreshes must not create duplicate DOM IDs");
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobileLayout = await page.evaluate(() => ({ viewport: window.innerWidth, document: document.documentElement.scrollWidth }));
+  assert.ok(mobileLayout.document <= mobileLayout.viewport + 2, "admin dashboard must not force page-level horizontal scrolling on mobile: " + JSON.stringify(mobileLayout));
+  const nav = page.locator(".mobile-nav");
+  assert.equal(await nav.getAttribute("aria-label"), "Toggle navigation", "mobile nav button must have a meaningful accessible name");
+  await nav.click();
+  assert.equal(await page.locator("body").evaluate(body => body.classList.contains("nav-open")), true, "mobile nav toggle should open the navigation");
+  await nav.click();
+  const unnamedButtons = await page.locator("button:visible").evaluateAll(buttons => buttons.filter(button => !(button.getAttribute("aria-label") || button.getAttribute("title") || button.innerText.trim())).map(button => button.outerHTML));
+  assert.deepEqual(unnamedButtons, [], "visible dashboard buttons must have an accessible name");
   assert.deepEqual(await page.evaluate(() => window.__cspViolations), [], "admin dashboard must have no CSP violations");
   assert.deepEqual(pageErrors, [], "admin browser flow must not throw JavaScript errors");
   await page.close();
@@ -247,6 +257,10 @@ async function testAdminFirstTimeMfaEnrollment(browser, baseUrl) {
 
 async function testCustomerValidationError(browser, baseUrl) {
   const page = await browser.newPage();
+  await page.addInitScript(() => {
+    window.__cspViolations = [];
+    window.addEventListener("securitypolicyviolation", event => window.__cspViolations.push(event.violatedDirective + ": " + event.blockedURI));
+  });
   await page.route("**/api/**", async route => {
     const req = route.request();
     const url = new URL(req.url());
@@ -267,12 +281,17 @@ async function testCustomerValidationError(browser, baseUrl) {
   const output = await page.locator("#authOut").innerText();
   assert.match(output, /email: field required; password: field required/);
   assert.doesNotMatch(output, /\[object Object\]/);
+  assert.deepEqual(await page.evaluate(() => window.__cspViolations), [], "customer validation page must run under strict script CSP without violations");
   await page.close();
 }
 
 async function testCustomerMfaOtpWithdrawalFlow(browser, baseUrl) {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
   const pageErrors = [];
+  await page.addInitScript(() => {
+    window.__cspViolations = [];
+    window.addEventListener("securitypolicyviolation", event => window.__cspViolations.push(event.violatedDirective + ": " + event.blockedURI));
+  });
   page.on("pageerror", error => pageErrors.push(error.message));
   let sentIntent = null;
   let verifiedStepUp = null;
@@ -329,6 +348,8 @@ async function testCustomerMfaOtpWithdrawalFlow(browser, baseUrl) {
   await page.getByRole("button", { name: "Verify authenticator" }).click();
   await page.locator("#account").waitFor({ state: "visible", timeout: 10000 });
   await page.locator('#sidebar a.nav-link[data-section="wallet"]').click();
+  const mobileLayout = await page.evaluate(() => ({ viewport: window.innerWidth, document: document.documentElement.scrollWidth }));
+  assert.ok(mobileLayout.document <= mobileLayout.viewport + 2, "customer dashboard must not force page-level horizontal scrolling on mobile: " + JSON.stringify(mobileLayout));
   await page.locator("#wdAmount").fill("12.345678");
   await page.locator("#wdDestination").fill("TAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
   await page.getByRole("button", { name: "Send OTP" }).click();
@@ -352,6 +373,7 @@ async function testCustomerMfaOtpWithdrawalFlow(browser, baseUrl) {
   assert.equal(withdrawalRequest.headers["x-withdrawal-step-up"], verifiedStepUp, "withdrawal must use the one-time step-up token");
   assert.match(withdrawalRequest.headers["idempotency-key"] || "", /^[0-9a-f-]{36}$/i, "withdrawal POST must carry an idempotency key");
   assert.deepEqual(pageErrors, [], "mocked customer MFA/OTP/withdrawal flow must not throw JavaScript errors");
+  assert.deepEqual(await page.evaluate(() => window.__cspViolations), [], "customer MFA/withdrawal flow must have no CSP violations under strict script policy");
   await page.close();
 }
 
