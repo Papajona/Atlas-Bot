@@ -62,20 +62,20 @@ async function testAdminDashboard(browser, baseUrl) {
     sessionStorage.setItem("ait_admin_mfa_verified", "true");
     window.__cspViolations = [];
     window.addEventListener("securitypolicyviolation", event => {
-      window.__cspViolations.push(\`${event.violatedDirective}: ${event.blockedURI}\`);
+      window.__cspViolations.push(`${event.violatedDirective}: ${event.blockedURI}`);
     });
   }, { accessToken: "e30." + Buffer.from(JSON.stringify({ sub: "admin-user-1", aal: "aal2" })).toString("base64url") + ".test-signature" });
 
   const digest = "a".repeat(64);
   const rows = Array.from({ length: 100 }, (_, index) => ({
     id: index + 1,
-    request_id: \`wd-browser-${index + 1}\`,
+    request_id: `wd-browser-${index + 1}`,
     customer_id: index + 900,
-    customer_email: \`customer${index + 1}@example.invalid\`,
-    account_ref: \`acct-${index + 1}\`,
+    customer_email: `customer${index + 1}@example.invalid`,
+    account_ref: `acct-${index + 1}`,
     amount: index === 0 ? 12.345678 : 1.234567,
     currency: "USDT",
-    destination_masked: index === 0 ? "TAbc…Wwb" : \`Tmasked${index}…end\`,
+    destination_masked: index === 0 ? "TAbc…Wwb" : `Tmasked${index}…end`,
     status: "APPROVED",
     risk_score: null,
     risk_flags: [],
@@ -118,7 +118,7 @@ async function testAdminDashboard(browser, baseUrl) {
     return json(route, {});
   });
 
-  const response = await page.goto(\`${baseUrl}/admin\`);
+  const response = await page.goto(`${baseUrl}/admin`);
   assert.equal(response.status(), 200, "admin dashboard should load");
   const csp = response.headers()["content-security-policy"];
   assert.match(csp, /script-src 'self';/);
@@ -137,6 +137,7 @@ async function testAdminDashboard(browser, baseUrl) {
   assert.match(await firstRow.locator("td").nth(4).innerText(), /n\/a/, "missing risk score must not appear as zero");
   assert.match(await firstRow.locator("td").nth(6).innerText(), new RegExp(digest), "proposal digest should appear next to Execute");
 
+  await page.locator("#releaseToken").fill("test-release-token");
   let declinedConfirmation = "";
   page.once("dialog", async dialog => { declinedConfirmation = dialog.message(); await dialog.dismiss(); });
   await page.locator('[data-action="execute-withdrawal"][data-withdrawal-id="1"]').click();
@@ -167,7 +168,7 @@ async function testAdminDashboard(browser, baseUrl) {
     const responsePromise = page.waitForResponse(response => response.url().includes("/api/admin/withdrawals?status=APPROVED") && response.request().method() === "GET");
     await page.getByRole("button", { name: "Refresh queue" }).click();
     await responsePromise;
-    assert.equal(await page.locator("#withdrawalRows tr").count(), 100, \`queue stress iteration ${i + 1} must render all rows\`);
+    assert.equal(await page.locator("#withdrawalRows tr").count(), 100, `queue stress iteration ${i + 1} must render all rows`);
   }
   assert.ok(queueCalls >= startedQueueCalls + 12, "stress run should issue a queue request for every refresh");
   const duplicateIds = await page.locator("[id]").evaluateAll(elements => {
@@ -193,7 +194,7 @@ async function testCustomerValidationError(browser, baseUrl) {
     }
     return json(route, {});
   });
-  await page.goto(\`${baseUrl}/customer\`);
+  await page.goto(`${baseUrl}/customer`);
   await page.locator("#toggle").click();
   await page.locator("#email").fill("customer@example.invalid");
   await page.locator("#password").fill("not-a-real-password");
@@ -254,7 +255,7 @@ async function testCustomerMfaOtpWithdrawalFlow(browser, baseUrl) {
     return json(route, {});
   });
 
-  await page.goto(\`${baseUrl}/customer\`);
+  await page.goto(`${baseUrl}/customer`);
   await page.locator("#toggle").click();
   await page.locator("#email").fill("customer@example.invalid");
   await page.locator("#password").fill("mock-password");
@@ -296,7 +297,7 @@ async function testCustomerMfaOtpWithdrawalFlow(browser, baseUrl) {
     server.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address();
-  const baseUrl = \`http://127.0.0.1:${address.port}\`;
+  const baseUrl = `http://127.0.0.1:${address.port}`;
   const browser = await chromium.launch({ headless: true });
   try {
     await testAdminDashboard(browser, baseUrl);
