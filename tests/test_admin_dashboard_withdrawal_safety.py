@@ -47,6 +47,7 @@ def test_polling_is_conditional_on_a_session_and_422_detail_is_readable():
     assert "setInterval(()=>{if(loggedIn())loadWithdrawals()},10000)" in html
     assert "function detailText(d)" in html
     assert "throw new Error(detailText(j.detail)||text||'Request failed')" in html
+    assert "new Error(detailText(j.detail)||detailText(j.message)||'Administrator login failed')" in html
 
 
 def test_untrusted_row_ids_are_coerced_to_numbers_for_inline_handlers():
