@@ -1,0 +1,42 @@
+name: Dashboard Browser and Stress Verification
+
+on:
+  pull_request:
+    paths:
+      - "app/templates/dashboard.html"
+      - "app/static/admin-dashboard.js"
+      - "app/static/customer-dashboard.js"
+      - "app/static/app.css"
+      - "app/templates/customer.html"
+      - "app/static/customer.css"
+      - "app/static/customer-home.css"
+      - "app/monitoring.py"
+      - "app/main.py"
+      - "tests/browser/**"
+      - ".github/workflows/admin-dashboard-browser.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: admin-dashboard-browser-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chromium-browser-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout pull request
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Playwright
+        run: npm install --no-save --no-package-lock playwright
+      - name: Install Chromium and system dependencies
+        run: npx playwright install --with-deps chromium
+      - name: Run dashboard and customer browser regressions plus UI stress
+        run: node tests/browser/admin-dashboard.spec.cjs
