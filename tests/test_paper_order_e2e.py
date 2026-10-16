@@ -147,67 +147,61 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
     asyncio.run(run())
 
 
-def test_paper_simulator_refuses_unverified_fx_volume(monkeypatch):
+def test_platform_paper_submission_rejects_fx_and_unverified_derivatives():
     import pandas as pd
-    from sqlalchemy import select
     from app import execution
-    from app.config import settings
     from app.db import init_db, SessionLocal, Trade
 
-    symbol = f"FXPAPER-{uuid.uuid4().hex[:8]}"
+    fx_symbol = f"FXPAPER-{uuid.uuid4().hex[:8]}"
+    derivative_symbol = f"SWAPPAPER-{uuid.uuid4().hex[:8]}"
     now = pd.Timestamp.now(tz="UTC")
-    current_floor = now.floor("5min")
-    submit_bar = current_floor - pd.Timedelta(minutes=10)
-    process_bar = current_floor - pd.Timedelta(minutes=5)
-    monkeypatch.setattr(settings, "paper_order_ttl_bars", 1)
+    bar_at = now.floor("5min") - pd.Timedelta(minutes=10)
 
     async def run():
         await init_db()
-        provenance0 = {
+        fx_provenance = {
             "source":"oanda_v20_mid", "symbol":"EUR_USD", "exchange":"oanda", "timeframe":"5m",
             "fetched_at_utc":now.isoformat(), "row_count":3, "sha256":"c"*64,
             "asset_class":"forex", "market_type":"otc", "volume_unit":"unknown",
             "volume_unit_verified":False,
         }
-        context = {
-            "bar_timestamp":submit_bar.isoformat(), "data_provenance":provenance0,
-            "asset":"forex", "symbol":symbol, "exchange":"oanda", "timeframe":"5m",
+        fx_context = {
+            "bar_timestamp":bar_at.isoformat(), "data_provenance":fx_provenance,
+            "asset":"forex", "symbol":fx_symbol, "exchange":"oanda", "timeframe":"5m",
         }
-        # The symbol in the context is server-bound to the order; the provider instrument
-        # can have its own normalized OANDA name. No OTC candle count is treated as base volume.
-        submitted = await execution.execute_signal(
-            symbol, "buy", 0.3, 100.0,
-            {"score":0.9, "_paper_execution_context":context},
-            "oanda", "5m", submit_bar.isoformat(),
-            force_paper=True, stop_loss_price=99.0, take_profit_price=102.0, asset="forex",
-        )
-        assert submitted["status"] == "OPEN"
-        df = pd.DataFrame(
-            {"open":[99.0,99.5,100.0,100.5], "high":[100.0,100.0,101.0,101.5],
-             "low":[98.0,99.0,99.5,100.0], "close":[99.0,99.5,100.0,101.0],
-             "volume":[100000.0,100000.0,100000.0,100000.0]},
-            index=pd.DatetimeIndex([submit_bar-pd.Timedelta(minutes=10),
-                                    submit_bar-pd.Timedelta(minutes=5), submit_bar, process_bar]),
-        )
-        provenance1 = dict(provenance0, fetched_at_utc=pd.Timestamp.now(tz="UTC").isoformat(),
-                           row_count=len(df), sha256="d"*64)
-        df.attrs["data_provenance"] = provenance1
-        result = await execution.advance_platform_paper_orders(
-            df, exchange="oanda", symbol=symbol, timeframe="5m", asset="forex"
-        )
-        assert result["liquidity_verified"] is False
-        assert result["fills"] == 0
-        assert result["expired"] == 1
+        with pytest.raises(execution.RiskBlocked, match="limited to verified crypto spot"):
+            await execution.execute_signal(
+                fx_symbol, "buy", 0.3, 1.1,
+                {"score":0.9, "_paper_execution_context":fx_context},
+                "oanda", "5m", bar_at.isoformat(),
+                force_paper=True, stop_loss_price=1.09, take_profit_price=1.12, asset="forex",
+            )
+
+        derivative_provenance = {
+            "source":"ccxt_ohlcv", "symbol":derivative_symbol, "exchange":"binance", "timeframe":"5m",
+            "fetched_at_utc":now.isoformat(), "row_count":3, "sha256":"d"*64,
+            "asset_class":"crypto", "market_type":"derivative_or_unknown",
+            "volume_unit":"unknown", "volume_unit_verified":False,
+        }
+        derivative_context = {
+            "bar_timestamp":bar_at.isoformat(), "data_provenance":derivative_provenance,
+            "asset":"crypto", "symbol":derivative_symbol, "exchange":"binance", "timeframe":"5m",
+        }
+        with pytest.raises(execution.RiskBlocked, match="verified CCXT crypto spot market"):
+            await execution.execute_signal(
+                derivative_symbol, "buy", 0.3, 50000.0,
+                {"score":0.9, "_paper_execution_context":derivative_context},
+                "binance", "5m", bar_at.isoformat(),
+                force_paper=True, stop_loss_price=49000.0, take_profit_price=52000.0, asset="crypto",
+            )
+
         async with SessionLocal() as db:
-            trade = (await db.execute(select(Trade).where(
-                Trade.symbol == symbol, Trade.mode == "PAPER"
-            ))).scalar_one()
-            assert trade.status == "CANCELED"
-            assert trade.filled_quantity == 0.0
-            assert trade.remaining_quantity == 0.0
+            fx_trades = (await db.execute(select(Trade).where(Trade.symbol == fx_symbol))).scalars().all()
+            derivative_trades = (await db.execute(select(Trade).where(Trade.symbol == derivative_symbol))).scalars().all()
+            assert fx_trades == []
+            assert derivative_trades == []
 
     asyncio.run(run())
-
 
 def test_paper_protective_stop_triggers_on_completed_bar_and_fills_later(monkeypatch):
     import pandas as pd
