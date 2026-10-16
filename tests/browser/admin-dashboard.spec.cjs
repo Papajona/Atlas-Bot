@@ -368,7 +368,7 @@ async function testCustomerMfaOtpWithdrawalFlow(browser, baseUrl) {
   await waitUntil(async () => (await page.locator("#otpOut").innerText()).includes("OTP sent"));
   await page.locator("#withdrawalOtp").fill("654321");
   await page.getByRole("button", { name: "Verify OTP" }).click();
-  await waitUntil(async () => (await page.locator("#otpOut").innerText()).includes("Verification active"));
+  await waitUntil(async () => (await page.locator("#otpOut").innerText()).includes("verification active"));
   let confirmation = "";
   page.once("dialog", async dialog => { confirmation = dialog.message(); await dialog.accept(); });
   await page.getByRole("button", { name: "Submit withdrawal request" }).click();
