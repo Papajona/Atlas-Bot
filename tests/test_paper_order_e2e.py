@@ -1,4 +1,4 @@
-"""End-to-end paper order through execute_signal: catches NameErrors and Decimal/float TypeErrors."""
+"""Regression tests preventing unsupported legacy paper execution from recording fills."""
 import asyncio
 import os
 import uuid
