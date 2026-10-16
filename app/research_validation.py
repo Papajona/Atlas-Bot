@@ -291,12 +291,18 @@ def fixed_signal_walk_forward_oos(
     evidence_id = str(carry_evidence_id or "").strip()
     carry_configured = carry is not None
     cost_complete = carry_configured and bool(evidence_source) and bool(evidence_id)
-    execution_complete = intrabar_exit is not None
+    # A supplied OHLC-derived exit mask is not tick-level event-order evidence.
+    # Promotion stays blocked until a validated tick-level stream is integrated.
+    execution_complete = False
     cost_analysis["carry_rate_configured"] = carry_configured
     cost_analysis["carry_evidence_source_present"] = bool(evidence_source)
     cost_analysis["carry_evidence_id_present"] = bool(evidence_id)
     cost_analysis["financing_cost_model_complete"] = cost_complete
     cost_analysis["intrabar_stop_target_model_complete"] = execution_complete
+    # The configured fee/slippage stress is not proof of venue-calibrated execution costs.
+    cost_analysis["execution_cost_model_complete"] = False
+    cost_analysis["execution_cost_calibration_status"] = "MISSING_VENUE_CALIBRATION_EVIDENCE"
+    cost_analysis["execution_cost_calibration_evidence_id"] = None
     if not cost_complete:
         cost_analysis["note"] += (
             " Financing promotion evidence requires a configured per-bar carry value plus "
@@ -322,7 +328,10 @@ def fixed_signal_walk_forward_oos(
         "carry_evidence_source": evidence_source or None,
         "carry_evidence_id": evidence_id or None,
         "intrabar_stop_target_model_complete": execution_complete,
-        "execution_cost_model_complete": bool(cost_complete and execution_complete),
+        # Carry evidence and OHLC exit accounting do not establish venue-calibrated execution costs.
+        "execution_cost_model_complete": False,
+        "execution_cost_calibration_status": "MISSING_VENUE_CALIBRATION_EVIDENCE",
+        "execution_cost_calibration_evidence_id": None,
         "carry_bps_per_bar": carry,
     }
 
@@ -415,7 +424,13 @@ def oos_promotion_gate(
     # model, a plausible Sharpe or manually supplied cost_stress_ok=True is insufficient.
     financing_cost_model_complete = oos.get("financing_cost_model_complete") is True
     intrabar_stop_target_model_complete = oos.get("intrabar_stop_target_model_complete") is True
+    execution_cost_calibration_status = str(oos.get("execution_cost_calibration_status") or "").strip().upper()
+    execution_cost_calibration_evidence_id = str(oos.get("execution_cost_calibration_evidence_id") or "").strip()
     execution_cost_model_complete = oos.get("execution_cost_model_complete") is True
+    execution_cost_calibration_ok = (
+        execution_cost_calibration_status == "VERIFIED"
+        and bool(execution_cost_calibration_evidence_id)
+    )
     trial_registry_complete = oos.get("trial_registry_complete") is True
     status_ok = str(oos.get("status", "OK")) == "OK"
     enough_folds = len(returns) >= int(min_folds)
@@ -453,6 +468,8 @@ def oos_promotion_gate(
         rejection_reasons.append("financing_cost_model_incomplete")
     if not intrabar_stop_target_model_complete:
         rejection_reasons.append("intrabar_stop_target_model_incomplete")
+    if not execution_cost_calibration_ok:
+        rejection_reasons.append("venue_execution_cost_calibration_missing")
     if not execution_cost_model_complete:
         rejection_reasons.append("execution_cost_model_incomplete")
     if not trial_registry_complete:
@@ -494,6 +511,9 @@ def oos_promotion_gate(
         "financing_cost_model_complete": financing_cost_model_complete,
         "intrabar_stop_target_model_complete": intrabar_stop_target_model_complete,
         "execution_cost_model_complete": execution_cost_model_complete,
+        "execution_cost_calibration_status": execution_cost_calibration_status or "MISSING_VENUE_CALIBRATION_EVIDENCE",
+        "execution_cost_calibration_evidence_present": bool(execution_cost_calibration_evidence_id),
+        "execution_cost_calibration_ok": execution_cost_calibration_ok,
         "trial_registry_complete": trial_registry_complete,
         "trial_registry_ok": trial_registry_complete,
     }
