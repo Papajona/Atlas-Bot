@@ -30,8 +30,7 @@ $paper_role_check$;
 
 CREATE SCHEMA IF NOT EXISTS customer_paper AUTHORIZATION CURRENT_USER;
 REVOKE ALL ON SCHEMA customer_paper FROM PUBLIC;
--- Keep the runtime role confined to the explicitly granted customer_paper schema.
-REVOKE ALL ON SCHEMA public FROM PUBLIC;
+-- Do not revoke PUBLIC schema access globally; restrict only the dedicated paper runtime role below.
 
 CREATE TABLE IF NOT EXISTS customer_paper.accounts (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -180,6 +179,7 @@ BEGIN
         EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA customer_paper FROM authenticated';
         EXECUTE 'REVOKE ALL ON ALL SEQUENCES IN SCHEMA customer_paper FROM authenticated';
     END IF;
+    EXECUTE format('REVOKE ALL ON SCHEMA public FROM %I', role_name);
     EXECUTE format('GRANT USAGE ON SCHEMA customer_paper TO %I', role_name);
     EXECUTE format('GRANT SELECT, INSERT ON customer_paper.accounts TO %I', role_name);
     EXECUTE format('GRANT SELECT, INSERT ON customer_paper.journals TO %I', role_name);
