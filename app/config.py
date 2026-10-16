@@ -45,11 +45,39 @@ class Settings(BaseSettings):
             raise ValueError("ML_THREADS must be between 1 and 2 for the deployed CPU budget")
         return value
 
+    @field_validator("paper_fill_latency_bars", "paper_order_ttl_bars")
+    @classmethod
+    def _validate_paper_bar_counts(cls, value: int) -> int:
+        if value < 1 or value > 10000:
+            raise ValueError("paper fill latency and order TTL must be between 1 and 10000 bars")
+        return value
+
+    @field_validator("paper_max_bar_volume_participation", "paper_queue_fill_probability", "paper_rejection_probability")
+    @classmethod
+    def _validate_paper_probabilities(cls, value: float) -> float:
+        if not math.isfinite(float(value)) or not 0.0 <= float(value) <= 1.0:
+            raise ValueError("paper participation and probabilities must be finite values between 0 and 1")
+        return float(value)
+
+    @field_validator("paper_market_impact_coefficient", "paper_max_market_impact_bps")
+    @classmethod
+    def _validate_paper_impact(cls, value: float) -> float:
+        if not math.isfinite(float(value)) or float(value) < 0.0:
+            raise ValueError("paper market impact settings must be finite and non-negative")
+        return float(value)
+
     @field_validator("research_carry_bps_per_bar")
     @classmethod
     def _validate_research_carry(cls, value: float | None) -> float | None:
         if value is not None and (not math.isfinite(float(value)) or float(value) < 0):
             raise ValueError("RESEARCH_CARRY_BPS_PER_BAR must be finite and non-negative when configured")
+        return None if value is None else float(value)
+
+    @field_validator("research_cost_max_spread_mae_bps", "research_cost_max_slippage_mae_bps")
+    @classmethod
+    def _validate_research_cost_calibration_tolerance(cls, value: float | None) -> float | None:
+        if value is not None and (not math.isfinite(float(value)) or float(value) < 0):
+            raise ValueError("research cost calibration tolerances must be finite and non-negative")
         return None if value is None else float(value)
 
     # Real USDT funding (TRON / TRC-20). Production API receives only a public
@@ -130,6 +158,9 @@ class Settings(BaseSettings):
     research_yahoo_period: str = "3y"
     research_taker_bps: float = 5.5
     research_slippage_bps: float = 2.0
+    # No default: calibration must meet independently configured, venue-reviewed error bounds.
+    research_cost_max_spread_mae_bps: float | None = None
+    research_cost_max_slippage_mae_bps: float | None = None
     # No default: a missing instrument/venue financing assumption blocks research promotion.
     research_carry_bps_per_bar: float | None = None
     research_carry_evidence_source: str = ""
@@ -138,6 +169,12 @@ class Settings(BaseSettings):
     # development default is intentionally not accepted as customer-execution evidence.
     research_fee_source: str = ""
     research_fee_evidence_id: str = ""
+    # Public trust roots for signed, externally sourced research evidence.
+    # JSON object maps key IDs to base64-encoded raw 32-byte Ed25519 public keys.
+    research_evidence_public_keys_json: str = ""
+    # Customer simulation remains unavailable until an isolated PostgreSQL store is verified.
+    customer_paper_ledger_enabled: bool = False
+    customer_paper_database_url: str = ""
     research_folds: int = 5
     research_min_train: int = 800
     research_ai_threshold: float = 0.05
@@ -273,6 +310,15 @@ class Settings(BaseSettings):
     max_order_error_rate_5m: float = 0.05
     execution_health_window_orders: int = 20
     continuous_risk_check_interval_seconds: int = 5
+
+    # Platform-only paper execution. Fill controls are assumptions, never venue-calibrated facts.
+    paper_fill_latency_bars: int = 1
+    paper_order_ttl_bars: int = 24
+    paper_max_bar_volume_participation: float = 0.10
+    paper_queue_fill_probability: float = 0.80
+    paper_rejection_probability: float = 0.01
+    paper_market_impact_coefficient: float = 0.10
+    paper_max_market_impact_bps: float = 250.0
 
     # Research-backed multi-strategy engine. Paper-first and independently testable.
     strategy_engine_enabled: bool = True
