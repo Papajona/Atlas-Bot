@@ -140,6 +140,34 @@ def test_missing_universe_provenance_fails_closed_for_paper_candidates():
     }
     assert paper_candidates(research) == []
 
+
+def test_not_applicable_label_without_verified_noncrypto_asset_class_is_rejected():
+    from app.research_engine import paper_candidates
+
+    row = {"strategy": "trend", "sharpe": 2.0, "max_drawdown": -0.05,
+           "trades": 500, "total_return": 1.0}
+    folds = [{"total_return": 0.10}] * 5
+    research = {
+        "universe_bias": "NOT_APPLICABLE",
+        "strategies": [row],
+        "validation": {"per_strategy_oos": {
+            "trend": {"status": "OK", "oos_total_return": 0.10, "folds": folds}
+        }},
+    }
+    assert paper_candidates(research) == []
+
+    crypto_labelled = dict(research, asset_class="crypto")
+    assert paper_candidates(crypto_labelled) == []
+
+
+def test_backtest_report_records_asset_class_for_candidate_gate():
+    from app.research_engine import backtest_all_strategies
+
+    frame = pd.DataFrame({"close": [100.0]})
+    result = backtest_all_strategies(frame, include_ai=False, asset="crypto")
+    assert result["asset_class"] == "crypto"
+    assert result["universe_bias"] == "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
+
 def test_all_lightgbm_models_use_the_bounded_thread_setting():
     from app.config import settings
 
