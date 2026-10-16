@@ -50,6 +50,8 @@ def _oos(**extra):
         "financing_cost_model_complete": True,
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True,
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_evidence_id": "fixture:venue-cost-calibration",
         "trial_registry_complete": True,
         **extra,
     }
