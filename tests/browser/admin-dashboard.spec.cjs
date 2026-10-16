@@ -306,7 +306,13 @@ async function testCustomerValidationError(browser, baseUrl) {
 async function testAdminHostileData(browser, baseUrl) {
   const page = await browser.newPage();
   const pageErrors = [];
+  const apiRequests = [];
   page.on("pageerror", error => pageErrors.push(error.message));
+  page.on("request", request => {
+    if (new URL(request.url()).pathname.startsWith("/api/")) {
+      apiRequests.push({ method: request.method(), url: request.url() });
+    }
+  });
   const attack = '<img src=x onerror="window.__pwned=(window.__pwned||0)+1">';
   await page.addInitScript(() => {
     sessionStorage.setItem("ait_admin_access_token", "e30." + btoa(JSON.stringify({ sub: "xss-reviewer" })) + ".test");
@@ -332,7 +338,19 @@ async function testAdminHostileData(browser, baseUrl) {
     return json(route, {});
   });
   await page.goto(baseUrl + "/admin");
-  await waitUntil(async () => (await page.locator("#withdrawalRows tr").count()) === 2);
+  try {
+    await waitUntil(async () => (await page.locator("#withdrawalRows tr").count()) === 2);
+  } catch (error) {
+    const diagnostic = await page.evaluate(() => ({
+      tokenPresent: !!sessionStorage.getItem("ait_admin_access_token"),
+      mfaFlag: sessionStorage.getItem("ait_admin_mfa_verified"),
+      rowCount: document.querySelectorAll("#withdrawalRows tr").length,
+      queueError: document.getElementById("wdError")?.textContent,
+      authState: document.getElementById("authState")?.textContent,
+      output: document.getElementById("output")?.textContent,
+    }));
+    throw new Error("Admin hostile-data queue failed to render: " + JSON.stringify({ diagnostic, apiRequests, pageErrors, cause: String(error) }));
+  }
   await waitUntil(async () => (await page.locator("#roles tr").count()) > 0 && (await page.locator("#trades tr").count()) > 0);
   await page.waitForTimeout(250);
   const result = await page.evaluate(() => ({
