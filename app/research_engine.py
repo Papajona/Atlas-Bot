@@ -541,10 +541,25 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     calibration_ok = cost_validation.get("calibration_verified") is True
     calibration_status = "VERIFIED" if calibration_ok else "MISSING_VENUE_CALIBRATION_EVIDENCE"
     calibration_evidence_id = cost_validation.get("evidence_id") if calibration_ok else None
+    # Refresh the exact OOS records after validating the signed evidence. The
+    # OOS helpers run before the signed universe/cost documents are checked, so leaving
+    # their earlier defaults here would permanently block a valid manifest or, worse,
+    # allow downstream callers to read inconsistent report-level versus fold-level state.
     for cost_target in [ens_cost, oos, *per_strategy_oos.values()]:
+        cost_target["universe_bias"] = universe_bias
+        cost_target["survivorship_bias_blocked"] = (
+            str(asset).lower() == "crypto"
+            and universe_bias != "POINT_IN_TIME_VERIFIED"
+        )
         cost_target["execution_cost_calibration_status"] = calibration_status
         cost_target["execution_cost_calibration_evidence_id"] = calibration_evidence_id
         cost_target["execution_cost_model_complete"] = calibration_ok
+        # The research return simulator still applies fixed bps slippage, not a
+        # per-order volume/volatility-aware model. Signed fee/spread evidence does not
+        # make that different model complete, so keep promotion closed until the actual
+        # slippage model and its fingerprint are implemented and calibrated.
+        cost_target["slippage_model_complete"] = False
+        cost_target["slippage_model_status"] = "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED"
     dsr = {
         "status": "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
         "observations": int(np.isfinite(np.asarray(oos.get("oos_return_sample") or [], dtype=float)).sum()),
@@ -620,8 +635,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "execution_cost_model_complete": calibration_ok,
                         "execution_cost_calibration_status": calibration_status,
                         "execution_cost_calibration_evidence_id": calibration_evidence_id,
-                        "slippage_model_complete": calibration_ok,
-                        "slippage_model_status": ("VERIFIED_VENUE_CALIBRATION" if calibration_ok else "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED"),
+                        "slippage_model_complete": False,
+                        "slippage_model_status": "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED",
                         "execution_cost_calibration": cost_validation,
                         "execution_cost_model_fingerprint": model_fingerprint,
                         "crypto_universe_validation": universe_validation,
