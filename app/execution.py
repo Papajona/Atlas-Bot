@@ -1428,7 +1428,10 @@ async def advance_platform_paper_orders(
                             1.0 + slippage_bps / 10_000.0
                             if trade.side == "buy" else 1.0 - slippage_bps / 10_000.0
                         )
-                        fill_price = Decimal(str(reference_price * price_multiplier))
+                        fill_price = (
+                            Decimal("0") if outcome == "INVALID_EXIT_CONTEXT"
+                            else Decimal(str(reference_price * price_multiplier))
+                        )
                         if fill_price <= 0:
                             outcome = "INVALID_FILL_PRICE"
                             reason = "adverse cost model produced a non-positive fill price"
@@ -1664,6 +1667,10 @@ async def advance_platform_paper_orders(
         "rejected": counts["rejected"],
         "expired": counts["expired"],
         "waiting_for_liquidity": counts["waiting_for_liquidity"],
+        "stop_triggers": counts["stop_triggers"],
+        "take_profit_triggers": counts["take_profit_triggers"],
+        "ambiguous_stop_priority": counts["ambiguous_stop_priority"],
+        "protective_exit_orders_created": counts["protective_exit_orders_created"],
         "liquidity_verified": verified_liquidity,
         "calibration_status": "UNVALIDATED_HEURISTIC",
         "equity": equity_state,
