@@ -274,10 +274,14 @@ async function testCustomerValidationError(browser, baseUrl) {
     }
     return json(route, {});
   });
+  const scriptResponses = [];
+  page.on("response", response => { if (response.url().includes("customer-dashboard.js")) scriptResponses.push({ status: response.status(), url: response.url() }); });
   await page.goto(`${baseUrl}/customer`);
   assert.equal(await page.locator("#submit").innerText(), "Create account");
+  const before = await page.evaluate(() => ({ toggleAction: document.getElementById("toggle").dataset.customerAction, toggleModeType: typeof window.toggleMode, externalScripts: Array.from(document.scripts).map(script => ({ src: script.src, type: script.type, defer: script.defer })) }));
   await page.locator("#toggle").click();
-  assert.equal(await page.locator("#submit").innerText(), "Sign in", "delegated toggle handler must switch the authentication mode");
+  const after = await page.evaluate(() => ({ submitText: document.getElementById("submit").innerText, toggleText: document.getElementById("toggle").innerText, modeType: typeof window.toggleMode, pageErrors: window.__pageErrors || [] }));
+  assert.equal(after.submitText, "Sign in", "delegated toggle handler must switch the authentication mode; before=" + JSON.stringify(before) + "; after=" + JSON.stringify(after) + "; scriptResponses=" + JSON.stringify(scriptResponses));
   await page.locator("#email").fill("customer@example.invalid");
   await page.locator("#password").fill("not-a-real-password");
   const loginResponse = page.waitForResponse(response => response.url().endsWith("/api/auth/login") && response.request().method() === "POST");
