@@ -75,3 +75,12 @@ def test_dashboard_has_no_inline_script_or_event_handler():
     js = _js()
     assert "document.addEventListener('click'" in js
     assert "document.addEventListener('change'" in js
+
+
+def test_dashboard_does_not_claim_production_hardening_without_release_evidence():
+    html = _html()
+    css = Path("app/static/app.css").read_text(encoding="utf-8")
+    assert "PRODUCTION HARDENED" not in html
+    assert "ADMIN OPERATIONS · FAIL-CLOSED CONTROLS" in html
+    assert ".table-wrap { width:100%; max-width:100%; overflow-x:auto; }" in css
+    assert ".workspace, main, .grid, .grid > *, .panel, .command-bar, .table-wrap { min-width:0; }" in css
