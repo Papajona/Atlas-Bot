@@ -359,8 +359,7 @@ async function testCustomerMfaOtpWithdrawalFlow(browser, baseUrl) {
   await page.locator("#mfaCode").fill("123456");
   await page.getByRole("button", { name: "Verify authenticator" }).click();
   await page.locator("#account").waitFor({ state: "visible", timeout: 10000 });
-  await page.locator("#menuBtn").click();
-  await page.locator('#sidebar a.nav-link[data-section="wallet"]').click();
+  await page.locator('nav.mobile-nav a[href="#wallet"]').click();
   const mobileLayout = await page.evaluate(() => ({ viewport: window.innerWidth, document: document.documentElement.scrollWidth }));
   assert.ok(mobileLayout.document <= mobileLayout.viewport + 2, "customer dashboard must not force page-level horizontal scrolling on mobile: " + JSON.stringify(mobileLayout));
   await page.locator("#wdAmount").fill("12.345678");
