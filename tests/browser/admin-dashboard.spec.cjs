@@ -60,6 +60,8 @@ async function testAdminDashboard(browser, baseUrl) {
   await page.addInitScript(({ accessToken }) => {
     sessionStorage.setItem("ait_admin_access_token", accessToken);
     sessionStorage.setItem("ait_admin_mfa_verified", "true");
+    sessionStorage.setItem("ait_admin_refresh_token", "OLD-REFRESH-TEST-ONLY");
+    sessionStorage.setItem("ait_approver_token", "OLD-APPROVER-TEST-ONLY");
     window.__cspViolations = [];
     window.addEventListener("securitypolicyviolation", event => {
       window.__cspViolations.push(`${event.violatedDirective}: ${event.blockedURI}`);
@@ -73,7 +75,7 @@ async function testAdminDashboard(browser, baseUrl) {
     customer_id: index + 900,
     customer_email: `customer${index + 1}@example.invalid`,
     account_ref: `acct-${index + 1}`,
-    amount: index === 0 ? 12.345678 : 1.234567,
+    amount: index === 0 ? 12.345678 : index === 1 ? 1234567.891234 : 1.234567,
     currency: "USDT",
     destination_masked: index === 0 ? "TAbc…Wwb" : `Tmasked${index}…end`,
     status: "APPROVED",
@@ -128,12 +130,15 @@ async function testAdminDashboard(browser, baseUrl) {
   assert.equal(await page.locator("#releaseId").inputValue(), "admin-user-1", "release operator should follow the authenticated identity");
   assert.equal(await page.locator("#adminId").getAttribute("readonly"), "");
   assert.equal(await page.locator("#releaseId").getAttribute("readonly"), "");
+  assert.equal(await page.evaluate(() => sessionStorage.getItem("ait_admin_refresh_token")), null, "legacy refresh token must be purged at dashboard startup");
+  assert.equal(await page.evaluate(() => sessionStorage.getItem("ait_approver_token")), null, "legacy approver token must be purged at dashboard startup");
 
   await page.locator("#wdFilter").selectOption("APPROVED");
   await waitUntil(async () => (await page.locator("#withdrawalRows tr").count()) === 100);
   assert.equal(await page.locator("#withdrawals tbody#withdrawalRows").count(), 1, "the queue should stay nested in the table body");
   const firstRow = page.locator("#withdrawalRows tr").first();
   assert.match(await firstRow.locator("td").nth(2).innerText(), /12\.345678/, "withdrawal amount must preserve six decimal places");
+  assert.match(await page.locator("#withdrawalRows tr").nth(1).locator("td").nth(2).innerText(), /1,234,567\.891234/, "large withdrawal amounts must retain all six decimals and locale grouping");
   assert.match(await firstRow.locator("td").nth(4).innerText(), /n\/a/, "missing risk score must not appear as zero");
   assert.match(await firstRow.locator("td").nth(6).innerText(), new RegExp(digest), "proposal digest should appear next to Execute");
 
@@ -358,7 +363,8 @@ async function testLoggedOutAdminStopsPolling(browser, baseUrl) {
   await page.goto(baseUrl + "/admin");
   await page.waitForTimeout(1200);
   const settledRequestCount = requests.length;
-  await page.waitForTimeout(11000);
+  // Cross both scheduled polling intervals so this test cannot pass before the first poll.
+  await page.waitForTimeout(21000);
   assert.equal(requests.length, settledRequestCount, "a logged-out admin tab must not continue issuing periodic API requests");
   assert.ok(settledRequestCount <= 8, "only the initial page-load requests should occur without an admin session");
   assert.deepEqual(pageErrors, [], "a logged-out admin page must not throw browser errors");
