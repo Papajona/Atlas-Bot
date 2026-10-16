@@ -171,7 +171,7 @@ async function testAdminDashboard(browser, baseUrl) {
   });
   assert.deepEqual(duplicateIds, [], "repeated refreshes must not create duplicate DOM IDs");
   await page.setViewportSize({ width: 390, height: 844 });
-  const mobileLayout = await page.evaluate(() => ({ viewport: window.innerWidth, document: document.documentElement.scrollWidth }));
+  const mobileLayout = await page.evaluate(() => ({ viewport: window.innerWidth, document: document.documentElement.scrollWidth, offenders: Array.from(document.querySelectorAll("body *")).map(el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return { tag: el.tagName, id: el.id, className: typeof el.className === "string" ? el.className : "", left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width), position: s.position, insideTableScroller: !!el.closest(".table-wrap") }; }).filter(el => el.width > 0 && el.right > window.innerWidth + 2 && el.position !== "fixed" && !el.insideTableScroller).sort((a, b) => b.right - a.right).slice(0, 10) }));
   assert.ok(mobileLayout.document <= mobileLayout.viewport + 2, "admin dashboard must not force page-level horizontal scrolling on mobile: " + JSON.stringify(mobileLayout));
   const nav = page.locator(".mobile-nav");
   assert.equal(await nav.getAttribute("aria-label"), "Toggle navigation", "mobile nav button must have a meaningful accessible name");
