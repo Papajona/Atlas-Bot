@@ -1137,6 +1137,336 @@ async def mark_paper_equity(mark_prices: dict[str, float], customer_id: int | No
         return result
 
 
+def _paper_utc(value: Any) -> datetime:
+    """Parse a persisted or provider bar timestamp as an aware UTC datetime."""
+    if hasattr(value, "to_pydatetime"):
+        value = value.to_pydatetime()
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if not isinstance(value, datetime):
+        raise ValueError("paper bar timestamp must be a datetime")
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _paper_hash_fraction(value: str) -> float:
+    """Stable [0,1) draw used for reproducible, explicitly uncalibrated queue outcomes."""
+    number = int(hashlib.sha256(value.encode("utf-8")).hexdigest()[:13], 16)
+    return number / float(16 ** 13)
+
+
+def _paper_timeframe_seconds(timeframe: str) -> int:
+    values = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800,
+              "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400}
+    if timeframe not in values:
+        raise RiskBlocked(f"Unsupported paper timeframe: {timeframe}")
+    return values[timeframe]
+
+
+async def advance_platform_paper_orders(
+    df,
+    *,
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    asset: str,
+) -> dict:
+    """Advance platform paper orders once on a fresh completed bar, with persisted idempotency.
+
+    Only explicitly verified CCXT spot base-asset volume contributes fill capacity. Other
+    markets can age/cancel paper orders but cannot fill them using OTC or unknown volume.
+    This model is a deterministic simulator, not an exchange matching engine.
+    """
+    if df is None or len(df) < 2 or "close" not in getattr(df, "columns", ()):
+        return {"status": "INSUFFICIENT_DATA", "orders_seen": 0, "fills": 0}
+    try:
+        bar_at = _paper_utc(df.index[-1])
+        bar_seconds = _paper_timeframe_seconds(timeframe)
+        now = utcnow()
+        bar_close_at = bar_at + timedelta(seconds=bar_seconds)
+        if bar_close_at > now:
+            return {"status": "BAR_NOT_COMPLETE", "bar_at": bar_at.isoformat(), "orders_seen": 0, "fills": 0}
+        if (now - bar_close_at).total_seconds() > max(60, bar_seconds * 2):
+            return {"status": "STALE_BAR", "bar_at": bar_at.isoformat(), "orders_seen": 0, "fills": 0}
+        provenance = dict(getattr(df, "attrs", {}).get("data_provenance") or {})
+        source = str(provenance.get("source") or "")
+        data_sha256 = str(provenance.get("sha256") or "")
+        fetched_at = _paper_utc(provenance.get("fetched_at_utc"))
+        if (
+            len(data_sha256) != 64
+            or any(ch not in "0123456789abcdef" for ch in data_sha256.lower())
+            or int(provenance.get("row_count") or 0) != len(df)
+            or not source
+            or (now - fetched_at).total_seconds() < -30
+            or (now - fetched_at).total_seconds() > max(60, int(settings.stale_data_minutes) * 60)
+        ):
+            return {"status": "DATA_PROVENANCE_INVALID", "orders_seen": 0, "fills": 0}
+        close_price = float(df["close"].iloc[-1])
+        bar_volume = float(df["volume"].iloc[-1]) if "volume" in df.columns else 0.0
+        if not math.isfinite(close_price) or close_price <= 0:
+            return {"status": "INVALID_BAR_PRICE", "orders_seen": 0, "fills": 0}
+        if not math.isfinite(bar_volume) or bar_volume < 0:
+            bar_volume = 0.0
+        returns = df["close"].astype(float).pct_change().replace([float("inf"), float("-inf")], float("nan")).dropna().tail(20)
+        volatility = float(returns.std(ddof=0)) if len(returns) >= 2 else 0.0
+        if not math.isfinite(volatility) or volatility < 0:
+            volatility = 0.0
+    except RiskBlocked:
+        raise
+    except (TypeError, ValueError, OverflowError, KeyError, AttributeError) as exc:
+        return {"status": "DATA_PROVENANCE_INVALID", "reason": str(exc)[:200], "orders_seen": 0, "fills": 0}
+
+    volume_unit = str(provenance.get("volume_unit") or "unknown")
+    verified_liquidity = bool(
+        str(asset).lower() == "crypto"
+        and source == "ccxt_ohlcv"
+        and provenance.get("asset_class") == "crypto"
+        and provenance.get("market_type") == "spot"
+        and volume_unit == "base_asset"
+        and provenance.get("volume_unit_verified") is True
+    )
+    bar_identity = "|".join((exchange.lower(), symbol, timeframe, bar_at.isoformat()))
+    bar_key = hashlib.sha256(bar_identity.encode("utf-8")).hexdigest()
+    participation = min(1.0, max(0.0, float(settings.paper_max_bar_volume_participation)))
+    capacity = bar_volume * participation if verified_liquidity else 0.0
+    queue_probability = min(1.0, max(0.0, float(settings.paper_queue_fill_probability)))
+    rejection_probability = min(1.0, max(0.0, float(settings.paper_rejection_probability)))
+    min_latency = max(1, int(settings.paper_fill_latency_bars))
+    ttl_bars = max(1, int(settings.paper_order_ttl_bars))
+    max_impact_bps = max(0.0, float(settings.paper_max_market_impact_bps))
+    impact_coefficient = max(0.0, float(settings.paper_market_impact_coefficient))
+
+    counts = {"attempts": 0, "fills": 0, "partial_fills": 0, "queue_misses": 0,
+              "rejected": 0, "expired": 0, "waiting_for_liquidity": 0}
+    audit_events: list[dict] = []
+    async with SessionLocal() as db:
+        pairs = (await db.execute(
+            select(Trade, PaperOrderState)
+            .join(PaperOrderState, PaperOrderState.trade_id == Trade.id)
+            .where(
+                Trade.customer_id.is_(None),
+                Trade.mode == "PAPER",
+                Trade.exchange == exchange,
+                Trade.symbol == symbol,
+                Trade.timeframe == timeframe,
+                Trade.status.in_(("OPEN", "PARTIAL")),
+                PaperOrderState.status.in_(("OPEN", "PARTIAL")),
+            )
+            .order_by(Trade.created_at, Trade.id)
+            .with_for_update()
+        )).all()
+        if not pairs:
+            return {
+                "status": "NO_OPEN_ORDERS", "bar_at": bar_at.isoformat(),
+                "orders_seen": 0, "fills": 0, "liquidity_verified": verified_liquidity,
+            }
+
+        bar_state = (await db.execute(
+            select(PaperBarState).where(PaperBarState.bar_key == bar_key).with_for_update()
+        )).scalar_one_or_none()
+        if bar_state is None:
+            bar_state = PaperBarState(
+                bar_key=bar_key,
+                exchange=exchange,
+                symbol=symbol,
+                timeframe=timeframe,
+                bar_at=bar_at,
+                asset_class=str(asset).lower(),
+                data_source=source[:50],
+                data_sha256=data_sha256,
+                volume_unit=volume_unit[:30],
+                bar_volume=bar_volume,
+                capacity=capacity,
+                consumed=0.0,
+                close_price=close_price,
+                return_volatility=volatility,
+            )
+            db.add(bar_state)
+            await db.flush()
+
+        for trade, order_state in pairs:
+            if trade.status not in {"OPEN", "PARTIAL"} or order_state.status not in {"OPEN", "PARTIAL"}:
+                continue
+            try:
+                submitted_at = _paper_utc(order_state.submitted_bar_at)
+                previous_at = _paper_utc(order_state.last_processed_bar_at) if order_state.last_processed_bar_at else None
+            except (TypeError, ValueError, OverflowError):
+                trade.status = "FAILED"
+                trade.error = "Paper simulator state contains an invalid timestamp"
+                order_state.status = "FAILED"
+                continue
+            # An order never fills on its signal/submission bar, and a consumed bar can
+            # never be advanced twice, even if the endpoint or worker retries.
+            if bar_at <= submitted_at or (previous_at is not None and bar_at <= previous_at):
+                continue
+            prior_event = (await db.execute(
+                select(PaperFillEvent.id).where(
+                    PaperFillEvent.trade_id == trade.id, PaperFillEvent.bar_key == bar_key
+                )
+            )).first()
+            if prior_event:
+                order_state.last_processed_bar_at = bar_at
+                continue
+
+            counts["attempts"] += 1
+            order_state.bars_elapsed = int(order_state.bars_elapsed or 0) + 1
+            order_state.last_processed_bar_at = bar_at
+            order_state.updated_at = now
+            requested_remaining = max(
+                0.0,
+                float(trade.remaining_quantity or 0.0)
+                if trade.remaining_quantity is not None
+                else float(trade.requested_quantity or 0.0) - float(trade.filled_quantity or 0.0),
+            )
+            outcome = "WAIT_LATENCY"
+            reason = "minimum completed-bar latency has not elapsed"
+            fill_quantity = Decimal("0")
+            fill_price = Decimal("0")
+            fee_decimal = Decimal("0")
+            slippage_bps = 0.0
+
+            if order_state.bars_elapsed >= min_latency:
+                if not verified_liquidity or float(bar_state.capacity or 0.0) <= 0:
+                    outcome = "WAIT_UNVERIFIED_LIQUIDITY" if not verified_liquidity else "WAIT_NO_CAPACITY"
+                    reason = "verified crypto spot base-asset volume is required for a fill"
+                    counts["waiting_for_liquidity"] += 1
+                elif _paper_hash_fraction(f"{trade.client_order_id}|{bar_key}|REJECT") < rejection_probability:
+                    outcome = "REJECTED"
+                    reason = "deterministic rejection heuristic; not venue-calibrated"
+                    trade.status = "REJECTED"
+                    trade.error = reason
+                    trade.remaining_quantity = 0.0
+                    order_state.status = "REJECTED"
+                    counts["rejected"] += 1
+                elif _paper_hash_fraction(f"{trade.client_order_id}|{bar_key}|QUEUE") >= queue_probability:
+                    outcome = "QUEUE_MISS"
+                    reason = "deterministic queue-miss heuristic; not venue-calibrated"
+                    counts["queue_misses"] += 1
+                else:
+                    available = max(
+                        Decimal("0"),
+                        Decimal(str(bar_state.capacity or 0.0)) - Decimal(str(bar_state.consumed or 0.0)),
+                    )
+                    fill_quantity = min(Decimal(str(requested_remaining)), available)
+                    if fill_quantity <= Decimal("0.000000000001"):
+                        outcome = "WAIT_AGGREGATE_CAP"
+                        reason = "aggregate completed-bar participation capacity is exhausted"
+                        fill_quantity = Decimal("0")
+                        counts["waiting_for_liquidity"] += 1
+                    else:
+                        profile = PROFILES.get(str(asset).lower(), PROFILES["crypto"])
+                        impact = impact_coefficient * volatility * math.sqrt(
+                            max(0.0, float(fill_quantity) / max(bar_volume, 1e-18))
+                        ) * 10_000.0
+                        impact = min(max_impact_bps, max(0.0, impact))
+                        slippage_bps = max(0.0, float(profile.slippage_bps) + impact)
+                        price_multiplier = (
+                            1.0 + slippage_bps / 10_000.0
+                            if trade.side == "buy" else 1.0 - slippage_bps / 10_000.0
+                        )
+                        fill_price = Decimal(str(close_price * price_multiplier))
+                        if fill_price <= 0:
+                            outcome = "INVALID_FILL_PRICE"
+                            reason = "adverse cost model produced a non-positive fill price"
+                            fill_quantity = Decimal("0")
+                        else:
+                            old_filled = Decimal(str(trade.filled_quantity or 0.0))
+                            old_average = Decimal(str(trade.average_fill_price or 0.0))
+                            new_filled = old_filled + fill_quantity
+                            fee_decimal = (
+                                fill_quantity * fill_price * Decimal(str(profile.taker_bps))
+                                / Decimal("10000")
+                            )
+                            await _apply_fill_to_position(db, trade, float(new_filled), float(fill_price))
+                            weighted_average = (
+                                (old_filled * old_average + fill_quantity * fill_price) / new_filled
+                                if new_filled > 0 else fill_price
+                            )
+                            trade.filled_quantity = float(new_filled)
+                            trade.remaining_quantity = max(
+                                0.0, float(Decimal(str(trade.requested_quantity or 0.0)) - new_filled)
+                            )
+                            trade.average_fill_price = float(weighted_average)
+                            trade.notional = float(new_filled * weighted_average)
+                            trade.fee = float(Decimal(str(trade.fee or 0.0)) + fee_decimal)
+                            state = await _get_state_locked(db)
+                            state.cash_equity = max(0.0, float(state.cash_equity or 0.0) - float(fee_decimal))
+                            bar_state.consumed = float(Decimal(str(bar_state.consumed or 0.0)) + fill_quantity)
+                            remaining_after = Decimal(str(trade.remaining_quantity or 0.0))
+                            if remaining_after <= Decimal("0.000000000001"):
+                                trade.remaining_quantity = 0.0
+                                trade.status = "FILLED"
+                                order_state.status = "FILLED"
+                                outcome = "FILLED"
+                                reason = "completed-bar fill; costs are unvalidated heuristics"
+                                counts["fills"] += 1
+                            else:
+                                trade.status = "PARTIAL"
+                                order_state.status = "PARTIAL"
+                                outcome = "PARTIAL_FILL"
+                                reason = "partial fill bounded by aggregate verified bar-volume participation"
+                                counts["partial_fills"] += 1
+                            counts["fills"] += 0
+                            audit_events.append({
+                                "trade_id": trade.id, "symbol": trade.symbol, "exchange": trade.exchange,
+                                "bar_at": bar_at.isoformat(), "quantity": str(fill_quantity),
+                                "fill_price": str(fill_price), "fee": str(fee_decimal),
+                                "slippage_bps": round(slippage_bps, 6), "outcome": outcome,
+                            })
+
+            # TTL counts only fresh completed bars after submission, including bars with
+            # no trusted liquidity. Preserve a partial-fill record but cancel any remainder.
+            if trade.status in {"OPEN", "PARTIAL"} and order_state.bars_elapsed >= ttl_bars:
+                trade.status = "CANCELED"
+                trade.remaining_quantity = 0.0
+                order_state.status = "CANCELED"
+                if outcome == "PARTIAL_FILL":
+                    outcome = "PARTIAL_FILL_TTL_CANCELED"
+                    reason += "; remaining quantity canceled at TTL"
+                else:
+                    outcome = "CANCELED_TTL"
+                    reason = f"{reason}; order TTL exhausted"
+                counts["expired"] += 1
+
+            trade.updated_at = now
+            event = PaperFillEvent(
+                trade_id=trade.id,
+                bar_key=bar_key,
+                outcome=outcome,
+                attempted_quantity=requested_remaining,
+                filled_quantity=float(fill_quantity),
+                fill_price=float(fill_price),
+                fee=float(fee_decimal),
+                slippage_bps=float(slippage_bps),
+                reason=reason[:1000],
+            )
+            db.add(event)
+            audit_events.append({
+                "trade_id": trade.id, "symbol": trade.symbol, "bar_at": bar_at.isoformat(),
+                "outcome": outcome, "filled_quantity": str(fill_quantity), "reason": reason[:200],
+            })
+        await db.commit()
+
+    for item in audit_events:
+        await audit("PAPER_FILL_EVENT", item, actor_id="paper-simulator")
+    return {
+        "status": "PROCESSED",
+        "bar_at": bar_at.isoformat(),
+        "bar_key": bar_key,
+        "orders_seen": len(pairs),
+        "attempts": counts["attempts"],
+        "fills": counts["fills"],
+        "partial_fills": counts["partial_fills"],
+        "queue_misses": counts["queue_misses"],
+        "rejected": counts["rejected"],
+        "expired": counts["expired"],
+        "waiting_for_liquidity": counts["waiting_for_liquidity"],
+        "liquidity_verified": verified_liquidity,
+        "calibration_status": "UNVALIDATED_HEURISTIC",
+    }
+
+
 async def execute_signal(symbol: str, side: str, quantity: float, price: float, signal: dict[str, Any],
                          exchange: str, timeframe: str, signal_timestamp: str, force_paper: bool = False,
                          stop_loss_price: float | None = None, take_profit_price: float | None = None,
