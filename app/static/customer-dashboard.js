@@ -1,5 +1,4 @@
 
-function esc(value){const d=document.createElement('div');d.textContent=value==null?'':String(value);return d.innerHTML;}
 function clearAndAppend(el, nodes){el.replaceChildren(...nodes);}
 function cardNode(parts){const el=document.createElement('div');el.className='card';for(const part of parts){const n=document.createElement(part.tag||'div');n.textContent=part.text==null?'':String(part.text);if(part.className)n.className=part.className;el.appendChild(n);}return el;}
 
