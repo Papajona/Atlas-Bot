@@ -26,12 +26,21 @@ async function adminLogin(){
   }catch(e){$('authState').textContent='Admin sign-in: '+e.message}
 }
 async function adminEnroll(){
+  if(!token()){ $('authState').textContent='Sign in first.'; return; }
+  // Open synchronously in the click gesture so browser popup blockers do not discard
+  // the QR window after the network request completes.
+  const w=window.open('','_blank','width=420,height=520');
+  if(!w){$('authState').textContent='Allow popups for this site to view the Authenticator QR code.';return}
+  w.document.write('<title>Atlas Admin Authenticator</title><p>Loading authenticator setup…</p>');
   try{
-    if(!token())throw new Error('Sign in first.');
     const d=await api('/api/admin/auth/mfa/enroll',{method:'POST',body:'{}'});
     $('output').textContent='Scan this Google Authenticator QR code with your administrator device.\nManual secret: '+(d.totp?.secret||'unavailable');
-    if(d.totp?.qr_code){const w=window.open('','_blank','width=420,height=520');w.document.write('<title>Atlas Admin Authenticator</title><p>Scan with Google Authenticator, then return to Atlas.</p><img style="max-width:360px" src="data:image/svg+xml;charset=utf-8,'+encodeURIComponent(d.totp.qr_code)+'"><p>Manual secret: '+esc(d.totp.secret||'unavailable')+'</p>');}
-  }catch(e){$('authState').textContent='Authenticator enrollment: '+e.message}
+    if(d.totp?.qr_code){
+      w.document.open();
+      w.document.write('<title>Atlas Admin Authenticator</title><p>Scan with Google Authenticator, then return to Atlas.</p><img style="max-width:360px" alt="Authenticator enrollment QR code" src="data:image/svg+xml;charset=utf-8,'+encodeURIComponent(d.totp.qr_code)+'"><p>Manual secret: '+esc(d.totp.secret||'unavailable')+'</p>');
+      w.document.close();
+    }else{w.close();throw new Error('Authenticator provider did not return a QR code.')}
+  }catch(e){if(!w.closed)w.close();$('authState').textContent='Authenticator enrollment: '+e.message}
 }
 async function adminMfaVerify(){
   const code=$('adminMfaCode').value.trim();
