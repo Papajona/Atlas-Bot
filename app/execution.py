@@ -1187,6 +1187,17 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             if asset in {"forex", "commodity"} and forex_live and settings.oanda_practice:
                 raise RiskBlocked("OANDA practice mode is enabled; live Forex is locked")
             mode = "FOREX_DEMO" if forex_demo else ("LIVE" if live else "PAPER")
+            # Do not write unrealistically perfect paper fills to the trading ledger. The active
+            # legacy branch has no completed-bar lifecycle, latency, partial fills, or liquidity-aware
+            # impact model; claiming a fill here would contaminate paper-forward evidence. Until the
+            # bar-driven simulator is implemented and wired into the worker, fail closed before any
+            # Trade/Position/equity mutation. Live and OANDA practice paths are unaffected.
+            if mode == "PAPER":
+                raise RiskBlocked(
+                    "Platform paper execution is temporarily blocked: the legacy execution path "
+                    "does immediate full fills with fixed slippage. A bar-driven paper simulator "
+                    "must be integrated and verified before orders can be simulated."
+                )
             trading_account_id = account.id if account is not None else None
             risk_equity = float(account.equity if account is not None else s.equity)
 
