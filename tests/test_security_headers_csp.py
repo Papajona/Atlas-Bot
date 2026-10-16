@@ -7,7 +7,7 @@ def _src() -> str:
 
 def _policy(src: str, name: str = "CONTENT_SECURITY_POLICY") -> str:
     start = src.index(f"{name} = (")
-    end = src.index("\\n)", start)
+    end = src.index("\n)", start)
     return src[start:end]
 
 
