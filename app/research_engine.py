@@ -12,9 +12,6 @@ from .strategy_evidence import evidence_for
 from .research_validation import monte_carlo_bootstrap, parameter_plateau_score, cost_breakeven_report
 from .config import settings
 
-# Fail-closed release gate: no trusted signed comparable-trial archive verifier is
-# integrated into this code path yet. Do not enable from report fields or fixtures.
-TRUSTED_SIGNED_TRIAL_ARCHIVE_VERIFIER_AVAILABLE = False
 from .research_validation import (validate_ohlcv_frame, bootstrap_mean_ci,
                                   multiple_testing_sharpe_adjustment, cost_sensitivity,
                                   purged_walk_forward_splits, fixed_signal_walk_forward_oos,
@@ -657,6 +654,9 @@ def paper_candidates(
     min_trades: int | None = None,
     min_oos_total_return: float | None = None,
     min_oos_positive_fold_ratio: float | None = None,
+    *,
+    trial_archive_document: dict | None = None,
+    trusted_public_keys: str | dict[str, str] | None = None,
 ) -> list[dict]:
     """Select paper-shadow candidates using held-out metrics only.
 
@@ -683,22 +683,43 @@ def paper_candidates(
     elif asset_class not in {"forex", "commodity"} or universe_bias != "NOT_APPLICABLE":
         return []
     dsr = validation.get("deflated_sharpe") if isinstance(validation.get("deflated_sharpe"), dict) else {}
-    # The prospective DB registry is not a verified archive of all historical trials.
-    # A boolean in a report (including trial_registry_complete=True) is not proof that
-    # a signed, comparable archive was loaded and verified. No signed-archive verifier
-    # is wired into this candidate-selection path yet, so keep the gate closed until
-    # validation is backed by that verifier rather than synthetic report fields.
-    archive_evidence = validation.get("signed_comparable_trial_archive")
+    # Re-verify the actual signed document at candidate selection time. Report
+    # booleans and archived validation summaries are not trust roots: callers must
+    # provide the original signed artifact, and the server rechecks its Ed25519
+    # signature, complete trial labels, dataset hash, held-out sample and protocol.
+    archive_summary = validation.get("comparable_trial_archive")
+    provenance = research.get("data_provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    report_trials = validation.get("trial_labels")
+    if not isinstance(report_trials, list) or not report_trials:
+        return []
+    expected_context = {
+        "asset_class": asset_class,
+        "venue": str(provenance.get("exchange") or research.get("exchange") or "").strip().lower(),
+        "market_type": str(provenance.get("market_type") or "").strip().lower(),
+        "symbol": str(provenance.get("symbol") or research.get("symbol") or "").strip(),
+        "timeframe": str(provenance.get("timeframe") or research.get("timeframe") or "").strip(),
+        "dataset_sha256": str(provenance.get("sha256") or "").strip().lower(),
+        "oos_sample_sha256": str(validation.get("oos_sample_sha256") or "").strip().lower(),
+        "protocol_version": "atlas-purged-walk-forward-v1",
+    }
+    try:
+        from .research_evidence import validate_comparable_trial_archive
+
+        verified_archive = validate_comparable_trial_archive(
+            trial_archive_document,
+            trusted_public_keys,
+            candidate_labels={str(label) for label in report_trials},
+            expected_context=expected_context,
+        )
+    except (TypeError, ValueError, KeyError):
+        return []
     if (
-        not TRUSTED_SIGNED_TRIAL_ARCHIVE_VERIFIER_AVAILABLE
-        or not isinstance(archive_evidence, dict)
-        or archive_evidence.get("status") != "VERIFIED"
-        or archive_evidence.get("signature_verified") is not True
-        or not isinstance(archive_evidence.get("evidence_id"), str)
-        or not archive_evidence.get("evidence_id").strip()
-        or not isinstance(archive_evidence.get("sha256"), str)
-        or len(archive_evidence.get("sha256")) != 64
-        or any(ch not in "0123456789abcdefABCDEF" for ch in archive_evidence.get("sha256"))
+        verified_archive.get("trial_archive_verified") is not True
+        or not isinstance(archive_summary, dict)
+        or archive_summary.get("trial_archive_verified") is not True
+        or archive_summary.get("evidence_id") != verified_archive.get("evidence_id")
+        or archive_summary.get("evidence_sha256") != verified_archive.get("evidence_sha256")
         or validation.get("trial_registry_complete") is not True
         or dsr.get("status") != "OK"
     ):
