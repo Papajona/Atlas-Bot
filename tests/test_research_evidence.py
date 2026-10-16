@@ -32,9 +32,9 @@ def _window():
 def test_signed_point_in_time_universe_verifies_and_rejects_forgery():
     start, end = _window()
     instruments = [
-        {"symbol": "BTC/USDT", "listed_at": "2017-01-01T00:00:00Z", "delisted_at": None},
+        {"symbol": "BTC/USDT", "listed_at": "2017-01-01T00:00:00Z", "delisted_at": None, "failed_at": None},
         {"symbol": "OLD/USDT", "listed_at": "2020-01-01T00:00:00Z",
-         "delisted_at": "2024-06-01T00:00:00Z"},
+         "delisted_at": "2024-06-01T00:00:00Z", "failed_at": None},
     ]
     doc = {
         "evidence_type": "crypto_point_in_time_universe", "evidence_id": "test-universe-v1",
@@ -214,5 +214,40 @@ def test_crypto_universe_rejects_malformed_delisting_timestamp():
         signed, keys, venue="binance", market_type="spot", coverage_start=start,
         coverage_end=end, symbol="BTC/USDT",
     )
+    assert result["universe_verified"] is False
+    assert result["reason"] == "UNIVERSE_INSTRUMENT_TIMELINE_INVALID"
+
+
+
+def test_signed_universe_requires_per_instrument_failure_timeline():
+    start, end = _window()
+    instruments = [
+        {"symbol": "BTC/USDT", "listed_at": "2017-01-01T00:00:00Z",
+         "delisted_at": None, "failed_at": None},
+        {"symbol": "FAILED/USDT", "listed_at": "2020-01-01T00:00:00Z",
+         "delisted_at": None, "failed_at": "2024-03-01T00:00:00Z"},
+    ]
+    doc = {
+        "evidence_type": "crypto_point_in_time_universe", "evidence_id": "test-universe-failures-v1",
+        "venue": "binance", "market_type": "spot", "coverage_start": start, "coverage_end": end,
+        "membership_policy": "POINT_IN_TIME", "coverage_complete": True,
+        "includes_delisted": True, "includes_failed_assets": True,
+        "sources": [_source(k) for k in ("listing_history", "delisting_history", "failed_assets")],
+        "instruments": instruments,
+        "instruments_sha256": canonical_sha256(sorted(instruments, key=lambda row: row["symbol"].casefold())),
+    }
+    signed, keys = _sign(doc)
+    args = dict(venue="binance", market_type="spot", coverage_start=start, coverage_end=end)
+    assert validate_crypto_universe_manifest(signed, keys, **args)["universe_verified"] is True
+
+    missing_failure_timeline = [dict(row) for row in instruments]
+    missing_failure_timeline[1].pop("failed_at")
+    invalid_doc = {
+        **doc,
+        "instruments": missing_failure_timeline,
+        "instruments_sha256": canonical_sha256(sorted(missing_failure_timeline, key=lambda row: row["symbol"].casefold())),
+    }
+    signed_invalid, keys = _sign(invalid_doc)
+    result = validate_crypto_universe_manifest(signed_invalid, keys, **args)
     assert result["universe_verified"] is False
     assert result["reason"] == "UNIVERSE_INSTRUMENT_TIMELINE_INVALID"
