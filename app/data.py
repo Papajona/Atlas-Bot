@@ -101,7 +101,7 @@ def fetch_crypto(symbol: str, exchange: str = "bybit", timeframe: str = "1h", da
         # market metadata explicitly identifies a non-contract spot market. Contract,
         # swap, future, option and unknown-market volumes must never be treated as base units.
         market = (ex.markets or {}).get(symbol, {}) or {}
-        verified_spot = market.get("spot") is True and market.get("contract") is not True
+        verified_spot = market.get("spot") is True and market.get("contract") is False
         verified.attrs["data_provenance"].update({
             "asset_class": "crypto",
             "market_type": "spot" if verified_spot else "derivative_or_unknown",
