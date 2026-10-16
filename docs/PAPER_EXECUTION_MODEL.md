@@ -33,6 +33,13 @@ Swap/futures/contract markets, unknown exchange metadata, Yahoo Finance volumes,
 - `PAPER_REJECTION_PROBABILITY` (default 0.01): deterministic rejection heuristic.
 - `PAPER_MARKET_IMPACT_COEFFICIENT` (default 0.10) and `PAPER_MAX_MARKET_IMPACT_BPS` (default 250): bounded, uncalibrated impact estimate.
 
+## Additional fail-closed research helpers
+
+- Stable SHA-256-derived pseudo-random outcomes and delays are available for reproducible tests. They are simulation-only and must not be used for security or live execution.
+- Delisting marks require evidence for the last trade; a documented settlement price requires its own evidence identifier. A last-trade mark is explicitly labelled a proxy, not realized cash recovery. This does not create historical listing data or prove that the venue allowed liquidation at that price.
+- Financing calculations now have an evidence-backed rate wrapper that rejects unverified rates, instrument mismatches, and rates not yet effective. It does not fetch or independently authenticate OANDA rates; the supplied evidence must be checked against the correct account, product, direction, and effective date.
+- These helpers are not a substitute for instrument-specific execution integration. Commodity orders remain blocked in the active platform simulator. FX/commodity sessions, the New York 5 p.m. rollover, holidays, Wednesday triple financing, contract-roll mechanics, margin calls, and forced liquidation are not claimed as fully implemented or broker-validated by these helpers.
+
 ## Still-open evidence gates
 
 - Crypto research candidates remain blocked unless a signed point-in-time universe manifest passes the validator for the exact venue, spot/market type, symbol and dataset date range. Current CCXT market listings are not historical membership evidence.
