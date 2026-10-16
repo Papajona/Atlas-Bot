@@ -106,10 +106,12 @@ def test_paper_gate_and_live_shadow_signals():
         },
     }
     candidates = paper_candidates(research)
-    assert candidates
+    # The trusted signed comparable-trial archive verifier is intentionally not
+    # integrated yet. Synthetic report fields must not bypass that fail-closed gate.
+    assert candidates == []
     names = [x["strategy"] for x in candidates]
     signals = live_strategy_signals(df, names)
-    assert signals and all(x["mode"] == "PAPER_SHADOW_ONLY" for x in signals)
+    assert signals == []
 
 def test_multi_timeframe_structure_and_risk_levels():
     from app.multi_timeframe import multi_timeframe_analysis, multi_timeframe_signal
