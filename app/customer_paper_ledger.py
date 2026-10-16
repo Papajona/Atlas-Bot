@@ -281,8 +281,10 @@ def _validated_paper_journal(
             raise ValueError("signed_amount is outside numeric(38,18) precision") from exc
         if quantized != amount or quantized == 0 or max(quantized.adjusted() + 1, 0) > 20:
             raise ValueError("signed_amount must be nonzero and exactly representable as numeric(38,18)")
-        total += quantized
         normalized_lines.append({"account_code": account_code, "signed_amount": format(quantized, "f")})
+    with localcontext() as ctx:
+        ctx.prec = 50
+        total = sum((Decimal(line["signed_amount"]) for line in normalized_lines), Decimal("0"))
     if total != 0:
         raise ValueError("journal signed_amount values must sum exactly to zero")
     try:
