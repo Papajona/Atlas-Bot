@@ -227,7 +227,10 @@ def test_crypto_universe_rejects_malformed_delisting_timestamp():
         )),
     }
     signed_invalid_timeline, keys = _sign(invalid_timeline_doc)
-    result = validate_crypto_universe_manifest(signed_invalid_timeline, keys, **args)
+    result = validate_crypto_universe_manifest(
+        signed_invalid_timeline, keys, venue="binance", market_type="spot",
+        coverage_start=start, coverage_end=end,
+    )
     assert result["universe_verified"] is False
     assert result["reason"] == "UNIVERSE_INSTRUMENT_TIMELINE_INVALID"
 
