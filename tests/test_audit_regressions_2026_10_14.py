@@ -168,6 +168,33 @@ def test_backtest_report_records_asset_class_for_candidate_gate():
     assert result["asset_class"] == "crypto"
     assert result["universe_bias"] == "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
 
+
+def test_paper_candidates_require_comparable_trial_dsr_and_execution_evidence():
+    from app.research_engine import paper_candidates
+
+    row = {"strategy":"trend","sharpe":1.2,"max_drawdown":-0.08,"trades":200,"total_return":0.25}
+    folds = [{"total_return":0.04},{"total_return":0.03},{"total_return":-0.02},
+             {"total_return":0.05},{"total_return":0.02}]
+    oos = {
+        "status":"OK", "oos_total_return":0.12, "sharpe":0.9, "max_drawdown":-0.08,
+        "trades":200, "folds":folds, "deflated_sharpe":0.99, "cost_stress_ok":True,
+        "financing_cost_model_complete":True, "intrabar_stop_target_model_complete":True,
+        "execution_cost_model_complete":True, "trial_registry_complete":True,
+    }
+    research = {
+        "asset_class":"forex", "universe_bias":"NOT_APPLICABLE", "strategies":[row],
+        "validation":{
+            "trial_registry_complete":False,
+            "deflated_sharpe":{"status":"MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY"},
+            "per_strategy_oos":{"trend":oos},
+        },
+    }
+    assert paper_candidates(research) == []
+
+    research["validation"]["trial_registry_complete"] = True
+    research["validation"]["deflated_sharpe"] = {"status":"OK","deflated_sharpe_ratio":0.99}
+    assert len(paper_candidates(research)) == 1
+
 def test_all_lightgbm_models_use_the_bounded_thread_setting():
     from app.config import settings
 
