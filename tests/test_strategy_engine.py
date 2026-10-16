@@ -89,18 +89,27 @@ def test_all_strategy_research_and_ai_review():
 def test_paper_gate_and_live_shadow_signals():
     from app.research_engine import paper_candidates, live_strategy_signals
     df = sample_df(1800)
+    passing_folds = [{"total_return":0.05},{"total_return":0.04},{"total_return":-0.01},{"total_return":0.03},{"total_return":0.02}]
     research = {
         "asset_class": "forex",
         "universe_bias": "NOT_APPLICABLE",
         "strategies": [{"strategy":"trend","sharpe":1.0,"max_drawdown":-0.10,"trades":150,"total_return":0.20}],
-        "validation": {"per_strategy_oos": {"trend": {"status":"OK","oos_total_return":0.10,"folds":[{"total_return":0.05},{"total_return":0.04},{"total_return":-0.01},{"total_return":0.03},{"total_return":0.02}]}}}
+        "validation": {
+            "trial_registry_complete": True,
+            "deflated_sharpe": {"status":"OK","deflated_sharpe_ratio":0.99},
+            "per_strategy_oos": {"trend": {
+                "status":"OK","oos_total_return":0.10,"sharpe":0.9,"max_drawdown":-0.10,"trades":150,
+                "deflated_sharpe":0.99,"cost_stress_ok":True,"financing_cost_model_complete":True,
+                "intrabar_stop_target_model_complete":True,"execution_cost_model_complete":True,
+                "trial_registry_complete":True,"folds":passing_folds,
+            }},
+        },
     }
     candidates = paper_candidates(research)
     assert candidates
     names = [x["strategy"] for x in candidates]
     signals = live_strategy_signals(df, names)
     assert signals and all(x["mode"] == "PAPER_SHADOW_ONLY" for x in signals)
-
 
 def test_multi_timeframe_structure_and_risk_levels():
     from app.multi_timeframe import multi_timeframe_analysis, multi_timeframe_signal
