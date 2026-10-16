@@ -158,6 +158,19 @@ class Settings(BaseSettings):
     research_yahoo_period: str = "3y"
     research_taker_bps: float = 5.5
     research_slippage_bps: float = 2.0
+    # Optional immediate-fill cost model inputs are retained for the standalone
+    # estimator/tests; the active executor remains bar-driven and does not use them.
+    paper_impact_max_participation_rate: float | None = None
+    paper_impact_coefficient: float | None = None
+    paper_execution_rejection_probability: float | None = None
+    paper_execution_latency_min_ms: float | None = None
+    paper_execution_latency_median_ms: float | None = None
+    paper_execution_latency_p95_ms: float | None = None
+    paper_execution_latency_max_ms: float | None = None
+    paper_latency_impact_coefficient: float | None = None
+    paper_execution_evidence_source: str = ""
+    paper_execution_evidence_path: str = ""
+    paper_execution_evidence_id: str = ""
     # No default: calibration must meet independently configured, venue-reviewed error bounds.
     research_cost_max_spread_mae_bps: float | None = None
     research_cost_max_slippage_mae_bps: float | None = None
