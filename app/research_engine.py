@@ -352,11 +352,33 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         )
     # Parameter-plateau check: small changes to the signal threshold should not destroy
     # the measured edge. A narrow single-point optimum is treated as fragile research.
+    import hashlib
     variants=[]
     for mult in (0.80,0.90,1.00,1.10,1.20):
         vcfg=StrategyConfig(**{**asdict(cfg), "signal_threshold": float(cfg.signal_threshold*mult)})
         vr=_component_backtest(df,"ensemble",vcfg,taker_bps,slippage_bps,asset,carry)
-        variants.append({"multiplier":mult,"sharpe":vr.get("sharpe",0.0),"total_return":vr.get("total_return",0.0),"max_drawdown":vr.get("max_drawdown",0.0)})
+        _, _, _, variant_returns, variant_position, _, _, variant_exits = _protected_component_position(
+            df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry
+        )
+        variant_oos = fixed_signal_walk_forward_oos(
+            df, variant_position, costs_bps=taker_bps + slippage_bps,
+            folds=folds, min_train=min_train, annualization_factor=annualization_factor,
+            taker_bps=taker_bps, slippage_bps=slippage_bps,
+            cost_stress_multiplier=cost_mult, positions_are_final=True,
+            bar_returns=variant_returns, intrabar_exit=variant_exits, carry_bps_per_bar=carry,
+            carry_evidence_source=carry_evidence_source, carry_evidence_id=carry_evidence_id,
+        )
+        variant_config_sha = hashlib.sha256(
+            json.dumps(asdict(vcfg), default=str, sort_keys=True).encode()
+        ).hexdigest()
+        variants.append({
+            "multiplier":mult, "sharpe":vr.get("sharpe",0.0),
+            "total_return":vr.get("total_return",0.0), "max_drawdown":vr.get("max_drawdown",0.0),
+            "config_sha256":variant_config_sha, "oos_status":variant_oos.get("status"),
+            "oos_sharpe":variant_oos.get("sharpe"), "oos_total_return":variant_oos.get("oos_total_return"),
+            "oos_max_drawdown":variant_oos.get("max_drawdown"), "oos_trades":variant_oos.get("trades"),
+            "oos_return_sample":variant_oos.get("oos_return_sample", []),
+        })
     robustness={"monte_carlo":monte_carlo_bootstrap(ensemble_net.to_numpy(),trials=500),"parameter_plateau":parameter_plateau_score({"variants":variants},metric="sharpe",tolerance=0.20),"parameter_variants":variants}
     # Formal DSR. Count every variant evaluated on this data: components + parameter variants (+ AI when included).
     net_ensemble = ensemble_net.to_numpy()
@@ -436,6 +458,116 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             ai_result = ai_walk_forward_backtest(df, asset, folds, min_train, ai_threshold)
         except Exception as exc:
             ai_result = {"strategy": "ai_walk_forward", "status": "INSUFFICIENT_DATA", "error": str(exc)}
+    # External research evidence is accepted only when signed by a configured trust root
+    # and bound to this exact venue, market, dataset and held-out sample. Missing evidence
+    # is diagnostic, never silently inferred from configured assumptions or synthetic tests.
+    from .research_evidence import (
+        canonical_sha256, oos_sample_fingerprint, validate_comparable_trial_archive,
+        validate_crypto_universe_manifest, validate_execution_cost_calibration,
+    )
+    evidence_keys = getattr(settings, "research_evidence_public_keys_json", "")
+    research_symbol = str(provenance.get("symbol") or df.attrs.get("symbol") or "").strip()
+    research_venue = str(provenance.get("exchange") or df.attrs.get("exchange") or "").strip()
+    research_market_type = str(provenance.get("market_type") or df.attrs.get("market_type") or "").strip()
+    research_timeframe = str(provenance.get("timeframe") or df.attrs.get("timeframe") or "").strip()
+    protocol_version = "atlas-purged-walk-forward-v1"
+    oos_windows = []
+    for split in validation_splits:
+        if 0 <= int(split.test_start) < len(df) and 0 < int(split.test_end) <= len(df) and int(split.test_end) > int(split.test_start):
+            oos_windows.append({
+                "test_start": df.index[int(split.test_start)].isoformat(),
+                "test_end_inclusive": df.index[int(split.test_end) - 1].isoformat(),
+                "purge": int(split.purge), "embargo": int(split.embargo),
+            })
+    sample_sha256 = oos_sample_fingerprint(str(provenance.get("sha256") or ""), oos_windows, protocol_version)
+    research_context = {
+        "asset_class": str(asset).strip().lower(), "venue": research_venue.lower(),
+        "market_type": research_market_type.lower(), "symbol": research_symbol,
+        "timeframe": research_timeframe, "dataset_sha256": str(provenance.get("sha256") or ""),
+        "oos_sample_sha256": sample_sha256, "protocol_version": protocol_version,
+    }
+    universe_document = df.attrs.get("point_in_time_universe_manifest")
+    if str(asset).lower() == "crypto":
+        if research_venue and research_market_type and len(df.index):
+            universe_validation = validate_crypto_universe_manifest(
+                universe_document, evidence_keys, venue=research_venue, market_type=research_market_type,
+                coverage_start=df.index[0].isoformat(), coverage_end=df.index[-1].isoformat(),
+                symbol=research_symbol or None,
+            )
+        else:
+            universe_validation = {"verified": False, "universe_verified": False,
+                                   "reason": "UNIVERSE_MARKET_PROVENANCE_MISSING"}
+        universe_bias = "POINT_IN_TIME_VERIFIED" if universe_validation.get("universe_verified") is True else "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
+    else:
+        universe_validation = {"verified": True, "universe_verified": True,
+                               "reason": "NOT_APPLICABLE_TO_NON_CRYPTO_ASSET"}
+        universe_bias = "NOT_APPLICABLE"
+
+    model_fingerprint = canonical_sha256({
+        "model": "atlas-research-cost-v1",
+        "taker_bps": float(taker_bps),
+        "slippage_bps": float(slippage_bps),
+        "cost_stress_multiplier": float(cost_mult),
+    })
+    cost_document = df.attrs.get("execution_cost_calibration_evidence")
+    if research_venue and research_market_type and research_symbol:
+        cost_validation = validate_execution_cost_calibration(
+            cost_document, evidence_keys, venue=research_venue, market_type=research_market_type,
+            symbol=research_symbol, model_fingerprint=model_fingerprint,
+        )
+    else:
+        cost_validation = {"verified": False, "calibration_verified": False,
+                           "reason": "COST_CALIBRATION_MARKET_PROVENANCE_MISSING"}
+    calibration_ok = cost_validation.get("calibration_verified") is True
+    calibration_status = "VERIFIED" if calibration_ok else "MISSING_VENUE_CALIBRATION_EVIDENCE"
+    calibration_evidence_id = cost_validation.get("evidence_id") if calibration_ok else None
+    for cost_target in [ens_cost, oos, *per_strategy_oos.values()]:
+        cost_target["execution_cost_calibration_status"] = calibration_status
+        cost_target["execution_cost_calibration_evidence_id"] = calibration_evidence_id
+        cost_target["execution_cost_model_complete"] = calibration_ok
+    dsr = {
+        "status": "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
+        "observations": int(np.isfinite(np.asarray(oos.get("oos_return_sample") or [], dtype=float)).sum()),
+        "trial_count_current_run": len(this_labels),
+        "trial_count_known_lower_bound": n_trials,
+        "note": "A complete signed archive of all trials measured on the identical held-out sample is required.",
+    }
+    trial_registry_complete = False
+    archive_document = df.attrs.get("trial_performance_archive")
+    archive_validation = validate_comparable_trial_archive(
+        archive_document, evidence_keys, candidate_labels=set(this_labels), expected_context=research_context,
+    )
+    if archive_validation.get("trial_archive_verified") is True:
+        archive_sharpes = archive_validation["trial_sharpes_annual"]
+        oos_returns = oos.get("oos_return_sample") or []
+        dsr = deflated_sharpe_report(
+            oos_returns, archive_sharpes, len(archive_sharpes),
+            max(1, int(round(annualization_factor))),
+        )
+        if dsr.get("status") == "OK":
+            trial_registry_complete = True
+            dsr["trial_archive_evidence_id"] = archive_validation.get("evidence_id")
+            dsr["trial_archive_sha256"] = archive_validation.get("evidence_sha256")
+            dsr["trial_count_current_run"] = len(this_labels)
+            oos["deflated_sharpe"] = dsr["deflated_sharpe_ratio"]
+            for component in components:
+                component_returns = per_strategy_oos[component].get("oos_return_sample") or []
+                component_dsr = deflated_sharpe_report(
+                    component_returns, archive_sharpes, len(archive_sharpes),
+                    max(1, int(round(annualization_factor))),
+                )
+                per_strategy_oos[component]["deflated_sharpe_detail"] = component_dsr
+                per_strategy_oos[component]["trial_registry_complete"] = component_dsr.get("status") == "OK"
+                if component_dsr.get("status") == "OK":
+                    per_strategy_oos[component]["deflated_sharpe"] = component_dsr["deflated_sharpe_ratio"]
+                else:
+                    trial_registry_complete = False
+    oos["trial_registry_complete"] = trial_registry_complete
+    for component in components:
+        per_strategy_oos[component]["trial_registry_complete"] = (
+            trial_registry_complete and per_strategy_oos[component].get("deflated_sharpe_detail", {}).get("status") == "OK"
+        )
+
     in_sample_ranked = _rank_for_research(results.copy())
     # Headline order is based on held-out metrics; invalid OOS results always rank last.
     oos_ranked = _rank_by_oos(results.copy(), per_strategy_oos)
