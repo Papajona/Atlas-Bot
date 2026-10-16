@@ -1190,19 +1190,22 @@ async def advance_platform_paper_orders(
         bar_seconds = _paper_timeframe_seconds(timeframe)
         now = utcnow()
         bar_close_at = bar_at + timedelta(seconds=bar_seconds)
-        if bar_close_at > now:
-            return {"status": "BAR_NOT_COMPLETE", "bar_at": bar_at.isoformat(), "orders_seen": 0, "fills": 0}
-        if (now - bar_close_at).total_seconds() > max(60, bar_seconds * 2):
-            return {"status": "STALE_BAR", "bar_at": bar_at.isoformat(), "orders_seen": 0, "fills": 0}
         provenance = dict(getattr(df, "attrs", {}).get("data_provenance") or {})
         source = str(provenance.get("source") or "")
+        # CCXT crypto timestamps are candle-open times and are checked against the
+        # timeframe here. Yahoo/OANDA adapters already exclude incomplete candles in
+        # their source-specific parsers, including OANDA's non-midnight daily sessions.
+        if source == "ccxt_ohlcv" and bar_close_at > now:
+            return {"status": "BAR_NOT_COMPLETE", "bar_at": bar_at.isoformat(), "orders_seen": 0, "fills": 0}
+        if bar_at > now or (now - bar_close_at).total_seconds() > max(60, bar_seconds * 2):
+            return {"status": "STALE_BAR", "bar_at": bar_at.isoformat(), "orders_seen": 0, "fills": 0}
         data_sha256 = str(provenance.get("sha256") or "")
         fetched_at = _paper_utc(provenance.get("fetched_at_utc"))
         if (
             len(data_sha256) != 64
             or any(ch not in "0123456789abcdef" for ch in data_sha256.lower())
             or int(provenance.get("row_count") or 0) != len(df)
-            or not source
+            or source not in {"ccxt_ohlcv", "yfinance", "oanda_v20_mid"}
             or (now - fetched_at).total_seconds() < -30
             or (now - fetched_at).total_seconds() > max(60, int(settings.stale_data_minutes) * 60)
         ):
@@ -1556,7 +1559,8 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     raise RiskBlocked("Paper execution requires a valid completed bar timestamp") from exc
                 now_utc = utcnow()
                 if (
-                    bar_close_at > now_utc
+                    (str(provenance.get("source") or "") == "ccxt_ohlcv" and bar_close_at > now_utc)
+                    or paper_submission_bar_at > now_utc
                     or (now_utc - bar_close_at).total_seconds() > max(60, _paper_timeframe_seconds(timeframe) * 2)
                     or (now_utc - provenance_fetched_at).total_seconds() < -30
                     or (now_utc - provenance_fetched_at).total_seconds() > max(60, int(settings.stale_data_minutes) * 60)
