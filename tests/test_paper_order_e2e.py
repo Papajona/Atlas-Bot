@@ -523,7 +523,7 @@ def test_paper_simulator_stress_shared_capacity_idempotency_and_fee_accounting(m
 
 
 def test_existing_position_stop_preempts_same_bar_entry_fill(monkeypatch):
-    """A fill elsewhere in the order loop must not suppress an existing position's stop."""
+    """An existing protective trigger must defer ambiguous same-bar entry fills."""
     import asyncio
     import json
     import pandas as pd
