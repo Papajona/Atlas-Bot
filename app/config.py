@@ -144,6 +144,45 @@ class Settings(BaseSettings):
     paper_execution_evidence_source: str = ""
     paper_execution_evidence_path: str = ""
     paper_execution_evidence_id: str = ""
+
+    # Persistent, completed-bar platform paper execution is opt-in until its
+    # calibrated evidence bundle is provisioned and the updated CI gates pass.
+    paper_bar_execution_enabled: bool = False
+    paper_fill_latency_bars: int = 1
+    paper_order_ttl_bars: int = 24
+    paper_max_bar_volume_participation: float = 0.10
+    paper_queue_fill_probability: float = 0.80
+    paper_rejection_probability: float = 0.01
+    paper_market_impact_coefficient: float = 0.10
+    paper_max_market_impact_bps: float = 250.0
+
+    @field_validator(
+        "paper_max_bar_volume_participation",
+        "paper_queue_fill_probability",
+        "paper_rejection_probability",
+    )
+    @classmethod
+    def _validate_paper_probabilities(cls, value: float) -> float:
+        number = float(value)
+        if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+            raise ValueError("paper participation/probability values must be finite and within [0, 1]")
+        return number
+
+    @field_validator("paper_fill_latency_bars", "paper_order_ttl_bars")
+    @classmethod
+    def _validate_paper_bar_counts(cls, value: int) -> int:
+        if isinstance(value, bool) or int(value) < 1:
+            raise ValueError("paper fill latency and order TTL must be positive bar counts")
+        return int(value)
+
+    @field_validator("paper_market_impact_coefficient", "paper_max_market_impact_bps")
+    @classmethod
+    def _validate_paper_impact_parameters(cls, value: float) -> float:
+        number = float(value)
+        if not math.isfinite(number) or number < 0.0:
+            raise ValueError("paper market impact parameters must be finite and non-negative")
+        return number
+
     # No default: a missing instrument/venue financing assumption blocks research promotion.
     research_carry_bps_per_bar: float | None = None
     research_carry_evidence_source: str = ""
