@@ -10,6 +10,7 @@ from app.config import settings
 from app.customer_paper_ledger import (
     CustomerPaperIdempotencyConflict,
     _tenant_policy_expression_is_exact,
+    _tenant_policy_validation_error,
     _validated_paper_journal,
     get_customer_paper_balances,
     post_customer_paper_journal,
@@ -182,3 +183,31 @@ def test_customer_paper_rls_preflight_accepts_only_exact_tenant_predicate():
         "(customer_id = NULLIF(current_setting('app.other_id'::text, true), ''::text)::bigint)"
     ) is False
     assert _tenant_policy_expression_is_exact("") is False
+
+
+def test_customer_paper_policy_validation_checks_permissive_mode_and_all_predicates():
+    predicate = (
+        "(customer_id = NULLIF(current_setting('app.customer_id'::text, true), "
+        "''::text)::bigint)"
+    )
+    policy = {
+        "policyname": "customer_paper_tenant",
+        "permissive": "PERMISSIVE",
+        "cmd": "ALL",
+        "qual": predicate,
+        "with_check": predicate,
+        "roles": ["atlas_paper_app"],
+    }
+    assert _tenant_policy_validation_error(policy, "atlas_paper_app") is None
+
+    restrictive = {**policy, "permissive": "RESTRICTIVE"}
+    assert _tenant_policy_validation_error(restrictive, "atlas_paper_app") == "NOT_PERMISSIVE"
+
+    widened = {**policy, "qual": predicate[:-1] + " OR true)"}
+    assert _tenant_policy_validation_error(widened, "atlas_paper_app") == "USING_EXPRESSION"
+
+    broader_role = {**policy, "roles": ["atlas_paper_app", "PUBLIC"]}
+    assert _tenant_policy_validation_error(broader_role, "atlas_paper_app") == "ROLE"
+
+    wrong_command = {**policy, "cmd": "SELECT"}
+    assert _tenant_policy_validation_error(wrong_command, "atlas_paper_app") == "COMMAND"
