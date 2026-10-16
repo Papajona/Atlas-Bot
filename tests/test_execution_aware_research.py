@@ -37,6 +37,8 @@ def test_ambiguous_bar_uses_stop_before_target_and_charges_exit_once():
     assert result["audit"]["stop_loss_exits"] == 1
     assert result["audit"]["take_profit_exits"] == 0
     assert result["audit"]["ambiguous_bars_filled_stop_first"] == 1
+    # Conservative OHLC stop-first handling does not prove tick-level event ordering.
+    assert result["audit"]["intrabar_stop_target_model_complete"] is False
     assert result["market_returns"].iloc[1] == pytest.approx(-0.04)
     # Position entry is charged on bar zero and the intrabar close on bar one.
     assert result["turnover"].iloc[0] == pytest.approx(1.0)
