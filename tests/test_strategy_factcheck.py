@@ -67,36 +67,39 @@ def test_paper_candidates_use_complete_oos_metrics_and_ignore_full_sample_scores
     assert paper_candidates(bad)==[]
 
     monkeypatch.setattr(research_engine.settings, "research_folds", 5)
-    # In-sample/full-frame metrics are deliberately poor. They must not influence
-    # paper-candidate selection when the required held-out metrics pass.
+    # Great held-out metrics and poor in-sample metrics do not override the
+    # missing signed comparable-trial archive or survivorship-biased universe.
     row = {"strategy": "trend", "sharpe": -3.0, "max_drawdown": -0.90,
            "trades": 0, "total_return": -0.80}
     passing_folds = [
         {"total_return": 0.05}, {"total_return": 0.04}, {"total_return": -0.01},
-        {"total_return": 0.03}, {"total_return": 0.02},
+        {"total_return": 0.03}, {"total_return": 0.02}, {"total_return": 0.01},
     ]
     oos = {
         "status": "OK", "oos_total_return": 0.10, "sharpe": 0.9,
         "max_drawdown": -0.12, "trades": 150, "folds": passing_folds,
+        "deflated_sharpe": 0.99, "cost_stress_ok": True,
+        "financing_cost_model_complete": True,
+        "intrabar_stop_target_model_complete": True,
+        "execution_cost_model_complete": True,
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_evidence_id": "fixture:venue-cost-calibration",
+        "trial_registry_complete": True,
     }
     research = {
+        "asset_class": "crypto",
         "universe_bias": "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY",
-        "strategies": [row], "validation": {"per_strategy_oos": {"trend": oos}},
+        "strategies": [row],
+        "validation": {
+            "trial_registry_complete": True,
+            "deflated_sharpe": {"status": "OK", "deflated_sharpe_ratio": 0.99},
+            "per_strategy_oos": {"trend": oos},
+        },
     }
 
-    candidates = paper_candidates(research)
-    assert len(candidates) == 1
-    candidate = candidates[0]
-    assert candidate["reason"] == "oos_metrics_gate_passed"
-    assert candidate["selection_basis"] == "OUT_OF_SAMPLE_ONLY"
-    assert candidate["promotion_eligible"] is False
-    assert candidate["metrics"]["sharpe"] == 0.9
-    assert candidate["metrics"]["total_return"] == 0.10
-    assert candidate["metrics"]["metric_basis"] == "OUT_OF_SAMPLE"
-    assert candidate["in_sample_diagnostics"] is row
-    assert candidate["universe_bias"] == "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
-    assert candidate["evidence_limitations"]
-
+    # This path has no trusted signed archive verifier configured. Report fields
+    # and synthetic fixture values must not produce a candidate.
+    assert paper_candidates(research) == []
 
 def test_paper_candidates_reject_strong_in_sample_result_when_oos_metrics_fail(monkeypatch):
     from app import research_engine
