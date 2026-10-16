@@ -291,7 +291,9 @@ def fixed_signal_walk_forward_oos(
     evidence_id = str(carry_evidence_id or "").strip()
     carry_configured = carry is not None
     cost_complete = carry_configured and bool(evidence_source) and bool(evidence_id)
-    execution_complete = intrabar_exit is not None
+    # A supplied OHLC-derived exit mask is not tick-level event-order evidence.
+    # Promotion stays blocked until a validated tick-level stream is integrated.
+    execution_complete = False
     cost_analysis["carry_rate_configured"] = carry_configured
     cost_analysis["carry_evidence_source_present"] = bool(evidence_source)
     cost_analysis["carry_evidence_id_present"] = bool(evidence_id)
