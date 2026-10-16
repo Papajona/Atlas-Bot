@@ -424,12 +424,11 @@ def oos_promotion_gate(
     intrabar_stop_target_model_complete = oos.get("intrabar_stop_target_model_complete") is True
     execution_cost_calibration_status = str(oos.get("execution_cost_calibration_status") or "").strip().upper()
     execution_cost_calibration_evidence_id = str(oos.get("execution_cost_calibration_evidence_id") or "").strip()
+    execution_cost_model_complete = oos.get("execution_cost_model_complete") is True
     execution_cost_calibration_ok = (
         execution_cost_calibration_status == "VERIFIED"
         and bool(execution_cost_calibration_evidence_id)
-        and oos.get("execution_cost_model_complete") is True
     )
-    execution_cost_model_complete = execution_cost_calibration_ok
     trial_registry_complete = oos.get("trial_registry_complete") is True
     status_ok = str(oos.get("status", "OK")) == "OK"
     enough_folds = len(returns) >= int(min_folds)
