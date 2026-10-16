@@ -20,6 +20,8 @@ def test_sensitive_database_fields_use_authenticated_encryption():
 def test_otp_and_withdrawal_step_up_are_present():
     main = (ROOT / 'app/main.py').read_text()
     customer = (ROOT / 'app/templates/customer.html').read_text()
+    customer_js = (ROOT / 'app/static/customer-dashboard.js').read_text()
+    customer = customer + customer_js
     assert '"/api/auth/otp/send"' in main
     assert '"/api/auth/otp/verify"' in main
     assert 'Fresh OTP step-up verification is required before withdrawal' in main
@@ -63,6 +65,8 @@ def test_withdrawal_otp_send_is_bound_to_authenticated_contact():
 
 def test_customer_portal_requests_withdrawal_purpose_and_clears_stepup():
     customer = (ROOT / 'app/templates/customer.html').read_text()
+    customer_js = (ROOT / 'app/static/customer-dashboard.js').read_text()
+    customer = customer + customer_js
     assert "purpose:'withdrawal'" in customer
     assert "sessionStorage.removeItem('atlas_withdrawal_step_up')" in customer
 
