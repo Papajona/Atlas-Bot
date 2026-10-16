@@ -134,27 +134,6 @@ def _normalize_yfinance_fx_symbol(symbol: str) -> str:
     return pair + "=X"
 
 
-
-def _normalize_yfinance_fx_symbol(symbol: str) -> str:
-    """Normalize a currency pair without treating commodity/index tickers as FX pairs."""
-    raw = str(symbol or "").strip().upper()
-    if raw.endswith("=X"):
-        pair = raw[:-2]
-    else:
-        pair = raw
-    pair = pair.replace("/", "").replace("_", "").replace("-", "")
-    if len(pair) == 6 and pair[:3] in {"XAU", "XAG", "XPT", "XPD"}:
-        raise ValueError(
-            "Precious-metal symbols are commodity instruments and cannot use the Yahoo FX adapter"
-        )
-    if len(pair) != 6 or not pair.isalpha():
-        raise ValueError(
-            "Yahoo FX data requires a six-letter currency-pair symbol such as EURUSD or EUR_USD; "
-            "non-FX instruments must use their own verified adapter"
-        )
-    return pair + "=X"
-
-
 def fetch_forex(symbol: str = "EURUSD", timeframe: str = "1h", days: int = 365) -> pd.DataFrame:
     """Fetch completed Yahoo Finance FX candles for supported timeframes only.
 
