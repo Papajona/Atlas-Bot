@@ -159,6 +159,12 @@ class Settings(BaseSettings):
     # development default is intentionally not accepted as customer-execution evidence.
     research_fee_source: str = ""
     research_fee_evidence_id: str = ""
+    # Public trust roots for signed, externally sourced research evidence.
+    # JSON object maps key IDs to base64-encoded raw 32-byte Ed25519 public keys.
+    research_evidence_public_keys_json: str = ""
+    # Customer simulation remains unavailable until an isolated PostgreSQL store is verified.
+    customer_paper_ledger_enabled: bool = False
+    customer_paper_database_url: str = ""
     research_folds: int = 5
     research_min_train: int = 800
     research_ai_threshold: float = 0.05
