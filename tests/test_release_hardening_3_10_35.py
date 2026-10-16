@@ -23,7 +23,9 @@ def test_referral_ui_handlers_exist():
     assert 'async function claimReferral()' in s
 
 def test_market_controls_are_functional():
-    s=(ROOT/"app/templates/customer.html").read_text()
+    html=(ROOT/"app/templates/customer.html").read_text()
+    js=(ROOT/"app/static/customer-dashboard.js").read_text()
+    s=html+js
     assert 'data-market-filter="bullish"' in s
     assert "globalSearch')?.addEventListener('input',applyMarketFilters)" in s
 
