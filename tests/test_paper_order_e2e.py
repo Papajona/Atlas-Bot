@@ -17,13 +17,18 @@ def _configure_test_calibration(monkeypatch, directory, exchange, symbol):
     from app.config import settings
     from app.trading_core import PROFILES
 
+    fixture_dataset = Path(__file__).parent / "fixtures" / "paper_calibration_dataset_test.json"
+    dataset_copy = Path(directory) / fixture_dataset.name
+    dataset_copy.write_bytes(fixture_dataset.read_bytes())
+    dataset_hash = hashlib.sha256(dataset_copy.read_bytes()).hexdigest()
     evidence = {
         "schema": "atlas-paper-execution-calibration-v1",
         "fixture_only": True,
         "provenance_source": "synthetic-unit-test-data",
         "evidence_source": "synthetic-unit-test-fixture",
         "calibration_method": "deterministic-unit-test-fixture-not-venue-calibration",
-        "dataset_sha256": "a" * 64,
+        "dataset_path": dataset_copy.name,
+        "dataset_sha256": dataset_hash,
         "observation_counts": {"fills": 10, "latency": 10, "order_outcomes": 10},
         "supported_markets": [f"{exchange.lower()}:{symbol}".lower()],
         "test_parameter_sets": [{
