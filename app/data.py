@@ -199,7 +199,8 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
         expected_upper_bound = days * bars_per_day
         max_pages = max(1, int(np.ceil(expected_upper_bound / page_size)) + 2)
         end_time = datetime.now(timezone.utc)
-        cursor = end_time - pd.Timedelta(days=days)
+        requested_start = end_time - pd.Timedelta(days=days)
+        cursor = requested_start
         candles = []
         seen_timestamps: set[pd.Timestamp] = set()
         granularity_delta = {
@@ -213,8 +214,10 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
                 symbol,
                 granularity,
                 count=page_size,
+                # OANDA documents that count must not be combined with both from and to: the
+                # window would also exceed the 5000-candle cap. Page forward with from + count
+                # only; the loop stops once the cursor reaches the requested end time.
                 from_time=cursor.isoformat(),
-                to_time=end_time.isoformat(),
             )
             if not batch:
                 break
@@ -258,6 +261,11 @@ def fetch_forex_oanda(symbol: str = "EUR_USD", timeframe: str = "1h", days: int 
         raise RuntimeError("No completed OANDA candles returned for requested time window")
     df = pd.DataFrame(rows, columns=["ts","open","high","low","close","volume"])
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    # The OANDA request uses from+count pagination, so enforce the caller's exact
+    # half-open UTC window locally rather than trusting the provider to clip every page.
+    df = df.loc[(df["ts"] >= requested_start) & (df["ts"] < end_time)].copy()
+    if df.empty:
+        raise RuntimeError("No completed OANDA candles returned inside the requested UTC time window")
     cleaned = _validate_ohlcv(df.set_index("ts"), timeframe, reject_gaps=False)
     return _attach_data_provenance(
         cleaned,
