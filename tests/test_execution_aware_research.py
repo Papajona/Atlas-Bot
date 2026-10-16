@@ -153,6 +153,7 @@ def test_oos_financing_completeness_requires_traceable_source_and_evidence_id():
         carry_evidence_id="fixture-rate-sheet-v1",
     )
     assert complete["financing_cost_model_complete"] is True
+    assert complete["intrabar_stop_target_model_complete"] is False
     assert complete["execution_cost_model_complete"] is False
     assert complete["execution_cost_calibration_status"] == "MISSING_VENUE_CALIBRATION_EVIDENCE"
     assert complete["execution_cost_calibration_evidence_id"] is None
