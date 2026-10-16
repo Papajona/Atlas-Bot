@@ -333,3 +333,187 @@ def test_paper_protective_stop_triggers_on_completed_bar_and_fills_later(monkeyp
             assert position.quantity == pytest.approx(0.0)
 
     asyncio.run(run())
+
+
+
+def test_paper_simulator_stress_shared_capacity_idempotency_and_fee_accounting(monkeypatch):
+    """Stress a busy bar: shared liquidity cap, partial fills, retry safety, and fee accounting."""
+    import asyncio
+    import json
+    import pandas as pd
+    from decimal import Decimal
+    from sqlalchemy import select
+    from app import execution
+    from app.config import settings
+    from app.db import init_db, SessionLocal, AppState, Trade, Position, PaperOrderState, PaperFillEvent, PaperBarState
+
+    suffix = uuid.uuid4().hex[:12]
+    symbol = f"STRESS-{suffix}"
+    now = pd.Timestamp.now(tz="UTC")
+    current_floor = now.floor("5min")
+    submitted_bar = current_floor - pd.Timedelta(minutes=10)
+    processed_bar = current_floor - pd.Timedelta(minutes=5)
+    order_count = 25
+    order_quantity = 0.75
+    volume = 100.0
+    expected_capacity = volume * 0.10
+
+    monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
+    monkeypatch.setattr(settings, "paper_rejection_probability", 0.0)
+    monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.10)
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 24)
+    monkeypatch.setattr(settings, "paper_market_impact_coefficient", 0.10)
+    monkeypatch.setattr(settings, "paper_max_market_impact_bps", 250.0)
+
+    async def run():
+        await init_db()
+        trade_ids = []
+        async with SessionLocal() as db:
+            state = await execution._get_state_locked(db)
+            state.kill_switch = False
+            state.cash_equity = 10000.0
+            for index in range(order_count):
+                unique = f"{suffix}-{index:03d}"
+                trade = Trade(
+                    signal_id=f"stress-signal-{unique}",
+                    client_order_id=f"stress-client-{unique}",
+                    exchange="binance",
+                    symbol=symbol,
+                    timeframe="5m",
+                    side="buy",
+                    quantity=order_quantity,
+                    requested_quantity=order_quantity,
+                    filled_quantity=0.0,
+                    remaining_quantity=order_quantity,
+                    requested_price=100.0,
+                    average_fill_price=0.0,
+                    fee=0.0,
+                    notional=0.0,
+                    mode="PAPER",
+                    status="OPEN",
+                    reason=json.dumps({"strategy": "paper-stress-test", "asset": "crypto"}),
+                    error="",
+                    stop_loss_price=90.0,
+                    take_profit_price=120.0,
+                )
+                db.add(trade)
+                await db.flush()
+                db.add(PaperOrderState(
+                    trade_id=trade.id,
+                    exchange="binance",
+                    symbol=symbol,
+                    timeframe="5m",
+                    submitted_bar_at=submitted_bar.to_pydatetime(),
+                    last_processed_bar_at=None,
+                    bars_elapsed=0,
+                    status="OPEN",
+                ))
+                trade_ids.append(trade.id)
+            await db.commit()
+
+        index = pd.DatetimeIndex([
+            current_floor - pd.Timedelta(minutes=15),
+            submitted_bar,
+            processed_bar,
+        ])
+        df = pd.DataFrame({
+            "open": [99.0, 100.0, 100.5],
+            "high": [100.0, 101.0, 101.5],
+            "low": [98.0, 99.0, 100.0],
+            "close": [99.0, 100.0, 101.0],
+            "volume": [150.0, 150.0, volume],
+        }, index=index)
+        provenance = {
+            "source": "ccxt_ohlcv",
+            "symbol": symbol,
+            "exchange": "binance",
+            "timeframe": "5m",
+            "fetched_at_utc": pd.Timestamp.now(tz="UTC").isoformat(),
+            "row_count": len(df),
+            "sha256": "a" * 64,
+            "asset_class": "crypto",
+            "market_type": "spot",
+            "volume_unit": "base_asset",
+            "volume_unit_verified": True,
+        }
+        df.attrs["data_provenance"] = provenance
+
+        result = await execution.advance_platform_paper_orders(
+            df, exchange="binance", symbol=symbol, timeframe="5m", asset="crypto"
+        )
+        assert result["status"] == "PROCESSED"
+        assert result["liquidity_verified"] is True
+        assert result["orders_seen"] == order_count
+        assert result["fills"] == 14
+        assert result["partial_fills"] == 1
+        assert result["queue_misses"] == 0
+        assert result["rejected"] == 0
+
+        async with SessionLocal() as db:
+            trades = (await db.execute(
+                select(Trade).where(Trade.id.in_(trade_ids)).order_by(Trade.id)
+            )).scalars().all()
+            positions = (await db.execute(select(Position).where(
+                Position.symbol == symbol,
+                Position.exchange == "binance",
+                Position.customer_id.is_(None),
+            ))).scalars().all()
+            events = (await db.execute(select(PaperFillEvent).where(
+                PaperFillEvent.trade_id.in_(trade_ids)
+            ))).scalars().all()
+            bar = (await db.execute(select(PaperBarState).where(
+                PaperBarState.exchange == "binance",
+                PaperBarState.symbol == symbol,
+                PaperBarState.timeframe == "5m",
+            ))).scalar_one()
+            state = (await db.execute(select(AppState).where(AppState.id == 1))).scalar_one()
+
+            filled_total = sum(Decimal(str(trade.filled_quantity or 0.0)) for trade in trades)
+            fee_total = sum(Decimal(str(trade.fee or 0.0)) for trade in trades)
+            event_filled_total = sum(Decimal(str(event.filled_quantity or 0.0)) for event in events)
+            event_fee_total = sum(Decimal(str(event.fee or 0.0)) for event in events)
+            assert len(positions) == 1
+            assert filled_total == Decimal("10.0")
+            assert event_filled_total == Decimal("10.0")
+            assert Decimal(str(bar.capacity)) == Decimal(str(expected_capacity))
+            assert Decimal(str(bar.consumed)) == Decimal("10.0")
+            assert sum(trade.status == "FILLED" for trade in trades) == 13
+            partial = [trade for trade in trades if trade.status == "PARTIAL"]
+            assert len(partial) == 1
+            assert partial[0].filled_quantity == pytest.approx(0.25)
+            assert sum(trade.status == "OPEN" for trade in trades) == 11
+            assert event_fee_total == fee_total
+            assert state.cash_equity == pytest.approx(10000.0 - float(fee_total), abs=1e-6)
+            # Adverse cost modelling is exercised; fill prices are not the ideal close.
+            assert all(trade.average_fill_price > 101.0 for trade in trades if trade.filled_quantity > 0)
+
+        # A retry of the same logical bar must not add fills, events, or fees.
+        repeated = await execution.advance_platform_paper_orders(
+            df, exchange="binance", symbol=symbol, timeframe="5m", asset="crypto"
+        )
+        assert repeated["status"] == "PROCESSED"
+        assert repeated["attempts"] == 0
+        assert repeated["fills"] == 0
+
+        # Reusing a bar identity with a different data hash fails closed.
+        conflict_df = df.copy()
+        conflict_df.attrs["data_provenance"] = dict(
+            provenance,
+            fetched_at_utc=pd.Timestamp.now(tz="UTC").isoformat(),
+            sha256="b" * 64,
+        )
+        conflict = await execution.advance_platform_paper_orders(
+            conflict_df, exchange="binance", symbol=symbol, timeframe="5m", asset="crypto"
+        )
+        assert conflict["status"] == "BAR_PROVENANCE_CONFLICT"
+        async with SessionLocal() as db:
+            trades = (await db.execute(select(Trade).where(Trade.id.in_(trade_ids)))).scalars().all()
+            events = (await db.execute(select(PaperFillEvent).where(
+                PaperFillEvent.trade_id.in_(trade_ids)
+            ))).scalars().all()
+            assert sum(Decimal(str(trade.filled_quantity or 0.0)) for trade in trades) == Decimal("10.0")
+            assert len(events) == order_count
+            assert sum(Decimal(str(event.fee or 0.0)) for event in events) == fee_total
+
+    asyncio.run(run())
