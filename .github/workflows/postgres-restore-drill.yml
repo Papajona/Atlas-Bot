@@ -1,0 +1,102 @@
+name: PostgreSQL Restore Integrity Drill
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "hardening/postgres-restore-drill"
+
+permissions:
+  contents: read
+
+jobs:
+  restore-drill:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: atlas_test
+          POSTGRES_USER: atlas
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U atlas -d atlas_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_test
+      ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_test
+      ENVIRONMENT: development
+      PAPER_TRADING: "true"
+      LIVE_TRADING_ENABLED: "false"
+      CUSTOMER_LIVE_TRADING_ENABLED: "false"
+      BROKER_SANDBOX: "true"
+      BACKGROUND_RECONCILIATION_ENABLED: "false"
+      PGPASSWORD: test_password
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Wait for PostgreSQL
+        run: until pg_isready -h 127.0.0.1 -p 5432 -U atlas -d atlas_test; do sleep 1; done
+
+      - name: Apply migrations
+        run: python -m alembic upgrade head
+
+      - name: Verify migration head before backup
+        run: |
+          python -m alembic current
+          python -m alembic heads
+          python -m alembic check
+
+      - name: Seed deterministic ledger state
+        run: python scripts/postgres_restore_drill.py --phase seed
+
+      - name: Create PostgreSQL custom-format backup
+        run: |
+          pg_dump             --host=127.0.0.1             --port=5432             --username=atlas             --dbname=atlas_test             --format=custom             --file=/tmp/atlas-restore-drill.dump
+          pg_restore --list /tmp/atlas-restore-drill.dump > /tmp/atlas-restore-drill.list
+          test -s /tmp/atlas-restore-drill.dump
+          test -s /tmp/atlas-restore-drill.list
+
+      - name: Destroy disposable database
+        run: |
+          dropdb --host=127.0.0.1 --port=5432 --username=atlas --if-exists atlas_test
+          createdb --host=127.0.0.1 --port=5432 --username=atlas atlas_test
+
+      - name: Restore backup
+        run: |
+          pg_restore             --host=127.0.0.1             --port=5432             --username=atlas             --dbname=atlas_test             --exit-on-error             /tmp/atlas-restore-drill.dump
+
+      - name: Verify restored migration state
+        run: |
+          python -m alembic current
+          python -m alembic heads
+          python -m alembic check
+
+      - name: Verify restored ledger and invariants
+        run: python scripts/postgres_restore_drill.py --phase verify
+
+      - name: Upload restore evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-restore-drill-evidence
+          path: |
+            /tmp/atlas-restore-drill.dump
+            /tmp/atlas-restore-drill.list
+          if-no-files-found: warn
+          retention-days: 14
