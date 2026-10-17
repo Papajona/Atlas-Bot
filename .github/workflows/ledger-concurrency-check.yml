@@ -15,6 +15,8 @@ on:
       - 'tests/test_postgres_ledger_concurrency_3_10_46.py'
       - 'tests/test_ledger_invariants_3_10_46.py'
       - 'tests/test_ledger_all_paths_concurrent_3_10_46.py'
+      - 'tests/test_simulation_ledger.py'
+      - 'tests/test_postgres_simulation_ledger.py'
       - 'tests/test_unified_custody.py'
       - 'requirements-dev.txt'
       - 'alembic/**'
@@ -212,8 +214,20 @@ jobs:
             exit $EXIT_CODE
           fi
 
+      - name: Run simulation ledger PostgreSQL isolation and concurrency tests (MANDATORY)
+        env:
+          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+          DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+        run: |
+          pytest -q -rs --junitxml=pg-simulation.xml tests/test_postgres_simulation_ledger.py -v --tb=short
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "ERROR: Simulation ledger isolation/concurrency tests failed. Paper execution remains blocked."
+            exit $EXIT_CODE
+          fi
+
       - name: Reject skipped mandatory PostgreSQL tests
-        run: python scripts/assert_no_skips.py pg-ledger.xml pg-paths.xml
+        run: python scripts/assert_no_skips.py pg-ledger.xml pg-paths.xml pg-simulation.xml
 
       - name: Report success
         if: success()
