@@ -1,7 +1,12 @@
 # Unified Custody and Binance Trading Allocation
 
 ## Design boundary
-Atlas remains the authoritative customer-liability ledger. Binance is an external trading/allocation location, not the accounting source of truth.
+Atlas remains the authoritative customer-liability ledger.
+
+### Address ownership boundary
+The repository contains `TWFuigmmGbb5gsTS4KUtY5v2FmA1rJ3yC5`, historically labeled as a treasury/collection address. Repository code cannot establish who controls a blockchain address. If the approved Binance account confirms this exact address as a Binance deposit/collection address, production configuration must set `USDT_TRON_TREASURY_ADDRESS_ROLE=binance_deposit`.
+
+In `binance_deposit` mode Atlas does not sweep to that address and does not count its on-chain balance as separate Atlas TRON custody when a Binance balance observation is also counted. Ownership must be evidenced by an approved Binance account record/export or controlled deposit workflow; the address string alone is not proof. Binance is an external trading/allocation location, not the accounting source of truth.
 
 Supported locations include CUSTODY:TRON and EXCHANGE:BINANCE:CUSTOMER:<customer_id>.
 
@@ -30,7 +35,7 @@ Customer liabilities are available + trading reserved + withdrawal reserved.
 A shortfall or unknown exchange observation fails closed by setting the application kill switch and disabling live execution.
 
 ## What this change does not prove
-This change does not prove that money can currently move from TRON to Binance. It creates the durable state and reconciliation boundary required to implement and test that transfer safely.
+This change does not prove that money can currently move from TRON to Binance. It also does not prove that the configured address belongs to Binance; that requires external Binance account-control evidence. It creates the durable state and reconciliation boundary required to implement and test that transfer safely.
 
 It also does not enable customer-live trading, Binance withdrawals, or any signer.
 

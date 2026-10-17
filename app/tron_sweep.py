@@ -40,6 +40,8 @@ def usdt_to_raw(amount: Decimal | str | float) -> int:
 def build_sweep_intent(*, wallet_id: int, source_address: str, amount_usdt: Decimal | str | float,
                        treasury_address: str | None = None, idempotency_key: str | None = None) -> SweepIntent:
     treasury = treasury_address or settings.usdt_tron_treasury_address
+    if settings.usdt_tron_treasury_address_role != "atlas_controlled":
+        raise SweepError("TRON sweep is disabled when the configured address is not Atlas-controlled custody")
     if not source_address or not treasury:
         raise SweepError("source and treasury addresses are required")
     if source_address == treasury:
