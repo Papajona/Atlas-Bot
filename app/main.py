@@ -3431,6 +3431,68 @@ async def customer_ledger(authorization: str | None = Header(default=None)):
         return {"currency": "USDT", "balance": balance, "entries": entries}
 
 
+@app.get("/api/customer/ledger/export.csv")
+async def customer_ledger_export_csv(authorization: str | None = Header(default=None)):
+    """Export the authenticated customer's authoritative USDT ledger statement."""
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db)
+        entries = await ledger_statement(db, profile.id, "USDT", 5000)
+        # CSV is generated from the same ledger statement source as the customer ledger API.
+        import csv
+        import io
+        output = io.StringIO(newline="")
+        writer = csv.writer(output)
+        writer.writerow(["created_at", "entry_type", "currency", "amount", "debit", "credit", "reference_type", "reference_id", "description"])
+        for entry in entries:
+            if isinstance(entry, dict):
+                writer.writerow([
+                    entry.get("created_at", ""), entry.get("entry_type", ""), entry.get("currency", "USDT"),
+                    entry.get("amount", ""), entry.get("debit", ""), entry.get("credit", ""),
+                    entry.get("reference_type", ""), entry.get("reference_id", ""), entry.get("description", ""),
+                ])
+            else:
+                writer.writerow([
+                    getattr(entry, "created_at", ""), getattr(entry, "entry_type", ""),
+                    getattr(entry, "currency", "USDT"), getattr(entry, "amount", ""),
+                    getattr(entry, "debit", ""), getattr(entry, "credit", ""),
+                    getattr(entry, "reference_type", ""), getattr(entry, "reference_id", ""),
+                    getattr(entry, "description", ""),
+                ])
+        filename = "atlas-account-statement-usdt.csv"
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                     "Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/customer/trades/{trade_id}/decision")
+async def customer_trade_decision(trade_id: int, authorization: str | None = Header(default=None)):
+    """Explain a trade using stored order/risk outcomes, scoped to its owner."""
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db)
+        trade = (await db.execute(select(Trade).where(
+            Trade.id == trade_id, Trade.customer_id == profile.id
+        ))).scalar_one_or_none()
+        if trade is None:
+            raise HTTPException(404, "Trade not found")
+        return {
+            "trade_id": trade.id,
+            "symbol": trade.symbol,
+            "side": trade.side,
+            "mode": trade.mode,
+            "status": trade.status,
+            "signal_id": trade.signal_id,
+            "reason": trade.reason or "",
+            "error": trade.error or "",
+            "created_at": trade.created_at.isoformat() if trade.created_at else None,
+            "updated_at": trade.updated_at.isoformat() if trade.updated_at else None,
+            "explanation_scope": "stored_trade_record",
+            "note": "This explains the persisted trade record only; it does not reconstruct decisions not recorded at execution time.",
+        }
+
+
 @app.get("/api/admin/funding")
 async def admin_funding(authorization: str | None = Header(default=None), status: str = "PENDING_REVIEW"):
     claims = await auth(None, authorization)
