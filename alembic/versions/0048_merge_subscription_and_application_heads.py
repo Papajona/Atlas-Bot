@@ -7,8 +7,6 @@ lifecycle head without rewriting historical migrations.
 Revision ID: 0048_merge_subscription_and_application_heads
 Revises: 0045_merge_application_heads, 0047_strategy_outcome_lifecycle
 """
-from alembic import op
-
 revision = "0048_merge_subscription_and_application_heads"
 down_revision = (
     "0045_merge_application_heads",
