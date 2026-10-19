@@ -11,7 +11,7 @@ import json
 import re
 import uuid
 from collections.abc import Mapping
-from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from decimal import Decimal, InvalidOperation, localcontext, ROUND_HALF_EVEN, localcontext
 from typing import Any
 
 from sqlalchemy import text
@@ -86,7 +86,10 @@ def _money(value: Decimal, name: str) -> Decimal:
 
 
 def _fmt(value: Decimal) -> str:
-    return format(value.quantize(_AMOUNT_QUANTUM), "f")
+    # Numeric(38,18) inputs can exceed Decimal's default precision (28).
+    with localcontext() as context:
+        context.prec = 50
+        return format(value.quantize(_AMOUNT_QUANTUM), "f")
 
 
 def _canonical_sha(payload: Mapping[str, Any]) -> str:
