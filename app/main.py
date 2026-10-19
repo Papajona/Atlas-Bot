@@ -5776,7 +5776,7 @@ async def review_withdrawal_risk(withdrawal_id: int, req: WithdrawalDecision, x_
     if not authenticated_reviewer or not _constant_time_text_equal(authenticated_reviewer, str(req.admin_id or "").strip()):
         raise HTTPException(403, "Risk reviewer identity must match the authenticated user")
     approver_auth(req.admin_id, x_approver_token, x_admin_token)
-    async with SessionLocal() as db
+    async with SessionLocal() as db:
         w = (await db.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id).with_for_update())).scalar_one_or_none()
         if not w:
             raise HTTPException(404, "Withdrawal not found")
