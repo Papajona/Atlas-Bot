@@ -18,6 +18,40 @@ Do not create a second Supabase project or a paid branch for the early paper-onl
 
 This mode is opt-in and disabled by default. Configure `CUSTOMER_PAPER_SHARED_DATABASE_ENABLED=true` only after the schema and least-privilege role are provisioned and verified. `CUSTOMER_PAPER_DATABASE_URL` must use the same host, port, and `postgres` database as the primary URL but a unique paper runtime role and a different password. Keep `CUSTOMER_PAPER_LEDGER_ENABLED=false` until the preflight passes against that exact endpoint and role. Never use Supabase's `postgres`, `service_role`, `authenticated`, or `anon` identity as the paper runtime role.
 
+### Operator setup sequence (existing project only)
+
+1. Store the current project's administrative database URL in a protected local environment variable such as `ATLAS_ADMIN_DATABASE_URL`; do not paste its password into shell commands, commit it, or print it to logs. Confirm the URL ends in the existing `/postgres` database. Take/confirm a current recoverable backup or export before schema DDL.
+2. Open an interactive `psql "$ATLAS_ADMIN_DATABASE_URL"` session. Create a dedicated runtime login, then set its password using psql's hidden password prompt (the secret is not part of the command line/history):
+
+   ```sql
+   CREATE ROLE atlas_customer_paper LOGIN NOINHERIT NOBYPASSRLS
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+   ```
+
+   Then run the psql meta-command `\\password atlas_customer_paper` at the prompt and grant database connectivity:
+
+   ```sql
+   GRANT CONNECT ON DATABASE postgres TO atlas_customer_paper;
+   ```
+
+   Do not give this role membership in another role, ownership of tables, schema CREATE, UPDATE/DELETE, or any elevated attribute. If the role already exists, stop and inspect its attributes/grants instead of blindly recreating or reusing it.
+3. From the reviewed Atlas-Bot checkout, run the schema file against that same existing database as the reviewed database owner (not as the paper runtime role):
+
+   ```bash
+   psql "$ATLAS_ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 \\
+     -v paper_runtime_role=atlas_customer_paper \\
+     -f scripts/customer_paper_ledger_schema.sql
+   ```
+
+   Review the file and the target URL before execution. This creates the `customer_paper` schema/tables and narrowly grants the runtime role. Do not run it against production just to make release checks green.
+4. Store the paper URL with the same project/host/database but username `atlas_customer_paper` and its separately generated password in the approved secret store. Set `CUSTOMER_PAPER_SHARED_DATABASE_ENABLED=true` only for the preflight. Keep `CUSTOMER_PAPER_LEDGER_ENABLED=false` during this read-only check. Run:
+
+   ```bash
+   python -c "import asyncio; from app.customer_paper_ledger import preflight_isolated_customer_paper_ledger; print(asyncio.run(preflight_isolated_customer_paper_ledger(require_enabled=False)))"
+   ```
+
+   Proceed with paper-only rehearsal only if the exact endpoint reports `status=PASS`, `isolation_mode=shared_database_schema`, and the runtime role/permissions match this runbook. Any other result is a hard stop; do not broaden grants to make it pass. The preflight is read-only and does not enable paper execution.
+
 The paper role must be `LOGIN NOINHERIT NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`, have no role memberships, own no paper tables, have no `CREATE` privilege on any schema, and have privileges only for `SELECT`/`INSERT` on the seven paper tables plus `USAGE` on their identity sequences. It must have no privileges on any real-money table, sequence, or executable `SECURITY DEFINER` function. Forced row-level security and the exact tenant policy are mandatory. The application refuses to proceed if any of these checks fail.
 
 Provisioning `scripts/customer_paper_ledger_schema.sql` is DDL against the existing database; it is **not** run automatically by the application. Before a human operator runs it, confirm a usable backup/export exists and review the target database and role. This change does not modify the connected Supabase database.
