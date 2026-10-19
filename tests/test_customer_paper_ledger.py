@@ -594,7 +594,7 @@ def test_customer_paper_sell_pnl_terminal_events_and_reversal_cash_guard(monkeyp
             metadata={"environment": "disposable-ci"},
         )
         await submit_spot_order("eth-buy-92004", "ETH/USDT", "BUY", "100")
-        buy = await record_customer_paper_fill(
+        await record_customer_paper_fill(
             customer_id=customer_id,
             client_order_id="eth-buy-92004",
             idempotency_key="eth-buy-fill-92004",
