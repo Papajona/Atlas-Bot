@@ -178,3 +178,21 @@ def test_consecutive_passes_required_defaults_to_two_strictly_safer_than_before(
     """Regression guard: default must stay >= 2 -- 1 would silently reinstate the old
     promote-on-first-pass behavior this feature exists to close."""
     assert AdaptiveModelPolicy().consecutive_passes_required >= 2
+
+def test_crypto_promotion_stays_blocked_without_point_in_time_universe_history(mocked_training, monkeypatch):
+    """Promotion bookkeeping fixtures must not weaken the crypto survivorship gate."""
+    monkeypatch.setattr(adaptive_bot.settings, "environment", "development", raising=False)
+    monkeypatch.setattr(adaptive_bot, "ai_walk_forward_backtest", lambda *a, **k: _passing_wfo())
+
+    model_path = mocked_training / "crypto-model.pkl"
+    result = ensure_adaptive_model(
+        _synthetic_ohlcv(),
+        str(model_path),
+        asset="crypto",
+        policy=AdaptiveModelPolicy(),
+    )
+
+    assert result["status"] == "CHALLENGER_REJECTED"
+    assert result["gate"]["oos_gate"]["survivorship_bias_blocked"] is True
+    assert "crypto_universe_survivorship_bias_not_resolved" in result["gate"]["oos_gate"]["rejection_reasons"]
+    assert not model_path.exists()
