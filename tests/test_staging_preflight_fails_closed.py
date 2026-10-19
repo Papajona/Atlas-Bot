@@ -18,12 +18,17 @@ def test_staging_identity_preflight_fails_closed_on_rls_migration_blockers():
     assert 'print("PASS: read-only target identity' in workflow
 
 
-def test_staging_preflight_rejects_the_production_project_as_staging():
+def test_staging_preflight_allows_same_project_and_still_binds_database_host():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(
         encoding="utf-8"
     )
     assert "ATLAS_PRODUCTION_SUPABASE_PROJECT_REF" in workflow
-    assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' in workflow
+    assert "ATLAS_STAGING_SUPABASE_PROJECT_REF" in workflow
+    assert "same-project supported" in workflow
+    assert 'if [[ "$STAGING_SUPABASE_PROJECT_REF" == "$PRODUCTION_SUPABASE_PROJECT_REF" ]]; then' in workflow
+    assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in workflow
+    assert "expected = os.environ[\"STAGING_SUPABASE_PROJECT_REF\"]" in workflow
+    assert "database hostname does not match the explicitly configured staging Supabase project" in workflow
     assert '"gcloud", "run", "services", "describe"' in workflow
 
 
