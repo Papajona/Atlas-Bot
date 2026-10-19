@@ -33,6 +33,7 @@ def _passing_wfo():
         "financing_cost_model_complete": True,
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True,
+        "slippage_model_complete": True,
         "execution_cost_calibration_status": "VERIFIED",
         "execution_cost_calibration_evidence_id": "fixture:venue-cost-calibration", "status": "OK", "oos_total_return": 0.10,
             "deflated_sharpe": 0.97, "trial_registry_complete": True}
