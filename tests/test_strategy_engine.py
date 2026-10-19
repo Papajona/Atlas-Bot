@@ -246,7 +246,7 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-    model_path = tmp_path / "btc.joblib"
+    model_path = tmp_path / "fx.joblib"
     candidate_result = {"model_sha256": "abc123", "features": 20, "folds": 3}
 
     signing_key = Ed25519PrivateKey.generate()
@@ -288,7 +288,7 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
         return {**candidate_result, "model_sha256": digest}
     monkeypatch.setattr(adaptive_bot, "train_model", fake_train)
 
-    out = adaptive_bot.ensure_adaptive_model(object(), str(model_path), policy=adaptive_bot.AdaptiveModelPolicy(min_trades=1))
+    out = adaptive_bot.ensure_adaptive_model(object(), str(model_path), asset="forex", policy=adaptive_bot.AdaptiveModelPolicy(min_trades=1))
     assert out["status"] == "CHALLENGER_PASSED_AWAITING_CONFIRMATION"  # consecutive-pass gate: first pass doesn't promote yet
     assert not model_path.exists()
     streak = pathlib.Path(str(model_path) + ".candidate_streak.json")
