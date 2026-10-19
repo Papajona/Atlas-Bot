@@ -254,6 +254,38 @@ def test_customer_paper_policy_validation_checks_permissive_mode_and_all_predica
     not (os.getenv("ATLAS_PAPER_TEST_DATABASE_URL") and os.getenv("ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL")),
     reason="requires the isolated disposable PostgreSQL customer paper databases provisioned by CI",
 )
+def test_customer_paper_lifecycle_rejects_derivatives_and_mismatched_quote_currency():
+    import asyncio
+
+    from app.customer_paper_lifecycle import submit_customer_paper_order
+
+    async def run():
+        with pytest.raises(ValueError, match="spot, swap, forex, or commodity"):
+            await submit_customer_paper_order(
+                customer_id=92099,
+                client_order_id="unsupported-swap",
+                venue="binance",
+                market_type="swap",
+                symbol="BTC/USDT",
+                side="BUY",
+                quantity="1",
+                currency="USDT",
+            )
+        with pytest.raises(ValueError, match="QUOTE must match"):
+            await submit_customer_paper_order(
+                customer_id=92099,
+                client_order_id="mismatched-quote",
+                venue="binance",
+                market_type="spot",
+                symbol="BTC/BTC",
+                side="BUY",
+                quantity="1",
+                currency="USDT",
+            )
+
+    asyncio.run(run())
+
+
 def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypatch):
     customer_id = 92001
     monkeypatch.setattr(settings, "database_url", os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"])
