@@ -254,6 +254,16 @@ def test_customer_paper_policy_validation_checks_permissive_mode_and_all_predica
     not (os.getenv("ATLAS_PAPER_TEST_DATABASE_URL") and os.getenv("ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL")),
     reason="requires the isolated disposable PostgreSQL customer paper databases provisioned by CI",
 )
+def test_customer_paper_numeric_format_supports_postgres_numeric_precision():
+    from decimal import Decimal
+
+    from app.customer_paper_lifecycle import _fmt
+
+    assert _fmt(Decimal("99999999999999999999.123456789012345678")) == (
+        "99999999999999999999.123456789012345678"
+    )
+
+
 def test_customer_paper_lifecycle_rejects_derivatives_and_mismatched_quote_currency():
     import asyncio
 
