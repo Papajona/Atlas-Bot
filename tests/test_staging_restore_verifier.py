@@ -45,6 +45,8 @@ def test_postgres_boolean_parser_accepts_actual_psql_output():
 
 def test_restore_revision_matches_workflow_and_operator_runbook():
     workflow = Path(".github/workflows/staging-restore-audit.yml").read_text(encoding="utf-8")
+    identity_workflow = Path(".github/workflows/staging-identity-preflight.yml").read_text(encoding="utf-8")
+    reconciliation_workflow = Path(".github/workflows/provider-ledger-reconciliation.yml").read_text(encoding="utf-8")
     verifier = Path("scripts/verify_staging_restore.py").read_text(encoding="utf-8")
     runbook = Path("RUNBOOK.md").read_text(encoding="utf-8")
     expected = "0051_research_trial_archive"
@@ -55,4 +57,6 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     assert "database revision is 0049" not in runbook
     assert "same Supabase project" in runbook
     assert "project refs differ before restoring" not in runbook
-    assert "must use a different Supabase project from production" not in workflow
+    assert "must use a different Supabase project from production" not in identity_workflow
+    for source in (workflow, identity_workflow, reconciliation_workflow):
+        assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in source
