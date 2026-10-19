@@ -575,6 +575,37 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
                 idempotency_key="cancel-filled-order",
             )
 
+        # The public client-order identifier allows 180 characters while the
+        # order-event key column is also bounded. Derive the event key from the
+        # fixed-length SHA-256 payload digest so maximum-length IDs remain valid.
+        long_client_id = "x" * 180
+        long_order = await submit_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id=long_client_id,
+            venue="binance",
+            market_type="spot",
+            symbol="ETH/USDT",
+            side="BUY",
+            quantity="1",
+            currency="USDT",
+            order_type="LIMIT",
+            limit_price="100",
+        )
+        assert long_order["status"] == "APPENDED"
+        long_order_replay = await submit_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id=long_client_id,
+            venue="binance",
+            market_type="spot",
+            symbol="ETH/USDT",
+            side="BUY",
+            quantity="1",
+            currency="USDT",
+            order_type="LIMIT",
+            limit_price="100",
+        )
+        assert long_order_replay["status"] == "REPLAYED"
+
     asyncio.run(run())
 
 
