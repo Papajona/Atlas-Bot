@@ -39,6 +39,31 @@ def _seed_lines(amount: str = "100"):
     ]
 
 
+def test_public_customer_paper_journal_writer_only_accepts_positive_seed():
+    valid = _seed_lines("10")
+
+    with pytest.raises(ValueError, match="only PAPER_SEED"):
+        asyncio.run(post_customer_paper_journal(
+            customer_id=7,
+            idempotency_key="forbidden-direct-fill-journal",
+            event_type="SIMULATED_FILL",
+            currency="USDT",
+            lines=valid,
+        ))
+
+    with pytest.raises(ValueError, match="positive PAPER_CASH"):
+        asyncio.run(post_customer_paper_journal(
+            customer_id=7,
+            idempotency_key="negative-cash-seed",
+            event_type="PAPER_SEED",
+            currency="USDT",
+            lines=[
+                {"account_code": "PAPER_CASH", "signed_amount": "-10"},
+                {"account_code": "PAPER_EQUITY", "signed_amount": "10"},
+            ],
+        ))
+
+
 def test_customer_paper_database_pair_rejects_same_database_even_with_separate_role():
     primary = "postgresql+asyncpg://atlas_primary:primary_password@db.example:5432/atlas"
     paper = "postgresql+asyncpg://atlas_paper:paper_password@db.example:5432/atlas"
