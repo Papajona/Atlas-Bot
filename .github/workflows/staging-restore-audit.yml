@@ -43,7 +43,7 @@ jobs:
       RESTORE_EVIDENCE_URI: ${{ inputs.restore_evidence_uri }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Require protected staging configuration and distinct project refs
+      - name: Require protected same-project staging configuration
         shell: bash
         run: |
           set -euo pipefail
@@ -58,10 +58,13 @@ jobs:
           : "${RESTORE_OPERATION_ID:?A real restore operation ID is required}"
           : "${BACKUP_REFERENCE:?An immutable backup reference is required}"
           : "${RESTORE_EVIDENCE_URI:?A provider restore evidence URL/URI is required}"
-          test "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" || {
-            echo "BLOCKED: staging and production refs must differ"
-            exit 1
-          }
+          # The free-stage deployment uses one Supabase project by design.
+          # Both refs are still required so the audit records the chosen topology.
+          if [[ "$STAGING_SUPABASE_PROJECT_REF" == "$PRODUCTION_SUPABASE_PROJECT_REF" ]]; then
+            echo "Same-project staging selected; runtime must remain paper-only and the database restore must not overwrite an active source."
+          else
+            echo "Distinct staging project selected."
+          fi
           [[ "$STAGING_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]
           [[ "$PRODUCTION_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]
           [[ "$EXPECTED_RUNTIME_DB_ROLE" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]

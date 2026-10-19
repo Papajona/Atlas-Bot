@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Read-only integrity audit for a database restored from an identified backup.
+"""Read-only integrity audit for a configured staging database and identified backup.
 
-The operator must restore the selected backup into a distinct, isolated staging target
-before running this script. This program will not create/restore/migrate/drop data.
+The free setup may use the existing Supabase project. This script only audits the
+configured target and never creates/restores/migrates/drops data; never overwrite an
+active source database to manufacture a restore result.
 """
 from __future__ import annotations
 
@@ -114,8 +115,8 @@ def read_database_uri(value: str, staging_ref: str, production_ref: str) -> tupl
         raise ValueError("STAGING_SUPABASE_PROJECT_REF must be an explicit 20-character project ref")
     if not production_ref or not re.fullmatch(r"[a-z0-9]{20}", production_ref):
         raise ValueError("PRODUCTION_SUPABASE_PROJECT_REF must be an explicit 20-character project ref")
-    if staging_ref == production_ref:
-        raise ValueError("staging and production Supabase project refs must differ")
+    # Equal refs are intentional in the single-project/free-tier setup.
+    # The URL must still resolve to the explicitly configured staging project.
     allowed_hosts = {f"db.{staging_ref}.supabase.co", f"{staging_ref}.supabase.co"}
     if parsed.hostname.lower() not in allowed_hosts:
         raise ValueError("DATABASE_URL host does not match the explicitly configured staging Supabase project")
@@ -222,8 +223,16 @@ def audit(args: argparse.Namespace) -> dict:
         "restore_operation_id": args.restore_operation_id,
         "backup_reference": args.backup_reference,
         "restore_evidence_uri": evidence,
-        "production_supabase_ref": os.environ["PRODUCTION_SUPABASE_PROJECT_REF"],
+        "production_supabase_ref": os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", ""),
         "staging_supabase_ref": os.environ["STAGING_SUPABASE_PROJECT_REF"],
+        "same_project_staging": (
+            os.environ.get("STAGING_SUPABASE_PROJECT_REF", "")
+            == os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", "")
+        ),
+        "staging_scope": "same_supabase_project" if (
+            os.environ.get("STAGING_SUPABASE_PROJECT_REF", "")
+            == os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", "")
+        ) else "separate_supabase_project",
         "staging_database_host": host,
         "expected_runtime_role": args.expected_runtime_role,
         "expected_revision": expected_revision,

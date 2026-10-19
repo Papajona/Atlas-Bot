@@ -341,6 +341,8 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         "database_host": host,
         "staging_project_ref": args.staging_ref,
         "production_project_ref": args.production_ref,
+        "same_project_staging": args.staging_ref == args.production_ref,
+        "staging_scope": "same_supabase_project" if args.staging_ref == args.production_ref else "separate_supabase_project",
         "expected_runtime_role": args.expected_runtime_role,
         "expected_revision": args.expected_revision,
         "provider_statement_sha256": sha256_file(path),
