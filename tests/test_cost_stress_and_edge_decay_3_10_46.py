@@ -50,6 +50,7 @@ def _oos(**extra):
         "financing_cost_model_complete": True,
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True,
+        "slippage_model_complete": True,
         "execution_cost_calibration_status": "VERIFIED",
         "execution_cost_calibration_evidence_id": "fixture:venue-cost-calibration",
         "trial_registry_complete": True,
@@ -121,6 +122,7 @@ def test_gate_requires_financing_and_intrabar_execution_evidence():
         "financing_cost_model_complete",
         "intrabar_stop_target_model_complete",
         "execution_cost_model_complete",
+        "slippage_model_complete",
     )
     for key in required:
         without_evidence = {name: value for name, value in passing.items() if name != key}
