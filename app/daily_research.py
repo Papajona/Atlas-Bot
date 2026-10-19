@@ -5,6 +5,7 @@ import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Any
+from types import SimpleNamespace
 
 from .config import settings
 from .distributed import acquire_lock, release_lock
@@ -12,6 +13,7 @@ from .market_intelligence import gather_market_intelligence
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates
 from .strategy_engine import StrategyConfig
 from .ai_providers import dual_ai_research_review
+from .research_trial_archive import archive_research_trials
 
 
 async def _retry_async(operation, *, attempts: int = 3, base_delay_seconds: float = 1.0):
@@ -290,6 +292,13 @@ async def run_daily_research() -> dict[str, Any]:
                     settings.research_ai_threshold,
                     await _prior_trial_labels(symbol),
                 )
+                trial_archive = await archive_research_trials(
+                    research,
+                    SimpleNamespace(symbol=symbol, asset=settings.default_asset),
+                )
+                # Prospective records are explicitly UNVERIFIED until complete
+                # code/data/venue fingerprints exist; they cannot satisfy promotion.
+                research["prospective_trial_archive"] = trial_archive
                 review = _ai_research_brief(research, intelligence)
                 if settings.gemini_api_key or settings.groq_api_key:
                     review["external_ai"] = await dual_ai_research_review(research, intelligence)
@@ -300,7 +309,14 @@ async def run_daily_research() -> dict[str, Any]:
                         "execution_authority": False,
                     }
                 review["run_drift"] = await _persist_research_run(symbol, research, review, intelligence.get("macro_regime"))
-                runs.append({"symbol": symbol, "research": research, "review": review})
+                run_record = {
+                    "symbol": symbol, "research": research, "review": review,
+                    "trial_archive": trial_archive,
+                }
+                if trial_archive.get("status") == "FAILED":
+                    run_record["status"] = "FAILED"
+                    run_record["error"] = f"trial_archive:{trial_archive.get('reason', 'UNKNOWN')}"
+                runs.append(run_record)
             except Exception as exc:
                 runs.append({"symbol": symbol, "status": "FAILED", "error": str(exc)})
         return {

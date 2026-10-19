@@ -241,7 +241,7 @@ def main() -> int:
     parser.add_argument("--backup-reference", required=True, help="Provider backup ID or immutable backup object URI")
     parser.add_argument("--restore-evidence-uri", required=True, help="Provider restore operation evidence URL or immutable audit-log URI")
     parser.add_argument("--expected-runtime-role", required=True)
-    parser.add_argument("--expected-revision", default="0049_public_schema_rls_lockdown")
+    parser.add_argument("--expected-revision", default="0051_research_trial_archive")
     parser.add_argument("--output", default="staging-restore-audit.json")
     args = parser.parse_args()
     try:

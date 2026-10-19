@@ -39,9 +39,10 @@ from .entry_exit_engine import EntryExitConfig, start_bot_decision, gated_entry_
 from .ai_providers import dual_ai_trade_safety_review, AIProviderError
 from .strategy_ai import generate_strategy_draft
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates, live_strategy_signals
+from .research_trial_archive import archive_research_trials
 from .research_validation import oos_promotion_gate, monte_carlo_bootstrap
 from .daily_research import run_daily_research, latest_macro_context
-from .execution import execute_signal, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits, customer_paper_execution_blocked
+from .execution import execute_signal, advance_platform_paper_orders, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits, customer_paper_execution_blocked
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
 from .payout import get_payout_provider, PayoutError, PayoutUnknown, PayoutNotFound
 from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, release_separation_violation, verify_release_operator
@@ -58,7 +59,7 @@ from .model_registry import verify_model_file, rollback_champion
 from .correlation_risk import adjusted_group_exposure
 from .custody_signer import validate_signer_config
 from .custody_reconciliation import reconcile_usdt_custody
-from .meta_labeling import meta_label_gate
+from .meta_labeling import meta_label_gate, meta_label_walk_forward
 from .derivatives_context import fetch_public_derivatives_context
 from .multi_timeframe import multi_timeframe_signal
 from .grid_trading import build_grid, grid_profit_pct
@@ -130,6 +131,7 @@ def verify_local_signature(signature: str, digest: str) -> bool:
 from .monitoring import TelemetryMiddleware, metrics_response, logger
 from .schemas import (
     MarketRequest,
+    ResearchMarketRequest,
     CustomerBotStartRequest,
     SmartTradeRequest,
     DcaBotRequest,
@@ -1272,11 +1274,11 @@ async def _usdt_tron_monitor_loop():
             _mark_worker_loop_success("usdt-tron")
             headers = {"accept": "application/json", "TRON-PRO-API-KEY": settings.usdt_trongrid_api_key}
             gate = _RateGate(settings.usdt_tron_max_qps)
-            async def _pace(_request):
-                await gate.wait()
+            async def _pace(_request, _gate=gate):
+                await _gate.wait()
             scan_slots = asyncio.Semaphore(max(1, int(settings.usdt_tron_scan_concurrency)))
             async with httpx.AsyncClient(timeout=15.0, event_hooks={"request": [_pace]}) as client:
-                async def _scan_one(wallet):
+                async def _scan_one(wallet, _headers=headers):
                     lock_key = f"tron-deposit-scan:{wallet.id}"
                     if not await acquire_lock(lock_key, ttl_seconds=max(120, poll_seconds + 120)):
                         return
@@ -1469,9 +1471,9 @@ async def _usdt_tron_monitor_loop():
                     finally:
                         await release_lock(lock_key)
 
-                async def _bounded(wallet):
-                    async with scan_slots:
-                        await _scan_one(wallet)
+                async def _bounded(wallet, _slots=scan_slots, _scan=_scan_one):
+                    async with _slots:
+                        await _scan(wallet)
                 await asyncio.gather(*(_bounded(w) for w in wallets))
         except asyncio.CancelledError:
             raise
@@ -2162,101 +2164,6 @@ def market_data(req, customer_id: int | None = None):
 
 
 
-def _market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[bool, list[str]]:
-    reasons: list[str] = []
-    if df is None or len(df) < settings.min_bars:
-        reasons.append("insufficient_bars")
-        return False, reasons
-    # Crypto-specific liquidity/established-universe checks are intentionally not applied to FX/commodities.
-    if asset == "crypto" and settings.adaptive_require_established_crypto:
-        try:
-            established = {x.strip().upper() for x in settings.adaptive_established_symbols.split(",") if x.strip()}
-            normalized_symbol = str(getattr(df, "attrs", {}).get("symbol", ""))
-            # Symbol allowlisting is enforced at request level below; volume remains a second independent gate.
-            if normalized_symbol and normalized_symbol.upper() not in established:
-                reasons.append("symbol_not_in_established_universe")
-            if "volume" not in df.columns:
-                reasons.append("missing_volume_for_liquidity_gate")
-            else:
-                tf_seconds = max(60.0, pd.Timedelta(timeframe).total_seconds())
-                bars_24h = max(1, int(round(86400.0 / tf_seconds)))
-                quote_volume_24h = float((df["close"].astype(float) * df["volume"].astype(float)).tail(bars_24h).sum())
-                if quote_volume_24h < settings.adaptive_min_quote_volume_24h_usd:
-                    reasons.append("market_liquidity_below_established_threshold")
-        except Exception:
-            reasons.append("liquidity_gate_unavailable")
-    if not getattr(df.index, "is_monotonic_increasing", False):
-        reasons.append("timestamps_not_monotonic")
-    if df.index.has_duplicates:
-        reasons.append("duplicate_timestamps")
-    last = df.index[-1]
-    try:
-        age = (datetime.now(timezone.utc) - last.to_pydatetime()).total_seconds()
-        tf = pd.Timedelta(timeframe).total_seconds()
-        # Completed-bar data is expected to be no older than 3 bars or the configured hard ceiling.
-        allowed = min(float(settings.stale_data_minutes * 60), max(60.0, tf * 3.5))
-        if age > allowed:
-            reasons.append("stale_market_data")
-    except Exception:
-        reasons.append("invalid_market_timestamp")
-    return not reasons, reasons
-
-
-async def _customer_oanda_spread_bps(customer_id: int, symbol: str) -> float | None:
-    async with SessionLocal() as cdb:
-        row = (await cdb.execute(select(CustomerOandaAccount).where(CustomerOandaAccount.customer_id == customer_id))).scalar_one_or_none()
-    broker = build_customer_oanda_broker(row, timeout_seconds=settings.oanda_timeout_seconds)
-    try:
-        ticker = await asyncio.to_thread(broker.ticker, _normalize_oanda_instrument(symbol))
-        bid, ask = float(ticker.get("bid") or 0), float(ticker.get("ask") or 0)
-        if bid <= 0 or ask <= 0 or ask < bid:
-            raise RuntimeError("OANDA quote has no valid bid/ask")
-        return (ask - bid) / ((ask + bid) / 2) * 10_000
-    finally:
-        broker.close()
-
-
-def _current_spread_bps(req: MarketRequest, customer_id: int | None = None) -> float | None:
-    if req.asset == "crypto":
-        import ccxt
-        if req.exchange not in ccxt.exchanges:
-            raise RuntimeError(f"Unsupported CCXT exchange: {req.exchange}")
-        ex = getattr(ccxt, req.exchange)({"enableRateLimit": True})
-        try:
-            ex.load_markets()
-            ticker = ex.fetch_ticker(req.symbol)
-            bid = float(ticker.get("bid") or 0)
-            ask = float(ticker.get("ask") or 0)
-            if bid <= 0 or ask <= 0 or ask < bid:
-                raise RuntimeError("Market quote has no valid bid/ask")
-            return (ask - bid) / ((ask + bid) / 2) * 10_000
-        finally:
-            if hasattr(ex, "close") and callable(ex.close):
-                ex.close()
-    if customer_id is not None and req.asset in {"forex", "commodity"}:
-        async def _get_customer_broker():
-            async with SessionLocal() as cdb:
-                row = (await cdb.execute(select(CustomerOandaAccount).where(CustomerOandaAccount.customer_id == customer_id))).scalar_one_or_none()
-            return build_customer_oanda_broker(row, timeout_seconds=settings.oanda_timeout_seconds)
-        # This function is normally called through asyncio.to_thread; customer-specific OANDA
-        # quote retrieval is handled by the autonomous caller before live execution.
-        return None
-    if settings.oanda_account_id and settings.oanda_api_token:
-        broker = __import__("app.forex_oanda", fromlist=["OandaBroker", "OandaConfig"]).OandaBroker(
-            __import__("app.forex_oanda", fromlist=["OandaBroker", "OandaConfig"]).OandaConfig(
-                settings.oanda_account_id, settings.oanda_api_token, settings.oanda_practice, settings.oanda_timeout_seconds))
-        try:
-            ticker = broker.ticker(_normalize_oanda_instrument(req.symbol))
-            bid, ask = float(ticker.get("bid") or 0), float(ticker.get("ask") or 0)
-            if bid <= 0 or ask <= 0 or ask < bid:
-                raise RuntimeError("OANDA quote has no valid bid/ask")
-            return (ask - bid) / ((ask + bid) / 2) * 10_000
-        finally:
-            broker.close()
-    return None
-
-
-
 def _server_paper_market_context(req: MarketRequest, df) -> dict[str, Any] | None:
     """Build market context from server-fetched closed CCXT spot candles and a fresh ticker.
 
@@ -2381,6 +2288,126 @@ def _server_paper_market_context(req: MarketRequest, df) -> dict[str, Any] | Non
             getattr(req, "exchange", ""), getattr(req, "symbol", ""), type(exc).__name__,
         )
         return None
+
+
+
+
+def _attach_research_evidence(df: pd.DataFrame, req: ResearchMarketRequest) -> pd.DataFrame:
+    """Attach caller-supplied signed artifacts without altering market provenance.
+
+    Research validators still verify Ed25519 signatures and bind each artifact to
+    the loaded frame's venue, market, symbol, timeframe, dataset and OOS sample.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("research evidence can only be attached to a pandas DataFrame")
+    result = df.copy(deep=False)
+    # Pandas exposes attrs as a mutable property; update the copied frame rather
+    # than assigning to the read-only property itself.
+    for field in (
+        "point_in_time_universe_manifest",
+        "execution_cost_calibration_evidence",
+        "trial_performance_archive",
+    ):
+        document = getattr(req, field, None)
+        if document is not None:
+            result.attrs[field] = document
+    return result
+
+
+
+
+def _market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+    if df is None or len(df) < settings.min_bars:
+        reasons.append("insufficient_bars")
+        return False, reasons
+    # Crypto-specific liquidity/established-universe checks are intentionally not applied to FX/commodities.
+    if asset == "crypto" and settings.adaptive_require_established_crypto:
+        try:
+            established = {x.strip().upper() for x in settings.adaptive_established_symbols.split(",") if x.strip()}
+            normalized_symbol = str(getattr(df, "attrs", {}).get("symbol", ""))
+            # Symbol allowlisting is enforced at request level below; volume remains a second independent gate.
+            if normalized_symbol and normalized_symbol.upper() not in established:
+                reasons.append("symbol_not_in_established_universe")
+            if "volume" not in df.columns:
+                reasons.append("missing_volume_for_liquidity_gate")
+            else:
+                tf_seconds = max(60.0, pd.Timedelta(timeframe).total_seconds())
+                bars_24h = max(1, int(round(86400.0 / tf_seconds)))
+                quote_volume_24h = float((df["close"].astype(float) * df["volume"].astype(float)).tail(bars_24h).sum())
+                if quote_volume_24h < settings.adaptive_min_quote_volume_24h_usd:
+                    reasons.append("market_liquidity_below_established_threshold")
+        except Exception:
+            reasons.append("liquidity_gate_unavailable")
+    if not getattr(df.index, "is_monotonic_increasing", False):
+        reasons.append("timestamps_not_monotonic")
+    if df.index.has_duplicates:
+        reasons.append("duplicate_timestamps")
+    last = df.index[-1]
+    try:
+        age = (datetime.now(timezone.utc) - last.to_pydatetime()).total_seconds()
+        tf = pd.Timedelta(timeframe).total_seconds()
+        # Completed-bar data is expected to be no older than 3 bars or the configured hard ceiling.
+        allowed = min(float(settings.stale_data_minutes * 60), max(60.0, tf * 3.5))
+        if age > allowed:
+            reasons.append("stale_market_data")
+    except Exception:
+        reasons.append("invalid_market_timestamp")
+    return not reasons, reasons
+
+
+async def _customer_oanda_spread_bps(customer_id: int, symbol: str) -> float | None:
+    async with SessionLocal() as cdb:
+        row = (await cdb.execute(select(CustomerOandaAccount).where(CustomerOandaAccount.customer_id == customer_id))).scalar_one_or_none()
+    broker = build_customer_oanda_broker(row, timeout_seconds=settings.oanda_timeout_seconds)
+    try:
+        ticker = await asyncio.to_thread(broker.ticker, _normalize_oanda_instrument(symbol))
+        bid, ask = float(ticker.get("bid") or 0), float(ticker.get("ask") or 0)
+        if bid <= 0 or ask <= 0 or ask < bid:
+            raise RuntimeError("OANDA quote has no valid bid/ask")
+        return (ask - bid) / ((ask + bid) / 2) * 10_000
+    finally:
+        broker.close()
+
+
+def _current_spread_bps(req: MarketRequest, customer_id: int | None = None) -> float | None:
+    if req.asset == "crypto":
+        import ccxt
+        if req.exchange not in ccxt.exchanges:
+            raise RuntimeError(f"Unsupported CCXT exchange: {req.exchange}")
+        ex = getattr(ccxt, req.exchange)({"enableRateLimit": True})
+        try:
+            ex.load_markets()
+            ticker = ex.fetch_ticker(req.symbol)
+            bid = float(ticker.get("bid") or 0)
+            ask = float(ticker.get("ask") or 0)
+            if bid <= 0 or ask <= 0 or ask < bid:
+                raise RuntimeError("Market quote has no valid bid/ask")
+            return (ask - bid) / ((ask + bid) / 2) * 10_000
+        finally:
+            if hasattr(ex, "close") and callable(ex.close):
+                ex.close()
+    if customer_id is not None and req.asset in {"forex", "commodity"}:
+        async def _get_customer_broker():
+            async with SessionLocal() as cdb:
+                row = (await cdb.execute(select(CustomerOandaAccount).where(CustomerOandaAccount.customer_id == customer_id))).scalar_one_or_none()
+            return build_customer_oanda_broker(row, timeout_seconds=settings.oanda_timeout_seconds)
+        # This function is normally called through asyncio.to_thread; customer-specific OANDA
+        # quote retrieval is handled by the autonomous caller before live execution.
+        return None
+    if settings.oanda_account_id and settings.oanda_api_token:
+        broker = __import__("app.forex_oanda", fromlist=["OandaBroker", "OandaConfig"]).OandaBroker(
+            __import__("app.forex_oanda", fromlist=["OandaBroker", "OandaConfig"]).OandaConfig(
+                settings.oanda_account_id, settings.oanda_api_token, settings.oanda_practice, settings.oanda_timeout_seconds))
+        try:
+            ticker = broker.ticker(_normalize_oanda_instrument(req.symbol))
+            bid, ask = float(ticker.get("bid") or 0), float(ticker.get("ask") or 0)
+            if bid <= 0 or ask <= 0 or ask < bid:
+                raise RuntimeError("OANDA quote has no valid bid/ask")
+            return (ask - bid) / ((ask + bid) / 2) * 10_000
+        finally:
+            broker.close()
+    return None
 
 
 async def _get_or_create_customer_trading_account(db, profile: CustomerProfile) -> TradingAccount:
@@ -6168,10 +6195,11 @@ async def strategy_signal_api(req: MarketRequest, x_admin_token: str | None = He
 
 
 @app.post("/api/research/backtest-all")
-async def research_backtest_all(req: MarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+async def research_backtest_all(req: ResearchMarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     await auth(x_admin_token, authorization)
     try:
         df = await asyncio.to_thread(market_data, req)
+        df = _attach_research_evidence(df, req)
         cfg = StrategyConfig(
             signal_threshold=settings.strategy_signal_threshold,
             target_vol_annual=settings.strategy_target_vol_annual,
@@ -6181,6 +6209,7 @@ async def research_backtest_all(req: MarketRequest, x_admin_token: str | None = 
         )
         result = await asyncio.to_thread(backtest_all_strategies, df, cfg, include_ai=True, asset=req.asset, folds=req.folds, min_train=req.min_train)
         result.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
+        result["trial_archive_write"] = await archive_research_trials(result, req)
         await _audit("RESEARCH_BACKTEST_ALL", {"symbol": req.symbol, "asset": req.asset, "strategy_count": result["strategy_count"]})
         return result
     except Exception as e:
@@ -6188,10 +6217,11 @@ async def research_backtest_all(req: MarketRequest, x_admin_token: str | None = 
 
 
 @app.post("/api/research/paper-signals")
-async def research_paper_signals(req: MarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+async def research_paper_signals(req: ResearchMarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     await auth(x_admin_token, authorization)
     try:
         df = await asyncio.to_thread(market_data, req)
+        df = _attach_research_evidence(df, req)
         cfg = StrategyConfig(
             signal_threshold=settings.strategy_signal_threshold,
             target_vol_annual=settings.strategy_target_vol_annual,
@@ -6200,6 +6230,8 @@ async def research_paper_signals(req: MarketRequest, x_admin_token: str | None =
             take_profit_atr=settings.strategy_take_profit_atr,
         )
         research = await asyncio.to_thread(backtest_all_strategies, df, cfg, include_ai=True, asset=req.asset, folds=req.folds, min_train=req.min_train)
+        research.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
+        trial_archive_write = await archive_research_trials(research, req)
         candidates = paper_candidates(research)
         names = [x["strategy"] for x in candidates]
         signals = await asyncio.to_thread(live_strategy_signals, df, names, cfg, req.asset)
@@ -6209,6 +6241,7 @@ async def research_paper_signals(req: MarketRequest, x_admin_token: str | None =
             "candidates": names,
             "signals": signals,
             "real_money_execution": False,
+            "trial_archive_write": trial_archive_write,
             "message": "Strategies must remain in paper/shadow mode until separate production risk and deployment gates are passed.",
         }
     except Exception as e:
@@ -6216,10 +6249,11 @@ async def research_paper_signals(req: MarketRequest, x_admin_token: str | None =
 
 
 @app.post("/api/research/review")
-async def research_review(req: MarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+async def research_review(req: ResearchMarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     await auth(x_admin_token, authorization)
     try:
         df = await asyncio.to_thread(market_data, req)
+        df = _attach_research_evidence(df, req)
         cfg = StrategyConfig(
             signal_threshold=settings.strategy_signal_threshold,
             target_vol_annual=settings.strategy_target_vol_annual,
@@ -6228,9 +6262,12 @@ async def research_review(req: MarketRequest, x_admin_token: str | None = Header
             take_profit_atr=settings.strategy_take_profit_atr,
         )
         research = await asyncio.to_thread(backtest_all_strategies, df, cfg, include_ai=True, asset=req.asset, folds=req.folds, min_train=req.min_train)
+        research.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
+        trial_archive_write = await archive_research_trials(research, req)
         live = await asyncio.to_thread(strategy_signal, df, cfg, req.asset)
         review = await asyncio.to_thread(ai_market_review, research, live)
         review.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
+        review["trial_archive_write"] = trial_archive_write
         return review
     except Exception as e:
         raise _safe_http_error(400, e, "Invalid request") from e
@@ -6400,16 +6437,29 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
     await require_role(claims, "OPERATIONS")
     path = model_file(req)
     try:
-        paper_req = req.model_copy(update={"days": 5})
-        df = await asyncio.to_thread(market_data, paper_req)
-        sig = await asyncio.to_thread(predict_latest, df, path)
-        paper_context = await asyncio.to_thread(_server_paper_market_context, paper_req, df)
-        if paper_context is not None:
-            sig = {**sig, "paper_market_context": paper_context}
+        df = await asyncio.to_thread(market_data, req.model_copy(update={"days": 5}))
         price = float(df.close.iloc[-1])
+        paper_processing = await advance_platform_paper_orders(
+            df,
+            exchange=req.exchange,
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+            asset=req.asset,
+        )
+        if paper_processing.get("status") in {"STALE_BAR", "BAR_NOT_COMPLETE", "DATA_PROVENANCE_INVALID", "BAR_PROVENANCE_CONFLICT", "INVALID_BAR_PRICE"}:
+            raise RiskBlocked("Paper execution refused stale, incomplete, or unverified market data")
+        if int(paper_processing.get("protective_exit_orders_pending") or 0) > 0:
+            # Do not submit additional entries while any protective exit is pending or on
+            # the same bar that triggered one. The exit is eligible only on a later bar.
+            equity_state = await mark_paper_equity({req.symbol: price})
+            return {"mode": "PAPER", "side": "protective_exit_triggered", "price": price,
+                    "paper_order_processing": paper_processing, "equity": equity_state}
+        sig = await asyncio.to_thread(predict_latest, df, path)
         ts = sig["signal_timestamp"]
         if sig["signal"] == 0:
-            return {"mode": "PAPER", "side": "flat", "price": price, **sig}
+            equity_state = await mark_paper_equity({req.symbol: price})
+            return {"mode": "PAPER", "side": "flat", "price": price, **sig,
+                    "paper_order_processing": paper_processing, "equity": equity_state}
         side = "buy" if sig["signal"] > 0 else "sell"
         async with SessionLocal() as db:
             s = await db.get(AppState, 1)
@@ -6418,15 +6468,68 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
         qty = target_notional / price
         stop = price * (1 - settings.stop_loss_pct) if side == "buy" else price * (1 + settings.stop_loss_pct)
         tp = price * (1 + settings.take_profit_pct) if side == "buy" else price * (1 - settings.take_profit_pct)
-        result = await execute_signal(req.symbol, side, qty, price, sig, req.exchange, req.timeframe, ts,
+        submission_signal = dict(sig)
+        provenance = dict(df.attrs.get("data_provenance") or {})
+        submission_signal["_paper_execution_context"] = {
+            "bar_timestamp": df.index[-1].isoformat(),
+            "data_provenance": provenance,
+            "asset": req.asset,
+            "symbol": req.symbol,
+            "exchange": req.exchange,
+            "timeframe": req.timeframe,
+        }
+        result = await execute_signal(req.symbol, side, qty, price, submission_signal, req.exchange, req.timeframe, ts,
                                       force_paper=True, stop_loss_price=stop, take_profit_price=tp, asset=req.asset)
         equity_state = await mark_paper_equity({req.symbol: price})
         return {"mode": "PAPER", "side": side, "price": price, "quantity": qty, **sig,
-                "execution": result, "equity": equity_state}
+                "execution": result, "paper_order_processing": paper_processing, "equity": equity_state}
     except RiskBlocked as e:
         raise _safe_http_error(409, e, "Operation could not be completed") from e
     except Exception as e:
         raise _safe_http_error(400, e, "Invalid request") from e
+
+
+@app.post("/api/research/meta-label")
+async def meta_label_research_api(
+    req: MarketRequest,
+    x_admin_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    """Expose chronological OOS meta-filter diagnostics; this endpoint never authorizes execution."""
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "OPERATIONS")
+    try:
+        df = await asyncio.to_thread(market_data, req)
+        result = await asyncio.to_thread(
+            meta_label_walk_forward,
+            df,
+            horizon=3,
+            min_edge_bps=10.0,
+            folds=5,
+            threshold=0.55,
+        )
+        result["asset_class"] = req.asset
+        result["symbol"] = req.symbol
+        result["exchange"] = req.exchange
+        result["timeframe"] = req.timeframe
+        result["data_provenance"] = dict(getattr(df, "attrs", {}).get("data_provenance") or {})
+        result["execution_authority"] = False
+        result["evidence_note"] = (
+            "Out-of-sample meta-label metrics are diagnostic only. They do not bypass the "
+            "comparable-trial DSR, financing, execution-cost, or live-release gates."
+        )
+        await _audit("RESEARCH_META_LABEL_OOS", {
+            "asset": req.asset,
+            "symbol": req.symbol,
+            "exchange": req.exchange,
+            "timeframe": req.timeframe,
+            "status": result.get("status"),
+            "oos_observations": result.get("oos_observations", 0),
+            "execution_authority": False,
+        })
+        return result
+    except Exception as e:
+        raise _safe_http_error(400, e, "Meta-label research could not be completed") from e
 
 
 @app.post("/api/execute")
@@ -6441,15 +6544,6 @@ async def execute(req: ExecuteRequest, x_admin_token: str | None = Header(defaul
     if req.request_id:
         sig["request_id"] = req.request_id
     try:
-        if req.force_paper and req.asset == "crypto":
-            # Build simulation context only from server-fetched closed candles and a
-            # fresh server-side ticker. Client-supplied prices/volumes are not used as
-            # the basis for venue-normalized volume, spread or volatility.
-            paper_req = req.model_copy(update={"days": 5})
-            paper_df = await asyncio.to_thread(market_data, paper_req)
-            paper_context = await asyncio.to_thread(_server_paper_market_context, paper_req, paper_df)
-            if paper_context is not None:
-                sig["paper_market_context"] = paper_context
         return await execute_signal(req.symbol, req.side, req.quantity, req.price, sig, req.exchange,
                                     req.timeframe, signal_timestamp, req.force_paper,
                                     req.stop_loss_price, req.take_profit_price, req.strategy, req.asset, req.demo_forex)

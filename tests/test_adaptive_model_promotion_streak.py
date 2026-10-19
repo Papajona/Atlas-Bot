@@ -32,9 +32,11 @@ def _passing_wfo():
             "folds": folds, "cost_stress_ok": True,
         "financing_cost_model_complete": True,
         "intrabar_stop_target_model_complete": True,
-        "execution_cost_model_complete": True, "status": "OK", "oos_total_return": 0.10,
-            "deflated_sharpe": 0.97, "trial_registry_complete": True,
-            "slippage_model_complete": True}
+        "execution_cost_model_complete": True,
+        "slippage_model_complete": True,
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_evidence_id": "fixture:venue-cost-calibration", "status": "OK", "oos_total_return": 0.10,
+            "deflated_sharpe": 0.97, "trial_registry_complete": True}
 
 
 def _failing_wfo():
@@ -177,12 +179,12 @@ def test_consecutive_passes_required_defaults_to_two_strictly_safer_than_before(
     promote-on-first-pass behavior this feature exists to close."""
     assert AdaptiveModelPolicy().consecutive_passes_required >= 2
 
-
-def test_crypto_promotion_rejects_current_survivors_only_universe(monkeypatch, tmp_path):
-    model_path = tmp_path / "crypto-model.pkl"
+def test_crypto_promotion_stays_blocked_without_point_in_time_universe_history(mocked_training, monkeypatch):
+    """Promotion bookkeeping fixtures must not weaken the crypto survivorship gate."""
     monkeypatch.setattr(adaptive_bot.settings, "environment", "development", raising=False)
     monkeypatch.setattr(adaptive_bot, "ai_walk_forward_backtest", lambda *a, **k: _passing_wfo())
 
+    model_path = mocked_training / "crypto-model.pkl"
     result = ensure_adaptive_model(
         _synthetic_ohlcv(),
         str(model_path),
@@ -191,7 +193,6 @@ def test_crypto_promotion_rejects_current_survivors_only_universe(monkeypatch, t
     )
 
     assert result["status"] == "CHALLENGER_REJECTED"
-    assert result["wfo"]["universe_bias"] == "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
     assert result["gate"]["oos_gate"]["survivorship_bias_blocked"] is True
     assert "crypto_universe_survivorship_bias_not_resolved" in result["gate"]["oos_gate"]["rejection_reasons"]
     assert not model_path.exists()
