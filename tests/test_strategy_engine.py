@@ -295,7 +295,7 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
     value = json.loads(streak.read_text())
     value["evaluated_at"] = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=21)).isoformat()
     streak.write_text(json.dumps(value))
-    out = adaptive_bot.ensure_adaptive_model(object(), str(model_path), policy=adaptive_bot.AdaptiveModelPolicy(min_trades=1))
+    out = adaptive_bot.ensure_adaptive_model(object(), str(model_path), asset="forex", policy=adaptive_bot.AdaptiveModelPolicy(min_trades=1))
     assert out["status"] == "CHAMPION_PROMOTED"
     assert model_path.exists()
     assert json.loads(pathlib.Path(str(model_path)+".meta.json").read_text())["model_sha256"] == hashlib.sha256(b"model-bytes").hexdigest()
