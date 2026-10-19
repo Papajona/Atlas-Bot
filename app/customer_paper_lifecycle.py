@@ -283,7 +283,7 @@ async def submit_customer_paper_order(
         raise ValueError("venue must be a normalized provider identifier")
     normalized_market = str(market_type or "").strip().lower()
     if normalized_market not in _MARKET_TYPES:
-        raise ValueError("market_type must be one of spot, swap, forex, or commodity")
+        raise ValueError("customer paper lifecycle currently supports spot only; derivative, FX and commodity execution require separate models")
     normalized_symbol = str(symbol or "").strip().upper()
     if not _SYMBOL_RE.fullmatch(normalized_symbol):
         raise ValueError("symbol is malformed")
