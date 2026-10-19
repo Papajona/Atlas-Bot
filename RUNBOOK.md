@@ -12,6 +12,52 @@ This repository's default deployment posture is staging/paper only. Keep all of 
 
 Do not place customer funds at risk while collecting release evidence. Do not enable mainnet funding, sweeping, live withdrawals, or live execution to make a check pass. A green CI job, a simulation, or a debug APK is not proof of a real deployment control.
 
+## Free single-project Supabase customer-paper mode
+
+Do not create a second Supabase project or a paid branch for the early paper-only stage. The low-cost option is a dedicated `customer_paper` schema in the existing project's `postgres` database, accessed only through a separate runtime role and credential. This is **schema/ACL isolation**, not a separate database failure domain: it shares storage, compute, availability, and backup/restore scope with the rest of the project.
+
+This mode is opt-in and disabled by default. Configure `CUSTOMER_PAPER_SHARED_DATABASE_ENABLED=true` only after the schema and least-privilege role are provisioned and verified. `CUSTOMER_PAPER_DATABASE_URL` must use the same host, port, and `postgres` database as the primary URL but a unique paper runtime role and a different password. Keep `CUSTOMER_PAPER_LEDGER_ENABLED=false` until the preflight passes against that exact endpoint and role. Never use Supabase's `postgres`, `service_role`, `authenticated`, or `anon` identity as the paper runtime role.
+
+### Operator setup sequence (existing project only)
+
+1. Store the current project's administrative database URL in a protected local environment variable such as `ATLAS_ADMIN_DATABASE_URL`; do not paste its password into shell commands, commit it, or print it to logs. Confirm the URL ends in the existing `/postgres` database. Take/confirm a current recoverable backup or export before schema DDL.
+2. Open an interactive `psql "$ATLAS_ADMIN_DATABASE_URL"` session. Create a dedicated runtime login, then set its password using psql's hidden password prompt (the secret is not part of the command line/history):
+
+   ```sql
+   CREATE ROLE atlas_customer_paper LOGIN NOINHERIT NOBYPASSRLS
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+   ```
+
+   Then run the psql meta-command `\password atlas_customer_paper` at the prompt and grant database connectivity:
+
+   ```sql
+   GRANT CONNECT ON DATABASE postgres TO atlas_customer_paper;
+   ```
+
+   Do not give this role membership in another role, ownership of tables, schema CREATE, UPDATE/DELETE, or any elevated attribute. If the role already exists, stop and inspect its attributes/grants instead of blindly recreating or reusing it.
+3. From the reviewed Atlas-Bot checkout, run the schema file against that same existing database as the reviewed database owner (not as the paper runtime role):
+
+   ```bash
+   psql "$ATLAS_ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 \
+     -v paper_runtime_role=atlas_customer_paper \
+     -f scripts/customer_paper_ledger_schema.sql
+   ```
+
+   Review the file and the target URL before execution. This creates the `customer_paper` schema/tables and narrowly grants the runtime role. Do not run it against production just to make release checks green.
+4. Store the paper URL with the same project/host/database but username `atlas_customer_paper` and its separately generated password in the approved secret store. Set `CUSTOMER_PAPER_SHARED_DATABASE_ENABLED=true` only for the preflight. Keep `CUSTOMER_PAPER_LEDGER_ENABLED=false` during this read-only check. Run:
+
+   ```bash
+   python -c "import asyncio; from app.customer_paper_ledger import preflight_isolated_customer_paper_ledger; print(asyncio.run(preflight_isolated_customer_paper_ledger(require_enabled=False)))"
+   ```
+
+   Proceed with paper-only rehearsal only if the exact endpoint reports `status=PASS`, `isolation_mode=shared_database_schema`, and the runtime role/permissions match this runbook. Any other result is a hard stop; do not broaden grants to make it pass. The preflight is read-only and does not enable paper execution.
+
+The paper role must be `LOGIN NOINHERIT NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`, have no role memberships, own no paper tables, have no `CREATE` privilege on any schema, and have privileges only for `SELECT`/`INSERT` on the seven paper tables plus `USAGE` on their identity sequences. It must have no privileges on any real-money table, sequence, or executable `SECURITY DEFINER` function. Forced row-level security and the exact tenant policy are mandatory. The application refuses to proceed if any of these checks fail.
+
+Provisioning `scripts/customer_paper_ledger_schema.sql` is DDL against the existing database; it is **not** run automatically by the application. Before a human operator runs it, confirm a usable backup/export exists and review the target database and role. This change does not modify the connected Supabase database.
+
+This mode is suitable only for early paper development/rehearsal after the schema preflight and PostgreSQL lifecycle tests pass. **The lifecycle primitives in `app/customer_paper_lifecycle.py` are not yet wired into the customer bot API/execution loop.** `app.execution.customer_paper_execution_blocked()` still blocks customer execution in paper mode, so `/api/customer/bot/start` returns HTTP 409; setting the schema and feature flags alone does not enable end-to-end customer paper trading. Do not remove that guard until the request-to-order-to-fill-to-ledger-to-recovery path is integrated and tested end to end. This mode does not count as an independently restored staging target or prove disaster recovery. Keep live trading, customer-fund movement, withdrawals, and payouts disabled; production clearance still requires a separately corroborated recovery drill and any applicable provider-reconciliation evidence without initiating real-money transactions.
+
 ## Emergency stop
 
 Call authenticated `POST /api/risk/kill`. The local kill switch is set before broker cancellation is attempted. The endpoint then attempts to cancel open orders. If cancellation fails, the system remains HALTED and the broker account must be checked manually. Record the incident, release SHA, service revision, event timestamp, cancellation result, and follow-up owner.
@@ -67,28 +113,30 @@ For a repeatable protected run, configure `ATLAS_OANDA_ARCHIVE_BUCKET`, `ATLAS_O
 
 ## Staging runtime database identity
 
-Run `.github/workflows/staging-identity-preflight.yml` manually from `main`, using the protected `staging` environment and explicit non-production Supabase project ref. The job is read-only: it verifies the deployed Cloud Run service account, database Secret Manager reference, database host, connection identity, Alembic revision, public-table RLS, and runtime role capabilities. It never creates roles or alters grants.
+Run `.github/workflows/staging-identity-preflight.yml` manually from `main`, using the protected `staging` environment and the existing Supabase project ref. For this free single-project setup, set `ATLAS_STAGING_SUPABASE_PROJECT_REF` and `ATLAS_PRODUCTION_SUPABASE_PROJECT_REF` to the same actual ref; no second project or paid branch is required. Staging means the protected staging Cloud Run service/configuration plus the isolated `customer_paper` schema in that same Supabase database. The job is read-only: it verifies the deployed Cloud Run service account, database Secret Manager reference, database host, connection identity, Alembic revision, public-table RLS, and runtime role capabilities. It never creates roles or alters grants.
 
-A valid result requires a dedicated login role that is not a table owner, superuser, gateway/service role, or role/database administrator; has `NOINHERIT`; has explicitly granted access; and has the reviewed backend-only `BYPASSRLS` capability required by migration 0049's no-generic-policy design. **Do not assume that the currently connected Supabase project is staging until its project ref is explicitly compared with the production ref.** If the protected environment/variables or dedicated role are absent, the job must remain blocked. Do not use `postgres` or `service_role` as the deployed application's database identity.
+A valid result requires a dedicated application login role that is not a table owner, superuser, gateway/service role, or role/database administrator; has `NOINHERIT`; has explicitly granted access; and has the reviewed backend-only `BYPASSRLS` capability required by migration 0049's no-generic-policy design. Matching staging and production refs are permitted because this project intentionally uses one Supabase project at the current development stage. That makes the public application schema shared: keep `PAPER_TRADING=true`, `LIVE_TRADING_ENABLED=false`, `CUSTOMER_LIVE_TRADING_ENABLED=false`, `PAYOUT_LIVE_ENABLED=false`, and `BROKER_SANDBOX=true`; route simulated customer activity only to `customer_paper` using its separate least-privilege role. If the protected staging service/configuration or required roles are absent, the job must remain blocked. Do not use `postgres` or `service_role` as the deployed application's runtime identity.
 
 The repository's main branch has previously been reported as lacking branch protection. A check that merely requires `refs/heads/main` is not the same as verified branch protection. Configure and verify required status checks in repository settings with an account that has permission to do so.
 
 ## Backup restoration and ledger/provider reconciliation drill
 
-Run this only against a separately isolated staging target. Restore into a *new or disposable target*, never over the source database. Do not relax the current Supabase plan, create a paid branch, or substitute a production connection to work around missing isolation.
+The running staging service and paper-trading schema must use the existing free Supabase project; do not create a separate project or paid branch. Set both protected project-ref variables to the current project's ref. The customer-paper schema is the rehearsal boundary for simulated orders, positions, and balances. It shares compute, availability, and backup/restore scope with the public application schema, so it is not a separate database failure domain.
 
-1. Record backup provider/source, backup ID or timestamp, source project ref, intended staging project ref, database revision, and the person authorizing the drill. Verify the source and target project refs differ before restoring.
+A full-project restore is a separate recovery exercise. Never restore a backup over the only active database just to make a workflow pass. If the current free plan offers no non-destructive restore target inside this same project, keep the *full restore certification* explicitly BLOCKED rather than creating another project/paid branch or risking the active source. This does not prevent paper-only staging/preflight in the current project; it does prevent claiming that disaster recovery has been proven.
+
+1. Record backup provider/source, backup ID or timestamp, the current project ref, database revision, and the person authorizing any recovery exercise. Equal staging/production refs are expected in this single-project setup; any actual restore operation must have a provider-backed record and a safe target.
 2. Restore the backup using the provider-supported restore path. Record the restore operation ID and completion time. Do not report the CI disposable-database smoke test as this drill.
 3. Run `python -m alembic check`, `deploy/validate-postgres-constraints.py`, the PostgreSQL ledger concurrency tests, and the targeted ledger/withdrawal recovery tests against the restored target.
 4. Compare journal debits and credits, journal-to-entry relationships, withdrawal/payout reserves, idempotency keys, provider IDs, and unresolved `UNKNOWN` outcomes. Store sanitized queries/results and the row counts/hash of the exported evidence, without database URLs, credentials, or customer PII.
 5. Reconcile against the provider's sandbox/practice or read-only transaction export. Every provider operation must map to exactly one intended ledger transition. Do not issue a real transfer or retry a payout as part of verification.
 6. Record discrepancies, fixes, rerun results, restore RTO, data-loss/RPO observations, and reviewer sign-off. A test suite running on a temporary database is supporting evidence only; it is not a backup restoration or external-provider reconciliation.
 
-For the read-only database checks, first perform the provider's real restore into a dedicated staging project and retain its operation record. Then run `Audit restored staging database` manually from `main` with the provider operation ID, immutable backup reference, and operation-record URL/URI. The workflow checks that the target host maps to the explicit staging project (distinct from production), that the database revision is 0049, and that public-table RLS, role permissions, journal balance/idempotency, and non-negative customer ledger buckets pass. Its supplied operation ID/URI is operator-provided evidence metadata; a reviewer must corroborate it against the backup provider's own record. The workflow is read-only and does not perform the restore or modify/migrate the database.
+For the read-only audit, run `Audit restored staging database` manually from `main` with the real provider operation ID, immutable backup reference, and operation-record URL/URI only after a safe, documented restore has completed. It accepts the same project ref for staging and production, verifies the database host matches that explicit existing project, and checks for revision `0051_research_trial_archive`, public-table RLS, role permissions, journal balance/idempotency, and non-negative customer ledger buckets. It does not perform the restore. When there is no non-destructive restore target available under the current free setup, do not fabricate these inputs; leave the full restore drill blocked while proceeding with the same-project staging identity/paper preflight. Its supplied operation ID/URI is operator-provided evidence metadata; a reviewer must corroborate it against the backup provider's own record. The workflow is read-only and does not perform the restore or modify/migrate the database.
 
-For payout statement matching, upload a provider-generated, appropriately filtered CSV to the restricted `ATLAS_PROVIDER_STATEMENT_BUCKET` under `provider-statements/`. Required columns are `provider_id,amount,currency,status,event_time_utc`; every row must refer to an Atlas withdrawal payout, not unrelated venue/account activity. Then run `Reconcile provider payout statement to staging ledger` manually from `main`. Configure the protected staging variables `ATLAS_PROVIDER_STATEMENT_BUCKET`, `ATLAS_STAGING_EVIDENCE_BUCKET`, `ATLAS_STAGING_SUPABASE_PROJECT_REF`, `ATLAS_PRODUCTION_SUPABASE_PROJECT_REF`, `ATLAS_STAGING_DATABASE_SECRET`, and `ATLAS_STAGING_RUNTIME_DB_ROLE`, plus Workload Identity Federation and the dedicated `GCP_STAGING_RECONCILIATION_SERVICE_ACCOUNT`. The job compares provider IDs, exact amounts/currencies, normalized provider outcomes, reserve/settlement/release journal idempotency, journal balance, RLS state, and runtime database privileges using a read-only connection. The statement must cover every withdrawal created within the chosen internal timestamp window; unmatched IDs or UNKNOWN operations without provider IDs fail the gate. The detailed evidence is stored in the restricted GCS evidence bucket; the Actions summary contains counts and the statement hash only.
+For payout statement matching, upload a provider-generated, appropriately filtered CSV to the restricted `ATLAS_PROVIDER_STATEMENT_BUCKET` under `provider-statements/`. Required columns are `provider_id,amount,currency,status,event_time_utc`; every row must refer to an Atlas withdrawal payout, not unrelated venue/account activity. Then run `Reconcile provider payout statement to staging ledger` manually from `main`. Configure the protected staging variables `ATLAS_PROVIDER_STATEMENT_BUCKET`, `ATLAS_STAGING_EVIDENCE_BUCKET`, `ATLAS_STAGING_SUPABASE_PROJECT_REF` and `ATLAS_PRODUCTION_SUPABASE_PROJECT_REF` (both set to the same current project ref for this setup), `ATLAS_STAGING_DATABASE_SECRET`, and `ATLAS_STAGING_RUNTIME_DB_ROLE`, plus Workload Identity Federation and the dedicated `GCP_STAGING_RECONCILIATION_SERVICE_ACCOUNT`. The job compares provider IDs, exact amounts/currencies, normalized provider outcomes, reserve/settlement/release journal idempotency, journal balance, RLS state, and runtime database privileges using a read-only connection. The statement must cover every withdrawal created within the chosen internal timestamp window; unmatched IDs or UNKNOWN operations without provider IDs fail the gate. The detailed evidence is stored in the restricted GCS evidence bucket; the Actions summary contains counts and the statement hash only.
 
-If no isolated target or read-only provider proof is available, mark both drills BLOCKED and keep the pilot closed.
+If no safe full-project restore target is available, mark the recovery drill BLOCKED without blocking the same-project paper staging preflight. If a provider-generated read-only statement is unavailable or mismatched, mark provider reconciliation BLOCKED. In either case, keep the live-money pilot closed.
 
 ## Alerting
 

@@ -33,7 +33,7 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
 
-      - name: Require explicit staging target configuration
+      - name: Require explicit staging target configuration (same-project supported)
         shell: bash
         env:
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
@@ -48,7 +48,7 @@ jobs:
           set -euo pipefail
           : "${GCP_PROJECT_ID:?Missing protected GCP_PROJECT_ID secret}"
           : "${GCP_REGION:?Missing protected GCP_REGION secret}"
-          : "${PRODUCTION_SUPABASE_PROJECT_REF:?Set ATLAS_PRODUCTION_SUPABASE_PROJECT_REF to the actual production project ref}"
+          : "${PRODUCTION_SUPABASE_PROJECT_REF:?Set ATLAS_PRODUCTION_SUPABASE_PROJECT_REF to the current project ref (same as staging for the free single-project setup)}"
           : "${STAGING_SUPABASE_PROJECT_REF:?Set staging environment variable ATLAS_STAGING_SUPABASE_PROJECT_REF}"
           : "${STAGING_DATABASE_SECRET:?Set staging environment variable ATLAS_STAGING_DATABASE_SECRET}"
           : "${STAGING_CLOUD_RUN_SERVICE:?Set staging environment variable ATLAS_STAGING_CLOUD_RUN_SERVICE}"
@@ -56,13 +56,15 @@ jobs:
           : "${EXPECTED_RUNTIME_DB_ROLE:?Set staging environment variable ATLAS_STAGING_RUNTIME_DB_ROLE}"
           [[ "$PRODUCTION_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]] || { echo "BLOCKED: production project ref must be an explicit 20-character Supabase project ref"; exit 1; }
           [[ "$STAGING_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]] || { echo "BLOCKED: staging project ref must be an explicit 20-character Supabase project ref"; exit 1; }
-          [[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]] || { echo "BLOCKED: staging must use a different Supabase project from production"; exit 1; }
+          if [[ "$STAGING_SUPABASE_PROJECT_REF" == "$PRODUCTION_SUPABASE_PROJECT_REF" ]]; then
+            echo "Same-project staging selected; paper/live/payout safety flags and the dedicated paper schema remain mandatory."
+          fi
           [[ "$STAGING_DATABASE_SECRET" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "BLOCKED: invalid staging Secret Manager secret name"; exit 1; }
           [[ "$STAGING_CLOUD_RUN_SERVICE" =~ ^[a-z][a-z0-9-]{0,48}$ ]] || { echo "BLOCKED: invalid staging Cloud Run service name"; exit 1; }
           [[ "$EXPECTED_RUNTIME_SERVICE_ACCOUNT" =~ ^[a-zA-Z0-9._@-]+$ ]] || { echo "BLOCKED: invalid expected staging runtime service account"; exit 1; }
           [[ "$EXPECTED_RUNTIME_DB_ROLE" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || { echo "BLOCKED: invalid expected runtime database role"; exit 1; }
           [[ ! "$EXPECTED_RUNTIME_DB_ROLE" =~ ^(postgres|service_role|supabase_admin|supabase_auth_admin|authenticator|anon|authenticated)$ ]] || { echo "BLOCKED: reserved or privileged role is not an approved runtime database role"; exit 1; }
-          echo "Explicit isolated-staging identity configuration is present."
+          echo "Explicit staging identity configuration is present; same-project staging is allowed."
 
       - name: Verify deployed staging Cloud Run identity and database secret wiring
         shell: bash

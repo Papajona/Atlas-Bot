@@ -273,11 +273,13 @@ def test_staging_identity_preflight_is_manual_main_only_and_read_only():
     assert "alembic upgrade" not in workflow
 
 
-def test_staging_identity_preflight_requires_a_distinct_project_and_runtime_identity():
+def test_staging_identity_preflight_allows_same_project_and_checks_runtime_identity():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
     assert "ATLAS_PRODUCTION_SUPABASE_PROJECT_REF" in workflow
     assert "STAGING_SUPABASE_PROJECT_REF" in workflow
-    assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' in workflow
+    assert "same-project supported" in workflow
+    assert 'if [[ "$STAGING_SUPABASE_PROJECT_REF" == "$PRODUCTION_SUPABASE_PROJECT_REF" ]]; then' in workflow
+    assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in workflow
     assert "ATLAS_STAGING_CLOUD_RUN_SERVICE" in workflow
     assert "ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT" in workflow
     assert '"gcloud", "run", "services", "describe"' in workflow

@@ -48,7 +48,7 @@ jobs:
       TO_UTC: ${{ inputs.to_utc }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Validate protected staging config and input paths
+      - name: Validate protected same-project staging config and input paths
         shell: bash
         run: |
           set -euo pipefail
@@ -57,7 +57,7 @@ jobs:
           : "${STATEMENT_BUCKET:?Set ATLAS_PROVIDER_STATEMENT_BUCKET in staging}"
           : "${EVIDENCE_BUCKET:?Set ATLAS_STAGING_EVIDENCE_BUCKET in staging}"
           : "${STAGING_SUPABASE_PROJECT_REF:?Set ATLAS_STAGING_SUPABASE_PROJECT_REF in staging}"
-          : "${PRODUCTION_SUPABASE_PROJECT_REF:?Set ATLAS_PRODUCTION_SUPABASE_PROJECT_REF in staging}"
+          : "${PRODUCTION_SUPABASE_PROJECT_REF:?Set ATLAS_PRODUCTION_SUPABASE_PROJECT_REF to the current project ref (same as staging for the free single-project setup)}"
           : "${STAGING_DATABASE_SECRET:?Set ATLAS_STAGING_DATABASE_SECRET in staging}"
           : "${EXPECTED_RUNTIME_DB_ROLE:?Set ATLAS_STAGING_RUNTIME_DB_ROLE in staging}"
           : "${PROVIDER:?Supply a provider name}"
@@ -65,10 +65,9 @@ jobs:
           [[ "$PROVIDER" =~ ^[A-Za-z0-9_-]{1,40}$ ]] || { echo "BLOCKED: invalid provider name"; exit 1; }
           [[ "$STAGING_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]
           [[ "$PRODUCTION_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]
-          test "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" || {
-            echo "BLOCKED: staging and production project refs are the same"
-            exit 1
-          }
+          if [[ "$STAGING_SUPABASE_PROJECT_REF" == "$PRODUCTION_SUPABASE_PROJECT_REF" ]]; then
+            echo "Same-project reconciliation selected; this job remains read-only and performs no provider calls or money movement."
+          fi
           [[ "$STATEMENT_OBJECT" =~ ^provider-statements/[A-Za-z0-9._/-]+\.csv$ && "$STATEMENT_OBJECT" != *".."* ]] || {
             echo "BLOCKED: provider statement must be a CSV object under provider-statements/"
             exit 1

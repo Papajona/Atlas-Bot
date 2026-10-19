@@ -26,6 +26,8 @@ REAL_MONEY_TABLES = (
 )
 PAPER_TABLES = (
     "customer_paper.accounts", "customer_paper.journals", "customer_paper.journal_lines",
+    "customer_paper.orders", "customer_paper.order_events", "customer_paper.fills",
+    "customer_paper.position_events",
 )
 
 
@@ -108,15 +110,24 @@ def _postgres_url(value: str) -> URL:
     return url
 
 
-def validate_database_url_pair(primary_url: str, paper_url: str) -> dict[str, Any]:
-    """Validate distinct server-side credentials/endpoints before any network access."""
+def validate_database_url_pair(
+    primary_url: str, paper_url: str, *, allow_same_database: bool = False
+) -> dict[str, Any]:
+    """Validate distinct runtime credentials and the selected database isolation boundary.
+
+    Shared-database mode is an explicit opt-in and remains gated by the live ACL/RLS preflight.
+    """
     primary = _postgres_url(primary_url)
     paper = _postgres_url(paper_url)
-    if (primary.host.casefold(), primary.port or 5432, primary.database) == (
+    same_database = (
+        primary.host.casefold(), primary.port or 5432, primary.database
+    ) == (
         paper.host.casefold(), paper.port or 5432, paper.database
-    ):
+    )
+    if same_database and not allow_same_database:
         raise ValueError(
-            "customer paper ledger must use a separate PostgreSQL database; a different role alone is not isolation"
+            "customer paper ledger must use a separate PostgreSQL database unless "
+            "shared-database schema isolation is explicitly enabled"
         )
     if primary.username == paper.username:
         raise ValueError("customer paper ledger requires a distinct PostgreSQL runtime role")
@@ -126,12 +137,13 @@ def validate_database_url_pair(primary_url: str, paper_url: str) -> dict[str, An
         "primary_host": primary.host.casefold(),
         "paper_host": paper.host.casefold(),
         "same_server": (primary.host.casefold(), primary.port or 5432) == (paper.host.casefold(), paper.port or 5432),
+        "same_database": same_database,
+        "isolation_mode": "shared_database_schema" if same_database else "separate_database",
         "primary_database": primary.database,
         "paper_database": paper.database,
         "distinct_runtime_roles": True,
         "distinct_credentials": True,
     }
-
 
 async def preflight_isolated_customer_paper_ledger(
     *,
@@ -151,9 +163,14 @@ async def preflight_isolated_customer_paper_ledger(
     if not paper_value:
         return {"status": "BLOCKED", "reason": "CUSTOMER_PAPER_DATABASE_URL_MISSING"}
     try:
-        pair = validate_database_url_pair(primary_value, paper_value)
+        pair = validate_database_url_pair(
+            primary_value,
+            paper_value,
+            allow_same_database=bool(settings.customer_paper_shared_database_enabled),
+        )
     except ValueError as exc:
         return {"status": "BLOCKED", "reason": "DATABASE_URL_ISOLATION_INVALID", "detail": str(exc)}
+    same_database = bool(pair.get("same_database"))
 
     engine = create_async_engine(
         paper_value if "+asyncpg" in paper_value else _postgres_url(paper_value).render_as_string(hide_password=False),
@@ -163,23 +180,42 @@ async def preflight_isolated_customer_paper_ledger(
     try:
         async with engine.connect() as conn:
             identity = (await conn.exec_driver_sql(
-                "SELECT current_database(), current_user, "
+                "SELECT current_database(), current_user, session_user, "
                 "current_setting('transaction_read_only'), "
+                "(SELECT rolcanlogin FROM pg_roles WHERE rolname = current_user), "
                 "(SELECT rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication "
                 " FROM pg_roles WHERE rolname = current_user), "
                 "(SELECT rolinherit OR rolbypassrls FROM pg_roles WHERE rolname = current_user), "
                 "(SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member "
                 " WHERE r.rolname=current_user), "
+                "(SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.roleid "
+                " WHERE r.rolname=current_user), "
                 "has_schema_privilege(current_user, 'public', 'USAGE'), "
-                "has_schema_privilege(current_user, 'public', 'CREATE')"
+                "has_schema_privilege(current_user, 'public', 'CREATE'), "
+                "(SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname='customer_paper')), "
+                "COALESCE((SELECT has_schema_privilege(current_user, n.oid, 'USAGE') "
+                "FROM pg_namespace n WHERE n.nspname='customer_paper'), false), "
+                "COALESCE((SELECT has_schema_privilege(current_user, n.oid, 'CREATE') "
+                "FROM pg_namespace n WHERE n.nspname='customer_paper'), false)"
             )).one()
-            (db_name, role_name, read_only, elevated, unsafe_rls_role, memberships,
-             public_schema_usage, public_schema_create) = identity
+            (db_name, role_name, session_role_name, read_only, role_can_login, elevated,
+             unsafe_rls_role, memberships, member_count, public_schema_usage, public_schema_create,
+             paper_schema_present, paper_schema_usage, paper_schema_create) = identity
             if db_name != _postgres_url(paper_value).database:
                 return {"status": "BLOCKED", "reason": "PAPER_DATABASE_IDENTITY_MISMATCH"}
+            configured_paper_role = _postgres_url(paper_value).username
+            if role_name != configured_paper_role or session_role_name != role_name:
+                return {"status": "BLOCKED", "reason": "PAPER_ROLE_IDENTITY_MISMATCH"}
+            if not bool(role_can_login):
+                return {"status": "BLOCKED", "reason": "PAPER_RUNTIME_ROLE_CANNOT_LOGIN"}
             if role_name == _postgres_url(primary_value).username:
                 return {"status": "BLOCKED", "reason": "PAPER_ROLE_REUSES_PRIMARY_ROLE"}
-            if bool(elevated) or bool(unsafe_rls_role) or int(memberships) != 0:
+            if (
+                bool(elevated)
+                or bool(unsafe_rls_role)
+                or int(memberships) != 0
+                or int(member_count) != 0
+            ):
                 return {"status": "BLOCKED", "reason": "PAPER_ROLE_HAS_UNSAFE_DATABASE_CAPABILITIES"}
             if str(read_only).lower() not in {"off", "false", "f"}:
                 # A global read-only connection is insufficient to verify order write grants.
@@ -191,6 +227,12 @@ async def preflight_isolated_customer_paper_ledger(
             # the default public USAGE grant simply to run the isolated paper ledger.
             if bool(public_schema_create):
                 return {"status": "BLOCKED", "reason": "PAPER_ROLE_HAS_UNEXPECTED_PUBLIC_SCHEMA_CREATE"}
+            if not bool(paper_schema_present):
+                return {"status": "BLOCKED", "reason": "PAPER_SCHEMA_NOT_PROVISIONED"}
+            if not bool(paper_schema_usage):
+                return {"status": "BLOCKED", "reason": "PAPER_SCHEMA_USAGE_MISSING"}
+            if bool(paper_schema_create):
+                return {"status": "BLOCKED", "reason": "PAPER_SCHEMA_CREATE_ALLOWED"}
             table_rows = (await conn.execute(text(
                 """
                 SELECT n.nspname || '.' || c.relname AS table_name,
@@ -200,10 +242,10 @@ async def preflight_isolated_customer_paper_ledger(
                        has_table_privilege(current_user, c.oid, 'UPDATE') AS can_update,
                        has_table_privilege(current_user, c.oid, 'DELETE') AS can_delete
                 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                WHERE (n.nspname='customer_paper' AND c.relname IN ('accounts','journals','journal_lines'))
+                WHERE (n.nspname='customer_paper' AND c.relname = ANY(:paper_table_names))
                    OR (n.nspname='public' AND c.relname = ANY(:real_tables))
                 """),
-                {"real_tables": list(REAL_MONEY_TABLES)},
+                {"real_tables": list(REAL_MONEY_TABLES), "paper_table_names": [name.split(".", 1)[1] for name in PAPER_TABLES]},
             )).mappings().all()
             by_name = {str(row["table_name"]): row for row in table_rows}
             missing_paper = sorted(set(PAPER_TABLES) - set(by_name))
@@ -223,6 +265,44 @@ async def preflight_isolated_customer_paper_ledger(
                     insecure_paper.append(f"{name}:UPDATE_ALLOWED")
                 if bool(row["can_delete"]):
                     insecure_paper.append(f"{name}:DELETE_ALLOWED")
+            paper_sequence_rows = (await conn.execute(text(
+                """
+                SELECT c.oid::regclass::text AS sequence_name,
+                       has_sequence_privilege(current_user, c.oid, 'USAGE') AS can_use
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'customer_paper'
+                  AND c.relkind = 'S'
+                  AND c.oid IN (
+                      NULLIF(pg_get_serial_sequence('customer_paper.accounts', 'id'), '')::regclass,
+                      NULLIF(pg_get_serial_sequence('customer_paper.journal_lines', 'id'), '')::regclass,
+                      NULLIF(pg_get_serial_sequence('customer_paper.order_events', 'id'), '')::regclass,
+                      NULLIF(pg_get_serial_sequence('customer_paper.position_events', 'id'), '')::regclass
+                  )
+                """
+            ))).mappings().all()
+            expected_sequences = {
+                "customer_paper.accounts_id_seq",
+                "customer_paper.journal_lines_id_seq",
+                "customer_paper.order_events_id_seq",
+                "customer_paper.position_events_id_seq",
+            }
+            observed_sequences = {str(row["sequence_name"]) for row in paper_sequence_rows}
+            if (
+                observed_sequences != expected_sequences
+                or any(not bool(row["can_use"]) for row in paper_sequence_rows)
+            ):
+                return {
+                    "status": "BLOCKED",
+                    "reason": "PAPER_SEQUENCE_PRIVILEGES_UNSAFE",
+                    "sequences": [
+                        {
+                            "name": str(row["sequence_name"]),
+                            "can_use": bool(row["can_use"]),
+                        }
+                        for row in paper_sequence_rows
+                    ],
+                }
             policy_rows = (await conn.execute(text(
                 "SELECT policyname, permissive, cmd, tablename, "
                 "coalesce(qual,'') AS qual, coalesce(with_check,'') AS with_check, roles "
@@ -231,7 +311,7 @@ async def preflight_isolated_customer_paper_ledger(
             policy_by_table: dict[str, list[Mapping[str, Any]]] = {}
             for policy in policy_rows:
                 policy_by_table.setdefault(str(policy["tablename"]), []).append(policy)
-            for table in ("accounts", "journals", "journal_lines"):
+            for table in (name.split(".", 1)[1] for name in PAPER_TABLES):
                 candidates = policy_by_table.get(table, [])
                 row = candidates[0] if len(candidates) == 1 else None
                 policy_error = _tenant_policy_validation_error(row, str(role_name))
@@ -271,16 +351,45 @@ async def preflight_isolated_customer_paper_ledger(
                     )).one()
                     if primary_db != _postgres_url(primary_value).database:
                         return {"status": "BLOCKED", "reason": "PRIMARY_DATABASE_IDENTITY_MISMATCH"}
+                    # PostgreSQL roles are cluster-local. If the paper role belongs to
+                    # a separate database cluster, it may not exist in this cluster.
+                    # The privilege probes below INNER JOIN pg_roles first, so absence
+                    # yields no exposed privileges rather than a "role does not exist"
+                    # exception; any same-named role that does exist is fully inspected.
+                    primary_paper_role = (await primary_conn.execute(text(
+                        """
+                        SELECT
+                            r.rolsuper OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication AS elevated,
+                            r.rolinherit OR r.rolbypassrls AS unsafe_rls_role,
+                            (SELECT count(*) FROM pg_auth_members m WHERE m.member = r.oid) AS memberships,
+                            (SELECT count(*) FROM pg_auth_members m WHERE m.roleid = r.oid) AS member_count
+                        FROM pg_roles r
+                        WHERE r.rolname = CAST(:paper_role AS name)
+                        """
+                    ), {"paper_role": role_name})).mappings().first()
+                    paper_role_present_on_primary = primary_paper_role is not None
+                    if primary_paper_role is not None and (
+                        bool(primary_paper_role["elevated"])
+                        or bool(primary_paper_role["unsafe_rls_role"])
+                        or int(primary_paper_role["memberships"]) != 0
+                        or int(primary_paper_role["member_count"]) != 0
+                    ):
+                        return {
+                            "status": "BLOCKED",
+                            "reason": "PAPER_ROLE_HAS_UNSAFE_PRIMARY_ROLE_CAPABILITIES",
+                        }
                     primary_schema_rows = (await primary_conn.execute(text(
                         """
                         SELECT n.nspname,
-                               has_schema_privilege(CAST(:paper_role AS name), n.oid, 'USAGE') AS can_use,
-                               has_schema_privilege(CAST(:paper_role AS name), n.oid, 'CREATE') AS can_create
+                               has_schema_privilege(r.oid, n.oid, 'USAGE') AS can_use,
+                               has_schema_privilege(r.oid, n.oid, 'CREATE') AS can_create
                         FROM pg_namespace n
+                        JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
+                          AND (NOT :same_database OR n.nspname <> 'customer_paper')
                         """
-                    ), {"paper_role": role_name})).mappings().all()
+                    ), {"paper_role": role_name, "same_database": same_database})).mappings().all()
                     # PostgreSQL normally grants USAGE on the "public" schema to
                     # PUBLIC. That alone does not grant table/function privileges and
                     # would make every distinct paper role fail preflight by default.
@@ -304,19 +413,21 @@ async def preflight_isolated_customer_paper_ledger(
                     primary_table_rows = (await primary_conn.execute(text(
                         """
                         SELECT n.nspname || '.' || c.relname AS table_name,
-                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'SELECT') AS can_select,
-                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'INSERT') AS can_insert,
-                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'UPDATE') AS can_update,
-                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'DELETE') AS can_delete,
-                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'TRUNCATE') AS can_truncate,
-                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'REFERENCES') AS can_reference,
-                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'TRIGGER') AS can_trigger
+                               has_table_privilege(r.oid, c.oid, 'SELECT') AS can_select,
+                               has_table_privilege(r.oid, c.oid, 'INSERT') AS can_insert,
+                               has_table_privilege(r.oid, c.oid, 'UPDATE') AS can_update,
+                               has_table_privilege(r.oid, c.oid, 'DELETE') AS can_delete,
+                               has_table_privilege(r.oid, c.oid, 'TRUNCATE') AS can_truncate,
+                               has_table_privilege(r.oid, c.oid, 'REFERENCES') AS can_reference,
+                               has_table_privilege(r.oid, c.oid, 'TRIGGER') AS can_trigger
                         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                        JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
+                          AND (NOT :same_database OR n.nspname <> 'customer_paper')
                           AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
                         """
-                    ), {"paper_role": role_name})).mappings().all()
+                    ), {"paper_role": role_name, "same_database": same_database})).mappings().all()
                     primary_exposure = []
                     for row in primary_table_rows:
                         for permission in (
@@ -328,15 +439,17 @@ async def preflight_isolated_customer_paper_ledger(
                     primary_sequence_rows = (await primary_conn.execute(text(
                         """
                         SELECT n.nspname || '.' || c.relname AS sequence_name,
-                               has_sequence_privilege(CAST(:paper_role AS name), c.oid, 'SELECT') AS can_select,
-                               has_sequence_privilege(CAST(:paper_role AS name), c.oid, 'USAGE') AS can_use,
-                               has_sequence_privilege(CAST(:paper_role AS name), c.oid, 'UPDATE') AS can_update
+                               has_sequence_privilege(r.oid, c.oid, 'SELECT') AS can_select,
+                               has_sequence_privilege(r.oid, c.oid, 'USAGE') AS can_use,
+                               has_sequence_privilege(r.oid, c.oid, 'UPDATE') AS can_update
                         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                        JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
+                          AND (NOT :same_database OR n.nspname <> 'customer_paper')
                           AND c.relkind = 'S'
                         """
-                    ), {"paper_role": role_name})).mappings().all()
+                    ), {"paper_role": role_name, "same_database": same_database})).mappings().all()
                     for row in primary_sequence_rows:
                         for permission in ("can_select", "can_use", "can_update"):
                             if bool(row[permission]):
@@ -345,10 +458,11 @@ async def preflight_isolated_customer_paper_ledger(
                         """
                         SELECT n.nspname || '.' || p.proname AS function_name
                         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                        JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
                           AND p.prosecdef
-                          AND has_function_privilege(CAST(:paper_role AS name), p.oid, 'EXECUTE')
+                          AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
                         """
                     ), {"paper_role": role_name})).mappings().all()
                     for row in primary_security_definer_rows:
@@ -363,11 +477,23 @@ async def preflight_isolated_customer_paper_ledger(
                 await primary_engine.dispose()
             return {
                 "status": "PASS",
-                "reason": "ISOLATED_CUSTOMER_PAPER_DATABASE_PREFLIGHT_PASS",
+                "reason": (
+                    "SHARED_DATABASE_SCHEMA_PREFLIGHT_PASS"
+                    if same_database
+                    else "ISOLATED_CUSTOMER_PAPER_DATABASE_PREFLIGHT_PASS"
+                ),
                 "identity": {"database": db_name, "role": role_name},
                 "url_pair": pair,
+                "isolation_mode": pair["isolation_mode"],
+                "same_database_schema_isolation": same_database,
                 "paper_tables": sorted(PAPER_TABLES),
+                "paper_sequence_privileges": "USAGE_VERIFIED_FOR_ALL_FOUR_IDENTITY_SEQUENCES",
                 "real_money_table_privileges": "NONE_FOR_ALL_EXISTING_CHECKED_TABLES",
+                "primary_role_identity_check": (
+                    "ROLE_PRESENT_PRIVILEGES_CHECKED"
+                    if paper_role_present_on_primary
+                    else "ROLE_ABSENT_FROM_PRIMARY_CLUSTER"
+                ),
                 "read_only_preflight": True,
                 "enables_customer_paper_trading": False,
             }
@@ -384,7 +510,7 @@ PAPER_ACCOUNT_CODES = frozenset({
 })
 PAPER_EVENT_TYPES = frozenset({
     "PAPER_SEED", "SIMULATED_FILL", "SIMULATED_FEE",
-    "SIMULATED_FUNDING", "SIMULATED_REALIZED_PNL", "RESET",
+    "SIMULATED_FUNDING", "SIMULATED_REALIZED_PNL", "REVERSAL", "RESET",
 })
 _CURRENCY_RE = re.compile(r"^[A-Z0-9]{2,12}$")
 _AMOUNT_QUANTUM = Decimal("0.000000000000000001")
@@ -529,15 +655,33 @@ async def post_customer_paper_journal(
     preflight, sets tenant RLS context transaction-locally, and avoids all real-money
     ledger sessions and tables.
     """
+    normalized_event = str(event_type or "").strip().upper()
+    if normalized_event != "PAPER_SEED":
+        raise ValueError(
+            "post_customer_paper_journal accepts only PAPER_SEED; fill and reversal "
+            "journals must be created atomically by the customer-paper lifecycle"
+        )
     payload = _validated_paper_journal(
         customer_id=customer_id,
         idempotency_key=idempotency_key,
-        event_type=event_type,
+        event_type=normalized_event,
         currency=currency,
         lines=lines,
         reference=reference,
         metadata=metadata,
     )
+    seed_amounts = {
+        item["account_code"]: Decimal(item["signed_amount"])
+        for item in payload["lines"]
+    }
+    if (
+        set(seed_amounts) != {"PAPER_CASH", "PAPER_EQUITY"}
+        or seed_amounts["PAPER_CASH"] <= 0
+        or seed_amounts["PAPER_EQUITY"] != -seed_amounts["PAPER_CASH"]
+    ):
+        raise ValueError(
+            "PAPER_SEED must add positive PAPER_CASH balanced by the equal negative PAPER_EQUITY"
+        )
     await _assert_customer_paper_ready()
     engine = _paper_engine()
     try:
