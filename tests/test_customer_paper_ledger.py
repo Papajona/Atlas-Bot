@@ -13,6 +13,7 @@ from app.customer_paper_lifecycle import (
     CustomerPaperOrderConflict,
     cancel_customer_paper_order,
     get_customer_paper_order,
+    expire_customer_paper_order,
     get_customer_paper_positions,
     list_open_customer_paper_orders,
     record_customer_paper_fill,
@@ -552,5 +553,133 @@ def test_customer_paper_cash_is_serialized_across_symbols(monkeypatch):
         positions = await get_customer_paper_positions(customer_id=customer_id)
         assert len(positions) == 1
         assert positions[0]["quantity"] == "1.000000000000000000"
+
+    asyncio.run(run())
+
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not (os.getenv("ATLAS_PAPER_TEST_DATABASE_URL") and os.getenv("ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL")),
+    reason="requires the isolated disposable PostgreSQL customer paper databases provisioned by CI",
+)
+def test_customer_paper_sell_pnl_terminal_events_and_reversal_cash_guard(monkeypatch):
+    customer_id = 92004
+    monkeypatch.setattr(settings, "database_url", os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"])
+    monkeypatch.setattr(settings, "customer_paper_database_url", os.environ["ATLAS_PAPER_TEST_DATABASE_URL"])
+    monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
+
+    async def submit_spot_order(client_order_id, symbol, side, limit_price):
+        return await submit_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id=client_order_id,
+            venue="binance",
+            market_type="spot",
+            symbol=symbol,
+            side=side,
+            quantity="1",
+            currency="USDT",
+            order_type="LIMIT",
+            limit_price=limit_price,
+        )
+
+    async def run():
+        await post_customer_paper_journal(
+            customer_id=customer_id,
+            idempotency_key="sell-seed-92004",
+            event_type="PAPER_SEED",
+            currency="USDT",
+            lines=_seed_lines("100"),
+            reference="disposable-sell-test-seed",
+            metadata={"environment": "disposable-ci"},
+        )
+        await submit_spot_order("eth-buy-92004", "ETH/USDT", "BUY", "100")
+        buy = await record_customer_paper_fill(
+            customer_id=customer_id,
+            client_order_id="eth-buy-92004",
+            idempotency_key="eth-buy-fill-92004",
+            bar_key="eth-bar-buy",
+            quantity="1",
+            price="90",
+        )
+        await submit_spot_order("eth-sell-92004", "ETH/USDT", "SELL", "95")
+        sell = await record_customer_paper_fill(
+            customer_id=customer_id,
+            client_order_id="eth-sell-92004",
+            idempotency_key="eth-sell-fill-92004",
+            bar_key="eth-bar-sell",
+            quantity="1",
+            price="95",
+            fee_amount="1",
+        )
+        assert sell["realized_pnl"] == "5.000000000000000000"
+
+        # Cash from ETH sale is subsequently spent on BTC. Reversing that sale
+        # would debit more cash than remains and must not mutate any append-only rows.
+        await submit_spot_order("btc-buy-92004", "BTC/USDT", "BUY", "100")
+        await record_customer_paper_fill(
+            customer_id=customer_id,
+            client_order_id="btc-buy-92004",
+            idempotency_key="btc-buy-fill-92004",
+            bar_key="btc-bar-buy",
+            quantity="1",
+            price="100",
+        )
+        with pytest.raises(CustomerPaperOrderConflict, match="overdraw paper cash"):
+            await reverse_customer_paper_fill(
+                customer_id=customer_id,
+                fill_id=sell["fill_id"],
+                idempotency_key="reverse-eth-sale-after-spend",
+            )
+        balances = await get_customer_paper_balances(customer_id=customer_id)
+        by_code = {row["account_code"]: Decimal(row["balance"]) for row in balances}
+        assert by_code["PAPER_CASH"] == Decimal("4")
+        assert by_code["PAPER_POSITION"] == Decimal("100")
+        assert by_code["PAPER_FEES"] == Decimal("1")
+        assert by_code["PAPER_PNL"] == Decimal("-5")
+        assert by_code["PAPER_EQUITY"] == Decimal("-100")
+
+        await submit_spot_order("sol-cancel-92004", "SOL/USDT", "BUY", "10")
+        cancelled = await cancel_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id="sol-cancel-92004",
+            idempotency_key="sol-cancel-key",
+        )
+        assert cancelled["state"] == "CANCELLED"
+        replay_cancel = await cancel_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id="sol-cancel-92004",
+            idempotency_key="sol-cancel-key",
+        )
+        assert replay_cancel["status"] == "REPLAYED"
+        with pytest.raises(CustomerPaperOrderConflict, match="state CANCELLED"):
+            await record_customer_paper_fill(
+                customer_id=customer_id,
+                client_order_id="sol-cancel-92004",
+                idempotency_key="fill-cancelled-sol",
+                bar_key="sol-after-cancel",
+                quantity="1",
+                price="9",
+            )
+
+        await submit_spot_order("xrp-expire-92004", "XRP/USDT", "BUY", "10")
+        expired = await expire_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id="xrp-expire-92004",
+            idempotency_key="xrp-expiry-key",
+        )
+        assert expired["state"] == "EXPIRED"
+        replay_expiry = await expire_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id="xrp-expire-92004",
+            idempotency_key="xrp-expiry-key",
+        )
+        assert replay_expiry["status"] == "REPLAYED"
+        assert (await get_customer_paper_order(
+            customer_id=customer_id, client_order_id="xrp-expire-92004"
+        ))["status"] == "EXPIRED"
+        assert await list_open_customer_paper_orders(customer_id=customer_id) == []
+        positions = await get_customer_paper_positions(customer_id=customer_id)
+        assert len(positions) == 1 and positions[0]["symbol"] == "BTC/USDT"
 
     asyncio.run(run())
