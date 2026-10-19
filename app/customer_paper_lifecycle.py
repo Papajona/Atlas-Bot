@@ -11,7 +11,7 @@ import json
 import re
 import uuid
 from collections.abc import Mapping
-from decimal import Decimal, InvalidOperation, localcontext, ROUND_HALF_EVEN, localcontext
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from typing import Any
 
 from sqlalchemy import text
