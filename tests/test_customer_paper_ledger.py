@@ -260,7 +260,7 @@ def test_customer_paper_lifecycle_rejects_derivatives_and_mismatched_quote_curre
     from app.customer_paper_lifecycle import submit_customer_paper_order
 
     async def run():
-        with pytest.raises(ValueError, match="spot, swap, forex, or commodity"):
+        with pytest.raises(ValueError, match="spot only"):
             await submit_customer_paper_order(
                 customer_id=92099,
                 client_order_id="unsupported-swap",
