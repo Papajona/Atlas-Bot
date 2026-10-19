@@ -486,6 +486,37 @@ def test_customer_paper_cash_is_serialized_across_symbols(monkeypatch):
                 limit_price="100",
             )
 
+        # The database rejects an order-state event that claims a fill when no
+        # corresponding immutable fill exists, even if a buggy caller bypasses helpers.
+        from sqlalchemy import text
+
+        order_record = await get_customer_paper_order(
+            customer_id=customer_id, client_order_id="cash-btc-order"
+        )
+        engine = paper_lifecycle._paper_engine()
+        try:
+            with pytest.raises(Exception, match="filled_quantity must equal the sum of persisted fills"):
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text("SELECT set_config('app.customer_id', :customer_id, true)"),
+                        {"customer_id": str(customer_id)},
+                    )
+                    await conn.execute(text(
+                        """
+                        INSERT INTO customer_paper.order_events
+                            (customer_id, order_id, event_key, event_type, filled_quantity, metadata_json)
+                        VALUES
+                            (:customer_id, :order_id, 'tampered-cumulative-fill', 'PARTIALLY_FILLED', 1, '{}'::jsonb)
+                        """
+                    ), {"customer_id": customer_id, "order_id": order_record["order_id"]})
+        finally:
+            await engine.dispose()
+        unchanged = await get_customer_paper_order(
+            customer_id=customer_id, client_order_id="cash-btc-order"
+        )
+        assert unchanged["status"] == "SUBMITTED"
+        assert unchanged["filled_quantity"] == "0.000000000000000000"
+
         async def try_fill(client_id, bar):
             try:
                 return await record_customer_paper_fill(
