@@ -53,7 +53,7 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
 
     assert f"--expected-revision {expected}" in workflow
     assert f'default="{expected}"' in verifier
-    assert f"database revision is exactly `{expected}`" in runbook
+    assert f"checks for revision `{expected}`" in runbook
     assert "database revision is 0049" not in runbook
     assert "same Supabase project" in runbook
     assert "project refs differ before restoring" not in runbook
