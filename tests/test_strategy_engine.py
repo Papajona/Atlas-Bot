@@ -384,7 +384,6 @@ def test_paper_candidates_use_oos_metrics_after_signed_archive_verification(monk
                 "intrabar_stop_target_model_complete": True,
                 "execution_cost_model_complete": True,
                 "slippage_model_complete": True,
-        "slippage_model_complete": True,
                 "execution_cost_calibration_status": "VERIFIED",
                 "execution_cost_calibration_evidence_id": "test-cost-evidence",
                 "trial_registry_complete": True,
