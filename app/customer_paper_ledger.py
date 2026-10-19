@@ -619,15 +619,33 @@ async def post_customer_paper_journal(
     preflight, sets tenant RLS context transaction-locally, and avoids all real-money
     ledger sessions and tables.
     """
+    normalized_event = str(event_type or "").strip().upper()
+    if normalized_event != "PAPER_SEED":
+        raise ValueError(
+            "post_customer_paper_journal accepts only PAPER_SEED; fill and reversal "
+            "journals must be created atomically by the customer-paper lifecycle"
+        )
     payload = _validated_paper_journal(
         customer_id=customer_id,
         idempotency_key=idempotency_key,
-        event_type=event_type,
+        event_type=normalized_event,
         currency=currency,
         lines=lines,
         reference=reference,
         metadata=metadata,
     )
+    seed_amounts = {
+        item["account_code"]: Decimal(item["signed_amount"])
+        for item in payload["lines"]
+    }
+    if (
+        set(seed_amounts) != {"PAPER_CASH", "PAPER_EQUITY"}
+        or seed_amounts["PAPER_CASH"] <= 0
+        or seed_amounts["PAPER_EQUITY"] != -seed_amounts["PAPER_CASH"]
+    ):
+        raise ValueError(
+            "PAPER_SEED must add positive PAPER_CASH balanced by the equal negative PAPER_EQUITY"
+        )
     await _assert_customer_paper_ready()
     engine = _paper_engine()
     try:
