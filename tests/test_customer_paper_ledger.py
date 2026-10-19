@@ -247,23 +247,14 @@ def test_isolated_customer_paper_ledger_posting_replay_and_tenant_isolation(monk
                 metadata={"environment": "disposable-ci"},
             )
 
-        await post_customer_paper_journal(
-            customer_id=91001,
-            idempotency_key="stress-fill-91001",
-            event_type="SIMULATED_FILL",
-            currency="USDT",
-            lines=[
-                {"account_code": "PAPER_CASH", "signed_amount": "-2.5"},
-                {"account_code": "PAPER_CLEARING", "signed_amount": "2.5"},
-            ],
-            reference="test-only-paper-fill",
-            metadata={"order_id": "synthetic-test-order"},
-        )
+        # This writer is intentionally limited to positive seed journals. Simulated
+        # fills must use submit_customer_paper_order/record_customer_paper_fill so
+        # cash, positions, fees, and lifecycle events commit atomically.
         balances = await get_customer_paper_balances(customer_id=91001)
         indexed = {(row["currency"], row["account_code"]): Decimal(row["balance"]) for row in balances}
-        assert indexed[("USDT", "PAPER_CASH")] == Decimal("97.5")
+        assert indexed[("USDT", "PAPER_CASH")] == Decimal("100")
         assert indexed[("USDT", "PAPER_EQUITY")] == Decimal("-100")
-        assert indexed[("USDT", "PAPER_CLEARING")] == Decimal("2.5")
+        assert indexed.get(("USDT", "PAPER_CLEARING"), Decimal("0")) == Decimal("0")
 
         # RLS hides every account and journal line belonging to a different tenant.
         assert await get_customer_paper_balances(customer_id=91002) == []
