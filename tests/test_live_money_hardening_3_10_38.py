@@ -14,6 +14,7 @@ def test_oos_promotion_gate_rejects_weak_last_fold_and_tail_loss():
         'financing_cost_model_complete': True,
         'intrabar_stop_target_model_complete': True,
         'execution_cost_model_complete': True,
+        'slippage_model_complete': True,
         'execution_cost_calibration_status': 'VERIFIED',
         'execution_cost_calibration_evidence_id': 'fixture:venue-cost-calibration', 'trial_registry_complete': True,
     }
