@@ -78,3 +78,22 @@ Do not invoke the workflow until the protected staging environment has the corre
 ## Promotion/release decision
 
 All four gates must be backed by reviewable source artifacts and passing tests on the exact commit. The signed docs, key IDs, raw source hashes, model fingerprints, trial archive IDs and PostgreSQL preflight/reconciliation outputs should be kept as release artifacts with immutable checksums. Test fixtures, CI synthetic values, prospective trial rows, or a green code suite are not substitutes. Keep customer paper execution disabled and all live trading, payouts, withdrawals and customer-fund movement disabled until separate release evidence and approvals are complete.
+
+## 7. Reproducible local evidence-bundle verification
+
+Before a promotion review, retrieve the raw upstream artifacts independently into a restricted local directory and map each exact URI in the signed evidence to a relative filename. Do not download arbitrary URIs from inside the verification script; it intentionally performs no network requests.
+
+The bundle contains:
+- **context.json:** exact venue, market type, asset class, symbol, timeframe, full coverage window, dataset/OOS SHA-256, protocol version, execution_cost_model_fingerprint, and the complete current candidate_labels list;
+- **universe.json, calibration.json, trial_archive.json:** the actual signed documents, not templates or synthetic fixtures;
+- **source-map.json:** a JSON object mapping each exact signed sources[].uri to a relative path under the local raw-source directory;
+- the raw source files themselves.
+
+The point-in-time universe must map listing_history, delisting_history, and failed_assets artifacts. Cost calibration must map observed_fills, order_book, and fee_schedule. The trial archive audit additionally requires raw experiment_log, config_snapshot, code_snapshot, dataset, and oos_results artifacts so the completeness claim can be reconciled to underlying records. Every file is byte-hashed; absolute paths, parent traversal, symlink escapes, unused map entries, missing files, and hash mismatches fail closed.
+
+Set RESEARCH_EVIDENCE_PUBLIC_KEYS_JSON to the reviewed Ed25519 public-key map and set the policy bounds RESEARCH_COST_MAX_SPREAD_MAE_BPS and RESEARCH_COST_MAX_SLIPPAGE_MAE_BPS from reviewed configuration. Then run this command from the repository root:
+
+    python scripts/verify_research_evidence_bundle.py --context context.json --universe universe.json --calibration calibration.json --trial-archive trial_archive.json --source-root raw_sources --source-map source-map.json --output research-evidence-verification.json
+
+A TECHNICAL_VALIDATION_PASS_PENDING_EXTERNAL_REVIEW result means only that the document signatures, context, configured error thresholds, and hashes of the supplied raw files passed. It does not assert that source coverage is complete or truthful and never authorizes promotion. Preserve the report and have an independent reviewer reconcile historical membership, observed fills/order-book snapshots, fee schedules, and all trial logs/configs/results. Never replace missing upstream records with generated fixtures or synthetic observations.
+
