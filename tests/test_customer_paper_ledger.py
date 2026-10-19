@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -42,6 +43,29 @@ def test_customer_paper_database_pair_allows_distinct_databases_on_same_server()
     assert pair["same_server"] is True
     assert pair["distinct_runtime_roles"] is True
     assert pair["distinct_credentials"] is True
+
+
+def test_customer_paper_database_pair_accepts_distinct_database_clusters():
+    primary = "postgresql+asyncpg://atlas_primary:primary_password@primary.example:5432/atlas"
+    paper = "postgresql+asyncpg://atlas_paper:paper_password@paper.example:5432/atlas_paper"
+    pair = validate_database_url_pair(primary, paper)
+    assert pair["same_server"] is False
+    assert pair["primary_host"] == "primary.example"
+    assert pair["paper_host"] == "paper.example"
+    assert pair["distinct_runtime_roles"] is True
+    assert pair["distinct_credentials"] is True
+
+
+def test_primary_privilege_preflight_tolerates_paper_role_absent_from_primary_cluster():
+    source = Path("app/customer_paper_ledger.py").read_text(encoding="utf-8")
+    # Roles are cluster-local. Every primary-database ACL probe must join pg_roles
+    # before calling a has_*_privilege function, so an absent cross-cluster principal
+    # produces no rows rather than raising PostgreSQL's "role does not exist" error.
+    assert source.count("JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)") == 4
+    assert "has_schema_privilege(CAST(:paper_role AS name)" not in source
+    assert "has_table_privilege(CAST(:paper_role AS name)" not in source
+    assert "has_sequence_privilege(CAST(:paper_role AS name)" not in source
+    assert "has_function_privilege(CAST(:paper_role AS name)" not in source
 
 
 def test_customer_paper_journal_validation_is_exact_and_balanced():
