@@ -78,6 +78,8 @@ def test_primary_privilege_preflight_tolerates_paper_role_absent_from_primary_cl
     assert "has_table_privilege(CAST(:paper_role AS name)" not in source
     assert "has_sequence_privilege(CAST(:paper_role AS name)" not in source
     assert "has_function_privilege(CAST(:paper_role AS name)" not in source
+    assert "WHERE r.rolname=current_user), \"" in source
+    assert "r.oid=m.roleid" in source
 
 
 def test_customer_paper_journal_validation_is_exact_and_balanced():
