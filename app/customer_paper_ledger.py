@@ -273,12 +273,22 @@ async def preflight_isolated_customer_paper_ledger(
                     )).one()
                     if primary_db != _postgres_url(primary_value).database:
                         return {"status": "BLOCKED", "reason": "PRIMARY_DATABASE_IDENTITY_MISMATCH"}
+                    # PostgreSQL roles are cluster-local. If the paper role belongs to
+                    # a separate database cluster, it may not exist in this cluster.
+                    # The privilege probes below INNER JOIN pg_roles first, so absence
+                    # yields no exposed privileges rather than a "role does not exist"
+                    # exception; any same-named role that does exist is fully inspected.
+                    paper_role_present_on_primary = bool((await primary_conn.execute(
+                        text("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = CAST(:paper_role AS name))"),
+                        {"paper_role": role_name},
+                    )).scalar())
                     primary_schema_rows = (await primary_conn.execute(text(
                         """
                         SELECT n.nspname,
-                               has_schema_privilege(CAST(:paper_role AS name), n.oid, 'USAGE') AS can_use,
-                               has_schema_privilege(CAST(:paper_role AS name), n.oid, 'CREATE') AS can_create
+                               has_schema_privilege(r.oid, n.oid, 'USAGE') AS can_use,
+                               has_schema_privilege(r.oid, n.oid, 'CREATE') AS can_create
                         FROM pg_namespace n
+                        JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
                         """
@@ -306,14 +316,15 @@ async def preflight_isolated_customer_paper_ledger(
                     primary_table_rows = (await primary_conn.execute(text(
                         """
                         SELECT n.nspname || '.' || c.relname AS table_name,
-                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'SELECT') AS can_select,
-                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'INSERT') AS can_insert,
-                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'UPDATE') AS can_update,
-                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'DELETE') AS can_delete,
-                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'TRUNCATE') AS can_truncate,
-                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'REFERENCES') AS can_reference,
-                               has_table_privilege(CAST(:paper_role AS name), c.oid, 'TRIGGER') AS can_trigger
+                               has_table_privilege(r.oid, c.oid, 'SELECT') AS can_select,
+                               has_table_privilege(r.oid, c.oid, 'INSERT') AS can_insert,
+                               has_table_privilege(r.oid, c.oid, 'UPDATE') AS can_update,
+                               has_table_privilege(r.oid, c.oid, 'DELETE') AS can_delete,
+                               has_table_privilege(r.oid, c.oid, 'TRUNCATE') AS can_truncate,
+                               has_table_privilege(r.oid, c.oid, 'REFERENCES') AS can_reference,
+                               has_table_privilege(r.oid, c.oid, 'TRIGGER') AS can_trigger
                         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                        JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
                           AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
@@ -330,10 +341,11 @@ async def preflight_isolated_customer_paper_ledger(
                     primary_sequence_rows = (await primary_conn.execute(text(
                         """
                         SELECT n.nspname || '.' || c.relname AS sequence_name,
-                               has_sequence_privilege(CAST(:paper_role AS name), c.oid, 'SELECT') AS can_select,
-                               has_sequence_privilege(CAST(:paper_role AS name), c.oid, 'USAGE') AS can_use,
-                               has_sequence_privilege(CAST(:paper_role AS name), c.oid, 'UPDATE') AS can_update
+                               has_sequence_privilege(r.oid, c.oid, 'SELECT') AS can_select,
+                               has_sequence_privilege(r.oid, c.oid, 'USAGE') AS can_use,
+                               has_sequence_privilege(r.oid, c.oid, 'UPDATE') AS can_update
                         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                        JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
                           AND c.relkind = 'S'
@@ -347,10 +359,11 @@ async def preflight_isolated_customer_paper_ledger(
                         """
                         SELECT n.nspname || '.' || p.proname AS function_name
                         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                        JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
                           AND p.prosecdef
-                          AND has_function_privilege(CAST(:paper_role AS name), p.oid, 'EXECUTE')
+                          AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
                         """
                     ), {"paper_role": role_name})).mappings().all()
                     for row in primary_security_definer_rows:
@@ -370,6 +383,11 @@ async def preflight_isolated_customer_paper_ledger(
                 "url_pair": pair,
                 "paper_tables": sorted(PAPER_TABLES),
                 "real_money_table_privileges": "NONE_FOR_ALL_EXISTING_CHECKED_TABLES",
+                "primary_role_identity_check": (
+                    "ROLE_PRESENT_PRIVILEGES_CHECKED"
+                    if paper_role_present_on_primary
+                    else "ROLE_ABSENT_FROM_PRIMARY_CLUSTER"
+                ),
                 "read_only_preflight": True,
                 "enables_customer_paper_trading": False,
             }
