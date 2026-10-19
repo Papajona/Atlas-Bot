@@ -139,6 +139,7 @@ def test_oos_promotion_gate_requires_complete_trial_history_and_strong_evidence(
         "financing_cost_model_complete": True,
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True,
+        "slippage_model_complete": True,
         "execution_cost_calibration_status": "VERIFIED",
         "execution_cost_calibration_evidence_id": "fixture:venue-cost-calibration",
         "trial_registry_complete": True,
