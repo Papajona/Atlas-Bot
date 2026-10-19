@@ -165,8 +165,9 @@ async def preflight_isolated_customer_paper_ledger(
     try:
         async with engine.connect() as conn:
             identity = (await conn.exec_driver_sql(
-                "SELECT current_database(), current_user, "
+                "SELECT current_database(), current_user, session_user, "
                 "current_setting('transaction_read_only'), "
+                "(SELECT rolcanlogin FROM pg_roles WHERE rolname = current_user), "
                 "(SELECT rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication "
                 " FROM pg_roles WHERE rolname = current_user), "
                 "(SELECT rolinherit OR rolbypassrls FROM pg_roles WHERE rolname = current_user), "
@@ -175,10 +176,15 @@ async def preflight_isolated_customer_paper_ledger(
                 "has_schema_privilege(current_user, 'public', 'USAGE'), "
                 "has_schema_privilege(current_user, 'public', 'CREATE')"
             )).one()
-            (db_name, role_name, read_only, elevated, unsafe_rls_role, memberships,
-             public_schema_usage, public_schema_create) = identity
+            (db_name, role_name, session_role_name, read_only, role_can_login, elevated,
+             unsafe_rls_role, memberships, public_schema_usage, public_schema_create) = identity
             if db_name != _postgres_url(paper_value).database:
                 return {"status": "BLOCKED", "reason": "PAPER_DATABASE_IDENTITY_MISMATCH"}
+            configured_paper_role = _postgres_url(paper_value).username
+            if role_name != configured_paper_role or session_role_name != role_name:
+                return {"status": "BLOCKED", "reason": "PAPER_ROLE_IDENTITY_MISMATCH"}
+            if not bool(role_can_login):
+                return {"status": "BLOCKED", "reason": "PAPER_RUNTIME_ROLE_CANNOT_LOGIN"}
             if role_name == _postgres_url(primary_value).username:
                 return {"status": "BLOCKED", "reason": "PAPER_ROLE_REUSES_PRIMARY_ROLE"}
             if bool(elevated) or bool(unsafe_rls_role) or int(memberships) != 0:
@@ -225,6 +231,32 @@ async def preflight_isolated_customer_paper_ledger(
                     insecure_paper.append(f"{name}:UPDATE_ALLOWED")
                 if bool(row["can_delete"]):
                     insecure_paper.append(f"{name}:DELETE_ALLOWED")
+            paper_sequence_rows = (await conn.execute(text(
+                """
+                SELECT c.oid::regclass::text AS sequence_name,
+                       has_sequence_privilege(current_user, c.oid, 'USAGE') AS can_use
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'customer_paper'
+                  AND c.relkind = 'S'
+                  AND c.oid IN (
+                      NULLIF(pg_get_serial_sequence('customer_paper.accounts', 'id'), '')::regclass,
+                      NULLIF(pg_get_serial_sequence('customer_paper.journal_lines', 'id'), '')::regclass
+                  )
+                """
+            ))).mappings().all()
+            if len(paper_sequence_rows) != 2 or any(not bool(row["can_use"]) for row in paper_sequence_rows):
+                return {
+                    "status": "BLOCKED",
+                    "reason": "PAPER_SEQUENCE_PRIVILEGES_UNSAFE",
+                    "sequences": [
+                        {
+                            "name": str(row["sequence_name"]),
+                            "can_use": bool(row["can_use"]),
+                        }
+                        for row in paper_sequence_rows
+                    ],
+                }
             policy_rows = (await conn.execute(text(
                 "SELECT policyname, permissive, cmd, tablename, "
                 "coalesce(qual,'') AS qual, coalesce(with_check,'') AS with_check, roles "
@@ -382,6 +414,7 @@ async def preflight_isolated_customer_paper_ledger(
                 "identity": {"database": db_name, "role": role_name},
                 "url_pair": pair,
                 "paper_tables": sorted(PAPER_TABLES),
+                "paper_sequence_privileges": "USAGE_VERIFIED_FOR_ACCOUNTS_AND_JOURNAL_LINES",
                 "real_money_table_privileges": "NONE_FOR_ALL_EXISTING_CHECKED_TABLES",
                 "primary_role_identity_check": (
                     "ROLE_PRESENT_PRIVILEGES_CHECKED"
