@@ -340,6 +340,55 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
             reference="disposable-lifecycle-test-seed",
             metadata={"environment": "disposable-ci"},
         )
+
+        # The database-level deferred trigger rejects a balanced journal that tries
+        # to reduce cash through a forged PAPER_SEED, bypassing the Python writer.
+        from sqlalchemy import text
+
+        engine = paper_lifecycle._paper_engine()
+        try:
+            account_rows = await get_customer_paper_balances(customer_id=customer_id)
+            assert {row["account_code"] for row in account_rows} >= {"PAPER_CASH", "PAPER_EQUITY"}
+            with pytest.raises(Exception, match="PAPER_SEED must add positive PAPER_CASH"):
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text("SELECT set_config('app.customer_id', :customer_id, true)"),
+                        {"customer_id": str(customer_id)},
+                    )
+                    accounts = (await conn.execute(text(
+                        """
+                        SELECT account_code, id FROM customer_paper.accounts
+                        WHERE customer_id=:customer_id AND currency='USDT'
+                          AND account_code IN ('PAPER_CASH','PAPER_EQUITY')
+                        """
+                    ), {"customer_id": customer_id})).mappings().all()
+                    account_ids = {row["account_code"]: row["id"] for row in accounts}
+                    journal_id = "92001000-0000-4000-8000-000000000001"
+                    await conn.execute(text(
+                        """
+                        INSERT INTO customer_paper.journals
+                            (id, customer_id, idempotency_key, event_type, reference, metadata_json)
+                        VALUES
+                            (:id, :customer_id, 'forged-negative-seed-92001', 'PAPER_SEED',
+                             'negative-seed-database-guard', '{}'::jsonb)
+                        """
+                    ), {"id": journal_id, "customer_id": customer_id})
+                    await conn.execute(text(
+                        """
+                        INSERT INTO customer_paper.journal_lines
+                            (journal_id, account_id, customer_id, currency, signed_amount)
+                        VALUES
+                            (:journal_id, :cash_account, :customer_id, 'USDT', -1),
+                            (:journal_id, :equity_account, :customer_id, 'USDT', 1)
+                        """
+                    ), {
+                        "journal_id": journal_id, "customer_id": customer_id,
+                        "cash_account": account_ids["PAPER_CASH"],
+                        "equity_account": account_ids["PAPER_EQUITY"],
+                    })
+        finally:
+            await engine.dispose()
+
         order = await submit_customer_paper_order(
             customer_id=customer_id,
             client_order_id="lifecycle-btc-buy-92001",
