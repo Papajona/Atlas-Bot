@@ -173,11 +173,13 @@ async def preflight_isolated_customer_paper_ledger(
                 "(SELECT rolinherit OR rolbypassrls FROM pg_roles WHERE rolname = current_user), "
                 "(SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member "
                 " WHERE r.rolname=current_user), "
+                "(SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.roleid "
+                " WHERE r.rolname=current_user), "
                 "has_schema_privilege(current_user, 'public', 'USAGE'), "
                 "has_schema_privilege(current_user, 'public', 'CREATE')"
             )).one()
             (db_name, role_name, session_role_name, read_only, role_can_login, elevated,
-             unsafe_rls_role, memberships, public_schema_usage, public_schema_create) = identity
+             unsafe_rls_role, memberships, member_count, public_schema_usage, public_schema_create) = identity
             if db_name != _postgres_url(paper_value).database:
                 return {"status": "BLOCKED", "reason": "PAPER_DATABASE_IDENTITY_MISMATCH"}
             configured_paper_role = _postgres_url(paper_value).username
@@ -187,7 +189,12 @@ async def preflight_isolated_customer_paper_ledger(
                 return {"status": "BLOCKED", "reason": "PAPER_RUNTIME_ROLE_CANNOT_LOGIN"}
             if role_name == _postgres_url(primary_value).username:
                 return {"status": "BLOCKED", "reason": "PAPER_ROLE_REUSES_PRIMARY_ROLE"}
-            if bool(elevated) or bool(unsafe_rls_role) or int(memberships) != 0:
+            if (
+                bool(elevated)
+                or bool(unsafe_rls_role)
+                or int(memberships) != 0
+                or int(member_count) != 0
+            ):
                 return {"status": "BLOCKED", "reason": "PAPER_ROLE_HAS_UNSAFE_DATABASE_CAPABILITIES"}
             if str(read_only).lower() not in {"off", "false", "f"}:
                 # A global read-only connection is insufficient to verify order write grants.
