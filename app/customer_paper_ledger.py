@@ -241,11 +241,23 @@ async def preflight_isolated_customer_paper_ledger(
                   AND c.relkind = 'S'
                   AND c.oid IN (
                       NULLIF(pg_get_serial_sequence('customer_paper.accounts', 'id'), '')::regclass,
-                      NULLIF(pg_get_serial_sequence('customer_paper.journal_lines', 'id'), '')::regclass
+                      NULLIF(pg_get_serial_sequence('customer_paper.journal_lines', 'id'), '')::regclass,
+                      NULLIF(pg_get_serial_sequence('customer_paper.order_events', 'id'), '')::regclass,
+                      NULLIF(pg_get_serial_sequence('customer_paper.position_events', 'id'), '')::regclass
                   )
                 """
             ))).mappings().all()
-            if len(paper_sequence_rows) != 2 or any(not bool(row["can_use"]) for row in paper_sequence_rows):
+            expected_sequences = {
+                "customer_paper.accounts_id_seq",
+                "customer_paper.journal_lines_id_seq",
+                "customer_paper.order_events_id_seq",
+                "customer_paper.position_events_id_seq",
+            }
+            observed_sequences = {str(row["sequence_name"]) for row in paper_sequence_rows}
+            if (
+                observed_sequences != expected_sequences
+                or any(not bool(row["can_use"]) for row in paper_sequence_rows)
+            ):
                 return {
                     "status": "BLOCKED",
                     "reason": "PAPER_SEQUENCE_PRIVILEGES_UNSAFE",
