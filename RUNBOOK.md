@@ -28,7 +28,7 @@ This mode is opt-in and disabled by default. Configure `CUSTOMER_PAPER_SHARED_DA
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
    ```
 
-   Then run the psql meta-command `\\password atlas_customer_paper` at the prompt and grant database connectivity:
+   Then run the psql meta-command `\password atlas_customer_paper` at the prompt and grant database connectivity:
 
    ```sql
    GRANT CONNECT ON DATABASE postgres TO atlas_customer_paper;
@@ -38,8 +38,8 @@ This mode is opt-in and disabled by default. Configure `CUSTOMER_PAPER_SHARED_DA
 3. From the reviewed Atlas-Bot checkout, run the schema file against that same existing database as the reviewed database owner (not as the paper runtime role):
 
    ```bash
-   psql "$ATLAS_ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 \\
-     -v paper_runtime_role=atlas_customer_paper \\
+   psql "$ATLAS_ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 \
+     -v paper_runtime_role=atlas_customer_paper \
      -f scripts/customer_paper_ledger_schema.sql
    ```
 
