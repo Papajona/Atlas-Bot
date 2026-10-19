@@ -360,7 +360,7 @@ async def submit_customer_paper_order(
             order_id = str(row[0])
             await _insert_order_event(
                 conn, customer_id=customer_id, order_id=order_id,
-                event_key=f"order-submitted:{client_id}", event_type="SUBMITTED",
+                event_key=f"order-submitted:{digest}", event_type="SUBMITTED",
                 filled_quantity=Decimal("0"), metadata={"payload_sha256": digest},
             )
         return {"status": "APPENDED", "order_id": order_id, "client_order_id": client_id, "payload_sha256": digest}
