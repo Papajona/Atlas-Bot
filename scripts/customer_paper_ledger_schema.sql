@@ -292,9 +292,8 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_balanced_journal();
 
 DROP TRIGGER IF EXISTS trg_customer_paper_order_state_guard ON customer_paper.order_events;
-CREATE CONSTRAINT TRIGGER trg_customer_paper_order_state_guard
-AFTER INSERT ON customer_paper.order_events
-DEFERRABLE INITIALLY DEFERRED
+CREATE TRIGGER trg_customer_paper_order_state_guard
+BEFORE INSERT ON customer_paper.order_events
 FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_order_event_state();
 
 DO $paper_immutable_triggers$
