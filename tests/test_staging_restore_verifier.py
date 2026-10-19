@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from scripts.verify_staging_restore import read_database_uri, truthy
@@ -33,3 +35,15 @@ def test_postgres_boolean_parser_accepts_actual_psql_output():
     assert truthy("true") is True
     assert truthy("f") is False
     assert truthy("false") is False
+
+
+def test_restore_revision_matches_workflow_and_operator_runbook():
+    workflow = Path(".github/workflows/staging-restore-audit.yml").read_text(encoding="utf-8")
+    verifier = Path("scripts/verify_staging_restore.py").read_text(encoding="utf-8")
+    runbook = Path("RUNBOOK.md").read_text(encoding="utf-8")
+    expected = "0051_research_trial_archive"
+
+    assert f"--expected-revision {expected}" in workflow
+    assert f'default="{expected}"' in verifier
+    assert f"database revision is exactly `{expected}`" in runbook
+    assert "database revision is 0049" not in runbook
