@@ -327,6 +327,10 @@ CREATE TRIGGER trg_customer_paper_order_state_guard
 BEFORE INSERT ON customer_paper.order_events
 FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_order_event_state();
 
+-- The original three-table schema used "lines" rather than "journal_lines".
+-- Remove that legacy trigger name before creating the normalized seven-table set.
+DROP TRIGGER IF EXISTS trg_customer_paper_lines_immutable ON customer_paper.journal_lines;
+
 DO $paper_immutable_triggers$
 DECLARE table_name text;
 BEGIN
