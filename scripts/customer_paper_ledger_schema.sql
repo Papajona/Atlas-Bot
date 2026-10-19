@@ -22,6 +22,7 @@ BEGIN
           AND NOT r.rolsuper AND NOT r.rolcreaterole AND NOT r.rolcreatedb
           AND NOT r.rolreplication AND NOT r.rolinherit AND NOT r.rolbypassrls
           AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid)
+          AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.roleid = r.oid)
     ) THEN
         RAISE EXCEPTION 'paper runtime role does not have the required least-privilege attributes';
     END IF;
