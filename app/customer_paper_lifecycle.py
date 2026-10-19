@@ -1,8 +1,9 @@
 """Isolated, append-only customer paper order/fill/position lifecycle.
 
 This module deliberately never imports the real-money ledger or broker adapters. Every
-operation writes only to the separately configured paper database after the full
-isolation preflight passes. Feature enablement remains off by default.
+operation writes only through the separately configured paper endpoint, which may target
+a dedicated database or the approved customer_paper schema in the existing database after
+the full isolation preflight passes. Feature enablement remains off by default.
 """
 from __future__ import annotations
 
