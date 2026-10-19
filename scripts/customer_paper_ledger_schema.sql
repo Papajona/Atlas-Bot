@@ -5,8 +5,9 @@
   \quit 2
 \endif
 
--- Execute only against the dedicated customer-paper PostgreSQL database, as a
--- reviewed database owner. Provision paper_runtime_role separately as LOGIN,
+-- Execute only against the reviewed PostgreSQL target. In the free single-project
+-- setup this is the existing project's postgres database with a dedicated customer_paper
+-- schema. Provision paper_runtime_role separately as LOGIN,
 -- NOINHERIT, NOBYPASSRLS, non-superuser, with no memberships or admin privileges.
 SELECT set_config('app.paper_runtime_role', :'paper_runtime_role', false);
 
