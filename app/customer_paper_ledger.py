@@ -26,6 +26,8 @@ REAL_MONEY_TABLES = (
 )
 PAPER_TABLES = (
     "customer_paper.accounts", "customer_paper.journals", "customer_paper.journal_lines",
+    "customer_paper.orders", "customer_paper.order_events", "customer_paper.fills",
+    "customer_paper.position_events",
 )
 
 
@@ -200,10 +202,10 @@ async def preflight_isolated_customer_paper_ledger(
                        has_table_privilege(current_user, c.oid, 'UPDATE') AS can_update,
                        has_table_privilege(current_user, c.oid, 'DELETE') AS can_delete
                 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                WHERE (n.nspname='customer_paper' AND c.relname IN ('accounts','journals','journal_lines'))
+                WHERE (n.nspname='customer_paper' AND c.relname = ANY(:paper_table_names))
                    OR (n.nspname='public' AND c.relname = ANY(:real_tables))
                 """),
-                {"real_tables": list(REAL_MONEY_TABLES)},
+                {"real_tables": list(REAL_MONEY_TABLES), "paper_table_names": [name.split(".", 1)[1] for name in PAPER_TABLES]},
             )).mappings().all()
             by_name = {str(row["table_name"]): row for row in table_rows}
             missing_paper = sorted(set(PAPER_TABLES) - set(by_name))
@@ -231,7 +233,7 @@ async def preflight_isolated_customer_paper_ledger(
             policy_by_table: dict[str, list[Mapping[str, Any]]] = {}
             for policy in policy_rows:
                 policy_by_table.setdefault(str(policy["tablename"]), []).append(policy)
-            for table in ("accounts", "journals", "journal_lines"):
+            for table in (name.split(".", 1)[1] for name in PAPER_TABLES):
                 candidates = policy_by_table.get(table, [])
                 row = candidates[0] if len(candidates) == 1 else None
                 policy_error = _tenant_policy_validation_error(row, str(role_name))
@@ -384,7 +386,7 @@ PAPER_ACCOUNT_CODES = frozenset({
 })
 PAPER_EVENT_TYPES = frozenset({
     "PAPER_SEED", "SIMULATED_FILL", "SIMULATED_FEE",
-    "SIMULATED_FUNDING", "SIMULATED_REALIZED_PNL", "RESET",
+    "SIMULATED_FUNDING", "SIMULATED_REALIZED_PNL", "REVERSAL", "RESET",
 })
 _CURRENCY_RE = re.compile(r"^[A-Z0-9]{2,12}$")
 _AMOUNT_QUANTUM = Decimal("0.000000000000000001")
