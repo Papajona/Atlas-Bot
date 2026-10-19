@@ -8,6 +8,17 @@ from pathlib import Path
 import pytest
 
 from app.config import settings
+from app import customer_paper_lifecycle as paper_lifecycle
+from app.customer_paper_lifecycle import (
+    CustomerPaperOrderConflict,
+    cancel_customer_paper_order,
+    get_customer_paper_order,
+    get_customer_paper_positions,
+    list_open_customer_paper_orders,
+    record_customer_paper_fill,
+    reverse_customer_paper_fill,
+    submit_customer_paper_order,
+)
 from app.customer_paper_ledger import (
     CustomerPaperIdempotencyConflict,
     _tenant_policy_expression_is_exact,
@@ -235,3 +246,238 @@ def test_customer_paper_policy_validation_checks_permissive_mode_and_all_predica
 
     wrong_command = {**policy, "cmd": "SELECT"}
     assert _tenant_policy_validation_error(wrong_command, "atlas_paper_app") == "COMMAND"
+
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not (os.getenv("ATLAS_PAPER_TEST_DATABASE_URL") and os.getenv("ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL")),
+    reason="requires the isolated disposable PostgreSQL customer paper databases provisioned by CI",
+)
+def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypatch):
+    customer_id = 92001
+    monkeypatch.setattr(settings, "database_url", os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"])
+    monkeypatch.setattr(settings, "customer_paper_database_url", os.environ["ATLAS_PAPER_TEST_DATABASE_URL"])
+    monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
+
+    async def run():
+        await post_customer_paper_journal(
+            customer_id=customer_id,
+            idempotency_key="lifecycle-seed-92001",
+            event_type="PAPER_SEED",
+            currency="USDT",
+            lines=_seed_lines("1000"),
+            reference="disposable-lifecycle-test-seed",
+            metadata={"environment": "disposable-ci"},
+        )
+        order = await submit_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id="lifecycle-btc-buy-92001",
+            venue="binance",
+            market_type="spot",
+            symbol="BTC/USDT",
+            side="BUY",
+            quantity="2",
+            currency="USDT",
+            order_type="LIMIT",
+            limit_price="100",
+        )
+        assert order["status"] == "APPENDED"
+
+        # Price validation and a fault injected after the fill insert both fail
+        # inside the transaction; neither is allowed to leave a partial fill.
+        with pytest.raises(CustomerPaperOrderConflict, match="limit price"):
+            await record_customer_paper_fill(
+                customer_id=customer_id,
+                client_order_id="lifecycle-btc-buy-92001",
+                idempotency_key="lifecycle-fill-1",
+                bar_key="btc-bar-1",
+                quantity="1",
+                price="101",
+                fee_amount="1",
+            )
+
+        original_append = paper_lifecycle._append_journal_on_connection
+
+        async def fail_after_fill_insert(*args, **kwargs):
+            raise RuntimeError("injected journal fault to verify transaction rollback")
+
+        monkeypatch.setattr(paper_lifecycle, "_append_journal_on_connection", fail_after_fill_insert)
+        with pytest.raises(RuntimeError, match="injected journal fault"):
+            await record_customer_paper_fill(
+                customer_id=customer_id,
+                client_order_id="lifecycle-btc-buy-92001",
+                idempotency_key="lifecycle-fill-1",
+                bar_key="btc-bar-1",
+                quantity="1",
+                price="95",
+                fee_amount="1",
+            )
+        monkeypatch.setattr(paper_lifecycle, "_append_journal_on_connection", original_append)
+
+        recovered = await get_customer_paper_order(
+            customer_id=customer_id, client_order_id="lifecycle-btc-buy-92001"
+        )
+        assert recovered["status"] == "SUBMITTED"
+        assert recovered["filled_quantity"] == "0.000000000000000000"
+
+        first = await record_customer_paper_fill(
+            customer_id=customer_id,
+            client_order_id="lifecycle-btc-buy-92001",
+            idempotency_key="lifecycle-fill-1",
+            bar_key="btc-bar-1",
+            quantity="1",
+            price="95",
+            fee_amount="1",
+        )
+        assert first["status"] == "APPENDED"
+        assert first["order_status"] == "PARTIALLY_FILLED"
+        replay = await record_customer_paper_fill(
+            customer_id=customer_id,
+            client_order_id="lifecycle-btc-buy-92001",
+            idempotency_key="lifecycle-fill-1",
+            bar_key="btc-bar-1",
+            quantity="1",
+            price="95",
+            fee_amount="1",
+        )
+        assert replay["status"] == "REPLAYED"
+        with pytest.raises(CustomerPaperIdempotencyConflict, match="different fill payload"):
+            await record_customer_paper_fill(
+                customer_id=customer_id,
+                client_order_id="lifecycle-btc-buy-92001",
+                idempotency_key="lifecycle-fill-1",
+                bar_key="btc-bar-1",
+                quantity="1",
+                price="96",
+                fee_amount="1",
+            )
+
+        second = await record_customer_paper_fill(
+            customer_id=customer_id,
+            client_order_id="lifecycle-btc-buy-92001",
+            idempotency_key="lifecycle-fill-2",
+            bar_key="btc-bar-2",
+            quantity="1",
+            price="100",
+            fee_amount="1",
+        )
+        assert second["order_status"] == "FILLED"
+        final_order = await get_customer_paper_order(
+            customer_id=customer_id, client_order_id="lifecycle-btc-buy-92001"
+        )
+        assert final_order["status"] == "FILLED"
+        assert final_order["filled_quantity"] == "2.000000000000000000"
+        assert await list_open_customer_paper_orders(customer_id=customer_id) == []
+        positions = await get_customer_paper_positions(customer_id=customer_id)
+        assert len(positions) == 1
+        assert positions[0]["symbol"] == "BTC/USDT"
+        assert positions[0]["quantity"] == "2.000000000000000000"
+        assert positions[0]["cost_basis"] == "195.000000000000000000"
+
+        reversed_fill = await reverse_customer_paper_fill(
+            customer_id=customer_id, fill_id=second["fill_id"], idempotency_key="lifecycle-reverse-2"
+        )
+        assert reversed_fill["status"] == "APPENDED"
+        reversal_replay = await reverse_customer_paper_fill(
+            customer_id=customer_id, fill_id=second["fill_id"], idempotency_key="lifecycle-reverse-2"
+        )
+        assert reversal_replay["status"] == "REPLAYED"
+        # The most recent position event is now a reversal, so an older fill may not
+        # be reversed out of order and silently restate later P&L.
+        with pytest.raises(CustomerPaperOrderConflict, match="latest non-reversed fill"):
+            await reverse_customer_paper_fill(
+                customer_id=customer_id, fill_id=first["fill_id"], idempotency_key="lifecycle-reverse-1"
+            )
+        positions_after_reversal = await get_customer_paper_positions(customer_id=customer_id)
+        assert positions_after_reversal[0]["quantity"] == "1.000000000000000000"
+        assert positions_after_reversal[0]["cost_basis"] == "95.000000000000000000"
+        balances = await get_customer_paper_balances(customer_id=customer_id)
+        by_code = {row["account_code"]: Decimal(row["balance"]) for row in balances}
+        assert by_code["PAPER_CASH"] == Decimal("904")
+        assert by_code["PAPER_POSITION"] == Decimal("95")
+        assert by_code["PAPER_FEES"] == Decimal("1")
+        assert by_code["PAPER_EQUITY"] == Decimal("-1000")
+
+        # Queries are tenant-filtered; a different customer cannot inspect this order.
+        assert await get_customer_paper_order(
+            customer_id=92002, client_order_id="lifecycle-btc-buy-92001"
+        ) is None
+        with pytest.raises(CustomerPaperOrderConflict, match="does not exist for this tenant"):
+            await cancel_customer_paper_order(
+                customer_id=92002,
+                client_order_id="lifecycle-btc-buy-92001",
+                idempotency_key="tenant-cross-cancel",
+            )
+        with pytest.raises(CustomerPaperOrderConflict, match="state FILLED"):
+            await cancel_customer_paper_order(
+                customer_id=customer_id,
+                client_order_id="lifecycle-btc-buy-92001",
+                idempotency_key="cancel-filled-order",
+            )
+
+    asyncio.run(run())
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not (os.getenv("ATLAS_PAPER_TEST_DATABASE_URL") and os.getenv("ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL")),
+    reason="requires the isolated disposable PostgreSQL customer paper databases provisioned by CI",
+)
+def test_customer_paper_cash_is_serialized_across_symbols(monkeypatch):
+    customer_id = 92003
+    monkeypatch.setattr(settings, "database_url", os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"])
+    monkeypatch.setattr(settings, "customer_paper_database_url", os.environ["ATLAS_PAPER_TEST_DATABASE_URL"])
+    monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
+
+    async def run():
+        await post_customer_paper_journal(
+            customer_id=customer_id,
+            idempotency_key="cross-symbol-seed-92003",
+            event_type="PAPER_SEED",
+            currency="USDT",
+            lines=_seed_lines("100"),
+            reference="disposable-cash-lock-test-seed",
+            metadata={"environment": "disposable-ci"},
+        )
+        for symbol, client_id in (("BTC/USDT", "cash-btc-order"), ("ETH/USDT", "cash-eth-order")):
+            await submit_customer_paper_order(
+                customer_id=customer_id,
+                client_order_id=client_id,
+                venue="binance",
+                market_type="spot",
+                symbol=symbol,
+                side="BUY",
+                quantity="1",
+                currency="USDT",
+                order_type="LIMIT",
+                limit_price="100",
+            )
+
+        async def try_fill(client_id, bar):
+            try:
+                return await record_customer_paper_fill(
+                    customer_id=customer_id,
+                    client_order_id=client_id,
+                    idempotency_key="cross-symbol-fill-" + client_id,
+                    bar_key=bar,
+                    quantity="1",
+                    price="90",
+                )
+            except CustomerPaperOrderConflict as exc:
+                return exc
+
+        results = await asyncio.gather(
+            try_fill("cash-btc-order", "cash-btc-bar"),
+            try_fill("cash-eth-order", "cash-eth-bar"),
+        )
+        assert sum(isinstance(result, dict) and result["status"] == "APPENDED" for result in results) == 1
+        assert sum(isinstance(result, CustomerPaperOrderConflict) for result in results) == 1
+        balances = await get_customer_paper_balances(customer_id=customer_id)
+        by_code = {row["account_code"]: Decimal(row["balance"]) for row in balances}
+        assert by_code["PAPER_CASH"] == Decimal("10")
+        positions = await get_customer_paper_positions(customer_id=customer_id)
+        assert len(positions) == 1
+        assert positions[0]["quantity"] == "1.000000000000000000"
+
+    asyncio.run(run())
