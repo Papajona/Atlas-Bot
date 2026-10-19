@@ -489,18 +489,24 @@ async def record_customer_paper_fill(
             pnl_delta = -realized
             cash_delta = _money((-notional if side == "BUY" else notional) - fee, "cash delta")
             realized_after = _money(realized_before + realized, "cumulative realized P&L")
-            if side == "BUY":
-                cash_before = Decimal((await conn.execute(text(
-                    """
-                    SELECT COALESCE(SUM(l.signed_amount), 0)
-                    FROM customer_paper.accounts a
-                    LEFT JOIN customer_paper.journal_lines l
-                      ON l.account_id=a.id AND l.customer_id=a.customer_id AND l.currency=a.currency
-                    WHERE a.customer_id=:customer_id AND a.currency=:currency AND a.account_code='PAPER_CASH'
-                    """
-                ), {"customer_id": customer_id, "currency": currency})).scalar_one())
-                if cash_before + cash_delta < 0:
-                    raise CustomerPaperOrderConflict("paper BUY fill would overdraw the customer's paper cash")
+            # Serialize cash checks across different symbols for this tenant/currency.
+            # The position lock alone is insufficient: concurrent orders in two symbols
+            # otherwise can both spend the same available paper cash.
+            await conn.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": "paper-cash:" + str(customer_id) + ":" + currency},
+            )
+            cash_before = Decimal((await conn.execute(text(
+                """
+                SELECT COALESCE(SUM(l.signed_amount), 0)
+                FROM customer_paper.accounts a
+                LEFT JOIN customer_paper.journal_lines l
+                  ON l.account_id=a.id AND l.customer_id=a.customer_id AND l.currency=a.currency
+                WHERE a.customer_id=:customer_id AND a.currency=:currency AND a.account_code='PAPER_CASH'
+                """
+            ), {"customer_id": customer_id, "currency": currency})).scalar_one())
+            if cash_before + cash_delta < 0:
+                raise CustomerPaperOrderConflict("paper fill would overdraw the customer's paper cash")
 
             fill_id = str(uuid.uuid4())
             filled_row = (await conn.execute(text(
@@ -828,8 +834,27 @@ async def reverse_customer_paper_fill(
             if latest is None or str(latest[0]) != canonical_fill_id or str(latest[1]) != "FILL":
                 raise CustomerPaperOrderConflict("only the latest non-reversed fill for this position can be reversed safely")
 
+            reversal_cash_delta = -Decimal(fill["cash_delta"])
+            fill_currency = str(fill["currency"])
+            await conn.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": "paper-cash:" + str(customer_id) + ":" + fill_currency},
+            )
+            cash_before = Decimal((await conn.execute(text(
+                """
+                SELECT COALESCE(SUM(l.signed_amount), 0)
+                FROM customer_paper.accounts a
+                LEFT JOIN customer_paper.journal_lines l
+                  ON l.account_id=a.id AND l.customer_id=a.customer_id AND l.currency=a.currency
+                WHERE a.customer_id=:customer_id AND a.currency=:currency AND a.account_code='PAPER_CASH'
+                """
+            ), {"customer_id": customer_id, "currency": fill_currency})).scalar_one())
+            if cash_before + reversal_cash_delta < 0:
+                raise CustomerPaperOrderConflict(
+                    "reversing this fill would overdraw paper cash after subsequent activity"
+                )
             reversal_lines: list[dict[str, Any]] = [
-                {"account_code": "PAPER_CASH", "signed_amount": -Decimal(fill["cash_delta"])},
+                {"account_code": "PAPER_CASH", "signed_amount": reversal_cash_delta},
                 {"account_code": "PAPER_POSITION", "signed_amount": -Decimal(fill["position_delta"])},
             ]
             if Decimal(fill["pnl_delta"]) != 0:
