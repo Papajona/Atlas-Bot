@@ -216,21 +216,42 @@ CREATE OR REPLACE FUNCTION customer_paper.assert_balanced_journal()
 RETURNS trigger LANGUAGE plpgsql AS $paper_balance$
 DECLARE
     target_id uuid;
+    event_name text;
     line_count bigint;
     currency_count bigint;
     total_amount numeric(38,18);
+    cash_count bigint;
+    equity_count bigint;
+    cash_amount numeric(38,18);
+    equity_amount numeric(38,18);
 BEGIN
     IF TG_TABLE_NAME = 'journals' THEN
         target_id := NEW.id;
     ELSE
         target_id := NEW.journal_id;
     END IF;
-    SELECT count(*), count(DISTINCT currency), coalesce(sum(signed_amount), 0)
-      INTO line_count, currency_count, total_amount
-      FROM customer_paper.journal_lines
-     WHERE journal_id = target_id;
+    SELECT event_type INTO event_name
+      FROM customer_paper.journals
+     WHERE id = target_id;
+    SELECT count(*), count(DISTINCT l.currency), coalesce(sum(l.signed_amount), 0),
+           count(*) FILTER (WHERE a.account_code = 'PAPER_CASH'),
+           count(*) FILTER (WHERE a.account_code = 'PAPER_EQUITY'),
+           coalesce(sum(l.signed_amount) FILTER (WHERE a.account_code = 'PAPER_CASH'), 0),
+           coalesce(sum(l.signed_amount) FILTER (WHERE a.account_code = 'PAPER_EQUITY'), 0)
+      INTO line_count, currency_count, total_amount, cash_count, equity_count, cash_amount, equity_amount
+      FROM customer_paper.journal_lines l
+      JOIN customer_paper.accounts a
+        ON a.id = l.account_id AND a.customer_id = l.customer_id AND a.currency = l.currency
+     WHERE l.journal_id = target_id;
     IF line_count < 2 OR currency_count <> 1 OR total_amount <> 0 THEN
         RAISE EXCEPTION 'customer paper journal must contain at least two same-currency lines summing exactly to zero'
+            USING ERRCODE = '23514';
+    END IF;
+    IF event_name = 'PAPER_SEED' AND (
+        line_count <> 2 OR cash_count <> 1 OR equity_count <> 1
+        OR cash_amount <= 0 OR equity_amount <> -cash_amount
+    ) THEN
+        RAISE EXCEPTION 'PAPER_SEED must add positive PAPER_CASH balanced by equal negative PAPER_EQUITY'
             USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
