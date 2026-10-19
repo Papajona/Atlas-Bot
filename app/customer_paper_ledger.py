@@ -329,10 +329,28 @@ async def preflight_isolated_customer_paper_ledger(
                     # The privilege probes below INNER JOIN pg_roles first, so absence
                     # yields no exposed privileges rather than a "role does not exist"
                     # exception; any same-named role that does exist is fully inspected.
-                    paper_role_present_on_primary = bool((await primary_conn.execute(
-                        text("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = CAST(:paper_role AS name))"),
-                        {"paper_role": role_name},
-                    )).scalar())
+                    primary_paper_role = (await primary_conn.execute(text(
+                        """
+                        SELECT
+                            r.rolsuper OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication AS elevated,
+                            r.rolinherit OR r.rolbypassrls AS unsafe_rls_role,
+                            (SELECT count(*) FROM pg_auth_members m WHERE m.member = r.oid) AS memberships,
+                            (SELECT count(*) FROM pg_auth_members m WHERE m.roleid = r.oid) AS member_count
+                        FROM pg_roles r
+                        WHERE r.rolname = CAST(:paper_role AS name)
+                        """
+                    ), {"paper_role": role_name})).mappings().first()
+                    paper_role_present_on_primary = primary_paper_role is not None
+                    if primary_paper_role is not None and (
+                        bool(primary_paper_role["elevated"])
+                        or bool(primary_paper_role["unsafe_rls_role"])
+                        or int(primary_paper_role["memberships"]) != 0
+                        or int(primary_paper_role["member_count"]) != 0
+                    ):
+                        return {
+                            "status": "BLOCKED",
+                            "reason": "PAPER_ROLE_HAS_UNSAFE_PRIMARY_ROLE_CAPABILITIES",
+                        }
                     primary_schema_rows = (await primary_conn.execute(text(
                         """
                         SELECT n.nspname,
