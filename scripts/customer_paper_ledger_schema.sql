@@ -241,6 +241,7 @@ RETURNS trigger LANGUAGE plpgsql AS $paper_event_state$
 DECLARE
     previous_event text;
     previous_filled numeric(38,18);
+    actual_filled numeric(38,18);
     maximum_quantity numeric(38,18);
 BEGIN
     SELECT event_type, filled_quantity INTO previous_event, previous_filled
@@ -250,6 +251,14 @@ BEGIN
     ORDER BY id DESC LIMIT 1;
     SELECT quantity INTO maximum_quantity
     FROM customer_paper.orders WHERE id = NEW.order_id AND customer_id = NEW.customer_id;
+    SELECT COALESCE(SUM(quantity), 0) INTO actual_filled
+    FROM customer_paper.fills
+    WHERE customer_id = NEW.customer_id AND order_id = NEW.order_id;
+
+    IF NEW.filled_quantity <> actual_filled THEN
+        RAISE EXCEPTION 'order event filled_quantity must equal the sum of persisted fills'
+            USING ERRCODE = '23514';
+    END IF;
 
     IF NEW.event_type = 'SUBMITTED' THEN
         IF previous_event IS NOT NULL OR NEW.filled_quantity <> 0 THEN
