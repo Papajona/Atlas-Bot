@@ -74,6 +74,7 @@ def test_oos_gate_reports_missing_metrics_and_never_promotes_them():
         "financing_cost_model_complete": True,
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True,
+        "slippage_model_complete": True,
         "execution_cost_calibration_status": "VERIFIED",
         "execution_cost_calibration_evidence_id": "fixture:venue-cost-calibration",
         "trial_registry_complete": True,
@@ -106,6 +107,7 @@ def test_oos_gate_requires_traceable_venue_execution_cost_calibration():
         "financing_cost_model_complete": True,
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True,
+        "slippage_model_complete": True,
         "trial_registry_complete": True,
     }
     missing = oos_promotion_gate(strong)
@@ -151,6 +153,7 @@ def test_oos_gate_names_incomplete_trial_registry_as_a_blocker():
         "financing_cost_model_complete": True,
         "intrabar_stop_target_model_complete": True,
         "execution_cost_model_complete": True,
+        "slippage_model_complete": True,
         "execution_cost_calibration_status": "VERIFIED",
         "execution_cost_calibration_evidence_id": "fixture:venue-cost-calibration",
         "trial_registry_complete": False,
