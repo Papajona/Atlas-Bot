@@ -12,6 +12,18 @@ This repository's default deployment posture is staging/paper only. Keep all of 
 
 Do not place customer funds at risk while collecting release evidence. Do not enable mainnet funding, sweeping, live withdrawals, or live execution to make a check pass. A green CI job, a simulation, or a debug APK is not proof of a real deployment control.
 
+## Free single-project Supabase customer-paper mode
+
+Do not create a second Supabase project or a paid branch for the early paper-only stage. The low-cost option is a dedicated `customer_paper` schema in the existing project's `postgres` database, accessed only through a separate runtime role and credential. This is **schema/ACL isolation**, not a separate database failure domain: it shares storage, compute, availability, and backup/restore scope with the rest of the project.
+
+This mode is opt-in and disabled by default. Configure `CUSTOMER_PAPER_SHARED_DATABASE_ENABLED=true` only after the schema and least-privilege role are provisioned and verified. `CUSTOMER_PAPER_DATABASE_URL` must use the same host, port, and `postgres` database as the primary URL but a unique paper runtime role and a different password. Keep `CUSTOMER_PAPER_LEDGER_ENABLED=false` until the preflight passes against that exact endpoint and role. Never use Supabase's `postgres`, `service_role`, `authenticated`, or `anon` identity as the paper runtime role.
+
+The paper role must be `LOGIN NOINHERIT NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`, have no role memberships, own no paper tables, have no `CREATE` privilege on any schema, and have privileges only for `SELECT`/`INSERT` on the seven paper tables plus `USAGE` on their identity sequences. It must have no privileges on any real-money table, sequence, or executable `SECURITY DEFINER` function. Forced row-level security and the exact tenant policy are mandatory. The application refuses to proceed if any of these checks fail.
+
+Provisioning `scripts/customer_paper_ledger_schema.sql` is DDL against the existing database; it is **not** run automatically by the application. Before a human operator runs it, confirm a usable backup/export exists and review the target database and role. This change does not modify the connected Supabase database.
+
+This mode is suitable only for early paper development/rehearsal after the schema preflight and PostgreSQL lifecycle tests pass. It does not count as an independently restored staging target or prove disaster recovery. Keep live trading, customer-fund movement, withdrawals, and payouts disabled; production clearance still requires a separately corroborated recovery drill and any applicable provider-reconciliation evidence without initiating real-money transactions.
+
 ## Emergency stop
 
 Call authenticated `POST /api/risk/kill`. The local kill switch is set before broker cancellation is attempted. The endpoint then attempts to cancel open orders. If cancellation fails, the system remains HALTED and the broker account must be checked manually. Record the incident, release SHA, service revision, event timestamp, cancellation result, and follow-up owner.

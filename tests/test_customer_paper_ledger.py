@@ -71,6 +71,55 @@ def test_customer_paper_database_pair_rejects_same_database_even_with_separate_r
         validate_database_url_pair(primary, paper)
 
 
+def test_customer_paper_shared_database_mode_requires_explicit_opt_in_and_distinct_credentials():
+    primary = "postgresql+asyncpg://atlas_primary:primary_password@db.example:5432/postgres"
+    paper = "postgresql+asyncpg://atlas_paper:paper_password@db.example:5432/postgres"
+
+    with pytest.raises(ValueError, match="explicitly enabled"):
+        validate_database_url_pair(primary, paper)
+
+    pair = validate_database_url_pair(primary, paper, allow_same_database=True)
+    assert pair["same_database"] is True
+    assert pair["isolation_mode"] == "shared_database_schema"
+    assert pair["same_server"] is True
+    assert pair["distinct_runtime_roles"] is True
+    assert pair["distinct_credentials"] is True
+
+
+def test_customer_paper_shared_database_mode_rejects_reused_role_or_password():
+    primary = "postgresql+asyncpg://atlas_primary:primary_password@db.example:5432/postgres"
+    same_role = "postgresql+asyncpg://atlas_primary:paper_password@db.example:5432/postgres"
+    same_password = "postgresql+asyncpg://atlas_paper:primary_password@db.example:5432/postgres"
+
+    with pytest.raises(ValueError, match="distinct PostgreSQL runtime role"):
+        validate_database_url_pair(primary, same_role, allow_same_database=True)
+    with pytest.raises(ValueError, match="distinct database credential"):
+        validate_database_url_pair(primary, same_password, allow_same_database=True)
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not (os.getenv("ATLAS_PAPER_SHARED_PRIMARY_TEST_DATABASE_URL") and os.getenv("ATLAS_PAPER_TEST_DATABASE_URL")),
+    reason="requires the disposable PostgreSQL paper schema and separate runtime role provisioned by CI",
+)
+def test_customer_paper_shared_database_schema_preflight_isolated_from_primary_relations(monkeypatch):
+    primary_url = os.environ["ATLAS_PAPER_SHARED_PRIMARY_TEST_DATABASE_URL"]
+    paper_url = os.environ["ATLAS_PAPER_TEST_DATABASE_URL"]
+    pair = validate_database_url_pair(primary_url, paper_url, allow_same_database=True)
+    assert pair["same_database"] is True
+
+    monkeypatch.setattr(settings, "database_url", primary_url)
+    monkeypatch.setattr(settings, "customer_paper_database_url", paper_url)
+    monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
+    monkeypatch.setattr(settings, "customer_paper_shared_database_enabled", True)
+
+    result = asyncio.run(preflight_isolated_customer_paper_ledger())
+    assert result["status"] == "PASS", result
+    assert result["isolation_mode"] == "shared_database_schema"
+    assert result["same_database_schema_isolation"] is True
+    assert result["enables_customer_paper_trading"] is False
+
+
 def test_customer_paper_database_pair_allows_distinct_databases_on_same_server():
     primary = "postgresql+asyncpg://atlas_primary:primary_password@db.example:5432/atlas"
     paper = "postgresql+asyncpg://atlas_paper:paper_password@db.example:5432/atlas_paper"

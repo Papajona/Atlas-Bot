@@ -110,15 +110,24 @@ def _postgres_url(value: str) -> URL:
     return url
 
 
-def validate_database_url_pair(primary_url: str, paper_url: str) -> dict[str, Any]:
-    """Validate distinct server-side credentials/endpoints before any network access."""
+def validate_database_url_pair(
+    primary_url: str, paper_url: str, *, allow_same_database: bool = False
+) -> dict[str, Any]:
+    """Validate distinct runtime credentials and the selected database isolation boundary.
+
+    Shared-database mode is an explicit opt-in and remains gated by the live ACL/RLS preflight.
+    """
     primary = _postgres_url(primary_url)
     paper = _postgres_url(paper_url)
-    if (primary.host.casefold(), primary.port or 5432, primary.database) == (
+    same_database = (
+        primary.host.casefold(), primary.port or 5432, primary.database
+    ) == (
         paper.host.casefold(), paper.port or 5432, paper.database
-    ):
+    )
+    if same_database and not allow_same_database:
         raise ValueError(
-            "customer paper ledger must use a separate PostgreSQL database; a different role alone is not isolation"
+            "customer paper ledger must use a separate PostgreSQL database unless "
+            "shared-database schema isolation is explicitly enabled"
         )
     if primary.username == paper.username:
         raise ValueError("customer paper ledger requires a distinct PostgreSQL runtime role")
@@ -128,12 +137,13 @@ def validate_database_url_pair(primary_url: str, paper_url: str) -> dict[str, An
         "primary_host": primary.host.casefold(),
         "paper_host": paper.host.casefold(),
         "same_server": (primary.host.casefold(), primary.port or 5432) == (paper.host.casefold(), paper.port or 5432),
+        "same_database": same_database,
+        "isolation_mode": "shared_database_schema" if same_database else "separate_database",
         "primary_database": primary.database,
         "paper_database": paper.database,
         "distinct_runtime_roles": True,
         "distinct_credentials": True,
     }
-
 
 async def preflight_isolated_customer_paper_ledger(
     *,
@@ -153,9 +163,14 @@ async def preflight_isolated_customer_paper_ledger(
     if not paper_value:
         return {"status": "BLOCKED", "reason": "CUSTOMER_PAPER_DATABASE_URL_MISSING"}
     try:
-        pair = validate_database_url_pair(primary_value, paper_value)
+        pair = validate_database_url_pair(
+            primary_value,
+            paper_value,
+            allow_same_database=bool(settings.customer_paper_shared_database_enabled),
+        )
     except ValueError as exc:
         return {"status": "BLOCKED", "reason": "DATABASE_URL_ISOLATION_INVALID", "detail": str(exc)}
+    same_database = bool(pair.get("same_database"))
 
     engine = create_async_engine(
         paper_value if "+asyncpg" in paper_value else _postgres_url(paper_value).render_as_string(hide_password=False),
@@ -176,10 +191,16 @@ async def preflight_isolated_customer_paper_ledger(
                 "(SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.roleid "
                 " WHERE r.rolname=current_user), "
                 "has_schema_privilege(current_user, 'public', 'USAGE'), "
-                "has_schema_privilege(current_user, 'public', 'CREATE')"
+                "has_schema_privilege(current_user, 'public', 'CREATE'), "
+                "(SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname='customer_paper')), "
+                "COALESCE((SELECT has_schema_privilege(current_user, n.oid, 'USAGE') "
+                "FROM pg_namespace n WHERE n.nspname='customer_paper'), false), "
+                "COALESCE((SELECT has_schema_privilege(current_user, n.oid, 'CREATE') "
+                "FROM pg_namespace n WHERE n.nspname='customer_paper'), false)"
             )).one()
             (db_name, role_name, session_role_name, read_only, role_can_login, elevated,
-             unsafe_rls_role, memberships, member_count, public_schema_usage, public_schema_create) = identity
+             unsafe_rls_role, memberships, member_count, public_schema_usage, public_schema_create,
+             paper_schema_present, paper_schema_usage, paper_schema_create) = identity
             if db_name != _postgres_url(paper_value).database:
                 return {"status": "BLOCKED", "reason": "PAPER_DATABASE_IDENTITY_MISMATCH"}
             configured_paper_role = _postgres_url(paper_value).username
@@ -206,6 +227,12 @@ async def preflight_isolated_customer_paper_ledger(
             # the default public USAGE grant simply to run the isolated paper ledger.
             if bool(public_schema_create):
                 return {"status": "BLOCKED", "reason": "PAPER_ROLE_HAS_UNEXPECTED_PUBLIC_SCHEMA_CREATE"}
+            if not bool(paper_schema_present):
+                return {"status": "BLOCKED", "reason": "PAPER_SCHEMA_NOT_PROVISIONED"}
+            if not bool(paper_schema_usage):
+                return {"status": "BLOCKED", "reason": "PAPER_SCHEMA_USAGE_MISSING"}
+            if bool(paper_schema_create):
+                return {"status": "BLOCKED", "reason": "PAPER_SCHEMA_CREATE_ALLOWED"}
             table_rows = (await conn.execute(text(
                 """
                 SELECT n.nspname || '.' || c.relname AS table_name,
@@ -360,8 +387,9 @@ async def preflight_isolated_customer_paper_ledger(
                         JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
+                          AND (NOT :same_database OR n.nspname <> 'customer_paper')
                         """
-                    ), {"paper_role": role_name})).mappings().all()
+                    ), {"paper_role": role_name, "same_database": same_database})).mappings().all()
                     # PostgreSQL normally grants USAGE on the "public" schema to
                     # PUBLIC. That alone does not grant table/function privileges and
                     # would make every distinct paper role fail preflight by default.
@@ -396,9 +424,10 @@ async def preflight_isolated_customer_paper_ledger(
                         JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
+                          AND (NOT :same_database OR n.nspname <> 'customer_paper')
                           AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
                         """
-                    ), {"paper_role": role_name})).mappings().all()
+                    ), {"paper_role": role_name, "same_database": same_database})).mappings().all()
                     primary_exposure = []
                     for row in primary_table_rows:
                         for permission in (
@@ -417,9 +446,10 @@ async def preflight_isolated_customer_paper_ledger(
                         JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
+                          AND (NOT :same_database OR n.nspname <> 'customer_paper')
                           AND c.relkind = 'S'
                         """
-                    ), {"paper_role": role_name})).mappings().all()
+                    ), {"paper_role": role_name, "same_database": same_database})).mappings().all()
                     for row in primary_sequence_rows:
                         for permission in ("can_select", "can_use", "can_update"):
                             if bool(row[permission]):
@@ -447,9 +477,15 @@ async def preflight_isolated_customer_paper_ledger(
                 await primary_engine.dispose()
             return {
                 "status": "PASS",
-                "reason": "ISOLATED_CUSTOMER_PAPER_DATABASE_PREFLIGHT_PASS",
+                "reason": (
+                    "SHARED_DATABASE_SCHEMA_PREFLIGHT_PASS"
+                    if same_database
+                    else "ISOLATED_CUSTOMER_PAPER_DATABASE_PREFLIGHT_PASS"
+                ),
                 "identity": {"database": db_name, "role": role_name},
                 "url_pair": pair,
+                "isolation_mode": pair["isolation_mode"],
+                "same_database_schema_isolation": same_database,
                 "paper_tables": sorted(PAPER_TABLES),
                 "paper_sequence_privileges": "USAGE_VERIFIED_FOR_ALL_FOUR_IDENTITY_SEQUENCES",
                 "real_money_table_privileges": "NONE_FOR_ALL_EXISTING_CHECKED_TABLES",

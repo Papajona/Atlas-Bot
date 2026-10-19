@@ -188,6 +188,8 @@ class Settings(BaseSettings):
     # Customer simulation remains unavailable until an isolated PostgreSQL store is verified.
     customer_paper_ledger_enabled: bool = False
     customer_paper_database_url: str = ""
+    # Opt-in for free single-project deployments; this is schema/ACL isolation, not a separate DB failure domain.
+    customer_paper_shared_database_enabled: bool = False
     research_folds: int = 5
     research_min_train: int = 800
     research_ai_threshold: float = 0.05
