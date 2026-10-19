@@ -426,7 +426,7 @@ async def preflight_isolated_customer_paper_ledger(
                 "identity": {"database": db_name, "role": role_name},
                 "url_pair": pair,
                 "paper_tables": sorted(PAPER_TABLES),
-                "paper_sequence_privileges": "USAGE_VERIFIED_FOR_ACCOUNTS_AND_JOURNAL_LINES",
+                "paper_sequence_privileges": "USAGE_VERIFIED_FOR_ALL_FOUR_IDENTITY_SEQUENCES",
                 "real_money_table_privileges": "NONE_FOR_ALL_EXISTING_CHECKED_TABLES",
                 "primary_role_identity_check": (
                     "ROLE_PRESENT_PRIVILEGES_CHECKED"
