@@ -29,7 +29,7 @@ _AMOUNT_QUANTUM = Decimal("0.000000000000000001")
 _CURRENCY_RE = re.compile(r"^[A-Z0-9]{2,12}$")
 _SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9/_:.-]{0,79}$")
 _VENUE_RE = re.compile(r"^[a-z0-9_-]{1,40}$")
-_MARKET_TYPES = {"spot", "swap", "forex", "commodity"}
+_MARKET_TYPES = {"spot"}
 
 
 class CustomerPaperOrderConflict(CustomerPaperLedgerBlocked):
@@ -297,6 +297,11 @@ async def submit_customer_paper_order(
     normalized_currency = str(currency or "").strip().upper()
     if not _CURRENCY_RE.fullmatch(normalized_currency):
         raise ValueError("currency must be 2 to 12 uppercase alphanumeric characters")
+    # This lifecycle models long-only spot assets in quote currency. Do not let a
+    # derivative/FX/commodity contract or mismatched quote asset silently reuse it.
+    symbol_parts = normalized_symbol.split("/")
+    if len(symbol_parts) != 2 or not all(symbol_parts) or symbol_parts[1] != normalized_currency:
+        raise ValueError("spot symbols must be BASE/QUOTE and QUOTE must match the ledger currency")
     limit = None if limit_price is None else _input_decimal(limit_price, "limit_price", positive=True)
     if normalized_order_type == "LIMIT" and limit is None:
         raise ValueError("LIMIT orders require a positive limit_price")
