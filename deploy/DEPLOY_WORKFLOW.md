@@ -88,7 +88,7 @@ Each gets `secretAccessor` only on the secrets in the table above. Review the bu
 | `PROCESS_ROLE` | `api` / `worker` / `job` | decides which loops start |
 | `BACKGROUND_RECONCILIATION_ENABLED` | API script `false`; default `true` | the worker relies on the default `true` |
 | `ADAPTIVE_BOT_CONTROLLER_ENABLED` | `true` | worker starts bot and executor controllers |
-| `GEMINI_MODEL`, `GEMINI_STRATEGY_MODEL` | `gemini-3.5-flash-lite` | `gemini-2.5-*` is scheduled for shutdown in Oct 2026; override via env at deploy |
+| `GEMINI_MODEL`, `GEMINI_STRATEGY_MODEL` | `gemini-3.7-flash` | Live inference verified on 2026-10-20 after `gemini-3.5-flash-lite` returned HTTP 503; explicitly overridden models must also pass the provider gate |
 | `GROQ_MODEL`, `GROQ_STRATEGY_MODEL` | `openai/gpt-oss-20b` | check with `python -m scripts.check_ai_models` before every deploy |
 | `RESEARCH_REQUIRE_COST_STRESS` / `RESEARCH_COST_STRESS_MULTIPLIER` | `true` / `2.0` | promotion needs a positive net edge at 2x costs |
 | `RESEARCH_MIN_DEFLATED_SHARPE` | `0.95` in production | production adaptive-model promotion fails closed below 0.95; development/staging may use a lower value for research |
