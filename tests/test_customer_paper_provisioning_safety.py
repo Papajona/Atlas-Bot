@@ -53,9 +53,15 @@ def test_admin_connection_rejects_wrong_host_port_database_or_scheme(uri: str, t
         _connection_env(uri, PROJECT_REF, tmp_path / "pgpass")
 
 
-def test_schema_sql_is_transactional_and_resets_old_acl_grants():
+def test_schema_apply_is_single_transaction_and_resets_old_acl_grants():
     sql = Path("scripts/customer_paper_ledger_schema.sql").read_text(encoding="utf-8")
-    assert "BEGIN;" in sql and sql.rstrip().endswith("COMMIT;")
+    provisioner = Path("scripts/provision_customer_paper_schema.py").read_text(encoding="utf-8")
+    assert "\\set ON_ERROR_STOP on" in sql
+    assert "\\if :{?paper_runtime_role}" in sql
+    assert (
+        '_psql(\n            env,\n            "-v", f"paper_runtime_role={RUNTIME_ROLE}",\n'
+        '            "-1",\n            "-f", str(SCHEMA_FILE),\n        )'
+    ) in provisioner
     assert "REVOKE ALL ON ALL TABLES IN SCHEMA customer_paper FROM %I" in sql
     assert "REVOKE ALL ON ALL SEQUENCES IN SCHEMA customer_paper FROM %I" in sql
     assert "REVOKE ALL ON ALL FUNCTIONS IN SCHEMA customer_paper FROM %I" in sql
