@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
-
-from urllib.parse import parse_qs, unquote, urlsplit
 
 from scripts.provision_customer_paper_schema import (
     VERIFY_SQL,
@@ -88,7 +88,6 @@ def test_provision_verifier_matches_all_nine_current_schema_tables_and_policy_ty
         "accounts", "journals", "journal_lines", "orders", "fills", "order_events",
         "position_events", "market_bar_budgets", "market_bar_allocations",
     }
-    import re
     actual_tables = set(re.findall(r"CREATE TABLE IF NOT EXISTS customer_paper\.(\w+)", schema))
     assert actual_tables == expected_tables
     for table in ("accounts", "journals", "journal_lines", "orders", "fills", "order_events", "position_events"):
