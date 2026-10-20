@@ -114,7 +114,19 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
     monkeypatch.setattr(settings, "paper_max_market_impact_bps", 0.0)
 
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    market = {"bar_at": now - timedelta(minutes=3)}
+    frozen_now = now + timedelta(minutes=3)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return frozen_now.replace(tzinfo=None)
+            return frozen_now.astimezone(tz)
+
+    # Freeze only the router's clock so three completed minute-bars can be replayed
+    # deterministically without sleeping and without using future live market data.
+    monkeypatch.setattr(paper_api, "datetime", FrozenDateTime)
+    market = {"bar_at": now}
 
     def fake_market_data(_request):
         return _verified_bars(market["bar_at"], volume="100")
@@ -175,7 +187,7 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
 
     # Both tenants advance against the exact same completed bar. Shared capacity is 1.0:
     # customer A receives 0.6 and customer B can receive only the 0.4 remainder.
-    market["bar_at"] = now - timedelta(minutes=2)
+    market["bar_at"] = now + timedelta(minutes=1)
     first = post("/api/customer/paper/orders/shared-bar-order-a/advance", "customer-a")
     second = post("/api/customer/paper/orders/shared-bar-order-b/advance", "customer-b")
     assert first.status_code == 200, first.text
@@ -190,7 +202,7 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
     assert replay_attempt.json()["status"] == "WAITING_FOR_BAR_CAPACITY"
 
     # A later bar completes the remainder after restart/recovery by reading persisted state.
-    market["bar_at"] = now - timedelta(minutes=1)
+    market["bar_at"] = now + timedelta(minutes=2)
     finish = post("/api/customer/paper/orders/shared-bar-order-b/advance", "customer-b")
     assert finish.status_code == 200, finish.text
     assert finish.json()["order"]["status"] == "FILLED"
