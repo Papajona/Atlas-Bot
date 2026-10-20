@@ -232,6 +232,15 @@ jobs:
                     reviewed_reason="reviewed obsolete 0048 default-deny migration branch; current main has the non-conflicting 0049 lockdown, schema-level access revocation, RLS and runtime regression checks"
                   fi
                   ;;
+                "hardening/ci-readiness-gates:1d4228e4722b3e91cd8503162bf89cbbd1e08c73")
+                  if [[ "$(git rev-parse "$main_sha:scripts/assert_no_skips.py")" == "$(git rev-parse "$sha:scripts/assert_no_skips.py")" ]] \
+                    && git show "$main_sha:.github/workflows/ledger-concurrency-check.yml" | grep -F "      - 'alembic/**'" >/dev/null \
+                    && git show "$main_sha:.github/workflows/ledger-concurrency-check.yml" | grep -F "      - 'tests/test_unified_custody.py'" >/dev/null \
+                    && git show "$main_sha:.github/workflows/ledger-concurrency-check.yml" | grep -F 'timeout-minutes: 45' >/dev/null \
+                    && git show "$main_sha:.github/workflows/ledger-concurrency-check.yml" | grep -F 'permissions:' >/dev/null; then
+                    reviewed_reason="reviewed superseded CI-readiness branch; no-skip assertion script is byte-identical and current main has broader ledger workflow triggers and equivalent or stronger permissions/timeouts"
+                  fi
+                  ;;
               esac
               if [[ -n "$reviewed_reason" ]]; then
                 reason="$reviewed_reason"
