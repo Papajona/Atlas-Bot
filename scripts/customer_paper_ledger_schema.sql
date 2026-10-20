@@ -213,6 +213,741 @@ BEGIN
 END
 $paper_immutable$;
 
+-- Shared aggregate capacity is public market metadata, not a customer ledger. It has no
+-- customer_id, is append-only, and prevents separate tenants from each consuming the
+-- full volume of the same completed bar.
+CREATE TABLE IF NOT EXISTS customer_paper.market_bar_budgets (
+    bar_key varchar(64) PRIMARY KEY CHECK (bar_key ~ '^[0-9a-f]{64}
+RETURNS trigger LANGUAGE plpgsql AS $paper_balance$
+DECLARE
+    target_id uuid;
+    event_name text;
+    line_count bigint;
+    currency_count bigint;
+    total_amount numeric(38,18);
+    cash_count bigint;
+    equity_count bigint;
+    cash_amount numeric(38,18);
+    equity_amount numeric(38,18);
+BEGIN
+    IF TG_TABLE_NAME = 'journals' THEN
+        target_id := NEW.id;
+    ELSE
+        target_id := NEW.journal_id;
+    END IF;
+    SELECT event_type INTO event_name
+      FROM customer_paper.journals
+     WHERE id = target_id;
+    SELECT count(*), count(DISTINCT l.currency), coalesce(sum(l.signed_amount), 0),
+           count(*) FILTER (WHERE a.account_code = 'PAPER_CASH'),
+           count(*) FILTER (WHERE a.account_code = 'PAPER_EQUITY'),
+           coalesce(sum(l.signed_amount) FILTER (WHERE a.account_code = 'PAPER_CASH'), 0),
+           coalesce(sum(l.signed_amount) FILTER (WHERE a.account_code = 'PAPER_EQUITY'), 0)
+      INTO line_count, currency_count, total_amount, cash_count, equity_count, cash_amount, equity_amount
+      FROM customer_paper.journal_lines l
+      JOIN customer_paper.accounts a
+        ON a.id = l.account_id AND a.customer_id = l.customer_id AND a.currency = l.currency
+     WHERE l.journal_id = target_id;
+    IF line_count < 2 OR currency_count <> 1 OR total_amount <> 0 THEN
+        RAISE EXCEPTION 'customer paper journal must contain at least two same-currency lines summing exactly to zero'
+            USING ERRCODE = '23514';
+    END IF;
+    IF event_name = 'PAPER_SEED' AND (
+        line_count <> 2 OR cash_count <> 1 OR equity_count <> 1
+        OR cash_amount <= 0 OR equity_amount <> -cash_amount
+    ) THEN
+        RAISE EXCEPTION 'PAPER_SEED must add positive PAPER_CASH balanced by equal negative PAPER_EQUITY'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END
+$paper_balance$;
+
+CREATE OR REPLACE FUNCTION customer_paper.assert_order_event_state()
+RETURNS trigger LANGUAGE plpgsql AS $paper_event_state$
+DECLARE
+    previous_event text;
+    previous_filled numeric(38,18);
+    actual_filled numeric(38,18);
+    maximum_quantity numeric(38,18);
+BEGIN
+    SELECT event_type, filled_quantity INTO previous_event, previous_filled
+    FROM customer_paper.order_events
+    WHERE customer_id = NEW.customer_id AND order_id = NEW.order_id
+      AND id <> NEW.id
+    ORDER BY id DESC LIMIT 1;
+    SELECT quantity INTO maximum_quantity
+    FROM customer_paper.orders WHERE id = NEW.order_id AND customer_id = NEW.customer_id;
+    SELECT COALESCE(SUM(quantity), 0) INTO actual_filled
+    FROM customer_paper.fills
+    WHERE customer_id = NEW.customer_id AND order_id = NEW.order_id;
+
+    IF NEW.filled_quantity <> actual_filled THEN
+        RAISE EXCEPTION 'order event filled_quantity must equal the sum of persisted fills'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.event_type = 'SUBMITTED' THEN
+        IF previous_event IS NOT NULL OR NEW.filled_quantity <> 0 THEN
+            RAISE EXCEPTION 'SUBMITTED must be the first order event with zero fill quantity'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF previous_event IS NULL OR previous_event NOT IN ('SUBMITTED','PARTIALLY_FILLED') THEN
+        RAISE EXCEPTION 'order terminal state cannot be changed'
+            USING ERRCODE = '23514';
+    ELSIF NEW.filled_quantity < previous_filled OR NEW.filled_quantity > maximum_quantity THEN
+        RAISE EXCEPTION 'order filled quantity must be monotonic and bounded by order quantity'
+            USING ERRCODE = '23514';
+    ELSIF NEW.event_type IN ('PARTIALLY_FILLED','FILLED') AND NEW.filled_quantity <= 0 THEN
+        RAISE EXCEPTION 'filled event requires positive cumulative quantity'
+            USING ERRCODE = '23514';
+    ELSIF NEW.event_type = 'PARTIALLY_FILLED' AND NEW.filled_quantity >= maximum_quantity THEN
+        RAISE EXCEPTION 'PARTIALLY_FILLED must leave a positive quantity open'
+            USING ERRCODE = '23514';
+    ELSIF NEW.event_type = 'FILLED' AND NEW.filled_quantity <> maximum_quantity THEN
+        RAISE EXCEPTION 'FILLED requires the full ordered quantity'
+            USING ERRCODE = '23514';
+    ELSIF NEW.event_type IN ('CANCELLED','EXPIRED','REJECTED') AND NEW.filled_quantity <> previous_filled THEN
+        RAISE EXCEPTION 'terminal order event cannot change cumulative fills'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END
+$paper_event_state$;
+
+-- Deferrable because SUBMITTED and its corresponding order row are inserted in one transaction.
+DROP TRIGGER IF EXISTS trg_customer_paper_balance_journal ON customer_paper.journals;
+CREATE CONSTRAINT TRIGGER trg_customer_paper_balance_journal
+AFTER INSERT ON customer_paper.journals
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_balanced_journal();
+DROP TRIGGER IF EXISTS trg_customer_paper_balance_lines ON customer_paper.journal_lines;
+CREATE CONSTRAINT TRIGGER trg_customer_paper_balance_lines
+AFTER INSERT ON customer_paper.journal_lines
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_balanced_journal();
+
+DROP TRIGGER IF EXISTS trg_customer_paper_order_state_guard ON customer_paper.order_events;
+CREATE TRIGGER trg_customer_paper_order_state_guard
+BEFORE INSERT ON customer_paper.order_events
+FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_order_event_state();
+
+-- The original three-table schema used "lines" rather than "journal_lines".
+-- Remove that legacy trigger name before creating the normalized seven-table set.
+DROP TRIGGER IF EXISTS trg_customer_paper_lines_immutable ON customer_paper.journal_lines;
+
+DO $paper_immutable_triggers$
+DECLARE table_name text;
+BEGIN
+    FOREACH table_name IN ARRAY ARRAY[
+        'accounts','journals','journal_lines','orders','order_events','fills','position_events','market_bar_budgets'
+    ] LOOP
+        EXECUTE format('DROP TRIGGER IF EXISTS trg_customer_paper_%I_immutable ON customer_paper.%I', table_name, table_name);
+        EXECUTE format('CREATE TRIGGER trg_customer_paper_%I_immutable BEFORE UPDATE OR DELETE ON customer_paper.%I FOR EACH ROW EXECUTE FUNCTION customer_paper.reject_mutation()', table_name, table_name);
+    END LOOP;
+END
+$paper_immutable_triggers$;
+
+ALTER TABLE customer_paper.accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.accounts FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.journals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.journals FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.journal_lines ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.journal_lines FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.orders FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.order_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.order_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.fills ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.fills FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.position_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.position_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.market_bar_budgets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.market_bar_budgets FORCE ROW LEVEL SECURITY;
+
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA customer_paper FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA customer_paper FROM PUBLIC;
+DO $paper_grants$
+DECLARE
+    role_name text := current_setting('app.paper_runtime_role', true);
+    policy_table text;
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN
+        EXECUTE 'REVOKE ALL ON SCHEMA customer_paper FROM anon';
+        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA customer_paper FROM anon';
+        EXECUTE 'REVOKE ALL ON ALL SEQUENCES IN SCHEMA customer_paper FROM anon';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='authenticated') THEN
+        EXECUTE 'REVOKE ALL ON SCHEMA customer_paper FROM authenticated';
+        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA customer_paper FROM authenticated';
+        EXECUTE 'REVOKE ALL ON ALL SEQUENCES IN SCHEMA customer_paper FROM authenticated';
+    END IF;
+    EXECUTE format('REVOKE ALL ON SCHEMA public FROM %I', role_name);
+    EXECUTE format('GRANT USAGE ON SCHEMA customer_paper TO %I', role_name);
+    FOREACH policy_table IN ARRAY ARRAY[
+        'accounts','journals','journal_lines','orders','order_events','fills','position_events'
+    ] LOOP
+        EXECUTE format('GRANT SELECT, INSERT ON customer_paper.%I TO %I', policy_table, role_name);
+        EXECUTE format('DROP POLICY IF EXISTS customer_paper_tenant ON customer_paper.%I', policy_table);
+        EXECUTE format(
+            'CREATE POLICY customer_paper_tenant ON customer_paper.%I FOR ALL TO %I USING (customer_id = NULLIF(current_setting(''app.customer_id'', true), '''')::bigint) WITH CHECK (customer_id = NULLIF(current_setting(''app.customer_id'', true), '''')::bigint)',
+            policy_table, role_name
+        );
+    END LOOP;
+    -- Shared public-bar metadata is not tenant financial data. The backend may read/insert
+    -- budget rows, but never update/delete them or own the table.
+    EXECUTE format('GRANT SELECT, INSERT ON customer_paper.market_bar_budgets TO %I', role_name);
+    EXECUTE 'DROP POLICY IF EXISTS customer_paper_bar_budget_backend ON customer_paper.market_bar_budgets';
+    EXECUTE format('CREATE POLICY customer_paper_bar_budget_backend ON customer_paper.market_bar_budgets FOR ALL TO %I USING (true) WITH CHECK (true)', role_name);
+    EXECUTE format('GRANT USAGE ON ALL SEQUENCES IN SCHEMA customer_paper TO %I', role_name);
+END
+$paper_grants$;
+),
+    venue varchar(40) NOT NULL CHECK (venue ~ '^[a-z0-9_-]{1,40}
+RETURNS trigger LANGUAGE plpgsql AS $paper_balance$
+DECLARE
+    target_id uuid;
+    event_name text;
+    line_count bigint;
+    currency_count bigint;
+    total_amount numeric(38,18);
+    cash_count bigint;
+    equity_count bigint;
+    cash_amount numeric(38,18);
+    equity_amount numeric(38,18);
+BEGIN
+    IF TG_TABLE_NAME = 'journals' THEN
+        target_id := NEW.id;
+    ELSE
+        target_id := NEW.journal_id;
+    END IF;
+    SELECT event_type INTO event_name
+      FROM customer_paper.journals
+     WHERE id = target_id;
+    SELECT count(*), count(DISTINCT l.currency), coalesce(sum(l.signed_amount), 0),
+           count(*) FILTER (WHERE a.account_code = 'PAPER_CASH'),
+           count(*) FILTER (WHERE a.account_code = 'PAPER_EQUITY'),
+           coalesce(sum(l.signed_amount) FILTER (WHERE a.account_code = 'PAPER_CASH'), 0),
+           coalesce(sum(l.signed_amount) FILTER (WHERE a.account_code = 'PAPER_EQUITY'), 0)
+      INTO line_count, currency_count, total_amount, cash_count, equity_count, cash_amount, equity_amount
+      FROM customer_paper.journal_lines l
+      JOIN customer_paper.accounts a
+        ON a.id = l.account_id AND a.customer_id = l.customer_id AND a.currency = l.currency
+     WHERE l.journal_id = target_id;
+    IF line_count < 2 OR currency_count <> 1 OR total_amount <> 0 THEN
+        RAISE EXCEPTION 'customer paper journal must contain at least two same-currency lines summing exactly to zero'
+            USING ERRCODE = '23514';
+    END IF;
+    IF event_name = 'PAPER_SEED' AND (
+        line_count <> 2 OR cash_count <> 1 OR equity_count <> 1
+        OR cash_amount <= 0 OR equity_amount <> -cash_amount
+    ) THEN
+        RAISE EXCEPTION 'PAPER_SEED must add positive PAPER_CASH balanced by equal negative PAPER_EQUITY'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END
+$paper_balance$;
+
+CREATE OR REPLACE FUNCTION customer_paper.assert_order_event_state()
+RETURNS trigger LANGUAGE plpgsql AS $paper_event_state$
+DECLARE
+    previous_event text;
+    previous_filled numeric(38,18);
+    actual_filled numeric(38,18);
+    maximum_quantity numeric(38,18);
+BEGIN
+    SELECT event_type, filled_quantity INTO previous_event, previous_filled
+    FROM customer_paper.order_events
+    WHERE customer_id = NEW.customer_id AND order_id = NEW.order_id
+      AND id <> NEW.id
+    ORDER BY id DESC LIMIT 1;
+    SELECT quantity INTO maximum_quantity
+    FROM customer_paper.orders WHERE id = NEW.order_id AND customer_id = NEW.customer_id;
+    SELECT COALESCE(SUM(quantity), 0) INTO actual_filled
+    FROM customer_paper.fills
+    WHERE customer_id = NEW.customer_id AND order_id = NEW.order_id;
+
+    IF NEW.filled_quantity <> actual_filled THEN
+        RAISE EXCEPTION 'order event filled_quantity must equal the sum of persisted fills'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.event_type = 'SUBMITTED' THEN
+        IF previous_event IS NOT NULL OR NEW.filled_quantity <> 0 THEN
+            RAISE EXCEPTION 'SUBMITTED must be the first order event with zero fill quantity'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF previous_event IS NULL OR previous_event NOT IN ('SUBMITTED','PARTIALLY_FILLED') THEN
+        RAISE EXCEPTION 'order terminal state cannot be changed'
+            USING ERRCODE = '23514';
+    ELSIF NEW.filled_quantity < previous_filled OR NEW.filled_quantity > maximum_quantity THEN
+        RAISE EXCEPTION 'order filled quantity must be monotonic and bounded by order quantity'
+            USING ERRCODE = '23514';
+    ELSIF NEW.event_type IN ('PARTIALLY_FILLED','FILLED') AND NEW.filled_quantity <= 0 THEN
+        RAISE EXCEPTION 'filled event requires positive cumulative quantity'
+            USING ERRCODE = '23514';
+    ELSIF NEW.event_type = 'PARTIALLY_FILLED' AND NEW.filled_quantity >= maximum_quantity THEN
+        RAISE EXCEPTION 'PARTIALLY_FILLED must leave a positive quantity open'
+            USING ERRCODE = '23514';
+    ELSIF NEW.event_type = 'FILLED' AND NEW.filled_quantity <> maximum_quantity THEN
+        RAISE EXCEPTION 'FILLED requires the full ordered quantity'
+            USING ERRCODE = '23514';
+    ELSIF NEW.event_type IN ('CANCELLED','EXPIRED','REJECTED') AND NEW.filled_quantity <> previous_filled THEN
+        RAISE EXCEPTION 'terminal order event cannot change cumulative fills'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END
+$paper_event_state$;
+
+-- Deferrable because SUBMITTED and its corresponding order row are inserted in one transaction.
+DROP TRIGGER IF EXISTS trg_customer_paper_balance_journal ON customer_paper.journals;
+CREATE CONSTRAINT TRIGGER trg_customer_paper_balance_journal
+AFTER INSERT ON customer_paper.journals
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_balanced_journal();
+DROP TRIGGER IF EXISTS trg_customer_paper_balance_lines ON customer_paper.journal_lines;
+CREATE CONSTRAINT TRIGGER trg_customer_paper_balance_lines
+AFTER INSERT ON customer_paper.journal_lines
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_balanced_journal();
+
+DROP TRIGGER IF EXISTS trg_customer_paper_order_state_guard ON customer_paper.order_events;
+CREATE TRIGGER trg_customer_paper_order_state_guard
+BEFORE INSERT ON customer_paper.order_events
+FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_order_event_state();
+
+-- The original three-table schema used "lines" rather than "journal_lines".
+-- Remove that legacy trigger name before creating the normalized seven-table set.
+DROP TRIGGER IF EXISTS trg_customer_paper_lines_immutable ON customer_paper.journal_lines;
+
+DO $paper_immutable_triggers$
+DECLARE table_name text;
+BEGIN
+    FOREACH table_name IN ARRAY ARRAY[
+        'accounts','journals','journal_lines','orders','order_events','fills','position_events'
+    ] LOOP
+        EXECUTE format('DROP TRIGGER IF EXISTS trg_customer_paper_%I_immutable ON customer_paper.%I', table_name, table_name);
+        EXECUTE format('CREATE TRIGGER trg_customer_paper_%I_immutable BEFORE UPDATE OR DELETE ON customer_paper.%I FOR EACH ROW EXECUTE FUNCTION customer_paper.reject_mutation()', table_name, table_name);
+    END LOOP;
+END
+$paper_immutable_triggers$;
+
+ALTER TABLE customer_paper.accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.accounts FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.journals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.journals FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.journal_lines ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.journal_lines FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.orders FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.order_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.order_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.fills ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.fills FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.position_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.position_events FORCE ROW LEVEL SECURITY;
+
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA customer_paper FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA customer_paper FROM PUBLIC;
+DO $paper_grants$
+DECLARE
+    role_name text := current_setting('app.paper_runtime_role', true);
+    policy_table text;
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN
+        EXECUTE 'REVOKE ALL ON SCHEMA customer_paper FROM anon';
+        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA customer_paper FROM anon';
+        EXECUTE 'REVOKE ALL ON ALL SEQUENCES IN SCHEMA customer_paper FROM anon';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='authenticated') THEN
+        EXECUTE 'REVOKE ALL ON SCHEMA customer_paper FROM authenticated';
+        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA customer_paper FROM authenticated';
+        EXECUTE 'REVOKE ALL ON ALL SEQUENCES IN SCHEMA customer_paper FROM authenticated';
+    END IF;
+    EXECUTE format('REVOKE ALL ON SCHEMA public FROM %I', role_name);
+    EXECUTE format('GRANT USAGE ON SCHEMA customer_paper TO %I', role_name);
+    FOREACH policy_table IN ARRAY ARRAY[
+        'accounts','journals','journal_lines','orders','order_events','fills','position_events'
+    ] LOOP
+        EXECUTE format('GRANT SELECT, INSERT ON customer_paper.%I TO %I', policy_table, role_name);
+        EXECUTE format('DROP POLICY IF EXISTS customer_paper_tenant ON customer_paper.%I', policy_table);
+        EXECUTE format(
+            'CREATE POLICY customer_paper_tenant ON customer_paper.%I FOR ALL TO %I USING (customer_id = NULLIF(current_setting(''app.customer_id'', true), '''')::bigint) WITH CHECK (customer_id = NULLIF(current_setting(''app.customer_id'', true), '''')::bigint)',
+            policy_table, role_name
+        );
+    END LOOP;
+    EXECUTE format('GRANT USAGE ON ALL SEQUENCES IN SCHEMA customer_paper TO %I', role_name);
+END
+$paper_grants$;
+),
+    market_type varchar(16) NOT NULL CHECK (market_type = 'spot'),
+    symbol varchar(80) NOT NULL CHECK (symbol ~ '^[A-Z0-9][A-Z0-9/_:.-]{0,79}
+RETURNS trigger LANGUAGE plpgsql AS $paper_balance$
+DECLARE
+    target_id uuid;
+    event_name text;
+    line_count bigint;
+    currency_count bigint;
+    total_amount numeric(38,18);
+    cash_count bigint;
+    equity_count bigint;
+    cash_amount numeric(38,18);
+    equity_amount numeric(38,18);
+BEGIN
+    IF TG_TABLE_NAME = 'journals' THEN
+        target_id := NEW.id;
+    ELSE
+        target_id := NEW.journal_id;
+    END IF;
+    SELECT event_type INTO event_name
+      FROM customer_paper.journals
+     WHERE id = target_id;
+    SELECT count(*), count(DISTINCT l.currency), coalesce(sum(l.signed_amount), 0),
+           count(*) FILTER (WHERE a.account_code = 'PAPER_CASH'),
+           count(*) FILTER (WHERE a.account_code = 'PAPER_EQUITY'),
+           coalesce(sum(l.signed_amount) FILTER (WHERE a.account_code = 'PAPER_CASH'), 0),
+           coalesce(sum(l.signed_amount) FILTER (WHERE a.account_code = 'PAPER_EQUITY'), 0)
+      INTO line_count, currency_count, total_amount, cash_count, equity_count, cash_amount, equity_amount
+      FROM customer_paper.journal_lines l
+      JOIN customer_paper.accounts a
+        ON a.id = l.account_id AND a.customer_id = l.customer_id AND a.currency = l.currency
+     WHERE l.journal_id = target_id;
+    IF line_count < 2 OR currency_count <> 1 OR total_amount <> 0 THEN
+        RAISE EXCEPTION 'customer paper journal must contain at least two same-currency lines summing exactly to zero'
+            USING ERRCODE = '23514';
+    END IF;
+    IF event_name = 'PAPER_SEED' AND (
+        line_count <> 2 OR cash_count <> 1 OR equity_count <> 1
+        OR cash_amount <= 0 OR equity_amount <> -cash_amount
+    ) THEN
+        RAISE EXCEPTION 'PAPER_SEED must add positive PAPER_CASH balanced by equal negative PAPER_EQUITY'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END
+$paper_balance$;
+
+CREATE OR REPLACE FUNCTION customer_paper.assert_order_event_state()
+RETURNS trigger LANGUAGE plpgsql AS $paper_event_state$
+DECLARE
+    previous_event text;
+    previous_filled numeric(38,18);
+    actual_filled numeric(38,18);
+    maximum_quantity numeric(38,18);
+BEGIN
+    SELECT event_type, filled_quantity INTO previous_event, previous_filled
+    FROM customer_paper.order_events
+    WHERE customer_id = NEW.customer_id AND order_id = NEW.order_id
+      AND id <> NEW.id
+    ORDER BY id DESC LIMIT 1;
+    SELECT quantity INTO maximum_quantity
+    FROM customer_paper.orders WHERE id = NEW.order_id AND customer_id = NEW.customer_id;
+    SELECT COALESCE(SUM(quantity), 0) INTO actual_filled
+    FROM customer_paper.fills
+    WHERE customer_id = NEW.customer_id AND order_id = NEW.order_id;
+
+    IF NEW.filled_quantity <> actual_filled THEN
+        RAISE EXCEPTION 'order event filled_quantity must equal the sum of persisted fills'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.event_type = 'SUBMITTED' THEN
+        IF previous_event IS NOT NULL OR NEW.filled_quantity <> 0 THEN
+            RAISE EXCEPTION 'SUBMITTED must be the first order event with zero fill quantity'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF previous_event IS NULL OR previous_event NOT IN ('SUBMITTED','PARTIALLY_FILLED') THEN
+        RAISE EXCEPTION 'order terminal state cannot be changed'
+            USING ERRCODE = '23514';
+    ELSIF NEW.filled_quantity < previous_filled OR NEW.filled_quantity > maximum_quantity THEN
+        RAISE EXCEPTION 'order filled quantity must be monotonic and bounded by order quantity'
+            USING ERRCODE = '23514';
+    ELSIF NEW.event_type IN ('PARTIALLY_FILLED','FILLED') AND NEW.filled_quantity <= 0 THEN
+        RAISE EXCEPTION 'filled event requires positive cumulative quantity'
+            USING ERRCODE = '23514';
+    ELSIF NEW.event_type = 'PARTIALLY_FILLED' AND NEW.filled_quantity >= maximum_quantity THEN
+        RAISE EXCEPTION 'PARTIALLY_FILLED must leave a positive quantity open'
+            USING ERRCODE = '23514';
+    ELSIF NEW.event_type = 'FILLED' AND NEW.filled_quantity <> maximum_quantity THEN
+        RAISE EXCEPTION 'FILLED requires the full ordered quantity'
+            USING ERRCODE = '23514';
+    ELSIF NEW.event_type IN ('CANCELLED','EXPIRED','REJECTED') AND NEW.filled_quantity <> previous_filled THEN
+        RAISE EXCEPTION 'terminal order event cannot change cumulative fills'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END
+$paper_event_state$;
+
+-- Deferrable because SUBMITTED and its corresponding order row are inserted in one transaction.
+DROP TRIGGER IF EXISTS trg_customer_paper_balance_journal ON customer_paper.journals;
+CREATE CONSTRAINT TRIGGER trg_customer_paper_balance_journal
+AFTER INSERT ON customer_paper.journals
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_balanced_journal();
+DROP TRIGGER IF EXISTS trg_customer_paper_balance_lines ON customer_paper.journal_lines;
+CREATE CONSTRAINT TRIGGER trg_customer_paper_balance_lines
+AFTER INSERT ON customer_paper.journal_lines
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_balanced_journal();
+
+DROP TRIGGER IF EXISTS trg_customer_paper_order_state_guard ON customer_paper.order_events;
+CREATE TRIGGER trg_customer_paper_order_state_guard
+BEFORE INSERT ON customer_paper.order_events
+FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_order_event_state();
+
+-- The original three-table schema used "lines" rather than "journal_lines".
+-- Remove that legacy trigger name before creating the normalized seven-table set.
+DROP TRIGGER IF EXISTS trg_customer_paper_lines_immutable ON customer_paper.journal_lines;
+
+DO $paper_immutable_triggers$
+DECLARE table_name text;
+BEGIN
+    FOREACH table_name IN ARRAY ARRAY[
+        'accounts','journals','journal_lines','orders','order_events','fills','position_events'
+    ] LOOP
+        EXECUTE format('DROP TRIGGER IF EXISTS trg_customer_paper_%I_immutable ON customer_paper.%I', table_name, table_name);
+        EXECUTE format('CREATE TRIGGER trg_customer_paper_%I_immutable BEFORE UPDATE OR DELETE ON customer_paper.%I FOR EACH ROW EXECUTE FUNCTION customer_paper.reject_mutation()', table_name, table_name);
+    END LOOP;
+END
+$paper_immutable_triggers$;
+
+ALTER TABLE customer_paper.accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.accounts FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.journals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.journals FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.journal_lines ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.journal_lines FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.orders FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.order_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.order_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.fills ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.fills FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.position_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.position_events FORCE ROW LEVEL SECURITY;
+
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA customer_paper FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA customer_paper FROM PUBLIC;
+DO $paper_grants$
+DECLARE
+    role_name text := current_setting('app.paper_runtime_role', true);
+    policy_table text;
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN
+        EXECUTE 'REVOKE ALL ON SCHEMA customer_paper FROM anon';
+        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA customer_paper FROM anon';
+        EXECUTE 'REVOKE ALL ON ALL SEQUENCES IN SCHEMA customer_paper FROM anon';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='authenticated') THEN
+        EXECUTE 'REVOKE ALL ON SCHEMA customer_paper FROM authenticated';
+        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA customer_paper FROM authenticated';
+        EXECUTE 'REVOKE ALL ON ALL SEQUENCES IN SCHEMA customer_paper FROM authenticated';
+    END IF;
+    EXECUTE format('REVOKE ALL ON SCHEMA public FROM %I', role_name);
+    EXECUTE format('GRANT USAGE ON SCHEMA customer_paper TO %I', role_name);
+    FOREACH policy_table IN ARRAY ARRAY[
+        'accounts','journals','journal_lines','orders','order_events','fills','position_events'
+    ] LOOP
+        EXECUTE format('GRANT SELECT, INSERT ON customer_paper.%I TO %I', policy_table, role_name);
+        EXECUTE format('DROP POLICY IF EXISTS customer_paper_tenant ON customer_paper.%I', policy_table);
+        EXECUTE format(
+            'CREATE POLICY customer_paper_tenant ON customer_paper.%I FOR ALL TO %I USING (customer_id = NULLIF(current_setting(''app.customer_id'', true), '''')::bigint) WITH CHECK (customer_id = NULLIF(current_setting(''app.customer_id'', true), '''')::bigint)',
+            policy_table, role_name
+        );
+    END LOOP;
+    EXECUTE format('GRANT USAGE ON ALL SEQUENCES IN SCHEMA customer_paper TO %I', role_name);
+END
+$paper_grants$;
+),
+    timeframe varchar(8) NOT NULL CHECK (timeframe IN ('1m','5m','15m','30m','1h','2h','4h','1d')),
+    bar_at timestamptz NOT NULL,
+    bar_data_sha256 varchar(64) NOT NULL CHECK (bar_data_sha256 ~ '^[0-9a-f]{64}
+RETURNS trigger LANGUAGE plpgsql AS $paper_balance$
+DECLARE
+    target_id uuid;
+    event_name text;
+    line_count bigint;
+    currency_count bigint;
+    total_amount numeric(38,18);
+    cash_count bigint;
+    equity_count bigint;
+    cash_amount numeric(38,18);
+    equity_amount numeric(38,18);
+BEGIN
+    IF TG_TABLE_NAME = 'journals' THEN
+        target_id := NEW.id;
+    ELSE
+        target_id := NEW.journal_id;
+    END IF;
+    SELECT event_type INTO event_name
+      FROM customer_paper.journals
+     WHERE id = target_id;
+    SELECT count(*), count(DISTINCT l.currency), coalesce(sum(l.signed_amount), 0),
+           count(*) FILTER (WHERE a.account_code = 'PAPER_CASH'),
+           count(*) FILTER (WHERE a.account_code = 'PAPER_EQUITY'),
+           coalesce(sum(l.signed_amount) FILTER (WHERE a.account_code = 'PAPER_CASH'), 0),
+           coalesce(sum(l.signed_amount) FILTER (WHERE a.account_code = 'PAPER_EQUITY'), 0)
+      INTO line_count, currency_count, total_amount, cash_count, equity_count, cash_amount, equity_amount
+      FROM customer_paper.journal_lines l
+      JOIN customer_paper.accounts a
+        ON a.id = l.account_id AND a.customer_id = l.customer_id AND a.currency = l.currency
+     WHERE l.journal_id = target_id;
+    IF line_count < 2 OR currency_count <> 1 OR total_amount <> 0 THEN
+        RAISE EXCEPTION 'customer paper journal must contain at least two same-currency lines summing exactly to zero'
+            USING ERRCODE = '23514';
+    END IF;
+    IF event_name = 'PAPER_SEED' AND (
+        line_count <> 2 OR cash_count <> 1 OR equity_count <> 1
+        OR cash_amount <= 0 OR equity_amount <> -cash_amount
+    ) THEN
+        RAISE EXCEPTION 'PAPER_SEED must add positive PAPER_CASH balanced by equal negative PAPER_EQUITY'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END
+$paper_balance$;
+
+CREATE OR REPLACE FUNCTION customer_paper.assert_order_event_state()
+RETURNS trigger LANGUAGE plpgsql AS $paper_event_state$
+DECLARE
+    previous_event text;
+    previous_filled numeric(38,18);
+    actual_filled numeric(38,18);
+    maximum_quantity numeric(38,18);
+BEGIN
+    SELECT event_type, filled_quantity INTO previous_event, previous_filled
+    FROM customer_paper.order_events
+    WHERE customer_id = NEW.customer_id AND order_id = NEW.order_id
+      AND id <> NEW.id
+    ORDER BY id DESC LIMIT 1;
+    SELECT quantity INTO maximum_quantity
+    FROM customer_paper.orders WHERE id = NEW.order_id AND customer_id = NEW.customer_id;
+    SELECT COALESCE(SUM(quantity), 0) INTO actual_filled
+    FROM customer_paper.fills
+    WHERE customer_id = NEW.customer_id AND order_id = NEW.order_id;
+
+    IF NEW.filled_quantity <> actual_filled THEN
+        RAISE EXCEPTION 'order event filled_quantity must equal the sum of persisted fills'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.event_type = 'SUBMITTED' THEN
+        IF previous_event IS NOT NULL OR NEW.filled_quantity <> 0 THEN
+            RAISE EXCEPTION 'SUBMITTED must be the first order event with zero fill quantity'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF previous_event IS NULL OR previous_event NOT IN ('SUBMITTED','PARTIALLY_FILLED') THEN
+        RAISE EXCEPTION 'order terminal state cannot be changed'
+            USING ERRCODE = '23514';
+    ELSIF NEW.filled_quantity < previous_filled OR NEW.filled_quantity > maximum_quantity THEN
+        RAISE EXCEPTION 'order filled quantity must be monotonic and bounded by order quantity'
+            USING ERRCODE = '23514';
+    ELSIF NEW.event_type IN ('PARTIALLY_FILLED','FILLED') AND NEW.filled_quantity <= 0 THEN
+        RAISE EXCEPTION 'filled event requires positive cumulative quantity'
+            USING ERRCODE = '23514';
+    ELSIF NEW.event_type = 'PARTIALLY_FILLED' AND NEW.filled_quantity >= maximum_quantity THEN
+        RAISE EXCEPTION 'PARTIALLY_FILLED must leave a positive quantity open'
+            USING ERRCODE = '23514';
+    ELSIF NEW.event_type = 'FILLED' AND NEW.filled_quantity <> maximum_quantity THEN
+        RAISE EXCEPTION 'FILLED requires the full ordered quantity'
+            USING ERRCODE = '23514';
+    ELSIF NEW.event_type IN ('CANCELLED','EXPIRED','REJECTED') AND NEW.filled_quantity <> previous_filled THEN
+        RAISE EXCEPTION 'terminal order event cannot change cumulative fills'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END
+$paper_event_state$;
+
+-- Deferrable because SUBMITTED and its corresponding order row are inserted in one transaction.
+DROP TRIGGER IF EXISTS trg_customer_paper_balance_journal ON customer_paper.journals;
+CREATE CONSTRAINT TRIGGER trg_customer_paper_balance_journal
+AFTER INSERT ON customer_paper.journals
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_balanced_journal();
+DROP TRIGGER IF EXISTS trg_customer_paper_balance_lines ON customer_paper.journal_lines;
+CREATE CONSTRAINT TRIGGER trg_customer_paper_balance_lines
+AFTER INSERT ON customer_paper.journal_lines
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_balanced_journal();
+
+DROP TRIGGER IF EXISTS trg_customer_paper_order_state_guard ON customer_paper.order_events;
+CREATE TRIGGER trg_customer_paper_order_state_guard
+BEFORE INSERT ON customer_paper.order_events
+FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_order_event_state();
+
+-- The original three-table schema used "lines" rather than "journal_lines".
+-- Remove that legacy trigger name before creating the normalized seven-table set.
+DROP TRIGGER IF EXISTS trg_customer_paper_lines_immutable ON customer_paper.journal_lines;
+
+DO $paper_immutable_triggers$
+DECLARE table_name text;
+BEGIN
+    FOREACH table_name IN ARRAY ARRAY[
+        'accounts','journals','journal_lines','orders','order_events','fills','position_events'
+    ] LOOP
+        EXECUTE format('DROP TRIGGER IF EXISTS trg_customer_paper_%I_immutable ON customer_paper.%I', table_name, table_name);
+        EXECUTE format('CREATE TRIGGER trg_customer_paper_%I_immutable BEFORE UPDATE OR DELETE ON customer_paper.%I FOR EACH ROW EXECUTE FUNCTION customer_paper.reject_mutation()', table_name, table_name);
+    END LOOP;
+END
+$paper_immutable_triggers$;
+
+ALTER TABLE customer_paper.accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.accounts FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.journals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.journals FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.journal_lines ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.journal_lines FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.orders FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.order_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.order_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.fills ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.fills FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.position_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.position_events FORCE ROW LEVEL SECURITY;
+
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA customer_paper FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA customer_paper FROM PUBLIC;
+DO $paper_grants$
+DECLARE
+    role_name text := current_setting('app.paper_runtime_role', true);
+    policy_table text;
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN
+        EXECUTE 'REVOKE ALL ON SCHEMA customer_paper FROM anon';
+        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA customer_paper FROM anon';
+        EXECUTE 'REVOKE ALL ON ALL SEQUENCES IN SCHEMA customer_paper FROM anon';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='authenticated') THEN
+        EXECUTE 'REVOKE ALL ON SCHEMA customer_paper FROM authenticated';
+        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA customer_paper FROM authenticated';
+        EXECUTE 'REVOKE ALL ON ALL SEQUENCES IN SCHEMA customer_paper FROM authenticated';
+    END IF;
+    EXECUTE format('REVOKE ALL ON SCHEMA public FROM %I', role_name);
+    EXECUTE format('GRANT USAGE ON SCHEMA customer_paper TO %I', role_name);
+    FOREACH policy_table IN ARRAY ARRAY[
+        'accounts','journals','journal_lines','orders','order_events','fills','position_events'
+    ] LOOP
+        EXECUTE format('GRANT SELECT, INSERT ON customer_paper.%I TO %I', policy_table, role_name);
+        EXECUTE format('DROP POLICY IF EXISTS customer_paper_tenant ON customer_paper.%I', policy_table);
+        EXECUTE format(
+            'CREATE POLICY customer_paper_tenant ON customer_paper.%I FOR ALL TO %I USING (customer_id = NULLIF(current_setting(''app.customer_id'', true), '''')::bigint) WITH CHECK (customer_id = NULLIF(current_setting(''app.customer_id'', true), '''')::bigint)',
+            policy_table, role_name
+        );
+    END LOOP;
+    EXECUTE format('GRANT USAGE ON ALL SEQUENCES IN SCHEMA customer_paper TO %I', role_name);
+END
+$paper_grants$;
+),
+    base_volume numeric(38,18) NOT NULL CHECK (base_volume >= 0),
+    capacity numeric(38,18) NOT NULL CHECK (capacity >= 0 AND capacity <= base_volume),
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE OR REPLACE FUNCTION customer_paper.assert_balanced_journal()
 RETURNS trigger LANGUAGE plpgsql AS $paper_balance$
 DECLARE
