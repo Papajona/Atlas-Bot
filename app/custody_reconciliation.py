@@ -79,6 +79,30 @@ def solvency_decision(*, assets: Decimal, liabilities: Decimal, minimum_ratio: D
     }
 
 
+def _custody_addresses(*, wallets, treasury_address: str, treasury_address_role: str) -> list[str]:
+    """List only on-chain addresses demonstrated to be Atlas-controlled.
+
+    A Binance deposit address is external custody even if a historical setting
+    names it as the treasury; it must never be added to Atlas assets as well.
+    """
+    role = str(treasury_address_role or "").strip().lower()
+    if role not in {"atlas_controlled", "binance_deposit"}:
+        raise ValueError("TRON treasury address role is not verified")
+    addresses: list[str] = []
+    seen: set[str] = set()
+    if role == "atlas_controlled" and treasury_address:
+        seen.add(treasury_address)
+        addresses.append(treasury_address)
+    for wallet in wallets:
+        address = str(wallet.deposit_address or "").strip()
+        if not address or (role == "binance_deposit" and address == treasury_address):
+            continue
+        if address not in seen:
+            seen.add(address)
+            addresses.append(address)
+    return addresses
+
+
 async def _address_balance(client: httpx.AsyncClient, address: str) -> Decimal:
     response = await client.get(
         f"{settings.usdt_trongrid_base_url.rstrip('/')}/v1/accounts/{address}/trc20/balance",
@@ -113,6 +137,31 @@ async def reconcile_usdt_custody(db) -> dict:
         + sum((D(str(row.withdrawal_reserved)) for row in rows), D("0"))
     )
 
+    treasury_role = str(settings.usdt_tron_treasury_address_role or "").strip().lower()
+    if treasury_role not in {"atlas_controlled", "binance_deposit"}:
+        report = {
+            "status": "UNKNOWN",
+            "asset": USDT,
+            "network": TRON,
+            "customer_liabilities": liabilities,
+            "custody_onchain_balance": None,
+            "coverage_gap": None,
+            "solvency_ratio": None,
+            "addresses_checked": 0,
+            "treasury_address_role": treasury_role or "unknown",
+            "error": "TRON treasury address ownership is unverified; configure an independently evidenced address role before custody reconciliation",
+        }
+        await _halt_live_for_unverified_custody(db)
+        await _upsert_incident(
+            db,
+            key="CUSTODY_RECONCILIATION:USDT:TRON:ADDRESS_ROLE",
+            severity="CRITICAL",
+            category="CUSTODY_RECONCILIATION",
+            summary="TRON treasury address ownership is unverified",
+            detail=report,
+        )
+        return report
+
     wallets = (
         await db.execute(
             select(Wallet).where(
@@ -122,16 +171,11 @@ async def reconcile_usdt_custody(db) -> dict:
             )
         )
     ).scalars().all()
-    addresses = []
-    seen = set()
-    if settings.usdt_tron_treasury_address:
-        seen.add(settings.usdt_tron_treasury_address)
-        addresses.append(settings.usdt_tron_treasury_address)
-    for wallet in wallets:
-        address = str(wallet.deposit_address or "").strip()
-        if address and address not in seen:
-            seen.add(address)
-            addresses.append(address)
+    addresses = _custody_addresses(
+        wallets=wallets,
+        treasury_address=settings.usdt_tron_treasury_address,
+        treasury_address_role=treasury_role,
+    )
 
     if not settings.usdt_trongrid_api_key or not settings.usdt_tron_treasury_address:
         report = {
@@ -234,8 +278,12 @@ async def reconcile_usdt_custody(db) -> dict:
         "exchange_assets": exchange_report["assets"] if exchange_report else None,
         "exchange_observation_count": exchange_report["observation_count"] if exchange_report else 0,
         "addresses_checked": len(balances),
-        "treasury_balance": balances.get(settings.usdt_tron_treasury_address, D("0")),
-        "virtual_wallet_balance": sum(balances.values(), D("0")) - balances.get(settings.usdt_tron_treasury_address, D("0")),
+        "treasury_balance": balances.get(settings.usdt_tron_treasury_address, D("0")) if treasury_role == "atlas_controlled" else None,
+        "virtual_wallet_balance": (
+            sum(balances.values(), D("0")) - balances.get(settings.usdt_tron_treasury_address, D("0"))
+            if treasury_role == "atlas_controlled" else sum(balances.values(), D("0"))
+        ),
+        "treasury_address_role": treasury_role,
     }
 
     if decision["status"] == "OK":

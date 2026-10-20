@@ -1,5 +1,15 @@
 from decimal import Decimal
+import pytest
+
+from app.config import settings
 from app.tron_sweep import build_sweep_intent, usdt_to_raw, SweepError
+
+
+@pytest.fixture(autouse=True)
+def verified_atlas_treasury_role(monkeypatch):
+    # These tests cover sweep amount/idempotency semantics; ownership-state failure
+    # is covered separately in test_binance_deposit_address_boundary.py.
+    monkeypatch.setattr(settings, "usdt_tron_treasury_address_role", "atlas_controlled")
 
 
 def test_usdt_raw_precision():

@@ -92,6 +92,8 @@ class Settings(BaseSettings):
     # Public treasury/collection address. Customer attribution uses unique virtual deposit addresses;
     # this address is for controlled sweeps/treasury accounting, not direct customer attribution.
     usdt_tron_treasury_address: str = "TWFuigmmGbb5gsTS4KUtY5v2FmA1rJ3yC5"
+    # Ownership is not inferable from an address string. Unknown blocks custody claims and sweeps.
+    usdt_tron_treasury_address_role: str = "unknown"  # unknown | atlas_controlled | binance_deposit
     usdt_tron_shared_deposit_mode: bool = False  # never guess customer from amount on a shared TRC-20 address
     customer_cash_only_trading: bool = True
     usdt_tron_poll_seconds: int = 60
@@ -481,6 +483,14 @@ class Settings(BaseSettings):
     binance_arbitrage_min_net_edge_pct: float = 0.10
 
 
+
+    @field_validator("usdt_tron_treasury_address_role")
+    @classmethod
+    def _validate_usdt_tron_treasury_address_role(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"unknown", "atlas_controlled", "binance_deposit"}:
+            raise ValueError("USDT_TRON_TREASURY_ADDRESS_ROLE must be unknown, atlas_controlled, or binance_deposit")
+        return normalized
 
     @field_validator("forwarded_allow_ips")
     @classmethod

@@ -179,6 +179,7 @@ def test_reconcile_reports_error_not_zero_when_provider_has_no_usdt_metadata(mon
     monkeypatch.setattr(settings, "usdt_tron_usdt_contract", CONTRACT)
     monkeypatch.setattr(settings, "usdt_trongrid_api_key", "unit-test-not-a-real-key")
     monkeypatch.setattr(settings, "usdt_tron_treasury_address", "TTestTreasuryAddress")
+    monkeypatch.setattr(settings, "usdt_tron_treasury_address_role", "atlas_controlled")
     monkeypatch.setattr(settings, "binance_custody_reconciliation_enabled", False)
     monkeypatch.setattr(custody_reconciliation.httpx, "AsyncClient", FakeClient)
 
