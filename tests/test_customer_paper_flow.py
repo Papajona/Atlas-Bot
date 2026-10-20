@@ -282,4 +282,10 @@ def test_paper_position_reader_recovers_timeframe_from_immutable_order_metadata(
     assert "JOIN customer_paper.fills AS f" in block
     assert "JOIN customer_paper.orders AS o" in block
     assert "o.metadata_json ->> 'timeframe'" in block
-    assert '"timeframe": str(row["timeframe"] or "")' in block
+    assert "f.bar_key AS last_event_bar_key" in block
+    assert "entry_event.quantity_before = 0" in block
+    assert "entry_order.metadata_json ->> 'stop_loss_price'" in block
+    assert "entry_order.metadata_json ->> 'take_profit_price'" in block
+    assert '"last_event_bar_key": str(row["last_event_bar_key"] or "")' in block
+    assert '"stop_loss_price": str(row["stop_loss_price"] or "")' in block
+    assert '"take_profit_price": str(row["take_profit_price"] or "")' in block
