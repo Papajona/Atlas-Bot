@@ -210,23 +210,23 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
         engine = _paper_engine()
         try:
             async with engine.begin() as conn:
-                bar_key = conn.execute if False else None  # keep the transaction test fully async
                 budget = (await conn.execute(text(
                     "SELECT bar_key, capacity FROM customer_paper.market_bar_budgets ORDER BY created_at LIMIT 1"
                 ))).mappings().first()
                 assert budget is not None
                 with pytest.raises(Exception, match="aggregate paper fill allocations exceed"):
-                    await conn.execute(text(
-                        """
-                        INSERT INTO customer_paper.market_bar_allocations
-                            (allocation_id, bar_key, allocated_quantity)
-                        VALUES (:allocation_id, :bar_key, :quantity)
-                        """
-                    ), {
-                        "allocation_id": "00000000-0000-4000-8000-000000000001",
-                        "bar_key": budget["bar_key"],
-                        "quantity": Decimal(budget["capacity"]),
-                    })
+                    async with conn.begin_nested():
+                        await conn.execute(text(
+                            """
+                            INSERT INTO customer_paper.market_bar_allocations
+                                (allocation_id, bar_key, allocated_quantity)
+                            VALUES (:allocation_id, :bar_key, :quantity)
+                            """
+                        ), {
+                            "allocation_id": "00000000-0000-4000-8000-000000000001",
+                            "bar_key": budget["bar_key"],
+                            "quantity": Decimal(budget["capacity"]),
+                        })
         finally:
             await engine.dispose()
 
