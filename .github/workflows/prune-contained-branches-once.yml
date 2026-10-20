@@ -1,0 +1,87 @@
+name: One-time cleanup of branches already contained in main
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  prune-contained-branches:
+    # This one-time marker is supplied only on the reviewed cleanup merge.
+    # Ordinary pushes to main never trigger branch deletion.
+    if: startsWith(github.event.head_commit.message, '[atlas-branch-prune-once-20261020]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout complete history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Delete only unprotected branches fully contained in main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PUSHED_MAIN_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*' --prune
+          main_sha="$PUSHED_MAIN_SHA"
+          git cat-file -e "${main_sha}^{commit}"
+
+          mapfile -t open_pr_heads < <(
+            gh api "repos/${GH_REPO}/pulls?state=open&per_page=100" --jq '.[].head.ref'
+          )
+
+          deleted=0
+          kept=0
+          failed=0
+          while IFS=$'\t' read -r branch protected sha; do
+            [[ -z "$branch" || "$branch" == "main" ]] && continue
+
+            if [[ "$protected" == "true" ]]; then
+              echo "KEEP protected branch: $branch"
+              kept=$((kept + 1))
+              continue
+            fi
+
+            open_pr=false
+            for pr_head in "${open_pr_heads[@]}"; do
+              if [[ "$pr_head" == "$branch" ]]; then
+                open_pr=true
+                break
+              fi
+            done
+            if [[ "$open_pr" == "true" ]]; then
+              echo "KEEP branch used by an open PR: $branch"
+              kept=$((kept + 1))
+              continue
+            fi
+
+            # This is the key safety condition: do not delete a ref unless
+            # its exact tip commit is already reachable from the pushed main.
+            if git merge-base --is-ancestor "$sha" "$main_sha"; then
+              if gh api --method DELETE "repos/${GH_REPO}/git/refs/heads/${branch}" >/dev/null; then
+                echo "DELETED fully integrated branch: $branch"
+                deleted=$((deleted + 1))
+              else
+                echo "ERROR deleting integrated branch: $branch" >&2
+                failed=$((failed + 1))
+              fi
+            else
+              echo "KEEP branch with unique/unmerged commits: $branch"
+              kept=$((kept + 1))
+            fi
+          done < <(
+            gh api --paginate "repos/${GH_REPO}/branches?per_page=100" \
+              --jq '.[] | [.name, (.protected | tostring), .commit.sha] | @tsv'
+          )
+
+          echo "Cleanup summary: deleted=$deleted kept=$kept failed=$failed"
+          if [[ "$failed" -gt 0 ]]; then
+            exit 1
+          fi
