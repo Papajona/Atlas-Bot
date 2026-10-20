@@ -266,6 +266,33 @@ CREATE TRIGGER trg_customer_paper_market_bar_allocations_capacity
 BEFORE INSERT ON customer_paper.market_bar_allocations
 FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_market_bar_capacity();
 
+-- A SECURITY DEFINER probe makes the three critical guard triggers checkable by the
+-- restricted runtime role without granting it direct access to PostgreSQL catalogs.
+-- The function is read-only, takes no input, and returns only a boolean.
+CREATE OR REPLACE FUNCTION customer_paper.verify_market_bar_capacity_guards()
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $paper_bar_guard_check$
+    SELECT count(*) = 3
+    FROM pg_catalog.pg_trigger t
+    JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'customer_paper'
+      AND NOT t.tgisinternal
+      AND t.tgenabled IN ('O', 'A')
+      AND (
+          (c.relname = 'market_bar_budgets'
+              AND t.tgname = 'trg_customer_paper_market_bar_budgets_immutable')
+          OR (c.relname = 'market_bar_allocations'
+              AND t.tgname = 'trg_customer_paper_market_bar_allocations_immutable')
+          OR (c.relname = 'market_bar_allocations'
+              AND t.tgname = 'trg_customer_paper_market_bar_allocations_capacity')
+      );
+$paper_bar_guard_check$;
+REVOKE ALL ON FUNCTION customer_paper.verify_market_bar_capacity_guards() FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION customer_paper.assert_balanced_journal()
 RETURNS trigger LANGUAGE plpgsql AS $paper_balance$
 DECLARE
@@ -453,6 +480,7 @@ BEGIN
     EXECUTE format('GRANT SELECT, INSERT ON customer_paper.market_bar_allocations TO %I', role_name);
     EXECUTE 'DROP POLICY IF EXISTS customer_paper_bar_budget_backend ON customer_paper.market_bar_allocations';
     EXECUTE format('CREATE POLICY customer_paper_bar_budget_backend ON customer_paper.market_bar_allocations FOR ALL TO %I USING (true) WITH CHECK (true)', role_name);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION customer_paper.verify_market_bar_capacity_guards() TO %I', role_name);
     EXECUTE format('GRANT USAGE ON ALL SEQUENCES IN SCHEMA customer_paper TO %I', role_name);
 END
 $paper_grants$;
