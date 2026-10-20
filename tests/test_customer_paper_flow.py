@@ -290,3 +290,15 @@ def test_paper_position_reader_recovers_timeframe_from_immutable_order_metadata(
     assert '"last_event_bar_key": str(row["last_event_bar_key"] or "")' in block
     assert '"stop_loss_price": str(row["stop_loss_price"] or "")' in block
     assert '"take_profit_price": str(row["take_profit_price"] or "")' in block
+
+
+def test_server_paper_context_measures_closed_bar_age_from_bar_close():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    start = source.index("def _server_paper_market_context(")
+    end = source.index("\n\ndef ", start)
+    block = source[start:end]
+    assert "last_bar_ms + timeframe_ms > now_ms" in block
+    assert "completed_bar_age_seconds = (now_ms - (last_bar_ms + timeframe_ms)) / 1000.0" in block
+    assert "if completed_bar_age_seconds > max_bar_age_seconds:" in block
