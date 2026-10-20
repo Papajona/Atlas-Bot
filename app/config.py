@@ -543,6 +543,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _production_security_requirements(self):
+        if self.live_enable_request_ttl_minutes < 1:
+            raise ValueError("LIVE_ENABLE_REQUEST_TTL_MINUTES must be >= 1")
+        if self.environment == "production" and not self.admin_totp_required:
+            raise ValueError("ADMIN_TOTP_REQUIRED must remain true in production")
         if self.binance_customer_subaccounts_enabled:
             raise ValueError(
                 "Binance customer subaccounts are disabled by Atlas operating policy; "
