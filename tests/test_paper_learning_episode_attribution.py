@@ -6,6 +6,15 @@ import pytest
 from sqlalchemy import select
 
 
+@pytest.fixture(autouse=True)
+def encryption_key(monkeypatch):
+    from cryptography.fernet import Fernet
+    from app.config import settings
+    monkeypatch.setattr(settings, "app_encryption_key", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "app_encryption_keys_json", "")
+    monkeypatch.setattr(settings, "app_encryption_active_key_id", "v1")
+
+
 def test_closing_paper_order_episode_is_not_replayed_as_position_entry():
     from app import execution
     from app.db import (
