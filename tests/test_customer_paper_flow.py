@@ -25,8 +25,9 @@ def _market_fixture(*, timestamp: datetime | None = None, low: float = 98.0, hig
                     bid: float = 99.9, ask: float = 100.1, symbol: str = "BTC/USDT",
                     exchange: str = "binance", timeframe: str = "1h"):
     now = datetime.now(timezone.utc)
+    timeframe_seconds = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400}[timeframe]
     bar_at = timestamp or (now - timedelta(hours=2))
-    index = pd.date_range(end=pd.Timestamp(bar_at), periods=21, freq="1h")
+    index = pd.date_range(end=pd.Timestamp(bar_at), periods=21, freq=pd.to_timedelta(timeframe_seconds, unit="s"))
     frame = pd.DataFrame(
         {
             "open": [100.0] * 21,
@@ -55,7 +56,6 @@ def _market_fixture(*, timestamp: datetime | None = None, low: float = 98.0, hig
     request = SimpleNamespace(
         asset="crypto", symbol=symbol, exchange=exchange, timeframe=timeframe, days=5,
     )
-    timeframe_seconds = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400}[timeframe]
     quote_at = bar_at + timedelta(seconds=timeframe_seconds + 1)
     context = {
         "context_source": "server_ccxt_closed_spot_ohlcv_and_ticker",
@@ -193,9 +193,9 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
         # Two tenants cannot spend more than the shared capacity for the same bar.
         monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.0005)
         capacity_customer_a, capacity_customer_b = 99233, 99234
-        capacity_at = fourth_at + timedelta(hours=5)
-        cap_req_a, cap_frame_a, cap_context_a = _market_fixture(timestamp=capacity_at)
-        cap_req_b, cap_frame_b, cap_context_b = _market_fixture(timestamp=capacity_at)
+        capacity_at = fourth_at + timedelta(minutes=5)
+        cap_req_a, cap_frame_a, cap_context_a = _market_fixture(timestamp=capacity_at, timeframe="1m")
+        cap_req_b, cap_frame_b, cap_context_b = _market_fixture(timestamp=capacity_at, timeframe="1m")
         for cid, reqx, framex, contextx in (
             (capacity_customer_a, cap_req_a, cap_frame_a, cap_context_a),
             (capacity_customer_b, cap_req_b, cap_frame_b, cap_context_b),
@@ -206,9 +206,9 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
                 strategy="shared-capacity-regression",
             )
             assert intent["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
-        capacity_fill_at = capacity_at + timedelta(hours=1)
-        cap_req_a2, cap_frame_a2, cap_context_a2 = _market_fixture(timestamp=capacity_fill_at)
-        cap_req_b2, cap_frame_b2, cap_context_b2 = _market_fixture(timestamp=capacity_fill_at)
+        capacity_fill_at = capacity_at + timedelta(minutes=1)
+        cap_req_a2, cap_frame_a2, cap_context_a2 = _market_fixture(timestamp=capacity_fill_at, timeframe="1m")
+        cap_req_b2, cap_frame_b2, cap_context_b2 = _market_fixture(timestamp=capacity_fill_at, timeframe="1m")
         a_fill = await recover_customer_paper_spot_flow(
             customer_id=capacity_customer_a, req=cap_req_a2, df=cap_frame_a2, market_context=cap_context_a2,
         )
@@ -226,8 +226,8 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
 
         # Simulate a crash after order intent commit but before fill commit.
         recovery_customer = 99232
-        recovery_at = capacity_fill_at + timedelta(hours=5)
-        recovery_req, recovery_frame, recovery_context = _market_fixture(timestamp=recovery_at)
+        recovery_at = capacity_fill_at + timedelta(minutes=5)
+        recovery_req, recovery_frame, recovery_context = _market_fixture(timestamp=recovery_at, timeframe="1m")
         from app.customer_paper_flow import ensure_customer_paper_account
         await ensure_customer_paper_account(recovery_customer, "USDT")
         signal_bar = recovery_frame.index[-1].isoformat()
@@ -259,8 +259,8 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
         )
         assert waiting["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
         assert await get_customer_paper_positions(customer_id=recovery_customer) == []
-        recovery_next_at = recovery_at + timedelta(hours=1)
-        recovery_req2, recovery_frame2, recovery_context2 = _market_fixture(timestamp=recovery_next_at)
+        recovery_next_at = recovery_at + timedelta(minutes=1)
+        recovery_req2, recovery_frame2, recovery_context2 = _market_fixture(timestamp=recovery_next_at, timeframe="1m")
         recovered = await recover_customer_paper_spot_flow(
             customer_id=recovery_customer, req=recovery_req2,
             df=recovery_frame2, market_context=recovery_context2,
