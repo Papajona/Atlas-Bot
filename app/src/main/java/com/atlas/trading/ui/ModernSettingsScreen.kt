@@ -412,7 +412,7 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Lock,
                     iconTint = brandTeal,
                     title = "Biometric App Lock",
-                    subtitle = "Require Fingerprint / Device Credential to unlock app",
+                    subtitle = "Display preference only; device-level app lock is not enforced in this build",
                     checked = biometricLock,
                     onCheckedChange = { biometricLock = it },
                     textPrimary = textPrimary,
@@ -425,13 +425,13 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.CheckCircle,
                     iconTint = emeraldAccent,
                     title = "Two-Factor Authentication",
-                    badge = "ACTIVE (AAL2)",
-                    badgeBg = emeraldBadgeBg,
-                    badgeText = emeraldBadgeText,
-                    subtitle = "Google Authenticator TOTP enforced",
+                    badge = "NOT VERIFIED HERE",
+                    badgeBg = Color(0xFFFFF7ED),
+                    badgeText = Color(0xFF9A3412),
+                    subtitle = "Check administrator MFA in the authenticated web console",
                     onClick = {
                         activeDialogTitle = "Two-Factor Authentication"
-                        activeDialogContent = "Two-factor authentication (AAL2) is enabled and enforced for all administrative and operator actions.\n\nAuthenticator: Google Authenticator / Hardware Key\nStatus: Active & Verified"
+                        activeDialogContent = "This mobile settings screen does not verify current MFA enrollment or AAL2. Check the server-reported MFA status in the authenticated administrator console before privileged actions."
                     },
                     textPrimary = textPrimary,
                     textMuted = textMuted
@@ -458,13 +458,13 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.List,
                     iconTint = brandTeal,
                     title = "Encrypted Security Audit Trail",
-                    subtitle = "Inspect tamper-proof cryptographic audit entries",
-                    badge = "AES-GCM",
+                    subtitle = "Audit history is unavailable until the authenticated backend audit API is connected",
+                    badge = "NOT CONNECTED",
                     badgeBg = Color(0xFFEFF6FF),
                     badgeText = Color(0xFF1D4ED8),
                     onClick = {
                         activeDialogTitle = "Encrypted Security Audit Trail"
-                        activeDialogContent = "Latest Security Events Recorded:\n• [2026-10-04 15:48 UTC] AUDIT_INITIALIZED (KeyStore AES-256-GCM)\n• [2026-10-04 15:49 UTC] BIOMETRIC_CREDENTIAL_VERIFIED (Pass)\n• [2026-10-04 15:52 UTC] BACKEND_PORTAL_ALLOWLIST_CHECK (Pass)\n• [2026-10-04 16:05 UTC] SYSTEM_INTEGRITY_PASSED (Zero-DEX)"
+                        activeDialogContent = "No live audit events are available in this build. Connect an authenticated account and backend audit API before displaying security events."
                     },
                     textPrimary = textPrimary,
                     textMuted = textMuted
@@ -506,9 +506,9 @@ fun ModernSettingsScreen(
                                 color = textPrimary
                             )
                             Text(
-                                text = "Connected • Cloud Run (14ms WebSocket)",
+                                text = "Not connected • live telemetry unavailable",
                                 fontSize = 11.sp,
-                                color = emeraldAccent,
+                                color = textMuted,
                                 fontWeight = FontWeight.SemiBold
                             )
                         }
@@ -517,7 +517,7 @@ fun ModernSettingsScreen(
                     Spacer(modifier = Modifier.height(10.dp))
 
                     Text(
-                        text = "Access live portfolio risk matrices, Deflated Sharpe telemetry, and the emergency Kill Switch circuit breaker.",
+                        text = "Live risk telemetry and the emergency Kill Switch are available only through the authenticated operator console.",
                         fontSize = 12.sp,
                         color = textMuted,
                         lineHeight = 18.sp
