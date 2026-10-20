@@ -304,6 +304,8 @@ jobs:
           test "$(printf '%s\n' "$heads" | grep -c '(head)')" -eq 1
           python -m alembic downgrade base
           python -m alembic upgrade head
+          # Check drift only after reaching the actual migration head, not at an older revision.
+          python -m alembic check
       - name: Controlled withdrawal recovery regressions
         run: |
           python -m pytest -q \
