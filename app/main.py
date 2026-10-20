@@ -2352,7 +2352,12 @@ def _server_paper_market_context(req: MarketRequest, df) -> dict[str, Any] | Non
                 float(settings.stale_data_minutes * 60),
                 max(60.0, timeframe_seconds * 3.5),
             )
-            if (now_ms - last_bar_ms) / 1000.0 > max_bar_age_seconds:
+            # OHLCV timestamps identify candle OPEN, not candle CLOSE. A just-closed
+            # 1h candle is about an hour old by open timestamp but is not stale. Measure
+            # freshness from the completed-candle boundary so paper recovery can advance
+            # on the next closed bar instead of rejecting all higher-timeframe bars.
+            completed_bar_age_seconds = (now_ms - (last_bar_ms + timeframe_ms)) / 1000.0
+            if completed_bar_age_seconds > max_bar_age_seconds:
                 return None
 
             volume = pd.to_numeric(df["volume"], errors="coerce").tail(20)
