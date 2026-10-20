@@ -367,6 +367,10 @@ def downgrade() -> None:
     # Recreate stand-alone indexes dropped because a unique/composite index already covered them.
     restore_indexes = [
         ("customer_alerts", "ix_customer_alerts_customer", ["customer_id"]),
+        # These indexes were removed in upgrade but are expected by the older
+        # migrations' downgrade functions, so restore them before reversing 0012/0009.
+        ("positions", "ix_positions_customer_id", ["customer_id"]),
+        ("withdrawal_step_up_tokens", "ix_withdrawal_step_up_tokens_auth_user_id", ["auth_user_id"]),
         ("customer_deriv_accounts", "ix_customer_deriv_account_customer_id", ["customer_id"]),
         ("customer_oanda_accounts", "ix_customer_oanda_account_customer_id", ["customer_id"]),
         ("customer_ledger_accounts", "ix_customer_ledger_account_customer", ["customer_id"]),
