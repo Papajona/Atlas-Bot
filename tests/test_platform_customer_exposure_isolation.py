@@ -1,6 +1,4 @@
 import asyncio
-from decimal import Decimal
-
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.execution import _projected_exposure

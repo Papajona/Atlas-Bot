@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
-from app.fx_engine import FXModelConfig, fx_model_signal, fx_walk_forward_score
+from app.fx_engine import fx_model_signal, fx_walk_forward_score
 
 
 def _trend(n=500, up=True):

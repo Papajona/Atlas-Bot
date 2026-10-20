@@ -1,5 +1,4 @@
 import pandas as pd
-import pytest
 
 import app.data as data
 

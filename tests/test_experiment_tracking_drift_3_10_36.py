@@ -1,4 +1,5 @@
 """Regression tests for experiment tracking, drift monitoring and the strategy-builder dead-end fix."""
+import importlib
 import json
 import sys
 import types
@@ -10,8 +11,8 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 
-try:  # lightgbm may be absent in minimal CI images; the drift math doesn't need it.
-    import lightgbm  # noqa: F401
+try:  # lightgbm may be absent in minimal CI images; drift tests do not require it.
+    importlib.import_module("lightgbm")
 except ModuleNotFoundError:
     stub = types.ModuleType("lightgbm")
     stub.LGBMClassifier = type("LGBMClassifier", (), {})
