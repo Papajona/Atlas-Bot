@@ -20,6 +20,7 @@ def _key(monkeypatch):
     monkeypatch.setattr(settings, "app_encryption_key", Fernet.generate_key().decode())
     monkeypatch.setattr(settings, "app_encryption_keys_json", "{}")
     monkeypatch.setattr(settings, "app_encryption_active_key_id", "v1")
+    monkeypatch.setattr(settings, "usdt_tron_treasury_address_role", "atlas_controlled")
 
 
 # ---- TRON sweeps ---------------------------------------------------------------------------------
