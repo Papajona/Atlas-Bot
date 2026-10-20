@@ -43,6 +43,7 @@ from .research_trial_archive import archive_research_trials
 from .research_validation import oos_promotion_gate, monte_carlo_bootstrap
 from .daily_research import run_daily_research, latest_macro_context
 from .execution import execute_signal, advance_platform_paper_orders, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits, customer_paper_execution_blocked
+from .customer_paper_api import build_customer_paper_router
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
 from .payout import get_payout_provider, PayoutError, PayoutUnknown, PayoutNotFound
 from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, release_separation_violation, verify_release_operator
