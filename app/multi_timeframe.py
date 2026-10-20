@@ -36,11 +36,20 @@ def _trend_score(frame: pd.DataFrame, cfg: MultiTimeframeConfig) -> pd.Series:
 
 
 def _map_back(series: pd.Series, index: pd.DatetimeIndex) -> pd.Series:
-    # Conservative availability rule: a higher-timeframe observation becomes usable
-    # only after the NEXT base-bar boundary. This makes the research path robust even
-    # when callers evaluate a signal on the exact higher-timeframe close timestamp.
-    shifted = series.shift(1)
-    merged = shifted.reindex(index.union(shifted.index)).sort_index().ffill()
+    """Expose each completed higher-timeframe value only at the next base-bar open."""
+    ordered_index = pd.DatetimeIndex(index).drop_duplicates().sort_values()
+    deltas = ordered_index.to_series().diff().dropna()
+    positive_deltas = deltas[deltas > pd.Timedelta(0)]
+    if positive_deltas.empty:
+        # Without a base-bar interval, fail closed instead of guessing when a feature
+        # became available.
+        return pd.Series(np.nan, index=index, dtype=float)
+
+    # Use the most common observed interval, which is resilient to occasional gaps.
+    base_delta = positive_deltas.mode().iloc[0]
+    available = series.copy()
+    available.index = pd.DatetimeIndex(available.index) + base_delta
+    merged = available.reindex(index.union(available.index)).sort_index().ffill()
     return merged.reindex(index)
 
 
