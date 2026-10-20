@@ -870,7 +870,7 @@ async def get_customer_paper_order(*, customer_id: int, client_order_id: str) ->
             row = (await conn.execute(text(
                 """
                 SELECT o.id, o.client_order_id, o.venue, o.market_type, o.symbol, o.side, o.order_type,
-                       o.quantity, o.limit_price, o.currency, e.event_type AS status,
+                       o.quantity, o.limit_price, o.currency, o.metadata_json, e.event_type AS status,
                        COALESCE(f.filled_quantity,0) AS filled_quantity
                 FROM customer_paper.orders o
                 LEFT JOIN LATERAL (
@@ -889,6 +889,13 @@ async def get_customer_paper_order(*, customer_id: int, client_order_id: str) ->
         limit = row["limit_price"]
         filled = Decimal(row["filled_quantity"] or 0)
         quantity = Decimal(row["quantity"])
+        stored_metadata = row["metadata_json"]
+        if isinstance(stored_metadata, str):
+            try:
+                stored_metadata = json.loads(stored_metadata)
+            except ValueError:
+                stored_metadata = {}
+        safe_metadata = dict(stored_metadata) if isinstance(stored_metadata, Mapping) else {}
         return {
             "order_id": str(row["id"]), "client_order_id": str(row["client_order_id"]),
             "venue": str(row["venue"]), "market_type": str(row["market_type"]),
@@ -896,6 +903,7 @@ async def get_customer_paper_order(*, customer_id: int, client_order_id: str) ->
             "quantity": _fmt(quantity), "filled_quantity": _fmt(filled),
             "remaining_quantity": _fmt(quantity - filled), "limit_price": _fmt(Decimal(limit)) if limit is not None else None,
             "currency": str(row["currency"]), "status": str(row["status"] or "UNKNOWN"),
+            "metadata": safe_metadata,
         }
     finally:
         await engine.dispose()
