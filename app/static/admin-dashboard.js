@@ -6,76 +6,178 @@ function token(){return sessionStorage.getItem('ait_admin_access_token')||''}
 function jwtClaims(){const part=token().split('.')[1];if(!part)return {};try{const b=part.replace(/-/g,'+').replace(/_/g,'/');return JSON.parse(atob(b.padEnd(Math.ceil(b.length/4)*4,'=')))}catch{return {}}}
 function actorId(){const c=jwtClaims();return String(c.sub||c.user_id||'').trim()}
 function syncActorIdentity(){const id=actorId();$('adminId').value=id;$('releaseId').value=id;$('operatorIdentity').textContent=id?'Authenticated identity: '+id+'. Sign out and sign in as a different authorized treasury user before releasing a withdrawal you approved.':'Unable to derive the user identity from this access token. Sign in again.';$('adminLogoutBtn').hidden=!id;$('adminEnrollBtn').hidden=loggedIn()||!!window.adminMfaFactorId}
-function loggedIn(){return sessionStorage.getItem('ait_admin_mfa_verified')==='true'&&!!(token()||sessionStorage.getItem('ait_admin_token'))}
+const adminMfaRequired=document.body.dataset.adminTotpRequired==='true';
+let dashboardReady=false;
+let dashboardRefreshTimer=null;
+let withdrawalRefreshTimer=null;
+function loggedIn(){return dashboardReady&&!!token()&&(!adminMfaRequired||sessionStorage.getItem('ait_admin_mfa_verified')==='true')}
 function headers(){const h={'Content-Type':'application/json'};if(token())h['Authorization']='Bearer '+token();const legacy=sessionStorage.getItem('ait_admin_token')||'';if(!token()&&legacy)h['X-Admin-Token']=legacy;return h}
 function detailText(d){if(Array.isArray(d))return d.map(e=>e&&e.msg?(((e.loc||[]).slice(1).join('.')+': ')+e.msg).replace(/^: /,''):String(e)).join('; ');if(d&&typeof d==='object')return JSON.stringify(d);return d?String(d):''}
-async function api(path,opts={}){const r=await fetch(path,{...opts,headers:{...headers(),...(opts.headers||{})}});const text=await r.text();let j={};try{j=JSON.parse(text)}catch{}if(!r.ok)throw new Error(detailText(j.detail)||text||'Request failed');return j}
-async function adminLogin(){
-  sessionStorage.removeItem('ait_admin_mfa_verified');sessionStorage.removeItem('ait_admin_access_token');sessionStorage.removeItem('ait_admin_token');
+async function api(path,opts={}){
+  if(!dashboardReady&&!String(path).startsWith('/api/admin/auth/')) {
+    throw new Error('Complete administrator sign-in and server-verified MFA before accessing protected dashboard data.');
+  }
+  const r=await fetch(path,{...opts,headers:{...headers(),...(opts.headers||{})}});
+  const text=await r.text();let j={};try{j=JSON.parse(text)}catch{}
+  if(r.status===401){
+    lockAdminDashboard('Administrator session expired or was rejected. Sign in again.');
+    throw new Error(detailText(j.detail)||text||'Administrator session expired.');
+  }
+  if(!r.ok)throw new Error(detailText(j.detail)||text||'Request failed');
+  return j
+}
+function lockAdminDashboard(message,clearTokens=true){
+  dashboardReady=false;
+  document.body.classList.remove('admin-session-ready');
+  sessionStorage.removeItem('ait_admin_mfa_verified');
+  if(clearTokens){
+    sessionStorage.removeItem('ait_admin_access_token');
+    sessionStorage.removeItem('ait_admin_refresh_token');
+    sessionStorage.removeItem('ait_admin_token');
+    sessionStorage.removeItem('ait_approver_token');
+    window.adminMfaFactorId=null;
+    window.adminMfaChallengeId=null;
+  }
+  if(dashboardRefreshTimer!==null)clearInterval(dashboardRefreshTimer);
+  if(withdrawalRefreshTimer!==null)clearInterval(withdrawalRefreshTimer);
+  dashboardRefreshTimer=null;
+  withdrawalRefreshTimer=null;
+  $('mode').textContent='SIGN IN REQUIRED';
+  $('adminId').value='';
+  $('releaseId').value='';
+  $('withdrawalRows').replaceChildren();
+  $('trades').replaceChildren();
+  $('roles').replaceChildren();
+  $('adminMfaBox').style.display='none';
+  $('adminMfaVerifyBtn').style.display='none';
+  if(message)$('authState').textContent=message;
+  $('adminLogoutBtn').hidden=true;
+  $('adminEnrollBtn').hidden=!token();
+}
+function activateDashboard(){
+  if(!token()||(adminMfaRequired&&sessionStorage.getItem('ait_admin_mfa_verified')!=='true')){
+    lockAdminDashboard('The server has not confirmed the required administrator authentication level. Protected data remains locked.');
+    return;
+  }
+  dashboardReady=true;
+  document.body.classList.add('admin-session-ready');
+  $('mode').textContent='VERIFIED ADMIN';
+  $('authState').textContent='Administrator session verified by the server. Protected dashboard data is loading.';
+  syncActorIdentity();
+  refresh();loadWithdrawals();loadRoles();loadMargin();
+  if(dashboardRefreshTimer===null)dashboardRefreshTimer=setInterval(()=>{if(dashboardReady)refresh()},15000);
+  if(withdrawalRefreshTimer===null)withdrawalRefreshTimer=setInterval(()=>{if(dashboardReady)loadWithdrawals()},20000);
+}
+async function beginAdminMfaChallenge(status){
+  if(!status?.enabled||!Array.isArray(status.factor_ids)||!status.factor_ids.length){
+    $('authState').textContent='No verified authenticator is available. Enroll Google Authenticator to continue.';
+    $('adminEnrollBtn').hidden=false;
+    return;
+  }
+  window.adminMfaFactorId=String(status.factor_ids[0]);
+  const challenge=await api('/api/admin/auth/mfa/challenge',{method:'POST',body:JSON.stringify({factor_id:window.adminMfaFactorId})});
+  if(!challenge?.id)throw new Error('The authenticator challenge did not return an ID.');
+  window.adminMfaChallengeId=String(challenge.id);
+  $('adminMfaBox').style.display='block';
+  $('adminMfaVerifyBtn').style.display='inline-block';
+  $('adminEnrollBtn').hidden=true;
+  $('authState').textContent='Enter the six-digit Google Authenticator code. Protected data remains locked until the server confirms AAL2.';
+  $('adminMfaCode').focus();
+}
+async function resumeAdminSession(){
+  if(!token()){
+    lockAdminDashboard('Sign in with an authorized administrator account and complete required Google Authenticator MFA.');
+    return;
+  }
+  if(!adminMfaRequired){
+    sessionStorage.setItem('ait_admin_mfa_verified','true');
+    activateDashboard();
+    return;
+  }
   try{
-    const r=await fetch('/api/admin/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:$('adminEmail').value.trim(),password:$('adminPassword').value})});
-    const j=await r.json(); if(!r.ok) throw new Error(detailText(j.detail)||detailText(j.message)||'Administrator login failed');
-    sessionStorage.setItem('ait_admin_access_token',j.access_token);syncActorIdentity();
-
-    if(j.totp_enrolled&&j.mfa_required){
-      const st=await api('/api/admin/auth/mfa/status'); window.adminMfaFactorId=st.factor_ids?.[0]||null;
-      if(!window.adminMfaFactorId)throw new Error('No verified Google Authenticator factor is available.');
-      syncActorIdentity();
-      const ch=await api('/api/admin/auth/mfa/challenge',{method:'POST',body:JSON.stringify({factor_id:window.adminMfaFactorId})});
-      window.adminMfaChallengeId=ch.id; $('adminMfaBox').style.display='block'; $('adminMfaVerifyBtn').style.display='inline-block'; $('authState').textContent='Enter the 6-digit Google Authenticator code.';
-    }else if(j.mfa_required){syncActorIdentity();$('authState').textContent='Enroll Google Authenticator before administrator access is granted.';}else{sessionStorage.setItem('ait_admin_mfa_verified','true');syncActorIdentity();refresh();loadWithdrawals();loadRoles();loadMargin()}
-  }catch(e){$('authState').textContent='Admin sign-in: '+e.message}
+    const status=await api('/api/admin/auth/mfa/status');
+    if(status.enabled&&status.aal==='aal2'){
+      sessionStorage.setItem('ait_admin_mfa_verified','true');
+      activateDashboard();
+    }else if(status.enabled){
+      sessionStorage.removeItem('ait_admin_mfa_verified');
+      await beginAdminMfaChallenge(status);
+    }else{
+      sessionStorage.removeItem('ait_admin_mfa_verified');
+      $('adminEnrollBtn').hidden=false;
+      $('authState').textContent='Signed in, but no verified authenticator exists. Enroll Google Authenticator; all protected data remains locked.';
+    }
+  }catch(error){
+    lockAdminDashboard('The administrator session could not be verified. Sign in again. '+error.message);
+  }
+}
+async function adminLogin(){
+  lockAdminDashboard('Signing in…',true);
+  try{
+    const response=await fetch('/api/admin/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:$('adminEmail').value.trim(),password:$('adminPassword').value})});
+    const result=await response.json().catch(()=>({}));
+    if(!response.ok)throw new Error(detailText(result.detail)||detailText(result.message)||'Administrator login failed');
+    if(!result.access_token)throw new Error('Authentication response did not contain an access token.');
+    sessionStorage.setItem('ait_admin_access_token',result.access_token);
+    if(result.refresh_token)sessionStorage.setItem('ait_admin_refresh_token',result.refresh_token);
+    await resumeAdminSession();
+  }catch(error){
+    lockAdminDashboard('Admin sign-in: '+error.message);
+  }
 }
 async function adminEnroll(){
-  if(!token()||loggedIn()){$('authState').textContent=loggedIn()?'Authenticator is already verified for this session.':'Sign in first.';return}
-  // Open synchronously in the click gesture so browser popup blockers do not discard
-  // the QR window after the network request completes.
-  const w=window.open('','_blank','width=420,height=520');
-  if(!w){$('authState').textContent='Allow popups for this site to view the Authenticator QR code.';return}
-  w.document.write('<title>Atlas Admin Authenticator</title><p>Loading authenticator setup…</p>');
+  if(!token()){$('authState').textContent='Sign in first.';return}
+  if(dashboardReady){$('authState').textContent='This administrator session is already verified.';return}
   try{
-    const d=await api('/api/admin/auth/mfa/enroll',{method:'POST',body:'{}'});
-    if(!d.id||!d.totp?.qr_code)throw new Error('Authenticator provider did not return a factor ID and QR code.');
-    window.adminMfaFactorId=String(d.id);
-    $('output').textContent='Scan this Google Authenticator QR code with your administrator device.\nManual secret: '+(d.totp.secret||'unavailable');
-    w.document.open();
-    w.document.write('<title>Atlas Admin Authenticator</title><p>Scan with Google Authenticator, then return to Atlas.</p><img style="max-width:360px" alt="Authenticator enrollment QR code" src="data:image/svg+xml;charset=utf-8,'+encodeURIComponent(d.totp.qr_code)+'"><p>Manual secret: '+esc(d.totp.secret||'unavailable')+'</p>');
-    w.document.close();
+    const enrollment=await api('/api/admin/auth/mfa/enroll',{method:'POST',body:'{}'});
+    if(!enrollment?.id||!enrollment?.totp?.qr_code)throw new Error('The authenticator service did not return an enrollment ID and QR code.');
+    window.adminMfaFactorId=String(enrollment.id);
+    $('adminMfaQr').src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(enrollment.totp.qr_code);
+    $('adminMfaSecret').textContent=enrollment.totp.secret||'No manual key provided';
+    $('adminMfaEnrollment').hidden=false;
+    const challenge=await api('/api/admin/auth/mfa/challenge',{method:'POST',body:JSON.stringify({factor_id:window.adminMfaFactorId})});
+    if(!challenge?.id)throw new Error('The enrollment challenge did not return an ID.');
+    window.adminMfaChallengeId=String(challenge.id);
     $('adminMfaBox').style.display='block';
     $('adminMfaVerifyBtn').style.display='inline-block';
-    $('adminMfaCode').value='';
-    syncActorIdentity();
-    try{
-      const ch=await api('/api/admin/auth/mfa/challenge',{method:'POST',body:JSON.stringify({factor_id:window.adminMfaFactorId})});
-      if(!ch.id)throw new Error('Authenticator provider did not return a challenge ID.');
-      window.adminMfaChallengeId=String(ch.id);
-      $('authState').textContent='Scan the QR code, then enter the six-digit authenticator code to verify enrollment.';
-    }catch(e){
-      window.adminMfaChallengeId=null;
-      $('authState').textContent='QR loaded. Challenge will be retried when you verify: '+e.message;
-    }
-  }catch(e){if(!w.closed)w.close();window.adminMfaFactorId=null;window.adminMfaChallengeId=null;syncActorIdentity();$('authState').textContent='Authenticator enrollment: '+e.message}
+    $('adminEnrollBtn').hidden=true;
+    $('authState').textContent='Scan the enrollment QR with Google Authenticator and enter its six-digit code. Protected data remains locked.';
+    $('adminMfaCode').focus();
+  }catch(error){
+    $('authState').textContent='Authenticator enrollment: '+error.message;
+  }
 }
 async function adminMfaVerify(){
   const code=$('adminMfaCode').value.trim();
-  if(!/^[0-9]{6}$/.test(code)){ $('authState').textContent='Enter the 6-digit Google Authenticator code.'; return }
-  if(!window.adminMfaFactorId){$('authState').textContent='Sign in and start Authenticator enrollment before verifying.';return}
+  if(!/^[0-9]{6}$/.test(code)){$('authState').textContent='Enter the six-digit Google Authenticator code.';$('adminMfaCode').focus();return}
+  if(!token()||!window.adminMfaFactorId){$('authState').textContent='Sign in and start authenticator enrollment before verifying.';return}
   try{
     if(!window.adminMfaChallengeId){
       const challenge=await api('/api/admin/auth/mfa/challenge',{method:'POST',body:JSON.stringify({factor_id:window.adminMfaFactorId})});
-      if(!challenge.id)throw new Error('Authenticator provider did not return a challenge ID.');
+      if(!challenge?.id)throw new Error('The authenticator challenge did not return an ID.');
       window.adminMfaChallengeId=String(challenge.id);
     }
-    const d=await api('/api/admin/auth/mfa/verify',{method:'POST',body:JSON.stringify({factor_id:window.adminMfaFactorId,challenge_id:window.adminMfaChallengeId,code})});
-    if(!d.access_token)throw new Error('Authenticator verification did not return an upgraded session. Sign in again.');
-    sessionStorage.setItem('ait_admin_access_token',d.access_token);
+    const verified=await api('/api/admin/auth/mfa/verify',{method:'POST',body:JSON.stringify({factor_id:window.adminMfaFactorId,challenge_id:window.adminMfaChallengeId,code})});
+    if(!verified.access_token)throw new Error('Authenticator verification did not return an upgraded session. Sign in again.');
+    sessionStorage.setItem('ait_admin_access_token',verified.access_token);
+    if(verified.refresh_token)sessionStorage.setItem('ait_admin_refresh_token',verified.refresh_token);
+    const status=await api('/api/admin/auth/mfa/status');
+    if(!status.enabled||status.aal!=='aal2'){
+      lockAdminDashboard('Authenticator response received, but the server did not confirm AAL2. Protected data remains locked.');
+      return;
+    }
     sessionStorage.setItem('ait_admin_mfa_verified','true');
     window.adminMfaChallengeId=null;
-    $('adminMfaBox').style.display='none'; $('adminMfaVerifyBtn').style.display='none'; $('adminMfaCode').value='';
-    syncActorIdentity();
-    $('authState').textContent='Administrator AAL2 session active.';
-    refresh(); loadWithdrawals(); loadRoles(); loadMargin();
-  }catch(e){window.adminMfaChallengeId=null;$('authState').textContent='Authenticator verification: '+e.message}
+    $('adminMfaCode').value='';
+    $('adminMfaBox').style.display='none';
+    $('adminMfaVerifyBtn').style.display='none';
+    $('adminMfaEnrollment').hidden=true;
+    $('adminMfaQr').removeAttribute('src');
+    $('adminMfaSecret').textContent='';
+    activateDashboard();
+  }catch(error){
+    $('authState').textContent='Authenticator verification: '+error.message;
+  }
 }
 function req(){return {asset:$('asset').value,symbol:$('symbol').value.trim(),exchange:$('exchange').value.trim(),timeframe:$('tf').value,days:+$('days').value,folds:+$('folds').value,min_train:800}}
 async function loadWithdrawals(){
@@ -131,8 +233,8 @@ async function reconcile(){run('/api/reconcile',req())}
 async function halt(){try{$('output').textContent=JSON.stringify(await api('/api/risk/kill',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent=e.message}}
 async function resetRisk(){try{$('output').textContent=JSON.stringify(await api('/api/risk/reset',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent=e.message}}
 async function disableLive(){try{$('output').textContent=JSON.stringify(await api('/api/live/disable',{method:'POST'}),null,2);refresh()}catch(e){$('output').textContent=e.message}}
-if(loggedIn()){syncActorIdentity();$('authState').textContent='Administrator MFA-verified session active.';refresh();loadWithdrawals();loadRoles();loadMargin()}else{$('mode').textContent='SIGN IN REQUIRED';$('authState').textContent='Sign in with an authorized administrator account and complete Google Authenticator MFA.'}
-function adminLogout(){for(const k of ['ait_admin_access_token','ait_admin_refresh_token','ait_admin_token','ait_admin_mfa_verified','ait_approver_token'])sessionStorage.removeItem(k);window.adminMfaFactorId=null;window.adminMfaChallengeId=null;$('adminId').value='';$('releaseId').value='';$('approverToken').value='';$('releaseToken').value='';$('releaseSignature').value='';$('withdrawalRows').replaceChildren();$('adminMfaBox').style.display='none';$('adminMfaVerifyBtn').style.display='none';$('adminMfaCode').value='';$('adminLogoutBtn').hidden=true;$('adminEnrollBtn').hidden=false;$('operatorIdentity').textContent='Signed out. Sign in as a different authorized user to change operator identity.';$('authState').textContent='Signed out.';$('mode').textContent='SIGN IN REQUIRED'}
+resumeAdminSession();
+function adminLogout(){lockAdminDashboard('Signed out.',true);$('approverToken').value='';$('releaseToken').value='';$('releaseSignature').value='';$('adminMfaCode').value='';$('adminMfaEnrollment').hidden=true;$('adminMfaQr').removeAttribute('src');$('adminMfaSecret').textContent='';$('operatorIdentity').textContent='Signed out. Sign in as a different authorized user to change operator identity.';}
 document.addEventListener('click',event=>{const el=event.target.closest('[data-action]');if(!el)return;const id=Number(el.dataset.withdrawalId);const actions={'toggle-nav':()=>document.body.classList.toggle('nav-open'),'admin-login':adminLogin,'admin-enroll':adminEnroll,'admin-mfa-verify':adminMfaVerify,'admin-logout':adminLogout,'train':train,'backtest':backtest,'strategy-backtest':strategyBacktest,'backtest-all':backtestAll,'meta-label-audit':metaLabelAudit,'ai-review':aiReview,'paper-signals':paperSignals,'signal':signal,'strategy-signal':strategySignal,'paper-step':paperStep,'halt':halt,'reset-risk':resetRisk,'disable-live':disableLive,'load-margin':loadMargin,'load-withdrawals':loadWithdrawals,'load-roles':loadRoles,'save-role':saveRole,'reconcile':reconcile,'approve-withdrawal':()=>approveWithdrawal(id),'reject-withdrawal':()=>rejectWithdrawal(id),'execute-withdrawal':()=>executeWithdrawal(id),'prepare-proposal':()=>prepareWithdrawalProposal(id),'reconcile-withdrawal':()=>reconcileWithdrawal(id)};const fn=actions[el.dataset.action];if(fn){event.preventDefault();fn()}});
 document.addEventListener('change',event=>{if(event.target.dataset.actionChange==='load-withdrawals')loadWithdrawals()});
-setInterval(()=>{if(loggedIn())refresh()},15000);setInterval(()=>{if(loggedIn())loadWithdrawals()},20000)
+
