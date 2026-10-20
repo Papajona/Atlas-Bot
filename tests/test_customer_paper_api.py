@@ -32,6 +32,9 @@ def _verified_bars(latest_bar_at: datetime, *, volume: str = "100") -> pd.DataFr
     frame.attrs["data_provenance"] = {
         "source": "ccxt_ohlcv",
         "asset_class": "crypto",
+        "exchange": "binance",
+        "symbol": "BTC/USDT",
+        "timeframe": "1m",
         "market_type": "spot",
         "volume_unit": "base_asset",
         "volume_unit_verified": True,
