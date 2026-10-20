@@ -959,13 +959,13 @@ async def get_customer_paper_positions(*, customer_id: int) -> list[dict[str, st
                     pe.venue, pe.market_type, pe.symbol, pe.quantity_after, pe.average_entry_after,
                     pe.cost_basis_after, pe.realized_pnl_after,
                     COALESCE(o.metadata_json ->> 'timeframe', '') AS timeframe,
-                    mb.bar_at AS last_event_bar_key,
+                    COALESCE(mb.bar_at::text, o.metadata_json ->> 'signal_bar_timestamp', '') AS last_event_bar_key,
                     COALESCE(entry_order.metadata_json ->> 'stop_loss_price', '') AS stop_loss_price,
                     COALESCE(entry_order.metadata_json ->> 'take_profit_price', '') AS take_profit_price
                 FROM customer_paper.position_events AS pe
                 JOIN customer_paper.fills AS f
                   ON f.id = pe.fill_id AND f.customer_id = pe.customer_id
-                JOIN customer_paper.market_bar_budgets AS mb
+                LEFT JOIN customer_paper.market_bar_budgets AS mb
                   ON mb.bar_key = f.bar_key
                 JOIN customer_paper.orders AS o
                   ON o.id = f.order_id AND o.customer_id = f.customer_id
