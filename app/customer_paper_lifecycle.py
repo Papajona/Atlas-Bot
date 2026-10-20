@@ -736,7 +736,7 @@ async def record_customer_paper_fill(
                     "allocated_quantity": amount,
                 })
 
-            journal_lines: list[dict[str, Any]] =
+            journal_lines: list[dict[str, Any]] = [
                 {"account_code": "PAPER_CASH", "signed_amount": cash_delta},
                 {"account_code": "PAPER_POSITION", "signed_amount": position_delta},
             ]
