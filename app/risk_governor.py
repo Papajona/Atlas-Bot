@@ -19,7 +19,7 @@ def evaluate_trade(*, side: str, price: float, quantity: float, live: bool,
     if not math.isfinite(price) or price <= 0 or not math.isfinite(quantity) or quantity <= 0: reasons.append("invalid_market_or_quantity")
     if stop_loss_price is not None and (not math.isfinite(stop_loss_price) or stop_loss_price <= 0):
         reasons.append("invalid_stop_loss")
-    if take_profit_price is not None and not math.isfinite(take_profit_price):
+    if take_profit_price is not None and (not math.isfinite(take_profit_price) or take_profit_price <= 0):
         reasons.append("invalid_take_profit")
     if live and not stop_loss_price: reasons.append("live_protective_stop_missing")
     if live and (equity is None or risk_per_trade is None): reasons.append("live_risk_sizing_inputs_missing")
