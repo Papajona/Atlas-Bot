@@ -96,11 +96,9 @@ async function testAdminDashboard(browser, baseUrl) {
     const url = new URL(req.url());
     const pathname = url.pathname;
     if (pathname === "/api/admin/auth/mfa/status" && req.method === "GET") {
-      const authorization = req.headers()["authorization"] || "";
-      if (authorization.includes("admin-user-1") || authorization.includes("test-signature")) {
-        return json(route, { enabled: true, aal: "aal2", factor_count: 1, factor_ids: ["verified-factor-id"] });
-      }
-      return json(route, { enabled: false, aal: "aal1", factor_count: 0, factor_ids: [] });
+      // This test preloads a verified admin fixture token; the separate enrollment
+      // test below covers aal1 -> aal2 transitions and refusal before verification.
+      return json(route, { enabled: true, aal: "aal2", factor_count: 1, factor_ids: ["verified-factor-id"] });
     }
     if (pathname === "/api/state") {
       return json(route, { mode: "PAPER", equity: 1000, realized_pnl: 0, unrealized_pnl: 0, drawdown: 0, daily_loss: 0, live_enabled: false, kill_switch: false, open_positions: [] });
