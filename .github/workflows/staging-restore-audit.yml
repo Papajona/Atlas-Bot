@@ -113,7 +113,7 @@ jobs:
             --backup-reference "$BACKUP_REFERENCE" \
             --restore-evidence-uri "$RESTORE_EVIDENCE_URI" \
             --expected-runtime-role "$EXPECTED_RUNTIME_DB_ROLE" \
-            --expected-revision 0051_research_trial_archive \
+            --expected-revision 0052_schema_metadata_reconciliation \
             --output "$RUNNER_TEMP/staging-restore-audit.json"
       - name: Archive audit output even if ledger invariants failed
         if: always()
