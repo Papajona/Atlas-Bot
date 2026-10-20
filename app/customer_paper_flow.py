@@ -581,6 +581,7 @@ async def execute_customer_paper_spot_signal(
         "order_role": role,
         "timeframe": str(req.timeframe),
         "signal_bar_timestamp": market["bar_timestamp"],
+        "submission_bar_at": market["bar_timestamp"],
         "data_sha256": market["data_sha256"],
         "strategy": str(strategy or "unknown")[:120],
         "stop_loss_price": str(stop_loss_price) if normalized_side == "BUY" and stop_loss_price is not None else None,
@@ -623,7 +624,7 @@ async def execute_customer_paper_spot_signal(
     ]
     if len(match) != 1:
         raise CustomerPaperFlowBlocked("Submitted paper order was not visible to the recovery query")
-    execution = await _fill_open_order(customer_id, match[0], market)
+    execution = await _fill_open_order(customer_id, match[0], market, df)
     return {
         "mode": "CUSTOMER_PAPER",
         "status": execution.get("status", "UNKNOWN"),
