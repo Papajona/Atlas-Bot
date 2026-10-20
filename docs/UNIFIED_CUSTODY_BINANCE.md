@@ -3,6 +3,8 @@
 ## Design boundary
 Atlas remains the authoritative customer-liability ledger. Binance is an external trading/allocation location, not the accounting source of truth.
 
+The configured TRON treasury address is not proof of ownership. `USDT_TRON_TREASURY_ADDRESS_ROLE=unknown` is the fail-closed default: reconciliation returns UNKNOWN and sweeps are rejected. Set `atlas_controlled` only with independently verified control evidence. If verified as an exchange deposit address, set `binance_deposit`; it is excluded from Atlas-controlled on-chain assets and can never be a sweep destination.
+
 Supported locations include CUSTODY:TRON and EXCHANGE:BINANCE:CUSTOMER:<customer_id>.
 
 Customer balances remain the sum of the Atlas ledger buckets. External custody/exchange balances are independently observed and reconciled against those liabilities.
