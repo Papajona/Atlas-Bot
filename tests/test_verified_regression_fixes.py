@@ -123,3 +123,26 @@ def test_trade_learning_replay_is_started_only_when_enabled():
     startup = source[source.index("async def startup()"):source.index("async def shutdown()")]
     assert "if settings.trade_learning_enabled:" in startup
     assert "_trade_learning_replay_loop" in startup
+
+
+@pytest.mark.parametrize(
+    "side,take_profit_price",
+    [
+        ("buy", 0.0),
+        ("buy", -1.0),
+        ("sell", 0.0),
+        ("sell", -1.0),
+    ],
+)
+def test_risk_governor_blocks_non_positive_take_profit_prices(side, take_profit_price):
+    decision = evaluate_trade(
+        side=side,
+        price=100.0,
+        quantity=1.0,
+        live=False,
+        stop_loss_price=90.0 if side == "buy" else 110.0,
+        take_profit_price=take_profit_price,
+        signal={},
+    )
+    assert decision.action == "BLOCK"
+    assert "invalid_take_profit" in decision.reasons
