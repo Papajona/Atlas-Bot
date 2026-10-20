@@ -23,7 +23,10 @@ def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
     if "volume" in df.columns:
         agg["volume"] = "sum"
-    return df.resample(rule, label="right", closed="right").agg(agg).dropna(subset=["open", "high", "low", "close"])
+    # Market-data providers timestamp OHLCV candles at their OPEN time. Use [left, right)
+    # buckets labeled at the close boundary so a candle at 04:00 belongs to the 04:00–08:00
+    # higher-timeframe bar, never to the bar that has already ended at 04:00.
+    return df.resample(rule, label="right", closed="left").agg(agg).dropna(subset=["open", "high", "low", "close"])
 
 
 def _trend_score(frame: pd.DataFrame, cfg: MultiTimeframeConfig) -> pd.Series:
