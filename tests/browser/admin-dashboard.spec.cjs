@@ -96,7 +96,7 @@ async function testAdminDashboard(browser, baseUrl) {
     const req = route.request();
     const url = new URL(req.url());
     const pathname = url.pathname;
-    if (pathname === "/api/admin/auth/mfa/status" && req.method === "GET") {
+    if (pathname.includes("/api/admin/auth/mfa/status")) {
       mfaStatusCalls += 1;
       // This test preloads a verified admin fixture token; the separate enrollment
       // test below covers aal1 -> aal2 transitions and refusal before verification.
