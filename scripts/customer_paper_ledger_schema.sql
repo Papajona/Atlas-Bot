@@ -460,6 +460,11 @@ BEGIN
         EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA customer_paper FROM authenticated';
         EXECUTE 'REVOKE ALL ON ALL SEQUENCES IN SCHEMA customer_paper FROM authenticated';
     END IF;
+    -- Remove any stale grants from previous/manual provisioning before re-applying the least-privilege contract.
+    EXECUTE format('REVOKE ALL ON SCHEMA customer_paper FROM %I', role_name);
+    EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA customer_paper FROM %I', role_name);
+    EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA customer_paper FROM %I', role_name);
+    EXECUTE format('REVOKE ALL ON ALL FUNCTIONS IN SCHEMA customer_paper FROM %I', role_name);
     EXECUTE format('REVOKE ALL ON SCHEMA public FROM %I', role_name);
     EXECUTE format('GRANT USAGE ON SCHEMA customer_paper TO %I', role_name);
     FOREACH policy_table IN ARRAY ARRAY[
