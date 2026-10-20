@@ -111,7 +111,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$PR_NUMBER" == "115" && "$PR_BRANCH" == "fix/remaining-audit-gates-2026-10-14" ]] || [[ "$PR_NUMBER" == "122" && "$PR_BRANCH" == "fix/audit-bias-runtime-money-2026-10-14" ]]; then
+          if [[ "$PR_NUMBER" == "115" && "$PR_BRANCH" == "fix/remaining-audit-gates-2026-10-14" ]] || [[ "$PR_NUMBER" == "122" && "$PR_BRANCH" == "fix/audit-bias-runtime-money-2026-10-14" ]] || [[ "$PR_NUMBER" == "170" && "$PR_BRANCH" == "fix/certifi-security-update-2026-10-20" ]]; then
             :
           else
             echo "Refusing to commit lock artifact to unexpected PR/branch: $PR_NUMBER:$PR_BRANCH" >&2
