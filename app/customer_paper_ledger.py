@@ -333,8 +333,8 @@ async def preflight_isolated_customer_paper_ledger(
                 insecure_paper.append(f"customer_paper.{budget_table}:GLOBAL_POLICY_INVALID_" + ("MISSING" if not budget_policies else "MULTIPLE"))
             else:
                 policy = budget_policies[0]
-                normalized_using = re.sub(r"\\s+", "", str(policy.get("qual") or "")).strip("()").casefold()
-                normalized_check = re.sub(r"\\s+", "", str(policy.get("with_check") or "")).strip("()").casefold()
+                normalized_using = re.sub(r"\s+", "", str(policy.get("qual") or "")).strip("()").casefold()
+                normalized_check = re.sub(r"\s+", "", str(policy.get("with_check") or "")).strip("()").casefold()
                 if str(policy.get("policyname") or "") != "customer_paper_bar_budget_backend":
                     insecure_paper.append(f"customer_paper.{budget_table}:GLOBAL_POLICY_INVALID_NAME")
                 if str(policy.get("cmd") or "").upper() != "ALL":
