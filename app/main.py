@@ -7035,3 +7035,12 @@ async def admin_release_diagnostics(
             "configuration_characters": len(str(payload.get("configuration") or "")),
         }, actor_id=actor_id)
 
+# Customer-authenticated spot paper orders write only to the isolated customer_paper schema.
+# The autonomous customer-bot route remains blocked until its strategy cycle is separately
+# integrated and validated through this same durable order/fill/recovery path.
+app.include_router(build_customer_paper_router(
+    get_customer=get_customer,
+    market_data=market_data,
+    market_request_type=MarketRequest,
+))
+
