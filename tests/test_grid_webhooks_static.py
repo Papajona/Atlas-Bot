@@ -1,5 +1,5 @@
 from pathlib import Path
-from app.grid_trading import build_grid, grid_profit_pct
+from app.grid_trading import build_grid
 
 ROOT=Path(__file__).resolve().parents[1]
 

@@ -8,7 +8,6 @@ TEMPLATES = ["app/templates/dashboard.html", "app/templates/customer.html"]
 
 def _split(path: str):
     html = Path(path).read_text(encoding="utf-8")
-    scripts = re.findall(r"<script[^>]*>(.*?)</script>", html, re.S)
     markup = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.S)
     if path == "app/templates/dashboard.html":
         js = Path("app/static/admin-dashboard.js").read_text(encoding="utf-8")
@@ -24,7 +23,7 @@ def test_customer_and_admin_scripts_are_external_and_not_inline():
     ]:
         html = Path(path).read_text(encoding="utf-8")
         assert f'<script src="/static/{script}" defer></script>' in html
-        assert not re.search(r"<script>(.*?)</script>", html, re.S)
+        assert not re.search(r"<script\b(?![^>]*\bsrc\s*=)[^>]*>.*?</script\s*>", html, re.S | re.I)
         assert not re.search(r"\son(?:click|change|submit|input)=", html, re.I)
 
 

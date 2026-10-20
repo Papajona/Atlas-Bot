@@ -82,7 +82,7 @@ def test_missing_fee_data_is_estimated_charged_and_flagged():
 
 def test_fee_never_decreases_automatically():
     async def check(sessions):
-        async with sessions() as db:
+        async with sessions():
             t = _trade(fee=5.0)
             d, c, _, _ = execution._prepare_live_fee(t, {"fee": {"currency": "USDT", "cost": 4.0}}, 0.1, 60000)
             assert d == 0.0 and c == 5.0 and t.fee == 5.0

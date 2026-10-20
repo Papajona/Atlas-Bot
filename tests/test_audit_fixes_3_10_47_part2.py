@@ -5,13 +5,12 @@ import types
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.execution as execution
 import app.incidents as incidents
 from app.config import Settings, settings
-from app.db import AppState, Base, Incident
+from app.db import AppState, Base
 
 ROOT = Path(__file__).resolve().parents[1]
 

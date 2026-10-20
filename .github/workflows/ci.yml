@@ -357,15 +357,8 @@ jobs:
             " | grep -qx RLS_OK
           PGPASSWORD=test_password dropdb -h 127.0.0.1 -U atlas atlas_restore
           rm -f /tmp/atlas-ci.dump
-      - name: Python lint (fatal static errors)
-        run: |
-          set +e
-          python -m pyflakes app scripts tests > /tmp/pyflakes.txt 2>&1
-          status=$?
-          set -e
-          cat /tmp/pyflakes.txt
-          if grep -E "undefined name|redefinition of" /tmp/pyflakes.txt; then exit 1; fi
-          echo "Pyflakes completed with status $status; only fatal static errors fail CI."
+      - name: Python lint (strict)
+        run: python -m pyflakes app scripts tests
       - name: Repository secret scan
         run: python scripts/check_no_secrets.py
       - name: Security scan

@@ -52,7 +52,7 @@ async def _customer(sessions, available):
 
 async def _balances(sessions, cid):
     from sqlalchemy import select
-    from app.db import CustomerLedgerAccount, LedgerJournal, LedgerJournalLine
+    from app.db import CustomerLedgerAccount, LedgerJournalLine
     async with sessions() as db:
         l = (await db.execute(select(CustomerLedgerAccount).where(CustomerLedgerAccount.customer_id == cid))).scalar_one()
         journal_ids = (
