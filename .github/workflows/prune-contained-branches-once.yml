@@ -1,4 +1,4 @@
-name: One-time cleanup of branches already contained in main
+name: One-time cleanup of branches already integrated into main
 
 on:
   push:
@@ -10,8 +10,7 @@ permissions:
 
 jobs:
   prune-contained-branches:
-    # This one-time marker is supplied only on the reviewed cleanup merge.
-    # Ordinary pushes to main never trigger branch deletion.
+    # Runs only on the one explicitly marked cleanup merge. Ordinary pushes do nothing.
     if: startsWith(github.event.head_commit.message, '[atlas-branch-prune-once-20261020]')
     runs-on: ubuntu-latest
     steps:
@@ -19,9 +18,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ github.token }}
 
-      - name: Delete only unprotected branches fully contained in main
+      - name: Delete only proven-integrated unprotected branches
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -34,7 +32,13 @@ jobs:
           git cat-file -e "${main_sha}^{commit}"
 
           mapfile -t open_pr_heads < <(
-            gh api "repos/${GH_REPO}/pulls?state=open&per_page=100" --jq '.[].head.ref'
+            gh api --paginate "repos/${GH_REPO}/pulls?state=open&per_page=100" --jq '.[].head.ref'
+          )
+          # Squash merges do not make the source tip an ancestor of main. This
+          # tuple proves exact name + exact head SHA + merged commit ancestry.
+          mapfile -t merged_pr_tuples < <(
+            gh api --paginate "repos/${GH_REPO}/pulls?state=closed&per_page=100" \
+              --jq '.[] | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha != null) | [.head.ref, .head.sha, .merge_commit_sha] | @tsv'
           )
 
           deleted=0
@@ -42,7 +46,6 @@ jobs:
           failed=0
           while IFS=$'\t' read -r branch protected sha; do
             [[ -z "$branch" || "$branch" == "main" ]] && continue
-
             if [[ "$protected" == "true" ]]; then
               echo "KEEP protected branch: $branch"
               kept=$((kept + 1))
@@ -51,10 +54,7 @@ jobs:
 
             open_pr=false
             for pr_head in "${open_pr_heads[@]}"; do
-              if [[ "$pr_head" == "$branch" ]]; then
-                open_pr=true
-                break
-              fi
+              if [[ "$pr_head" == "$branch" ]]; then open_pr=true; break; fi
             done
             if [[ "$open_pr" == "true" ]]; then
               echo "KEEP branch used by an open PR: $branch"
@@ -62,19 +62,32 @@ jobs:
               continue
             fi
 
-            # This is the key safety condition: do not delete a ref unless
-            # its exact tip commit is already reachable from the pushed main.
+            reason=""
             if git merge-base --is-ancestor "$sha" "$main_sha"; then
-              if gh api --method DELETE "repos/${GH_REPO}/git/refs/heads/${branch}" >/dev/null; then
-                echo "DELETED fully integrated branch: $branch"
-                deleted=$((deleted + 1))
-              else
-                echo "ERROR deleting integrated branch: $branch" >&2
-                failed=$((failed + 1))
-              fi
+              reason="tip is an ancestor of main"
             else
-              echo "KEEP branch with unique/unmerged commits: $branch"
+              for tuple in "${merged_pr_tuples[@]}"; do
+                IFS=$'\t' read -r pr_branch pr_head_sha pr_merge_sha <<< "$tuple"
+                if [[ "$pr_branch" == "$branch" && "$pr_head_sha" == "$sha" ]] \
+                  && git merge-base --is-ancestor "$pr_merge_sha" "$main_sha"; then
+                  reason="exact branch tip was merged into main"
+                  break
+                fi
+              done
+            fi
+
+            if [[ -z "$reason" ]]; then
+              echo "KEEP branch with unique/unproven commits: $branch"
               kept=$((kept + 1))
+              continue
+            fi
+
+            if gh api --method DELETE "repos/${GH_REPO}/git/refs/heads/${branch}" >/dev/null; then
+              echo "DELETED ($reason): $branch"
+              deleted=$((deleted + 1))
+            else
+              echo "ERROR deleting integrated branch: $branch" >&2
+              failed=$((failed + 1))
             fi
           done < <(
             gh api --paginate "repos/${GH_REPO}/branches?per_page=100" \
@@ -82,6 +95,4 @@ jobs:
           )
 
           echo "Cleanup summary: deleted=$deleted kept=$kept failed=$failed"
-          if [[ "$failed" -gt 0 ]]; then
-            exit 1
-          fi
+          if [[ "$failed" -gt 0 ]]; then exit 1; fi
