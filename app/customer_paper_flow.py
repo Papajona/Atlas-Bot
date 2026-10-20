@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 
 from .config import settings
@@ -29,6 +29,12 @@ from .customer_paper_lifecycle import (
     register_customer_paper_market_bar,
     submit_customer_paper_order,
 )
+
+
+_TIMEFRAME_SECONDS = {
+    "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
+    "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400,
+}
 
 
 class CustomerPaperFlowBlocked(RuntimeError):
@@ -171,8 +177,13 @@ def validate_customer_paper_market(req, df, market_context: Mapping) -> dict:
         bar_dt = datetime.fromisoformat(str(df.index[-1].isoformat()).replace("Z", "+00:00"))
     except (TypeError, ValueError) as exc:
         raise CustomerPaperFlowBlocked("Quote or completed-bar timestamp is invalid") from exc
+    timeframe_seconds = _TIMEFRAME_SECONDS.get(str(req.timeframe))
+    if timeframe_seconds is None:
+        raise CustomerPaperFlowBlocked("Customer paper timeframe is unsupported")
     if quote_dt.tzinfo is None or bar_dt.tzinfo is None or quote_dt <= bar_dt:
         raise CustomerPaperFlowBlocked("Fresh quote must follow the latest completed signal bar")
+    if quote_dt.astimezone(timezone.utc) <= bar_dt.astimezone(timezone.utc) + timedelta(seconds=timeframe_seconds):
+        raise CustomerPaperFlowBlocked("Fresh quote must post-date the completed candle close")
     bar_timestamp = bar_dt.astimezone(timezone.utc).isoformat()
     bar_data_sha256, base_volume = _stable_completed_bar_digest(req, df, bar_timestamp)
     return {
