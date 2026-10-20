@@ -214,6 +214,24 @@ jobs:
                     reviewed_reason="reviewed Binance deposit-address boundary branch; current main contains the ownership, exclusion, and sweep guards with regression coverage"
                   fi
                   ;;
+                "hardening/automatic-tron-customer-credit:da09885016ff25252c7a2822b7fe60744166791c")
+                  if git show "$main_sha:tests/test_customer_wallets_static.py" | grep -F 'def test_tron_auto_credit_is_customer_wallet_bound_and_confirmed_only' >/dev/null \
+                    && git show "$main_sha:tests/test_customer_wallets_static.py" | grep -F 'status=("PENDING_REVIEW" if settings.funding_manual_review_required else "CONFIRMED")' >/dev/null \
+                    && git show "$main_sha:tests/test_customer_wallets_static.py" | grep -F 'def test_tron_shared_address_mode_never_auto_credits_by_amount' >/dev/null \
+                    && git show "$main_sha:tests/test_customer_wallets_static.py" | grep -F 'credit_mode": "AUTOMATIC"' >/dev/null \
+                    && git show "$main_sha:app/main.py" | grep -F '_headers' >/dev/null; then
+                    reviewed_reason="reviewed stale TRON auto-credit test branch; current main retains wallet-bound idempotent credit but adds the newer manual-review safety state and stronger regression coverage"
+                  fi
+                  ;;
+                "security/default-deny-public-schema-20261009:ec70157ac8417c868ec4dacd4c1de0d5316bba6d")
+                  if git show "$main_sha:alembic/versions/0049_public_schema_rls_lockdown.py" | grep -F 'REVOKE USAGE ON SCHEMA public FROM PUBLIC' >/dev/null \
+                    && git show "$main_sha:alembic/versions/0049_public_schema_rls_lockdown.py" | grep -F 'REVOKE CREATE ON SCHEMA public FROM PUBLIC' >/dev/null \
+                    && git show "$main_sha:alembic/versions/0049_public_schema_rls_lockdown.py" | grep -F 'ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY' >/dev/null \
+                    && git show "$main_sha:.github/workflows/ci.yml" | grep -F 'RLS is disabled on one or more public tables' >/dev/null \
+                    && git show "$main_sha:.github/workflows/ci.yml" | grep -F 'role % retains USAGE on public schema' >/dev/null; then
+                    reviewed_reason="reviewed obsolete 0048 default-deny migration branch; current main has the non-conflicting 0049 lockdown, schema-level access revocation, RLS and runtime regression checks"
+                  fi
+                  ;;
               esac
               if [[ -n "$reviewed_reason" ]]; then
                 reason="$reviewed_reason"
