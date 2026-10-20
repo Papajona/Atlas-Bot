@@ -286,6 +286,7 @@ def main() -> int:
         _psql(
             env,
             "-v", f"paper_runtime_role={RUNTIME_ROLE}",
+            "-1",
             "-f", str(SCHEMA_FILE),
         )
         verification = _psql(env, "-c", VERIFY_SQL).split("|")
