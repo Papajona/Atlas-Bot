@@ -10,6 +10,7 @@ from scripts.provision_customer_paper_schema import (
     VERIFY_SQL,
     _connection_env,
     _pgpass_escape,
+    _role_setup_sql,
     _runtime_connection_uri,
 )
 
@@ -67,6 +68,16 @@ def test_schema_apply_is_single_transaction_and_resets_old_acl_grants():
     assert "REVOKE ALL ON ALL FUNCTIONS IN SCHEMA customer_paper FROM %I" in sql
     assert "FORCE ROW LEVEL SECURITY" in sql
     assert "CREATE POLICY customer_paper_tenant" in sql
+
+
+def test_role_setup_revokes_postgres_16_creator_membership_before_readback():
+    sql = _role_setup_sql("safe'password")
+
+    assert sql.index("CREATE ROLE atlas_customer_paper") < sql.index(
+        "REVOKE atlas_customer_paper FROM CURRENT_USER;"
+    ) < sql.index("ALTER ROLE atlas_customer_paper PASSWORD")
+    assert "PASSWORD 'safe''password';" in sql
+    assert sql.rstrip().endswith("COMMIT;")
 
 
 def test_runtime_customer_paper_uri_requires_tls_and_encodes_credentials():
