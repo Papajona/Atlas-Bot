@@ -17,6 +17,8 @@ ccxt==4.5.88
 yfinance==0.2.55
 pyarrow==23.0.1
 httpx==0.28.1
+# Pin the audited fixed upstream release; requirements.lock and requirements-dev.lock carry verified hashes.
+certifi==2026.10.19
 google-cloud-secret-manager>=2.24.0,<3
 prometheus-client==0.22.1
 cryptography==50.0.1
