@@ -3459,6 +3459,73 @@ async def customer_ledger(authorization: str | None = Header(default=None)):
         return {"currency": "USDT", "balance": balance, "entries": entries}
 
 
+@app.get("/api/customer/ledger/export.csv")
+async def customer_ledger_export_csv(authorization: str | None = Header(default=None)):
+    """Export the authenticated customer's USDT ledger journal lines without mutating balances."""
+    import csv
+    import io
+
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db)
+        entries = await ledger_statement(db, profile.id, "USDT", 5000)
+        output = io.StringIO(newline="")
+        writer = csv.writer(output)
+        writer.writerow([
+            "created_at", "journal_id", "entry_type", "currency",
+            "reference_type", "reference_id", "account_code", "debit", "credit",
+        ])
+        for entry in entries:
+            writer.writerow([
+                entry.get("created_at", ""),
+                entry.get("journal_id", ""),
+                entry.get("entry_type", ""),
+                "USDT",
+                entry.get("reference_type", ""),
+                entry.get("reference_id", ""),
+                entry.get("account_code", ""),
+                entry.get("debit", ""),
+                entry.get("credit", ""),
+            ])
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="atlas-customer-ledger-usdt.csv"',
+                "Cache-Control": "no-store",
+                "Pragma": "no-cache",
+            },
+        )
+
+
+@app.get("/api/customer/trades/{trade_id}/decision")
+async def customer_trade_decision(trade_id: int, authorization: str | None = Header(default=None)):
+    """Expose only the authenticated owner's persisted trade outcome; do not fabricate a rationale."""
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db)
+        trade = (await db.execute(
+            select(Trade).where(
+                Trade.id == trade_id,
+                Trade.customer_id == profile.id,
+            )
+        )).scalar_one_or_none()
+        if trade is None:
+            raise HTTPException(404, "Trade not found")
+        return {
+            "trade_id": trade.id,
+            "symbol": trade.symbol,
+            "side": trade.side,
+            "mode": trade.mode,
+            "status": trade.status,
+            "signal_id": trade.signal_id,
+            "reason": trade.reason or "",
+            "error": trade.error or "",
+            "created_at": trade.created_at.isoformat() if trade.created_at else None,
+            "updated_at": trade.updated_at.isoformat() if trade.updated_at else None,
+            "explanation_scope": "stored_trade_record",
+            "note": "This explains the persisted trade record only; it does not reconstruct decisions not recorded at execution time.",
+        }
+
+
 @app.get("/api/admin/funding")
 async def admin_funding(authorization: str | None = Header(default=None), status: str = "PENDING_REVIEW"):
     claims = await auth(None, authorization)
