@@ -81,7 +81,7 @@ def test_customer_paper_market_context_requires_verified_closed_spot_data(monkey
     verified = validate_customer_paper_market(req, frame, context)
     assert verified["currency"] == "USDT"
     assert verified["data_sha256"] == frame.attrs["data_provenance"]["sha256"]
-    assert verified["bid"] == 99.9
+    assert verified["bid"] == Decimal("99.9")
 
     bad_context = dict(context, quote_age_seconds=6)
     with pytest.raises(CustomerPaperFlowBlocked, match="older than five seconds"):
