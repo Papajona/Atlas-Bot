@@ -29,6 +29,9 @@ PAPER_TABLES = (
     "customer_paper.orders", "customer_paper.order_events", "customer_paper.fills",
     "customer_paper.position_events",
 )
+# Shared market-bar budgets contain only public OHLCV provenance and aggregate capacity,
+# never customer identifiers or financial balances. They use a separate explicit policy.
+PAPER_GLOBAL_TABLES = ("customer_paper.market_bar_budgets", "customer_paper.market_bar_allocations")
 
 
 def _tenant_policy_expression_is_exact(expression: Any) -> bool:
@@ -245,15 +248,15 @@ async def preflight_isolated_customer_paper_ledger(
                 WHERE (n.nspname='customer_paper' AND c.relname = ANY(:paper_table_names))
                    OR (n.nspname='public' AND c.relname = ANY(:real_tables))
                 """),
-                {"real_tables": list(REAL_MONEY_TABLES), "paper_table_names": [name.split(".", 1)[1] for name in PAPER_TABLES]},
+                {"real_tables": list(REAL_MONEY_TABLES), "paper_table_names": [name.split(".", 1)[1] for name in PAPER_TABLES + PAPER_GLOBAL_TABLES]},
             )).mappings().all()
             by_name = {str(row["table_name"]): row for row in table_rows}
-            missing_paper = sorted(set(PAPER_TABLES) - set(by_name))
+            missing_paper = sorted(set(PAPER_TABLES + PAPER_GLOBAL_TABLES) - set(by_name))
             if missing_paper:
                 return {"status": "BLOCKED", "reason": "PAPER_SCHEMA_NOT_PROVISIONED",
                         "missing_tables": missing_paper, "identity": {"database": db_name, "role": role_name}}
             insecure_paper = []
-            for name in PAPER_TABLES:
+            for name in PAPER_TABLES + PAPER_GLOBAL_TABLES:
                 row = by_name[name]
                 if row["relkind"] not in {"r", "p"}:
                     insecure_paper.append(f"{name}:NOT_A_TABLE")
@@ -321,6 +324,39 @@ async def preflight_isolated_customer_paper_ledger(
                     insecure_paper.append(
                         f"customer_paper.{table}:TENANT_POLICY_INVALID_{policy_error}"
                     )
+            # These global tables contain only public bar metadata and aggregate fill capacity,
+            # never customer IDs, positions, balances or journals. Their single policy is global
+            # only for the dedicated backend role; RLS remains forced and direct API roles receive
+            # no table privileges.
+            for global_table in (name.split(".", 1)[1] for name in PAPER_GLOBAL_TABLES):
+                candidates = policy_by_table.get(global_table, [])
+                row = candidates[0] if len(candidates) == 1 else None
+                if len(candidates) != 1:
+                    insecure_paper.append(
+                        f"customer_paper.{global_table}:GLOBAL_POLICY_INVALID_" + ("MISSING" if not candidates else "MULTIPLE")
+                    )
+                    continue
+                normalized_using = re.sub(r"\s+", "", str(row.get("qual") or "")).strip("()").casefold()
+                normalized_check = re.sub(r"\s+", "", str(row.get("with_check") or "")).strip("()").casefold()
+                if str(row.get("policyname") or "") != "customer_paper_bar_budget_backend":
+                    insecure_paper.append(f"customer_paper.{global_table}:GLOBAL_POLICY_INVALID_NAME")
+                if str(row.get("cmd") or "").upper() != "ALL":
+                    insecure_paper.append(f"customer_paper.{global_table}:GLOBAL_POLICY_INVALID_COMMAND")
+                if str(row.get("permissive") or "").upper() != "PERMISSIVE":
+                    insecure_paper.append(f"customer_paper.{global_table}:GLOBAL_POLICY_INVALID_PERMISSIVENESS")
+                if normalized_using != "true" or normalized_check != "true":
+                    insecure_paper.append(f"customer_paper.{global_table}:GLOBAL_POLICY_INVALID_PREDICATE")
+                if not _tenant_policy_roles_are_exact(row.get("roles"), str(role_name)):
+                    insecure_paper.append(f"customer_paper.{global_table}:GLOBAL_POLICY_INVALID_ROLE")
+
+            # Trigger metadata is owner-sensitive in restricted PostgreSQL sessions. Check
+            # it through the migration-owned, read-only SECURITY DEFINER boolean probe; the
+            # runtime role gains no direct catalog access and the function exposes no DDL.
+            guard_row = (await conn.execute(text(
+                "SELECT customer_paper.verify_market_bar_capacity_guards()"
+            ))).scalar_one_or_none()
+            if guard_row is not True:
+                insecure_paper.append("customer_paper:BAR_CAPACITY_TRIGGER_MISSING_OR_DISABLED")
             if insecure_paper:
                 return {"status": "BLOCKED", "reason": "PAPER_SCHEMA_PRIVILEGES_UNSAFE",
                         "findings": insecure_paper}
@@ -461,10 +497,11 @@ async def preflight_isolated_customer_paper_ledger(
                         JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
+                          AND (NOT :same_database OR n.nspname <> 'customer_paper')
                           AND p.prosecdef
                           AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
                         """
-                    ), {"paper_role": role_name})).mappings().all()
+                    ), {"paper_role": role_name, "same_database": same_database})).mappings().all()
                     for row in primary_security_definer_rows:
                         primary_exposure.append(f"{row['function_name']}:SECURITY_DEFINER_EXECUTE")
                     if primary_exposure:

@@ -12,6 +12,7 @@ import json
 import re
 import uuid
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from typing import Any
 
@@ -368,6 +369,118 @@ async def submit_customer_paper_order(
     finally:
         await engine.dispose()
 
+ 
+async def register_customer_paper_market_bar(
+    *,
+    venue: str,
+    symbol: str,
+    timeframe: str,
+    bar_at: datetime | str,
+    bar_data_sha256: str,
+    base_volume: str | int | Decimal,
+    participation_rate: str | int | Decimal,
+) -> dict[str, str]:
+    """Persist a stable, shared bar budget before any tenant can consume its liquidity.
+
+    Only public market metadata is stored. The bar identity excludes fetched-at time so
+    that retries for the same completed candle share one capacity record; immutable OHLCV
+    digest equality rejects conflicting source payloads for that candle.
+    """
+    normalized_venue = str(venue or "").strip().lower()
+    if not _VENUE_RE.fullmatch(normalized_venue):
+        raise ValueError("venue must be a normalized provider identifier")
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not _SYMBOL_RE.fullmatch(normalized_symbol):
+        raise ValueError("symbol is malformed")
+    normalized_timeframe = str(timeframe or "").strip().lower()
+    if normalized_timeframe not in {"1m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"}:
+        raise ValueError("unsupported market-bar timeframe")
+    try:
+        stamp = bar_at if isinstance(bar_at, datetime) else datetime.fromisoformat(str(bar_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("bar_at must be an ISO timestamp") from exc
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        raise ValueError("bar_at must be timezone-aware")
+    stamp = stamp.astimezone(timezone.utc)
+    stamp_text = stamp.isoformat()
+    digest = str(bar_data_sha256 or "").strip().lower()
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise ValueError("bar_data_sha256 must be a SHA-256 hex digest")
+    volume = _input_decimal(base_volume, "base_volume", non_negative=True)
+    try:
+        participation = Decimal(str(participation_rate))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError("participation_rate must be a finite decimal between zero and one") from exc
+    if not participation.is_finite() or participation < 0 or participation > 1:
+        raise ValueError("participation_rate must be between zero and one")
+    capacity = _money(volume * participation, "market bar capacity")
+    bar_key = hashlib.sha256(
+        f"paper-market-bar-v1|{normalized_venue}|spot|{normalized_symbol}|{normalized_timeframe}|{stamp_text}".encode("utf-8")
+    ).hexdigest()
+    await _assert_customer_paper_ready()
+    engine = _paper_engine()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"paper-market-bar:{bar_key}"},
+            )
+            inserted = (await conn.execute(text(
+                """
+                INSERT INTO customer_paper.market_bar_budgets
+                    (bar_key, venue, market_type, symbol, timeframe, bar_at,
+                     bar_data_sha256, base_volume, capacity)
+                VALUES
+                    (:bar_key, :venue, 'spot', :symbol, :timeframe, :bar_at,
+                     :bar_data_sha256, :base_volume, :capacity)
+                ON CONFLICT (bar_key) DO NOTHING
+                RETURNING bar_key
+                """
+            ), {
+                "bar_key": bar_key, "venue": normalized_venue, "symbol": normalized_symbol,
+                "timeframe": normalized_timeframe, "bar_at": stamp, "bar_data_sha256": digest,
+                "base_volume": volume, "capacity": capacity,
+            })).first()
+            row = (await conn.execute(text(
+                """
+                SELECT venue, market_type, symbol, timeframe, bar_at, bar_data_sha256,
+                       base_volume, capacity
+                FROM customer_paper.market_bar_budgets WHERE bar_key=:bar_key
+                """
+            ), {"bar_key": bar_key})).mappings().first()
+            if row is None:
+                raise CustomerPaperLedgerBlocked("market bar budget could not be read after insert")
+            same_bar = (
+                str(row["venue"]) == normalized_venue
+                and str(row["market_type"]) == "spot"
+                and str(row["symbol"]) == normalized_symbol
+                and str(row["timeframe"]) == normalized_timeframe
+                and row["bar_at"].astimezone(timezone.utc) == stamp
+                and str(row["bar_data_sha256"]) == digest
+                and Decimal(row["base_volume"]) == volume
+                and Decimal(row["capacity"]) == capacity
+            )
+            if not same_bar:
+                raise CustomerPaperOrderConflict(
+                    "completed-bar provenance conflicts with the immutable shared paper budget"
+                )
+            consumed = Decimal((await conn.execute(text(
+                "SELECT COALESCE(SUM(allocated_quantity), 0) FROM customer_paper.market_bar_allocations WHERE bar_key=:bar_key"
+            ), {"bar_key": bar_key})).scalar_one())
+            available = capacity - consumed
+            if available < 0:
+                raise CustomerPaperLedgerBlocked("persisted market-bar allocations exceed their capacity")
+        return {
+            "status": "APPENDED" if inserted is not None else "REPLAYED",
+            "bar_key": bar_key,
+            "capacity": _fmt(capacity),
+            "consumed": _fmt(consumed),
+            "available": _fmt(available),
+            "bar_at": stamp_text,
+        }
+    finally:
+        await engine.dispose()
+
 
 async def record_customer_paper_fill(
     *,
@@ -378,6 +491,7 @@ async def record_customer_paper_fill(
     quantity: str | int | Decimal,
     price: str | int | Decimal,
     fee_amount: str | int | Decimal = "0",
+    enforce_market_bar_budget: bool = False,
 ) -> dict[str, Any]:
     """Atomically append one simulated fill, fee, position event and balanced journal.
 
@@ -390,9 +504,11 @@ async def record_customer_paper_fill(
     client_id = _key(client_order_id, "client_order_id", 180)
     fill_key = _key(idempotency_key, "idempotency_key", 150)
     normalized_bar_key = _key(bar_key, "bar_key", 180)
-    amount = _input_decimal(quantity, "quantity", positive=True)
+    requested_amount = _input_decimal(quantity, "quantity", positive=True)
+    amount = requested_amount
     fill_price = _input_decimal(price, "price", positive=True)
-    fee = _input_decimal(fee_amount, "fee_amount", non_negative=True)
+    requested_fee = _input_decimal(fee_amount, "fee_amount", non_negative=True)
+    fee = requested_fee
     await _assert_customer_paper_ready()
     engine = _paper_engine()
     try:
@@ -400,7 +516,7 @@ async def record_customer_paper_fill(
             await _set_tenant(conn, customer_id)
             order = (await conn.execute(text(
                 """
-                SELECT id, venue, market_type, symbol, side, order_type, quantity, limit_price, currency
+                SELECT id, venue, market_type, symbol, side, order_type, quantity, limit_price, currency, metadata_json
                 FROM customer_paper.orders
                 WHERE customer_id=:customer_id AND client_order_id=:client_order_id
                 """
@@ -412,11 +528,16 @@ async def record_customer_paper_fill(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
                 {"lock_key": f"paper-order-fill:{customer_id}:{order_id}"},
             )
+            if enforce_market_bar_budget:
+                await conn.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                    {"lock_key": f"paper-market-bar:{normalized_bar_key}"},
+                )
             currency = str(order["currency"])
             payload = {
                 "customer_id": customer_id, "order_id": order_id, "idempotency_key": fill_key,
-                "bar_key": normalized_bar_key, "quantity": _fmt(amount), "price": _fmt(fill_price),
-                "fee_amount": _fmt(fee), "currency": currency,
+                "bar_key": normalized_bar_key, "quantity": _fmt(requested_amount), "price": _fmt(fill_price),
+                "fee_amount": _fmt(requested_fee), "currency": currency,
             }
             digest = _canonical_sha(payload)
             existing = (await conn.execute(text(
@@ -449,16 +570,70 @@ async def record_customer_paper_fill(
                 "SELECT COALESCE(SUM(quantity), 0) FROM customer_paper.fills WHERE customer_id=:customer_id AND order_id=:order_id"
             ), {"customer_id": customer_id, "order_id": order_id})).scalar_one())
             order_quantity = Decimal(order["quantity"])
-            if total_filled + amount > order_quantity:
+            venue = str(order["venue"])
+            market_type = str(order["market_type"])
+            symbol = str(order["symbol"])
+            if enforce_market_bar_budget:
+                stored_metadata = order["metadata_json"]
+                if isinstance(stored_metadata, str):
+                    try:
+                        stored_metadata = json.loads(stored_metadata)
+                    except ValueError:
+                        stored_metadata = {}
+                order_metadata = dict(stored_metadata) if isinstance(stored_metadata, Mapping) else {}
+                budget = (await conn.execute(text(
+                    """
+                    SELECT venue, market_type, symbol, timeframe, bar_at, capacity
+                    FROM customer_paper.market_bar_budgets WHERE bar_key=:bar_key
+                    """
+                ), {"bar_key": normalized_bar_key})).mappings().first()
+                if budget is None:
+                    raise CustomerPaperOrderConflict("fill lacks a registered immutable market-bar budget")
+                if (
+                    str(budget["venue"]) != venue
+                    or str(budget["market_type"]) != market_type
+                    or str(budget["symbol"]) != symbol
+                    or str(order_metadata.get("exchange") or "") != venue
+                    or str(order_metadata.get("timeframe") or "") != str(budget["timeframe"])
+                ):
+                    raise CustomerPaperOrderConflict("market-bar budget does not match the persisted order market")
+                try:
+                    submitted_at = datetime.fromisoformat(str(order_metadata["submission_bar_at"]).replace("Z", "+00:00"))
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise CustomerPaperOrderConflict("persisted paper order has no valid submission-bar timestamp") from exc
+                if submitted_at.tzinfo is None or submitted_at.utcoffset() is None:
+                    raise CustomerPaperOrderConflict("persisted paper order submission timestamp is not timezone-aware")
+                if budget["bar_at"].astimezone(timezone.utc) <= submitted_at.astimezone(timezone.utc):
+                    raise CustomerPaperOrderConflict("paper fills must use a completed bar strictly after the submission bar")
+                expected_bar_key = hashlib.sha256(
+                    f"paper-market-bar-v1|{venue}|spot|{symbol}|{budget['timeframe']}|{budget['bar_at'].astimezone(timezone.utc).isoformat()}".encode("utf-8")
+                ).hexdigest()
+                if expected_bar_key != normalized_bar_key:
+                    raise CustomerPaperOrderConflict("market-bar key does not match persisted bar identity")
+                consumed = Decimal((await conn.execute(text(
+                    "SELECT COALESCE(SUM(allocated_quantity), 0) FROM customer_paper.market_bar_allocations WHERE bar_key=:bar_key"
+                ), {"bar_key": normalized_bar_key})).scalar_one())
+                available = Decimal(budget["capacity"]) - consumed
+                remaining = order_quantity - total_filled
+                if available < 0 or remaining < 0:
+                    raise CustomerPaperLedgerBlocked("paper bar allocation or order fill totals are inconsistent")
+                amount = min(requested_amount, remaining, available)
+                if amount <= 0:
+                    return {
+                        "status": "NO_LIQUIDITY", "order_id": order_id, "bar_key": normalized_bar_key,
+                        "available_quantity": _fmt(max(Decimal("0"), available)),
+                    }
+                if amount < requested_amount:
+                    fee = _money(requested_fee * amount / requested_amount, "pro-rated fill fee")
+                else:
+                    fee = requested_fee
+            elif total_filled + amount > order_quantity:
                 raise CustomerPaperOrderConflict("simulated fill would exceed the immutable order quantity")
             limit = Decimal(order["limit_price"]) if order["limit_price"] is not None else None
             side = str(order["side"])
             if limit is not None and ((side == "BUY" and fill_price > limit) or (side == "SELL" and fill_price < limit)):
                 raise CustomerPaperOrderConflict("fill price violates the immutable limit price")
 
-            venue = str(order["venue"])
-            market_type = str(order["market_type"])
-            symbol = str(order["symbol"])
             await conn.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
                 {"lock_key": f"paper-position:{customer_id}:{venue}:{market_type}:{symbol}"},
@@ -548,6 +723,18 @@ async def record_customer_paper_fill(
             })).first()
             if filled_row is None:
                 raise CustomerPaperIdempotencyConflict("fill idempotency key raced with a concurrent request")
+            if enforce_market_bar_budget:
+                await conn.execute(text(
+                    """
+                    INSERT INTO customer_paper.market_bar_allocations
+                        (allocation_id, bar_key, allocated_quantity)
+                    VALUES (:allocation_id, :bar_key, :allocated_quantity)
+                    """
+                ), {
+                    "allocation_id": fill_id,
+                    "bar_key": normalized_bar_key,
+                    "allocated_quantity": amount,
+                })
 
             journal_lines: list[dict[str, Any]] = [
                 {"account_code": "PAPER_CASH", "signed_amount": cash_delta},
@@ -683,7 +870,7 @@ async def get_customer_paper_order(*, customer_id: int, client_order_id: str) ->
             row = (await conn.execute(text(
                 """
                 SELECT o.id, o.client_order_id, o.venue, o.market_type, o.symbol, o.side, o.order_type,
-                       o.quantity, o.limit_price, o.currency, e.event_type AS status,
+                       o.quantity, o.limit_price, o.currency, o.metadata_json, e.event_type AS status,
                        COALESCE(f.filled_quantity,0) AS filled_quantity
                 FROM customer_paper.orders o
                 LEFT JOIN LATERAL (
@@ -702,6 +889,13 @@ async def get_customer_paper_order(*, customer_id: int, client_order_id: str) ->
         limit = row["limit_price"]
         filled = Decimal(row["filled_quantity"] or 0)
         quantity = Decimal(row["quantity"])
+        stored_metadata = row["metadata_json"]
+        if isinstance(stored_metadata, str):
+            try:
+                stored_metadata = json.loads(stored_metadata)
+            except ValueError:
+                stored_metadata = {}
+        safe_metadata = dict(stored_metadata) if isinstance(stored_metadata, Mapping) else {}
         return {
             "order_id": str(row["id"]), "client_order_id": str(row["client_order_id"]),
             "venue": str(row["venue"]), "market_type": str(row["market_type"]),
@@ -709,6 +903,7 @@ async def get_customer_paper_order(*, customer_id: int, client_order_id: str) ->
             "quantity": _fmt(quantity), "filled_quantity": _fmt(filled),
             "remaining_quantity": _fmt(quantity - filled), "limit_price": _fmt(Decimal(limit)) if limit is not None else None,
             "currency": str(row["currency"]), "status": str(row["status"] or "UNKNOWN"),
+            "metadata": safe_metadata,
         }
     finally:
         await engine.dispose()

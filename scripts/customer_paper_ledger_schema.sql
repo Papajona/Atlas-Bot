@@ -213,6 +213,86 @@ BEGIN
 END
 $paper_immutable$;
 
+-- Shared aggregate capacity is public market metadata, not a customer ledger. It has no
+-- customer_id, is append-only, and prevents separate tenants from each consuming the
+-- full volume of the same completed bar.
+CREATE TABLE IF NOT EXISTS customer_paper.market_bar_budgets (
+    bar_key varchar(64) PRIMARY KEY CHECK (bar_key ~ '^[0-9a-f]{64}$'),
+    venue varchar(40) NOT NULL CHECK (venue ~ '^[a-z0-9_-]{1,40}$'),
+    market_type varchar(16) NOT NULL CHECK (market_type = 'spot'),
+    symbol varchar(80) NOT NULL CHECK (symbol ~ '^[A-Z0-9][A-Z0-9/_:.-]{0,79}$'),
+    timeframe varchar(8) NOT NULL CHECK (timeframe IN ('1m','5m','15m','30m','1h','2h','4h','1d')),
+    bar_at timestamptz NOT NULL,
+    bar_data_sha256 varchar(64) NOT NULL CHECK (bar_data_sha256 ~ '^[0-9a-f]{64}$'),
+    base_volume numeric(38,18) NOT NULL CHECK (base_volume >= 0),
+    capacity numeric(38,18) NOT NULL CHECK (capacity >= 0 AND capacity <= base_volume),
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS customer_paper.market_bar_allocations (
+    allocation_id uuid PRIMARY KEY REFERENCES customer_paper.fills(id),
+    bar_key varchar(64) NOT NULL REFERENCES customer_paper.market_bar_budgets(bar_key),
+    allocated_quantity numeric(38,18) NOT NULL CHECK (allocated_quantity > 0),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (bar_key, allocation_id)
+);
+
+CREATE OR REPLACE FUNCTION customer_paper.assert_market_bar_capacity()
+RETURNS trigger LANGUAGE plpgsql AS $paper_bar_capacity$
+DECLARE
+    maximum_capacity numeric(38,18);
+    already_allocated numeric(38,18);
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended('paper-market-bar:' || NEW.bar_key, 0));
+    SELECT capacity INTO maximum_capacity
+      FROM customer_paper.market_bar_budgets WHERE bar_key = NEW.bar_key;
+    IF maximum_capacity IS NULL THEN
+        RAISE EXCEPTION 'paper fill allocation has no verified market-bar budget'
+            USING ERRCODE = '23503';
+    END IF;
+    SELECT COALESCE(SUM(allocated_quantity), 0) INTO already_allocated
+      FROM customer_paper.market_bar_allocations WHERE bar_key = NEW.bar_key;
+    IF already_allocated + NEW.allocated_quantity > maximum_capacity THEN
+        RAISE EXCEPTION 'aggregate paper fill allocations exceed completed-bar capacity'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END
+$paper_bar_capacity$;
+
+DROP TRIGGER IF EXISTS trg_customer_paper_market_bar_allocations_capacity
+    ON customer_paper.market_bar_allocations;
+CREATE TRIGGER trg_customer_paper_market_bar_allocations_capacity
+BEFORE INSERT ON customer_paper.market_bar_allocations
+FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_market_bar_capacity();
+
+-- A SECURITY DEFINER probe makes the three critical guard triggers checkable by the
+-- restricted runtime role without granting it direct access to PostgreSQL catalogs.
+-- The function is read-only, takes no input, and returns only a boolean.
+CREATE OR REPLACE FUNCTION customer_paper.verify_market_bar_capacity_guards()
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $paper_bar_guard_check$
+    SELECT count(*) = 3
+    FROM pg_catalog.pg_trigger t
+    JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'customer_paper'
+      AND NOT t.tgisinternal
+      AND t.tgenabled IN ('O', 'A')
+      AND (
+          (c.relname = 'market_bar_budgets'
+              AND t.tgname = 'trg_customer_paper_market_bar_budgets_immutable')
+          OR (c.relname = 'market_bar_allocations'
+              AND t.tgname = 'trg_customer_paper_market_bar_allocations_immutable')
+          OR (c.relname = 'market_bar_allocations'
+              AND t.tgname = 'trg_customer_paper_market_bar_allocations_capacity')
+      );
+$paper_bar_guard_check$;
+REVOKE ALL ON FUNCTION customer_paper.verify_market_bar_capacity_guards() FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION customer_paper.assert_balanced_journal()
 RETURNS trigger LANGUAGE plpgsql AS $paper_balance$
 DECLARE
@@ -329,14 +409,14 @@ BEFORE INSERT ON customer_paper.order_events
 FOR EACH ROW EXECUTE FUNCTION customer_paper.assert_order_event_state();
 
 -- The original three-table schema used "lines" rather than "journal_lines".
--- Remove that legacy trigger name before creating the normalized seven-table set.
+-- Remove that legacy trigger name before creating the normalized customer-table set.
 DROP TRIGGER IF EXISTS trg_customer_paper_lines_immutable ON customer_paper.journal_lines;
 
 DO $paper_immutable_triggers$
 DECLARE table_name text;
 BEGIN
     FOREACH table_name IN ARRAY ARRAY[
-        'accounts','journals','journal_lines','orders','order_events','fills','position_events'
+        'accounts','journals','journal_lines','orders','order_events','fills','position_events','market_bar_budgets','market_bar_allocations'
     ] LOOP
         EXECUTE format('DROP TRIGGER IF EXISTS trg_customer_paper_%I_immutable ON customer_paper.%I', table_name, table_name);
         EXECUTE format('CREATE TRIGGER trg_customer_paper_%I_immutable BEFORE UPDATE OR DELETE ON customer_paper.%I FOR EACH ROW EXECUTE FUNCTION customer_paper.reject_mutation()', table_name, table_name);
@@ -358,6 +438,10 @@ ALTER TABLE customer_paper.fills ENABLE ROW LEVEL SECURITY;
 ALTER TABLE customer_paper.fills FORCE ROW LEVEL SECURITY;
 ALTER TABLE customer_paper.position_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE customer_paper.position_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.market_bar_budgets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.market_bar_budgets FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.market_bar_allocations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.market_bar_allocations FORCE ROW LEVEL SECURITY;
 
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA customer_paper FROM PUBLIC;
 REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA customer_paper FROM PUBLIC;
@@ -388,6 +472,15 @@ BEGIN
             policy_table, role_name
         );
     END LOOP;
+    -- Shared public-bar metadata is not tenant financial data. The backend may read/insert
+    -- budget rows, but never update/delete them or own the table.
+    EXECUTE format('GRANT SELECT, INSERT ON customer_paper.market_bar_budgets TO %I', role_name);
+    EXECUTE 'DROP POLICY IF EXISTS customer_paper_bar_budget_backend ON customer_paper.market_bar_budgets';
+    EXECUTE format('CREATE POLICY customer_paper_bar_budget_backend ON customer_paper.market_bar_budgets FOR ALL TO %I USING (true) WITH CHECK (true)', role_name);
+    EXECUTE format('GRANT SELECT, INSERT ON customer_paper.market_bar_allocations TO %I', role_name);
+    EXECUTE 'DROP POLICY IF EXISTS customer_paper_bar_budget_backend ON customer_paper.market_bar_allocations';
+    EXECUTE format('CREATE POLICY customer_paper_bar_budget_backend ON customer_paper.market_bar_allocations FOR ALL TO %I USING (true) WITH CHECK (true)', role_name);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION customer_paper.verify_market_bar_capacity_guards() TO %I', role_name);
     EXECUTE format('GRANT USAGE ON ALL SEQUENCES IN SCHEMA customer_paper TO %I', role_name);
 END
 $paper_grants$;

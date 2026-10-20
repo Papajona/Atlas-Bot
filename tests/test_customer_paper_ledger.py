@@ -142,6 +142,16 @@ def test_customer_paper_database_pair_accepts_distinct_database_clusters():
     assert pair["distinct_credentials"] is True
 
 
+def test_primary_security_definer_scan_excludes_only_shared_paper_schema():
+    source = Path("app/customer_paper_ledger.py").read_text(encoding="utf-8")
+    # In shared-database mode the customer_paper schema is the isolated paper boundary.
+    # Its guard helper is checked independently in the paper connection; primary schemas
+    # must still be scanned for executable SECURITY DEFINER functions.
+    assert "AND (NOT :same_database OR n.nspname <> 'customer_paper')" in source
+    assert 'AND p.prosecdef' in source
+    assert "has_function_privilege(r.oid, p.oid, 'EXECUTE')" in source
+
+
 def test_primary_privilege_preflight_tolerates_paper_role_absent_from_primary_cluster():
     source = Path("app/customer_paper_ledger.py").read_text(encoding="utf-8")
     # Roles are cluster-local. Every primary-database ACL probe must join pg_roles
