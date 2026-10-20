@@ -262,7 +262,7 @@ async function testAdminFirstTimeMfaEnrollment(browser, baseUrl) {
   await page.getByRole("button", { name: "Enroll Google Authenticator" }).click();
   await page.locator("#adminMfaQr").waitFor();
   await waitUntil(async () => page.locator("#adminMfaQr").evaluate(img => img.complete && img.naturalWidth > 0));
-  await waitUntil(async () => (await page.locator("#authState").innerText()).includes("six-digit Google Authenticator code"));
+  await waitUntil(async () => (await page.locator("#authState").innerText()).includes("enter its six-digit code. Protected data remains locked."));
   assert.equal(await page.locator("#adminMfaBox").isVisible(), true);
   assert.equal(await page.locator("#adminMfaVerifyBtn").isVisible(), true);
   assert.equal(enrollBody && Object.keys(enrollBody).length, 0, "enrollment request must not send arbitrary factor metadata from the browser");
