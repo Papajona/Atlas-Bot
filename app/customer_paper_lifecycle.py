@@ -955,12 +955,17 @@ async def get_customer_paper_positions(*, customer_id: int) -> list[dict[str, st
             await _set_tenant(conn, customer_id)
             rows = (await conn.execute(text(
                 """
-                SELECT DISTINCT ON (venue, market_type, symbol)
-                    venue, market_type, symbol, quantity_after, average_entry_after,
-                    cost_basis_after, realized_pnl_after
-                FROM customer_paper.position_events
-                WHERE customer_id=:customer_id
-                ORDER BY venue, market_type, symbol, id DESC
+                SELECT DISTINCT ON (pe.venue, pe.market_type, pe.symbol)
+                    pe.venue, pe.market_type, pe.symbol, pe.quantity_after, pe.average_entry_after,
+                    pe.cost_basis_after, pe.realized_pnl_after,
+                    COALESCE(o.metadata_json ->> 'timeframe', '') AS timeframe
+                FROM customer_paper.position_events AS pe
+                JOIN customer_paper.fills AS f
+                  ON f.id = pe.fill_id AND f.customer_id = pe.customer_id
+                JOIN customer_paper.orders AS o
+                  ON o.id = f.order_id AND o.customer_id = f.customer_id
+                WHERE pe.customer_id=:customer_id
+                ORDER BY pe.venue, pe.market_type, pe.symbol, pe.id DESC
                 """
             ), {"customer_id": customer_id})).mappings().all()
         return [{
@@ -969,6 +974,7 @@ async def get_customer_paper_positions(*, customer_id: int) -> list[dict[str, st
             "average_entry_price": _fmt(Decimal(row["average_entry_after"])),
             "cost_basis": _fmt(Decimal(row["cost_basis_after"])),
             "realized_pnl": _fmt(Decimal(row["realized_pnl_after"])),
+            "timeframe": str(row["timeframe"] or ""),
         } for row in rows if Decimal(row["quantity_after"]) > 0]
     finally:
         await engine.dispose()
