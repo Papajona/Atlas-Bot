@@ -11,7 +11,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 
 from .config import settings
 from .customer_paper_ledger import (
@@ -24,6 +24,7 @@ from .customer_paper_lifecycle import (
     get_customer_paper_positions,
     list_open_customer_paper_orders,
     record_customer_paper_fill,
+    register_customer_paper_market_bar,
     submit_customer_paper_order,
 )
 
@@ -51,6 +52,46 @@ def _quote_currency(symbol: str) -> str:
 
 def _sha(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+_BAR_QUANTUM = Decimal("0.000000000000000001")
+
+
+def _bar_decimal_text(value: object, name: str, *, non_negative: bool = False) -> str:
+    parsed = _finite_decimal(value, name, non_negative=non_negative)
+    if (not non_negative and parsed <= 0) or (non_negative and parsed < 0):
+        raise CustomerPaperFlowBlocked(f"{name} has an invalid sign")
+    with localcontext() as context:
+        context.prec = 80
+        normalized = parsed.quantize(_BAR_QUANTUM, rounding=ROUND_HALF_EVEN)
+    return format(normalized, "f")
+
+
+def _stable_completed_bar_digest(req, df, bar_timestamp: str) -> tuple[str, Decimal]:
+    """Build the same immutable OHLCV identity used by the manual paper API."""
+    names = ("open", "high", "low", "close", "volume")
+    values = {
+        name: Decimal(_bar_decimal_text(df[name].iloc[-1], f"completed-bar {name}", non_negative=name == "volume"))
+        for name in names
+    }
+    if (
+        values["high"] < max(values["open"], values["close"], values["low"])
+        or values["low"] > min(values["open"], values["close"], values["high"])
+    ):
+        raise CustomerPaperFlowBlocked("Completed bar has inconsistent OHLC values")
+    stable_bar = {
+        "venue": str(req.exchange).strip().lower(),
+        "market_type": "spot",
+        "volume_unit": "base_asset",
+        "symbol": str(req.symbol),
+        "timeframe": str(req.timeframe),
+        "bar_at": bar_timestamp,
+        **{name: format(values[name], "f") for name in names},
+    }
+    digest = hashlib.sha256(
+        json.dumps(stable_bar, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    ).hexdigest()
+    return digest, values["volume"]
 
 
 def _json_mapping(value: object) -> dict:
@@ -130,10 +171,14 @@ def validate_customer_paper_market(req, df, market_context: Mapping) -> dict:
         raise CustomerPaperFlowBlocked("Quote or completed-bar timestamp is invalid") from exc
     if quote_dt.tzinfo is None or bar_dt.tzinfo is None or quote_dt <= bar_dt:
         raise CustomerPaperFlowBlocked("Fresh quote must follow the latest completed signal bar")
+    bar_timestamp = bar_dt.astimezone(timezone.utc).isoformat()
+    bar_data_sha256, base_volume = _stable_completed_bar_digest(req, df, bar_timestamp)
     return {
         "currency": quote_currency,
         "data_sha256": digest,
-        "bar_timestamp": bar_dt.astimezone(timezone.utc).isoformat(),
+        "bar_timestamp": bar_timestamp,
+        "bar_data_sha256": bar_data_sha256,
+        "base_volume": base_volume,
         "quote_timestamp": quote_dt.astimezone(timezone.utc).isoformat(),
         "bid": bid,
         "ask": ask,
