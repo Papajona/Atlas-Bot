@@ -2,11 +2,13 @@
 
 ## Custody model
 
-Atlas uses a **central TRON treasury/collection address** for controlled settlement and a **unique virtual TRC-20 deposit address per customer** for automatic attribution. The treasury address must never be used as a shared auto-credit address. TRC-20 transfer history contains sender, receiver, transaction and amount, but no native Atlas customer identifier; amount-only matching is therefore unsafe.
+Atlas uses a **central TRON treasury/collection address** for controlled settlement only when independent evidence establishes that Atlas controls it, and a **unique virtual TRC-20 deposit address per customer** for automatic attribution. The configured address string alone does not prove ownership. The treasury address must never be used as a shared auto-credit address. TRC-20 transfer history contains sender, receiver, transaction and amount, but no native Atlas customer identifier; amount-only matching is therefore unsafe.
 
 Configured treasury address:
 
 `TWFuigmmGbb5gsTS4KUtY5v2FmA1rJ3yC5`
+
+Ownership of this address is **unverified by repository evidence**. `USDT_TRON_TREASURY_ADDRESS_ROLE=unknown` is the safe default: reconciliation reports UNKNOWN and sweeping is blocked. Set `atlas_controlled` only after independent control evidence. If independently confirmed as a Binance deposit/collection address, set `binance_deposit`; it must not be included as separate Atlas-controlled TRON custody or used as a sweep destination.
 
 USDT TRC-20 contract:
 
