@@ -102,8 +102,16 @@ jobs:
             if [[ -z "$reason" ]]; then
               merge_base=""
               if merge_base=$(git merge-base "$sha" "$main_sha" 2>/dev/null); then
+                changed_paths_file=$(mktemp)
+                if ! git diff --name-only -z "$merge_base" "$sha" > "$changed_paths_file"; then
+                  rm -f "$changed_paths_file"
+                  echo "KEEP/ERROR: changed-path enumeration failed: $branch" >&2
+                  failed=$((failed + 1))
+                  continue
+                fi
                 changed_paths=()
-                mapfile -d '' -t changed_paths < <(git diff --name-only -z "$merge_base" "$sha")
+                mapfile -d '' -t changed_paths < "$changed_paths_file"
+                rm -f "$changed_paths_file"
                 if [[ ${#changed_paths[@]} -eq 0 ]]; then
                   reason="branch has no net file changes relative to merge base"
                 elif git diff --quiet "$sha" "$main_sha" -- "${changed_paths[@]}"; then
