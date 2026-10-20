@@ -67,12 +67,14 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
                 await db.commit()
 
                 balance = await customer_balance(db, 9001)
-                assert balance == {
-                    "available": 100.0,
-                    "trading_reserved": 0.0,
-                    "withdrawal_reserved": 0.0,
-                    "total": 100.0,
-                }
+                assert balance["available"] == 100.0
+                assert balance["trading_reserved"] == 0.0
+                assert balance["withdrawal_reserved"] == 0.0
+                assert balance["total"] == 100.0
+                assert balance["available_exact"] == "100.000000"
+                assert balance["trading_reserved_exact"] == "0.000000"
+                assert balance["withdrawal_reserved_exact"] == "0.000000"
+                assert balance["total_exact"] == "100.000000"
 
                 # 2. Withdrawal authorization boundary: reserve before release.
                 await reserve_withdrawal(db, 9001, 25, reference_id="acceptance-withdrawal-1")
