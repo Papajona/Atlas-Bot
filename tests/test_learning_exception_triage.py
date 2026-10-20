@@ -19,7 +19,8 @@ def test_prior_trial_label_database_errors_propagate_instead_of_disabling_leakag
     end = src.index("\n\nasync def _persist_research_run", start)
     block = src[start:end]
     assert "except Exception" not in block
-    assert "await db.execute(select(ResearchRun.research_json)" in block
+    assert "query = select(ResearchRun.research_json).where(ResearchRun.symbol == symbol)" in block
+    assert "rows = (await db.execute(query)).scalars().all()" in block
     assert "except (TypeError, ValueError, AttributeError)" in block
 
 
