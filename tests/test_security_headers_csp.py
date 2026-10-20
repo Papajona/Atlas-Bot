@@ -23,7 +23,7 @@ def test_dashboard_csp_allows_svg_qr_image_and_blocks_inline_script_execution():
 def test_csp_hardening_directives_present():
     src = _src()
     policy = _policy(src)
-    for directive in ("object-src 'none'", "base-uri 'self'", "frame-ancestors 'none'", "form-action 'self'"):
+    for directive in ("object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'", "form-action 'self'"):
         assert directive in policy
 
 
