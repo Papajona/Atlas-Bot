@@ -11,7 +11,7 @@ permissions:
 jobs:
   prune-contained-branches:
     # This unique marker is used only on the explicit cleanup merge.
-    if: startsWith(github.event.head_commit.message, '[atlas-branch-prune-once-20261020]') || startsWith(github.event.head_commit.message, '[atlas-branch-prune-content-once-20261020]') || startsWith(github.event.head_commit.message, '[atlas-branch-prune-reviewed-once-20261020]')
+    if: startsWith(github.event.head_commit.message, '[atlas-branch-prune-once-20261020]') || startsWith(github.event.head_commit.message, '[atlas-branch-prune-content-once-20261020]') || startsWith(github.event.head_commit.message, '[atlas-branch-prune-reviewed-once-20261020]') || startsWith(github.event.head_commit.message, '[atlas-branch-prune-verified-duplicates-once-20261020]')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout complete history
@@ -174,6 +174,44 @@ jobs:
                     && ! git show "$sha:scripts/check_ai_models.py" | grep -F 'def _check_groq' >/dev/null \
                     && git show "$main_sha:tests/test_check_ai_models_import.py" | grep -F 'root_bootstrap' >/dev/null; then
                     reviewed_reason="reviewed superseded AI check branch; current main performs provider inference and stronger import-bootstrap regression checks"
+                  fi
+                  ;;
+                "fix/tron-custody-address-role-current-main-20261020:a41fbf9145a321a28dee29f593dbed7d7413ee95")
+                  if git show "$main_sha:app/config.py" | grep -F 'usdt_tron_treasury_address_role: str = "unknown"' >/dev/null \
+                    && git show "$main_sha:app/config.py" | grep -F 'def _validate_usdt_tron_treasury_address_role' >/dev/null \
+                    && git show "$main_sha:app/config.py" | grep -F 'unknown, atlas_controlled, or binance_deposit' >/dev/null; then
+                    reviewed_reason="reviewed TRON role-configuration branch; current main includes the fail-closed role setting and validator"
+                  fi
+                  ;;
+                "fix/tron-provider-header-capture-20261020:79d8c9c9261849eefee4e3ca9b276c64243be9fc")
+                  if git show "$main_sha:tests/test_tron_header_capture.py" | grep -F 'assert len(requests) == 3' >/dev/null \
+                    && git show "$main_sha:tests/test_tron_header_capture.py" | grep -F 'values[0].id == "_headers"' >/dev/null \
+                    && git show "$main_sha:app/main.py" | grep -F 'async def _bounded(wallet, _slots=scan_slots, _scan=_scan_one):' >/dev/null \
+                    && git show "$main_sha:app/main.py" | grep -F 'headers=_headers' >/dev/null; then
+                    reviewed_reason="reviewed TRON header-capture branch; current main has the stricter captured-header regression and bounded scanner binding"
+                  fi
+                  ;;
+                "test/current-worker-supervisor-restart-20261020:604887ddadba212de79e0d5d86fbca6dcdea3d6e")
+                  if git show "$main_sha:tests/test_worker_supervisor_and_paper_gate.py" | grep -F 'def test_supervisor_restarts_worker_after_audit_failure' >/dev/null \
+                    && git show "$main_sha:tests/test_worker_supervisor_and_paper_gate.py" | grep -F 'assert main._worker_loop_health[worker_name]["restart_count"] == 1' >/dev/null \
+                    && git show "$main_sha:tests/test_worker_supervisor_and_paper_gate.py" | grep -F 'assert calls == [1, 2]' >/dev/null; then
+                    reviewed_reason="reviewed duplicate worker-supervisor regression branch; the complete audit-failure restart test is already in main"
+                  fi
+                  ;;
+                "test/current-worker-supervisor-restart-on-current-main-20261020:c7057c217a1277d21de1df3e2a6b909d39198cc7")
+                  if git show "$main_sha:tests/test_worker_supervisor_and_paper_gate.py" | grep -F 'def test_supervisor_restarts_worker_after_audit_failure' >/dev/null \
+                    && git show "$main_sha:tests/test_worker_supervisor_and_paper_gate.py" | grep -F 'assert main._worker_loop_health[worker_name]["restart_count"] == 1' >/dev/null \
+                    && git show "$main_sha:tests/test_worker_supervisor_and_paper_gate.py" | grep -F 'assert calls == [1, 2]' >/dev/null; then
+                    reviewed_reason="reviewed duplicate current-main worker-supervisor test branch; the behavior is covered by the existing combined regression test"
+                  fi
+                  ;;
+                "hardening/binance-deposit-address-boundary:4e618b23de760d8d3965c05ab71d73123a381e6d")
+                  if git show "$main_sha:tests/test_binance_deposit_address_boundary.py" | grep -F 'test_unknown_treasury_role_cannot_be_used_for_sweeps' >/dev/null \
+                    && git show "$main_sha:tests/test_binance_deposit_address_boundary.py" | grep -F 'test_binance_deposit_role_cannot_be_used_as_atlas_sweep_destination' >/dev/null \
+                    && git show "$main_sha:app/config.py" | grep -F 'def _validate_usdt_tron_treasury_address_role' >/dev/null \
+                    && git show "$main_sha:app/custody_reconciliation.py" | grep -F 'role not in {"atlas_controlled", "binance_deposit"}' >/dev/null \
+                    && git show "$main_sha:app/tron_sweep.py" | grep -F 'requires verified Atlas-controlled treasury address ownership' >/dev/null; then
+                    reviewed_reason="reviewed Binance deposit-address boundary branch; current main contains the ownership, exclusion, and sweep guards with regression coverage"
                   fi
                   ;;
               esac
