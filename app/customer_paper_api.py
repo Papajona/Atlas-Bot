@@ -447,8 +447,8 @@ def build_customer_paper_router(
             elif _stable_draw(client_order_id, budget["bar_key"], "queue") > min(1.0, max(0.0, float(settings.paper_queue_fill_probability))):
                 attempt = "DETERMINISTIC_QUEUE_MISS"
             else:
-                profile = PROFILES.get("crypto")
-                if profile is None:
+                execution_profile = PROFILES.get("crypto")
+                if execution_profile is None:
                     raise HTTPException(503, "Crypto paper execution profile is not configured")
                 returns = df["close"].astype(float).pct_change().replace([float("inf"), float("-inf")], float("nan")).dropna().tail(20)
                 volatility = float(returns.std(ddof=0)) if len(returns) >= 2 else 0.0
@@ -465,7 +465,7 @@ def build_customer_paper_router(
                     * 10000.0
                 )
                 impact = min(max(0.0, float(settings.paper_max_market_impact_bps)), max(0.0, impact))
-                slippage_bps = max(0.0, float(profile.slippage_bps) + impact)
+                slippage_bps = max(0.0, float(execution_profile.slippage_bps) + impact)
                 # A limit fill cannot be priced worse than its limit; market orders absorb adverse slippage.
                 final_price = reference_price
                 if order["order_type"] == "MARKET":
@@ -478,7 +478,7 @@ def build_customer_paper_router(
                 price_text = _decimal_text(final_price)
                 fee = (
                     Decimal(order["quantity"]) * Decimal(price_text)
-                    * Decimal(str(profile.taker_bps)) / Decimal("10000")
+                    * Decimal(str(execution_profile.taker_bps)) / Decimal("10000")
                 )
                 fill_key = "bar-fill:" + hashlib.sha256(f"{client_order_id}|{budget['bar_key']}".encode("utf-8")).hexdigest()
                 fill = await record_customer_paper_fill(
