@@ -958,12 +958,34 @@ async def get_customer_paper_positions(*, customer_id: int) -> list[dict[str, st
                 SELECT DISTINCT ON (pe.venue, pe.market_type, pe.symbol)
                     pe.venue, pe.market_type, pe.symbol, pe.quantity_after, pe.average_entry_after,
                     pe.cost_basis_after, pe.realized_pnl_after,
-                    COALESCE(o.metadata_json ->> 'timeframe', '') AS timeframe
+                    COALESCE(o.metadata_json ->> 'timeframe', '') AS timeframe,
+                    f.bar_key AS last_event_bar_key,
+                    COALESCE(entry_order.metadata_json ->> 'stop_loss_price', '') AS stop_loss_price,
+                    COALESCE(entry_order.metadata_json ->> 'take_profit_price', '') AS take_profit_price
                 FROM customer_paper.position_events AS pe
                 JOIN customer_paper.fills AS f
                   ON f.id = pe.fill_id AND f.customer_id = pe.customer_id
                 JOIN customer_paper.orders AS o
                   ON o.id = f.order_id AND o.customer_id = f.customer_id
+                LEFT JOIN LATERAL (
+                    SELECT entry_order.metadata_json
+                    FROM customer_paper.position_events AS entry_event
+                    JOIN customer_paper.fills AS entry_fill
+                      ON entry_fill.id = entry_event.fill_id
+                     AND entry_fill.customer_id = entry_event.customer_id
+                    JOIN customer_paper.orders AS entry_order
+                      ON entry_order.id = entry_fill.order_id
+                     AND entry_order.customer_id = entry_fill.customer_id
+                    WHERE entry_event.customer_id = pe.customer_id
+                      AND entry_event.venue = pe.venue
+                      AND entry_event.market_type = pe.market_type
+                      AND entry_event.symbol = pe.symbol
+                      AND entry_event.id <= pe.id
+                      AND entry_event.quantity_before = 0
+                      AND entry_event.quantity_after > 0
+                    ORDER BY entry_event.id DESC
+                    LIMIT 1
+                ) AS entry_order ON true
                 WHERE pe.customer_id=:customer_id
                 ORDER BY pe.venue, pe.market_type, pe.symbol, pe.id DESC
                 """
@@ -975,6 +997,9 @@ async def get_customer_paper_positions(*, customer_id: int) -> list[dict[str, st
             "cost_basis": _fmt(Decimal(row["cost_basis_after"])),
             "realized_pnl": _fmt(Decimal(row["realized_pnl_after"])),
             "timeframe": str(row["timeframe"] or ""),
+            "last_event_bar_key": str(row["last_event_bar_key"] or ""),
+            "stop_loss_price": str(row["stop_loss_price"] or ""),
+            "take_profit_price": str(row["take_profit_price"] or ""),
         } for row in rows if Decimal(row["quantity_after"]) > 0]
     finally:
         await engine.dispose()
