@@ -90,12 +90,14 @@ async function testAdminDashboard(browser, baseUrl) {
   let releaseCalls = 0;
   let lastRelease = null;
   let enrollCalls = 0;
+  let mfaStatusCalls = 0;
 
   await page.route("**/api/**", async route => {
     const req = route.request();
     const url = new URL(req.url());
     const pathname = url.pathname;
     if (pathname === "/api/admin/auth/mfa/status" && req.method === "GET") {
+      mfaStatusCalls += 1;
       // This test preloads a verified admin fixture token; the separate enrollment
       // test below covers aal1 -> aal2 transitions and refusal before verification.
       return json(route, { enabled: true, aal: "aal2", factor_count: 1, factor_ids: ["verified-factor-id"] });
@@ -130,7 +132,16 @@ async function testAdminDashboard(browser, baseUrl) {
   const csp = response.headers()["content-security-policy"];
   assert.match(csp, /script-src 'self';/);
   assert.doesNotMatch(csp, /script-src[^;]*'unsafe-inline'/);
-  await page.locator("#operatorIdentity").waitFor({ state: "visible" });
+  await waitUntil(async () => await page.locator("#operatorIdentity").isVisible()).catch(async error => {
+    const diagnostic = await page.evaluate(() => ({
+      bodyClass: document.body.className,
+      mfaFlag: document.body.dataset.adminTotpRequired,
+      statusText: document.querySelector("#authState")?.textContent,
+      accessTokenPresent: !!sessionStorage.getItem("ait_admin_access_token"),
+      mfaVerified: sessionStorage.getItem("ait_admin_mfa_verified"),
+    }));
+    throw new Error(error.message + "; auth diagnostic=" + JSON.stringify({...diagnostic, mfaStatusCalls}));
+  });
   assert.equal(await page.locator("#adminId").inputValue(), "admin-user-1", "admin ID should follow the JWT subject");
   assert.equal(await page.locator("#releaseId").inputValue(), "admin-user-1", "release operator should follow the authenticated identity");
   assert.equal(await page.locator("#adminId").getAttribute("readonly"), "");
