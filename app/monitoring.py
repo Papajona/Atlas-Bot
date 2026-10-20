@@ -21,11 +21,11 @@ OPEN_POSITIONS = Gauge("trader_open_positions", "Number of non-zero positions")
 # and therefore retains a compatibility policy until that separate page is migrated.
 CONTENT_SECURITY_POLICY = (
     "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
-    "script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+    "script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 )
 COMPAT_CONTENT_SECURITY_POLICY = (
     "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
-    "script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+    "script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 )
 
 
