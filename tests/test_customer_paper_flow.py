@@ -203,3 +203,70 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
         assert recovered_positions[0]["quantity"] == "0.250000000000000000"
 
     asyncio.run(run())
+
+
+def test_customer_paper_virtual_capital_configuration_is_finite_positive_and_usdt_only():
+    from pydantic import ValidationError
+    from app.config import Settings
+
+    for invalid in (0, -1, float("nan"), float("inf"), 1_000_000_000_001):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, environment="test", customer_paper_initial_balance=invalid)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, environment="test", customer_paper_initial_currency="USD")
+
+
+def test_controller_paper_gate_requires_all_paper_only_flags_and_passed_preflight(monkeypatch):
+    from app import main
+    from app.config import settings
+    from app import customer_paper_ledger
+
+    for field, value in (
+        ("paper_trading", True),
+        ("live_trading_enabled", False),
+        ("customer_live_trading_enabled", False),
+        ("payout_live_enabled", False),
+        ("broker_sandbox", True),
+        ("deriv_live_enabled", False),
+        ("usdt_tron_enabled", False),
+        ("customer_paper_ledger_enabled", True),
+        ("customer_paper_database_url", "postgresql+asyncpg://paper:secret@localhost/atlas_paper"),
+    ):
+        monkeypatch.setattr(settings, field, value)
+
+    calls = []
+
+    async def passed_preflight(*, require_enabled=True):
+        calls.append(require_enabled)
+        return {"status": "PASS"}
+
+    monkeypatch.setattr(customer_paper_ledger, "preflight_isolated_customer_paper_ledger", passed_preflight)
+    result = asyncio.run(main._customer_paper_isolation_preflight())
+    assert result["status"] == "PASS"
+    assert calls == [True]
+
+    monkeypatch.setattr(settings, "usdt_tron_enabled", True)
+    blocked = asyncio.run(main._customer_paper_isolation_preflight())
+    assert blocked["status"] == "BLOCKED"
+    assert blocked["reason"] == "CUSTOMER_PAPER_SAFETY_FLAGS_NOT_READY"
+    assert calls == [True]
+
+
+def test_customer_bot_paper_execution_uses_isolated_flow_and_keeps_real_executor_for_non_customer_paths():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    cycle_start = source.index("async def _run_persisted_adaptive_bot_cycle(")
+    cycle_end = source.index("\n\nasync def ", cycle_start)
+    cycle = source[cycle_start:cycle_end]
+    route_start = source.index("async def customer_start_bot(")
+    route_end = source.index("\n\nasync def _require_feature", route_start)
+    route = source[route_start:route_end]
+
+    assert "customer_paper_ledger_preflight" in cycle
+    assert "recover_customer_paper_spot_flow(" in cycle
+    assert "execute_customer_paper_spot_signal(" in cycle
+    assert "execute_customer_paper_spot_signal(" in route
+    assert "force_paper=paper_mode" in cycle
+    assert "force_paper=paper_mode" in route
+    assert "customer_paper_ledger_enabled: bool = False" in (Path(__file__).resolve().parents[1] / "app" / "config.py").read_text()
