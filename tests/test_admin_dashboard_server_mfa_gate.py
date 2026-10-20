@@ -8,7 +8,8 @@ def test_admin_dashboard_revalidates_mfa_with_server_before_protected_requests()
     script = (ROOT / "app/static/admin-dashboard.js").read_text(encoding="utf-8")
     template = (ROOT / "app/templates/dashboard.html").read_text(encoding="utf-8")
 
-    assert "const adminMfaRequired=document.body.dataset.adminTotpRequired==='true';" in script
+    assert "const adminTotpFlag=document.body.dataset.adminTotpRequired;" in script
+    assert "const adminMfaRequired=adminTotpFlag!=='false';" in script
     assert "if(!dashboardReady&&!String(path).startsWith('/api/admin/auth/'))" in script
     assert "const status=await api('/api/admin/auth/mfa/status');" in script
     assert "status.enabled&&status.aal==='aal2'" in script
