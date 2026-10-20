@@ -11,7 +11,7 @@ permissions:
 jobs:
   prune-contained-branches:
     # This unique marker is used only on the explicit cleanup merge.
-    if: startsWith(github.event.head_commit.message, '[atlas-branch-prune-once-20261020]')
+    if: startsWith(github.event.head_commit.message, '[atlas-branch-prune-once-20261020]') || startsWith(github.event.head_commit.message, '[atlas-branch-prune-content-once-20261020]')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout complete history
@@ -93,6 +93,38 @@ jobs:
                   break
                 fi
               done
+            fi
+
+            # If ancestry / exact merged-PR proof did not apply, check whether
+            # every path changed by this branch has exactly the same final blob
+            # (or deletion state) on main. This is stricter than filename overlap:
+            # any byte/content/mode difference preserves the branch.
+            if [[ -z "$reason" ]]; then
+              merge_base=""
+              if merge_base=$(git merge-base "$sha" "$main_sha" 2>/dev/null); then
+                changed_paths_file=$(mktemp)
+                if ! git diff --name-only -z "$merge_base" "$sha" > "$changed_paths_file"; then
+                  rm -f "$changed_paths_file"
+                  echo "KEEP/ERROR: changed-path enumeration failed: $branch" >&2
+                  failed=$((failed + 1))
+                  continue
+                fi
+                changed_paths=()
+                mapfile -d '' -t changed_paths < "$changed_paths_file"
+                rm -f "$changed_paths_file"
+                if [[ ${#changed_paths[@]} -eq 0 ]]; then
+                  reason="branch has no net file changes relative to merge base"
+                elif git diff --quiet "$sha" "$main_sha" -- "${changed_paths[@]}"; then
+                  reason="all branch-changed paths exactly match main"
+                else
+                  diff_status=$?
+                  if [[ "$diff_status" -gt 1 ]]; then
+                    echo "KEEP/ERROR: changed-path comparison failed: $branch" >&2
+                    failed=$((failed + 1))
+                    continue
+                  fi
+                fi
+              fi
             fi
 
             if [[ -z "$reason" ]]; then
