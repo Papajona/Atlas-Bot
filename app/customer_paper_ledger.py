@@ -349,29 +349,14 @@ async def preflight_isolated_customer_paper_ledger(
                 if not _tenant_policy_roles_are_exact(row.get("roles"), str(role_name)):
                     insecure_paper.append(f"customer_paper.{global_table}:GLOBAL_POLICY_INVALID_ROLE")
 
-            required_bar_triggers = {
-                "trg_customer_paper_market_bar_budgets_immutable",
-                "trg_customer_paper_market_bar_allocations_immutable",
-                "trg_customer_paper_market_bar_allocations_capacity",
-            }
-            trigger_rows = (await conn.execute(text(
-                """
-                SELECT t.tgname AS trigger_name, t.tgenabled AS enabled
-                FROM pg_trigger t
-                JOIN pg_class c ON c.oid=t.tgrelid
-                JOIN pg_namespace n ON n.oid=c.relnamespace
-                WHERE n.nspname='customer_paper'
-                  AND c.relname IN ('market_bar_budgets','market_bar_allocations')
-                  AND NOT t.tgisinternal
-                """
-            ))).mappings().all()
-            enabled_triggers = {
-                str(row["trigger_name"]) for row in trigger_rows
-                if str(row["enabled"]) in {"O", "A"}
-            }
-            missing_bar_triggers = sorted(required_bar_triggers - enabled_triggers)
-            if missing_bar_triggers:
-                insecure_paper.append("customer_paper:BAR_CAPACITY_TRIGGER_MISSING:" + ",".join(missing_bar_triggers))
+            # Trigger metadata is owner-sensitive in restricted PostgreSQL sessions. Check
+            # it through the migration-owned, read-only SECURITY DEFINER boolean probe; the
+            # runtime role gains no direct catalog access and the function exposes no DDL.
+            guard_row = (await conn.execute(text(
+                "SELECT customer_paper.verify_market_bar_capacity_guards()"
+            ))).scalar_one_or_none()
+            if guard_row is not True:
+                insecure_paper.append("customer_paper:BAR_CAPACITY_TRIGGER_MISSING_OR_DISABLED")
             if insecure_paper:
                 return {"status": "BLOCKED", "reason": "PAPER_SCHEMA_PRIVILEGES_UNSAFE",
                         "findings": insecure_paper}
