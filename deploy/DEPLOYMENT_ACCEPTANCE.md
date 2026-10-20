@@ -15,6 +15,7 @@
 - [ ] Paper trading remains enabled.
 - [ ] Live trading remains disabled.
 - [ ] TRON funding remains disabled unless separately approved: API and worker deploy scripts default `USDT_TRON_ENABLED=false` and `USDT_TRON_SWEEP_ENABLED=false`; enabling funding requires `ALLOW_TRON_FUNDING=YES`, and mainnet additionally requires `ALLOW_MAINNET_TRON_FUNDING=YES`. Paper mode is not a funding-isolation control.
+- [ ] `USDT_TRON_TREASURY_ADDRESS_ROLE` remains `unknown` until the configured address's controller is independently evidenced. `unknown` blocks custody claims and every sweep; `binance_deposit` excludes the external address from Atlas assets and cannot be a sweep destination.
 - [ ] OANDA demo/sandbox connectivity tested.
 - [ ] Crypto sandbox/testnet connectivity tested if enabled.
 - [ ] Model train → signal flow survives a Cloud Run revision restart.
