@@ -12,6 +12,7 @@ import json
 import re
 import uuid
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from typing import Any
 
@@ -365,6 +366,118 @@ async def submit_customer_paper_order(
                 filled_quantity=Decimal("0"), metadata={"payload_sha256": digest},
             )
         return {"status": "APPENDED", "order_id": order_id, "client_order_id": client_id, "payload_sha256": digest}
+    finally:
+        await engine.dispose()
+
+ 
+async def register_customer_paper_market_bar(
+    *,
+    venue: str,
+    symbol: str,
+    timeframe: str,
+    bar_at: datetime | str,
+    bar_data_sha256: str,
+    base_volume: str | int | Decimal,
+    participation_rate: str | int | Decimal,
+) -> dict[str, str]:
+    """Persist a stable, shared bar budget before any tenant can consume its liquidity.
+
+    Only public market metadata is stored. The bar identity excludes fetched-at time so
+    that retries for the same completed candle share one capacity record; immutable OHLCV
+    digest equality rejects conflicting source payloads for that candle.
+    """
+    normalized_venue = str(venue or "").strip().lower()
+    if not _VENUE_RE.fullmatch(normalized_venue):
+        raise ValueError("venue must be a normalized provider identifier")
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not _SYMBOL_RE.fullmatch(normalized_symbol):
+        raise ValueError("symbol is malformed")
+    normalized_timeframe = str(timeframe or "").strip().lower()
+    if normalized_timeframe not in {"1m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"}:
+        raise ValueError("unsupported market-bar timeframe")
+    try:
+        stamp = bar_at if isinstance(bar_at, datetime) else datetime.fromisoformat(str(bar_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("bar_at must be an ISO timestamp") from exc
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        raise ValueError("bar_at must be timezone-aware")
+    stamp = stamp.astimezone(timezone.utc)
+    stamp_text = stamp.isoformat()
+    digest = str(bar_data_sha256 or "").strip().lower()
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise ValueError("bar_data_sha256 must be a SHA-256 hex digest")
+    volume = _input_decimal(base_volume, "base_volume", non_negative=True)
+    try:
+        participation = Decimal(str(participation_rate))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError("participation_rate must be a finite decimal between zero and one") from exc
+    if not participation.is_finite() or participation < 0 or participation > 1:
+        raise ValueError("participation_rate must be between zero and one")
+    capacity = _money(volume * participation, "market bar capacity")
+    bar_key = hashlib.sha256(
+        f"paper-market-bar-v1|{normalized_venue}|spot|{normalized_symbol}|{normalized_timeframe}|{stamp_text}".encode("utf-8")
+    ).hexdigest()
+    await _assert_customer_paper_ready()
+    engine = _paper_engine()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"paper-market-bar:{bar_key}"},
+            )
+            inserted = (await conn.execute(text(
+                """
+                INSERT INTO customer_paper.market_bar_budgets
+                    (bar_key, venue, market_type, symbol, timeframe, bar_at,
+                     bar_data_sha256, base_volume, capacity)
+                VALUES
+                    (:bar_key, :venue, 'spot', :symbol, :timeframe, :bar_at,
+                     :bar_data_sha256, :base_volume, :capacity)
+                ON CONFLICT (bar_key) DO NOTHING
+                RETURNING bar_key
+                """
+            ), {
+                "bar_key": bar_key, "venue": normalized_venue, "symbol": normalized_symbol,
+                "timeframe": normalized_timeframe, "bar_at": stamp, "bar_data_sha256": digest,
+                "base_volume": volume, "capacity": capacity,
+            })).first()
+            row = (await conn.execute(text(
+                """
+                SELECT venue, market_type, symbol, timeframe, bar_at, bar_data_sha256,
+                       base_volume, capacity
+                FROM customer_paper.market_bar_budgets WHERE bar_key=:bar_key
+                """
+            ), {"bar_key": bar_key})).mappings().first()
+            if row is None:
+                raise CustomerPaperLedgerBlocked("market bar budget could not be read after insert")
+            same_bar = (
+                str(row["venue"]) == normalized_venue
+                and str(row["market_type"]) == "spot"
+                and str(row["symbol"]) == normalized_symbol
+                and str(row["timeframe"]) == normalized_timeframe
+                and row["bar_at"].astimezone(timezone.utc) == stamp
+                and str(row["bar_data_sha256"]) == digest
+                and Decimal(row["base_volume"]) == volume
+                and Decimal(row["capacity"]) == capacity
+            )
+            if not same_bar:
+                raise CustomerPaperOrderConflict(
+                    "completed-bar provenance conflicts with the immutable shared paper budget"
+                )
+            consumed = Decimal((await conn.execute(text(
+                "SELECT COALESCE(SUM(allocated_quantity), 0) FROM customer_paper.market_bar_allocations WHERE bar_key=:bar_key"
+            ), {"bar_key": bar_key})).scalar_one())
+            available = capacity - consumed
+            if available < 0:
+                raise CustomerPaperLedgerBlocked("persisted market-bar allocations exceed their capacity")
+        return {
+            "status": "APPENDED" if inserted is not None else "REPLAYED",
+            "bar_key": bar_key,
+            "capacity": _fmt(capacity),
+            "consumed": _fmt(consumed),
+            "available": _fmt(available),
+            "bar_at": stamp_text,
+        }
     finally:
         await engine.dispose()
 
