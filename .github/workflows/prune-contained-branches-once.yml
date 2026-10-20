@@ -11,7 +11,7 @@ permissions:
 jobs:
   prune-contained-branches:
     # This unique marker is used only on the explicit cleanup merge.
-    if: startsWith(github.event.head_commit.message, '[atlas-branch-prune-once-20261020]') || startsWith(github.event.head_commit.message, '[atlas-branch-prune-content-once-20261020]')
+    if: startsWith(github.event.head_commit.message, '[atlas-branch-prune-once-20261020]') || startsWith(github.event.head_commit.message, '[atlas-branch-prune-content-once-20261020]') || startsWith(github.event.head_commit.message, '[atlas-branch-prune-reviewed-once-20261020]')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout complete history
@@ -124,6 +124,61 @@ jobs:
                     continue
                   fi
                 fi
+              fi
+            fi
+
+            # Exact-SHA allowlist for a few branches individually reviewed as superseded.
+            # Each entry also checks current-main content before allowing deletion.
+            if [[ -z "$reason" ]]; then
+              reviewed_reason=""
+              case "$branch:$sha" in
+                "fix/tron-sweep-require-explicit-contract-success-20261014:b45fb0f5bfac71dbc4e3e63a0d5c70747f39f4f2")
+                  if git show "$main_sha:app/tron_sweep.py" | grep -F 'if str(settings.usdt_tron_treasury_address_role or "").strip().lower() != "atlas_controlled":' >/dev/null \
+                    && ! git show "$sha:app/tron_sweep.py" | grep -F 'if str(settings.usdt_tron_treasury_address_role or "").strip().lower() != "atlas_controlled":' >/dev/null \
+                    && [[ "$(git rev-parse "$main_sha:tests/test_tron_sweep_real_chain_shapes.py")" == "$(git rev-parse "$sha:tests/test_tron_sweep_real_chain_shapes.py")" ]]; then
+                    reviewed_reason="reviewed superseded TRON sweep branch; main has the stronger treasury-ownership guard and identical protocol tests"
+                  fi
+                  ;;
+                "fix/settlement-race-test-syntax:3a23e895de5b225a37e747d425df92e70cf3d372")
+                  if git show "$main_sha:tests/test_ledger_invariants_3_10_46.py" | grep -F 'from pathlib import Path' >/dev/null \
+                    && git show "$sha:tests/test_ledger_invariants_3_10_46.py" | grep -F 'from app.db import Base, CustomerLedgerAccount, LedgerJournal, LedgerJournalLine' >/dev/null \
+                    && ! git show "$main_sha:tests/test_ledger_invariants_3_10_46.py" | grep -F 'from app.db import Base, CustomerLedgerAccount, LedgerJournal, LedgerJournalLine' >/dev/null; then
+                    reviewed_reason="reviewed import-only test branch; current-main invariant test passed without the unused ledger model imports"
+                  fi
+                  ;;
+                "fix/withdrawal-settlement-race:ecb4e5f4ce24f46af772301cc9f1c74a5b3243eb")
+                  if git show "$main_sha:tests/test_ledger_invariants_3_10_46.py" | grep -F 'from pathlib import Path' >/dev/null \
+                    && ! git show "$sha:tests/test_ledger_invariants_3_10_46.py" | grep -F 'from pathlib import Path' >/dev/null; then
+                    reviewed_reason="reviewed stale withdrawal test branch; it removes the Path import required by the test in current main"
+                  fi
+                  ;;
+                "fix/audit-followup-buildconfig-20261010:1fe9e8edbbea200b1bb35993ad7646a476850d80")
+                  if git show "$main_sha:app/src/main/java/com/atlas/trading/MainActivity.kt" | grep -F 'getString(R.string.backend_url)' >/dev/null \
+                    && git show "$main_sha:app/src/main/res/values/strings.xml" | grep -F 'name="backend_url"' >/dev/null \
+                    && git show "$main_sha:app/src/main/java/com/atlas/trading/MainActivity.kt" | grep -F 'userName = "Account"' >/dev/null \
+                    && git show "$sha:app/src/main/java/com/atlas/trading/MainActivity.kt" | grep -F 'BuildConfig.BACKEND_URL' >/dev/null \
+                    && git show "$sha:app/src/main/java/com/atlas/trading/MainActivity.kt" | grep -F 'userName = "Alice"' >/dev/null; then
+                    reviewed_reason="reviewed obsolete Android portal change; current main uses the declared backend_url resource and non-demo Account label"
+                  fi
+                  ;;
+                "fix/alembic-model-schema-drift-gate:9e8a0bf54ab38670a5a3ca065432c606565f90b0")
+                  if git show "$main_sha:.github/workflows/ci.yml" | grep -F 'python -m alembic check' >/dev/null \
+                    && git show "$main_sha:.github/workflows/ci.yml" | grep -F 'test "$restored_head" = "$expected_head"' >/dev/null \
+                    && git show "$sha:.github/workflows/ci.yml" | grep -F 'test "$restored_head" = "0049_public_schema_rls_lockdown"' >/dev/null; then
+                    reviewed_reason="reviewed stale migration-gate branch; current main has Alembic drift checks plus dynamic restored-head verification"
+                  fi
+                  ;;
+                "fix/production-verification-ai-model-import-20261009:e249dae44d7c61add582ccc22feac305cc3b715b")
+                  if git show "$main_sha:scripts/check_ai_models.py" | grep -F 'Chat Completions inference succeeded' >/dev/null \
+                    && git show "$main_sha:scripts/check_ai_models.py" | grep -F 'def _check_groq' >/dev/null \
+                    && ! git show "$sha:scripts/check_ai_models.py" | grep -F 'def _check_groq' >/dev/null \
+                    && git show "$main_sha:tests/test_check_ai_models_import.py" | grep -F 'root_bootstrap' >/dev/null; then
+                    reviewed_reason="reviewed superseded AI check branch; current main performs provider inference and stronger import-bootstrap regression checks"
+                  fi
+                  ;;
+              esac
+              if [[ -n "$reviewed_reason" ]]; then
+                reason="$reviewed_reason"
               fi
             fi
 
