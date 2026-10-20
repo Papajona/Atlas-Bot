@@ -491,6 +491,7 @@ async def record_customer_paper_fill(
     quantity: str | int | Decimal,
     price: str | int | Decimal,
     fee_amount: str | int | Decimal = "0",
+    enforce_market_bar_budget: bool = False,
 ) -> dict[str, Any]:
     """Atomically append one simulated fill, fee, position event and balanced journal.
 
@@ -503,9 +504,11 @@ async def record_customer_paper_fill(
     client_id = _key(client_order_id, "client_order_id", 180)
     fill_key = _key(idempotency_key, "idempotency_key", 150)
     normalized_bar_key = _key(bar_key, "bar_key", 180)
-    amount = _input_decimal(quantity, "quantity", positive=True)
+    requested_amount = _input_decimal(quantity, "quantity", positive=True)
+    amount = requested_amount
     fill_price = _input_decimal(price, "price", positive=True)
-    fee = _input_decimal(fee_amount, "fee_amount", non_negative=True)
+    requested_fee = _input_decimal(fee_amount, "fee_amount", non_negative=True)
+    fee = requested_fee
     await _assert_customer_paper_ready()
     engine = _paper_engine()
     try:
@@ -513,7 +516,7 @@ async def record_customer_paper_fill(
             await _set_tenant(conn, customer_id)
             order = (await conn.execute(text(
                 """
-                SELECT id, venue, market_type, symbol, side, order_type, quantity, limit_price, currency
+                SELECT id, venue, market_type, symbol, side, order_type, quantity, limit_price, currency, metadata_json
                 FROM customer_paper.orders
                 WHERE customer_id=:customer_id AND client_order_id=:client_order_id
                 """
@@ -525,11 +528,16 @@ async def record_customer_paper_fill(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
                 {"lock_key": f"paper-order-fill:{customer_id}:{order_id}"},
             )
+            if enforce_market_bar_budget:
+                await conn.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                    {"lock_key": f"paper-market-bar:{normalized_bar_key}"},
+                )
             currency = str(order["currency"])
             payload = {
                 "customer_id": customer_id, "order_id": order_id, "idempotency_key": fill_key,
-                "bar_key": normalized_bar_key, "quantity": _fmt(amount), "price": _fmt(fill_price),
-                "fee_amount": _fmt(fee), "currency": currency,
+                "bar_key": normalized_bar_key, "quantity": _fmt(requested_amount), "price": _fmt(fill_price),
+                "fee_amount": _fmt(requested_fee), "currency": currency,
             }
             digest = _canonical_sha(payload)
             existing = (await conn.execute(text(
@@ -562,16 +570,70 @@ async def record_customer_paper_fill(
                 "SELECT COALESCE(SUM(quantity), 0) FROM customer_paper.fills WHERE customer_id=:customer_id AND order_id=:order_id"
             ), {"customer_id": customer_id, "order_id": order_id})).scalar_one())
             order_quantity = Decimal(order["quantity"])
-            if total_filled + amount > order_quantity:
+            venue = str(order["venue"])
+            market_type = str(order["market_type"])
+            symbol = str(order["symbol"])
+            if enforce_market_bar_budget:
+                stored_metadata = order["metadata_json"]
+                if isinstance(stored_metadata, str):
+                    try:
+                        stored_metadata = json.loads(stored_metadata)
+                    except ValueError:
+                        stored_metadata = {}
+                order_metadata = dict(stored_metadata) if isinstance(stored_metadata, Mapping) else {}
+                budget = (await conn.execute(text(
+                    """
+                    SELECT venue, market_type, symbol, timeframe, bar_at, capacity
+                    FROM customer_paper.market_bar_budgets WHERE bar_key=:bar_key
+                    """
+                ), {"bar_key": normalized_bar_key})).mappings().first()
+                if budget is None:
+                    raise CustomerPaperOrderConflict("fill lacks a registered immutable market-bar budget")
+                if (
+                    str(budget["venue"]) != venue
+                    or str(budget["market_type"]) != market_type
+                    or str(budget["symbol"]) != symbol
+                    or str(order_metadata.get("exchange") or "") != venue
+                    or str(order_metadata.get("timeframe") or "") != str(budget["timeframe"])
+                ):
+                    raise CustomerPaperOrderConflict("market-bar budget does not match the persisted order market")
+                try:
+                    submitted_at = datetime.fromisoformat(str(order_metadata["submission_bar_at"]).replace("Z", "+00:00"))
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise CustomerPaperOrderConflict("persisted paper order has no valid submission-bar timestamp") from exc
+                if submitted_at.tzinfo is None or submitted_at.utcoffset() is None:
+                    raise CustomerPaperOrderConflict("persisted paper order submission timestamp is not timezone-aware")
+                if budget["bar_at"].astimezone(timezone.utc) <= submitted_at.astimezone(timezone.utc):
+                    raise CustomerPaperOrderConflict("paper fills must use a completed bar strictly after the submission bar")
+                expected_bar_key = hashlib.sha256(
+                    f"paper-market-bar-v1|{venue}|spot|{symbol}|{budget['timeframe']}|{budget['bar_at'].astimezone(timezone.utc).isoformat()}".encode("utf-8")
+                ).hexdigest()
+                if expected_bar_key != normalized_bar_key:
+                    raise CustomerPaperOrderConflict("market-bar key does not match persisted bar identity")
+                consumed = Decimal((await conn.execute(text(
+                    "SELECT COALESCE(SUM(allocated_quantity), 0) FROM customer_paper.market_bar_allocations WHERE bar_key=:bar_key"
+                ), {"bar_key": normalized_bar_key})).scalar_one())
+                available = Decimal(budget["capacity"]) - consumed
+                remaining = order_quantity - total_filled
+                if available < 0 or remaining < 0:
+                    raise CustomerPaperLedgerBlocked("paper bar allocation or order fill totals are inconsistent")
+                amount = min(requested_amount, remaining, available)
+                if amount <= 0:
+                    return {
+                        "status": "NO_LIQUIDITY", "order_id": order_id, "bar_key": normalized_bar_key,
+                        "available_quantity": _fmt(max(Decimal("0"), available)),
+                    }
+                if amount < requested_amount:
+                    fee = _money(requested_fee * amount / requested_amount, "pro-rated fill fee")
+                else:
+                    fee = requested_fee
+            elif total_filled + amount > order_quantity:
                 raise CustomerPaperOrderConflict("simulated fill would exceed the immutable order quantity")
             limit = Decimal(order["limit_price"]) if order["limit_price"] is not None else None
             side = str(order["side"])
             if limit is not None and ((side == "BUY" and fill_price > limit) or (side == "SELL" and fill_price < limit)):
                 raise CustomerPaperOrderConflict("fill price violates the immutable limit price")
 
-            venue = str(order["venue"])
-            market_type = str(order["market_type"])
-            symbol = str(order["symbol"])
             await conn.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
                 {"lock_key": f"paper-position:{customer_id}:{venue}:{market_type}:{symbol}"},
@@ -661,8 +723,20 @@ async def record_customer_paper_fill(
             })).first()
             if filled_row is None:
                 raise CustomerPaperIdempotencyConflict("fill idempotency key raced with a concurrent request")
+            if enforce_market_bar_budget:
+                await conn.execute(text(
+                    """
+                    INSERT INTO customer_paper.market_bar_allocations
+                        (allocation_id, bar_key, allocated_quantity)
+                    VALUES (:allocation_id, :bar_key, :allocated_quantity)
+                    """
+                ), {
+                    "allocation_id": fill_id,
+                    "bar_key": normalized_bar_key,
+                    "allocated_quantity": amount,
+                })
 
-            journal_lines: list[dict[str, Any]] = [
+            journal_lines: list[dict[str, Any]] =
                 {"account_code": "PAPER_CASH", "signed_amount": cash_delta},
                 {"account_code": "PAPER_POSITION", "signed_amount": position_delta},
             ]
