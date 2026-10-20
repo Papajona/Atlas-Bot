@@ -31,10 +31,10 @@ def test_customer_start_gates_customer_paper_before_ai_work():
     source = _source("app/main.py")
     start = source[source.index('@app.post("/api/customer/bot/start")'):]
     paper_mode = start.index("needs_customer_paper = bool(paper_mode and profile.id is not None)")
-    config_gate = start.index("if not _customer_paper_configuration_ready():")
-    unsupported_asset_gate = start.index('if req.asset != "crypto":')
-    candidate_setup = start.index("candidate = None")
-    preflight = start.index("paper_preflight = await _customer_paper_isolation_preflight()")
+    config_gate = start.index("if not _customer_paper_configuration_ready():", paper_mode)
+    unsupported_asset_gate = start.index('if req.asset != "crypto":', config_gate)
+    candidate_setup = start.index("candidate = None", unsupported_asset_gate)
+    preflight = start.index("paper_preflight = await _customer_paper_isolation_preflight()", candidate_setup)
     analysis = start.index("asyncio.to_thread(start_bot_decision")
     ai_review = start.index("dual_ai_trade_safety_review(")
 
