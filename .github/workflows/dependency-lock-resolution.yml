@@ -75,7 +75,8 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       (
         (github.event.pull_request.number == 115 && github.head_ref == 'fix/remaining-audit-gates-2026-10-14') ||
-        (github.event.pull_request.number == 122 && github.head_ref == 'fix/audit-bias-runtime-money-2026-10-14')
+        (github.event.pull_request.number == 122 && github.head_ref == 'fix/audit-bias-runtime-money-2026-10-14') ||
+        (github.event.pull_request.number == 170 && github.head_ref == 'fix/certifi-security-update-2026-10-20')
       )
     runs-on: ubuntu-latest
     timeout-minutes: 5
