@@ -11,8 +11,25 @@ def _validate_ohlcv(df: pd.DataFrame, timeframe: str, reject_gaps: bool = True) 
     if missing:
         raise RuntimeError(f"Missing OHLCV columns: {missing}")
     out = df[required].copy()
-    out.index = pd.to_datetime(out.index, utc=True)
-    out = out[~out.index.duplicated(keep="last")].sort_index()
+    try:
+        out.index = pd.to_datetime(out.index, utc=True)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("Market data contains invalid timestamps") from exc
+    if out.index.isna().any():
+        raise RuntimeError("Market data contains invalid timestamps")
+    duplicated = out.index.duplicated(keep=False)
+    if duplicated.any():
+        duplicate_rows = out.loc[duplicated]
+        conflicts = []
+        for timestamp, group in duplicate_rows.groupby(level=0, sort=False):
+            if bool(group[required].nunique(dropna=False).gt(1).any()):
+                conflicts.append(pd.Timestamp(timestamp).isoformat())
+        if conflicts:
+            sample = ", ".join(conflicts[:5])
+            suffix = " ..." if len(conflicts) > 5 else ""
+            raise RuntimeError(f"Conflicting OHLCV rows share timestamp(s): {sample}{suffix}")
+        out = out[~out.index.duplicated(keep="last")]
+    out = out.sort_index()
     out = out.replace([np.inf, -np.inf], np.nan).dropna()
     if out.empty:
         raise RuntimeError("Market data is empty after cleaning")
@@ -54,6 +71,32 @@ def _attach_data_provenance(df: pd.DataFrame, *, source: str, symbol: str, excha
     return df
 
 
+def _deduplicate_ohlcv_timestamps(df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse exact duplicate OHLCV rows, but reject conflicting rows for one candle time.
+
+    Repeated timestamps can occur when paginated market-data responses overlap. Exact
+    duplicates are harmless; differing OHLCV values for the same timestamp are ambiguous
+    evidence and must not be silently resolved by keeping an arbitrary row.
+    """
+    required = {"ts", "open", "high", "low", "close", "volume"}
+    missing = required.difference(df.columns)
+    if missing:
+        raise RuntimeError(f"OHLCV timestamp deduplication missing columns: {sorted(missing)}")
+    duplicated = df.loc[df["ts"].duplicated(keep=False)]
+    if duplicated.empty:
+        return df
+    value_columns = ["open", "high", "low", "close", "volume"]
+    conflicts: list[str] = []
+    for timestamp, group in duplicated.groupby("ts", sort=False, dropna=False):
+        if bool(group[value_columns].nunique(dropna=False).gt(1).any()):
+            conflicts.append(pd.Timestamp(timestamp).isoformat())
+    if conflicts:
+        sample = ", ".join(conflicts[:5])
+        suffix = " ..." if len(conflicts) > 5 else ""
+        raise RuntimeError(f"Conflicting crypto OHLCV rows share timestamp(s): {sample}{suffix}")
+    return df.drop_duplicates(subset=["ts"], keep="last")
+
+
 def fetch_crypto(symbol: str, exchange: str = "bybit", timeframe: str = "1h", days: int = 365,
                  closed_only: bool = True) -> pd.DataFrame:
     import ccxt
@@ -84,7 +127,7 @@ def fetch_crypto(symbol: str, exchange: str = "bybit", timeframe: str = "1h", da
             raise RuntimeError("No crypto OHLCV returned")
         df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
         df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
-        df = df.drop_duplicates("ts").set_index("ts").sort_index()
+        df = _deduplicate_ohlcv_timestamps(df).set_index("ts").sort_index()
         if closed_only:
             cutoff = pd.Timestamp(datetime.fromtimestamp((now_ms - tf_ms) / 1000, tz=timezone.utc))
             df = df[df.index <= cutoff]
