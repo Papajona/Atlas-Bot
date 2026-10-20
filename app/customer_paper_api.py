@@ -105,6 +105,9 @@ def _market_bar_context(df: Any, *, symbol: str, timeframe: str) -> dict[str, An
     if (
         source != "ccxt_ohlcv"
         or str(provenance.get("asset_class") or "").lower() != "crypto"
+        or str(provenance.get("exchange") or "").lower() != "binance"
+        or str(provenance.get("symbol") or "").upper() != symbol
+        or str(provenance.get("timeframe") or "") != timeframe
         or str(provenance.get("market_type") or "").lower() != "spot"
         or str(provenance.get("volume_unit") or "").lower() != "base_asset"
         or provenance.get("volume_unit_verified") is not True
