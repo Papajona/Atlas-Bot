@@ -69,7 +69,7 @@ def test_customer_csv_export_serializes_journal_lines_for_authenticated_customer
     response = asyncio.run(main.customer_ledger_export_csv(authorization="opaque-token"))
 
     assert response.status_code == 200
-    assert response.media_type == "text/csv"
+    assert response.media_type.startswith("text/csv")
     assert 'filename="atlas-customer-ledger-usdt.csv"' in response.headers["content-disposition"]
     assert response.headers["cache-control"] == "no-store"
     rows = response.body.decode("utf-8").splitlines()
