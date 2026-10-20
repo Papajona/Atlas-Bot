@@ -150,6 +150,23 @@ def _connection_env(database_url: str, expected_ref: str, passfile: Path) -> dic
     return env
 
 
+def _role_setup_sql(password: str) -> str:
+    """Create the restricted role and remove PostgreSQL 16+ creator membership."""
+    escaped_password = password.replace("'", "''")
+    return (
+        "BEGIN;\n"
+        "CREATE ROLE atlas_customer_paper LOGIN NOINHERIT NOBYPASSRLS "
+        "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;\n"
+        # PostgreSQL 16+ grants a non-superuser CREATEROLE creator membership
+        # with ADMIN OPTION. Remove it inside the transaction so the runtime
+        # role satisfies the no-memberships invariant before read-back checks.
+        "REVOKE atlas_customer_paper FROM CURRENT_USER;\n"
+        f"ALTER ROLE atlas_customer_paper PASSWORD '{escaped_password}';\n"
+        "GRANT CONNECT ON DATABASE postgres TO atlas_customer_paper;\n"
+        "COMMIT;\n"
+    )
+
+
 def _psql(env: dict[str, str], *args: str) -> str:
     result = subprocess.run(
         ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", *args],
@@ -241,20 +258,12 @@ def main() -> int:
             if output_path.parent.stat().st_mode & 0o077:
                 raise RuntimeError("Credential output directory must be private (permissions 0700 or stricter)")
             password = secrets.token_urlsafe(48)
-            escaped_password = password.replace("'", "''")
             connection_uri = _runtime_connection_uri(staging_ref, password)
             # Keep a protected copy before attempting role DDL so an ambiguous connection
             # failure cannot leave an orphan role with a lost generated password.
             output_path.write_text(connection_uri + "\n", encoding="utf-8")
             output_path.chmod(0o600)
-            role_sql = (
-                "BEGIN;\n"
-                "CREATE ROLE atlas_customer_paper LOGIN NOINHERIT NOBYPASSRLS "
-                "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;\n"
-                f"ALTER ROLE atlas_customer_paper PASSWORD '{escaped_password}';\n"
-                "GRANT CONNECT ON DATABASE postgres TO atlas_customer_paper;\n"
-                "COMMIT;\n"
-            )
+            role_sql = _role_setup_sql(password)
             with tempfile.NamedTemporaryFile(
                 mode="w", encoding="utf-8", prefix="atlas-paper-role-", suffix=".sql",
                 dir=temporary, delete=False,
