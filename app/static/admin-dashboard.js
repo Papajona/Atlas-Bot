@@ -6,7 +6,8 @@ function token(){return sessionStorage.getItem('ait_admin_access_token')||''}
 function jwtClaims(){const part=token().split('.')[1];if(!part)return {};try{const b=part.replace(/-/g,'+').replace(/_/g,'/');return JSON.parse(atob(b.padEnd(Math.ceil(b.length/4)*4,'=')))}catch{return {}}}
 function actorId(){const c=jwtClaims();return String(c.sub||c.user_id||'').trim()}
 function syncActorIdentity(){const id=actorId();$('adminId').value=id;$('releaseId').value=id;$('operatorIdentity').textContent=id?'Authenticated identity: '+id+'. Sign out and sign in as a different authorized treasury user before releasing a withdrawal you approved.':'Unable to derive the user identity from this access token. Sign in again.';$('adminLogoutBtn').hidden=!id;$('adminEnrollBtn').hidden=loggedIn()||!!window.adminMfaFactorId}
-const adminMfaRequired=document.body.dataset.adminTotpRequired==='true';
+const adminTotpFlag=document.body.dataset.adminTotpRequired;
+const adminMfaRequired=adminTotpFlag!=='false'; // Fail closed when a template is rendered without server-side settings.
 let dashboardReady=false;
 let dashboardRefreshTimer=null;
 let withdrawalRefreshTimer=null;
@@ -119,7 +120,6 @@ async function adminLogin(){
     if(!response.ok)throw new Error(detailText(result.detail)||detailText(result.message)||'Administrator login failed');
     if(!result.access_token)throw new Error('Authentication response did not contain an access token.');
     sessionStorage.setItem('ait_admin_access_token',result.access_token);
-    if(result.refresh_token)sessionStorage.setItem('ait_admin_refresh_token',result.refresh_token);
     await resumeAdminSession();
   }catch(error){
     lockAdminDashboard('Admin sign-in: '+error.message);
@@ -160,7 +160,6 @@ async function adminMfaVerify(){
     const verified=await api('/api/admin/auth/mfa/verify',{method:'POST',body:JSON.stringify({factor_id:window.adminMfaFactorId,challenge_id:window.adminMfaChallengeId,code})});
     if(!verified.access_token)throw new Error('Authenticator verification did not return an upgraded session. Sign in again.');
     sessionStorage.setItem('ait_admin_access_token',verified.access_token);
-    if(verified.refresh_token)sessionStorage.setItem('ait_admin_refresh_token',verified.refresh_token);
     const status=await api('/api/admin/auth/mfa/status');
     if(!status.enabled||status.aal!=='aal2'){
       lockAdminDashboard('Authenticator response received, but the server did not confirm AAL2. Protected data remains locked.');
