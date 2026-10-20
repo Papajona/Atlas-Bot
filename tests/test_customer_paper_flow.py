@@ -270,3 +270,16 @@ def test_customer_bot_paper_execution_uses_isolated_flow_and_keeps_real_executor
     assert "force_paper=paper_mode" in cycle
     assert "force_paper=paper_mode" in route
     assert "customer_paper_ledger_enabled: bool = False" in (Path(__file__).resolve().parents[1] / "app" / "config.py").read_text()
+
+
+def test_paper_position_reader_recovers_timeframe_from_immutable_order_metadata():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_lifecycle.py").read_text(encoding="utf-8")
+    start = source.index("async def get_customer_paper_positions(")
+    end = source.index("\n\nasync def ", start)
+    block = source[start:end]
+    assert "JOIN customer_paper.fills AS f" in block
+    assert "JOIN customer_paper.orders AS o" in block
+    assert "o.metadata_json ->> 'timeframe'" in block
+    assert '"timeframe": str(row["timeframe"] or "")' in block
