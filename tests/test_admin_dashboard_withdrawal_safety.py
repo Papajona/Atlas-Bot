@@ -88,8 +88,8 @@ def test_dashboard_does_not_claim_production_hardening_without_release_evidence(
 
 def test_admin_polling_budget_is_below_shared_per_ip_rate_limit():
     js = _js()
-    assert "setInterval(()=>{if(loggedIn())refresh()},15000)" in js
-    assert "setInterval(()=>{if(loggedIn())loadWithdrawals()},20000)" in js
+    assert "setInterval(()=>{if(dashboardReady)refresh()},15000)" in js
+    assert "setInterval(()=>{if(dashboardReady)loadWithdrawals()},20000)" in js
     # refresh requests state+trades (2 requests every 15 s); queue refresh requests
     # summary+rows (2 requests every 20 s): 8 + 6 = 14 requests/minute/tab.
     requests_per_minute_per_tab = (2 * 60 / 15) + (2 * 60 / 20)
