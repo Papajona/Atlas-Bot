@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   prune-contained-branches:
-    # Runs only on the one explicitly marked cleanup merge. Ordinary pushes do nothing.
+    # This unique marker is used only on the explicit cleanup merge.
     if: startsWith(github.event.head_commit.message, '[atlas-branch-prune-once-20261020]')
     runs-on: ubuntu-latest
     steps:
@@ -19,7 +19,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Delete only proven-integrated unprotected branches
+      - name: Delete only branches proven integrated into main
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -27,24 +27,43 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch origin '+refs/heads/*:refs/remotes/origin/*' --prune
           main_sha="$PUSHED_MAIN_SHA"
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*' --prune
           git cat-file -e "${main_sha}^{commit}"
 
-          mapfile -t open_pr_heads < <(
-            gh api --paginate "repos/${GH_REPO}/pulls?state=open&per_page=100" --jq '.[].head.ref'
-          )
-          # Squash merges do not make the source tip an ancestor of main. This
-          # tuple proves exact name + exact head SHA + merged commit ancestry.
-          mapfile -t merged_pr_tuples < <(
-            gh api --paginate "repos/${GH_REPO}/pulls?state=closed&per_page=100" \
-              --jq '.[] | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha != null) | [.head.ref, .head.sha, .merge_commit_sha] | @tsv'
-          )
+          # Capture and check every API call before using its output. A lookup
+          # failure aborts the job instead of silently producing an empty list.
+          open_pr_output=$(gh api --paginate "repos/${GH_REPO}/pulls?state=open&per_page=100" --jq '.[].head.ref') || {
+            echo "ERROR: open-PR enumeration failed; refusing all deletion." >&2
+            exit 1
+          }
+          merged_pr_output=$(gh api --paginate "repos/${GH_REPO}/pulls?state=closed&per_page=100" \
+            --jq '.[] | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha != null) | [.head.ref, .head.sha, .merge_commit_sha] | @tsv') || {
+            echo "ERROR: merged-PR enumeration failed; refusing all deletion." >&2
+            exit 1
+          }
+          branch_output=$(gh api --paginate "repos/${GH_REPO}/branches?per_page=100" \
+            --jq '.[] | [.name, (.protected | tostring), .commit.sha] | @tsv') || {
+            echo "ERROR: complete branch enumeration failed; refusing all deletion." >&2
+            exit 1
+          }
+          if [[ -z "$branch_output" ]]; then
+            echo "ERROR: branch enumeration returned no branches; refusing false-success cleanup." >&2
+            exit 1
+          fi
+
+          open_pr_heads=()
+          merged_pr_tuples=()
+          branch_rows=()
+          if [[ -n "$open_pr_output" ]]; then mapfile -t open_pr_heads <<< "$open_pr_output"; fi
+          if [[ -n "$merged_pr_output" ]]; then mapfile -t merged_pr_tuples <<< "$merged_pr_output"; fi
+          mapfile -t branch_rows <<< "$branch_output"
 
           deleted=0
           kept=0
           failed=0
-          while IFS=$'\t' read -r branch protected sha; do
+          for row in "${branch_rows[@]}"; do
+            IFS=$'\t' read -r branch protected sha <<< "$row"
             [[ -z "$branch" || "$branch" == "main" ]] && continue
             if [[ "$protected" == "true" ]]; then
               echo "KEEP protected branch: $branch"
@@ -82,17 +101,32 @@ jobs:
               continue
             fi
 
-            if gh api --method DELETE "repos/${GH_REPO}/git/refs/heads/${branch}" >/dev/null; then
+            # The explicit lease rejects deletion if the remote branch changed
+            # since enumeration; do not retry without the expected SHA.
+            if push_output=$(git push origin "--force-with-lease=refs/heads/${branch}:${sha}" ":refs/heads/${branch}" 2>&1); then
               echo "DELETED ($reason): $branch"
               deleted=$((deleted + 1))
             else
-              echo "ERROR deleting integrated branch: $branch" >&2
+              echo "KEEP/ERROR: branch changed or GitHub rejected safe deletion: $branch" >&2
+              echo "$push_output" >&2
               failed=$((failed + 1))
             fi
-          done < <(
-            gh api --paginate "repos/${GH_REPO}/branches?per_page=100" \
-              --jq '.[] | [.name, (.protected | tostring), .commit.sha] | @tsv'
-          )
+          done
 
-          echo "Cleanup summary: deleted=$deleted kept=$kept failed=$failed"
-          if [[ "$failed" -gt 0 ]]; then exit 1; fi
+          echo "Cleanup result: deleted=$deleted kept=$kept failed=$failed"
+          if [[ "$failed" -gt 0 ]]; then
+            echo "ERROR: at least one eligible deletion failed. Cleanup is not reported as successful." >&2
+            exit 1
+          fi
+
+          # Final API read-back makes a failed enumeration/deletion visible.
+          post_branch_output=$(gh api --paginate "repos/${GH_REPO}/branches?per_page=100" --jq '.[].name') || {
+            echo "ERROR: post-cleanup branch verification failed." >&2
+            exit 1
+          }
+          if [[ -z "$post_branch_output" ]]; then
+            echo "ERROR: post-cleanup branch verification returned no branch names." >&2
+            exit 1
+          fi
+          post_branch_count=$(printf '%s\n' "$post_branch_output" | wc -l | tr -d ' ')
+          echo "Verified branch refs after cleanup: $post_branch_count (main is retained)."
