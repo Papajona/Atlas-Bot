@@ -55,7 +55,8 @@ def _market_fixture(*, timestamp: datetime | None = None, low: float = 98.0, hig
     request = SimpleNamespace(
         asset="crypto", symbol=symbol, exchange=exchange, timeframe=timeframe, days=5,
     )
-    quote_at = now - timedelta(seconds=1)
+    timeframe_seconds = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400}[timeframe]
+    quote_at = bar_at + timedelta(seconds=timeframe_seconds + 1)
     context = {
         "context_source": "server_ccxt_closed_spot_ohlcv_and_ticker",
         "market_type": "spot",
@@ -117,12 +118,14 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
     monkeypatch.setattr(settings, "customer_paper_shared_database_enabled", False)
     monkeypatch.setattr(settings, "customer_paper_initial_balance", 10000.0)
     monkeypatch.setattr(settings, "customer_paper_initial_currency", "USDT")
+    monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.01)
 
     async def run():
         customer_id = 99231
-        req, frame, context = _market_fixture(low=98, high=102)
+        first_at = datetime.now(timezone.utc) - timedelta(hours=4)
+        req, frame, context = _market_fixture(timestamp=first_at, low=98, high=102)
         first_bar = frame.index[-1].to_pydatetime()
-        opened = await execute_customer_paper_spot_signal(
+        submitted = await execute_customer_paper_spot_signal(
             customer_id=customer_id,
             req=req,
             df=frame,
@@ -134,27 +137,51 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
             strategy="paper-flow-regression",
             signal_metadata={"model_version": "fixture-model"},
         )
+        # Orders are durable first; no fill can use the candle that generated the signal.
+        assert submitted["decision"] == "NO_TRADE"
+        assert submitted["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
+        assert submitted["real_money_ledger_written"] is False
+        assert submitted["paper_account"]["real_funds_used"] is False
+        assert await get_customer_paper_positions(customer_id=customer_id) == []
+
+        # The next completed bar supplies both the fill quote and shared liquidity budget.
+        second_at = first_bar + timedelta(hours=1)
+        req2, frame2, context2 = _market_fixture(timestamp=second_at, low=98, high=102)
+        opened = await recover_customer_paper_spot_flow(
+            customer_id=customer_id, req=req2, df=frame2, market_context=context2,
+        )
+        assert opened is not None
+        assert opened["status"] == "RECOVERY_PROCESSED"
         assert opened["decision"] == "TRADE"
-        assert opened["status"] == "APPENDED"
-        assert opened["real_money_ledger_written"] is False
-        assert opened["paper_account"]["real_funds_used"] is False
+        assert opened["execution"]["fill"]["status"] == "APPENDED"
         positions = await get_customer_paper_positions(customer_id=customer_id)
         assert len(positions) == 1
         assert positions[0]["symbol"] == "BTC/USDT"
+        assert positions[0]["quantity"] == "1.000000000000000000"
         assert positions[0]["stop_loss_price"] == "95"
         assert positions[0]["take_profit_price"] == "110"
+        assert positions[0]["last_event_bar_key"] == second_at.isoformat()
 
-        # The following completed candle crossed the stop; the simulator submits a
-        # compensating SELL and fills it from the fresh post-bar quote.
-        second_at = first_bar + timedelta(hours=1)
-        req2, frame2, context2 = _market_fixture(
-            timestamp=second_at, low=90, high=101, bid=90.0, ask=90.2,
+        # A completed candle crossing the stop creates a durable exit intent, but the
+        # exit is filled only on a later completed bar (never retrospectively in-bar).
+        third_at = second_at + timedelta(hours=1)
+        req3, frame3, context3 = _market_fixture(timestamp=third_at, low=90, high=101, bid=90.0, ask=90.2)
+        pending_exit = await recover_customer_paper_spot_flow(
+            customer_id=customer_id, req=req3, df=frame3, market_context=context3,
         )
+        assert pending_exit is not None
+        assert pending_exit["status"] == "PROTECTIVE_EXIT_PENDING"
+        assert pending_exit["decision"] == "NO_TRADE"
+        assert pending_exit["execution"]["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
+        assert len(await get_customer_paper_positions(customer_id=customer_id)) == 1
+
+        fourth_at = third_at + timedelta(hours=1)
+        req4, frame4, context4 = _market_fixture(timestamp=fourth_at, low=89, high=95, bid=90.0, ask=90.2)
         closed = await recover_customer_paper_spot_flow(
-            customer_id=customer_id, req=req2, df=frame2, market_context=context2,
+            customer_id=customer_id, req=req4, df=frame4, market_context=context4,
         )
         assert closed is not None
-        assert closed["status"] == "PROTECTIVE_EXIT"
+        assert closed["status"] == "RECOVERY_PROCESSED"
         assert closed["decision"] == "TRADE"
         assert closed["execution"]["fill"]["status"] == "APPENDED"
         assert await get_customer_paper_positions(customer_id=customer_id) == []
@@ -163,11 +190,45 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
         assert by_code["PAPER_FEES"] > 0
         assert by_code["PAPER_CASH"] > 0
 
-        # Simulate a worker crash after order intent commit but before fill commit.
-        recovery_customer = 99232
-        recovery_req, recovery_frame, recovery_context = _market_fixture()
-        from app.customer_paper_flow import ensure_customer_paper_account
+        # Two tenants cannot spend more than the shared capacity for the same bar.
+        monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.0005)
+        capacity_customer_a, capacity_customer_b = 99233, 99234
+        capacity_at = fourth_at + timedelta(hours=5)
+        cap_req_a, cap_frame_a, cap_context_a = _market_fixture(timestamp=capacity_at)
+        cap_req_b, cap_frame_b, cap_context_b = _market_fixture(timestamp=capacity_at)
+        for cid, reqx, framex, contextx in (
+            (capacity_customer_a, cap_req_a, cap_frame_a, cap_context_a),
+            (capacity_customer_b, cap_req_b, cap_frame_b, cap_context_b),
+        ):
+            intent = await execute_customer_paper_spot_signal(
+                customer_id=cid, req=reqx, df=framex, market_context=contextx,
+                side="BUY", quantity="0.4", stop_loss_price="95", take_profit_price="110",
+                strategy="shared-capacity-regression",
+            )
+            assert intent["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
+        capacity_fill_at = capacity_at + timedelta(hours=1)
+        cap_req_a2, cap_frame_a2, cap_context_a2 = _market_fixture(timestamp=capacity_fill_at)
+        cap_req_b2, cap_frame_b2, cap_context_b2 = _market_fixture(timestamp=capacity_fill_at)
+        a_fill = await recover_customer_paper_spot_flow(
+            customer_id=capacity_customer_a, req=cap_req_a2, df=cap_frame_a2, market_context=cap_context_a2,
+        )
+        b_fill = await recover_customer_paper_spot_flow(
+            customer_id=capacity_customer_b, req=cap_req_b2, df=cap_frame_b2, market_context=cap_context_b2,
+        )
+        assert a_fill["execution"]["fill"]["status"] == "APPENDED"
+        assert b_fill["execution"]["fill"]["status"] == "APPENDED"
+        quantity_a = Decimal((await get_customer_paper_positions(customer_id=capacity_customer_a))[0]["quantity"])
+        quantity_b = Decimal((await get_customer_paper_positions(customer_id=capacity_customer_b))[0]["quantity"])
+        # 1000 units * 0.0005 participation = 0.5 shared units across both tenants.
+        assert quantity_a + quantity_b <= Decimal("0.500000000000000000")
+        assert quantity_a == Decimal("0.400000000000000000")
+        assert quantity_b == Decimal("0.100000000000000000")
 
+        # Simulate a crash after order intent commit but before fill commit.
+        recovery_customer = 99232
+        recovery_at = capacity_fill_at + timedelta(hours=5)
+        recovery_req, recovery_frame, recovery_context = _market_fixture(timestamp=recovery_at)
+        from app.customer_paper_flow import ensure_customer_paper_account
         await ensure_customer_paper_account(recovery_customer, "USDT")
         signal_bar = recovery_frame.index[-1].isoformat()
         order = await submit_customer_paper_order(
@@ -185,15 +246,24 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
                 "order_role": "ENTRY",
                 "timeframe": str(recovery_req.timeframe),
                 "signal_bar_timestamp": signal_bar,
+                "submission_bar_at": signal_bar,
                 "data_sha256": recovery_frame.attrs["data_provenance"]["sha256"],
                 "stop_loss_price": "95",
                 "take_profit_price": "110",
             },
         )
         assert order["status"] == "APPENDED"
-        recovered = await recover_customer_paper_spot_flow(
+        waiting = await recover_customer_paper_spot_flow(
             customer_id=recovery_customer, req=recovery_req,
             df=recovery_frame, market_context=recovery_context,
+        )
+        assert waiting["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
+        assert await get_customer_paper_positions(customer_id=recovery_customer) == []
+        recovery_next_at = recovery_at + timedelta(hours=1)
+        recovery_req2, recovery_frame2, recovery_context2 = _market_fixture(timestamp=recovery_next_at)
+        recovered = await recover_customer_paper_spot_flow(
+            customer_id=recovery_customer, req=recovery_req2,
+            df=recovery_frame2, market_context=recovery_context2,
         )
         assert recovered is not None
         assert recovered["status"] == "RECOVERY_PROCESSED"
