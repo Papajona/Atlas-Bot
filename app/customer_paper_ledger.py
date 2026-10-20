@@ -29,6 +29,9 @@ PAPER_TABLES = (
     "customer_paper.orders", "customer_paper.order_events", "customer_paper.fills",
     "customer_paper.position_events",
 )
+# Shared market-bar budgets contain only public OHLCV provenance and aggregate capacity,
+# never customer identifiers or financial balances. They use a separate explicit policy.
+PAPER_GLOBAL_TABLES = ("customer_paper.market_bar_budgets",)
 
 
 def _tenant_policy_expression_is_exact(expression: Any) -> bool:
@@ -245,15 +248,15 @@ async def preflight_isolated_customer_paper_ledger(
                 WHERE (n.nspname='customer_paper' AND c.relname = ANY(:paper_table_names))
                    OR (n.nspname='public' AND c.relname = ANY(:real_tables))
                 """),
-                {"real_tables": list(REAL_MONEY_TABLES), "paper_table_names": [name.split(".", 1)[1] for name in PAPER_TABLES]},
+                {"real_tables": list(REAL_MONEY_TABLES), "paper_table_names": [name.split(".", 1)[1] for name in PAPER_TABLES + PAPER_GLOBAL_TABLES]},
             )).mappings().all()
             by_name = {str(row["table_name"]): row for row in table_rows}
-            missing_paper = sorted(set(PAPER_TABLES) - set(by_name))
+            missing_paper = sorted(set(PAPER_TABLES + PAPER_GLOBAL_TABLES) - set(by_name))
             if missing_paper:
                 return {"status": "BLOCKED", "reason": "PAPER_SCHEMA_NOT_PROVISIONED",
                         "missing_tables": missing_paper, "identity": {"database": db_name, "role": role_name}}
             insecure_paper = []
-            for name in PAPER_TABLES:
+            for name in PAPER_TABLES + PAPER_GLOBAL_TABLES:
                 row = by_name[name]
                 if row["relkind"] not in {"r", "p"}:
                     insecure_paper.append(f"{name}:NOT_A_TABLE")
@@ -321,6 +324,27 @@ async def preflight_isolated_customer_paper_ledger(
                     insecure_paper.append(
                         f"customer_paper.{table}:TENANT_POLICY_INVALID_{policy_error}"
                     )
+            # The shared bar-budget table contains only public market-bar metadata, not tenant
+            # data. Its sole policy must grant the paper runtime role global access to rows while
+            # RLS remains forced and direct API roles have no object privileges.
+            budget_table = "market_bar_budgets"
+            budget_policies = policy_by_table.get(budget_table, [])
+            if len(budget_policies) != 1:
+                insecure_paper.append(f"customer_paper.{budget_table}:GLOBAL_POLICY_INVALID_" + ("MISSING" if not budget_policies else "MULTIPLE"))
+            else:
+                policy = budget_policies[0]
+                normalized_using = re.sub(r"\\s+", "", str(policy.get("qual") or "")).strip("()").casefold()
+                normalized_check = re.sub(r"\\s+", "", str(policy.get("with_check") or "")).strip("()").casefold()
+                if str(policy.get("policyname") or "") != "customer_paper_bar_budget_backend":
+                    insecure_paper.append(f"customer_paper.{budget_table}:GLOBAL_POLICY_INVALID_NAME")
+                if str(policy.get("cmd") or "").upper() != "ALL":
+                    insecure_paper.append(f"customer_paper.{budget_table}:GLOBAL_POLICY_INVALID_COMMAND")
+                if str(policy.get("permissive") or "").upper() != "PERMISSIVE":
+                    insecure_paper.append(f"customer_paper.{budget_table}:GLOBAL_POLICY_INVALID_PERMISSIVENESS")
+                if normalized_using != "true" or normalized_check != "true":
+                    insecure_paper.append(f"customer_paper.{budget_table}:GLOBAL_POLICY_INVALID_PREDICATE")
+                if not _tenant_policy_roles_are_exact(policy.get("roles"), str(role_name)):
+                    insecure_paper.append(f"customer_paper.{budget_table}:GLOBAL_POLICY_INVALID_ROLE")
             if insecure_paper:
                 return {"status": "BLOCKED", "reason": "PAPER_SCHEMA_PRIVILEGES_UNSAFE",
                         "findings": insecure_paper}
