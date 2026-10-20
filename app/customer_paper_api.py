@@ -151,6 +151,7 @@ def _market_bar_context(df: Any, *, symbol: str, timeframe: str) -> dict[str, An
     stable_bar = {
         "venue": "binance",
         "market_type": "spot",
+        "volume_unit": "base_asset",
         "symbol": symbol,
         "timeframe": timeframe,
         "bar_at": bar_at.isoformat(),
