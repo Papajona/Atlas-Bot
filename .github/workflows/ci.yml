@@ -304,6 +304,8 @@ jobs:
           test "$(printf '%s\n' "$heads" | grep -c '(head)')" -eq 1
           python -m alembic downgrade base
           python -m alembic upgrade head
+          # Check drift only after reaching the actual migration head, not at an older revision.
+          python -m alembic check
       - name: Controlled withdrawal recovery regressions
         run: |
           python -m pytest -q \
@@ -341,7 +343,9 @@ jobs:
             -h 127.0.0.1 -U atlas -d atlas_restore /tmp/atlas-ci.dump
           restored_head="$(PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -At \
             -h 127.0.0.1 -U atlas -d atlas_restore -c 'SELECT version_num FROM alembic_version')"
-          test "$restored_head" = "0051_research_trial_archive"
+          expected_head="$(python -m alembic heads | awk '{print $1}')"
+          printf 'Expected migration head: %s\nRestored database head: %s\n' "$expected_head" "$restored_head"
+          test "$restored_head" = "$expected_head"
           restored_paper_tables="$(PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -At \
             -h 127.0.0.1 -U atlas -d atlas_restore -c "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname IN ('paper_order_states', 'paper_bar_states', 'paper_fill_events')")"
           test "$restored_paper_tables" = "3"
