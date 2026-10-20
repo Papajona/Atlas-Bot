@@ -954,6 +954,19 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 episode.status = "OPEN"
             episode.updated_at = utcnow()
 
+        # Orders that add to or close an existing position are not new position
+        # lifecycles. Preserve their decision snapshot, but exclude their order-level
+        # episode from the completed-position replay queue.
+        if trade.id != int(entry_trade_id or trade.id) and not position_flipped:
+            order_episode = (await db.execute(
+                select(TradeLearningEpisode)
+                .where(TradeLearningEpisode.entry_trade_id == trade.id)
+                .with_for_update()
+            )).scalar_one_or_none()
+            if order_episode is not None and order_episode.status != "COMPLETED":
+                order_episode.status = "NOT_POSITION_ENTRY"
+                order_episode.updated_at = utcnow()
+
         position.mark_price = Decimal(str(fill_price))
         # Accumulate booked realized P&L in Decimal at the same six-decimal scale
         # used by the custodial ledger, preventing reporting from drifting away from
