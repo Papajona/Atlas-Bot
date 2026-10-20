@@ -497,10 +497,11 @@ async def preflight_isolated_customer_paper_ledger(
                         JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
+                          AND (NOT :same_database OR n.nspname <> 'customer_paper')
                           AND p.prosecdef
                           AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
                         """
-                    ), {"paper_role": role_name})).mappings().all()
+                    ), {"paper_role": role_name, "same_database": same_database})).mappings().all()
                     for row in primary_security_definer_rows:
                         primary_exposure.append(f"{row['function_name']}:SECURITY_DEFINER_EXECUTE")
                     if primary_exposure:
