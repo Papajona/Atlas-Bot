@@ -404,3 +404,40 @@ def test_paper_candidates_use_oos_metrics_after_signed_archive_verification(monk
     assert candidate["metrics"]["sharpe"] == 0.9
     assert candidate["metrics"]["total_return"] == 0.10
     assert candidate["in_sample_diagnostics"]["sharpe"] == -99.0
+
+def test_multi_timeframe_resampling_uses_open_timestamp_buckets_without_boundary_shift():
+    """Each source candle belongs to the higher-timeframe interval in which it opens."""
+    from app.multi_timeframe import _resample_ohlcv
+
+    idx = pd.date_range("2025-01-01 00:00:00", periods=96, freq="5min", tz="UTC")
+    open_ = 100.0 + np.arange(len(idx), dtype=float)
+    df = pd.DataFrame(
+        {
+            "open": open_,
+            "high": open_ + 2.0,
+            "low": open_ - 3.0,
+            "close": open_ + 0.25,
+            "volume": np.ones(len(idx), dtype=float),
+        },
+        index=idx,
+    )
+
+    bars = _resample_ohlcv(df, "4h")
+
+    assert bars.index.tolist() == [
+        pd.Timestamp("2025-01-01 04:00:00", tz="UTC"),
+        pd.Timestamp("2025-01-01 08:00:00", tz="UTC"),
+    ]
+    # [00:00, 04:00): source rows at 00:00 through 03:55, exactly 48 5-minute bars.
+    assert bars.iloc[0]["open"] == 100.0
+    assert bars.iloc[0]["high"] == 149.0
+    assert bars.iloc[0]["low"] == 97.0
+    assert bars.iloc[0]["close"] == 147.25
+    assert bars.iloc[0]["volume"] == 48.0
+    # The 04:00 source candle starts the next interval; it is not folded into the prior bar.
+    assert bars.iloc[1]["open"] == 148.0
+    assert bars.iloc[1]["high"] == 197.0
+    assert bars.iloc[1]["low"] == 145.0
+    assert bars.iloc[1]["close"] == 195.25
+    assert bars.iloc[1]["volume"] == 48.0
+
