@@ -207,6 +207,13 @@ async function testAdminFirstTimeMfaEnrollment(browser, baseUrl) {
     if (p === "/api/admin/auth/login" && req.method() === "POST") {
       return json(route, { ok: true, access_token: beforeMfaToken, refresh_token: "test-refresh", mfa_required: true, totp_enrolled: false });
     }
+    if (p === "/api/admin/auth/mfa/status" && req.method() === "GET") {
+      const authorization = req.headers()["authorization"] || "";
+      if (authorization.includes(upgradedToken)) {
+        return json(route, { enabled: true, aal: "aal2", factor_count: 1, factor_ids: ["new-factor-id"] });
+      }
+      return json(route, { enabled: false, aal: "aal1", factor_count: 0, factor_ids: [] });
+    }
     if (p === "/api/admin/auth/mfa/enroll" && req.method() === "POST") {
       enrollBody = req.postDataJSON();
       return json(route, { id: "new-factor-id", totp: { secret: "TEST-ONLY-SECRET", qr_code: '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100"><rect width="100" height="100" fill="#fff"/><rect x="10" y="10" width="28" height="28" fill="#000"/><rect x="62" y="10" width="28" height="28" fill="#000"/><rect x="10" y="62" width="28" height="28" fill="#000"/></svg>' } });
@@ -236,12 +243,10 @@ async function testAdminFirstTimeMfaEnrollment(browser, baseUrl) {
   await waitUntil(async () => (await page.locator("#authState").innerText()).includes("Enroll Google Authenticator"));
   assert.equal(await page.locator("#adminEnrollBtn").isHidden(), false, "an unenrolled admin must be offered enrollment without entering the protected polling state");
 
-  const popupPromise = page.waitForEvent("popup");
   await page.getByRole("button", { name: "Enroll Google Authenticator" }).click();
-  const popup = await popupPromise;
-  await popup.locator("img[alt='Authenticator enrollment QR code']").waitFor();
-  await waitUntil(async () => popup.locator("img").evaluate(img => img.complete && img.naturalWidth > 0));
-  await waitUntil(async () => (await page.locator("#authState").innerText()).includes("six-digit authenticator code"));
+  await page.locator("#adminMfaQr").waitFor();
+  await waitUntil(async () => page.locator("#adminMfaQr").evaluate(img => img.complete && img.naturalWidth > 0));
+  await waitUntil(async () => (await page.locator("#authState").innerText()).includes("six-digit Google Authenticator code"));
   assert.equal(await page.locator("#adminMfaBox").isVisible(), true);
   assert.equal(await page.locator("#adminMfaVerifyBtn").isVisible(), true);
   assert.equal(enrollBody && Object.keys(enrollBody).length, 0, "enrollment request must not send arbitrary factor metadata from the browser");
@@ -250,13 +255,12 @@ async function testAdminFirstTimeMfaEnrollment(browser, baseUrl) {
 
   await page.locator("#adminMfaCode").fill("123456");
   await page.locator("#adminMfaVerifyBtn").click();
-  await waitUntil(async () => (await page.locator("#authState").innerText()).includes("Administrator AAL2 session active"));
+  await waitUntil(async () => (await page.locator("#authState").innerText()).includes("Administrator session verified by the server"));
   assert.deepEqual(verifyBody, { factor_id: "new-factor-id", challenge_id: "new-challenge-id", code: "123456" });
   assert.equal(await page.evaluate(() => sessionStorage.getItem("ait_admin_mfa_verified")), "true");
   assert.equal(await page.evaluate(() => sessionStorage.getItem("ait_admin_access_token")), upgradedToken);
   assert.equal(await page.locator("#adminEnrollBtn").isHidden(), true, "enrollment must be hidden once MFA is verified");
   assert.deepEqual(pageErrors, [], "first-time admin enrollment flow must not throw browser JavaScript errors");
-  await popup.close();
   await page.close();
 }
 
