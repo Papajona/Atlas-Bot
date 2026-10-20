@@ -349,6 +349,7 @@ async function testAdminHostileData(browser, baseUrl) {
   await page.route("**/api/**", async route => {
     const req = route.request();
     const pathname = new URL(req.url()).pathname;
+    if (pathname.includes("/api/admin/auth/mfa/status")) return json(route, { enabled: true, aal: "aal2", factor_count: 1, factor_ids: ["verified-factor-id"] });
     if (pathname === "/api/state") return json(route, { mode: "PAPER", equity: 1000, realized_pnl: 0, unrealized_pnl: 0, drawdown: 0, daily_loss: 0, live_enabled: false, kill_switch: false, open_positions: [] });
     if (pathname === "/api/trades") return json(route, [{ created_at: new Date().toISOString(), symbol: attack, side: attack, requested_quantity: 1, filled_quantity: 1, requested_price: 1, average_fill_price: 1, status: attack }]);
     if (pathname === "/api/admin/withdrawals/summary") return json(route, { pending_count: 2, pending_amount: 13.345678, approved_count: 0, approved_amount: 0, in_flight_count: 0, rejected_count: 0 });
