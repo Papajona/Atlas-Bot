@@ -45,9 +45,22 @@ def _verified_bars(latest_bar_at: datetime, *, volume: str = "100") -> pd.DataFr
     return frame
 
 
-def test_customer_paper_market_context_requires_verified_complete_spot_bar():
+def _freeze_paper_api_clock(monkeypatch, frozen_now: datetime) -> None:
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return frozen_now.replace(tzinfo=None)
+            return frozen_now.astimezone(tz)
+
+    monkeypatch.setattr(paper_api, "datetime", FrozenDateTime)
+
+
+def test_customer_paper_market_context_requires_verified_complete_spot_bar(monkeypatch):
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    _freeze_paper_api_clock(monkeypatch, now)
     frame = _verified_bars(now - timedelta(minutes=2))
+    frame.attrs["data_provenance"]["fetched_at_utc"] = (now - timedelta(seconds=1)).isoformat()
     context = paper_api._market_bar_context(frame, symbol="BTC/USDT", timeframe="1m")
 
     assert context["market_type"] == "spot"
@@ -56,15 +69,18 @@ def test_customer_paper_market_context_requires_verified_complete_spot_bar():
     assert context["timestamp"] == now - timedelta(minutes=2)
 
 
-def test_customer_paper_market_context_rejects_unverified_or_incomplete_candle():
+def test_customer_paper_market_context_rejects_unverified_or_incomplete_candle(monkeypatch):
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    _freeze_paper_api_clock(monkeypatch, now)
     frame = _verified_bars(now - timedelta(minutes=2))
+    frame.attrs["data_provenance"]["fetched_at_utc"] = (now - timedelta(seconds=1)).isoformat()
     frame.attrs["data_provenance"]["source"] = "yfinance"
     with pytest.raises(HTTPException) as rejected_source:
         paper_api._market_bar_context(frame, symbol="BTC/USDT", timeframe="1m")
     assert rejected_source.value.status_code == 409
 
     incomplete = _verified_bars(now - timedelta(seconds=30))
+    incomplete.attrs["data_provenance"]["fetched_at_utc"] = (now - timedelta(seconds=1)).isoformat()
     with pytest.raises(HTTPException) as rejected_bar:
         paper_api._market_bar_context(incomplete, symbol="BTC/USDT", timeframe="1m")
     assert rejected_bar.value.status_code == 409
