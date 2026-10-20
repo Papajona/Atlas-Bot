@@ -352,7 +352,7 @@ def test_paper_position_reader_recovers_timeframe_from_immutable_order_metadata(
     assert "JOIN customer_paper.fills AS f" in block
     assert "JOIN customer_paper.orders AS o" in block
     assert "o.metadata_json ->> 'timeframe'" in block
-    assert "mb.bar_at AS last_event_bar_key" in block
+    assert "COALESCE(mb.bar_at::text, o.metadata_json ->> 'signal_bar_timestamp', '') AS last_event_bar_key" in block
     assert "JOIN customer_paper.market_bar_budgets AS mb" in block
     assert "entry_event.quantity_before = 0" in block
     assert "entry_order.metadata_json ->> 'stop_loss_price'" in block
