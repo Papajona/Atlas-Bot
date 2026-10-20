@@ -109,12 +109,12 @@ def test_gemini_alternative_discovery_uses_only_listed_stable_flash_models():
         {"name": "models/gemini-3.6-flash", "supportedGenerationMethods": ["generateContent"]},
         {"name": "models/gemini-3.7-flash-preview", "supportedGenerationMethods": ["generateContent"]},
         {"name": "models/gemini-3.5-flash", "supportedGenerationMethods": ["generateContent"]},
-        {"name": "models/gemini-3.5-flash-lite", "supportedGenerationMethods": ["generateContent"]},
+        {"name": "models/gemini-3.7-flash", "supportedGenerationMethods": ["generateContent"]},
         {"name": "models/gemini-3.4-flash", "supportedGenerationMethods": ["embedContent"]},
         {"name": "models/gemini-3.3-pro", "supportedGenerationMethods": ["generateContent"]},
     ]
     assert _select_gemini_flash_alternatives(models, "gemini-3.6-flash") == [
-        "gemini-3.5-flash", "gemini-3.5-flash-lite"
+        "gemini-3.5-flash", "gemini-3.7-flash"
     ]
 
 
@@ -125,7 +125,7 @@ def test_production_gate_has_no_provider_quota_waiver_and_uses_verified_model():
     verify = (root / ".github" / "workflows" / "production-verification.yml").read_text()
     deploy = (root / ".github" / "workflows" / "production-deploy.yml").read_text()
     assert "temporarily waived" not in verify
-    assert "GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}" in verify
-    assert "GEMINI_STRATEGY_MODEL: ${{ vars.GEMINI_STRATEGY_MODEL || 'gemini-3.5-flash-lite' }}" in verify
-    assert "GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}" in deploy
-    assert "GEMINI_STRATEGY_MODEL: ${{ vars.GEMINI_STRATEGY_MODEL || 'gemini-3.5-flash-lite' }}" in deploy
+    assert "GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.7-flash' }}" in verify
+    assert "GEMINI_STRATEGY_MODEL: ${{ vars.GEMINI_STRATEGY_MODEL || 'gemini-3.7-flash' }}" in verify
+    assert "GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.7-flash' }}" in deploy
+    assert "GEMINI_STRATEGY_MODEL: ${{ vars.GEMINI_STRATEGY_MODEL || 'gemini-3.7-flash' }}" in deploy
