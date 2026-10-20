@@ -230,7 +230,7 @@ CREATE TABLE IF NOT EXISTS customer_paper.market_bar_budgets (
 );
 
 CREATE TABLE IF NOT EXISTS customer_paper.market_bar_allocations (
-    allocation_id uuid PRIMARY KEY,
+    allocation_id uuid PRIMARY KEY REFERENCES customer_paper.fills(id),
     bar_key varchar(64) NOT NULL REFERENCES customer_paper.market_bar_budgets(bar_key),
     allocated_quantity numeric(38,18) NOT NULL CHECK (allocated_quantity > 0),
     created_at timestamptz NOT NULL DEFAULT now(),
