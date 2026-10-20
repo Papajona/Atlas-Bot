@@ -52,8 +52,8 @@ def test_polling_waits_for_mfa_verified_session_and_identity_is_token_bound():
     assert "function actorId()" in js
     assert "$('adminId').value=id;$('releaseId').value=id" in js
     assert "ait_admin_mfa_verified')==='true'" in js
-    assert "setInterval(()=>{if(loggedIn())refresh()},15000)" in js
-    assert "setInterval(()=>{if(loggedIn())loadWithdrawals()},20000)" in js
+    assert "setInterval(()=>{if(dashboardReady)refresh()},15000)" in js
+    assert "setInterval(()=>{if(dashboardReady)loadWithdrawals()},20000)" in js
     assert "function adminLogout()" in js
     assert "$('adminLogoutBtn').hidden=true" in js
 
