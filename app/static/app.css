@@ -33,3 +33,11 @@ main{max-width:1600px;padding:28px max(26px,4vw) 70px}.panel{background:linear-g
   body.nav-open .topbar { z-index:40; }
   .mobile-nav { position:relative; z-index:41; }
 }
+
+/* Hide protected admin data until the server verifies the administrator session. */
+body:not(.admin-session-ready) main>section:not(#overview){display:none}
+.mfa-enrollment[hidden]{display:none}
+.mfa-enrollment{margin-top:16px;padding:16px;border:1px solid var(--line);border-radius:14px;overflow-wrap:anywhere}
+.mfa-enrollment img{display:block;background:#fff;padding:8px;max-width:100%;height:auto}
+:focus-visible{outline:3px solid var(--cyan);outline-offset:3px}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}

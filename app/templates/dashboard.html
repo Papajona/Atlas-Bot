@@ -7,7 +7,7 @@
   <title>Atlas Trading OS · Admin Security</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
-<body>
+<body data-admin-totp-required="{{ 'true' if settings.admin_totp_required else 'false' }}">
 <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div><div class="grid-noise"></div>
 <div class="app-shell">
 <aside class="sidebar">
@@ -35,13 +35,13 @@
 
 <main>
 <section id="overview" class="toolbar panel command-bar">
-  <div class="field"><label>Admin email</label><input id="adminEmail" type="email" autocomplete="username" placeholder="admin@example.com"></div>
-  <div class="field"><label>Admin password</label><input id="adminPassword" type="password" autocomplete="current-password" placeholder="Supabase Auth password"></div>
+  <div class="field"><label for="adminEmail">Admin email</label><input id="adminEmail" type="email" autocomplete="username" placeholder="admin@example.com"></div>
+  <div class="field"><label for="adminPassword">Admin password</label><input id="adminPassword" type="password" autocomplete="current-password" placeholder="Supabase Auth password"></div>
   <button data-action="admin-login">Sign in</button>
   <button id="adminEnrollBtn" data-action="admin-enroll">Enroll Google Authenticator</button>
-  <div id="adminMfaBox" class="field" style="display:none"><label>Authenticator code</label><input id="adminMfaCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit code"></div>
+  <div id="adminMfaBox" class="field" style="display:none"><label for="adminMfaCode">Authenticator code</label><input id="adminMfaCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" aria-describedby="authState" placeholder="6-digit code"></div>
   <button id="adminMfaVerifyBtn" style="display:none" data-action="admin-mfa-verify">Verify Authenticator</button><button id="adminLogoutBtn" data-action="admin-logout" type="button" hidden>Sign out</button>
-  <span id="authState" class="muted">Production admin access requires Google Authenticator (TOTP).</span>
+  <span id="authState" class="muted" role="status" aria-live="polite" aria-atomic="true">Sign in to verify administrator access. Production requires Google Authenticator (TOTP).</span><div id="adminMfaEnrollment" class="mfa-enrollment" hidden><p>Scan this QR code with Google Authenticator, then enter the six-digit code above.</p><img id="adminMfaQr" alt="QR code for enrolling the administrator authenticator" width="240" height="240"><p><strong>Manual setup key</strong></p><code id="adminMfaSecret"></code></div>
 </section>
 
 <section class="grid cards kpi-grid">
@@ -74,7 +74,7 @@
     <button data-action="strategy-signal">Get strategy signal</button>
     <button data-action="paper-step">Execute paper step</button>
   </div>
-  <div class="strategy-badges"><span class="tag">Trend</span><span class="tag">Momentum</span><span class="tag">Breakout</span><span class="tag">Mean reversion</span><span class="tag">Volatility target</span></div><pre id="output">Ready.</pre>
+  <div class="strategy-badges"><span class="tag">Trend</span><span class="tag">Momentum</span><span class="tag">Breakout</span><span class="tag">Mean reversion</span><span class="tag">Volatility target</span></div><pre id="output" role="region" aria-label="Admin action results" aria-live="polite" aria-atomic="false" tabindex="0">Sign in to load protected dashboard data.</pre>
 </div>
 
 <div class="panel risk-panel" id="risk">
@@ -113,7 +113,7 @@
   </div>
   <div id="operatorIdentity" class="muted" role="status">Operator identities populate from the authenticated session. Approval and release must use separate people.</div>
   <div id="wdError" class="muted" role="status"></div>
-  <div class="table-wrap"><table><thead><tr><th>Request</th><th>Customer</th><th>Amount</th><th>Destination</th><th>Risk</th><th>Approvals</th><th>Status</th><th>Action</th></tr></thead><tbody id="withdrawalRows"></tbody></table></div>
+  <div class="table-wrap"><table><thead><tr><th>Request</th><th>Customer</th><th>Amount</th><th>Destination</th><th>Risk</th><th>Approvals</th><th>Status</th><th>Action</th></tr></thead><tbody id="withdrawalRows" aria-live="polite" aria-relevant="additions text"></tbody></table></div>
 </section>
 
 <section class="panel" id="security">
@@ -124,11 +124,11 @@
     <label>Active<select id="roleActive"><option value="true">Yes</option><option value="false">No</option></select></label>
   </div>
   <div class="actions"><button data-action="save-role">Save role</button></div>
-  <div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Active</th><th>Created</th></tr></thead><tbody id="roles"></tbody></table></div>
+  <div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Active</th><th>Created</th></tr></thead><tbody id="roles" aria-live="polite" aria-relevant="additions text"></tbody></table></div>
 </section>
 <section class="panel" id="executions">
   <div class="section-head"><div><div class="eyebrow">ORDER LIFECYCLE</div><h2>Tracked executions</h2></div><button data-action="reconcile">Reconcile broker</button></div>
-  <div class="table-wrap"><table><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Requested</th><th>Filled</th><th>Avg price</th><th>Mode</th><th>Status</th></tr></thead><tbody id="trades"></tbody></table></div>
+  <div class="table-wrap"><table><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Requested</th><th>Filled</th><th>Avg price</th><th>Mode</th><th>Status</th></tr></thead><tbody id="trades" aria-live="polite" aria-relevant="additions text"></tbody></table></div>
 </section>
 </main>
 </div></div>

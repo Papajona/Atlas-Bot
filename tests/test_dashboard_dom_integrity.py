@@ -53,5 +53,5 @@ def test_script_only_references_ids_that_exist(path):
 
 def test_withdrawal_rows_are_written_into_the_table_body_not_the_panel():
     markup, js = _split("app/templates/dashboard.html")
-    assert '<tbody id="withdrawalRows">' in markup
+    assert '<tbody id="withdrawalRows" aria-live="polite"' in markup
     assert "$('withdrawalRows').innerHTML=" in js

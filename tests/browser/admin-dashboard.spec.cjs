@@ -90,11 +90,18 @@ async function testAdminDashboard(browser, baseUrl) {
   let releaseCalls = 0;
   let lastRelease = null;
   let enrollCalls = 0;
+  let mfaStatusCalls = 0;
 
   await page.route("**/api/**", async route => {
     const req = route.request();
     const url = new URL(req.url());
     const pathname = url.pathname;
+    if (pathname.includes("/api/admin/auth/mfa/status")) {
+      mfaStatusCalls += 1;
+      // This test preloads a verified admin fixture token; the separate enrollment
+      // test below covers aal1 -> aal2 transitions and refusal before verification.
+      return json(route, { enabled: true, aal: "aal2", factor_count: 1, factor_ids: ["verified-factor-id"] });
+    }
     if (pathname === "/api/state") {
       return json(route, { mode: "PAPER", equity: 1000, realized_pnl: 0, unrealized_pnl: 0, drawdown: 0, daily_loss: 0, live_enabled: false, kill_switch: false, open_positions: [] });
     }
@@ -125,7 +132,16 @@ async function testAdminDashboard(browser, baseUrl) {
   const csp = response.headers()["content-security-policy"];
   assert.match(csp, /script-src 'self';/);
   assert.doesNotMatch(csp, /script-src[^;]*'unsafe-inline'/);
-  await page.locator("#operatorIdentity").waitFor({ state: "visible" });
+  await waitUntil(async () => await page.locator("#operatorIdentity").isVisible()).catch(async error => {
+    const diagnostic = await page.evaluate(() => ({
+      bodyClass: document.body.className,
+      mfaFlag: document.body.dataset.adminTotpRequired,
+      statusText: document.querySelector("#authState")?.textContent,
+      accessTokenPresent: !!sessionStorage.getItem("ait_admin_access_token"),
+      mfaVerified: sessionStorage.getItem("ait_admin_mfa_verified"),
+    }));
+    throw new Error(error.message + "; auth diagnostic=" + JSON.stringify({...diagnostic, mfaStatusCalls}));
+  });
   assert.equal(await page.locator("#adminId").inputValue(), "admin-user-1", "admin ID should follow the JWT subject");
   assert.equal(await page.locator("#releaseId").inputValue(), "admin-user-1", "release operator should follow the authenticated identity");
   assert.equal(await page.locator("#adminId").getAttribute("readonly"), "");
@@ -207,6 +223,13 @@ async function testAdminFirstTimeMfaEnrollment(browser, baseUrl) {
     if (p === "/api/admin/auth/login" && req.method() === "POST") {
       return json(route, { ok: true, access_token: beforeMfaToken, refresh_token: "test-refresh", mfa_required: true, totp_enrolled: false });
     }
+    if (p === "/api/admin/auth/mfa/status" && req.method() === "GET") {
+      const authorization = req.headers()["authorization"] || "";
+      if (authorization.includes(upgradedToken)) {
+        return json(route, { enabled: true, aal: "aal2", factor_count: 1, factor_ids: ["new-factor-id"] });
+      }
+      return json(route, { enabled: false, aal: "aal1", factor_count: 0, factor_ids: [] });
+    }
     if (p === "/api/admin/auth/mfa/enroll" && req.method() === "POST") {
       enrollBody = req.postDataJSON();
       return json(route, { id: "new-factor-id", totp: { secret: "TEST-ONLY-SECRET", qr_code: '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100"><rect width="100" height="100" fill="#fff"/><rect x="10" y="10" width="28" height="28" fill="#000"/><rect x="62" y="10" width="28" height="28" fill="#000"/><rect x="10" y="62" width="28" height="28" fill="#000"/></svg>' } });
@@ -236,12 +259,10 @@ async function testAdminFirstTimeMfaEnrollment(browser, baseUrl) {
   await waitUntil(async () => (await page.locator("#authState").innerText()).includes("Enroll Google Authenticator"));
   assert.equal(await page.locator("#adminEnrollBtn").isHidden(), false, "an unenrolled admin must be offered enrollment without entering the protected polling state");
 
-  const popupPromise = page.waitForEvent("popup");
   await page.getByRole("button", { name: "Enroll Google Authenticator" }).click();
-  const popup = await popupPromise;
-  await popup.locator("img[alt='Authenticator enrollment QR code']").waitFor();
-  await waitUntil(async () => popup.locator("img").evaluate(img => img.complete && img.naturalWidth > 0));
-  await waitUntil(async () => (await page.locator("#authState").innerText()).includes("six-digit authenticator code"));
+  await page.locator("#adminMfaQr").waitFor();
+  await waitUntil(async () => page.locator("#adminMfaQr").evaluate(img => img.complete && img.naturalWidth > 0));
+  await waitUntil(async () => (await page.locator("#authState").innerText()).includes("enter its six-digit code. Protected data remains locked."));
   assert.equal(await page.locator("#adminMfaBox").isVisible(), true);
   assert.equal(await page.locator("#adminMfaVerifyBtn").isVisible(), true);
   assert.equal(enrollBody && Object.keys(enrollBody).length, 0, "enrollment request must not send arbitrary factor metadata from the browser");
@@ -250,13 +271,12 @@ async function testAdminFirstTimeMfaEnrollment(browser, baseUrl) {
 
   await page.locator("#adminMfaCode").fill("123456");
   await page.locator("#adminMfaVerifyBtn").click();
-  await waitUntil(async () => (await page.locator("#authState").innerText()).includes("Administrator AAL2 session active"));
+  await waitUntil(async () => (await page.locator("#authState").innerText()).includes("Administrator session verified by the server"));
   assert.deepEqual(verifyBody, { factor_id: "new-factor-id", challenge_id: "new-challenge-id", code: "123456" });
   assert.equal(await page.evaluate(() => sessionStorage.getItem("ait_admin_mfa_verified")), "true");
   assert.equal(await page.evaluate(() => sessionStorage.getItem("ait_admin_access_token")), upgradedToken);
   assert.equal(await page.locator("#adminEnrollBtn").isHidden(), true, "enrollment must be hidden once MFA is verified");
   assert.deepEqual(pageErrors, [], "first-time admin enrollment flow must not throw browser JavaScript errors");
-  await popup.close();
   await page.close();
 }
 
@@ -329,6 +349,7 @@ async function testAdminHostileData(browser, baseUrl) {
   await page.route("**/api/**", async route => {
     const req = route.request();
     const pathname = new URL(req.url()).pathname;
+    if (pathname.includes("/api/admin/auth/mfa/status")) return json(route, { enabled: true, aal: "aal2", factor_count: 1, factor_ids: ["verified-factor-id"] });
     if (pathname === "/api/state") return json(route, { mode: "PAPER", equity: 1000, realized_pnl: 0, unrealized_pnl: 0, drawdown: 0, daily_loss: 0, live_enabled: false, kill_switch: false, open_positions: [] });
     if (pathname === "/api/trades") return json(route, [{ created_at: new Date().toISOString(), symbol: attack, side: attack, requested_quantity: 1, filled_quantity: 1, requested_price: 1, average_fill_price: 1, status: attack }]);
     if (pathname === "/api/admin/withdrawals/summary") return json(route, { pending_count: 2, pending_amount: 13.345678, approved_count: 0, approved_amount: 0, in_flight_count: 0, rejected_count: 0 });
