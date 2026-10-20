@@ -454,9 +454,16 @@ def build_customer_paper_router(
                 volatility = float(returns.std(ddof=0)) if len(returns) >= 2 else 0.0
                 if not math.isfinite(volatility) or volatility < 0:
                     raise HTTPException(409, "Market volatility estimate is invalid")
-                impact = float(settings.paper_market_impact_coefficient) * volatility * math.sqrt(
-                    max(0.0, float(Decimal(order["quantity"]) / max(values["volume"], Decimal("1e-18")))
-                ) * 10000.0
+                participation_for_impact = max(
+                    0.0,
+                    float(Decimal(order["quantity"]) / max(values["volume"], Decimal("1e-18"))),
+                )
+                impact = (
+                    float(settings.paper_market_impact_coefficient)
+                    * volatility
+                    * math.sqrt(participation_for_impact)
+                    * 10000.0
+                )
                 impact = min(max(0.0, float(settings.paper_max_market_impact_bps)), max(0.0, impact))
                 slippage_bps = max(0.0, float(profile.slippage_bps) + impact)
                 # A limit fill cannot be priced worse than its limit; market orders absorb adverse slippage.
