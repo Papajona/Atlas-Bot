@@ -218,7 +218,9 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
     # Repeating the same bar after a worker/client retry cannot consume extra volume.
     replay_attempt = post("/api/customer/paper/orders/shared-bar-order-b/advance", "customer-b")
     assert replay_attempt.status_code == 200, replay_attempt.text
-    assert replay_attempt.json()["status"] == "WAITING_FOR_BAR_CAPACITY"
+    assert replay_attempt.json()["status"] == "REPLAYED"
+    assert Decimal(replay_attempt.json()["fill"]["quantity"]) == Decimal("0.400000000000000000")
+    assert replay_attempt.json()["order"]["filled_quantity"] == "0.400000000000000000"
 
     # A later bar completes the remainder after restart/recovery by reading persisted state.
     market["bar_at"] = now + timedelta(minutes=2)
