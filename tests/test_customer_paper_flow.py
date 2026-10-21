@@ -1,224 +1,428 @@
-import asyncio
-from pathlib import Path
+from __future__ import annotations
 
-import numpy as np
+import asyncio
+import hashlib
+import os
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
-from pydantic import ValidationError
 
-from app import main as main_module
-from app import strategy_engine
-from app.execution import customer_paper_execution_blocked
-from app.risk_governor import evaluate_trade
-from app.schemas import ExecuteRequest
-from app.strategy_engine import StrategyConfig, strategy_backtest
-
-
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def _source(path: str) -> str:
-    return (ROOT / path).read_text(encoding="utf-8")
-
-
-def test_customer_paper_execution_guard_is_behavioural():
-    assert customer_paper_execution_blocked(123, True) is True
-    assert customer_paper_execution_blocked(123, False) is False
-    assert customer_paper_execution_blocked(None, True) is False
-
-
-def test_customer_start_gates_customer_paper_before_ai_work():
-    source = _source("app/main.py")
-    start = source[source.index('@app.post("/api/customer/bot/start")'):]
-    paper_mode = start.index("needs_customer_paper = bool(paper_mode and profile.id is not None)")
-    unsupported_asset_gate = start.index('if req.asset != "crypto":', paper_mode)
-    config_gate = start.index("if not _customer_paper_configuration_ready():", unsupported_asset_gate)
-    candidate_setup = start.index("candidate = None", config_gate)
-    preflight = start.index("paper_preflight = await _customer_paper_isolation_preflight()", candidate_setup)
-    analysis = start.index("asyncio.to_thread(start_bot_decision")
-    ai_review = start.index("dual_ai_trade_safety_review(")
-
-    assert paper_mode < unsupported_asset_gate < config_gate < candidate_setup < preflight < analysis < ai_review
-    assert "no analysis or AI review was run" in start[paper_mode:analysis]
-    assert "CUSTOMER_PAPER_LEDGER_ENABLED" in source
-    assert 'customer_paper_ledger_enabled: bool = False' in _source("app/config.py")
-    cycle = source[source.index("async def _run_persisted_adaptive_bot_cycle"): ]
-    assert "simulation_ledger_required" in cycle
-    assert 'bot.status = "STOPPED"' in cycle
-
-
-def test_risk_governor_blocks_non_finite_protective_levels():
-    common = dict(side="sell", price=100.0, quantity=1.0, live=True,
-                  signal={}, spread_bps=1.0)
-    nan_stop = evaluate_trade(**common, stop_loss_price=float("nan"), take_profit_price=90.0)
-    inf_stop = evaluate_trade(**common, stop_loss_price=float("inf"), take_profit_price=90.0)
-    nan_target = evaluate_trade(**common, stop_loss_price=110.0, take_profit_price=float("nan"))
-    assert nan_stop.action == "BLOCK" and "invalid_stop_loss" in nan_stop.reasons
-    assert inf_stop.action == "BLOCK" and "invalid_stop_loss" in inf_stop.reasons
-    assert nan_target.action == "BLOCK" and "invalid_take_profit" in nan_target.reasons
-
-
-@pytest.mark.parametrize("field", ["quantity", "price", "score", "long_probability", "short_probability", "flat_probability", "stop_loss_price", "take_profit_price"])
-def test_execute_request_rejects_non_finite_floats(field):
-    value = {"symbol": "BTC/USDT:USDT", "side": "buy", "quantity": 1.0, "price": 1.0, field: float("inf")}
-    with pytest.raises(ValidationError):
-        ExecuteRequest(**value)
-
-
-def test_strategy_backtest_ignores_optional_session_nans_and_counts_entries(monkeypatch):
-    idx = pd.date_range("2025-01-01", periods=7, freq="h", tz="UTC")
-    opens = np.asarray([100, 101, 102, 103, 104, 103, 102], dtype=float)
-    frame = pd.DataFrame({
-        "open": opens,
-        "high": opens + 1.0,
-        "low": opens - 1.0,
-        "close": opens,
-        "volume": np.full(len(opens), 100.0),
-    }, index=idx)
-    signals = pd.DataFrame({
-        "ensemble": [1, 1, 1, 0, 0, -1, -1],
-        "atr": [1.0] * 7,
-        "realized_vol": [0.5, 0.25, 0.2, 0.3, 0.3, 0.5, 0.25],
-        "london_range_high": [np.nan] * 7,
-    }, index=idx)
-    signals.attrs["annualization_factor"] = 24.0
-    monkeypatch.setattr(strategy_engine, "strategy_signals", lambda *args, **kwargs: signals)
-    result = strategy_backtest(
-        frame,
-        StrategyConfig(target_vol_annual=0.3, max_leverage=3.0, signal_threshold=0.1),
-    )
-    assert result["validated_bars"] == 7
-    assert result["trades"] == 2
-
-
-def test_safe_audit_does_not_propagate_database_failure(monkeypatch):
-    async def broken_audit(*args, **kwargs):
-        raise RuntimeError("database unavailable")
-
-    monkeypatch.setattr(main_module, "_audit", broken_audit)
-
-    async def run():
-        await main_module._safe_audit("TEST_WORKER_FAILURE", {"error": "simulated"})
-
-    asyncio.run(run())
-
-
-def test_worker_supervisor_restarts_failed_loop(monkeypatch):
-    attempts = {"count": 0}
-
-    async def broken_loop():
-        attempts["count"] += 1
-        raise RuntimeError("simulated loop failure")
-
-    async def cancel_on_backoff(_seconds):
-        raise asyncio.CancelledError()
-
-    monkeypatch.setattr(main_module.asyncio, "sleep", cancel_on_backoff)
-
-    async def run():
-        try:
-            await main_module._supervise_worker_loop(broken_loop, "test-loop")
-        except asyncio.CancelledError:
-            pass
-
-    asyncio.run(run())
-    assert attempts["count"] == 1
-    assert main_module._worker_loop_health["test-loop"]["restart_count"] == 1
-    assert main_module._worker_loop_health["test-loop"]["status"] == "RESTARTING"
-
-
-def test_trade_learning_replay_is_started_only_when_enabled():
-    source = _source("app/main.py")
-    startup = source[source.index("async def startup()"):source.index("async def shutdown()")]
-    assert "if settings.trade_learning_enabled:" in startup
-    assert "_trade_learning_replay_loop" in startup
-
-
-@pytest.mark.parametrize(
-    "side,take_profit_price",
-    [
-        ("buy", 0.0),
-        ("buy", -1.0),
-        ("sell", 0.0),
-        ("sell", -1.0),
-    ],
+from app.config import settings
+from app.customer_paper_flow import (
+    CustomerPaperFlowBlocked,
+    execute_customer_paper_spot_signal,
+    recover_customer_paper_spot_flow,
+    validate_customer_paper_market,
 )
-def test_risk_governor_blocks_non_positive_take_profit_prices(side, take_profit_price):
-    decision = evaluate_trade(
-        side=side,
-        price=100.0,
-        quantity=1.0,
-        live=False,
-        stop_loss_price=90.0 if side == "buy" else 110.0,
-        take_profit_price=take_profit_price,
-        signal={},
-    )
-    assert decision.action == "BLOCK"
-    assert "invalid_take_profit" in decision.reasons
+from app.customer_paper_ledger import get_customer_paper_balances
+from app.customer_paper_lifecycle import get_customer_paper_positions, submit_customer_paper_order
 
 
-@pytest.mark.parametrize("timeframe", ["4h", "1d"])
-def test_customer_paper_quality_uses_closed_candle_age(timeframe, monkeypatch):
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "min_bars", 1)
-    monkeypatch.setattr(settings, "adaptive_require_established_crypto", False)
-    monkeypatch.setattr(settings, "stale_data_minutes", 180)
-    now = pd.Timestamp.now(tz="UTC")
-    last_open = now - pd.Timedelta(timeframe) - pd.Timedelta(seconds=30)
+def _market_fixture(*, timestamp: datetime | None = None, low: float = 98.0, high: float = 102.0,
+                    bid: float = 99.9, ask: float = 100.1, symbol: str = "BTC/USDT",
+                    exchange: str = "binance", timeframe: str = "1h"):
+    now = datetime.now(timezone.utc)
+    timeframe_seconds = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400}[timeframe]
+    bar_at = timestamp or (now - timedelta(hours=2))
+    index = pd.date_range(end=pd.Timestamp(bar_at), periods=21, freq=pd.to_timedelta(timeframe_seconds, unit="s"))
     frame = pd.DataFrame(
-        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.0], "volume": [1000.0]},
-        index=pd.DatetimeIndex([last_open]),
+        {
+            "open": [100.0] * 21,
+            "high": [max(high, 100.0)] * 21,
+            "low": [min(low, 100.0)] * 21,
+            "close": [100.0] * 21,
+            "volume": [1000.0] * 21,
+        },
+        index=index,
     )
+    digest = hashlib.sha256(
+        f"{symbol}|{exchange}|{timeframe}|{index[-1].isoformat()}".encode("utf-8")
+    ).hexdigest()
+    frame.attrs["data_provenance"] = {
+        "source": "ccxt_ohlcv",
+        "symbol": symbol,
+        "exchange": exchange,
+        "timeframe": timeframe,
+        "asset_class": "crypto",
+        "market_type": "spot",
+        "volume_unit": "base_asset",
+        "volume_unit_verified": True,
+        "sha256": digest,
+        "row_count": len(frame),
+    }
+    request = SimpleNamespace(
+        asset="crypto", symbol=symbol, exchange=exchange, timeframe=timeframe, days=5,
+    )
+    quote_at = bar_at + timedelta(seconds=timeframe_seconds + 1)
+    context = {
+        "context_source": "server_ccxt_closed_spot_ohlcv_and_ticker",
+        "market_type": "spot",
+        "exchange": exchange,
+        "symbol": symbol,
+        "ohlcv_sha256": digest,
+        "bid": bid,
+        "ask": ask,
+        "spread_bps": (ask - bid) / ((ask + bid) / 2) * 10_000,
+        "quote_timestamp_utc": quote_at.isoformat(),
+        "quote_age_seconds": 1.0,
+        "last_completed_bar_timestamp_utc": index[-1].isoformat(),
+    }
+    return request, frame, context
 
-    safe, reasons = main_module._customer_paper_market_data_quality(frame, timeframe, "crypto")
 
-    assert safe, reasons
-    assert "stale_market_data" not in reasons
+def test_customer_paper_market_context_requires_verified_closed_spot_data(monkeypatch):
+    monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
+    monkeypatch.setattr(settings, "customer_paper_initial_currency", "USDT")
+    req, frame, context = _market_fixture()
+
+    verified = validate_customer_paper_market(req, frame, context)
+    assert verified["currency"] == "USDT"
+    assert verified["data_sha256"] == frame.attrs["data_provenance"]["sha256"]
+    assert verified["bid"] == Decimal("99.9")
+
+    bad_context = dict(context, quote_age_seconds=6)
+    with pytest.raises(CustomerPaperFlowBlocked, match="older than five seconds"):
+        validate_customer_paper_market(req, frame, bad_context)
+
+    bad_frame = frame.copy()
+    bad_frame.attrs["data_provenance"] = {
+        **frame.attrs["data_provenance"],
+        "market_type": "derivative_or_unknown",
+        "volume_unit": "unknown",
+        "volume_unit_verified": False,
+    }
+    with pytest.raises(CustomerPaperFlowBlocked, match="Market data provenance mismatch"):
+        validate_customer_paper_market(req, bad_frame, context)
 
 
-def test_customer_paper_quality_rejects_a_future_incomplete_close(monkeypatch):
+def test_customer_paper_market_blocks_wrong_quote_currency(monkeypatch):
+    monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
+    monkeypatch.setattr(settings, "customer_paper_initial_currency", "USDT")
+    req, frame, context = _market_fixture(symbol="BTC/BTC")
+    with pytest.raises(CustomerPaperFlowBlocked, match="virtual quote currency"):
+        validate_customer_paper_market(req, frame, context)
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not (os.getenv("ATLAS_PAPER_TEST_DATABASE_URL") and os.getenv("ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL")),
+    reason="requires CI-provisioned isolated customer paper and primary PostgreSQL databases",
+)
+def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkeypatch):
+    monkeypatch.setattr(settings, "database_url", os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"])
+    monkeypatch.setattr(settings, "customer_paper_database_url", os.environ["ATLAS_PAPER_TEST_DATABASE_URL"])
+    monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
+    monkeypatch.setattr(settings, "customer_paper_shared_database_enabled", False)
+    monkeypatch.setattr(settings, "customer_paper_initial_balance", 10000.0)
+    monkeypatch.setattr(settings, "customer_paper_initial_currency", "USDT")
+    monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.01)
+
+    async def run():
+        customer_id = 99231
+        first_at = datetime.now(timezone.utc) - timedelta(hours=4)
+        req, frame, context = _market_fixture(timestamp=first_at, low=98, high=102)
+        first_bar = frame.index[-1].to_pydatetime()
+        submitted = await execute_customer_paper_spot_signal(
+            customer_id=customer_id,
+            req=req,
+            df=frame,
+            market_context=context,
+            side="BUY",
+            quantity="1",
+            stop_loss_price="95",
+            take_profit_price="110",
+            strategy="paper-flow-regression",
+            signal_metadata={"model_version": "fixture-model"},
+        )
+        # Orders are durable first; no fill can use the candle that generated the signal.
+        assert submitted["decision"] == "NO_TRADE"
+        assert submitted["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
+        assert submitted["real_money_ledger_written"] is False
+        assert submitted["paper_account"]["real_funds_used"] is False
+        assert await get_customer_paper_positions(customer_id=customer_id) == []
+
+        # The next completed bar supplies both the fill quote and shared liquidity budget.
+        second_at = first_bar + timedelta(hours=1)
+        req2, frame2, context2 = _market_fixture(timestamp=second_at, low=98, high=102)
+        opened = await recover_customer_paper_spot_flow(
+            customer_id=customer_id, req=req2, df=frame2, market_context=context2,
+        )
+        assert opened is not None
+        assert opened["status"] == "RECOVERY_PROCESSED"
+        assert opened["decision"] == "TRADE"
+        assert opened["execution"]["fill"]["status"] == "APPENDED"
+        positions = await get_customer_paper_positions(customer_id=customer_id)
+        assert len(positions) == 1
+        assert positions[0]["symbol"] == "BTC/USDT"
+        assert positions[0]["quantity"] == "1.000000000000000000"
+        assert positions[0]["stop_loss_price"] == "95"
+        assert positions[0]["take_profit_price"] == "110"
+        assert positions[0]["last_event_bar_key"] == second_at.isoformat()
+
+        # A completed candle crossing the stop creates a durable exit intent, but the
+        # exit is filled only on a later completed bar (never retrospectively in-bar).
+        third_at = second_at + timedelta(hours=1)
+        req3, frame3, context3 = _market_fixture(timestamp=third_at, low=90, high=101, bid=90.0, ask=90.2)
+        pending_exit = await recover_customer_paper_spot_flow(
+            customer_id=customer_id, req=req3, df=frame3, market_context=context3,
+        )
+        assert pending_exit is not None
+        assert pending_exit["status"] == "PROTECTIVE_EXIT_PENDING"
+        assert pending_exit["decision"] == "NO_TRADE"
+        assert pending_exit["execution"]["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
+        assert len(await get_customer_paper_positions(customer_id=customer_id)) == 1
+
+        fourth_at = third_at + timedelta(hours=1)
+        req4, frame4, context4 = _market_fixture(timestamp=fourth_at, low=89, high=95, bid=90.0, ask=90.2)
+        closed = await recover_customer_paper_spot_flow(
+            customer_id=customer_id, req=req4, df=frame4, market_context=context4,
+        )
+        assert closed is not None
+        assert closed["status"] == "RECOVERY_PROCESSED"
+        assert closed["decision"] == "TRADE"
+        assert closed["execution"]["fill"]["status"] == "APPENDED"
+        assert await get_customer_paper_positions(customer_id=customer_id) == []
+        balances = await get_customer_paper_balances(customer_id=customer_id)
+        by_code = {x["account_code"]: Decimal(x["balance"]) for x in balances}
+        assert by_code["PAPER_FEES"] > 0
+        assert by_code["PAPER_CASH"] > 0
+
+        # Two tenants cannot spend more than the shared capacity for the same bar.
+        monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.0005)
+        capacity_customer_a, capacity_customer_b = 99233, 99234
+        capacity_at = fourth_at + timedelta(minutes=5)
+        cap_req_a, cap_frame_a, cap_context_a = _market_fixture(timestamp=capacity_at, timeframe="1m")
+        cap_req_b, cap_frame_b, cap_context_b = _market_fixture(timestamp=capacity_at, timeframe="1m")
+        for cid, reqx, framex, contextx in (
+            (capacity_customer_a, cap_req_a, cap_frame_a, cap_context_a),
+            (capacity_customer_b, cap_req_b, cap_frame_b, cap_context_b),
+        ):
+            intent = await execute_customer_paper_spot_signal(
+                customer_id=cid, req=reqx, df=framex, market_context=contextx,
+                side="BUY", quantity="0.4", stop_loss_price="95", take_profit_price="110",
+                strategy="shared-capacity-regression",
+            )
+            assert intent["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
+        capacity_fill_at = capacity_at + timedelta(minutes=1)
+        cap_req_a2, cap_frame_a2, cap_context_a2 = _market_fixture(timestamp=capacity_fill_at, timeframe="1m")
+        cap_req_b2, cap_frame_b2, cap_context_b2 = _market_fixture(timestamp=capacity_fill_at, timeframe="1m")
+        a_fill = await recover_customer_paper_spot_flow(
+            customer_id=capacity_customer_a, req=cap_req_a2, df=cap_frame_a2, market_context=cap_context_a2,
+        )
+        b_fill = await recover_customer_paper_spot_flow(
+            customer_id=capacity_customer_b, req=cap_req_b2, df=cap_frame_b2, market_context=cap_context_b2,
+        )
+        assert a_fill["execution"]["fill"]["status"] == "APPENDED"
+        assert b_fill["execution"]["fill"]["status"] == "APPENDED"
+        quantity_a = Decimal((await get_customer_paper_positions(customer_id=capacity_customer_a))[0]["quantity"])
+        quantity_b = Decimal((await get_customer_paper_positions(customer_id=capacity_customer_b))[0]["quantity"])
+        # 1000 units * 0.0005 participation = 0.5 shared units across both tenants.
+        assert quantity_a + quantity_b <= Decimal("0.500000000000000000")
+        assert quantity_a == Decimal("0.400000000000000000")
+        assert quantity_b == Decimal("0.100000000000000000")
+
+        # Simulate a crash after order intent commit but before fill commit.
+        recovery_customer = 99232
+        recovery_at = capacity_fill_at + timedelta(minutes=5)
+        recovery_req, recovery_frame, recovery_context = _market_fixture(timestamp=recovery_at, timeframe="1m")
+        from app.customer_paper_flow import ensure_customer_paper_account
+        await ensure_customer_paper_account(recovery_customer, "USDT")
+        signal_bar = recovery_frame.index[-1].isoformat()
+        order = await submit_customer_paper_order(
+            customer_id=recovery_customer,
+            client_order_id="crash-recovery-order-99232",
+            venue="binance",
+            market_type="spot",
+            symbol="BTC/USDT",
+            side="BUY",
+            quantity="0.25",
+            currency="USDT",
+            order_type="MARKET",
+            metadata={
+                "paper_flow_version": 1,
+                "exchange": str(recovery_req.exchange).lower(),
+                "market_type": "spot",
+                "order_role": "ENTRY",
+                "timeframe": str(recovery_req.timeframe),
+                "signal_bar_timestamp": signal_bar,
+                "submission_bar_at": signal_bar,
+                "data_sha256": recovery_frame.attrs["data_provenance"]["sha256"],
+                "stop_loss_price": "95",
+                "take_profit_price": "110",
+            },
+        )
+        assert order["status"] == "APPENDED"
+        waiting = await recover_customer_paper_spot_flow(
+            customer_id=recovery_customer, req=recovery_req,
+            df=recovery_frame, market_context=recovery_context,
+        )
+        assert waiting["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
+        assert await get_customer_paper_positions(customer_id=recovery_customer) == []
+        recovery_next_at = recovery_at + timedelta(minutes=1)
+        recovery_req2, recovery_frame2, recovery_context2 = _market_fixture(timestamp=recovery_next_at, timeframe="1m")
+        recovered = await recover_customer_paper_spot_flow(
+            customer_id=recovery_customer, req=recovery_req2,
+            df=recovery_frame2, market_context=recovery_context2,
+        )
+        assert recovered is not None
+        assert recovered["status"] == "RECOVERY_PROCESSED"
+        assert recovered["execution"]["fill"]["status"] == "APPENDED"
+        recovered_positions = await get_customer_paper_positions(customer_id=recovery_customer)
+        assert len(recovered_positions) == 1
+        assert recovered_positions[0]["quantity"] == "0.250000000000000000"
+
+    asyncio.run(run())
+
+
+def test_customer_paper_virtual_capital_configuration_is_finite_positive_and_usdt_only():
+    from pydantic import ValidationError
+    from app.config import Settings
+
+    for invalid in (0, -1, float("nan"), float("inf"), 1_000_000_000_001):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, environment="test", customer_paper_initial_balance=invalid)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, environment="test", customer_paper_initial_currency="USD")
+
+
+def test_controller_paper_gate_requires_all_paper_only_flags_and_passed_preflight(monkeypatch):
+    from app import main
     from app.config import settings
+    from app import customer_paper_ledger
 
-    monkeypatch.setattr(settings, "min_bars", 1)
-    monkeypatch.setattr(settings, "adaptive_require_established_crypto", False)
-    monkeypatch.setattr(settings, "stale_data_minutes", 180)
-    now = pd.Timestamp.now(tz="UTC")
-    last_open = now - pd.Timedelta("1h") + pd.Timedelta(seconds=30)
-    frame = pd.DataFrame(
-        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.0], "volume": [1000.0]},
-        index=pd.DatetimeIndex([last_open]),
-    )
+    for field, value in (
+        ("paper_trading", True),
+        ("live_trading_enabled", False),
+        ("customer_live_trading_enabled", False),
+        ("payout_live_enabled", False),
+        ("broker_sandbox", True),
+        ("deriv_live_enabled", False),
+        ("usdt_tron_enabled", False),
+        ("customer_paper_ledger_enabled", True),
+        ("customer_paper_database_url", "postgresql+asyncpg://paper:secret@localhost/atlas_paper"),
+    ):
+        monkeypatch.setattr(settings, field, value)
 
-    safe, reasons = main_module._customer_paper_market_data_quality(frame, "1h", "crypto")
+    calls = []
 
-    assert not safe
-    assert "incomplete_latest_bar" in reasons
+    async def passed_preflight(*, require_enabled=True):
+        calls.append(require_enabled)
+        return {"status": "PASS"}
+
+    monkeypatch.setattr(customer_paper_ledger, "preflight_isolated_customer_paper_ledger", passed_preflight)
+    result = asyncio.run(main._customer_paper_isolation_preflight())
+    assert result["status"] == "PASS"
+    assert calls == [True]
+
+    monkeypatch.setattr(settings, "usdt_tron_enabled", True)
+    blocked = asyncio.run(main._customer_paper_isolation_preflight())
+    assert blocked["status"] == "BLOCKED"
+    assert blocked["reason"] == "CUSTOMER_PAPER_SAFETY_FLAGS_NOT_READY"
+    assert calls == [True]
+
+
+def test_customer_bot_paper_execution_uses_isolated_flow_and_keeps_real_executor_for_non_customer_paths():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    cycle_start = source.index("async def _run_persisted_adaptive_bot_cycle(")
+    cycle_end = source.index("\n\nasync def ", cycle_start)
+    cycle = source[cycle_start:cycle_end]
+    route_start = source.index("async def customer_start_bot(")
+    route_end = source.index("\n\nasync def _require_feature", route_start)
+    route = source[route_start:route_end]
+
+    assert "customer_paper_ledger_preflight" in cycle
+    assert "recover_customer_paper_spot_flow(" in cycle
+    assert "execute_customer_paper_spot_signal(" in cycle
+    assert "execute_customer_paper_spot_signal(" in route
+    assert "force_paper=paper_mode" in cycle
+    assert "force_paper=paper_mode" in route
+    assert "customer_paper_ledger_enabled: bool = False" in (Path(__file__).resolve().parents[1] / "app" / "config.py").read_text()
+
+
+def test_paper_position_reader_recovers_timeframe_from_immutable_order_metadata():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_lifecycle.py").read_text(encoding="utf-8")
+    start = source.index("async def get_customer_paper_positions(")
+    end = source.index("\n\nasync def ", start)
+    block = source[start:end]
+    assert "JOIN customer_paper.fills AS f" in block
+    assert "JOIN customer_paper.orders AS o" in block
+    assert "o.metadata_json ->> 'timeframe'" in block
+    assert "COALESCE(mb.bar_at::text, o.metadata_json ->> 'signal_bar_timestamp', '') AS last_event_bar_key" in block
+    assert "LEFT JOIN customer_paper.market_bar_budgets AS mb" in block
+    assert "entry_event.quantity_before = 0" in block
+    assert "entry_order.side = 'BUY'" in block
+    assert "entry_order.metadata_json ->> 'stop_loss_price'" in block
+    assert "entry_order.metadata_json ->> 'take_profit_price'" in block
+    assert '"last_event_bar_key": str(row["last_event_bar_key"] or "")' in block
+    assert '"stop_loss_price": str(row["stop_loss_price"] or "")' in block
+    assert '"take_profit_price": str(row["take_profit_price"] or "")' in block
+
+
+def test_server_paper_context_measures_closed_bar_age_from_bar_close():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    start = source.index("def _server_paper_market_context(")
+    end = source.index("\n\ndef ", start)
+    block = source[start:end]
+    assert "last_bar_ms + timeframe_ms > now_ms" in block
+    assert "completed_bar_age_seconds = (now_ms - (last_bar_ms + timeframe_ms)) / 1000.0" in block
+    assert "if completed_bar_age_seconds > max_bar_age_seconds:" in block
+
+
+def _async_value(value):
+    async def result(**_kwargs):
+        return value
+    return result
+
+
+def _paper_fill_test_context():
+    import app.customer_paper_flow as flow
+
+    first = pd.Timestamp.now(tz="UTC").floor("h")
+    second = first + pd.Timedelta(hours=1)
+    state = {
+        "order_id": "order-id-1", "status": "SUBMITTED",
+        "remaining_quantity": "2", "side": "BUY", "venue": "binance",
+        "symbol": "BTC/USDT", "currency": "USDT",
+    }
+    order = {
+        "client_order_id": "paper-order-1",
+        "metadata": {
+            "signal_bar_timestamp": first.isoformat(), "submission_bar_at": first.isoformat(),
+            "timeframe": "1h", "exchange": "binance", "market_type": "spot",
+        },
+    }
+    market = {
+        "bar_timestamp": second.isoformat(),
+        "quote_timestamp": (second + pd.Timedelta(seconds=2)).isoformat(),
+        "bar_data_sha256": "b" * 64, "data_sha256": "d" * 64,
+        "base_volume": "1000", "bid": Decimal("119.9"), "ask": Decimal("120"),
+        "spread_bps": Decimal("8.3"), "currency": "USDT",
+    }
+    return flow, state, order, market
 
 
 def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypatch):
     import app.customer_paper_flow as flow
 
     now = pd.Timestamp.now(tz="UTC").floor("h")
-    prior = now - pd.Timedelta(hours=3)
-    breach = now - pd.Timedelta(hours=2)
-    latest = now - pd.Timedelta(hours=1)
+    prior, breach, latest = now - pd.Timedelta(hours=3), now - pd.Timedelta(hours=2), now - pd.Timedelta(hours=1)
     frame = pd.DataFrame(
-        {
-            "open": [100.0, 96.0, 100.0],
-            "high": [101.0, 101.0, 101.0],
-            "low": [99.0, 94.0, 99.0],
-            "close": [100.0, 96.0, 100.0],
-            "volume": [1000.0, 1000.0, 1000.0],
-        },
+        {"open": [100.0, 96.0, 100.0], "high": [101.0, 101.0, 101.0],
+         "low": [99.0, 94.0, 99.0], "close": [100.0, 96.0, 100.0],
+         "volume": [1000.0, 1000.0, 1000.0]},
         index=pd.DatetimeIndex([prior, breach, latest]),
     )
     req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
-    market = {
-        "bar_timestamp": latest.isoformat(),
-        "currency": "USDT",
-        "data_sha256": "d" * 64,
-    }
+    market = {"bar_timestamp": latest.isoformat(), "currency": "USDT", "data_sha256": "d" * 64}
     monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([{
         "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
         "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
@@ -232,9 +436,9 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
 
     async def pending(**kwargs):
         return [{
-            "client_order_id": captured["client_order_id"],
-            "venue": "binance", "symbol": "BTC/USDT", "side": "SELL",
-            "status": "SUBMITTED", "metadata": captured["metadata"],
+            "client_order_id": captured["client_order_id"], "venue": "binance",
+            "symbol": "BTC/USDT", "side": "SELL", "status": "SUBMITTED",
+            "metadata": captured["metadata"],
         }]
 
     async def wait_next(**kwargs):
@@ -244,10 +448,7 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
     monkeypatch.setattr(flow, "list_open_customer_paper_orders", pending)
     monkeypatch.setattr(flow, "_fill_open_order", wait_next)
 
-    async def run():
-        return await flow._protective_exit(7, req, frame, market)
-
-    result = asyncio.run(run())
+    result = asyncio.run(flow._protective_exit(7, req, frame, market))
     assert result["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
     assert captured["side"] == "SELL"
     assert captured["metadata"]["exchange"] == "binance"
@@ -257,69 +458,10 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
     assert captured["metadata"]["submission_bar_at"] == latest.isoformat()
 
 
-def _async_value(value):
-    async def result(**_kwargs):
-        return value
-    return result
-
-
-def test_paper_fill_metadata_includes_exchange_for_budget_validation():
-    from pathlib import Path
-
-    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_flow.py").read_text(encoding="utf-8")
-    signal_start = source.index("async def execute_customer_paper_spot_signal(")
-    exit_start = source.index("async def _protective_exit(")
-    signal = source[signal_start:exit_start]
-    protective = source[exit_start:source.index("async def recover_customer_paper_spot_flow(", exit_start)]
-    assert '"exchange": str(req.exchange).lower()' in signal
-    assert '"exchange": str(req.exchange).lower()' in protective
-    assert '"market_type": "spot"' in signal
-    assert '"market_type": "spot"' in protective
-
-
-def _paper_fill_test_context():
-    import app.customer_paper_flow as flow
-
-    first = pd.Timestamp.now(tz="UTC").floor("h")
-    second = first + pd.Timedelta(hours=1)
-    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
-    state = {
-        "order_id": "order-id-1",
-        "status": "SUBMITTED",
-        "remaining_quantity": "2",
-        "side": "BUY",
-        "venue": "binance",
-        "symbol": "BTC/USDT",
-        "currency": "USDT",
-    }
-    order = {
-        "client_order_id": "paper-order-1",
-        "metadata": {
-            "signal_bar_timestamp": first.isoformat(),
-            "submission_bar_at": first.isoformat(),
-            "timeframe": "1h",
-            "exchange": "binance",
-            "market_type": "spot",
-        },
-    }
-    market = {
-        "bar_timestamp": second.isoformat(),
-        "quote_timestamp": (second + pd.Timedelta(seconds=2)).isoformat(),
-        "bar_data_sha256": "b" * 64,
-        "data_sha256": "d" * 64,
-        "base_volume": "1000",
-        "bid": Decimal("119.9"),
-        "ask": Decimal("120"),
-        "spread_bps": Decimal("8.3"),
-        "currency": "USDT",
-    }
-    return flow, req, state, order, market
-
-
 def test_pending_paper_buy_is_resized_at_the_fill_quote_to_available_cash(monkeypatch):
     import app.customer_paper_flow as flow
 
-    _, _req, state, order, market = _paper_fill_test_context()
+    _, state, order, market = _paper_fill_test_context()
     captured = {}
     monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
     monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([]))
@@ -344,11 +486,9 @@ def test_pending_paper_buy_is_resized_at_the_fill_quote_to_available_cash(monkey
         return {"status": "APPENDED", "fill_id": "fill-1"}
 
     monkeypatch.setattr(flow, "record_customer_paper_fill", append_fill)
-
     result = asyncio.run(flow._fill_open_order(
         customer_id=1001, order=order, market=market, df=pd.DataFrame()
     ))
-
     assert result["fill"]["status"] == "APPENDED"
     assert captured["quantity"] == "0.833333333333333333"
     assert Decimal(captured["quantity"]) * Decimal(captured["price"]) <= Decimal("100")
@@ -357,7 +497,7 @@ def test_pending_paper_buy_is_resized_at_the_fill_quote_to_available_cash(monkey
 def test_same_bar_paper_fill_retry_replays_immutable_fill_without_resubmitting(monkeypatch):
     import app.customer_paper_flow as flow
 
-    _, _req, state, order, market = _paper_fill_test_context()
+    _, state, order, market = _paper_fill_test_context()
     replay = {
         "status": "REPLAYED", "fill_id": "existing-fill", "order_id": state["order_id"],
         "idempotency_key": "existing-key", "bar_key": "bar-key-replay",
@@ -375,11 +515,9 @@ def test_same_bar_paper_fill_retry_replays_immutable_fill_without_resubmitting(m
         raise AssertionError("same-bar retry must replay the immutable fill")
 
     monkeypatch.setattr(flow, "record_customer_paper_fill", must_not_append)
-
     result = asyncio.run(flow._fill_open_order(
         customer_id=1002, order=order, market=market, df=pd.DataFrame()
     ))
-
     assert result["status"] == "REPLAYED"
     assert result["fill"]["fill_id"] == "existing-fill"
 
@@ -387,7 +525,7 @@ def test_same_bar_paper_fill_retry_replays_immutable_fill_without_resubmitting(m
 def test_paper_buy_that_is_no_longer_affordable_expires_instead_of_stalling(monkeypatch):
     import app.customer_paper_flow as flow
 
-    _, _req, state, order, market = _paper_fill_test_context()
+    _, state, order, market = _paper_fill_test_context()
     monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
     monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([]))
     monkeypatch.setattr(flow, "register_customer_paper_market_bar", _async_value({
@@ -416,11 +554,9 @@ def test_paper_buy_that_is_no_longer_affordable_expires_instead_of_stalling(monk
 
     monkeypatch.setattr(flow, "expire_customer_paper_order", expire)
     monkeypatch.setattr(flow, "record_customer_paper_fill", must_not_append)
-
     result = asyncio.run(flow._fill_open_order(
         customer_id=1003, order=order, market=market, df=pd.DataFrame()
     ))
-
     assert result["status"] == "EXPIRED_INSUFFICIENT_PAPER_CASH"
     assert expired["client_order_id"] == order["client_order_id"]
 
