@@ -1211,7 +1211,6 @@ async def _run_persisted_adaptive_bot_cycle(
                 signal_metadata={
                     "model_version": str(ml_signal.get("model_version") or model_meta.get("model_version") or ""),
                     "strategy_version": "atlas-adaptive-autonomous-v1",
-                    "decision_id": str(decision_id or ""),
                 },
             )
         except CustomerPaperFlowBlocked as exc:
