@@ -360,7 +360,7 @@ def test_paper_position_reader_recovers_timeframe_from_immutable_order_metadata(
     assert "entry_order.side = 'BUY'" in block
     assert "entry_order.metadata_json ->> 'stop_loss_price'" in block
     assert "entry_order.metadata_json ->> 'take_profit_price'" in block
-    assert '"last_event_bar_key": str(row["last_event_bar_key"] or "")' in block
+    assert '"last_event_bar_key": _canonical_timestamp_text(row["last_event_bar_key"])' in block
     assert '"stop_loss_price": str(row["stop_loss_price"] or "")' in block
     assert '"take_profit_price": str(row["take_profit_price"] or "")' in block
 
