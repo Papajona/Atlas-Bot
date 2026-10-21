@@ -200,3 +200,28 @@ def test_recovered_paper_trade_audit_only_emits_for_new_fill():
     source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
     guard = 'and str(((recovered.get("execution") or {}).get("fill") or {}).get("status") or "").upper() == "APPENDED"'
     assert source.count(guard) == 2
+
+
+@pytest.mark.parametrize(
+    ("timeframe", "time_after_close"),
+    [("4h", pd.Timedelta(hours=4)), ("1d", pd.Timedelta(hours=12))],
+)
+def test_customer_paper_quality_allows_closed_slow_candles_with_fresh_quote_window(
+    timeframe, time_after_close, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "min_bars", 1)
+    monkeypatch.setattr(settings, "adaptive_require_established_crypto", False)
+    monkeypatch.setattr(settings, "stale_data_minutes", 180)
+    now = pd.Timestamp.now(tz="UTC")
+    bar_open = now - pd.Timedelta(timeframe) - time_after_close
+    frame = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.0], "volume": [1000.0]},
+        index=pd.DatetimeIndex([bar_open]),
+    )
+
+    safe, reasons = main_module._customer_paper_market_data_quality(frame, timeframe, "crypto")
+
+    assert safe, reasons
+    assert "stale_market_data" not in reasons
