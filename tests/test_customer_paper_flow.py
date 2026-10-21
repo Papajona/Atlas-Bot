@@ -629,3 +629,30 @@ def test_concurrent_paper_cash_spend_expires_unaffordable_pending_buy(monkeypatc
     assert result["status"] == "EXPIRED_INSUFFICIENT_PAPER_CASH"
     assert expired["client_order_id"] == order["client_order_id"]
     assert expired["idempotency_key"].startswith("paper-cash-race-")
+
+
+def test_pending_paper_sell_expires_when_position_was_closed_elsewhere(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    _, state, order, market = _paper_fill_test_context()
+    state["side"] = "SELL"
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([]))
+    expired = {}
+
+    async def expire(**kwargs):
+        expired.update(kwargs)
+        return {"status": "EXPIRED"}
+
+    async def must_not_register(**kwargs):
+        raise AssertionError("no market budget is needed for a SELL with no open position")
+
+    monkeypatch.setattr(flow, "expire_customer_paper_order", expire)
+    monkeypatch.setattr(flow, "register_customer_paper_market_bar", must_not_register)
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=1005, order=order, market=market, df=pd.DataFrame()
+    ))
+
+    assert result["status"] == "EXPIRED_NO_OPEN_POSITION"
+    assert result["fill"]["status"] == "EXPIRED"
+    assert expired["client_order_id"] == order["client_order_id"]
