@@ -1,6 +1,8 @@
 name: Supabase Staging Identity Preflight
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -13,7 +15,7 @@ concurrency:
 
 jobs:
   verify-staging-identity:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, '[atlas-branch-prune-reviewed-once-20261020]'))
     runs-on: ubuntu-latest
     environment: staging
     steps:
