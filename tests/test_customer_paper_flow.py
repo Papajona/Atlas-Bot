@@ -160,7 +160,7 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
         assert positions[0]["quantity"] == "1.000000000000000000"
         assert positions[0]["stop_loss_price"] == "95"
         assert positions[0]["take_profit_price"] == "110"
-        assert positions[0]["last_event_bar_key"] == second_at.isoformat()
+        assert datetime.fromisoformat(positions[0]["last_event_bar_key"]) == second_at
 
         # A completed candle crossing the stop creates a durable exit intent, but the
         # exit is filled only on a later completed bar (never retrospectively in-bar).
