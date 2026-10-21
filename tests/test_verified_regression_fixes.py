@@ -192,3 +192,11 @@ def test_customer_paper_quality_rejects_a_future_incomplete_close(monkeypatch):
 
     assert not safe
     assert "incomplete_latest_bar" in reasons
+
+
+def test_recovered_paper_trade_audit_only_emits_for_new_fill():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    guard = 'and str(((recovered.get("execution") or {}).get("fill") or {}).get("status") or "").upper() == "APPENDED"'
+    assert source.count(guard) == 2
