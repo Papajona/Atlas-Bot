@@ -75,8 +75,8 @@ jobs:
           CREATE ROLE anon NOLOGIN;
           CREATE ROLE authenticated NOLOGIN;
           CREATE ROLE service_role NOLOGIN BYPASSRLS;
-          -- Seed unsafe default ACLs as well as existing-object grants so migration 0049
-          -- proves it removes future table, sequence and function grants for its creator role.
+          -- Seed unsafe defaults and existing-object grants. Migration 0049 removes public API-role
+          -- defaults; migration 0050 additionally opts future objects out of service_role defaults.
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO anon, authenticated;
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO anon, authenticated;
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon, authenticated;
@@ -168,7 +168,7 @@ jobs:
           END
           $seed_public_api_grants$;
           SQL
-      - name: Upgrade from production revision through merge and lockdown
+      - name: Upgrade from production revision through public-schema and future-default lockdown
         run: python -m alembic upgrade 0050_supabase_public_default_acl_lockdown
       - name: Verify public-schema lockdown at runtime
         run: |
