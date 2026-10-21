@@ -586,3 +586,46 @@ def test_manual_paper_initialization_reuses_the_configured_seed_helper():
     assert "settings.customer_paper_initial_currency" in block
     assert "customer-paper-virtual-seed-v1" not in block
     assert "real_funds_used" in block and "virtual_only" in block
+
+
+def test_concurrent_paper_cash_spend_expires_unaffordable_pending_buy(monkeypatch):
+    import app.customer_paper_flow as flow
+    from app.customer_paper_lifecycle import CustomerPaperOrderConflict
+
+    _, state, order, market = _paper_fill_test_context()
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([]))
+    monkeypatch.setattr(flow, "register_customer_paper_market_bar", _async_value({
+        "bar_key": "bar-key-cash-race", "bar_at": market["bar_timestamp"],
+        "capacity": "10", "available": "10",
+    }))
+    monkeypatch.setattr(flow, "get_customer_paper_fill_for_bar", _async_value(None))
+    monkeypatch.setattr(flow, "get_customer_paper_balances", _async_value([{
+        "account_code": "PAPER_CASH", "currency": "USDT", "balance": "100",
+    }]))
+    monkeypatch.setattr(
+        flow, "_fill_price_and_fee",
+        lambda side, quantity, context: (
+            "120", "0", {"fee_bps_assumption": "0", "slippage_bps_assumption": "0",
+                         "cost_model_status": "TEST_FIXTURE"},
+        ),
+    )
+
+    async def cash_was_spent_by_another_fill(**kwargs):
+        raise CustomerPaperOrderConflict("paper fill would overdraw the customer's paper cash")
+
+    expired = {}
+
+    async def expire(**kwargs):
+        expired.update(kwargs)
+        return {"status": "EXPIRED"}
+
+    monkeypatch.setattr(flow, "record_customer_paper_fill", cash_was_spent_by_another_fill)
+    monkeypatch.setattr(flow, "expire_customer_paper_order", expire)
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=1004, order=order, market=market, df=pd.DataFrame()
+    ))
+
+    assert result["status"] == "EXPIRED_INSUFFICIENT_PAPER_CASH"
+    assert expired["client_order_id"] == order["client_order_id"]
+    assert expired["idempotency_key"].startswith("paper-cash-race-")
