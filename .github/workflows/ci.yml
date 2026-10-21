@@ -269,7 +269,15 @@ jobs:
                  OR has_function_privilege('anon', 'public.atlas_default_acl_probe_fn()', 'EXECUTE')
                  OR has_function_privilege('authenticated', 'public.atlas_default_acl_probe_fn()', 'EXECUTE')
                  OR has_table_privilege('service_role', 'public.atlas_default_acl_probe', 'SELECT')
+                 OR has_table_privilege('service_role', 'public.atlas_default_acl_probe', 'INSERT')
+                 OR has_table_privilege('service_role', 'public.atlas_default_acl_probe', 'UPDATE')
+                 OR has_table_privilege('service_role', 'public.atlas_default_acl_probe', 'DELETE')
+                 OR has_table_privilege('service_role', 'public.atlas_default_acl_probe', 'TRUNCATE')
+                 OR has_table_privilege('service_role', 'public.atlas_default_acl_probe', 'REFERENCES')
+                 OR has_table_privilege('service_role', 'public.atlas_default_acl_probe', 'TRIGGER')
                  OR has_sequence_privilege('service_role', probe_sequence, 'USAGE')
+                 OR has_sequence_privilege('service_role', probe_sequence, 'SELECT')
+                 OR has_sequence_privilege('service_role', probe_sequence, 'UPDATE')
                  OR has_function_privilege('service_role', 'public.atlas_default_acl_probe_fn()', 'EXECUTE') THEN
                   RAISE EXCEPTION 'a public API or service role inherited privileges on a newly created public object';
               END IF;
