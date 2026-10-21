@@ -659,6 +659,7 @@ def test_pending_paper_sell_expires_when_position_was_closed_elsewhere(monkeypat
 
 
 def test_manual_paper_sell_recovery_caps_against_the_order_venue():
+    """Manual sell recovery must never consume a position from a different venue."""
     from pathlib import Path
 
     source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_api.py").read_text(encoding="utf-8")
