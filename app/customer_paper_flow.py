@@ -11,7 +11,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, ROUND_DOWN, ROUND_HALF_EVEN, localcontext
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_EVEN, ROUND_UP, localcontext
 
 from .config import settings
 from .customer_paper_ledger import (
@@ -283,12 +283,26 @@ def _fill_price_and_fee(side: str, quantity: Decimal, market: dict) -> tuple[str
     fee_bps, slippage_bps, cost_status = _cost_inputs()
     side = str(side).upper()
     top_of_book = market["ask"] if side == "BUY" else market["bid"]
-    slip_fraction = slippage_bps / Decimal("10000")
-    price = top_of_book * (Decimal("1") + slip_fraction if side == "BUY" else Decimal("1") - slip_fraction)
-    if price <= 0:
-        raise CustomerPaperFlowBlocked("Slippage assumption produces an invalid fill price")
-    notional = quantity * price
-    fee = notional * fee_bps / Decimal("10000")
+    with localcontext() as context:
+        context.prec = 50
+        slip_fraction = slippage_bps / Decimal("10000")
+        raw_price = top_of_book * (
+            Decimal("1") + slip_fraction if side == "BUY" else Decimal("1") - slip_fraction
+        )
+        if raw_price <= 0:
+            raise CustomerPaperFlowBlocked("Slippage assumption produces an invalid fill price")
+        price_rounding = ROUND_UP if side == "BUY" else ROUND_DOWN
+        price = raw_price.quantize(_BAR_QUANTUM, rounding=price_rounding)
+        if price <= 0:
+            raise CustomerPaperFlowBlocked("Rounded simulated fill price is invalid")
+        rounded_quantity = quantity.quantize(_BAR_QUANTUM, rounding=ROUND_DOWN)
+        if rounded_quantity <= 0:
+            raise CustomerPaperFlowBlocked("Simulated fill quantity is below supported precision")
+        # Match the ledger's NUMERIC(..., 18) money scale before calculating costs.
+        notional = (rounded_quantity * price).quantize(_BAR_QUANTUM, rounding=ROUND_HALF_EVEN)
+        fee = (notional * fee_bps / Decimal("10000")).quantize(
+            _BAR_QUANTUM, rounding=ROUND_UP
+        )
     cost_details = {
         "cost_model_status": cost_status,
         "fee_bps_assumption": format(fee_bps, "f"),
@@ -715,22 +729,27 @@ async def execute_customer_paper_spot_signal(
         return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "short_entries_are_not_supported"}
 
     fee_bps, slippage_bps, cost_status = _cost_inputs()
-    slip_fraction = slippage_bps / Decimal("10000")
-    effective_buy_price = market["ask"] * (Decimal("1") + slip_fraction)
     available_cash = Decimal(account["paper_cash"])
     raw_quantity = _finite_decimal(quantity, "proposed paper quantity")
+    with localcontext() as context:
+        context.prec = 50
+        slip_fraction = slippage_bps / Decimal("10000")
+        effective_buy_price = market["ask"] * (Decimal("1") + slip_fraction)
+        if raw_quantity <= 0:
+            return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "non_positive_quantity"}
+        if normalized_side == "BUY":
+            fee_fraction = fee_bps / Decimal("10000")
+            affordable = available_cash / (effective_buy_price * (Decimal("1") + fee_fraction))
+            raw_quantity = min(raw_quantity, affordable)
+            if raw_quantity <= 0:
+                return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "insufficient_paper_cash"}
+        else:
+            raw_quantity = min(raw_quantity, Decimal(str(positions[0]["quantity"])))
+            if raw_quantity <= 0:
+                return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "no_long_position_to_close"}
+        raw_quantity = raw_quantity.quantize(_BAR_QUANTUM, rounding=ROUND_DOWN)
     if raw_quantity <= 0:
-        return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "non_positive_quantity"}
-    if normalized_side == "BUY":
-        fee_fraction = fee_bps / Decimal("10000")
-        affordable = available_cash / (effective_buy_price * (Decimal("1") + fee_fraction))
-        raw_quantity = min(raw_quantity, affordable)
-        if raw_quantity <= 0:
-            return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "insufficient_paper_cash"}
-    else:
-        raw_quantity = min(raw_quantity, Decimal(str(positions[0]["quantity"])))
-        if raw_quantity <= 0:
-            return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "no_long_position_to_close"}
+        return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "quantity_below_supported_precision"}
 
     role = "ENTRY" if normalized_side == "BUY" else "STRATEGY_EXIT"
     exit_reason = "STRATEGY_SELL" if normalized_side == "SELL" else None
