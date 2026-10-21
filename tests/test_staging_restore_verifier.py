@@ -49,13 +49,15 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     reconciliation_workflow = Path(".github/workflows/provider-ledger-reconciliation.yml").read_text(encoding="utf-8")
     verifier = Path("scripts/verify_staging_restore.py").read_text(encoding="utf-8")
     runbook = Path("RUNBOOK.md").read_text(encoding="utf-8")
-    expected = "0052_schema_metadata_reconciliation"
+    expected = "0053_supabase_public_default_acl_lockdown"
 
     assert f"--expected-revision {expected}" in workflow
     assert f'default="{expected}"' in verifier
     assert f"checks for revision `{expected}`" in runbook
     assert "database revision is 0049" not in runbook
     assert "same actual ref" in runbook
+    assert "EXPECTED_ALEMBIC_HEAD" in identity_workflow
+    assert "0053_supabase_public_default_acl_lockdown" in identity_workflow
     assert "no second project or paid branch is required" in runbook
     assert "project refs differ before restoring" not in runbook
     assert "must use a different Supabase project from production" not in identity_workflow

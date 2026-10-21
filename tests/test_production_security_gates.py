@@ -291,6 +291,8 @@ def test_staging_identity_preflight_allows_same_project_and_checks_runtime_ident
     assert "role_membership_count" in workflow
     assert "runtime DB role inherits other PostgreSQL roles" in workflow
     assert "no migration or write was executed" in workflow
+    assert 'EXPECTED_ALEMBIC_HEAD: "0053_supabase_public_default_acl_lockdown"' in workflow
+    assert "if revision != expected_head:" in workflow
     assert "alembic upgrade" not in workflow
 
 
