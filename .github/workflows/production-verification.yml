@@ -127,11 +127,11 @@ jobs:
         continue-on-error: true
         env:
           PYTHONPATH: .
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || secrets.GEMINI }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY || secrets.GROQ }}
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
-          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
-          GEMINI_STRATEGY_MODEL: ${{ vars.GEMINI_STRATEGY_MODEL || 'gemini-3.5-flash-lite' }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash' }}
+          GEMINI_STRATEGY_MODEL: ${{ vars.GEMINI_STRATEGY_MODEL || 'gemini-3.5-flash' }}
         run: |
           set +e
           python -m scripts.check_ai_models 2>&1 | tee ai-provider-verification.log
