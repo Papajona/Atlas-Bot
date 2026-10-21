@@ -2543,7 +2543,7 @@ def _market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[boo
 def _customer_paper_market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[bool, list[str]]:
     """Measure candle freshness from its close boundary for isolated paper execution."""
     safe, reasons = _market_data_quality(df, timeframe, asset)
-    if "stale_market_data" not in reasons or df is None or len(df) == 0:
+    if df is None or len(df) == 0:
         return safe, reasons
     try:
         last_open = pd.Timestamp(df.index[-1])
@@ -2559,7 +2559,10 @@ def _customer_paper_market_data_quality(df, timeframe: str, asset: str = "crypto
             if "incomplete_latest_bar" not in reasons:
                 reasons.append("incomplete_latest_bar")
         elif close_age <= float(settings.stale_data_minutes) * 60.0:
-            reasons.remove("stale_market_data")
+            if "stale_market_data" in reasons:
+                reasons.remove("stale_market_data")
+        elif "stale_market_data" not in reasons:
+            reasons.append("stale_market_data")
     except Exception:
         if "invalid_market_timestamp" not in reasons:
             reasons.append("invalid_market_timestamp")
