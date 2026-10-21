@@ -656,3 +656,11 @@ def test_pending_paper_sell_expires_when_position_was_closed_elsewhere(monkeypat
     assert result["status"] == "EXPIRED_NO_OPEN_POSITION"
     assert result["fill"]["status"] == "EXPIRED"
     assert expired["client_order_id"] == order["client_order_id"]
+
+
+def test_manual_paper_sell_recovery_caps_against_the_order_venue():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_api.py").read_text(encoding="utf-8")
+    assert 'str(position.get("venue") or "").lower() == str(order.get("venue") or "").lower()' in source
+    assert 'str(position.get("venue") or "").lower() == "binance"' not in source
