@@ -24,7 +24,6 @@ from .customer_paper_ledger import (
     CustomerPaperIdempotencyConflict,
     CustomerPaperLedgerBlocked,
     get_customer_paper_balances,
-    post_customer_paper_journal,
 )
 from .customer_paper_lifecycle import (
     CustomerPaperOrderConflict,
