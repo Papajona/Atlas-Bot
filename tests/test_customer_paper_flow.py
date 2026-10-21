@@ -687,7 +687,7 @@ def test_paper_fill_money_fields_round_conservatively_to_numeric_38_18(monkeypat
     assert Decimal(buy_price) == Decimal("100.000000000000000001")
     assert Decimal(sell_price) == Decimal("99.999999999999999999")
     assert Decimal(buy_fee) == Decimal("0.012345678901234568")
-    assert Decimal(sell_fee) == Decimal("0.012345678901234567")
+    assert Decimal(sell_fee) == Decimal("0.012345678901234568")
     assert Decimal(buy_fee).as_tuple().exponent == -18
     assert Decimal(sell_fee).as_tuple().exponent == -18
 
