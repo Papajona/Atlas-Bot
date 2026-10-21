@@ -135,6 +135,7 @@ jobs:
         env:
           STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
           EXPECTED_RUNTIME_DB_ROLE: ${{ vars.ATLAS_STAGING_RUNTIME_DB_ROLE }}
+          EXPECTED_ALEMBIC_HEAD: "0053_supabase_public_default_acl_lockdown"
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -242,6 +243,12 @@ jobs:
               raise SystemExit("BLOCKED: runtime database role lacks USAGE on public schema")
           if not revision:
               raise SystemExit("BLOCKED: Alembic revision is missing or ambiguous")
+          expected_head = os.environ["EXPECTED_ALEMBIC_HEAD"]
+          if revision != expected_head:
+              raise SystemExit(
+                  f"BLOCKED: database revision must equal repository head {expected_head}; "
+                  "apply the reviewed migration only to the approved staging target, then rerun this read-only preflight"
+              )
           if int(table_count) == 0:
               raise SystemExit("BLOCKED: public schema table inventory is empty")
           if int(unprotected_count) > 0:
