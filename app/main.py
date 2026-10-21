@@ -968,7 +968,10 @@ async def _run_persisted_adaptive_bot_cycle(
             return {"decision": "NO_TRADE", "stage": "customer_oanda_data_gate", "reason": str(exc)}
     else:
         df = await asyncio.to_thread(market_data, req)
-    data_safe, data_reasons = _market_data_quality(df, req.timeframe, req.asset)
+    data_safe, data_reasons = (
+        _customer_paper_market_data_quality(df, req.timeframe, req.asset)
+        if needs_customer_paper else _market_data_quality(df, req.timeframe, req.asset)
+    )
     if needs_customer_paper:
         if not data_safe:
             return {"decision": "NO_TRADE", "stage": "customer_paper_data_quality",
@@ -993,6 +996,17 @@ async def _run_persisted_adaptive_bot_cycle(
             return {"decision": "NO_TRADE", "stage": "customer_paper_recovery",
                     "reason": str(exc)}
         if recovered is not None:
+            if str(recovered.get("decision") or "").upper() == "TRADE":
+                recovered_execution = recovered.get("execution") or {}
+                recovered_fill = recovered_execution.get("fill") or {}
+                await _safe_audit("CUSTOMER_BOT_TRADE", {
+                    "customer_id": profile.id, "bot_id": bot_id, "symbol": req.symbol,
+                    "decision": "TRADE", "mode": "CUSTOMER_PAPER",
+                    "stage": "customer_paper_recovery",
+                    "order_id": recovered_execution.get("order_id") or recovered_fill.get("order_id"),
+                    "fill_id": recovered_fill.get("fill_id"),
+                    "fill_status": recovered_fill.get("status") or recovered_execution.get("status"),
+                })
             return {
                 **recovered,
                 "stage": "customer_paper_recovery",
@@ -1094,16 +1108,48 @@ async def _run_persisted_adaptive_bot_cycle(
     if needs_customer_paper:
         from types import SimpleNamespace
         from .customer_paper_lifecycle import get_customer_paper_positions
-        paper_positions = await get_customer_paper_positions(customer_id=profile.id)
-        open_positions = [
-            SimpleNamespace(
-                symbol=str(row.get("symbol") or ""),
+        try:
+            paper_positions = await get_customer_paper_positions(customer_id=profile.id)
+        except Exception as exc:
+            return {
+                "decision": "NO_TRADE", "stage": "paper_exposure_positions_unavailable",
+                "reason": f"isolated paper positions could not be verified ({type(exc).__name__})",
+            }
+        open_positions = []
+        for row in paper_positions:
+            symbol = str(row.get("symbol") or "")
+            venue = str(row.get("venue") or "").lower()
+            average = float(row.get("average_entry_price") or 0)
+            mark = average
+            # Exposure-increasing paper BUYs require current server marks for every
+            # open asset in the correlation group. If a mark cannot be proved, block.
+            if str(plan.get("side") or "").upper() == "BUY":
+                if (
+                    venue == str(req.exchange).lower()
+                    and symbol.upper() == str(req.symbol).upper()
+                    and customer_paper_market_context is not None
+                ):
+                    mark = float(customer_paper_market_context["bid"])
+                else:
+                    try:
+                        mark_req = req.model_copy(update={"symbol": symbol, "exchange": venue})
+                        mark_df = await asyncio.to_thread(market_data, mark_req)
+                        mark_context = await asyncio.to_thread(_server_paper_market_context, mark_req, mark_df)
+                        if mark_context is None or not math.isfinite(float(mark_context.get("bid", 0))) or float(mark_context.get("bid", 0)) <= 0:
+                            raise ValueError("no fresh validated bid")
+                        mark = float(mark_context["bid"])
+                    except Exception as exc:
+                        return {
+                            "decision": "NO_TRADE", "stage": "paper_exposure_mark_unavailable",
+                            "symbol": symbol,
+                            "reason": f"current server mark unavailable ({type(exc).__name__})",
+                        }
+            open_positions.append(SimpleNamespace(
+                symbol=symbol,
                 quantity=float(row.get("quantity") or 0),
-                average_entry_price=float(row.get("average_entry_price") or 0),
-                mark_price=float(row.get("average_entry_price") or 0),
-            )
-            for row in paper_positions
-        ]
+                average_entry_price=average,
+                mark_price=mark,
+            ))
     else:
         async with SessionLocal() as db2:
             open_positions = (await db2.execute(select(Position).where(
@@ -1114,7 +1160,7 @@ async def _run_persisted_adaptive_bot_cycle(
         open_positions, proposed_symbol=req.symbol, proposed_notional=proposed_notional,
         cap_usd=settings.correlation_group_cap_usd,
     )
-    if not group_check["allowed"]:
+    if not group_check["allowed"] and str(plan.get("side") or "").upper() == "BUY":
         headroom = max(0.0, settings.correlation_group_cap_usd - group_check["existing_notional"])
         quantity = min(quantity, headroom / max(float(plan["entry_price"]), 1e-12))
     if quantity <= 0:
@@ -2491,6 +2537,32 @@ def _market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[boo
             reasons.append("stale_market_data")
     except Exception:
         reasons.append("invalid_market_timestamp")
+    return not reasons, reasons
+
+
+def _customer_paper_market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[bool, list[str]]:
+    """Measure candle freshness from its close boundary for isolated paper execution."""
+    safe, reasons = _market_data_quality(df, timeframe, asset)
+    if "stale_market_data" not in reasons or df is None or len(df) == 0:
+        return safe, reasons
+    try:
+        last_open = pd.Timestamp(df.index[-1])
+        if last_open.tzinfo is None:
+            raise ValueError("naive candle timestamp")
+        timeframe_seconds = float(pd.Timedelta(timeframe).total_seconds())
+        if timeframe_seconds <= 0:
+            raise ValueError("invalid timeframe")
+        last_close = last_open + pd.Timedelta(seconds=timeframe_seconds)
+        now = pd.Timestamp(datetime.now(timezone.utc))
+        close_age = (now - last_close).total_seconds()
+        if close_age < 0:
+            if "incomplete_latest_bar" not in reasons:
+                reasons.append("incomplete_latest_bar")
+        elif close_age <= float(settings.stale_data_minutes) * 60.0:
+            reasons.remove("stale_market_data")
+    except Exception:
+        if "invalid_market_timestamp" not in reasons:
+            reasons.append("invalid_market_timestamp")
     return not reasons, reasons
 
 
@@ -4087,6 +4159,8 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             or req.asset in {"forex", "commodity"}
         )
         needs_customer_paper = bool(paper_mode and profile.id is not None)
+        if needs_customer_paper and "automated_entry_exit" not in plan.get("features", []):
+            raise HTTPException(403, "Your current plan does not permit automated paper execution")
         if needs_customer_paper:
             if req.asset != "crypto":
                 raise HTTPException(409, "Customer paper automation currently supports verified crypto spot only; no analysis or AI review was run.")
@@ -4202,7 +4276,10 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
 
     try:
         df = await _fetch_customer_oanda_data(profile.id, req) if req.asset in {"forex", "commodity"} else await asyncio.to_thread(market_data, req)
-        data_safe, data_reasons = _market_data_quality(df, req.timeframe, req.asset)
+        data_safe, data_reasons = (
+        _customer_paper_market_data_quality(df, req.timeframe, req.asset)
+        if needs_customer_paper else _market_data_quality(df, req.timeframe, req.asset)
+    )
         customer_paper_market_context = None
         if needs_customer_paper:
             if not data_safe:
@@ -4227,6 +4304,22 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                         "decision": "NO_TRADE", "stage": "customer_paper_runtime_gate",
                         "reason": gate_reason, "execution": None,
                     })
+            async with SessionLocal() as guard_db:
+                current_profile = await guard_db.get(CustomerProfile, profile.id)
+                current_account = await guard_db.get(TradingAccount, account_id)
+                current_state = await guard_db.get(AppState, 1)
+                latest_plan, _ = await _subscription_entitlements(guard_db, profile.id)
+                if (
+                    not current_profile or current_profile.status != "ACTIVE"
+                    or not current_account or current_account.status != "ACTIVE"
+                    or not current_state or current_state.kill_switch
+                    or "automated_entry_exit" not in latest_plan.get("features", [])
+                ):
+                    return await _record_customer_decision({
+                        "decision": "NO_TRADE", "stage": "customer_paper_runtime_gate",
+                        "reason": "active customer, account, platform risk, or automation entitlement recheck failed",
+                        "execution": None,
+                    })
             try:
                 recovered = await recover_customer_paper_spot_flow(
                     customer_id=profile.id, req=req, df=df,
@@ -4238,6 +4331,17 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     "reason": str(exc), "execution": None,
                 })
             if recovered is not None:
+                if str(recovered.get("decision") or "").upper() == "TRADE":
+                    recovered_execution = recovered.get("execution") or {}
+                    recovered_fill = recovered_execution.get("fill") or {}
+                    await _safe_audit("CUSTOMER_BOT_TRADE", {
+                        "customer_id": profile.id, "trading_account_id": account_id,
+                        "bot_id": bot_id, "symbol": req.symbol, "decision": "TRADE",
+                        "mode": "CUSTOMER_PAPER", "stage": "customer_paper_recovery",
+                        "order_id": recovered_execution.get("order_id") or recovered_fill.get("order_id"),
+                        "fill_id": recovered_fill.get("fill_id"),
+                        "fill_status": recovered_fill.get("status") or recovered_execution.get("status"),
+                    })
                 return await _record_customer_decision({
                     **recovered,
                     "stage": "customer_paper_recovery",
@@ -4511,7 +4615,6 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     signal_metadata={
                         "model_version": str((adaptive or {}).get("model_version") or ""),
                         "strategy_candidate_id": req.strategy_candidate_id,
-                        "decision_id": decision_id,
                     },
                 )
             except CustomerPaperFlowBlocked as exc:
