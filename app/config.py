@@ -66,6 +66,22 @@ class Settings(BaseSettings):
             raise ValueError("paper market impact settings must be finite and non-negative")
         return float(value)
 
+    @field_validator("customer_paper_initial_balance")
+    @classmethod
+    def _validate_customer_paper_initial_balance(cls, value: float) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed <= 0 or parsed > 1_000_000_000_000:
+            raise ValueError("CUSTOMER_PAPER_INITIAL_BALANCE must be finite, positive, and no greater than 1e12")
+        return parsed
+
+    @field_validator("customer_paper_initial_currency")
+    @classmethod
+    def _validate_customer_paper_initial_currency(cls, value: str) -> str:
+        normalized = str(value or "").strip().upper()
+        if normalized != "USDT":
+            raise ValueError("CUSTOMER_PAPER_INITIAL_CURRENCY must be USDT until other quote currencies are explicitly supported")
+        return normalized
+
     @field_validator("research_carry_bps_per_bar")
     @classmethod
     def _validate_research_carry(cls, value: float | None) -> float | None:
@@ -192,6 +208,9 @@ class Settings(BaseSettings):
     customer_paper_database_url: str = ""
     # Opt-in for free single-project deployments; this is schema/ACL isolation, not a separate DB failure domain.
     customer_paper_shared_database_enabled: bool = False
+    # Simulated starting capital only. It is credited solely to the isolated paper ledger.
+    customer_paper_initial_balance: float = 10000.0
+    customer_paper_initial_currency: str = "USDT"
     research_folds: int = 5
     research_min_train: int = 800
     research_ai_threshold: float = 0.05
@@ -251,8 +270,8 @@ class Settings(BaseSettings):
     ai_gateway_model: str = ""
     gemini_api_key: str = ""
     # gemini-2.5-* is scheduled to shut down in Oct 2026 (Google lists 16 and 20 Oct in different places); verify IDs with scripts/check_ai_models.py.
-    gemini_model: str = "gemini-3.5-flash-lite"
-    gemini_strategy_model: str = "gemini-3.5-flash-lite"
+    gemini_model: str = "gemini-3.5-flash"
+    gemini_strategy_model: str = "gemini-3.5-flash"
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-20b"
     groq_strategy_model: str = "openai/gpt-oss-20b"
