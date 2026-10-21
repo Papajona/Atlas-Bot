@@ -316,12 +316,15 @@ jobs:
           DROP TABLE public.atlas_managed_role_probe;
           RESET ROLE;
           SQL
-      - name: Verify migration graph and round-trip
+      - name: Verify migration graph and reversible upper-migration round-trip
         run: |
+          set -euo pipefail
           python -m alembic current
           heads="$(python -m alembic heads)"
           test "$(printf '%s\n' "$heads" | grep -c '(head)')" -eq 1
-          python -m alembic downgrade base
+          # Revision 0051 intentionally preserves the append-only research archive on downgrade.
+          # Stopping here verifies 0052/0053 can roll back and reapply without deleting retained history.
+          python -m alembic downgrade 0051_research_trial_archive
           python -m alembic upgrade head
           # Check drift only after reaching the actual migration head, not at an older revision.
           python -m alembic check
