@@ -388,6 +388,9 @@ def build_customer_paper_router(
             order = await _order_detail(profile.id, client_order_id)
             if order["status"] not in {"SUBMITTED", "PARTIALLY_FILLED"}:
                 return {"status": "TERMINAL", "virtual_only": True, "order": order}
+            order_venue = str(order.get("venue") or "").strip().lower()
+            if order_venue != "binance" or str(order.get("market_type") or "").strip().lower() != "spot":
+                raise HTTPException(409, "Manual paper-order advancement supports Binance spot orders only")
             metadata = order.get("metadata") or {}
             timeframe = str(metadata.get("timeframe") or "")
             if timeframe not in _TIMEFRAME_SECONDS or metadata.get("execution_model") != "completed_bar_volume_capped_heuristic_v1":
@@ -410,7 +413,7 @@ def build_customer_paper_router(
                     "order": order,
                 }
             budget = await register_customer_paper_market_bar(
-                venue="binance",
+                venue=order_venue,
                 symbol=order["symbol"],
                 timeframe=timeframe,
                 bar_at=bar["timestamp"],
@@ -464,7 +467,7 @@ def build_customer_paper_router(
                         (
                             Decimal(str(position.get("quantity") or "0"))
                             for position in positions
-                            if str(position.get("venue") or "").lower() == "binance"
+                            if str(position.get("venue") or "").lower() == str(order.get("venue") or "").lower()
                             and str(position.get("symbol") or "").upper() == str(order["symbol"]).upper()
                             and Decimal(str(position.get("quantity") or "0")) > 0
                         ),
