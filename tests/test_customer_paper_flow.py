@@ -423,3 +423,30 @@ def test_paper_buy_that_is_no_longer_affordable_expires_instead_of_stalling(monk
 
     assert result["status"] == "EXPIRED_INSUFFICIENT_PAPER_CASH"
     assert expired["client_order_id"] == order["client_order_id"]
+
+
+def test_pending_order_reader_exposes_market_identity_and_immutable_metadata():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_lifecycle.py").read_text(encoding="utf-8")
+    start = source.index("async def list_open_customer_paper_orders(")
+    end = source.index("\n\nasync def ", start)
+    block = source[start:end]
+    assert "o.client_order_id, o.venue, o.market_type, o.symbol, o.side" in block
+    assert "o.quantity, o.metadata_json" in block
+    assert '"venue": str(row["venue"]).lower()' in block
+    assert '"market_type": str(row["market_type"])' in block
+    assert '"metadata": metadata' in block
+
+
+def test_manual_paper_initialization_reuses_the_configured_seed_helper():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_api.py").read_text(encoding="utf-8")
+    start = source.index('@router.post("/account/initialize")')
+    end = source.index('\n    @router.get("/balances")', start)
+    block = source[start:end]
+    assert "ensure_customer_paper_account" in block
+    assert "settings.customer_paper_initial_currency" in block
+    assert "customer-paper-virtual-seed-v1" not in block
+    assert "real_funds_used" in block and "virtual_only" in block
