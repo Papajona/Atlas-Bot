@@ -155,3 +155,41 @@ def test_risk_governor_blocks_non_positive_take_profit_prices(side, take_profit_
     )
     assert decision.action == "BLOCK"
     assert "invalid_take_profit" in decision.reasons
+
+@pytest.mark.parametrize("timeframe", ["4h", "1d"])
+def test_customer_paper_quality_uses_closed_candle_age(timeframe, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "min_bars", 1)
+    monkeypatch.setattr(settings, "adaptive_require_established_crypto", False)
+    monkeypatch.setattr(settings, "stale_data_minutes", 180)
+    now = pd.Timestamp.now(tz="UTC")
+    last_open = now - pd.Timedelta(timeframe) - pd.Timedelta(seconds=30)
+    frame = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.0], "volume": [1000.0]},
+        index=pd.DatetimeIndex([last_open]),
+    )
+
+    safe, reasons = main_module._customer_paper_market_data_quality(frame, timeframe, "crypto")
+
+    assert safe, reasons
+    assert "stale_market_data" not in reasons
+
+
+def test_customer_paper_quality_rejects_a_future_incomplete_close(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "min_bars", 1)
+    monkeypatch.setattr(settings, "adaptive_require_established_crypto", False)
+    monkeypatch.setattr(settings, "stale_data_minutes", 180)
+    now = pd.Timestamp.now(tz="UTC")
+    last_open = now - pd.Timedelta("1h") + pd.Timedelta(seconds=30)
+    frame = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.0], "volume": [1000.0]},
+        index=pd.DatetimeIndex([last_open]),
+    )
+
+    safe, reasons = main_module._customer_paper_market_data_quality(frame, "1h", "crypto")
+
+    assert not safe
+    assert "incomplete_latest_bar" in reasons
