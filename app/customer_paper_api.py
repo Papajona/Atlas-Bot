@@ -12,7 +12,7 @@ import hashlib
 import json
 import math
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_EVEN, localcontext
 from typing import Any, Awaitable, Callable, Literal
 
 from fastapi import APIRouter, Header, HTTPException
@@ -24,12 +24,12 @@ from .customer_paper_ledger import (
     CustomerPaperIdempotencyConflict,
     CustomerPaperLedgerBlocked,
     get_customer_paper_balances,
-    post_customer_paper_journal,
 )
 from .customer_paper_lifecycle import (
     CustomerPaperOrderConflict,
     cancel_customer_paper_order,
     expire_customer_paper_order,
+    get_customer_paper_fill_for_bar,
     get_customer_paper_order,
     get_customer_paper_positions,
     list_open_customer_paper_orders,
@@ -248,40 +248,27 @@ def build_customer_paper_router(
         await _guard()
         profile = await _profile(authorization)
         try:
-            balances = await get_customer_paper_balances(customer_id=profile.id)
-            if any(row["account_code"] == "PAPER_CASH" for row in balances):
-                return {
-                    "status": "ALREADY_INITIALIZED",
-                    "virtual_only": True,
-                    "currency": "USDT",
-                    "balances": balances,
-                    "note": "This is a simulated paper allocation, not a deposit or withdrawable balance.",
-                }
-            journal = await post_customer_paper_journal(
-                customer_id=profile.id,
-                idempotency_key="customer-paper-virtual-seed-v1",
-                event_type="PAPER_SEED",
-                currency="USDT",
-                lines=[
-                    {"account_code": "PAPER_CASH", "signed_amount": _decimal_text(_VIRTUAL_STARTING_CASH)},
-                    {"account_code": "PAPER_EQUITY", "signed_amount": _decimal_text(-_VIRTUAL_STARTING_CASH)},
-                ],
-                reference="VIRTUAL_ONLY_STARTING_ALLOCATION",
-                metadata={
-                    "allocation_type": "virtual_paper_starting_balance",
-                    "virtual_only": True,
-                    "not_a_deposit": True,
-                    "not_withdrawable": True,
-                    "real_money_movement": False,
-                },
+            # Use the autonomous controller's exact seed key, configured amount and
+            # currency. Concurrent API/controller initialization must be one event.
+            from .customer_paper_flow import ensure_customer_paper_account
+
+            before = await get_customer_paper_balances(customer_id=profile.id)
+            already_initialized = any(
+                str(row.get("account_code") or "") == "PAPER_CASH"
+                for row in before
             )
+            currency = str(settings.customer_paper_initial_currency or "").strip().upper()
+            account = await ensure_customer_paper_account(
+                customer_id=profile.id, currency=currency
+            )
+            balances = await get_customer_paper_balances(customer_id=profile.id)
             return {
-                **journal,
-                "status": journal["status"],
+                "status": "ALREADY_INITIALIZED" if already_initialized else "INITIALIZED",
                 "virtual_only": True,
-                "currency": "USDT",
-                "starting_cash": _decimal_text(_VIRTUAL_STARTING_CASH),
-                "balances": await get_customer_paper_balances(customer_id=profile.id),
+                "currency": currency,
+                "starting_cash": account["initial_balance"],
+                "balances": balances,
+                "real_funds_used": False,
                 "note": "This is a simulated paper allocation, not a deposit or withdrawable balance.",
             }
         except HTTPException:
@@ -431,6 +418,20 @@ def build_customer_paper_router(
                 base_volume=_decimal_text(bar["values"]["volume"]),
                 participation_rate=_decimal_text(Decimal(str(settings.paper_max_bar_volume_participation))),
             )
+            prior_fill = await get_customer_paper_fill_for_bar(
+                customer_id=profile.id,
+                client_order_id=client_order_id,
+                bar_key=budget["bar_key"],
+            )
+            if prior_fill is not None:
+                return {
+                    "status": "REPLAYED",
+                    "virtual_only": True,
+                    "bar_at": bar["timestamp"].isoformat(),
+                    "bar_key": budget["bar_key"],
+                    "fill": prior_fill,
+                    "order": await _order_detail(profile.id, client_order_id),
+                }
             values = bar["values"]
             limit = Decimal(order["limit_price"]) if order["limit_price"] is not None else None
             side = order["side"]
@@ -454,13 +455,44 @@ def build_customer_paper_router(
                 execution_profile = PROFILES.get("crypto")
                 if execution_profile is None:
                     raise HTTPException(503, "Crypto paper execution profile is not configured")
+
+                remaining_quantity = Decimal(str(order.get("remaining_quantity") or order["quantity"]))
+                fill_quantity = min(remaining_quantity, max(Decimal("0"), Decimal(str(budget["available"]))))
+                if side == "SELL":
+                    positions = await get_customer_paper_positions(customer_id=profile.id)
+                    held = sum(
+                        (
+                            Decimal(str(position.get("quantity") or "0"))
+                            for position in positions
+                            if str(position.get("venue") or "").lower() == "binance"
+                            and str(position.get("symbol") or "").upper() == str(order["symbol"]).upper()
+                            and Decimal(str(position.get("quantity") or "0")) > 0
+                        ),
+                        Decimal("0"),
+                    )
+                    if held <= 0:
+                        await expire_customer_paper_order(
+                            customer_id=profile.id,
+                            client_order_id=client_order_id,
+                            idempotency_key="paper-no-position-api:" + hashlib.sha256(client_order_id.encode("utf-8")).hexdigest()[:40],
+                        )
+                        return {
+                            "status": "EXPIRED_NO_OPEN_POSITION",
+                            "virtual_only": True,
+                            "bar_at": bar["timestamp"].isoformat(),
+                            "bar_key": budget["bar_key"],
+                            "fill": {"status": "EXPIRED"},
+                            "order": await _order_detail(profile.id, client_order_id),
+                        }
+                    fill_quantity = min(fill_quantity, held)
+
                 returns = df["close"].astype(float).pct_change().replace([float("inf"), float("-inf")], float("nan")).dropna().tail(20)
                 volatility = float(returns.std(ddof=0)) if len(returns) >= 2 else 0.0
                 if not math.isfinite(volatility) or volatility < 0:
                     raise HTTPException(409, "Market volatility estimate is invalid")
                 participation_for_impact = max(
                     0.0,
-                    float(Decimal(order["quantity"]) / max(values["volume"], Decimal("1e-18"))),
+                    float(fill_quantity / max(values["volume"], Decimal("1e-18"))),
                 )
                 impact = (
                     float(settings.paper_market_impact_coefficient)
@@ -479,42 +511,96 @@ def build_customer_paper_router(
                     final_price = reference_price * multiplier
                 if final_price <= 0:
                     raise HTTPException(409, "Paper cost model produced a non-positive fill price")
+
                 price_text = _decimal_text(final_price)
-                fee = (
-                    Decimal(order["quantity"]) * Decimal(price_text)
-                    * Decimal(str(execution_profile.taker_bps)) / Decimal("10000")
-                )
-                fill_key = "bar-fill:" + hashlib.sha256(f"{client_order_id}|{budget['bar_key']}".encode("utf-8")).hexdigest()
-                fill = await record_customer_paper_fill(
-                    customer_id=profile.id,
-                    client_order_id=client_order_id,
-                    idempotency_key=fill_key,
-                    bar_key=budget["bar_key"],
-                    quantity=order["quantity"],
-                    price=price_text,
-                    fee_amount=_decimal_text(fee),
-                    enforce_market_bar_budget=True,
-                )
-                fresh_order = await _order_detail(profile.id, client_order_id)
-                if (
-                    elapsed_bars >= max(1, int(settings.paper_order_ttl_bars))
-                    and fresh_order["status"] == "PARTIALLY_FILLED"
-                ):
-                    await expire_customer_paper_order(
-                        customer_id=profile.id,
-                        client_order_id=client_order_id,
-                        idempotency_key=f"paper-ttl:{budget['bar_key']}",
+                fee_bps = max(Decimal("0"), Decimal(str(execution_profile.taker_bps)))
+                if side == "BUY":
+                    balances = await get_customer_paper_balances(customer_id=profile.id)
+                    cash = sum(
+                        (
+                            Decimal(str(row.get("balance") or "0"))
+                            for row in balances
+                            if str(row.get("account_code") or "") == "PAPER_CASH"
+                            and str(row.get("currency") or "").upper() == "USDT"
+                        ),
+                        Decimal("0"),
                     )
+                    unit_cost = Decimal(price_text) * (Decimal("1") + fee_bps / Decimal("10000"))
+                    with localcontext() as context:
+                        context.prec = 50
+                        affordable = max(Decimal("0"), cash / unit_cost).quantize(
+                            _DECIMAL_QUANTUM, rounding=ROUND_DOWN
+                        )
+                    fill_quantity = min(fill_quantity, affordable)
+                    if fill_quantity <= 0:
+                        await expire_customer_paper_order(
+                            customer_id=profile.id,
+                            client_order_id=client_order_id,
+                            idempotency_key="paper-unaffordable-api:" + hashlib.sha256(client_order_id.encode("utf-8")).hexdigest()[:40],
+                        )
+                        return {
+                            "status": "EXPIRED_INSUFFICIENT_PAPER_CASH",
+                            "virtual_only": True,
+                            "bar_at": bar["timestamp"].isoformat(),
+                            "bar_key": budget["bar_key"],
+                            "fill": {"status": "EXPIRED"},
+                            "order": await _order_detail(profile.id, client_order_id),
+                        }
+                if fill_quantity <= 0:
+                    attempt = "WAITING_FOR_BAR_CAPACITY"
+                else:
+                    fee = fill_quantity * Decimal(price_text) * fee_bps / Decimal("10000")
+                    fill_key = "bar-fill:" + hashlib.sha256(f"{client_order_id}|{budget['bar_key']}".encode("utf-8")).hexdigest()
+                    try:
+                        fill = await record_customer_paper_fill(
+                            customer_id=profile.id,
+                            client_order_id=client_order_id,
+                            idempotency_key=fill_key,
+                            bar_key=budget["bar_key"],
+                            quantity=_decimal_text(fill_quantity),
+                            price=price_text,
+                            fee_amount=_decimal_text(fee),
+                            enforce_market_bar_budget=True,
+                        )
+                    except CustomerPaperOrderConflict as exc:
+                        # Another order may have consumed virtual cash after the pre-read.
+                        if side == "BUY" and "overdraw" in str(exc).lower():
+                            await expire_customer_paper_order(
+                                customer_id=profile.id,
+                                client_order_id=client_order_id,
+                                idempotency_key="paper-cash-race-api:" + hashlib.sha256(
+                                    f"{client_order_id}|{budget['bar_key']}".encode("utf-8")
+                                ).hexdigest()[:40],
+                            )
+                            return {
+                                "status": "EXPIRED_INSUFFICIENT_PAPER_CASH",
+                                "virtual_only": True,
+                                "bar_at": bar["timestamp"].isoformat(),
+                                "bar_key": budget["bar_key"],
+                                "fill": {"status": "EXPIRED"},
+                                "order": await _order_detail(profile.id, client_order_id),
+                            }
+                        raise
                     fresh_order = await _order_detail(profile.id, client_order_id)
-                return {
-                    "status": fill["status"],
-                    "virtual_only": True,
-                    "bar_at": bar["timestamp"].isoformat(),
-                    "bar_key": budget["bar_key"],
-                    "fill": fill,
-                    "order": fresh_order,
-                    "execution_cost_evidence": "UNVALIDATED_HEURISTIC",
-                }
+                    if (
+                        elapsed_bars >= max(1, int(settings.paper_order_ttl_bars))
+                        and fresh_order["status"] == "PARTIALLY_FILLED"
+                    ):
+                        await expire_customer_paper_order(
+                            customer_id=profile.id,
+                            client_order_id=client_order_id,
+                            idempotency_key=f"paper-ttl:{budget['bar_key']}",
+                        )
+                        fresh_order = await _order_detail(profile.id, client_order_id)
+                    return {
+                        "status": fill["status"],
+                        "virtual_only": True,
+                        "bar_at": bar["timestamp"].isoformat(),
+                        "bar_key": budget["bar_key"],
+                        "fill": fill,
+                        "order": fresh_order,
+                        "execution_cost_evidence": "UNVALIDATED_HEURISTIC",
+                    }
 
             if elapsed_bars >= max(1, int(settings.paper_order_ttl_bars)):
                 await expire_customer_paper_order(

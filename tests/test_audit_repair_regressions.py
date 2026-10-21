@@ -129,3 +129,11 @@ def test_production_gate_has_no_provider_quota_waiver_and_uses_verified_model():
     assert "GEMINI_STRATEGY_MODEL: ${{ vars.GEMINI_STRATEGY_MODEL || 'gemini-3.5-flash-lite' }}" in verify
     assert "GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}" in deploy
     assert "GEMINI_STRATEGY_MODEL: ${{ vars.GEMINI_STRATEGY_MODEL || 'gemini-3.5-flash-lite' }}" in deploy
+    worker_deploy = (root / "deploy" / "cloud-run-worker-deploy.sh").read_text()
+    env_example = (root / "deploy" / "cloud-run.env.example").read_text()
+    runbook = (root / "deploy" / "DEPLOY_WORKFLOW.md").read_text()
+    assert "GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash-lite}" in worker_deploy
+    assert "GEMINI_STRATEGY_MODEL=${GEMINI_STRATEGY_MODEL:-gemini-3.5-flash-lite}" in worker_deploy
+    assert "GEMINI_MODEL=gemini-3.5-flash-lite" in env_example
+    assert "GEMINI_STRATEGY_MODEL=gemini-3.5-flash-lite" in env_example
+    assert "| `GEMINI_MODEL`, `GEMINI_STRATEGY_MODEL` | `gemini-3.5-flash-lite` |" in runbook

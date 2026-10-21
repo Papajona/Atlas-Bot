@@ -27,15 +27,23 @@ def test_customer_paper_execution_guard_is_behavioural():
     assert customer_paper_execution_blocked(None, True) is False
 
 
-def test_customer_start_rejects_paper_mode_before_ai_work():
+def test_customer_start_gates_customer_paper_before_ai_work():
     source = _source("app/main.py")
     start = source[source.index('@app.post("/api/customer/bot/start")'):]
-    guard = start.index("customer_paper_execution_blocked(profile.id, paper_mode)")
+    paper_mode = start.index("needs_customer_paper = bool(paper_mode and profile.id is not None)")
+    unsupported_asset_gate = start.index('if req.asset != "crypto":', paper_mode)
+    config_gate = start.index("if not _customer_paper_configuration_ready():", unsupported_asset_gate)
+    candidate_setup = start.index("candidate = None", config_gate)
+    preflight = start.index("paper_preflight = await _customer_paper_isolation_preflight()", candidate_setup)
     analysis = start.index("asyncio.to_thread(start_bot_decision")
     ai_review = start.index("dual_ai_trade_safety_review(")
-    assert guard < analysis < ai_review
-    assert "no analysis or AI review was run" in start[guard:analysis]
-    assert 'bot.status = "STOPPED"' in source[source.index("async def _run_persisted_adaptive_bot_cycle"):]
+
+    assert paper_mode < unsupported_asset_gate < config_gate < candidate_setup < preflight < analysis < ai_review
+    assert "_customer_paper_configuration_ready()" in start
+    assert 'customer_paper_ledger_enabled: bool = False' in _source("app/config.py")
+    cycle = source[source.index("async def _run_persisted_adaptive_bot_cycle"): ]
+    assert "simulation_ledger_required" in cycle
+    assert 'bot.status = "STOPPED"' in cycle
 
 
 def test_risk_governor_blocks_non_finite_protective_levels():
@@ -146,3 +154,74 @@ def test_risk_governor_blocks_non_positive_take_profit_prices(side, take_profit_
     )
     assert decision.action == "BLOCK"
     assert "invalid_take_profit" in decision.reasons
+
+@pytest.mark.parametrize("timeframe", ["4h", "1d"])
+def test_customer_paper_quality_uses_closed_candle_age(timeframe, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "min_bars", 1)
+    monkeypatch.setattr(settings, "adaptive_require_established_crypto", False)
+    monkeypatch.setattr(settings, "stale_data_minutes", 180)
+    now = pd.Timestamp.now(tz="UTC")
+    last_open = now - pd.Timedelta(timeframe) - pd.Timedelta(seconds=30)
+    frame = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.0], "volume": [1000.0]},
+        index=pd.DatetimeIndex([last_open]),
+    )
+
+    safe, reasons = main_module._customer_paper_market_data_quality(frame, timeframe, "crypto")
+
+    assert safe, reasons
+    assert "stale_market_data" not in reasons
+
+
+def test_customer_paper_quality_rejects_a_future_incomplete_close(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "min_bars", 1)
+    monkeypatch.setattr(settings, "adaptive_require_established_crypto", False)
+    monkeypatch.setattr(settings, "stale_data_minutes", 180)
+    now = pd.Timestamp.now(tz="UTC")
+    last_open = now - pd.Timedelta("1h") + pd.Timedelta(seconds=30)
+    frame = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.0], "volume": [1000.0]},
+        index=pd.DatetimeIndex([last_open]),
+    )
+
+    safe, reasons = main_module._customer_paper_market_data_quality(frame, "1h", "crypto")
+
+    assert not safe
+    assert "incomplete_latest_bar" in reasons
+
+
+def test_recovered_paper_trade_audit_only_emits_for_new_fill():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    guard = 'and str(((recovered.get("execution") or {}).get("fill") or {}).get("status") or "").upper() == "APPENDED"'
+    assert source.count(guard) == 2
+
+
+@pytest.mark.parametrize(
+    ("timeframe", "time_after_close"),
+    [("4h", pd.Timedelta(hours=4)), ("1d", pd.Timedelta(hours=12))],
+)
+def test_customer_paper_quality_allows_closed_slow_candles_with_fresh_quote_window(
+    timeframe, time_after_close, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "min_bars", 1)
+    monkeypatch.setattr(settings, "adaptive_require_established_crypto", False)
+    monkeypatch.setattr(settings, "stale_data_minutes", 180)
+    now = pd.Timestamp.now(tz="UTC")
+    bar_open = now - pd.Timedelta(timeframe) - time_after_close
+    frame = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.0], "volume": [1000.0]},
+        index=pd.DatetimeIndex([bar_open]),
+    )
+
+    safe, reasons = main_module._customer_paper_market_data_quality(frame, timeframe, "crypto")
+
+    assert safe, reasons
+    assert "stale_market_data" not in reasons
