@@ -482,6 +482,52 @@ async def register_customer_paper_market_bar(
         await engine.dispose()
 
 
+async def get_customer_paper_fill_for_bar(
+    *, customer_id: int, client_order_id: str, bar_key: str
+) -> dict[str, Any] | None:
+    """Return the immutable fill already recorded for this order/bar, for safe same-bar retries."""
+    customer_id = _customer_id(customer_id)
+    client_id = _key(client_order_id, "client_order_id", 180)
+    normalized_bar_key = _key(bar_key, "bar_key", 180)
+    await _assert_customer_paper_ready()
+    engine = _paper_engine()
+    try:
+        async with engine.begin() as conn:
+            await _set_tenant(conn, customer_id)
+            row = (await conn.execute(text(
+                """
+                SELECT f.id, f.idempotency_key, f.quantity, f.price, f.fee_amount, f.bar_key,
+                       f.order_id
+                FROM customer_paper.fills AS f
+                JOIN customer_paper.orders AS o
+                  ON o.id=f.order_id AND o.customer_id=f.customer_id
+                WHERE f.customer_id=:customer_id
+                  AND o.client_order_id=:client_order_id
+                  AND f.bar_key=:bar_key
+                ORDER BY f.created_at DESC
+                LIMIT 1
+                """
+            ), {
+                "customer_id": customer_id,
+                "client_order_id": client_id,
+                "bar_key": normalized_bar_key,
+            })).mappings().first()
+        if row is None:
+            return None
+        return {
+            "status": "REPLAYED",
+            "fill_id": str(row["id"]),
+            "order_id": str(row["order_id"]),
+            "idempotency_key": str(row["idempotency_key"]),
+            "bar_key": str(row["bar_key"]),
+            "quantity": _fmt(Decimal(row["quantity"])),
+            "price": _fmt(Decimal(row["price"])),
+            "fee_amount": _fmt(Decimal(row["fee_amount"])),
+        }
+    finally:
+        await engine.dispose()
+
+
 async def record_customer_paper_fill(
     *,
     customer_id: int,
@@ -919,7 +965,8 @@ async def list_open_customer_paper_orders(*, customer_id: int) -> list[dict[str,
             await _set_tenant(conn, customer_id)
             rows = (await conn.execute(text(
                 """
-                SELECT o.client_order_id, o.symbol, o.side, o.quantity,
+                SELECT o.client_order_id, o.venue, o.market_type, o.symbol, o.side,
+                       o.quantity, o.metadata_json,
                        COALESCE(f.filled_quantity,0) AS filled_quantity, e.event_type AS status
                 FROM customer_paper.orders o
                 LEFT JOIN LATERAL (
@@ -936,11 +983,27 @@ async def list_open_customer_paper_orders(*, customer_id: int) -> list[dict[str,
                 ORDER BY o.created_at, o.client_order_id
                 """
             ), {"customer_id": customer_id})).mappings().all()
-        return [{
-            "client_order_id": str(row["client_order_id"]), "symbol": str(row["symbol"]),
-            "side": str(row["side"]), "quantity": _fmt(Decimal(row["quantity"])),
-            "filled_quantity": _fmt(Decimal(row["filled_quantity"] or 0)), "status": str(row["status"]),
-        } for row in rows]
+        orders = []
+        for row in rows:
+            raw_metadata = row["metadata_json"]
+            if isinstance(raw_metadata, str):
+                try:
+                    raw_metadata = json.loads(raw_metadata)
+                except ValueError:
+                    raw_metadata = {}
+            metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+            orders.append({
+                "client_order_id": str(row["client_order_id"]),
+                "venue": str(row["venue"]).lower(),
+                "market_type": str(row["market_type"]),
+                "symbol": str(row["symbol"]),
+                "side": str(row["side"]),
+                "quantity": _fmt(Decimal(row["quantity"])),
+                "filled_quantity": _fmt(Decimal(row["filled_quantity"] or 0)),
+                "status": str(row["status"]),
+                "metadata": metadata,
+            })
+        return orders
     finally:
         await engine.dispose()
 
@@ -985,6 +1048,7 @@ async def get_customer_paper_positions(*, customer_id: int) -> list[dict[str, st
                       AND entry_event.id <= pe.id
                       AND entry_event.quantity_before = 0
                       AND entry_event.quantity_after > 0
+                      AND entry_order.side = 'BUY'
                     ORDER BY entry_event.id DESC
                     LIMIT 1
                 ) AS entry_order ON true
