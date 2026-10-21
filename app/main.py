@@ -2345,6 +2345,16 @@ def market_data(req, customer_id: int | None = None):
 
 
 
+def _customer_paper_max_bar_age_seconds(timeframe_seconds: float) -> float:
+    """Keep fast-bar freshness strict while allowing a completed slow bar through its next period."""
+    configured_seconds = max(60.0, float(settings.stale_data_minutes) * 60.0)
+    if not math.isfinite(timeframe_seconds) or timeframe_seconds <= 0:
+        raise ValueError("timeframe_seconds must be finite and positive")
+    if timeframe_seconds > configured_seconds:
+        return timeframe_seconds * 1.25
+    return min(configured_seconds, max(60.0, timeframe_seconds * 3.5))
+
+
 def _server_paper_market_context(req: MarketRequest, df) -> dict[str, Any] | None:
     """Build market context from server-fetched closed CCXT spot candles and a fresh ticker.
 
@@ -2396,10 +2406,7 @@ def _server_paper_market_context(req: MarketRequest, df) -> dict[str, Any] | Non
             last_bar_ms = int(pd.Timestamp(df.index[-1]).timestamp() * 1000)
             if last_bar_ms + timeframe_ms > now_ms:
                 return None  # forming candle
-            max_bar_age_seconds = min(
-                float(settings.stale_data_minutes * 60),
-                max(60.0, timeframe_seconds * 3.5),
-            )
+            max_bar_age_seconds = _customer_paper_max_bar_age_seconds(timeframe_seconds)
             # OHLCV timestamps identify candle OPEN, not candle CLOSE. A just-closed
             # 1h candle is about an hour old by open timestamp but is not stale. Measure
             # freshness from the completed-candle boundary so paper recovery can advance
@@ -2560,7 +2567,7 @@ def _customer_paper_market_data_quality(df, timeframe: str, asset: str = "crypto
         if close_age < 0:
             if "incomplete_latest_bar" not in reasons:
                 reasons.append("incomplete_latest_bar")
-        elif close_age <= float(settings.stale_data_minutes) * 60.0:
+        elif close_age <= _customer_paper_max_bar_age_seconds(timeframe_seconds):
             if "stale_market_data" in reasons:
                 reasons.remove("stale_market_data")
         elif "stale_market_data" not in reasons:
