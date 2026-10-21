@@ -241,6 +241,33 @@ jobs:
                     reviewed_reason="reviewed superseded CI-readiness branch; no-skip assertion script is byte-identical and current main has broader ledger workflow triggers and equivalent or stronger permissions/timeouts"
                   fi
                   ;;
+                "security/public-schema-rls-lockdown:ee1b636fd562c6fc4958a943290261510c7f4dd5")
+                  # Exact old migration SHA conflicts with main's reconciled 0048 merge
+                  # and 0049 lockdown chain. Delete only if main still carries 0049+0053
+                  # runtime/default-ACL gates and this ref still carries the old 0048->0047 edge.
+                  if git show "$main_sha:alembic/versions/0048_merge_subscription_and_application_heads.py" >/dev/null 2>&1 \
+                    && git show "$main_sha:alembic/versions/0049_public_schema_rls_lockdown.py" | grep -F 'revision = "0049_public_schema_rls_lockdown"' >/dev/null \
+                    && git show "$main_sha:alembic/versions/0049_public_schema_rls_lockdown.py" | grep -F 'REVOKE USAGE ON SCHEMA public FROM PUBLIC' >/dev/null \
+                    && git show "$main_sha:alembic/versions/0053_supabase_public_default_acl_lockdown.py" | grep -F 'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM service_role' >/dev/null \
+                    && git show "$sha:alembic/versions/0048_public_schema_rls_lockdown.py" | grep -F 'revision = "0048_public_schema_rls_lockdown"' >/dev/null \
+                    && git show "$sha:alembic/versions/0048_public_schema_rls_lockdown.py" | grep -F 'down_revision = "0047_strategy_outcome_lifecycle"' >/dev/null; then
+                    reviewed_reason="reviewed obsolete public-schema lockdown chain; exact branch tip points 0048 at the pre-merge 0047 head while main has reconciled 0048/0049/0053 guards"
+                  fi
+                  ;;
+                "feat/isolated-customer-simulation-ledger:e2dae17f4dcc4cf0fdf9577e425b2bc46c0f33ac")
+                  # This older implementation creates the public customer_simulation_* tables
+                  # on the primary SessionLocal connection. The maintained implementation on
+                  # main uses the explicit customer_paper schema and distinct runtime credentials.
+                  if git show "$main_sha:scripts/customer_paper_ledger_schema.sql" | grep -F 'CREATE SCHEMA IF NOT EXISTS customer_paper AUTHORIZATION CURRENT_USER' >/dev/null \
+                    && git show "$main_sha:app/customer_paper_ledger.py" | grep -F 'validate_database_url_pair' >/dev/null \
+                    && git show "$main_sha:app/config.py" | grep -F 'customer_paper_shared_database_enabled: bool = False' >/dev/null \
+                    && git show "$main_sha:tests/test_customer_paper_ledger.py" | grep -F 'test_customer_paper_shared_database_mode_rejects_reused_role_or_password' >/dev/null \
+                    && git show "$sha:alembic/versions/0050_customer_simulation_ledger.py" | grep -F 'revision = "0050_customer_simulation_ledger"' >/dev/null \
+                    && git show "$sha:alembic/versions/0050_customer_simulation_ledger.py" | grep -F 'customer_simulation_accounts' >/dev/null \
+                    && git show "$sha:app/simulation_ledger.py" | grep -F 'INSERT INTO customer_simulation_accounts' >/dev/null; then
+                    reviewed_reason="reviewed superseded public customer_simulation_* implementation; exact branch tip is the legacy primary-database design, replaced by the isolated customer_paper schema/credentials implementation on main"
+                  fi
+                  ;;
               esac
               if [[ -n "$reviewed_reason" ]]; then
                 reason="$reviewed_reason"
