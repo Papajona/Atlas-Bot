@@ -439,16 +439,39 @@ async def _fill_open_order(customer_id: int, order: dict, market: dict, df) -> d
             }
         fill_price, fee, costs = _fill_price_and_fee(side, remaining, market)
 
-    result = await _paper_call(record_customer_paper_fill(
-        customer_id=customer_id,
-        client_order_id=client_id,
-        idempotency_key="paperfill-" + _sha(f"{state['order_id']}|{bar_key}")[:48],
-        bar_key=bar_key,
-        quantity=format(remaining, "f"),
-        price=fill_price,
-        fee_amount=fee,
-        enforce_market_bar_budget=True,
-    ), "append isolated paper fill")
+    try:
+        result = await _paper_call(record_customer_paper_fill(
+            customer_id=customer_id,
+            client_order_id=client_id,
+            idempotency_key="paperfill-" + _sha(f"{state['order_id']}|{bar_key}")[:48],
+            bar_key=bar_key,
+            quantity=format(remaining, "f"),
+            price=fill_price,
+            fee_amount=fee,
+            enforce_market_bar_budget=True,
+        ), "append isolated paper fill")
+    except CustomerPaperFlowBlocked as exc:
+        # The paper-cash advisory lock can reveal a concurrent spend after the
+        # pre-read. Do not leave an unaffordable BUY permanently blocking recovery.
+        if side == "BUY" and "overdraw" in str(exc).lower():
+            await _paper_call(
+                expire_customer_paper_order(
+                    customer_id=customer_id,
+                    client_order_id=client_id,
+                    idempotency_key="paper-cash-race-" + _sha(f"{client_id}|{bar_key}")[:48],
+                ),
+                "expire paper order after concurrent cash consumption",
+            )
+            return {
+                "status": "EXPIRED_INSUFFICIENT_PAPER_CASH",
+                "client_order_id": client_id,
+                "order_id": state["order_id"],
+                "bar_key": bar_key,
+                "fill": {"status": "EXPIRED"},
+                "recovered_pending_order": True,
+                "cost_model": costs,
+            }
+        raise
     return {
         "status": result.get("status"),
         "client_order_id": client_id,
