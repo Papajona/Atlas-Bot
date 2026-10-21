@@ -42,8 +42,9 @@ from .research_engine import backtest_all_strategies, ai_market_review, paper_ca
 from .research_trial_archive import archive_research_trials
 from .research_validation import oos_promotion_gate, monte_carlo_bootstrap
 from .daily_research import run_daily_research, latest_macro_context
-from .execution import execute_signal, advance_platform_paper_orders, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits, customer_paper_execution_blocked
+from .execution import execute_signal, advance_platform_paper_orders, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits
 from .customer_paper_api import build_customer_paper_router
+from .customer_paper_flow import CustomerPaperFlowBlocked, ensure_customer_paper_account, recover_customer_paper_spot_flow, execute_customer_paper_spot_signal
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
 from .payout import get_payout_provider, PayoutError, PayoutUnknown, PayoutNotFound
 from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, release_separation_violation, verify_release_operator
@@ -509,6 +510,41 @@ async def _ensure_adaptive_model_locked(req: MarketRequest, df, policy: Adaptive
         await release_lock(lock_key)
 
 
+def _customer_paper_configuration_ready() -> bool:
+    """Independent switches required before customer orders can touch the paper schema."""
+    return bool(
+        settings.paper_trading
+        and not settings.live_trading_enabled
+        and not settings.customer_live_trading_enabled
+        and not settings.payout_live_enabled
+        and settings.broker_sandbox
+        and not getattr(settings, "deriv_live_enabled", False)
+        and not settings.usdt_tron_enabled
+        and settings.customer_paper_ledger_enabled
+        and str(settings.customer_paper_database_url or "").strip()
+    )
+
+
+async def _customer_paper_isolation_preflight() -> dict:
+    """Read-only proof that the paper runtime role is isolated before any paper write."""
+    if not _customer_paper_configuration_ready():
+        return {"status": "BLOCKED", "reason": "CUSTOMER_PAPER_SAFETY_FLAGS_NOT_READY"}
+    try:
+        from .customer_paper_ledger import preflight_isolated_customer_paper_ledger
+        result = await preflight_isolated_customer_paper_ledger(require_enabled=True)
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "customer_paper_isolation_preflight_failed error_type=%s",
+            type(exc).__name__,
+        )
+        return {"status": "BLOCKED", "reason": "CUSTOMER_PAPER_PREFLIGHT_EXCEPTION"}
+    if not isinstance(result, dict) or str(result.get("status") or "").upper() != "PASS":
+        return result if isinstance(result, dict) else {
+            "status": "BLOCKED", "reason": "CUSTOMER_PAPER_PREFLIGHT_INVALID_RESULT"
+        }
+    return result
+
+
 async def _adaptive_bot_runtime_gate(bot_id: int, customer_id: int, trading_account_id: int) -> tuple[bool, bool, str]:
     """Re-check mutable customer, billing and risk state immediately before execution."""
     async with SessionLocal() as db:
@@ -899,15 +935,32 @@ async def _run_persisted_adaptive_bot_cycle(
         equity = max(0.0, float(account.equity))
         risk_fraction = float(bot.risk_fraction or settings.risk_per_trade)
         paper_mode = bool(settings.paper_trading or not settings.live_trading_enabled or not state.live_enabled or bot.mode != "LIVE")
-        if customer_paper_execution_blocked(profile.id if profile else bot.customer_id, paper_mode):
+        needs_customer_paper = bool(paper_mode and profile.id is not None)
+        if needs_customer_paper and not _customer_paper_configuration_ready():
             bot.status = "STOPPED"
             bot.next_run_at = None
-            bot.last_error = "Customer paper execution requires an isolated simulation ledger"
+            bot.last_error = "Customer paper execution requires an enabled isolated paper ledger and paper-only configuration"
             bot.last_decision = "NO_TRADE"
             bot.last_stage = "simulation_ledger_required"
             await db.commit()
             return {"decision": "NO_TRADE", "stage": "simulation_ledger_required",
-                    "reason": "Customer paper execution requires an isolated simulation ledger"}
+                    "reason": "Customer paper execution requires an enabled isolated paper ledger"}
+    customer_paper_market_context = None
+    if needs_customer_paper:
+        if req.asset != "crypto":
+            return {"decision": "NO_TRADE", "stage": "customer_paper_asset_gate",
+                    "reason": "Customer paper controller currently supports verified crypto spot only"}
+        paper_preflight = await _customer_paper_isolation_preflight()
+        if str(paper_preflight.get("status") or "").upper() != "PASS":
+            return {"decision": "NO_TRADE", "stage": "customer_paper_ledger_preflight",
+                    "reason": str(paper_preflight.get("reason") or "isolated paper ledger preflight did not pass")}
+        paper_currency = str(req.symbol or "").rsplit("/", 1)[-1].strip().upper()
+        try:
+            paper_account = await ensure_customer_paper_account(profile.id, paper_currency)
+            equity = max(0.0, float(paper_account["paper_cash"]))
+        except CustomerPaperFlowBlocked as exc:
+            return {"decision": "NO_TRADE", "stage": "customer_paper_ledger_seed",
+                    "reason": str(exc)}
     if req.asset in {"forex", "commodity"}:
         try:
             df = await _fetch_customer_oanda_data(profile.id, req)
@@ -915,8 +968,55 @@ async def _run_persisted_adaptive_bot_cycle(
             return {"decision": "NO_TRADE", "stage": "customer_oanda_data_gate", "reason": str(exc)}
     else:
         df = await asyncio.to_thread(market_data, req)
-    data_safe, data_reasons = _market_data_quality(df, req.timeframe, req.asset)
-    spread_bps = await _customer_oanda_spread_bps(profile.id, req.symbol) if req.asset in {"forex", "commodity"} else await asyncio.to_thread(_current_spread_bps, req)
+    data_safe, data_reasons = (
+        _customer_paper_market_data_quality(df, req.timeframe, req.asset)
+        if needs_customer_paper else _market_data_quality(df, req.timeframe, req.asset)
+    )
+    if needs_customer_paper:
+        if not data_safe:
+            return {"decision": "NO_TRADE", "stage": "customer_paper_data_quality",
+                    "reasons": data_reasons}
+        customer_paper_market_context = await asyncio.to_thread(_server_paper_market_context, req, df)
+        if customer_paper_market_context is None:
+            return {"decision": "NO_TRADE", "stage": "customer_paper_market_context",
+                    "reason": "Verified completed spot candles and a fresh server quote are required"}
+        spread_bps = float(customer_paper_market_context["spread_bps"])
+        allowed, confirmed_paper_mode, gate_reason = await _adaptive_bot_runtime_gate(
+            bot_id, profile.id, account.id
+        )
+        if not allowed or not confirmed_paper_mode:
+            return {"decision": "NO_TRADE", "stage": "customer_paper_runtime_gate",
+                    "reason": gate_reason}
+        try:
+            recovered = await recover_customer_paper_spot_flow(
+                customer_id=profile.id, req=req, df=df,
+                market_context=customer_paper_market_context,
+            )
+        except CustomerPaperFlowBlocked as exc:
+            return {"decision": "NO_TRADE", "stage": "customer_paper_recovery",
+                    "reason": str(exc)}
+        if recovered is not None:
+            if (
+                str(recovered.get("decision") or "").upper() == "TRADE"
+                and str(((recovered.get("execution") or {}).get("fill") or {}).get("status") or "").upper() == "APPENDED"
+            ):
+                recovered_execution = recovered.get("execution") or {}
+                recovered_fill = recovered_execution.get("fill") or {}
+                await _safe_audit("CUSTOMER_BOT_TRADE", {
+                    "customer_id": profile.id, "bot_id": bot_id, "symbol": req.symbol,
+                    "decision": "TRADE", "mode": "CUSTOMER_PAPER",
+                    "stage": "customer_paper_recovery",
+                    "order_id": recovered_execution.get("order_id") or recovered_fill.get("order_id"),
+                    "fill_id": recovered_fill.get("fill_id"),
+                    "fill_status": recovered_fill.get("status") or recovered_execution.get("status"),
+                })
+            return {
+                **recovered,
+                "stage": "customer_paper_recovery",
+                "analysis": {"market_timestamp": str(df.index[-1].isoformat()), "data_quality": "PASS"},
+            }
+    else:
+        spread_bps = await _customer_oanda_spread_bps(profile.id, req.symbol) if req.asset in {"forex", "commodity"} else await asyncio.to_thread(_current_spread_bps, req)
     if spread_bps is None and not paper_mode:
         data_safe = False
         data_reasons.append("live_spread_unavailable")
@@ -1008,16 +1108,62 @@ async def _run_persisted_adaptive_bot_cycle(
     # Apply the portfolio correlation-group cap before submitting this candidate.
     # This check scales the proposed quantity to remaining headroom; execute_signal()
     # performs its own authoritative execution/risk-state checks before the broker call.
-    async with SessionLocal() as db2:
-        open_positions = (await db2.execute(select(Position).where(
-            Position.customer_id == profile.id, Position.quantity != 0,
-        ))).scalars().all()
+    if needs_customer_paper:
+        from types import SimpleNamespace
+        from .customer_paper_lifecycle import get_customer_paper_positions
+        try:
+            paper_positions = await get_customer_paper_positions(customer_id=profile.id)
+        except Exception as exc:
+            return {
+                "decision": "NO_TRADE", "stage": "paper_exposure_positions_unavailable",
+                "reason": f"isolated paper positions could not be verified ({type(exc).__name__})",
+            }
+        open_positions = []
+        for row in paper_positions:
+            symbol = str(row.get("symbol") or "")
+            venue = str(row.get("venue") or "").lower()
+            average = float(row.get("average_entry_price") or 0)
+            mark = average
+            # Exposure-increasing paper BUYs require current server marks for every
+            # open asset in the correlation group. If a mark cannot be proved, block.
+            if str(plan.get("side") or "").upper() == "BUY":
+                if (
+                    venue == str(req.exchange).lower()
+                    and symbol.upper() == str(req.symbol).upper()
+                    and customer_paper_market_context is not None
+                ):
+                    mark = float(customer_paper_market_context["bid"])
+                else:
+                    try:
+                        mark_req = req.model_copy(update={"symbol": symbol, "exchange": venue})
+                        mark_df = await asyncio.to_thread(market_data, mark_req)
+                        mark_context = await asyncio.to_thread(_server_paper_market_context, mark_req, mark_df)
+                        if mark_context is None or not math.isfinite(float(mark_context.get("bid", 0))) or float(mark_context.get("bid", 0)) <= 0:
+                            raise ValueError("no fresh validated bid")
+                        mark = float(mark_context["bid"])
+                    except Exception as exc:
+                        return {
+                            "decision": "NO_TRADE", "stage": "paper_exposure_mark_unavailable",
+                            "symbol": symbol,
+                            "reason": f"current server mark unavailable ({type(exc).__name__})",
+                        }
+            open_positions.append(SimpleNamespace(
+                symbol=symbol,
+                quantity=float(row.get("quantity") or 0),
+                average_entry_price=average,
+                mark_price=mark,
+            ))
+    else:
+        async with SessionLocal() as db2:
+            open_positions = (await db2.execute(select(Position).where(
+                Position.customer_id == profile.id, Position.quantity != 0,
+            ))).scalars().all()
     proposed_notional = quantity * float(plan["entry_price"])
     group_check = adjusted_group_exposure(
         open_positions, proposed_symbol=req.symbol, proposed_notional=proposed_notional,
         cap_usd=settings.correlation_group_cap_usd,
     )
-    if not group_check["allowed"]:
+    if not group_check["allowed"] and str(plan.get("side") or "").upper() == "BUY":
         headroom = max(0.0, settings.correlation_group_cap_usd - group_check["existing_notional"])
         quantity = min(quantity, headroom / max(float(plan["entry_price"]), 1e-12))
     if quantity <= 0:
@@ -1046,9 +1192,43 @@ async def _run_persisted_adaptive_bot_cycle(
         "customer_id": profile.id,
         "trading_account_id": account.id,
     }
-    execution = await execute_signal(req.symbol, plan["side"], quantity, float(plan["entry_price"]), signal, req.exchange, req.timeframe, deterministic["timestamp"], force_paper=paper_mode, stop_loss_price=float(plan["stop_loss_price"]), take_profit_price=float(plan["take_profit_price"]), strategy="atlas-adaptive-autonomous-v1", asset=req.asset, customer_id=profile.id)
+    if needs_customer_paper:
+        fresh_paper_context = await asyncio.to_thread(_server_paper_market_context, req, df)
+        if fresh_paper_context is None:
+            return {"decision": "NO_TRADE", "stage": "customer_paper_market_context",
+                    "reason": "Fresh verified spot quote unavailable before paper order submission"}
+        allowed, confirmed_paper_mode, gate_reason = await _adaptive_bot_runtime_gate(
+            bot_id, profile.id, account.id
+        )
+        if not allowed or not confirmed_paper_mode:
+            return {"decision": "NO_TRADE", "stage": "customer_paper_runtime_gate",
+                    "reason": gate_reason}
+        try:
+            execution = await execute_customer_paper_spot_signal(
+                customer_id=profile.id, req=req, df=df,
+                market_context=fresh_paper_context,
+                side=plan["side"], quantity=str(quantity),
+                stop_loss_price=str(plan["stop_loss_price"]),
+                take_profit_price=str(plan["take_profit_price"]),
+                strategy="atlas-adaptive-autonomous-v1",
+                signal_metadata={
+                    "model_version": str(ml_signal.get("model_version") or model_meta.get("model_version") or ""),
+                    "strategy_version": "atlas-adaptive-autonomous-v1",
+                },
+            )
+        except CustomerPaperFlowBlocked as exc:
+            return {"decision": "NO_TRADE", "stage": "customer_paper_execution",
+                    "reason": str(exc)}
+        if execution.get("decision") != "TRADE":
+            return {
+                "decision": "NO_TRADE", "stage": "customer_paper_order_gate", "mode": "CUSTOMER_PAPER",
+                "analysis": deterministic, "adaptive_model": adaptive, "ml_signal": ml_signal,
+                "ai_review": ai_review, "execution": execution,
+            }
+    else:
+        execution = await execute_signal(req.symbol, plan["side"], quantity, float(plan["entry_price"]), signal, req.exchange, req.timeframe, deterministic["timestamp"], force_paper=paper_mode, stop_loss_price=float(plan["stop_loss_price"]), take_profit_price=float(plan["take_profit_price"]), strategy="atlas-adaptive-autonomous-v1", asset=req.asset, customer_id=profile.id)
     return {
-        "decision": "TRADE",
+        "decision": execution.get("decision", "TRADE") if needs_customer_paper else "TRADE",
         "mode": execution.get("mode"),
         "analysis": deterministic,
         "adaptive_model": adaptive,
@@ -2165,6 +2345,16 @@ def market_data(req, customer_id: int | None = None):
 
 
 
+def _customer_paper_max_bar_age_seconds(timeframe_seconds: float) -> float:
+    """Keep fast-bar freshness strict while allowing a completed slow bar through its next period."""
+    configured_seconds = max(60.0, float(settings.stale_data_minutes) * 60.0)
+    if not math.isfinite(timeframe_seconds) or timeframe_seconds <= 0:
+        raise ValueError("timeframe_seconds must be finite and positive")
+    if timeframe_seconds > configured_seconds:
+        return timeframe_seconds * 1.25
+    return min(configured_seconds, max(60.0, timeframe_seconds * 3.5))
+
+
 def _server_paper_market_context(req: MarketRequest, df) -> dict[str, Any] | None:
     """Build market context from server-fetched closed CCXT spot candles and a fresh ticker.
 
@@ -2216,11 +2406,13 @@ def _server_paper_market_context(req: MarketRequest, df) -> dict[str, Any] | Non
             last_bar_ms = int(pd.Timestamp(df.index[-1]).timestamp() * 1000)
             if last_bar_ms + timeframe_ms > now_ms:
                 return None  # forming candle
-            max_bar_age_seconds = min(
-                float(settings.stale_data_minutes * 60),
-                max(60.0, timeframe_seconds * 3.5),
-            )
-            if (now_ms - last_bar_ms) / 1000.0 > max_bar_age_seconds:
+            max_bar_age_seconds = _customer_paper_max_bar_age_seconds(timeframe_seconds)
+            # OHLCV timestamps identify candle OPEN, not candle CLOSE. A just-closed
+            # 1h candle is about an hour old by open timestamp but is not stale. Measure
+            # freshness from the completed-candle boundary so paper recovery can advance
+            # on the next closed bar instead of rejecting all higher-timeframe bars.
+            completed_bar_age_seconds = (now_ms - (last_bar_ms + timeframe_ms)) / 1000.0
+            if completed_bar_age_seconds > max_bar_age_seconds:
                 return None
 
             volume = pd.to_numeric(df["volume"], errors="coerce").tail(20)
@@ -2354,6 +2546,35 @@ def _market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[boo
             reasons.append("stale_market_data")
     except Exception:
         reasons.append("invalid_market_timestamp")
+    return not reasons, reasons
+
+
+def _customer_paper_market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[bool, list[str]]:
+    """Measure candle freshness from its close boundary for isolated paper execution."""
+    safe, reasons = _market_data_quality(df, timeframe, asset)
+    if df is None or len(df) == 0:
+        return safe, reasons
+    try:
+        last_open = pd.Timestamp(df.index[-1])
+        if last_open.tzinfo is None:
+            raise ValueError("naive candle timestamp")
+        timeframe_seconds = float(pd.Timedelta(timeframe).total_seconds())
+        if timeframe_seconds <= 0:
+            raise ValueError("invalid timeframe")
+        last_close = last_open + pd.Timedelta(seconds=timeframe_seconds)
+        now = pd.Timestamp(datetime.now(timezone.utc))
+        close_age = (now - last_close).total_seconds()
+        if close_age < 0:
+            if "incomplete_latest_bar" not in reasons:
+                reasons.append("incomplete_latest_bar")
+        elif close_age <= _customer_paper_max_bar_age_seconds(timeframe_seconds):
+            if "stale_market_data" in reasons:
+                reasons.remove("stale_market_data")
+        elif "stale_market_data" not in reasons:
+            reasons.append("stale_market_data")
+    except Exception:
+        if "invalid_market_timestamp" not in reasons:
+            reasons.append("invalid_market_timestamp")
     return not reasons, reasons
 
 
@@ -3949,11 +4170,18 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             or not state.live_enabled
             or req.asset in {"forex", "commodity"}
         )
-        if customer_paper_execution_blocked(profile.id, paper_mode):
-            raise HTTPException(
-                409,
-                "Customer bot execution is unavailable until an isolated simulation ledger exists; no analysis or AI review was run.",
-            )
+        needs_customer_paper = bool(paper_mode and profile.id is not None)
+        if needs_customer_paper and "automated_entry_exit" not in plan.get("features", []):
+            raise HTTPException(403, "Your current plan does not permit automated paper execution")
+        if needs_customer_paper:
+            if req.asset != "crypto":
+                raise HTTPException(409, "Customer paper automation currently supports verified crypto spot only; no analysis or AI review was run.")
+            if not _customer_paper_configuration_ready():
+                raise HTTPException(
+                    409,
+                    "Customer bot execution is unavailable until the isolated paper ledger is enabled and configured; no analysis or AI review was run.",
+                )
+        customer_paper_account = None
         candidate = None
         if req.strategy_candidate_id is not None:
             candidate = (await db.execute(select(StrategyCandidate).where(StrategyCandidate.id == req.strategy_candidate_id, StrategyCandidate.customer_id == profile.id))).scalar_one_or_none()
@@ -3961,6 +4189,20 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 raise HTTPException(409, "Strategy candidate must pass validation and explicit live approval before autonomous deployment")
             if candidate.asset != req.asset or candidate.symbol != req.symbol or candidate.exchange != req.exchange or candidate.timeframe != req.timeframe:
                 raise HTTPException(409, "Strategy candidate does not match the selected market configuration")
+        if needs_customer_paper:
+            paper_preflight = await _customer_paper_isolation_preflight()
+            if str(paper_preflight.get("status") or "").upper() != "PASS":
+                raise HTTPException(
+                    409,
+                    "Customer paper isolation preflight blocked: "
+                    + str(paper_preflight.get("reason") or "verification did not pass")
+                    + "; no customer order was submitted.",
+                )
+            paper_currency = str(req.symbol or "").rsplit("/", 1)[-1].strip().upper()
+            try:
+                customer_paper_account = await ensure_customer_paper_account(profile.id, paper_currency)
+            except CustomerPaperFlowBlocked as exc:
+                raise HTTPException(409, f"Customer paper ledger cannot be initialized: {exc}") from exc
         account = await _get_or_create_customer_trading_account(db, profile)
         if not paper_mode:
             try:
@@ -3970,7 +4212,10 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 )
             except LiveExecutionBlocked as exc:
                 raise _safe_http_error(403, exc, "Live bot cannot be armed") from exc
-        equity = max(0.0, float(account.equity))
+        equity = max(
+            0.0,
+            float(customer_paper_account["paper_cash"] if needs_customer_paper and customer_paper_account else account.equity),
+        )
         account_id = account.id
         bot_id = None
         if req.autonomous:
@@ -4043,8 +4288,84 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
 
     try:
         df = await _fetch_customer_oanda_data(profile.id, req) if req.asset in {"forex", "commodity"} else await asyncio.to_thread(market_data, req)
-        data_safe, data_reasons = _market_data_quality(df, req.timeframe, req.asset)
-        spread_bps = await _customer_oanda_spread_bps(profile.id, req.symbol) if req.asset in {"forex", "commodity"} else await asyncio.to_thread(_current_spread_bps, req)
+        data_safe, data_reasons = (
+        _customer_paper_market_data_quality(df, req.timeframe, req.asset)
+        if needs_customer_paper else _market_data_quality(df, req.timeframe, req.asset)
+    )
+        customer_paper_market_context = None
+        if needs_customer_paper:
+            if not data_safe:
+                return await _record_customer_decision({
+                    "decision": "NO_TRADE", "stage": "customer_paper_data_quality",
+                    "reasons": data_reasons, "execution": None,
+                })
+            customer_paper_market_context = await asyncio.to_thread(_server_paper_market_context, req, df)
+            if customer_paper_market_context is None:
+                return await _record_customer_decision({
+                    "decision": "NO_TRADE", "stage": "customer_paper_market_context",
+                    "reason": "Verified completed spot candles and a fresh server quote are required",
+                    "execution": None,
+                })
+            spread_bps = float(customer_paper_market_context["spread_bps"])
+            if bot_id:
+                allowed, confirmed_paper_mode, gate_reason = await _adaptive_bot_runtime_gate(
+                    bot_id, profile.id, account_id
+                )
+                if not allowed or not confirmed_paper_mode:
+                    return await _record_customer_decision({
+                        "decision": "NO_TRADE", "stage": "customer_paper_runtime_gate",
+                        "reason": gate_reason, "execution": None,
+                    })
+            async with SessionLocal() as guard_db:
+                current_profile = await guard_db.get(CustomerProfile, profile.id)
+                current_account = await guard_db.get(TradingAccount, account_id)
+                current_state = await guard_db.get(AppState, 1)
+                latest_plan, _ = await _subscription_entitlements(guard_db, profile.id)
+                if (
+                    not current_profile or current_profile.status != "ACTIVE"
+                    or not current_account or current_account.status != "ACTIVE"
+                    or not current_state or current_state.kill_switch
+                    or "automated_entry_exit" not in latest_plan.get("features", [])
+                ):
+                    return await _record_customer_decision({
+                        "decision": "NO_TRADE", "stage": "customer_paper_runtime_gate",
+                        "reason": "active customer, account, platform risk, or automation entitlement recheck failed",
+                        "execution": None,
+                    })
+            try:
+                recovered = await recover_customer_paper_spot_flow(
+                    customer_id=profile.id, req=req, df=df,
+                    market_context=customer_paper_market_context,
+                )
+            except CustomerPaperFlowBlocked as exc:
+                return await _record_customer_decision({
+                    "decision": "NO_TRADE", "stage": "customer_paper_recovery",
+                    "reason": str(exc), "execution": None,
+                })
+            if recovered is not None:
+                if (
+                str(recovered.get("decision") or "").upper() == "TRADE"
+                and str(((recovered.get("execution") or {}).get("fill") or {}).get("status") or "").upper() == "APPENDED"
+            ):
+                    recovered_execution = recovered.get("execution") or {}
+                    recovered_fill = recovered_execution.get("fill") or {}
+                    await _safe_audit("CUSTOMER_BOT_TRADE", {
+                        "customer_id": profile.id, "trading_account_id": account_id,
+                        "bot_id": bot_id, "symbol": req.symbol, "decision": "TRADE",
+                        "mode": "CUSTOMER_PAPER", "stage": "customer_paper_recovery",
+                        "order_id": recovered_execution.get("order_id") or recovered_fill.get("order_id"),
+                        "fill_id": recovered_fill.get("fill_id"),
+                        "fill_status": recovered_fill.get("status") or recovered_execution.get("status"),
+                    })
+                return await _record_customer_decision({
+                    **recovered,
+                    "stage": "customer_paper_recovery",
+                    "analysis": {"market_timestamp": str(df.index[-1].isoformat()), "data_quality": "PASS"},
+                    "autonomous_bot_id": bot_id,
+                    "autonomous_status": "RUNNING" if bot_id else "DISABLED",
+                })
+        else:
+            spread_bps = await _customer_oanda_spread_bps(profile.id, req.symbol) if req.asset in {"forex", "commodity"} else await asyncio.to_thread(_current_spread_bps, req)
         if spread_bps is None and not paper_mode:
             data_safe = False
             data_reasons.append("live_spread_unavailable")
@@ -4272,13 +4593,68 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             "decision_id": decision_id,
             "decision_timestamp": str(deterministic.get("timestamp") or ""),
         }
-        execution = await execute_signal(
-            req.symbol, plan["side"], quantity, float(plan["entry_price"]), signal,
-            req.exchange, req.timeframe, deterministic["timestamp"],
-            force_paper=paper_mode, stop_loss_price=float(plan["stop_loss_price"]),
-            take_profit_price=float(plan["take_profit_price"]), strategy=str(router.get("strategy") or plan.get("strategy") or "atlas-gated-entry-exit-v2"), asset=req.asset,
-            customer_id=profile.id,
-        )
+        if needs_customer_paper:
+            fresh_paper_context = await asyncio.to_thread(_server_paper_market_context, req, df)
+            if fresh_paper_context is None:
+                raise HTTPException(409, "Fresh verified spot market context is unavailable; no customer paper order was submitted")
+            if bot_id:
+                allowed, confirmed_paper_mode, gate_reason = await _adaptive_bot_runtime_gate(
+                    bot_id, profile.id, account_id
+                )
+                if not allowed or not confirmed_paper_mode:
+                    raise HTTPException(409, f"Customer paper runtime recheck blocked execution: {gate_reason}")
+            else:
+                paper_preflight = await _customer_paper_isolation_preflight()
+                if str(paper_preflight.get("status") or "").upper() != "PASS":
+                    raise HTTPException(409, "Customer paper isolation preflight no longer passes; no order was submitted")
+                async with SessionLocal() as guard_db:
+                    current_profile = await guard_db.get(CustomerProfile, profile.id)
+                    current_account = await guard_db.get(TradingAccount, account_id)
+                    current_state = await guard_db.get(AppState, 1)
+                    latest_plan, _ = await _subscription_entitlements(guard_db, profile.id)
+                    if (
+                        not current_profile or current_profile.status != "ACTIVE"
+                        or not current_account or current_account.status != "ACTIVE"
+                        or not current_state or current_state.kill_switch
+                        or "automated_entry_exit" not in latest_plan.get("features", [])
+                    ):
+                        raise HTTPException(409, "Customer paper runtime, risk, or entitlement recheck blocked execution")
+            try:
+                execution = await execute_customer_paper_spot_signal(
+                    customer_id=profile.id, req=req, df=df,
+                    market_context=fresh_paper_context,
+                    side=plan["side"], quantity=str(quantity),
+                    stop_loss_price=str(plan["stop_loss_price"]),
+                    take_profit_price=str(plan["take_profit_price"]),
+                    strategy=str(router.get("strategy") or plan.get("strategy") or "atlas-gated-entry-exit-v2"),
+                    signal_metadata={
+                        "model_version": str((adaptive or {}).get("model_version") or ""),
+                        "strategy_candidate_id": req.strategy_candidate_id,
+                    },
+                )
+            except CustomerPaperFlowBlocked as exc:
+                raise HTTPException(409, f"Customer paper execution blocked: {exc}") from exc
+            if execution.get("decision") != "TRADE":
+                return await _record_customer_decision({
+                    "decision": "NO_TRADE",
+                    "stage": "customer_paper_order_gate",
+                    "mode": "CUSTOMER_PAPER",
+                    "analysis": deterministic,
+                    "adaptive_model": adaptive or {"status": "DISABLED"},
+                    "ml_signal": ml_signal if settings.adaptive_ai_enabled else {"status": "DISABLED"},
+                    "ai_review": ai_review,
+                    "execution": execution,
+                    "autonomous_bot_id": bot_id,
+                    "autonomous_status": "RUNNING" if bot_id else "DISABLED",
+                })
+        else:
+            execution = await execute_signal(
+                req.symbol, plan["side"], quantity, float(plan["entry_price"]), signal,
+                req.exchange, req.timeframe, deterministic["timestamp"],
+                force_paper=paper_mode, stop_loss_price=float(plan["stop_loss_price"]),
+                take_profit_price=float(plan["take_profit_price"]), strategy=str(router.get("strategy") or plan.get("strategy") or "atlas-gated-entry-exit-v2"), asset=req.asset,
+                customer_id=profile.id,
+            )
         await _audit("CUSTOMER_BOT_TRADE", {
             "customer_id": profile.id, "trading_account_id": account_id, "symbol": req.symbol, "decision": "TRADE",
             "mode": execution.get("mode"), "trade_id": execution.get("trade_id"),
@@ -4307,7 +4683,8 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     row.consecutive_errors = 0
                     await state_db.commit()
         return await _record_customer_decision({
-            "decision": "TRADE", "mode": execution.get("mode"), "analysis": deterministic,
+            "decision": execution.get("decision", "TRADE") if needs_customer_paper else "TRADE",
+            "mode": execution.get("mode"), "analysis": deterministic,
             "adaptive_model": adaptive or {"status": "DISABLED"},
             "ml_signal": ml_signal if settings.adaptive_ai_enabled else {"status": "DISABLED"},
             "ai_review": ai_review, "strategy_router": router,
