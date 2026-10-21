@@ -11,7 +11,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, ROUND_HALF_EVEN, localcontext
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_EVEN, localcontext
 
 from .config import settings
 from .customer_paper_ledger import (
@@ -22,10 +22,12 @@ from .customer_paper_ledger import (
 from .customer_paper_lifecycle import (
     CustomerPaperIdempotencyConflict,
     CustomerPaperOrderConflict,
+    get_customer_paper_fill_for_bar,
     get_customer_paper_order,
     get_customer_paper_positions,
     list_open_customer_paper_orders,
     record_customer_paper_fill,
+    expire_customer_paper_order,
     register_customer_paper_market_bar,
     submit_customer_paper_order,
 )
@@ -49,6 +51,16 @@ def _finite_decimal(value: object, name: str, *, non_negative: bool = False) -> 
     if not result.is_finite() or (non_negative and result < 0):
         raise CustomerPaperFlowBlocked(f"{name} must be finite and non-negative")
     return result
+
+
+async def _paper_call(awaitable, action: str):
+    """Convert isolated paper-ledger failures into fail-closed flow errors."""
+    try:
+        return await awaitable
+    except CustomerPaperFlowBlocked:
+        raise
+    except Exception as exc:
+        raise CustomerPaperFlowBlocked(f"{action}: {exc}") from exc
 
 
 def _quote_currency(symbol: str) -> str:
@@ -213,9 +225,11 @@ async def ensure_customer_paper_account(customer_id: int, currency: str) -> dict
     if initial <= 0 or initial.adjusted() + 1 > 20:
         raise CustomerPaperFlowBlocked("Configured virtual paper starting balance must be positive and numeric(38,18)-safe")
     try:
-        balances = await get_customer_paper_balances(customer_id=customer_id)
+        balances = await _paper_call(
+            get_customer_paper_balances(customer_id=customer_id), "read paper balances"
+        )
         if not balances:
-            await post_customer_paper_journal(
+            await _paper_call(post_customer_paper_journal(
                 customer_id=customer_id,
                 idempotency_key="initial-customer-paper-seed-v1",
                 event_type="PAPER_SEED",
@@ -230,9 +244,13 @@ async def ensure_customer_paper_account(customer_id: int, currency: str) -> dict
                     "real_customer_funds_used": False,
                     "configuration_currency": currency,
                 },
+            ), "seed virtual paper account")
+            balances = await _paper_call(
+                get_customer_paper_balances(customer_id=customer_id), "verify paper seed"
             )
-            balances = await get_customer_paper_balances(customer_id=customer_id)
-    except (CustomerPaperLedgerBlocked, ValueError) as exc:
+    except CustomerPaperFlowBlocked:
+        raise
+    except Exception as exc:
         raise CustomerPaperFlowBlocked(str(exc)) from exc
     currencies = {str(row.get("currency") or "").upper() for row in balances}
     by_code = {
@@ -288,7 +306,10 @@ async def _fill_open_order(customer_id: int, order: dict, market: dict, df) -> d
     client_id = str(order.get("client_order_id") or "")
     if not client_id:
         raise CustomerPaperFlowBlocked("Pending paper order is missing its client identifier")
-    state = await get_customer_paper_order(customer_id=customer_id, client_order_id=client_id)
+    state = await _paper_call(
+        get_customer_paper_order(customer_id=customer_id, client_order_id=client_id),
+        "read pending paper order",
+    )
     if state is None:
         raise CustomerPaperFlowBlocked("Pending order disappeared during recovery")
     if state.get("status") not in {"SUBMITTED", "PARTIALLY_FILLED"}:
@@ -332,7 +353,9 @@ async def _fill_open_order(customer_id: int, order: dict, market: dict, df) -> d
     if side not in {"BUY", "SELL"}:
         raise CustomerPaperFlowBlocked("Pending order side is invalid")
     position_matches = [
-        p for p in await get_customer_paper_positions(customer_id=customer_id)
+        p for p in await _paper_call(
+            get_customer_paper_positions(customer_id=customer_id), "read paper position for fill"
+        )
         if str(p.get("venue") or "").lower() == str(state.get("venue") or "").lower()
         and str(p.get("symbol") or "") == str(state.get("symbol") or "")
     ]
@@ -342,7 +365,7 @@ async def _fill_open_order(customer_id: int, order: dict, market: dict, df) -> d
             raise CustomerPaperFlowBlocked("Recovery SELL does not match an open long spot position")
 
     try:
-        budget = await register_customer_paper_market_bar(
+        budget = await _paper_call(register_customer_paper_market_bar(
             venue=str(state["venue"]).lower(),
             symbol=str(state["symbol"]).upper(),
             timeframe=str(meta.get("timeframe") or ""),
@@ -350,26 +373,82 @@ async def _fill_open_order(customer_id: int, order: dict, market: dict, df) -> d
             bar_data_sha256=str(market["bar_data_sha256"]),
             base_volume=market["base_volume"],
             participation_rate=str(settings.paper_max_bar_volume_participation),
-        )
+        ), "register paper market-bar budget")
     except (CustomerPaperLedgerBlocked, CustomerPaperOrderConflict, ValueError) as exc:
         raise CustomerPaperFlowBlocked(f"Shared paper market-bar budget is unavailable: {exc}") from exc
 
-    fill_price, fee, costs = _fill_price_and_fee(side, remaining, market)
     bar_key = str(budget["bar_key"])
-    fill_key = "paperfill-" + _sha(f"{state['order_id']}|{bar_key}")[:48]
-    try:
-        result = await record_customer_paper_fill(
-            customer_id=customer_id,
-            client_order_id=client_id,
-            idempotency_key=fill_key,
-            bar_key=bar_key,
-            quantity=format(remaining, "f"),
-            price=fill_price,
-            fee_amount=fee,
-            enforce_market_bar_budget=True,
+    # A completed bar may receive at most one fill attempt for an order. On retry,
+    # replay its immutable fill instead of recalculating payload from a newer quote.
+    prior_fill = await _paper_call(
+        get_customer_paper_fill_for_bar(
+            customer_id=customer_id, client_order_id=client_id, bar_key=bar_key
+        ),
+        "read same-bar paper fill",
+    )
+    if prior_fill is not None:
+        return {
+            "status": "REPLAYED",
+            "client_order_id": client_id,
+            "order_id": state["order_id"],
+            "bar_key": bar_key,
+            "bar_at": budget.get("bar_at"),
+            "bar_capacity": budget.get("capacity"),
+            "fill": prior_fill,
+            "cost_model": {"cost_model_status": "REPLAYED_FROM_IMMUTABLE_LEDGER"},
+            "recovered_pending_order": True,
+        }
+
+    fill_price, fee, costs = _fill_price_and_fee(side, remaining, market)
+    if side == "BUY":
+        balances = await _paper_call(
+            get_customer_paper_balances(customer_id=customer_id), "read paper cash for fill"
         )
-    except (CustomerPaperLedgerBlocked, CustomerPaperOrderConflict, CustomerPaperIdempotencyConflict, ValueError) as exc:
-        raise CustomerPaperFlowBlocked(f"Isolated paper fill was blocked: {exc}") from exc
+        cash = sum(
+            (
+                Decimal(str(row.get("balance") or "0"))
+                for row in balances
+                if str(row.get("account_code") or "") == "PAPER_CASH"
+                and str(row.get("currency") or "").upper() == str(state.get("currency") or "").upper()
+            ),
+            Decimal("0"),
+        )
+        fee_bps = Decimal(str(costs["fee_bps_assumption"]))
+        unit_cost = Decimal(fill_price) * (Decimal("1") + fee_bps / Decimal("10000"))
+        with localcontext() as context:
+            context.prec = 50
+            affordable = max(Decimal("0"), cash / unit_cost).quantize(_BAR_QUANTUM, rounding=ROUND_DOWN)
+        remaining = min(remaining, affordable)
+        if remaining <= 0:
+            await _paper_call(
+                expire_customer_paper_order(
+                    customer_id=customer_id,
+                    client_order_id=client_id,
+                    idempotency_key="paper-unaffordable-" + _sha(client_id)[:48],
+                ),
+                "expire unaffordable pending paper order",
+            )
+            return {
+                "status": "EXPIRED_INSUFFICIENT_PAPER_CASH",
+                "client_order_id": client_id,
+                "order_id": state["order_id"],
+                "bar_key": bar_key,
+                "fill": {"status": "EXPIRED"},
+                "recovered_pending_order": True,
+                "cost_model": costs,
+            }
+        fill_price, fee, costs = _fill_price_and_fee(side, remaining, market)
+
+    result = await _paper_call(record_customer_paper_fill(
+        customer_id=customer_id,
+        client_order_id=client_id,
+        idempotency_key="paperfill-" + _sha(f"{state['order_id']}|{bar_key}")[:48],
+        bar_key=bar_key,
+        quantity=format(remaining, "f"),
+        price=fill_price,
+        fee_amount=fee,
+        enforce_market_bar_budget=True,
+    ), "append isolated paper fill")
     return {
         "status": result.get("status"),
         "client_order_id": client_id,
@@ -387,7 +466,9 @@ async def _fill_open_order(customer_id: int, order: dict, market: dict, df) -> d
 async def process_customer_paper_orders(customer_id: int, req, df, market_context: Mapping) -> dict | None:
     """Recover one pending order for this customer/market using a fresh quote."""
     market = validate_customer_paper_market(req, df, market_context)
-    pending = await list_open_customer_paper_orders(customer_id=customer_id)
+    pending = await _paper_call(
+        list_open_customer_paper_orders(customer_id=customer_id), "list pending paper orders"
+    )
     matching = [
         order for order in pending
         if str(order.get("venue") or "").lower() == str(req.exchange).lower()
@@ -408,7 +489,9 @@ async def process_customer_paper_orders(customer_id: int, req, df, market_contex
 
 async def _protective_exit(customer_id: int, req, df, market: dict) -> dict | None:
     positions = [
-        p for p in await get_customer_paper_positions(customer_id=customer_id)
+        p for p in await _paper_call(
+            get_customer_paper_positions(customer_id=customer_id), "read paper positions"
+        )
         if str(p.get("venue") or "").lower() == str(req.exchange).lower()
         and str(p.get("symbol") or "") == str(req.symbol)
         and Decimal(str(p.get("quantity") or "0")) > 0
@@ -429,24 +512,40 @@ async def _protective_exit(customer_id: int, req, df, market: dict) -> dict | No
         return None
     stop = _finite_decimal(position.get("stop_loss_price"), "position stop loss") if position.get("stop_loss_price") else Decimal("0")
     target = _finite_decimal(position.get("take_profit_price"), "position take profit") if position.get("take_profit_price") else Decimal("0")
-    try:
-        low = _finite_decimal(df["low"].iloc[-1], "latest completed-bar low")
-        high = _finite_decimal(df["high"].iloc[-1], "latest completed-bar high")
-    except Exception as exc:
-        raise CustomerPaperFlowBlocked("Latest completed bar has invalid OHLC prices") from exc
     reason = None
-    # If stop and target are both crossed in one candle, choose the adverse stop first.
-    if stop > 0 and low <= stop:
-        reason = "STOP_LOSS"
-    elif target > 0 and high >= target:
-        reason = "TAKE_PROFIT"
-    if not reason:
+    breach_bar = None
+    # Evaluate every completed candle after the last persisted position event.
+    # This preserves stop/target protection across worker downtime and missed cycles.
+    for bar_at, bar in df.iterrows():
+        try:
+            bar_dt = datetime.fromisoformat(
+                str(getattr(bar_at, "isoformat", lambda: bar_at)()).replace("Z", "+00:00")
+            )
+            if bar_dt.tzinfo is None or bar_dt.utcoffset() is None:
+                raise ValueError("naive bar timestamp")
+            bar_dt = bar_dt.astimezone(timezone.utc)
+            if bar_dt <= latest_position_bar.astimezone(timezone.utc) or bar_dt > current_bar.astimezone(timezone.utc):
+                continue
+            low = _finite_decimal(bar["low"], "completed-bar low")
+            high = _finite_decimal(bar["high"], "completed-bar high")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CustomerPaperFlowBlocked("A completed candle after the position event has invalid time or OHLC prices") from exc
+        # If stop and target are crossed in one candle, choose the adverse stop first.
+        if stop > 0 and low <= stop:
+            reason, breach_bar = "STOP_LOSS", bar_dt
+            break
+        if target > 0 and high >= target:
+            reason, breach_bar = "TAKE_PROFIT", bar_dt
+            break
+    if not reason or breach_bar is None:
         return None
     quantity = Decimal(str(position["quantity"]))
+    breach_bar_at = breach_bar.isoformat()
+    submission_bar_at = current_bar.astimezone(timezone.utc).isoformat()
     position_client_id = "cpx-" + _sha(
-        f"{customer_id}|{req.exchange}|{req.symbol}|{req.timeframe}|{market['bar_timestamp']}|{reason}"
+        f"{customer_id}|{req.exchange}|{req.symbol}|{req.timeframe}|{breach_bar_at}|{reason}"
     )[:48]
-    await submit_customer_paper_order(
+    await _paper_call(submit_customer_paper_order(
         customer_id=customer_id,
         client_order_id=position_client_id,
         venue=str(req.exchange).lower(),
@@ -458,18 +557,22 @@ async def _protective_exit(customer_id: int, req, df, market: dict) -> dict | No
         order_type="MARKET",
         metadata={
             "paper_flow_version": 1,
+            "exchange": str(req.exchange).lower(),
+            "market_type": "spot",
             "order_role": "PROTECTIVE_EXIT",
             "timeframe": str(req.timeframe),
             "exit_reason": reason,
-            "signal_bar_timestamp": market["bar_timestamp"],
-            "submission_bar_at": market["bar_timestamp"],
+            "signal_bar_timestamp": breach_bar_at,
+            "submission_bar_at": submission_bar_at,
             "data_sha256": market["data_sha256"],
             "stop_loss_price": None,
             "take_profit_price": None,
             "cost_model_status": "UNVERIFIED_DEFAULT_ASSUMPTIONS",
         },
+    ), "submit protective paper exit")
+    pending = await _paper_call(
+        list_open_customer_paper_orders(customer_id=customer_id), "list pending protective exits"
     )
-    pending = await list_open_customer_paper_orders(customer_id=customer_id)
     match = [
         order for order in pending
         if order.get("client_order_id") == position_client_id
@@ -542,9 +645,15 @@ async def execute_customer_paper_spot_signal(
 
     protective = await _protective_exit(customer_id, req, df, market)
     if protective is not None:
+        protective_fill_status = str(
+            (protective.get("fill") or {}).get("status") or protective.get("status") or ""
+        ).upper()
+        protective_executed = protective_fill_status in {"APPENDED", "REPLAYED"}
         return {
-            "mode": "CUSTOMER_PAPER", "status": "PROTECTIVE_EXIT",
-            "decision": "TRADE", "execution": protective,
+            "mode": "CUSTOMER_PAPER",
+            "status": "PROTECTIVE_EXIT" if protective_executed else "PROTECTIVE_EXIT_PENDING",
+            "decision": "TRADE" if protective_executed else "NO_TRADE",
+            "execution": protective,
             "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
         }
 
@@ -552,7 +661,9 @@ async def execute_customer_paper_spot_signal(
     if normalized_side not in {"BUY", "SELL"}:
         raise CustomerPaperFlowBlocked("Customer paper signal side must be BUY or SELL")
     positions = [
-        p for p in await get_customer_paper_positions(customer_id=customer_id)
+        p for p in await _paper_call(
+            get_customer_paper_positions(customer_id=customer_id), "read paper positions"
+        )
         if str(p.get("venue") or "").lower() == str(req.exchange).lower()
         and str(p.get("symbol") or "") == str(req.symbol)
         and Decimal(str(p.get("quantity") or "0")) > 0
@@ -589,6 +700,8 @@ async def execute_customer_paper_spot_signal(
     # metadata; identical retries within the same bar must have an identical payload.
     meta = {
         "paper_flow_version": 1,
+        "exchange": str(req.exchange).lower(),
+        "market_type": "spot",
         "order_role": role,
         "timeframe": str(req.timeframe),
         "signal_bar_timestamp": market["bar_timestamp"],
@@ -602,7 +715,7 @@ async def execute_customer_paper_spot_signal(
         "cost_model_status": cost_status,
         "decision_metadata": _json_mapping(signal_metadata),
     }
-    submitted = await submit_customer_paper_order(
+    submitted = await _paper_call(submit_customer_paper_order(
         customer_id=customer_id,
         client_order_id=client_id,
         venue=str(req.exchange).lower(),
@@ -614,9 +727,12 @@ async def execute_customer_paper_spot_signal(
         order_type="MARKET",
         limit_price=None,
         metadata=meta,
-    )
+    ), "submit strategy paper order")
     if submitted.get("status") == "REPLAYED":
-        prior = await get_customer_paper_order(customer_id=customer_id, client_order_id=client_id)
+        prior = await _paper_call(
+            get_customer_paper_order(customer_id=customer_id, client_order_id=client_id),
+            "read replayed strategy paper order",
+        )
         if prior is None:
             raise CustomerPaperFlowBlocked("Idempotent order replay has no durable order row")
         if prior.get("status") in {"FILLED", "CANCELLED", "EXPIRED", "REJECTED"}:
@@ -628,7 +744,9 @@ async def execute_customer_paper_spot_signal(
                 "cost_model_status": cost_status,
                 "real_money_ledger_written": False,
             }
-    pending = await list_open_customer_paper_orders(customer_id=customer_id)
+    pending = await _paper_call(
+        list_open_customer_paper_orders(customer_id=customer_id), "list submitted paper orders"
+    )
     match = [
         order for order in pending
         if order.get("client_order_id") == client_id
