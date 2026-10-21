@@ -996,7 +996,10 @@ async def _run_persisted_adaptive_bot_cycle(
             return {"decision": "NO_TRADE", "stage": "customer_paper_recovery",
                     "reason": str(exc)}
         if recovered is not None:
-            if str(recovered.get("decision") or "").upper() == "TRADE":
+            if (
+                str(recovered.get("decision") or "").upper() == "TRADE"
+                and str(((recovered.get("execution") or {}).get("fill") or {}).get("status") or "").upper() == "APPENDED"
+            ):
                 recovered_execution = recovered.get("execution") or {}
                 recovered_fill = recovered_execution.get("fill") or {}
                 await _safe_audit("CUSTOMER_BOT_TRADE", {
@@ -4333,7 +4336,10 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     "reason": str(exc), "execution": None,
                 })
             if recovered is not None:
-                if str(recovered.get("decision") or "").upper() == "TRADE":
+                if (
+                str(recovered.get("decision") or "").upper() == "TRADE"
+                and str(((recovered.get("execution") or {}).get("fill") or {}).get("status") or "").upper() == "APPENDED"
+            ):
                     recovered_execution = recovered.get("execution") or {}
                     recovered_fill = recovered_execution.get("fill") or {}
                     await _safe_audit("CUSTOMER_BOT_TRADE", {
