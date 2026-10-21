@@ -360,8 +360,27 @@ async def _fill_open_order(customer_id: int, order: dict, market: dict, df) -> d
     ]
     if side == "SELL":
         held = Decimal(str(position_matches[0]["quantity"])) if position_matches else Decimal("0")
-        if held <= 0 or remaining > held:
-            raise CustomerPaperFlowBlocked("Recovery SELL does not match an open long spot position")
+        if held <= 0:
+            await _paper_call(
+                expire_customer_paper_order(
+                    customer_id=customer_id,
+                    client_order_id=client_id,
+                    idempotency_key="paper-no-position-" + _sha(client_id)[:48],
+                ),
+                "expire stale paper sell with no open position",
+            )
+            return {
+                "status": "EXPIRED_NO_OPEN_POSITION",
+                "client_order_id": client_id,
+                "order_id": state["order_id"],
+                "fill": {"status": "EXPIRED"},
+                "recovered_pending_order": True,
+            }
+        # Another paper cycle can reduce the position between submitting and
+        # recovering a pending SELL. Bound each attempt to currently held spot
+        # quantity; any excess stays open only until later bars reduce it further,
+        # then the no-position path above expires the stale remainder.
+        remaining = min(remaining, held)
 
     try:
         budget = await _paper_call(register_customer_paper_market_bar(
