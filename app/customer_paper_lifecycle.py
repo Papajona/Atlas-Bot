@@ -1007,6 +1007,20 @@ async def list_open_customer_paper_orders(*, customer_id: int) -> list[dict[str,
         await engine.dispose()
 
 
+def _canonical_timestamp_text(value: Any) -> str:
+    """Return persisted timestamps in a stable UTC ISO-8601 form across DB drivers."""
+    raw = str(value or "")
+    if not raw:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return raw
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return raw
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
 async def get_customer_paper_positions(*, customer_id: int) -> list[dict[str, str]]:
     """Return latest immutable position snapshots; no in-memory state is required on restart."""
     customer_id = _customer_id(customer_id)
@@ -1062,7 +1076,7 @@ async def get_customer_paper_positions(*, customer_id: int) -> list[dict[str, st
             "cost_basis": _fmt(Decimal(row["cost_basis_after"])),
             "realized_pnl": _fmt(Decimal(row["realized_pnl_after"])),
             "timeframe": str(row["timeframe"] or ""),
-            "last_event_bar_key": str(row["last_event_bar_key"] or ""),
+            "last_event_bar_key": _canonical_timestamp_text(row["last_event_bar_key"]),
             "stop_loss_price": str(row["stop_loss_price"] or ""),
             "take_profit_price": str(row["take_profit_price"] or ""),
         } for row in rows if Decimal(row["quantity_after"]) > 0]
