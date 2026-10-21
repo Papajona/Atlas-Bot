@@ -219,7 +219,7 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
         "currency": "USDT",
         "data_sha256": "d" * 64,
     }
-    monkeypatch.setattr(flow, "get_customer_paper_positions", lambda **_: _async_value([{
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([{
         "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
         "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
         "stop_loss_price": "95", "take_profit_price": "110",
