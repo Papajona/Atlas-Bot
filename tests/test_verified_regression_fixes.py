@@ -31,15 +31,15 @@ def test_customer_start_gates_customer_paper_before_ai_work():
     source = _source("app/main.py")
     start = source[source.index('@app.post("/api/customer/bot/start")'):]
     paper_mode = start.index("needs_customer_paper = bool(paper_mode and profile.id is not None)")
-    config_gate = start.index("if not _customer_paper_configuration_ready():", paper_mode)
-    unsupported_asset_gate = start.index('if req.asset != "crypto":', config_gate)
-    candidate_setup = start.index("candidate = None", unsupported_asset_gate)
+    unsupported_asset_gate = start.index('if req.asset != "crypto":', paper_mode)
+    config_gate = start.index("if not _customer_paper_configuration_ready():", unsupported_asset_gate)
+    candidate_setup = start.index("candidate = None", config_gate)
     preflight = start.index("paper_preflight = await _customer_paper_isolation_preflight()", candidate_setup)
     analysis = start.index("asyncio.to_thread(start_bot_decision")
     ai_review = start.index("dual_ai_trade_safety_review(")
 
-    assert paper_mode < config_gate < unsupported_asset_gate < candidate_setup
-    assert candidate_setup < preflight < analysis < ai_review
+    assert paper_mode < unsupported_asset_gate < config_gate < candidate_setup < preflight < analysis < ai_review
+    assert "no analysis or AI review was run" in start[paper_mode:analysis]
     assert "CUSTOMER_PAPER_LEDGER_ENABLED" in source
     assert 'customer_paper_ledger_enabled: bool = False' in _source("app/config.py")
     cycle = source[source.index("async def _run_persisted_adaptive_bot_cycle"): ]
