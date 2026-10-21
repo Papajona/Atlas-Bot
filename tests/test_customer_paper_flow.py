@@ -441,8 +441,8 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
             "metadata": captured["metadata"],
         }]
 
-    async def wait_next(**kwargs):
-        return {"status": "WAITING_FOR_NEXT_COMPLETED_BAR", "client_order_id": kwargs["order"]["client_order_id"]}
+    async def wait_next(customer_id, order, market_context, df):
+        return {"status": "WAITING_FOR_NEXT_COMPLETED_BAR", "client_order_id": order["client_order_id"]}
 
     monkeypatch.setattr(flow, "submit_customer_paper_order", submit)
     monkeypatch.setattr(flow, "list_open_customer_paper_orders", pending)
