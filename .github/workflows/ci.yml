@@ -76,11 +76,11 @@ jobs:
           CREATE ROLE authenticated NOLOGIN;
           CREATE ROLE service_role NOLOGIN BYPASSRLS;
           -- Seed unsafe defaults and existing-object grants. Migration 0049 removes public API-role
-          -- defaults; migration 0050 additionally opts future objects out of service_role defaults.
+          -- defaults; migration 0053 additionally opts future objects out of service_role defaults.
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO anon, authenticated;
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO anon, authenticated;
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon, authenticated;
-          -- Model the existing Supabase service_role defaults so migration 0050 proves it opts future public objects out.
+          -- Model the existing Supabase service_role defaults so migration 0053 proves it opts future public objects out.
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO service_role;
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO service_role;
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO service_role;
@@ -169,7 +169,7 @@ jobs:
           $seed_public_api_grants$;
           SQL
       - name: Upgrade from production revision through public-schema and future-default lockdown
-        run: python -m alembic upgrade 0050_supabase_public_default_acl_lockdown
+        run: python -m alembic upgrade 0053_supabase_public_default_acl_lockdown
       - name: Verify public-schema lockdown at runtime
         run: |
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
