@@ -248,40 +248,27 @@ def build_customer_paper_router(
         await _guard()
         profile = await _profile(authorization)
         try:
-            balances = await get_customer_paper_balances(customer_id=profile.id)
-            if any(row["account_code"] == "PAPER_CASH" for row in balances):
-                return {
-                    "status": "ALREADY_INITIALIZED",
-                    "virtual_only": True,
-                    "currency": "USDT",
-                    "balances": balances,
-                    "note": "This is a simulated paper allocation, not a deposit or withdrawable balance.",
-                }
-            journal = await post_customer_paper_journal(
-                customer_id=profile.id,
-                idempotency_key="customer-paper-virtual-seed-v1",
-                event_type="PAPER_SEED",
-                currency="USDT",
-                lines=[
-                    {"account_code": "PAPER_CASH", "signed_amount": _decimal_text(_VIRTUAL_STARTING_CASH)},
-                    {"account_code": "PAPER_EQUITY", "signed_amount": _decimal_text(-_VIRTUAL_STARTING_CASH)},
-                ],
-                reference="VIRTUAL_ONLY_STARTING_ALLOCATION",
-                metadata={
-                    "allocation_type": "virtual_paper_starting_balance",
-                    "virtual_only": True,
-                    "not_a_deposit": True,
-                    "not_withdrawable": True,
-                    "real_money_movement": False,
-                },
+            # Use the autonomous controller's exact seed key, configured amount and
+            # currency. Concurrent API/controller initialization must be one event.
+            from .customer_paper_flow import ensure_customer_paper_account
+
+            before = await get_customer_paper_balances(customer_id=profile.id)
+            already_initialized = any(
+                str(row.get("account_code") or "") == "PAPER_CASH"
+                for row in before
             )
+            currency = str(settings.customer_paper_initial_currency or "").strip().upper()
+            account = await ensure_customer_paper_account(
+                customer_id=profile.id, currency=currency
+            )
+            balances = await get_customer_paper_balances(customer_id=profile.id)
             return {
-                **journal,
-                "status": journal["status"],
+                "status": "ALREADY_INITIALIZED" if already_initialized else "INITIALIZED",
                 "virtual_only": True,
-                "currency": "USDT",
-                "starting_cash": _decimal_text(_VIRTUAL_STARTING_CASH),
-                "balances": await get_customer_paper_balances(customer_id=profile.id),
+                "currency": currency,
+                "starting_cash": account["initial_balance"],
+                "balances": balances,
+                "real_funds_used": False,
                 "note": "This is a simulated paper allocation, not a deposit or withdrawable balance.",
             }
         except HTTPException:
