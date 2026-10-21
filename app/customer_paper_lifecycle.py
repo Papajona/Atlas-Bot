@@ -504,7 +504,6 @@ async def get_customer_paper_fill_for_bar(
                 WHERE f.customer_id=:customer_id
                   AND o.client_order_id=:client_order_id
                   AND f.bar_key=:bar_key
-                ORDER BY f.created_at DESC
                 LIMIT 1
                 """
             ), {
