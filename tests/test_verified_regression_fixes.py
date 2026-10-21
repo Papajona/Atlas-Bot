@@ -39,7 +39,7 @@ def test_customer_start_gates_customer_paper_before_ai_work():
     ai_review = start.index("dual_ai_trade_safety_review(")
 
     assert paper_mode < unsupported_asset_gate < config_gate < candidate_setup < preflight < analysis < ai_review
-    assert "CUSTOMER_PAPER_LEDGER_ENABLED" in source
+    assert "_customer_paper_configuration_ready()" in start
     assert 'customer_paper_ledger_enabled: bool = False' in _source("app/config.py")
     cycle = source[source.index("async def _run_persisted_adaptive_bot_cycle"): ]
     assert "simulation_ledger_required" in cycle
