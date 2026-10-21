@@ -275,3 +275,151 @@ def test_paper_fill_metadata_includes_exchange_for_budget_validation():
     assert '"exchange": str(req.exchange).lower()' in protective
     assert '"market_type": "spot"' in signal
     assert '"market_type": "spot"' in protective
+
+
+def _paper_fill_test_context():
+    import app.customer_paper_flow as flow
+
+    first = pd.Timestamp.now(tz="UTC").floor("h")
+    second = first + pd.Timedelta(hours=1)
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    state = {
+        "order_id": "order-id-1",
+        "status": "SUBMITTED",
+        "remaining_quantity": "2",
+        "side": "BUY",
+        "venue": "binance",
+        "symbol": "BTC/USDT",
+        "currency": "USDT",
+    }
+    order = {
+        "client_order_id": "paper-order-1",
+        "metadata": {
+            "signal_bar_timestamp": first.isoformat(),
+            "submission_bar_at": first.isoformat(),
+            "timeframe": "1h",
+            "exchange": "binance",
+            "market_type": "spot",
+        },
+    }
+    market = {
+        "bar_timestamp": second.isoformat(),
+        "quote_timestamp": (second + pd.Timedelta(seconds=2)).isoformat(),
+        "bar_data_sha256": "b" * 64,
+        "data_sha256": "d" * 64,
+        "base_volume": "1000",
+        "bid": Decimal("119.9"),
+        "ask": Decimal("120"),
+        "spread_bps": Decimal("8.3"),
+        "currency": "USDT",
+    }
+    return flow, req, state, order, market
+
+
+def test_pending_paper_buy_is_resized_at_the_fill_quote_to_available_cash(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    _, _req, state, order, market = _paper_fill_test_context()
+    captured = {}
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([]))
+    monkeypatch.setattr(flow, "register_customer_paper_market_bar", _async_value({
+        "bar_key": "bar-key-cash-cap", "bar_at": market["bar_timestamp"],
+        "capacity": "10", "available": "10",
+    }))
+    monkeypatch.setattr(flow, "get_customer_paper_fill_for_bar", _async_value(None))
+    monkeypatch.setattr(flow, "get_customer_paper_balances", _async_value([{
+        "account_code": "PAPER_CASH", "currency": "USDT", "balance": "100",
+    }]))
+    monkeypatch.setattr(
+        flow, "_fill_price_and_fee",
+        lambda side, quantity, context: (
+            "120", "0", {"fee_bps_assumption": "0", "slippage_bps_assumption": "0",
+                         "cost_model_status": "TEST_FIXTURE"},
+        ),
+    )
+
+    async def append_fill(**kwargs):
+        captured.update(kwargs)
+        return {"status": "APPENDED", "fill_id": "fill-1"}
+
+    monkeypatch.setattr(flow, "record_customer_paper_fill", append_fill)
+
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=1001, order=order, market=market, df=pd.DataFrame()
+    ))
+
+    assert result["fill"]["status"] == "APPENDED"
+    assert captured["quantity"] == "0.833333333333333333"
+    assert Decimal(captured["quantity"]) * Decimal(captured["price"]) <= Decimal("100")
+
+
+def test_same_bar_paper_fill_retry_replays_immutable_fill_without_resubmitting(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    _, _req, state, order, market = _paper_fill_test_context()
+    replay = {
+        "status": "REPLAYED", "fill_id": "existing-fill", "order_id": state["order_id"],
+        "idempotency_key": "existing-key", "bar_key": "bar-key-replay",
+        "quantity": "0.5", "price": "120", "fee_amount": "0",
+    }
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([]))
+    monkeypatch.setattr(flow, "register_customer_paper_market_bar", _async_value({
+        "bar_key": "bar-key-replay", "bar_at": market["bar_timestamp"],
+        "capacity": "10", "available": "9.5",
+    }))
+    monkeypatch.setattr(flow, "get_customer_paper_fill_for_bar", _async_value(replay))
+
+    async def must_not_append(**kwargs):
+        raise AssertionError("same-bar retry must replay the immutable fill")
+
+    monkeypatch.setattr(flow, "record_customer_paper_fill", must_not_append)
+
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=1002, order=order, market=market, df=pd.DataFrame()
+    ))
+
+    assert result["status"] == "REPLAYED"
+    assert result["fill"]["fill_id"] == "existing-fill"
+
+
+def test_paper_buy_that_is_no_longer_affordable_expires_instead_of_stalling(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    _, _req, state, order, market = _paper_fill_test_context()
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([]))
+    monkeypatch.setattr(flow, "register_customer_paper_market_bar", _async_value({
+        "bar_key": "bar-key-no-cash", "bar_at": market["bar_timestamp"],
+        "capacity": "10", "available": "10",
+    }))
+    monkeypatch.setattr(flow, "get_customer_paper_fill_for_bar", _async_value(None))
+    monkeypatch.setattr(flow, "get_customer_paper_balances", _async_value([{
+        "account_code": "PAPER_CASH", "currency": "USDT", "balance": "0",
+    }]))
+    monkeypatch.setattr(
+        flow, "_fill_price_and_fee",
+        lambda side, quantity, context: (
+            "120", "0", {"fee_bps_assumption": "0", "slippage_bps_assumption": "0",
+                         "cost_model_status": "TEST_FIXTURE"},
+        ),
+    )
+    expired = {}
+
+    async def expire(**kwargs):
+        expired.update(kwargs)
+        return {"status": "EXPIRED"}
+
+    async def must_not_append(**kwargs):
+        raise AssertionError("an unaffordable order must not create a fill")
+
+    monkeypatch.setattr(flow, "expire_customer_paper_order", expire)
+    monkeypatch.setattr(flow, "record_customer_paper_fill", must_not_append)
+
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=1003, order=order, market=market, df=pd.DataFrame()
+    ))
+
+    assert result["status"] == "EXPIRED_INSUFFICIENT_PAPER_CASH"
+    assert expired["client_order_id"] == order["client_order_id"]
