@@ -20,7 +20,6 @@ from .customer_paper_ledger import (
     post_customer_paper_journal,
 )
 from .customer_paper_lifecycle import (
-    CustomerPaperIdempotencyConflict,
     CustomerPaperOrderConflict,
     get_customer_paper_fill_for_bar,
     get_customer_paper_order,
