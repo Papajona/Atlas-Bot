@@ -358,3 +358,31 @@ def test_production_verification_passes_provider_secrets_to_checker():
     assert "python -m scripts.check_ai_models" in block
     assert "temporarily waived" not in block
     assert "BLOCKED: provider credentials are not configured" in block
+
+
+def test_supabase_future_default_grants_are_opt_in():
+    migration = (
+        ROOT / "alembic" / "versions" / "0053_supabase_public_default_acl_lockdown.py"
+    ).read_text(encoding="utf-8")
+    assert 'revision = "0053_supabase_public_default_acl_lockdown"' in migration
+    assert 'down_revision = "0052_schema_metadata_reconciliation"' in migration
+    assert (
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        "REVOKE ALL PRIVILEGES ON TABLES FROM service_role"
+    ) in migration
+    assert (
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        "REVOKE ALL PRIVILEGES ON SEQUENCES FROM service_role"
+    ) in migration
+    assert (
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        "REVOKE EXECUTE ON FUNCTIONS FROM service_role"
+    ) in migration
+    # Existing-object grants must be left intact; only defaults for future objects change.
+    assert "REVOKE ALL PRIVILEGES ON ALL TABLES" not in migration
+    assert "REVOKE ALL PRIVILEGES ON ALL SEQUENCES" not in migration
+
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "alembic upgrade 0053_supabase_public_default_acl_lockdown" in workflow
+    assert "migration unexpectedly removed service_role access from an existing table" in workflow
+    assert "has_table_privilege('service_role', 'public.atlas_default_acl_probe', 'SELECT')" in workflow

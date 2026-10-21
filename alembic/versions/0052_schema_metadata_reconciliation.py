@@ -356,9 +356,14 @@ def downgrade() -> None:
             op.create_foreign_key(name, table, parent_table, local_cols, parent_cols)
             op.execute(sa.text(f'ALTER TABLE "{table}" VALIDATE CONSTRAINT "{name}"'))
 
-    # Drop indexes introduced by this revision (renamed indexes are handled separately).
+    # Drop indexes introduced by this revision, but not targets of index renames.
+    # A renamed legacy index is still the pre-existing index and must be renamed back
+    # below rather than dropped here. Some names occur in both lists because the ORM
+    # requires the normalized name while the historical schema already had the index.
+    renamed_index_targets = {(table, new) for table, _old, new in _RENAME_INDEXES}
     for table, name, _columns in reversed(_CREATE_INDEXES):
-        _drop_index(bind, table, name)
+        if (table, name) not in renamed_index_targets:
+            _drop_index(bind, table, name)
 
     # Restore old index names exactly as they were.
     for table, old, new in reversed(_RENAME_INDEXES):
