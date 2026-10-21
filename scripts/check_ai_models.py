@@ -131,7 +131,7 @@ def _diagnose_gemini_flash_alternatives(configured_model: str) -> None:
             {"Content-Type": "application/json", "x-goog-api-key": settings.gemini_api_key},
             {
                 "contents": [{"parts": [{"text": "Reply with OK."}]}],
-                "generationConfig": {"maxOutputTokens": 32, "temperature": 0},
+                "generationConfig": {"maxOutputTokens": 1024, "temperature": 0},
             },
         )
         candidates = alt_body.get("candidates")
@@ -144,10 +144,23 @@ def _diagnose_gemini_flash_alternatives(configured_model: str) -> None:
                     part.get("text", "") for part in parts
                     if isinstance(part, dict) and isinstance(part.get("text", ""), str)
                 )
-        print(f"[DIAGNOSTIC {'PASS' if alt_status == 200 and text.strip() else 'FAIL'}] Gemini alternative {alternative}: "
-              + ("inference succeeded; configure and rerun the gate before release."
-                 if alt_status == 200 and text.strip()
-                 else f"generation failed (HTTP {alt_status or 'network/error'}); not recommended."))
+        if alt_status == 200 and text.strip():
+            detail = "inference succeeded; configure and rerun the gate before release."
+        else:
+            detail = f"generation failed (HTTP {alt_status or 'network/error'})"
+            error = alt_body.get("error")
+            if isinstance(error, dict) and isinstance(error.get("message"), str):
+                detail += "; provider_error=" + error["message"][:180]
+            prompt_feedback = alt_body.get("promptFeedback")
+            if isinstance(prompt_feedback, dict) and prompt_feedback.get("blockReason"):
+                detail += "; prompt_block_reason=" + str(prompt_feedback["blockReason"])[:80]
+            if alt_status == 200:
+                detail += "; candidates=" + str(len(candidates) if isinstance(candidates, list) else 0)
+                if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
+                    finish = candidates[0].get("finishReason")
+                    if finish:
+                        detail += "; finish_reason=" + str(finish)[:80]
+        print(f"[DIAGNOSTIC {'PASS' if alt_status == 200 and text.strip() else 'FAIL'}] Gemini alternative {alternative}: {detail}")
 
 
 def _check_gemini(model: str) -> bool:
