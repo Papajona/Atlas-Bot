@@ -665,3 +665,29 @@ def test_manual_paper_sell_recovery_caps_against_the_order_venue():
     source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_api.py").read_text(encoding="utf-8")
     assert 'str(position.get("venue") or "").lower() == str(order.get("venue") or "").lower()' in source
     assert 'str(position.get("venue") or "").lower() == "binance"' not in source
+
+def test_paper_fill_money_fields_round_conservatively_to_numeric_38_18(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    monkeypatch.setattr(settings, "research_taker_bps", 10)
+    monkeypatch.setattr(settings, "research_slippage_bps", 0)
+    market = {
+        "ask": Decimal("100.0000000000000000009"),
+        "bid": Decimal("99.9999999999999999999"),
+        "spread_bps": Decimal("0.1"),
+        "quote_timestamp": "2026-10-21T00:00:00+00:00",
+        "data_sha256": "a" * 64,
+    }
+    quantity = Decimal("0.1234567890123456789")
+
+    buy_price, buy_fee, _ = flow._fill_price_and_fee("BUY", quantity, market)
+    sell_price, sell_fee, _ = flow._fill_price_and_fee("SELL", quantity, market)
+
+    # Buy-side rounding never improves the simulated price; sell-side rounding never does.
+    assert Decimal(buy_price) == Decimal("100.000000000000000001")
+    assert Decimal(sell_price) == Decimal("99.999999999999999999")
+    assert Decimal(buy_fee) == Decimal("0.012345678901234568")
+    assert Decimal(sell_fee) == Decimal("0.012345678901234567")
+    assert Decimal(buy_fee).as_tuple().exponent == -18
+    assert Decimal(sell_fee).as_tuple().exponent == -18
+
