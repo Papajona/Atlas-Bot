@@ -364,6 +364,9 @@ def test_file_backed_bootstrap_accepts_distinct_passwords_without_disclosing_the
     assert result.returncode == 0, result.stderr
     assert (payload_dir / "atlas-staging-primary-db-url").exists()
     assert (payload_dir / "atlas-staging-customer-paper-db-url").read_bytes() == uri.encode("utf-8")
+    logged_args = gcloud_log.read_text(encoding="utf-8")
+    assert "secrets versions add atlas-staging-primary-db-url" in logged_args
+    assert "secrets versions add atlas-staging-customer-paper-db-url" in logged_args
     assert "distinct credential" not in result.stdout + result.stderr
     assert paper_password not in result.stdout + result.stderr
     assert primary_password not in result.stdout + result.stderr
