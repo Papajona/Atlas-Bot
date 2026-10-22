@@ -109,27 +109,6 @@ if [[ -L "$PAPER_URL_FILE" ]]; then
 fi
 
 if [[ -f "$PAPER_URL_FILE" ]]; then
-  python - "$PAPER_URL_FILE" "$SUPABASE_PROJECT_REF" "$SUPABASE_DB_HOST" <<'PY'
-import stat, sys
-from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
-path = Path(sys.argv[1])
-expected_ref, expected_host = sys.argv[2:]
-mode = stat.S_IMODE(path.stat().st_mode)
-if mode & 0o077:
-    raise SystemExit("BLOCKED: generated paper database URL file must have private permissions (0600 or stricter)")
-uri = path.read_text(encoding="utf-8").strip()
-parsed = urlsplit(uri)
-if parsed.scheme != "postgresql+asyncpg":
-    raise SystemExit("BLOCKED: generated paper database URL must use the SQLAlchemy asyncpg URI scheme")
-if parsed.hostname != expected_host or parsed.port != 5432 or parsed.path != "/postgres":
-    raise SystemExit("BLOCKED: generated paper database URL does not match the configured session pooler endpoint")
-if unquote(parsed.username or "") != f"atlas_customer_paper.{expected_ref}" or not parsed.password:
-    raise SystemExit("BLOCKED: generated paper database URL has the wrong runtime role or missing password")
-if parse_qs(parsed.query).get("ssl") != ["require"]:
-    raise SystemExit("BLOCKED: generated paper database URL must require TLS")
-print("PASS: protected generated paper database URL matches the expected role, project and session pooler; value withheld")
-PY
   USE_PAPER_URL_FILE="true"
 else
   read -r -s -p "Enter the atlas_customer_paper database password (hidden): " PAPER_PASSWORD
@@ -160,7 +139,6 @@ PY
 
 PRIMARY_ENCODED="$(url_encode_password "$PRIMARY_PASSWORD")"
 PRIMARY_URL="postgresql+asyncpg://atlas_paper_reader.${SUPABASE_PROJECT_REF}:${PRIMARY_ENCODED}@${SUPABASE_DB_HOST}:5432/postgres?ssl=require"
-unset PRIMARY_PASSWORD
 
 if [[ "$USE_PAPER_URL_FILE" != "true" ]]; then
   if [[ "$PRIMARY_ENCODED" == "$(url_encode_password "$PAPER_PASSWORD")" ]]; then
@@ -185,34 +163,100 @@ put_secret() {
   unset secret_value
 }
 
-put_secret_file() {
-  local secret_name="$1"
-  local secret_path="$2"
-  if ! gcloud secrets describe "$secret_name" --project="$PROJECT_ID" >/dev/null 2>&1; then
-    gcloud secrets create "$secret_name" --replication-policy=automatic --project="$PROJECT_ID"
-  fi
-  # The operator-generated URL file ends with a newline; remove only that delimiter
-  # so the secret value is exactly the URI the app will parse.
-  python - "$secret_path" <<'PY' | gcloud secrets versions add "$secret_name" --data-file=- --project="$PROJECT_ID" >/dev/null
+validate_paper_url_file() {
+  local secret_path="$1"
+  local validated_uri
+
+  # Validate and capture the complete value before any Secret Manager side effect.
+  # Keep the primary password in the child environment only, never in argv or output.
+  if ! validated_uri="$(PRIMARY_PASSWORD="$PRIMARY_PASSWORD" python - "$secret_path" "$SUPABASE_PROJECT_REF" "$SUPABASE_DB_HOST" <<'PY'
+import hmac
+import os
+import re
+import stat
 import sys
 from pathlib import Path
-data = Path(sys.argv[1]).read_text(encoding="utf-8")
+from urllib.parse import parse_qs, unquote, urlsplit
+
+path = Path(sys.argv[1])
+if path.is_symlink():
+    raise SystemExit("BLOCKED: paper URL file must not be a symlink")
+try:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & 0o077:
+        raise SystemExit("BLOCKED: generated paper database URL file must have private permissions (0600 or stricter)")
+    data = path.read_bytes().decode("utf-8")
+except (OSError, UnicodeDecodeError):
+    raise SystemExit("BLOCKED: paper URL file must be readable UTF-8")
+
+# Permit exactly one terminal LF as the file delimiter, but not CRLF or extra lines.
 if data.endswith("\n"):
     data = data[:-1]
-if not data or "\n" in data or "\r" in data:
+if not data or "\n" in data or "\r" in data or "\x00" in data:
     raise SystemExit("BLOCKED: paper URL file must contain exactly one URI line")
+
+expected_ref, expected_host = sys.argv[2:]
+if re.search(r"%(?![0-9A-Fa-f]{2})", data):
+    raise SystemExit("BLOCKED: paper URL contains invalid percent-encoding")
+try:
+    parsed = urlsplit(data)
+    port = parsed.port
+except ValueError:
+    raise SystemExit("BLOCKED: paper URL is malformed or does not match the expected TLS-enabled endpoint")
+
+if (
+    parsed.scheme != "postgresql+asyncpg"
+    or parsed.hostname != expected_host
+    or port != 5432
+    or parsed.path != "/postgres"
+    or parsed.fragment
+    or unquote(parsed.username or "") != f"atlas_customer_paper.{expected_ref}"
+    or not parsed.password
+    or parse_qs(parsed.query, keep_blank_values=True) != {"ssl": ["require"]}
+):
+    raise SystemExit("BLOCKED: paper URL does not match the expected TLS-enabled customer-paper session-pooler endpoint")
+
+primary_password = os.environ.get("PRIMARY_PASSWORD", "")
+paper_password = unquote(parsed.password or "")
+if not primary_password or hmac.compare_digest(
+    primary_password.encode("utf-8"), paper_password.encode("utf-8")
+):
+    raise SystemExit("BLOCKED: primary and paper database roles must have different passwords")
+
+# Return the original single-line URI without its file delimiter. Nothing is logged.
 sys.stdout.write(data)
 PY
+)"; then
+    return 1
+  fi
+
+  if [[ -z "$validated_uri" ]]; then
+    echo "BLOCKED: paper URL is empty." >&2
+    return 1
+  fi
+
+  printf '%s' "$validated_uri"
 }
 
-put_secret "$PRIMARY_SECRET" "$PRIMARY_URL"
+# Validate and capture the operator-generated paper URL before *any* DB secret
+# is described, created, or versioned. This prevents a malformed paper URL from
+# leaving the primary DB secret partially updated.
 if [[ "$USE_PAPER_URL_FILE" == "true" ]]; then
-  put_secret_file "$PAPER_SECRET" "$PAPER_URL_FILE"
-  unset PAPER_URL
-else
-  put_secret "$PAPER_SECRET" "$PAPER_URL"
-  unset PAPER_URL
+  if ! PAPER_URL="$(validate_paper_url_file "$PAPER_URL_FILE")"; then
+    unset PRIMARY_URL PRIMARY_PASSWORD SUPABASE_ANON_KEY
+    exit 1
+  fi
+  if [[ -z "$PAPER_URL" ]]; then
+    unset PRIMARY_URL PRIMARY_PASSWORD SUPABASE_ANON_KEY
+    echo "BLOCKED: paper URL is empty." >&2
+    exit 1
+  fi
 fi
+unset PRIMARY_PASSWORD
+
+put_secret "$PRIMARY_SECRET" "$PRIMARY_URL"
+put_secret "$PAPER_SECRET" "$PAPER_URL"
+unset PAPER_URL
 put_secret "$ANON_KEY_SECRET" "$SUPABASE_ANON_KEY"
 unset PRIMARY_URL SUPABASE_ANON_KEY
 

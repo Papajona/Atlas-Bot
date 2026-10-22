@@ -65,7 +65,37 @@ jobs:
           require_success "ci.yml" "Atlas CI"
           require_success "ledger-concurrency-check.yml" "PostgreSQL ledger concurrency"
           require_success "production-verification.yml" "Production Verification Gate"
-          require_success "staging-identity-preflight.yml" "Supabase staging identity preflight"
+          require_staging_identity_success() {
+            local run_id run_status run_conclusion job_conclusion
+
+            run_id="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "staging-identity-preflight.yml" \
+              --commit "$GITHUB_SHA" \
+              --limit 100 \
+              --json databaseId,headBranch \
+              --jq '[.[] | select(.headBranch == "main")] | sort_by(.databaseId) | last | .databaseId // empty')"
+
+            if [ -z "$run_id" ]; then
+              echo "BLOCKED: no staging identity preflight run exists on main for exact commit $GITHUB_SHA"
+              exit 1
+            fi
+
+            run_status="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json status --jq '.status')"
+            run_conclusion="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json conclusion --jq '.conclusion // empty')"
+            job_conclusion="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json jobs --jq '[.jobs[] | select(.name == "verify-staging-identity")][0].conclusion // "missing"')"
+
+            if [ "$run_status" != "completed" ] \
+              || [ "$run_conclusion" != "success" ] \
+              || [ "$job_conclusion" != "success" ]; then
+              echo "BLOCKED: staging identity requires verify-staging-identity to succeed on exact commit $GITHUB_SHA"
+              echo "Observed run status=$run_status, workflow conclusion=$run_conclusion, job conclusion=$job_conclusion"
+              exit 1
+            fi
+            echo "PASS: verify-staging-identity succeeded on exact main commit $GITHUB_SHA"
+          }
+
+          require_staging_identity_success
           require_success "android-release.yml" "Protected signed Android release"
 
           # A green Android workflow is insufficient when its signing job was skipped.

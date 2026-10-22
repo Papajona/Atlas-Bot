@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import pytest
 
@@ -178,3 +180,194 @@ def test_provision_verifier_matches_all_nine_current_schema_tables_and_policy_ty
     source = Path("scripts/provision_customer_paper_schema.py").read_text(encoding="utf-8")
     assert "len(verification) != 12" in source
     assert '"nine_paper_tables_only": table_count == "9" and expected_table_count == "9"' in source
+
+
+
+def _extract_shell_function(script: str, name: str) -> str:
+    match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{\n.*?^\}}\n", script)
+    assert match is not None, f"{name}() must be present for behavioral testing"
+    return match.group(0)
+
+
+def _run_paper_bootstrap_subset(
+    tmp_path: Path,
+    file_bytes: bytes,
+    *,
+    fail_paper_add: bool = False,
+    primary_password: str = "primary-not-real",
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    validator = _extract_shell_function(script, "validate_paper_url_file")
+    put_secret = _extract_shell_function(script, "put_secret")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    gcloud_log = tmp_path / "gcloud.log"
+    payload_dir = tmp_path / "payloads"
+    payload_dir.mkdir()
+    gcloud_stub = fake_bin / "gcloud"
+    gcloud_stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "printf '%s\\n' \"$*\" >> \"$GCLOUD_LOG\"\n"
+        "if [[ \"$1\" == \"secrets\" && \"$2\" == \"versions\" && \"$3\" == \"add\" ]]; then\n"
+        "  cat > \"$SECRET_PAYLOAD_DIR/$4\"\n"
+        "  if [[ \"$4\" == \"$PAPER_SECRET\" && \"$GCLOUD_FAIL_PAPER_ADD\" == \"1\" ]]; then exit 9; fi\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    os.chmod(gcloud_stub, 0o755)
+
+    url_file = tmp_path / "database-url"
+    url_file.write_bytes(file_bytes)
+    url_file.chmod(0o600)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}{os.pathsep}{env.get('PATH', '')}",
+            "GCLOUD_LOG": str(gcloud_log),
+            "SECRET_PAYLOAD_DIR": str(payload_dir),
+            "PROJECT_ID": "atlas-staging-510915",
+            "GCLOUD_FAIL_PAPER_ADD": "1" if fail_paper_add else "0",
+            "SUPABASE_PROJECT_REF": "abcdefghijklmnopqrst",
+            "SUPABASE_DB_HOST": "aws-0-eu-west-1.pooler.supabase.com",
+            "PAPER_URL_FILE": str(url_file),
+            "PRIMARY_SECRET": "atlas-staging-primary-db-url",
+            "PAPER_SECRET": "atlas-staging-customer-paper-db-url",
+            "PRIMARY_PASSWORD": primary_password,
+            "PRIMARY_URL": "postgresql+asyncpg://atlas_paper_reader.abcdefghijklmnopqrst:primary-not-real@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require",
+        }
+    )
+    # This is the production order: validate/capture first, then mutate either DB secret.
+    command = (
+        "set -euo pipefail\n"
+        + validator
+        + "\n"
+        + put_secret
+        + "\n"
+        + 'if ! PAPER_URL="$(validate_paper_url_file "$PAPER_URL_FILE")"; then exit 17; fi\n'
+        + 'if [[ -z "$PAPER_URL" ]]; then exit 18; fi\n'
+        + 'put_secret "$PRIMARY_SECRET" "$PRIMARY_URL"\n'
+        + 'put_secret "$PAPER_SECRET" "$PAPER_URL"\n'
+    )
+    completed = subprocess.run(
+        ["bash", "-c", command],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed, gcloud_log, payload_dir
+
+
+@pytest.mark.parametrize(
+    "file_bytes",
+    [
+        b"",
+        b"postgresql://user:pass@host/db\nextra\n",
+        b"postgresql://user:pass@host/db\r\n",
+        b"postgresql://user:pass@host/db\x00",
+        b"\xff",
+        b"not-a-database-url",
+        b"postgresql://atlas_customer_paper.abcdefghijklmnopqrst:secret@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require",
+        b"postgresql+asyncpg://atlas_customer_paper.wrongproject:secret@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require",
+        b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:secret@wronghost.example:5432/postgres?ssl=require",
+        b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?ssl=require",
+        b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:secret@aws-0-eu-west-1.pooler.supabase.com:5432/other?ssl=require",
+        b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:secret@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=disable",
+        b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:bad%ZZescape@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require",
+    ],
+)
+def test_gcp_paper_url_validation_fails_before_any_secret_manager_call(
+    tmp_path: Path, file_bytes: bytes
+):
+    completed, gcloud_log, _ = _run_paper_bootstrap_subset(tmp_path, file_bytes)
+
+    assert completed.returncode != 0
+    assert not gcloud_log.exists() or gcloud_log.read_bytes() == b""
+
+
+def test_gcp_paper_url_is_validated_before_primary_secret_is_touched(tmp_path: Path):
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    validate_call = script.index('PAPER_URL="$(validate_paper_url_file "$PAPER_URL_FILE")"')
+    primary_secret_write = script.index('put_secret "$PRIMARY_SECRET" "$PRIMARY_URL"')
+    paper_secret_write = script.index('put_secret "$PAPER_SECRET" "$PAPER_URL"')
+
+    assert validate_call < primary_secret_write < paper_secret_write
+    assert "put_secret_file" not in script
+
+
+def test_gcp_paper_url_upload_is_exact_and_keeps_uri_out_of_gcloud_argv(tmp_path: Path):
+    uri = (
+        "postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:URI_SENTINEL_ONLY_ON_STDIN"
+        "@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require"
+    )
+    completed, gcloud_log, payload_dir = _run_paper_bootstrap_subset(
+        tmp_path, (uri + "\n").encode("utf-8")
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (payload_dir / "atlas-staging-customer-paper-db-url").read_bytes() == uri.encode("utf-8")
+    logged_args = gcloud_log.read_text(encoding="utf-8")
+    assert "URI_SENTINEL_ONLY_ON_STDIN" not in logged_args
+    assert "secrets describe atlas-staging-primary-db-url" in logged_args
+    assert "secrets versions add atlas-staging-primary-db-url" in logged_args
+    assert "secrets describe atlas-staging-customer-paper-db-url" in logged_args
+    assert "secrets versions add atlas-staging-customer-paper-db-url" in logged_args
+
+
+def test_gcp_paper_secret_upload_failure_returns_nonzero(tmp_path: Path):
+    uri = (
+        "postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:dummy"
+        "@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require"
+    )
+    completed, _, _ = _run_paper_bootstrap_subset(
+        tmp_path, uri.encode("utf-8"), fail_paper_add=True
+    )
+
+    assert completed.returncode != 0
+
+
+
+
+def test_file_backed_bootstrap_rejects_matching_primary_password_before_secret_writes(
+    tmp_path: Path,
+):
+    secret = "same-password-not-for-logs"
+    uri = (
+        "postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:"
+        f"{quote(secret, safe='')}@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require"
+    )
+    result, gcloud_log, _ = _run_paper_bootstrap_subset(
+        tmp_path, uri.encode("utf-8"), primary_password=secret
+    )
+
+    assert result.returncode != 0
+    assert not gcloud_log.exists() or gcloud_log.read_bytes() == b""
+    assert "different passwords" in result.stderr
+    assert secret not in result.stdout + result.stderr
+
+
+def test_file_backed_bootstrap_accepts_distinct_passwords_without_disclosing_them(
+    tmp_path: Path,
+):
+    paper_password = "distinct-paper-secret"
+    primary_password = "different-primary-secret"
+    uri = (
+        "postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:"
+        f"{quote(paper_password, safe='')}@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require"
+    )
+    result, gcloud_log, payload_dir = _run_paper_bootstrap_subset(
+        tmp_path, (uri + "\n").encode("utf-8"), primary_password=primary_password
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (payload_dir / "atlas-staging-primary-db-url").exists()
+    assert (payload_dir / "atlas-staging-customer-paper-db-url").read_bytes() == uri.encode("utf-8")
+    logged_args = gcloud_log.read_text(encoding="utf-8")
+    assert "secrets versions add atlas-staging-primary-db-url" in logged_args
+    assert "secrets versions add atlas-staging-customer-paper-db-url" in logged_args
+    assert "distinct credential" not in result.stdout + result.stderr
+    assert paper_password not in result.stdout + result.stderr
+    assert primary_password not in result.stdout + result.stderr

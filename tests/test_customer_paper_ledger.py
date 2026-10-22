@@ -25,6 +25,7 @@ from app.customer_paper_ledger import (
     _tenant_policy_expression_is_exact,
     _tenant_policy_validation_error,
     _validated_paper_journal,
+    _configured_database_role,
     get_customer_paper_balances,
     post_customer_paper_journal,
     preflight_isolated_customer_paper_ledger,
@@ -855,3 +856,36 @@ def test_customer_paper_sell_pnl_terminal_events_and_reversal_cash_guard(monkeyp
         assert len(positions) == 1 and positions[0]["symbol"] == "BTC/USDT"
 
     asyncio.run(run())
+
+
+
+def test_pooler_login_is_normalized_to_role_only_for_configured_project(monkeypatch):
+    project_ref = "wauaelzyugjuepmrewaw"
+    monkeypatch.setattr(
+        settings, "supabase_url", f"https://{project_ref}.supabase.co"
+    )
+    pooler = (
+        "postgresql+asyncpg://atlas_customer_paper."
+        f"{project_ref}:private-password@aws-0-eu-west-1.pooler.supabase.com:5432/"
+        "postgres?ssl=require"
+    )
+    assert _configured_database_role(pooler) == "atlas_customer_paper"
+
+    direct = (
+        f"postgresql+asyncpg://atlas_customer_paper:private-password@db.{project_ref}."
+        "supabase.co:5432/postgres?ssl=require"
+    )
+    assert _configured_database_role(direct) == "atlas_customer_paper"
+
+
+def test_pooler_login_rejects_wrong_project_suffix(monkeypatch):
+    project_ref = "wauaelzyugjuepmrewaw"
+    monkeypatch.setattr(
+        settings, "supabase_url", f"https://{project_ref}.supabase.co"
+    )
+    wrong_project_url = (
+        "postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:"
+        "private-password@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require"
+    )
+    with pytest.raises(ValueError, match="configured project reference"):
+        _configured_database_role(wrong_project_url)

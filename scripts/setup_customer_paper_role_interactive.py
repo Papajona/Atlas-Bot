@@ -19,7 +19,48 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit, urlunsplit
 
 POOLER_HOST = "aws-0-eu-west-1.pooler.supabase.com"
 RUNTIME_ROLE = "atlas_customer_paper"
+STAGING_PROJECT_REF = "wauaelzyugjuepmrewaw"
 
+
+
+def validate_project_ref(project_ref: str) -> str:
+    """Fail closed unless setup targets the one confirmed existing staging project."""
+    normalized = str(project_ref or "").strip()
+    if (
+        len(normalized) != 20
+        or not normalized.isascii()
+        or not normalized.isalnum()
+        or normalized.lower() != normalized
+    ):
+        raise ValueError("Project ref must be the exact lowercase 20-character Supabase ref")
+    if normalized != STAGING_PROJECT_REF:
+        raise ValueError("Project ref does not match the confirmed existing staging project")
+    return normalized
+
+
+def _create_url_file_atomically(url_file: Path, uri: str) -> None:
+    """Publish a complete mode-0600 URL without exposing partial final-path writes."""
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{url_file.name}.", suffix=".tmp", dir=str(url_file.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(uri + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        # Same-directory hard-link publication is atomic and fails if final already exists.
+        # Unlike os.replace(), os.link() never overwrites a competing final file.
+        os.link(temporary, url_file)
+    except BaseException:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+    else:
+        # On failure the final path, if published, still contains the complete fsynced URL.
+        temporary.unlink()
 
 def validate_runtime_url(uri: str, project_ref: str, expected_host: str = POOLER_HOST) -> str:
     """Return the decoded role password after validating the full expected endpoint."""
@@ -150,9 +191,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    project_ref = args.project_ref.strip()
-    if len(project_ref) != 20 or not project_ref.isascii() or not project_ref.isalnum() or project_ref.lower() != project_ref:
-        raise ValueError("Project ref must be the exact lowercase 20-character Supabase ref")
+    project_ref = validate_project_ref(args.project_ref)
 
     url_file = Path(args.url_file).expanduser()
     parent = url_file.parent
@@ -177,9 +216,7 @@ def main() -> int:
             "ssl=require",
             "",
         ))
-        fd = os.open(url_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(uri + "\n")
+        _create_url_file_atomically(url_file, uri)
         print("Created a protected runtime URL file; its contents are withheld.")
 
     with tempfile.TemporaryDirectory(prefix="atlas-paper-role-") as temp_dir:

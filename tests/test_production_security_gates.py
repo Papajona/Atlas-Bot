@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -334,9 +336,15 @@ def test_production_deploy_checks_database_role_before_any_deployment():
     assert 'db_url_file="$RUNNER_TEMP/atlas-production-db-url"' in block
     assert "trap 'rm -f \"$db_url_file\"' EXIT" in block
 
-def test_production_deploy_requires_staging_identity_preflight():
+def test_production_deploy_requires_successful_staging_identity_job_for_exact_main_commit():
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
-    assert 'require_success "staging-identity-preflight.yml" "Supabase staging identity preflight"' in workflow
+    assert "require_staging_identity_success" in workflow
+    assert 'require_success "staging-identity-preflight.yml" "Supabase staging identity preflight"' not in workflow
+    assert '--workflow "staging-identity-preflight.yml"' in workflow
+    assert '--commit "$GITHUB_SHA"' in workflow
+    assert 'select(.headBranch == "main")' in workflow
+    assert 'select(.name == "verify-staging-identity")][0].conclusion // "missing"' in workflow
+    assert '[ "$job_conclusion" != "success" ]' in workflow
 
 
 def test_production_startup_smoke_uses_non_admin_runtime_role_fixture():
@@ -444,3 +452,92 @@ def test_paper_reader_provisioning_is_no_write_and_no_public_schema_create():
     assert "GRANT INSERT" not in sql
     assert "GRANT UPDATE" not in sql
     assert "GRANT DELETE" not in sql
+
+
+
+def test_staging_identity_preflight_remains_manual_only_on_main():
+    workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
+    trigger_header = workflow.split("\npermissions:", 1)[0]
+    assert "workflow_dispatch:" in trigger_header
+    assert "\n  push:" not in trigger_header
+    assert "verify-staging-identity:" in workflow
+    assert "if: github.ref == 'refs/heads/main'" in workflow
+
+
+def _run_production_staging_job_gate(tmp_path: Path, job_conclusion: str):
+    workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+    start = workflow.index("          require_staging_identity_success() {")
+    end = workflow.index("\n          require_staging_identity_success\n", start)
+    shell_source = workflow[start:end + len("\n          require_staging_identity_success")]
+    assert start >= 0 and end >= 0, "production workflow must expose the exact staging job gate"
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    gh = fake_bin / "gh"
+    gh.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ \"$2\" == \"list\" ]]; then echo 123; exit 0; fi\n"
+        "if [[ \"$2\" == \"view\" ]]; then\n"
+        "  if [[ \"$*\" == *\"--json status\"* ]]; then echo completed; exit 0; fi\n"
+        "  if [[ \"$*\" == *\"--json conclusion\"* ]]; then echo success; exit 0; fi\n"
+        "  if [[ \"$*\" == *\"--json jobs\"* ]]; then echo \"$STAGING_JOB_CONCLUSION\"; exit 0; fi\n"
+        "fi\n"
+        "echo unexpected-gh-invocation >&2\n"
+        "exit 70\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o700)
+    shell_block = "\n".join(
+        line[10:] if line.startswith("          ") else line
+        for line in shell_source.splitlines()
+    )
+    result = subprocess.run(
+        ["bash", "-c", "set -euo pipefail\n" + shell_block],
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+            "GITHUB_REPOSITORY": "Papajona/Atlas-Bot",
+            "GITHUB_SHA": "f" * 40,
+            "STAGING_JOB_CONCLUSION": job_conclusion,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result
+
+
+def test_production_staging_gate_rejects_successful_workflow_with_skipped_job(tmp_path: Path):
+    result = _run_production_staging_job_gate(tmp_path, "skipped")
+
+    assert result.returncode != 0
+    assert "requires verify-staging-identity to succeed" in result.stdout
+
+
+def test_production_staging_gate_accepts_successful_exact_commit_job(tmp_path: Path):
+    result = _run_production_staging_job_gate(tmp_path, "success")
+
+    assert result.returncode == 0, result.stderr
+    assert "verify-staging-identity succeeded" in result.stdout
+
+
+def test_production_deploy_workflow_is_valid_yaml_with_unique_named_steps():
+    workflow_path = ROOT / ".github" / "workflows" / "production-deploy.yml"
+    ruby = r"""
+require "yaml"
+workflow = YAML.load_file(ARGV.fetch(0))
+steps = workflow.fetch("jobs").values.flat_map { |job| job.fetch("steps", []) }
+names = steps.map { |step| step["name"] }.compact
+duplicates = names.group_by(&:itself).select { |_, occurrences| occurrences.length > 1 }.keys
+abort("duplicate production deployment step names: #{duplicates.join(', ')}") unless duplicates.empty?
+abort("exact staging identity job gate missing") unless names.include?("Require all release CI gates on this exact commit")
+"""
+    result = subprocess.run(
+        ["ruby", "-e", ruby, str(workflow_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout

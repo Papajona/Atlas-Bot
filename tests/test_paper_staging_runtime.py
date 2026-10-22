@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
+import os
 from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.schemas import MarketRequest
 
@@ -69,14 +71,108 @@ def test_paper_staging_asgi_exposes_only_health_and_paper_routes():
 
 
 
-def test_primary_reader_preflight_allows_only_supabase_managed_non_inheriting_membership():
-    source = inspect.getsource(paper_staging._primary_reader_preflight)
-    assert "pg_auth_members m WHERE m.member = r.oid" in source
-    assert "grantor_role.rolname='supabase_admin'" in source
-    assert "member_role.rolname='postgres'" in source
-    assert "m.admin_option" in source
-    assert "to_jsonb(m) ? 'inherit_option'" in source
-    assert "to_jsonb(m) ? 'set_option'" in source
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not os.getenv("ATLAS_POSTGRES_URL"),
+    reason="requires the disposable PostgreSQL service provisioned by CI",
+)
+def test_primary_reader_preflight_membership_allowlist_is_behaviorally_exact():
+    predicate = paper_staging._UNSAFE_SUPABASE_MANAGED_MEMBERSHIP_PREDICATE
+
+    async def run():
+        engine = create_async_engine(os.environ["ATLAS_POSTGRES_URL"])
+        try:
+            async with engine.connect() as conn:
+                cases = [
+                    (
+                        {
+                            "member_name": "postgres",
+                            "grantor_name": "supabase_admin",
+                            "admin_option": True,
+                            "inherit_option": False,
+                            "set_option": False,
+                        },
+                        0,
+                    ),
+                    (
+                        {
+                            "member_name": "postgres",
+                            "grantor_name": "unexpected_grantor",
+                            "admin_option": True,
+                            "inherit_option": False,
+                            "set_option": False,
+                        },
+                        1,
+                    ),
+                    (
+                        {
+                            "member_name": "unexpected_member",
+                            "grantor_name": "supabase_admin",
+                            "admin_option": True,
+                            "inherit_option": False,
+                            "set_option": False,
+                        },
+                        1,
+                    ),
+                    (
+                        {
+                            "member_name": "postgres",
+                            "grantor_name": "supabase_admin",
+                            "admin_option": False,
+                            "inherit_option": False,
+                            "set_option": False,
+                        },
+                        1,
+                    ),
+                    (
+                        {
+                            "member_name": "postgres",
+                            "grantor_name": "supabase_admin",
+                            "admin_option": True,
+                            "inherit_option": True,
+                            "set_option": False,
+                        },
+                        1,
+                    ),
+                    (
+                        {
+                            "member_name": "postgres",
+                            "grantor_name": "supabase_admin",
+                            "admin_option": True,
+                            "inherit_option": False,
+                            "set_option": True,
+                        },
+                        1,
+                    ),
+                ]
+                query = text(
+                    f"""
+                    WITH membership_input AS (
+                        SELECT CAST(:member_name AS text) AS member_name,
+                               CAST(:grantor_name AS text) AS grantor_name,
+                               CAST(:admin_option AS boolean) AS admin_option,
+                               CAST(:inherit_option AS boolean) AS inherit_option,
+                               CAST(:set_option AS boolean) AS set_option
+                    )
+                    SELECT count(*) FILTER (WHERE {predicate})::integer AS member_count
+                    FROM membership_input AS m
+                    CROSS JOIN LATERAL (SELECT m.member_name AS rolname) AS member_role
+                    CROSS JOIN LATERAL (SELECT m.grantor_name AS rolname) AS grantor_role
+                    """
+                )
+                for membership, expected_member_count in cases:
+                    row = (
+                        await conn.execute(query, membership)
+                    ).mappings().one()
+                    member_count = int(row["member_count"])
+                    assert member_count == expected_member_count, membership
+                    assert paper_staging._primary_reader_membership_gate_passes(
+                        member_count
+                    ) is (expected_member_count == 0)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
 
 def test_staging_paper_request_accepts_short_history_without_relaxing_public_model():
     with pytest.raises(ValidationError):

@@ -13,6 +13,7 @@ import json
 import re
 import uuid
 from typing import Any
+from urllib.parse import urlsplit
 from sqlalchemy import text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -113,6 +114,34 @@ def _postgres_url(value: str) -> URL:
     return url
 
 
+
+def _configured_database_role(value: str | URL) -> str:
+    """Resolve a session-pooler login to its PostgreSQL role using the configured project ref.
+
+    Direct database endpoints keep the existing exact username comparison. Only a
+    recognized Supabase session-pooler hostname permits removing the exact configured
+    project-ref suffix; a missing/mismatched suffix fails closed.
+    """
+    url = _postgres_url(value) if isinstance(value, str) else value
+    username = str(url.username or "")
+    host = str(url.host or "").casefold()
+    pooler_host = re.fullmatch(
+        r"aws-\d+-[a-z0-9]+(?:-[a-z0-9]+)*\.pooler\.supabase\.com", host
+    )
+    if not pooler_host:
+        if host.endswith(".pooler.supabase.com"):
+            raise ValueError("Supabase session-pooler hostname is not a recognized endpoint")
+        return username
+
+    configured_host = urlsplit(str(getattr(settings, "supabase_url", "") or "").strip()).hostname
+    ref_match = re.fullmatch(r"([a-z0-9]{20})\.supabase\.co", str(configured_host or "").casefold())
+    if ref_match is None:
+        raise ValueError("configured Supabase URL does not identify a valid project reference")
+    suffix = "." + ref_match.group(1)
+    if not username.endswith(suffix) or len(username) <= len(suffix):
+        raise ValueError("session-pooler login username does not match the configured project reference")
+    return username[:-len(suffix)]
+
 def validate_database_url_pair(
     primary_url: str, paper_url: str, *, allow_same_database: bool = False
 ) -> dict[str, Any]:
@@ -171,6 +200,8 @@ async def preflight_isolated_customer_paper_ledger(
             paper_value,
             allow_same_database=bool(settings.customer_paper_shared_database_enabled),
         )
+        configured_primary_role = _configured_database_role(primary_value)
+        configured_paper_role = _configured_database_role(paper_value)
     except ValueError as exc:
         return {"status": "BLOCKED", "reason": "DATABASE_URL_ISOLATION_INVALID", "detail": str(exc)}
     same_database = bool(pair.get("same_database"))
@@ -212,12 +243,11 @@ async def preflight_isolated_customer_paper_ledger(
              paper_schema_present, paper_schema_usage, paper_schema_create) = identity
             if db_name != _postgres_url(paper_value).database:
                 return {"status": "BLOCKED", "reason": "PAPER_DATABASE_IDENTITY_MISMATCH"}
-            configured_paper_role = _postgres_url(paper_value).username
             if role_name != configured_paper_role or session_role_name != role_name:
                 return {"status": "BLOCKED", "reason": "PAPER_ROLE_IDENTITY_MISMATCH"}
             if not bool(role_can_login):
                 return {"status": "BLOCKED", "reason": "PAPER_RUNTIME_ROLE_CANNOT_LOGIN"}
-            if role_name == _postgres_url(primary_value).username:
+            if role_name == configured_primary_role:
                 return {"status": "BLOCKED", "reason": "PAPER_ROLE_REUSES_PRIMARY_ROLE"}
             if (
                 bool(elevated)
