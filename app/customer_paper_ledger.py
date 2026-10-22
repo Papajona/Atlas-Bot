@@ -477,6 +477,11 @@ async def preflight_isolated_customer_paper_ledger(
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
                           AND (NOT :same_database OR n.nspname <> 'customer_paper')
+                          -- An object ACL is not effectively reachable without USAGE
+                          -- on its schema. Supabase grants PUBLIC SELECT on two
+                          -- extensions.pg_stat_statements views while this runtime
+                          -- role correctly lacks USAGE on the extensions schema.
+                          AND has_schema_privilege(r.oid, n.oid, 'USAGE')
                           AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
                         """
                     ), {"paper_role": role_name, "same_database": same_database})).mappings().all()
@@ -499,6 +504,7 @@ async def preflight_isolated_customer_paper_ledger(
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
                           AND (NOT :same_database OR n.nspname <> 'customer_paper')
+                          AND has_schema_privilege(r.oid, n.oid, 'USAGE')
                           AND c.relkind = 'S'
                         """
                     ), {"paper_role": role_name, "same_database": same_database})).mappings().all()
@@ -514,6 +520,7 @@ async def preflight_isolated_customer_paper_ledger(
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
                           AND (NOT :same_database OR n.nspname <> 'customer_paper')
+                          AND has_schema_privilege(r.oid, n.oid, 'USAGE')
                           AND p.prosecdef
                           AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
                         """
