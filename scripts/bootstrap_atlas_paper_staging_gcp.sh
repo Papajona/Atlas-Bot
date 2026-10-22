@@ -203,6 +203,7 @@ put_secret_file() {
   # Validate and capture the complete value before any Secret Manager operation.
   # Read bytes first so CRLF is not silently normalized into an accepted LF.
   if ! validated_uri="$(python - "$secret_path" "$SUPABASE_PROJECT_REF" "$SUPABASE_DB_HOST" <<'PY'
+import re
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -219,6 +220,8 @@ if not data or "\n" in data or "\r" in data or "\x00" in data:
     raise SystemExit("BLOCKED: paper URL file must contain exactly one URI line")
 
 expected_ref, expected_host = sys.argv[2:]
+if re.search(r"%(?![0-9A-Fa-f]{2})", data):
+    raise SystemExit("BLOCKED: paper URL contains invalid percent-encoding")
 try:
     parsed = urlsplit(data)
     port = parsed.port
