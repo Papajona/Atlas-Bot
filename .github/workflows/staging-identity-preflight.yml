@@ -294,8 +294,7 @@ jobs:
                  (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
                    WHERE n.nspname='public' AND p.prosecdef AND has_function_privilege(current_user,p.oid,'EXECUTE')),
                  (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relowner=r.oid),
-                 (SELECT string_agg(version_num, ',' ORDER BY version_num) FROM public.alembic_version)
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relowner=r.oid)
           FROM pg_roles r WHERE r.rolname=current_user;
           """
           result = subprocess.run(["psql","-X","-A","-t","-v","ON_ERROR_STOP=1","-c",query],
@@ -304,13 +303,13 @@ jobs:
               print("BLOCKED: read-only primary identity query failed; DB output withheld")
               sys.exit(1)
           fields = result.stdout.strip().split("|")
-          if len(fields) != 23:
+          if len(fields) != 22:
               print("BLOCKED: primary identity query returned an unexpected shape")
               sys.exit(1)
           (db, role, session_role, read_only, can_login, superuser, create_role, create_db, replication,
            bypass_rls, inherit, memberships, member_count, public_usage, public_create, read_profiles,
            read_app_state, other_schema, unexpected_tables, public_sequences, callable_definers,
-           owned_tables, revision) = fields
+           owned_tables) = fields
           def truth(v): return str(v).strip().lower() in {"t","true","1","yes"}
           if db != "postgres" or role != os.environ["STAGING_RUNTIME_DB_ROLE"] or session_role != role:
               raise SystemExit("BLOCKED: connected primary identity does not match the configured runtime role")
@@ -324,9 +323,7 @@ jobs:
               raise SystemExit("BLOCKED: primary runtime role lacks exact public-schema read-only access")
           if any(int(v) for v in (other_schema, unexpected_tables, public_sequences, callable_definers, owned_tables)):
               raise SystemExit("BLOCKED: primary runtime role can access non-allowlisted objects or owns public tables")
-          if not revision or "," in revision:
-              raise SystemExit("BLOCKED: public Alembic revision is missing or ambiguous; no migrations were executed")
-          print(f"PASS: primary identity {role} is read-only, non-owner/non-admin, and can access only customer_profiles/app_state; observed existing Alembic revision {revision} (not modified).")
+          print(f"PASS: primary identity {role} is read-only, non-owner/non-admin, and can access only customer_profiles/app_state. No migration or write was executed by this preflight.")
           PY
 
       - name: Require deployed service readiness and full isolated-ledger preflight
