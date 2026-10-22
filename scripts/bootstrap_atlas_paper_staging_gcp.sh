@@ -20,7 +20,7 @@ ARTIFACT_REPOSITORY="atlas-staging"
 CLOUD_RUN_SERVICE="atlas-paper-staging"
 
 SUPABASE_PROJECT_REF="wauaelzyugjuepmrewaw"
-SUPABASE_DB_HOST="db.\${SUPABASE_PROJECT_REF}.supabase.co"
+SUPABASE_DB_HOST="db.${SUPABASE_PROJECT_REF}.supabase.co"
 PRIMARY_SECRET="atlas-staging-primary-db-url"
 PAPER_SECRET="atlas-staging-customer-paper-db-url"
 ANON_KEY_SECRET="atlas-staging-supabase-anon-key"
@@ -53,7 +53,7 @@ fi
 ensure_service_account() {
   local account_id="$1"
   local display_name="$2"
-  local email="\${account_id}@\${PROJECT_ID}.iam.gserviceaccount.com"
+  local email="${account_id}@${PROJECT_ID}.iam.gserviceaccount.com"
   if ! gcloud iam service-accounts describe "$email" --project="$PROJECT_ID" >/dev/null 2>&1; then
     gcloud iam service-accounts create "$account_id" \
       --project="$PROJECT_ID" --display-name="$display_name"
@@ -64,9 +64,9 @@ ensure_service_account "$DEPLOY_SA_ID" "Atlas paper staging GitHub deploy"
 ensure_service_account "$PREFLIGHT_SA_ID" "Atlas staging identity preflight"
 ensure_service_account "$RUNTIME_SA_ID" "Atlas paper-only Cloud Run runtime"
 
-DEPLOY_SA="\${DEPLOY_SA_ID}@\${PROJECT_ID}.iam.gserviceaccount.com"
-PREFLIGHT_SA="\${PREFLIGHT_SA_ID}@\${PROJECT_ID}.iam.gserviceaccount.com"
-RUNTIME_SA="\${RUNTIME_SA_ID}@\${PROJECT_ID}.iam.gserviceaccount.com"
+DEPLOY_SA="${DEPLOY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+PREFLIGHT_SA="${PREFLIGHT_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+RUNTIME_SA="${RUNTIME_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 if ! gcloud artifacts repositories describe "$ARTIFACT_REPOSITORY" \
     --location="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1; then
@@ -78,20 +78,20 @@ fi
 # The deploy identity can deploy Cloud Run services in the staging project and write
 # only to the single staging Artifact Registry repository.
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:\${DEPLOY_SA}" --role="roles/run.admin" --quiet
+  --member="serviceAccount:${DEPLOY_SA}" --role="roles/run.admin" --quiet
 gcloud artifacts repositories add-iam-policy-binding "$ARTIFACT_REPOSITORY" \
   --location="$REGION" --project="$PROJECT_ID" \
-  --member="serviceAccount:\${DEPLOY_SA}" --role="roles/artifactregistry.writer" --quiet
+  --member="serviceAccount:${DEPLOY_SA}" --role="roles/artifactregistry.writer" --quiet
 gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
-  --project="$PROJECT_ID" --member="serviceAccount:\${DEPLOY_SA}" \
+  --project="$PROJECT_ID" --member="serviceAccount:${DEPLOY_SA}" \
   --role="roles/iam.serviceAccountUser"
 
-PRINCIPAL_SET="principalSet://iam.googleapis.com/projects/\${PROJECT_NUMBER}/locations/global/workloadIdentityPools/\${POOL_ID}/attribute.repository/Papajona/Atlas-Bot"
+PRINCIPAL_SET="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/attribute.repository/Papajona/Atlas-Bot"
 gcloud iam service-accounts add-iam-policy-binding "$DEPLOY_SA" \
   --project="$PROJECT_ID" --member="$PRINCIPAL_SET" \
   --role="roles/iam.workloadIdentityUser"
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:\${PREFLIGHT_SA}" --role="roles/run.viewer" --quiet
+  --member="serviceAccount:${PREFLIGHT_SA}" --role="roles/run.viewer" --quiet
 
 read -r -s -p "Enter the atlas_paper_reader database password (hidden): " PRIMARY_PASSWORD
 printf '\n'
@@ -121,8 +121,8 @@ PY
 
 PRIMARY_ENCODED="$(url_encode_password "$PRIMARY_PASSWORD")"
 PAPER_ENCODED="$(url_encode_password "$PAPER_PASSWORD")"
-PRIMARY_URL="postgresql+asyncpg://atlas_paper_reader:\${PRIMARY_ENCODED}@\${SUPABASE_DB_HOST}:5432/postgres?ssl=require"
-PAPER_URL="postgresql+asyncpg://atlas_customer_paper:\${PAPER_ENCODED}@\${SUPABASE_DB_HOST}:5432/postgres?ssl=require"
+PRIMARY_URL="postgresql+asyncpg://atlas_paper_reader:${PRIMARY_ENCODED}@${SUPABASE_DB_HOST}:5432/postgres?ssl=require"
+PAPER_URL="postgresql+asyncpg://atlas_customer_paper:${PAPER_ENCODED}@${SUPABASE_DB_HOST}:5432/postgres?ssl=require"
 unset PRIMARY_PASSWORD PAPER_PASSWORD PRIMARY_ENCODED PAPER_ENCODED
 
 put_secret() {
@@ -145,7 +145,7 @@ unset PRIMARY_URL PAPER_URL SUPABASE_ANON_KEY
 for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET" "$ANON_KEY_SECRET"; do
   gcloud secrets add-iam-policy-binding "$secret_name" \
     --project="$PROJECT_ID" \
-    --member="serviceAccount:\${RUNTIME_SA}" \
+    --member="serviceAccount:${RUNTIME_SA}" \
     --role="roles/secretmanager.secretAccessor" --quiet
 done
 
@@ -153,7 +153,7 @@ done
 for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET"; do
   gcloud secrets add-iam-policy-binding "$secret_name" \
     --project="$PROJECT_ID" \
-    --member="serviceAccount:\${PREFLIGHT_SA}" \
+    --member="serviceAccount:${PREFLIGHT_SA}" \
     --role="roles/secretmanager.secretAccessor" --quiet
 done
 
