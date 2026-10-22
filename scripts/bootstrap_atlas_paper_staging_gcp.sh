@@ -109,8 +109,8 @@ if [[ -L "$PAPER_URL_FILE" ]]; then
 fi
 
 if [[ -f "$PAPER_URL_FILE" ]]; then
-  python - "$PAPER_URL_FILE" "$SUPABASE_PROJECT_REF" "$SUPABASE_DB_HOST" <<'PY'
-import stat, sys
+  if ! PRIMARY_PASSWORD="$PRIMARY_PASSWORD" python - "$PAPER_URL_FILE" "$SUPABASE_PROJECT_REF" "$SUPABASE_DB_HOST" <<'PY'
+import hmac, os, stat, sys
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 path = Path(sys.argv[1])
@@ -128,8 +128,18 @@ if unquote(parsed.username or "") != f"atlas_customer_paper.{expected_ref}" or n
     raise SystemExit("BLOCKED: generated paper database URL has the wrong runtime role or missing password")
 if parse_qs(parsed.query).get("ssl") != ["require"]:
     raise SystemExit("BLOCKED: generated paper database URL must require TLS")
-print("PASS: protected generated paper database URL matches the expected role, project and session pooler; value withheld")
+primary_password = os.environ.get("PRIMARY_PASSWORD", "")
+paper_password = unquote(parsed.password or "")
+if not primary_password or hmac.compare_digest(
+    primary_password.encode("utf-8"), paper_password.encode("utf-8")
+):
+    raise SystemExit("BLOCKED: primary and paper database roles must have different passwords")
+print("PASS: protected generated paper database URL matches the expected role, project, session pooler and distinct credential; values withheld")
 PY
+  then
+    unset PRIMARY_PASSWORD
+    exit 1
+  fi
   USE_PAPER_URL_FILE="true"
 else
   read -r -s -p "Enter the atlas_customer_paper database password (hidden): " PAPER_PASSWORD
