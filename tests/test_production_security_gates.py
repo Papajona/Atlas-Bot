@@ -264,16 +264,21 @@ def test_staging_identity_preflight_is_manual_main_only_and_read_only():
     assert "environment: staging" in workflow
     assert "ATLAS_STAGING_SUPABASE_PROJECT_REF" in workflow
     assert "ATLAS_STAGING_DATABASE_SECRET" in workflow
+    assert "ATLAS_STAGING_PAPER_DATABASE_SECRET" in workflow
     assert "ATLAS_STAGING_RUNTIME_DB_ROLE" in workflow
+    assert "ATLAS_STAGING_PAPER_DB_ROLE" in workflow
     assert "gcloud secrets versions access latest" in workflow
     assert "db.{expected}.supabase.co" in workflow
     assert "current_user, session_user" in workflow
     assert "default_transaction_read_only=on" in workflow
-    assert "no migration or write was executed" in workflow
+    assert "no migrations were executed" in workflow
     assert "alembic upgrade" not in workflow
+    assert "app.paper_staging:app" in workflow
+    assert "CUSTOMER_PAPER_DATABASE_URL" in workflow
+    assert "ATLAS_STAGING_SUPABASE_ANON_KEY_SECRET" in workflow
 
 
-def test_staging_identity_preflight_allows_same_project_and_checks_runtime_identity():
+def test_staging_identity_preflight_allows_same_project_and_checks_read_only_paper_runtime():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
     assert "ATLAS_PRODUCTION_SUPABASE_PROJECT_REF" in workflow
     assert "STAGING_SUPABASE_PROJECT_REF" in workflow
@@ -283,24 +288,27 @@ def test_staging_identity_preflight_allows_same_project_and_checks_runtime_ident
     assert "ATLAS_STAGING_CLOUD_RUN_SERVICE" in workflow
     assert "ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT" in workflow
     assert '"gcloud", "run", "services", "describe"' in workflow
-    assert "DATABASE_URL must reference exactly the configured staging database secret" in workflow
-    assert "if login_role != role:" in workflow
-    assert "BLOCKED: deployed staging service account differs" in workflow
-    assert 'if role in {"postgres", "service_role", "supabase_admin", "supabase_auth_admin", "authenticator", "anon", "authenticated"}:' in workflow
-    assert "runtime database role has administrative privileges" in workflow
-    assert "role_membership_count" in workflow
-    assert "runtime DB role inherits other PostgreSQL roles" in workflow
-    assert "no migration or write was executed" in workflow
-    assert 'EXPECTED_ALEMBIC_HEAD: "0053_supabase_public_default_acl_lockdown"' in workflow
-    assert "if revision != expected_head:" in workflow
+    assert "DATABASE_URL must reference the configured atlas_paper_reader secret" in workflow
+    assert "CUSTOMER_PAPER_DATABASE_URL must reference the configured atlas_customer_paper secret" in workflow
+    assert "SUPABASE_ANON_KEY must reference the configured Supabase publishable/anon key secret" in workflow
+    assert "primary DB URL is not the configured read-only runtime role" in workflow
+    assert "session_role != role" in workflow
+    assert "primary runtime role has administrative privileges or cannot login" in workflow
+    assert "must be NOINHERIT, BYPASSRLS and have no role memberships" in workflow
+    assert "no migrations were executed" in workflow
+    assert "SELECT_ONLY_CUSTOMER_PROFILES_AND_APP_STATE" in workflow
+    assert "EXPECTED_ALEMBIC_HEAD" not in workflow
     assert "alembic upgrade" not in workflow
 
 
 def test_staging_preflight_runtime_role_is_non_owner_and_non_admin():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
     guard = (ROOT / "app" / "startup_guards.py").read_text(encoding="utf-8")
-    assert "owned_count" in workflow
-    assert "if int(owned_count) > 0" in workflow
+    assert "owned_tables" in workflow
+    assert "owned_public_tables" in workflow
+    assert "c.relowner=r.oid" in workflow
+    assert "owned_tables" in workflow
+    assert "if int(v) for v in (other_schema, unexpected_tables, public_sequences, callable_definers, owned_tables)" in workflow
     assert "c.relowner = r.oid" in guard
     assert "r.rolcreaterole AS can_create_roles" in guard
     assert "r.rolcreatedb AS can_create_databases" in guard
