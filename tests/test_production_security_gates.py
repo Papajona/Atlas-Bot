@@ -398,6 +398,7 @@ def test_supabase_future_default_grants_are_opt_in():
 def test_paper_staging_deployment_is_restricted_and_keeps_risk_features_off():
     deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
     preflight = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
+    paper_app = (ROOT / "app" / "paper_staging.py").read_text(encoding="utf-8")
     assert "github.ref == 'refs/heads/main'" in deploy
     assert "ATLAS_ASGI_APP=app.paper_staging:app" in deploy
     for name, value in (
@@ -420,6 +421,10 @@ def test_paper_staging_deployment_is_restricted_and_keeps_risk_features_off():
     assert "atlas-staging-customer-paper-db-url" not in deploy
     assert "atlas-staging-supabase-anon-key" not in deploy
     assert "set-secrets" in deploy
+    assert "current_setting('transaction_read_only')" in paper_app
+    assert '"transaction_read_only"] or "").lower() not in {"on", "true", "t"}' in paper_app
+    assert "Customer profile must already exist" in paper_app
+    assert "app.main:app" not in deploy
 
 
 def test_paper_reader_provisioning_is_no_write_and_no_public_schema_create():
