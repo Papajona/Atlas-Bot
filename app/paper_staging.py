@@ -6,9 +6,12 @@ Only health/readiness and /api/customer/paper are exposed by this ASGI app.
 """
 from __future__ import annotations
 
+import asyncio
+import time
+from types import SimpleNamespace
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select, text
 
@@ -18,10 +21,36 @@ from .customer_paper_api import _paper_feature_flags, build_customer_paper_route
 from .customer_paper_ledger import preflight_isolated_customer_paper_ledger
 # Import the existing JWT/MFA verifier and market-data adapter. The main ASGI app is
 # not mounted or served; its startup/lifespan is never executed in this process.
-from .main import MarketRequest, api_rate_limit, customer_claims, market_data
+from .main import MarketRequest, _trusted_client_ip, allow_rate_limit, api_rate_limit, customer_claims, market_data
 
 
 _EXPECTED_PRIMARY_ROLE = "atlas_paper_reader"
+_PAPER_PREFLIGHT_CACHE_TTL_SECONDS = 5.0
+_paper_preflight_cache_result: dict[str, Any] | None = None
+_paper_preflight_cache_at = 0.0
+_paper_preflight_cache_lock = asyncio.Lock()
+
+
+async def _cached_paper_runtime_preflight() -> dict[str, Any]:
+    """Cache expensive role/schema checks briefly; risk state is still queried per request."""
+    global _paper_preflight_cache_result, _paper_preflight_cache_at
+    now = time.monotonic()
+    if (
+        _paper_preflight_cache_result is not None
+        and now - _paper_preflight_cache_at < _PAPER_PREFLIGHT_CACHE_TTL_SECONDS
+    ):
+        return dict(_paper_preflight_cache_result)
+    async with _paper_preflight_cache_lock:
+        now = time.monotonic()
+        if (
+            _paper_preflight_cache_result is not None
+            and now - _paper_preflight_cache_at < _PAPER_PREFLIGHT_CACHE_TTL_SECONDS
+        ):
+            return dict(_paper_preflight_cache_result)
+        result = await _paper_runtime_preflight()
+        _paper_preflight_cache_result = dict(result)
+        _paper_preflight_cache_at = time.monotonic()
+        return dict(result)
 
 
 async def _primary_reader_preflight() -> dict[str, Any]:
@@ -155,16 +184,27 @@ async def get_existing_customer(
     uid = str(claims.get("sub") or "").strip()
     if not uid:
         raise HTTPException(401, "Customer authentication is invalid")
-    profile = (
+    row = (
         await db.execute(
-            select(CustomerProfile).where(CustomerProfile.auth_user_id == uid)
+            select(
+                CustomerProfile.id,
+                CustomerProfile.auth_user_id,
+                CustomerProfile.status,
+            ).where(CustomerProfile.auth_user_id == uid)
         )
-    ).scalar_one_or_none()
-    if profile is None:
+    ).one_or_none()
+    if row is None:
         raise HTTPException(
             403,
             "Customer profile must already exist before paper-only staging access",
         )
+    # Keep PII/encrypted columns out of the query: this service has no encryption
+    # keyring and only needs the numeric tenant ID and active status.
+    profile = SimpleNamespace(
+        id=row.id,
+        auth_user_id=row.auth_user_id,
+        status=row.status,
+    )
     if str(getattr(profile, "status", "")).upper() != "ACTIVE":
         raise HTTPException(403, "Customer account is not active")
     return profile, claims
@@ -172,7 +212,7 @@ async def get_existing_customer(
 
 async def _paper_state_guard() -> None:
     """Check database and paper-ledger gates, then honor the persisted kill switch."""
-    result = await _paper_runtime_preflight()
+    result = await _cached_paper_runtime_preflight()
     if result.get("status") != "PASS":
         raise HTTPException(503, "Paper-only staging preflight is blocked: " + str(result.get("reason") or "UNKNOWN"))
     async with SessionLocal() as db:
@@ -196,6 +236,28 @@ app = FastAPI(
 app.middleware("http")(api_rate_limit)
 
 
+@app.middleware("http")
+async def _paper_readyz_rate_limit(request: Request, call_next):
+    if request.url.path == "/readyz":
+        try:
+            allowed, _ = await allow_rate_limit(
+                f"paper-readyz:ip:{_trusted_client_ip(request)}",
+                max(1, int(settings.expensive_api_rate_limit_per_minute)),
+            )
+        except Exception:
+            return JSONResponse(
+                {"status": "BLOCKED", "reason": "READINESS_RATE_LIMIT_UNAVAILABLE"},
+                status_code=503,
+            )
+        if not allowed:
+            return JSONResponse(
+                {"status": "BLOCKED", "reason": "READINESS_RATE_LIMITED"},
+                status_code=429,
+                headers={"Retry-After": "60"},
+            )
+    return await call_next(request)
+
+
 @app.get("/healthz")
 async def healthz():
     # Liveness only: don't make the container restart merely because provisioning is pending.
@@ -204,7 +266,7 @@ async def healthz():
 
 @app.get("/readyz")
 async def readyz():
-    result = await _paper_runtime_preflight()
+    result = await _cached_paper_runtime_preflight()
     if result.get("status") != "PASS":
         return JSONResponse(result, status_code=503)
     async with SessionLocal() as db:
