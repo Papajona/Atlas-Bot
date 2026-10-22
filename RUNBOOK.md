@@ -201,15 +201,30 @@ The password command prompts without echoing the value. Save that password in th
 
 ### 2. Provision the customer paper ledger role and schema
 
-Still connected to the same reviewed database, create the dedicated role only if it does not already exist, then set a distinct password using psql's hidden prompt:
+Still connected to the same reviewed database, first run this shell precheck. It aborts before opening an interactive password prompt if the role already exists or the database query fails:
+
+```bash
+set -euo pipefail
+ROLE_EXISTS="$(psql "$ATLAS_ADMIN_DATABASE_URL" -X -At -v ON_ERROR_STOP=1 \
+  -c "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='atlas_customer_paper')")"
+if [[ "$ROLE_EXISTS" != "f" ]]; then
+  echo "BLOCKED: atlas_customer_paper already exists or the role-existence check did not return false; inspect it before proceeding."
+  exit 1
+fi
+psql "$ATLAS_ADMIN_DATABASE_URL" -X -v ON_ERROR_STOP=1
+```
+
+At the resulting `psql` prompt, create the role and set its distinct password using psql's hidden prompt:
 
 ```psql
 CREATE ROLE atlas_customer_paper LOGIN NOINHERIT NOBYPASSRLS
     NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 GRANT CONNECT ON DATABASE postgres TO atlas_customer_paper;
-\password atlas_customer_paper
-\q
+\\password atlas_customer_paper
+\\q
 ```
+
+Do not retry role creation or run `\\password` if the precheck blocks. Inspect the existing role attributes, memberships, grants, ownership, and password-management record under the operator process first.
 
 Run the reviewed schema script against that same database as the database owner, not as either runtime role:
 
