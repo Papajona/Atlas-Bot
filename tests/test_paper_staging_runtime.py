@@ -77,7 +77,7 @@ def test_paper_staging_asgi_exposes_only_health_and_paper_routes():
     reason="requires the disposable PostgreSQL service provisioned by CI",
 )
 def test_primary_reader_preflight_membership_allowlist_is_behaviorally_exact():
-    predicate = paper_staging._SAFE_SUPABASE_MANAGED_MEMBERSHIP_PREDICATE
+    predicate = paper_staging._UNSAFE_SUPABASE_MANAGED_MEMBERSHIP_PREDICATE
 
     async def run():
         engine = create_async_engine(os.environ["ATLAS_POSTGRES_URL"])
@@ -154,7 +154,7 @@ def test_primary_reader_preflight_membership_allowlist_is_behaviorally_exact():
                                CAST(:inherit_option AS boolean) AS inherit_option,
                                CAST(:set_option AS boolean) AS set_option
                     )
-                    SELECT count(*) FILTER (WHERE NOT ({predicate}))::integer AS member_count
+                    SELECT count(*) FILTER (WHERE {predicate})::integer AS member_count
                     FROM membership_input AS m
                     CROSS JOIN LATERAL (SELECT m.member_name AS rolname) AS member_role
                     CROSS JOIN LATERAL (SELECT m.grantor_name AS rolname) AS grantor_role
