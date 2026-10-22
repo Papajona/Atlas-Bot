@@ -468,8 +468,8 @@ def test_staging_identity_preflight_remains_manual_only_on_main():
 def _run_production_staging_job_gate(tmp_path: Path, job_conclusion: str):
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
     start = workflow.index("          require_staging_identity_success() {")
-    end = workflow.index("\\n          require_staging_identity_success\\n", start)
-    shell_source = workflow[start:end + len("\\n          require_staging_identity_success")]
+    end = workflow.index("\n          require_staging_identity_success\n", start)
+    shell_source = workflow[start:end + len("\n          require_staging_identity_success")]
     assert start >= 0 and end >= 0, "production workflow must expose the exact staging job gate"
 
     fake_bin = tmp_path / "bin"
