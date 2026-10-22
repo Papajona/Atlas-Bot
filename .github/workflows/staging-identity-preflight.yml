@@ -221,7 +221,7 @@ jobs:
           paper = urlparse((root / "atlas-staging-paper-db-url").read_text().strip())
           expected = os.environ["STAGING_SUPABASE_PROJECT_REF"]
           for label, parsed in (("primary", primary), ("paper", paper)):
-              if parsed.scheme not in ("postgres", "postgresql") or not parsed.hostname:
+              if parsed.scheme not in ("postgres", "postgresql", "postgresql+asyncpg") or not parsed.hostname:
                   raise SystemExit(f"BLOCKED: {label} DB secret is not a valid PostgreSQL URI")
               if parsed.hostname.lower() not in {f"db.{expected}.supabase.co", f"{expected}.supabase.co"}:
                   raise SystemExit(f"BLOCKED: {label} DB hostname does not match the configured Supabase project")
