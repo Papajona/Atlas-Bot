@@ -65,7 +65,293 @@ jobs:
           require_success "ci.yml" "Atlas CI"
           require_success "ledger-concurrency-check.yml" "PostgreSQL ledger concurrency"
           require_success "production-verification.yml" "Production Verification Gate"
-          require_success "staging-identity-preflight.yml" "Supabase staging identity preflight"
+
+          # Workflow-level success is not evidence when the verification job was skipped.
+          # Inspect the latest staging run for this exact main commit and require the named job.
+          require_success_job() {
+            local workflow="$1"
+            local job_name="$2"
+            local label="$3"
+            local run_id inspection run_status run_conclusion job_conclusion
+
+            run_id="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "$workflow" \
+              --commit "$GITHUB_SHA" \
+              --limit 100 \
+              --json databaseId,headSha,headBranch \
+              --jq "[.[] | select(.headSha == \\"$GITHUB_SHA\\" and .headBranch == \\"main\\")] | sort_by(.databaseId) | last | .databaseId // empty")"
+
+            if [ -z "$run_id" ]; then
+              echo "BLOCKED: no staging identity preflight run exists on main for exact commit $GITHUB_SHA"
+              exit 1
+            fi
+
+            inspection="$(gh run view "$run_id" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json status,conclusion,jobs \
+              --jq "[.status, (.conclusion // \\"\\"), ([.jobs[] | select(.name == \\"$job_name\\")][0].conclusion // \\"missing\\")] | @tsv")"
+            IFS=          require_success "android-release.yml" "Protected signed Android release"
+
+          # A green Android workflow is insufficient when its signing job was skipped.
+          # Require the successful signed-release job and the non-expired APK evidence
+          # artifact for this exact commit before touching production.
+          android_run=""
+          while IFS= read -r candidate; do
+            [ -n "$candidate" ] || continue
+            job_conclusion="$(gh run view "$candidate" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json jobs \
+              --jq '[.jobs[] | select(.name=="android-release")][0].conclusion // empty')"
+            if [ "$job_conclusion" = "success" ]; then
+              android_run="$candidate"
+              break
+            fi
+          done < <(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow "android-release.yml" \
+            --commit "$GITHUB_SHA" \
+            --json databaseId,status,conclusion \
+            --jq '.[] | select(.status=="completed" and .conclusion=="success") | .databaseId')
+
+          if [ -z "$android_run" ]; then
+            echo "BLOCKED: no successful signed Android release job exists for exact commit $GITHUB_SHA"
+            exit 1
+          fi
+
+          artifact_count="$(gh api \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$android_run/artifacts" \
+            --jq '[.artifacts[] | select(.name=="atlas-release-apk" and .expired==false and .size_in_bytes>0)] | length')"
+          if [ "${artifact_count:-0}" -lt 1 ]; then
+            echo "BLOCKED: signed Android artifact is missing, expired, or empty"
+            exit 1
+          fi
+          echo "PASS: signed Android release and evidence artifact verified for $GITHUB_SHA"
+
+      - name: Download and independently verify signed Android artifact for this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_CERT_SHA256: ${{ secrets.ATLAS_RELEASE_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          # Select only a successful run whose signing job succeeded. A newer successful
+          # debug-only run must not mask an older valid signed-release run.
+          android_run=""
+          while IFS= read -r candidate; do
+            [ -n "$candidate" ] || continue
+            job_conclusion="$(gh run view "$candidate" --repo "$GITHUB_REPOSITORY" --json jobs --jq '[.jobs[] | select(.name=="android-release")][0].conclusion // empty')"
+            if [ "$job_conclusion" = "success" ]; then
+              android_run="$candidate"
+              break
+            fi
+          done < <(gh run list --repo "$GITHUB_REPOSITORY" --workflow "android-release.yml" --commit "$GITHUB_SHA" --status success --json databaseId --jq '.[].databaseId')
+          if [ -z "$android_run" ]; then
+            echo "BLOCKED: no successful signed Android release job exists for exact commit $GITHUB_SHA"
+            exit 1
+          fi
+
+          artifact_count="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$android_run/artifacts" --jq '[.artifacts[] | select(.name=="atlas-release-apk" and .expired==false and .size_in_bytes>0)] | length')"
+          if [ "${artifact_count:-0}" -ne 1 ]; then
+            echo "BLOCKED: expected exactly one non-expired, non-empty atlas-release-apk artifact"
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/atlas-android-release"
+          gh run download "$android_run" --repo "$GITHUB_REPOSITORY" --name atlas-release-apk --dir "$RUNNER_TEMP/atlas-android-release"
+          bundle="$RUNNER_TEMP/atlas-android-release"
+          apk="$bundle/atlas-release.apk"
+          test -s "$apk"
+          test -s "$bundle/atlas-release.sha256"
+          test -s "$bundle/atlas-release-metadata.txt"
+          test -s "$bundle/atlas-signing-report.txt"
+          (cd "$bundle" && sha256sum --check atlas-release.sha256)
+
+          # Verify the downloaded APK bytes directly; metadata/report files are not
+          # accepted as substitutes for inspecting the APK itself.
+          test -n "$EXPECTED_CERT_SHA256"
+          expected_cert="$(printf '%s' "$EXPECTED_CERT_SHA256" | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+          [[ "$expected_cert" =~ ^[0-9a-f]{64}$ ]] || { echo "BLOCKED: expected certificate fingerprint must be 64 hex characters"; exit 1; }
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          aapt="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          test -x "$apksigner"
+          test -x "$aapt"
+
+          "$apksigner" verify --verbose --print-certs "$apk" | tee "$RUNNER_TEMP/atlas-downloaded-apk-signing-report.txt"
+          actual_cert="$(sed -n 's/.*certificate SHA-256 digest: //p' "$RUNNER_TEMP/atlas-downloaded-apk-signing-report.txt" | head -n 1 | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+          test -n "$actual_cert"
+          test "$actual_cert" = "$expected_cert"
+
+          package_name="$("$aapt" dump badging "$apk" | sed -n "s/^package: name='\\([^']*\\)'.*/\\1/p" | head -n 1)"
+          test "$package_name" = "com.atlas.trading"
+
+          metadata_package="$(sed -n 's/^package=//p' "$bundle/atlas-release-metadata.txt")"
+          metadata_cert="$(sed -n 's/^certificate_sha256=//p' "$bundle/atlas-release-metadata.txt" | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+          test "$metadata_package" = "$package_name"
+          test "$metadata_cert" = "$actual_cert"
+
+          report_cert="$(sed -n 's/.*certificate SHA-256 digest: //p' "$bundle/atlas-signing-report.txt" | head -n 1 | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+          test "$report_cert" = "$actual_cert"
+          echo "PASS: exact-commit APK checksum, APK signature, actual package identity, metadata, and expected certificate all agree"
+      - name: Authenticate to Google Cloud with GitHub OIDC
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+      - name: Verify production database runtime role before deployment
+        shell: bash
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          SECRET_DATABASE_VERSION: ${{ secrets.SECRET_DATABASE_VERSION }}
+        run: |
+          set -euo pipefail
+          umask 077
+          db_url_file="$RUNNER_TEMP/atlas-production-db-url"
+          trap 'rm -f "$db_url_file"' EXIT
+          gcloud secrets versions access "$SECRET_DATABASE_VERSION" \
+            --secret=atlas-database-url --project="$GCP_PROJECT_ID" > "$db_url_file"
+          test -s "$db_url_file"
+          python - "$db_url_file" <<'PY'
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+          from urllib.parse import unquote, urlparse
+
+          secret_path = Path(sys.argv[1])
+          uri = secret_path.read_text(encoding="utf-8").strip()
+          parsed = urlparse(uri)
+          if parsed.scheme not in {"postgres", "postgresql", "postgresql+asyncpg", "postgresql+psycopg"} or not parsed.hostname:
+              raise SystemExit("BLOCKED: production DATABASE_URL is not a valid PostgreSQL URI")
+          env = {
+              k: v for k, v in os.environ.items()
+              if k not in {"DATABASE_URL", "PGPASSWORD", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS"}
+          }
+          env.update({
+              "PGHOST": parsed.hostname,
+              "PGPORT": str(parsed.port or 5432),
+              "PGUSER": unquote(parsed.username or ""),
+              "PGPASSWORD": unquote(parsed.password or ""),
+              "PGDATABASE": parsed.path.lstrip("/"),
+              "PGSSLMODE": "require",
+              "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=10000",
+          })
+          query = """
+          SELECT current_database(), current_user, session_user,
+                 COALESCE((SELECT string_agg(version_num, ',' ORDER BY version_num)
+                           FROM public.alembic_version), ''),
+                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p')),
+                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relrowsecurity),
+                 r.rolsuper, r.rolcreaterole, r.rolcreatedb, r.rolreplication, r.rolbypassrls,
+                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relowner=r.oid),
+                 (SELECT count(*) FROM pg_auth_members m WHERE m.member=r.oid),
+                 (NOT has_schema_privilege('anon','public','USAGE')
+                  AND NOT has_schema_privilege('authenticated','public','USAGE'))
+          FROM pg_roles r WHERE r.rolname=current_user
+          """
+          result = subprocess.run(
+              ["psql", "-X", "-A", "-t", "-F", "|", "-v", "ON_ERROR_STOP=1", "-c", query],
+              check=False, capture_output=True, text=True, env=env,
+          )
+          if result.returncode:
+              print("BLOCKED: read-only production database role check failed; database output withheld")
+              sys.exit(1)
+          fields = result.stdout.strip().split("|")
+          if len(fields) != 14:
+              raise SystemExit("BLOCKED: unexpected production database role query result")
+          (database, role, login_role, revision, table_count, unprotected_count,
+           is_superuser, can_create_roles, can_create_databases, can_replicate, bypass_rls,
+           owned_count, membership_count, api_schema_blocked) = fields
+          reserved = {"postgres", "service_role", "supabase_admin", "supabase_auth_admin",
+                      "authenticator", "anon", "authenticated"}
+          print(
+              f"Production DB role audit: database={database}, role={role}, login_role={login_role}, "
+              f"revision={revision or 'missing'}, public_tables={table_count}, "
+              f"tables_without_rls={unprotected_count}, owned_tables={owned_count}, "
+              f"role_memberships={membership_count}, bypass_rls={bypass_rls}"
+          )
+          if database != "postgres" or not role or login_role != role:
+              raise SystemExit("BLOCKED: unexpected database or login/current-role identity mismatch")
+          if role in reserved:
+              raise SystemExit("BLOCKED: production runtime cannot use a reserved PostgreSQL/Supabase role")
+          if is_superuser.lower() == "true" or can_create_roles.lower() == "true" or can_create_databases.lower() == "true" or can_replicate.lower() == "true":
+              raise SystemExit("BLOCKED: production database runtime role has administrative privileges")
+          if bypass_rls.lower() != "true":
+              raise SystemExit("BLOCKED: production runtime role must have reviewed BYPASSRLS for the backend-only/no-policy RLS design")
+          if int(owned_count) > 0 or int(membership_count) > 0:
+              raise SystemExit("BLOCKED: production runtime role must own no public tables and inherit no other roles")
+          if int(table_count) < 1 or int(unprotected_count) > 0:
+              raise SystemExit("BLOCKED: production public-schema RLS is incomplete")
+          if api_schema_blocked.lower() != "true":
+              raise SystemExit("BLOCKED: anon/authenticated still have public schema USAGE")
+          if not revision:
+              raise SystemExit("BLOCKED: production database Alembic revision is missing")
+          print("PASS: production DB URL resolves to a dedicated non-owner/non-admin runtime role with RLS lockdown intact.")
+          PY
+
+      - name: Deploy immutable API release
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          AR_REPOSITORY: ${{ secrets.AR_REPOSITORY }}
+          CLOUD_RUN_SERVICE: ${{ secrets.CLOUD_RUN_SERVICE }}
+          MODEL_BUCKET: ${{ secrets.MODEL_BUCKET }}
+          MODEL_STAGING_BUCKET: ${{ secrets.MODEL_STAGING_BUCKET }}
+          SERVICE_ACCOUNT: ${{ secrets.ATLAS_API_SERVICE_ACCOUNT }}
+          SECRET_DATABASE_VERSION: ${{ secrets.SECRET_DATABASE_VERSION }}
+          SECRET_KEY_VERSION: ${{ secrets.SECRET_KEY_VERSION }}
+          SECRET_TRON_XPUB_VERSION: ${{ secrets.SECRET_TRON_XPUB_VERSION }}
+          SECRET_APP_ENCRYPTION_VERSION: ${{ secrets.SECRET_APP_ENCRYPTION_VERSION }}
+          SECRET_REDIS_URL_VERSION: ${{ secrets.SECRET_REDIS_URL_VERSION }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          ADMIN_SUPABASE_USER_IDS: ${{ secrets.ADMIN_SUPABASE_USER_IDS }}
+          ADMIN_ROLE_ASSIGNMENTS: ${{ secrets.ADMIN_ROLE_ASSIGNMENTS }}
+          BACKUP_RECOVERY_URL: ${{ secrets.BACKUP_RECOVERY_URL }}
+          SECRET_TRONGRID_VERSION: ${{ secrets.SECRET_TRONGRID_VERSION }}
+          SECRET_MODEL_SIGNING_PUBLIC_VERSION: ${{ secrets.SECRET_MODEL_SIGNING_PUBLIC_VERSION }}
+          SECRET_SUPABASE_ANON_KEY_VERSION: ${{ secrets.SECRET_SUPABASE_ANON_KEY_VERSION }}
+          SECRET_FUNDING_WEBHOOK_VERSION: ${{ secrets.SECRET_FUNDING_WEBHOOK_VERSION }}
+          FORWARDED_ALLOW_IPS: ${{ secrets.FORWARDED_ALLOW_IPS }}
+          SECRET_GEMINI_API_KEY_VERSION: ${{ secrets.SECRET_GEMINI_API_KEY_VERSION }}
+          SECRET_GROQ_API_KEY_VERSION: ${{ secrets.SECRET_GROQ_API_KEY_VERSION }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
+          GEMINI_STRATEGY_MODEL: ${{ vars.GEMINI_STRATEGY_MODEL || 'gemini-3.5-flash-lite' }}
+          RESEARCH_FEE_SOURCE: ${{ vars.RESEARCH_FEE_SOURCE }}
+          RESEARCH_FEE_EVIDENCE_ID: ${{ vars.RESEARCH_FEE_EVIDENCE_ID }}
+          RESEARCH_MIN_DEFLATED_SHARPE: ${{ vars.RESEARCH_MIN_DEFLATED_SHARPE }}
+        run: bash deploy/cloud-run-deploy.sh
+
+      - name: Verify deployed immutable identity
+        env:
+          ATLAS_BASE_URL: ${{ inputs.base_url }}
+          EXPECTED_RELEASE_SHA: ${{ github.sha }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          AR_REPOSITORY: ${{ secrets.AR_REPOSITORY }}
+          CLOUD_RUN_SERVICE: ${{ secrets.CLOUD_RUN_SERVICE }}
+        run: |
+          IMAGE_TAG="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AR_REPOSITORY}/${CLOUD_RUN_SERVICE}:${EXPECTED_RELEASE_SHA}"
+          EXPECTED_IMAGE_DIGEST="$(gcloud artifacts docker images describe "${IMAGE_TAG}" --format='value(image_summary.digest)')"
+          test -n "${EXPECTED_IMAGE_DIGEST}"
+          echo "Verifying SHA ${EXPECTED_RELEASE_SHA} digest ${EXPECTED_IMAGE_DIGEST}"
+          bash deploy/verify-deployed-release.sh
+\\t' read -r run_status run_conclusion job_conclusion <<< "$inspection"
+
+            if [ "$run_status" != "completed" ] \
+              || [ "$run_conclusion" != "success" ] \
+              || [ "$job_conclusion" != "success" ]; then
+              echo "BLOCKED: $label requires job $job_name to succeed on exact commit $GITHUB_SHA"
+              echo "Observed run status=$run_status, workflow conclusion=$run_conclusion, job conclusion=$job_conclusion"
+              exit 1
+            fi
+            echo "PASS: $label job $job_name succeeded on exact main commit $GITHUB_SHA"
+          }
+          require_success_job "staging-identity-preflight.yml" "verify-staging-identity" "Supabase staging identity preflight"
           require_success "android-release.yml" "Protected signed Android release"
 
           # A green Android workflow is insufficient when its signing job was skipped.
