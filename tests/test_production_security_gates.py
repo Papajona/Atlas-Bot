@@ -341,7 +341,7 @@ def test_production_deploy_requires_successful_staging_identity_job_for_exact_ma
     assert "job_conclusion" in workflow
     assert '[.jobs[] | select(.name == \\"$job_name\\")][0].conclusion // \\"missing\\"' in workflow
     assert 'select(.headSha == \\"$GITHUB_SHA\\" and .headBranch == \\"main\\")' in workflow
-    assert 'if [ "$job_conclusion" != "success" ]; then' in workflow
+    assert '|| [ "$job_conclusion" != "success" ]' in workflow
 
 
 def test_production_startup_smoke_uses_non_admin_runtime_role_fixture():
