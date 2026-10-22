@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import Field
 from sqlalchemy import select, text
 
 from .config import settings
@@ -22,6 +23,12 @@ from .customer_paper_ledger import preflight_isolated_customer_paper_ledger
 # Import the existing JWT/MFA verifier and market-data adapter. The main ASGI app is
 # not mounted or served; its startup/lifespan is never executed in this process.
 from .main import MarketRequest, _trusted_client_ip, allow_rate_limit, api_rate_limit, customer_claims, market_data
+
+
+class PaperMarketRequest(MarketRequest):
+    """Restricted short-window market request used only by the isolated paper runtime."""
+
+    days: int = Field(default=1, ge=1, le=30)
 
 
 _EXPECTED_PRIMARY_ROLE = "atlas_paper_reader"
@@ -282,7 +289,7 @@ app.include_router(
     build_customer_paper_router(
         get_customer=get_existing_customer,
         market_data=market_data,
-        market_request_type=MarketRequest,
+        market_request_type=PaperMarketRequest,
         state_guard=_paper_state_guard,
     )
 )
