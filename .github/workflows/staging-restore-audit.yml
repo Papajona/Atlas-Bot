@@ -31,8 +31,8 @@ jobs:
     timeout-minutes: 15
     environment: staging
     env:
-      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-      GCP_REGION: ${{ secrets.GCP_REGION }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION || secrets.GCP_REGION }}
       STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
       PRODUCTION_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}
       STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
@@ -75,19 +75,41 @@ jobs:
           esac
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER || secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT || secrets.GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
         with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
-      - name: Validate provider evidence URI and retrieve staging database secret
+          project_id: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+      - name: Download provider restore-operation record and staging database secret
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$RESTORE_EVIDENCE_URI" == gs://* ]]; then
-            gcloud storage ls "$RESTORE_EVIDENCE_URI" >/dev/null
-          fi
           umask 077
+          if [[ "$RESTORE_EVIDENCE_URI" == gs://* ]]; then
+            gcloud storage cp "$RESTORE_EVIDENCE_URI" "$RUNNER_TEMP/restore-operation-evidence.json"
+          elif [[ "$RESTORE_EVIDENCE_URI" == https://* ]]; then
+            python - "$RESTORE_EVIDENCE_URI" <<'PY'
+          import sys
+          from urllib.parse import urlsplit
+          url = urlsplit(sys.argv[1])
+          host = (url.hostname or "").lower()
+          allowed = (
+              host == "api.supabase.com"
+              or host.endswith(".supabase.com")
+              or host == "storage.googleapis.com"
+              or host.endswith(".storage.googleapis.com")
+          )
+          if url.scheme != "https" or not allowed:
+              raise SystemExit("BLOCKED: HTTPS restore evidence host is not an approved Supabase/GCS provider host")
+          PY
+            curl --fail --silent --show-error --location --max-redirs 3 \
+              --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 30 \
+              "$RESTORE_EVIDENCE_URI" -o "$RUNNER_TEMP/restore-operation-evidence.json"
+          else
+            echo "BLOCKED: restore evidence must be a gs:// object or approved provider HTTPS URL" >&2
+            exit 1
+          fi
+          test -s "$RUNNER_TEMP/restore-operation-evidence.json"
           gcloud secrets versions access latest \
             --secret="$STAGING_DATABASE_SECRET" \
             --project="$GCP_PROJECT_ID" > "$RUNNER_TEMP/atlas-staging-db-url"
@@ -100,6 +122,19 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
+      - name: Verify provider restore-operation identity and status
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=. python scripts/verify_restore_operation_evidence.py \
+            --input "$RUNNER_TEMP/restore-operation-evidence.json" \
+            --operation-id "$RESTORE_OPERATION_ID" \
+            --backup-reference "$BACKUP_REFERENCE" \
+            --target-project-ref "$STAGING_SUPABASE_PROJECT_REF" \
+            --output "$RUNNER_TEMP/restore-evidence-verification.json"
+          evidence_sha="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["evidence_sha256"])' "$RUNNER_TEMP/restore-evidence-verification.json")"
+          echo "RESTORE_EVIDENCE_SHA256=$evidence_sha" >> "$GITHUB_ENV"
+          echo "VERIFIED_RESTORE_TARGET_PROJECT_REF=$STAGING_SUPABASE_PROJECT_REF" >> "$GITHUB_ENV"
       - name: Run read-only restored-database invariants
         env:
           STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
@@ -112,6 +147,8 @@ jobs:
             --restore-operation-id "$RESTORE_OPERATION_ID" \
             --backup-reference "$BACKUP_REFERENCE" \
             --restore-evidence-uri "$RESTORE_EVIDENCE_URI" \
+            --restore-evidence-sha256 "$RESTORE_EVIDENCE_SHA256" \
+            --verified-target-project-ref "$VERIFIED_RESTORE_TARGET_PROJECT_REF" \
             --expected-runtime-role "$EXPECTED_RUNTIME_DB_ROLE" \
             --expected-revision 0053_supabase_public_default_acl_lockdown \
             --output "$RUNNER_TEMP/staging-restore-audit.json"
@@ -120,17 +157,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -s "$RUNNER_TEMP/staging-restore-audit.json" ]]; then
-            gcloud storage cp "$RUNNER_TEMP/staging-restore-audit.json" \
-              "gs://$AUDIT_ARCHIVE_BUCKET/staging-restore-audits/$GITHUB_RUN_ID-$GITHUB_SHA/report.json"
-          else
-            echo "No audit report was produced. Restore is not certified."
+          out_dir="gs://$AUDIT_ARCHIVE_BUCKET/staging-restore-audits/$GITHUB_RUN_ID-$GITHUB_SHA"
+          archived=0
+          for file in \
+            "$RUNNER_TEMP/restore-evidence-verification.json" \
+            "$RUNNER_TEMP/staging-restore-audit.json"; do
+            if [[ -s "$file" ]]; then
+              gcloud storage cp "$file" "$out_dir/$(basename "$file")"
+              archived=1
+            fi
+          done
+          if [[ "$archived" -eq 0 ]]; then
+            echo "No audit evidence report was produced. Restore is not certified."
           fi
       - name: Preserve audit report as workflow artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: atlas-staging-restore-audit-${{ github.run_id }}
-          path: ${{ runner.temp }}/staging-restore-audit.json
+          path: |
+            ${{ runner.temp }}/restore-evidence-verification.json
+            ${{ runner.temp }}/staging-restore-audit.json
           if-no-files-found: warn
           retention-days: 90
