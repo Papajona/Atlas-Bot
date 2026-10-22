@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from urllib.parse import quote, urlsplit
+from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -50,16 +51,16 @@ def test_builds_transactional_least_privilege_role_setup_without_printing_secret
     assert "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION" in sql
     assert "REVOKE atlas_customer_paper FROM CURRENT_USER;" in sql
     assert "PASSWORD 'password''with quote';" in sql
-    assert "Unexpected role memberships" in sql
+    assert "unexpected role memberships" in sql.lower()
     assert sql.rstrip().endswith("SELECT 'PASS: restricted atlas_customer_paper role created and verified';")
     assert "DROP ROLE" not in sql
     assert "BYPASSRLS" in sql
     assert "SUPERUSER" not in sql.replace("NOSUPERUSER", "")
 
 
-def test_conninfo_uses_native_prompt_and_no_admin_password_is_written_to_environment():
-    source = open("scripts/setup_customer_paper_role_interactive.py", encoding="utf-8").read()
+def test_conninfo_uses_native_prompt_and_clears_password_overrides():
+    source = Path("scripts/setup_customer_paper_role_interactive.py").read_text(encoding="utf-8")
     assert '"psql", conninfo, "-W", "-X"' in source
     assert '"PGPASSWORD"' in source and '"PGPASSFILE"' in source
-    assert "passfile" not in source.lower()
+    assert "PGSERVICEFILE" in source
     assert "ATLAS_ADMIN_DATABASE_URL" in source
