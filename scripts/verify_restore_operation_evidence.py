@@ -23,14 +23,31 @@ _SUCCESS = {"COMPLETE", "COMPLETED", "SUCCEEDED", "SUCCESS", "DONE", "RESTORED"}
 def _record(document: Any) -> Mapping[str, Any]:
     if not isinstance(document, Mapping):
         raise ValueError("provider restore evidence must be a JSON object")
+
+    identity_fields = (
+        ("restore_operation_id", "restoreOperationId", "operation_id", "operationId", "id"),
+        ("backup_reference", "backupReference", "source_backup_id", "sourceBackupId", "backup_id", "backupId"),
+        ("target_supabase_project_ref", "target_project_ref", "targetProjectRef", "restored_project_ref"),
+        ("status", "state", "phase"),
+    )
+
+    def complete(record: Mapping[str, Any]) -> bool:
+        return all(any(
+            isinstance(record.get(name), (str, int))
+            and not isinstance(record.get(name), bool)
+            and str(record.get(name)).strip()
+            for name in aliases
+        ) for aliases in identity_fields)
+
+    # Prefer a complete top-level provider record over unrelated nested metadata.
+    if complete(document):
+        return document
     for key in ("restore_operation", "restoreOperation", "operation", "data", "result"):
         value = document.get(key)
         if isinstance(value, Mapping):
-            # API responses can wrap the operation one or more times.
-            try:
-                return _record(value)
-            except ValueError:
-                pass
+            nested = _record(value)
+            if complete(nested):
+                return nested
     return document
 
 
