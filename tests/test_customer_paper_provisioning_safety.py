@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import pytest
 
 from scripts.provision_customer_paper_schema import (
+    IDENTITY_SQL,
     VERIFY_SQL,
     _connection_env,
     _pgpass_escape,
@@ -100,13 +101,18 @@ def test_schema_apply_is_single_transaction_and_resets_old_acl_grants():
     assert "CREATE POLICY customer_paper_tenant" in sql
 
 
-def test_role_setup_revokes_postgres_16_creator_membership_before_readback():
+def test_role_setup_accepts_only_supabase_managed_control_plane_membership():
     sql = _role_setup_sql("safe'password")
 
     assert sql.index("CREATE ROLE atlas_customer_paper") < sql.index(
-        "REVOKE atlas_customer_paper FROM CURRENT_USER;"
-    ) < sql.index("ALTER ROLE atlas_customer_paper PASSWORD")
+        "ALTER ROLE atlas_customer_paper PASSWORD"
+    ) < sql.index("GRANT CONNECT ON DATABASE postgres TO atlas_customer_paper")
+    assert "REVOKE atlas_customer_paper FROM CURRENT_USER;" not in sql
     assert "PASSWORD 'safe''password';" in sql
+    assert "member_role.rolname='postgres'" in IDENTITY_SQL
+    assert "grantor_role.rolname='supabase_admin'" in IDENTITY_SQL
+    assert "to_jsonb(m) ? 'inherit_option'" in IDENTITY_SQL
+    assert "to_jsonb(m) ? 'set_option'" in IDENTITY_SQL
     assert sql.rstrip().endswith("COMMIT;")
 
 
