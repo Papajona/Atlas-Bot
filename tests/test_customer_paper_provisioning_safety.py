@@ -156,7 +156,12 @@ def test_runtime_customer_paper_uri_rejects_invalid_project_ref_or_empty_passwor
 def test_gcp_bootstrap_reuses_provisioner_generated_paper_url_without_retyping_password():
     script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
     assert 'PAPER_URL_FILE="${HOME}/.atlas-customer-paper/database-url"' in script
-    assert 'put_secret_file "$PAPER_SECRET" "$PAPER_URL_FILE"' in script
+    validate_call = script.index('PAPER_URL="$(validate_paper_url_file "$PAPER_URL_FILE")"')
+    primary_secret_write = script.index('put_secret "$PRIMARY_SECRET" "$PRIMARY_URL"')
+    paper_secret_write = script.index('put_secret "$PAPER_SECRET" "$PAPER_URL"')
+    assert validate_call < primary_secret_write < paper_secret_write
+    assert 'put_secret "$PAPER_SECRET" "$PAPER_URL"' in script
+    assert "put_secret_file" not in script
     assert 'atlas_customer_paper.${SUPABASE_PROJECT_REF}' in script
     assert 'db.${SUPABASE_PROJECT_REF}.supabase.co' not in script
 
