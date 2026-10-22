@@ -159,9 +159,9 @@ def test_primary_database_preflight_checks_only_relations_reachable_through_sche
     # paper role has no USAGE on the extensions schema. These object ACLs alone are
     # not reachable by that role and must not make shared-schema isolation fail.
     assert source.count("AND has_schema_privilege(r.oid, n.oid, 'USAGE')") == 3
-    assert "AND has_table_privilege(r.oid, c.oid, 'SELECT')" in source
-    assert "AND has_sequence_privilege(r.oid, c.oid, 'USAGE')" in source
-    assert "AND has_function_privilege(r.oid, p.oid, 'EXECUTE')" in source
+    assert "has_table_privilege(r.oid, c.oid, 'SELECT') AS can_select" in source
+    assert "has_sequence_privilege(r.oid, c.oid, 'USAGE') AS can_use" in source
+    assert "has_function_privilege(r.oid, p.oid, 'EXECUTE')" in source
 
 
 def test_primary_privilege_preflight_tolerates_paper_role_absent_from_primary_cluster():
