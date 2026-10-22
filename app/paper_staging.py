@@ -31,6 +31,7 @@ async def _primary_reader_preflight() -> dict[str, Any]:
         async with engine.connect() as conn:
             row = (await conn.execute(text("""
                 SELECT current_database(), current_user, session_user,
+                       current_setting('transaction_read_only') AS transaction_read_only,
                        r.rolcanlogin, r.rolsuper, r.rolcreaterole, r.rolcreatedb,
                        r.rolreplication, r.rolbypassrls, r.rolinherit,
                        (SELECT count(*) FROM pg_auth_members m WHERE m.member = r.oid) AS memberships,
