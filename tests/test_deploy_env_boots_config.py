@@ -69,6 +69,9 @@ def test_both_production_deploy_scripts_call_shared_research_validator() -> None
     assert "validate_research_deploy_env.py" in api
     assert ' "$RESEARCH_FEE_SOURCE" "$RESEARCH_FEE_EVIDENCE_ID" "$RESEARCH_MIN_DEFLATED_SHARPE" "@"' in api
     assert "validate_research_deploy_env.py" in worker
+    # Validation alone is insufficient: these values must reach the deployed API and worker runtime.
+    assert "@RESEARCH_FEE_SOURCE=${RESEARCH_FEE_SOURCE}@RESEARCH_FEE_EVIDENCE_ID=${RESEARCH_FEE_EVIDENCE_ID}@RESEARCH_MIN_DEFLATED_SHARPE=${RESEARCH_MIN_DEFLATED_SHARPE}" in api
+    assert "RESEARCH_FEE_SOURCE=${RESEARCH_FEE_SOURCE},RESEARCH_FEE_EVIDENCE_ID=${RESEARCH_FEE_EVIDENCE_ID},RESEARCH_MIN_DEFLATED_SHARPE=${RESEARCH_MIN_DEFLATED_SHARPE}" in worker
     assert ' "$RESEARCH_FEE_SOURCE" "$RESEARCH_FEE_EVIDENCE_ID" "$RESEARCH_MIN_DEFLATED_SHARPE" ","' in worker
     dollar = chr(36)
     for script in (api, worker):
