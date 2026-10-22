@@ -1,4 +1,7 @@
 from pathlib import Path
+import os
+import re
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -450,3 +453,72 @@ def test_paper_reader_provisioning_is_no_write_and_no_public_schema_create():
     assert "GRANT INSERT" not in sql
     assert "GRANT UPDATE" not in sql
     assert "GRANT DELETE" not in sql
+
+
+
+def test_staging_identity_preflight_remains_manual_only_on_main():
+    workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
+    trigger_header = workflow.split("\npermissions:", 1)[0]
+    assert "workflow_dispatch:" in trigger_header
+    assert "\n  push:" not in trigger_header
+    assert "verify-staging-identity:" in workflow
+    assert "if: github.ref == 'refs/heads/main'" in workflow
+
+
+def _run_production_staging_job_gate(tmp_path: Path, job_conclusion: str):
+    workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+    match = re.search(
+        r"(?ms)^          require_staging_identity_success\\(\\) \\{\\n.*?^          require_staging_identity_success$",
+        workflow,
+    )
+    assert match is not None, "production workflow must expose the exact staging job gate"
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    gh = fake_bin / "gh"
+    gh.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ \"$2\" == \"list\" ]]; then echo 123; exit 0; fi\n"
+        "if [[ \"$2\" == \"view\" ]]; then\n"
+        "  if [[ \"$*\" == *\"--json status\"* ]]; then echo completed; exit 0; fi\n"
+        "  if [[ \"$*\" == *\"--json conclusion\"* ]]; then echo success; exit 0; fi\n"
+        "  if [[ \"$*\" == *\"--json jobs\"* ]]; then echo \"$STAGING_JOB_CONCLUSION\"; exit 0; fi\n"
+        "fi\n"
+        "echo unexpected-gh-invocation >&2\n"
+        "exit 70\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o700)
+    shell_block = "\n".join(
+        line[10:] if line.startswith("          ") else line
+        for line in match.group(0).splitlines()
+    )
+    result = subprocess.run(
+        ["bash", "-c", "set -euo pipefail\n" + shell_block],
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+            "GITHUB_REPOSITORY": "Papajona/Atlas-Bot",
+            "GITHUB_SHA": "f" * 40,
+            "STAGING_JOB_CONCLUSION": job_conclusion,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result
+
+
+def test_production_staging_gate_rejects_successful_workflow_with_skipped_job(tmp_path: Path):
+    result = _run_production_staging_job_gate(tmp_path, "skipped")
+
+    assert result.returncode != 0
+    assert "requires verify-staging-identity to succeed" in result.stdout
+
+
+def test_production_staging_gate_accepts_successful_exact_commit_job(tmp_path: Path):
+    result = _run_production_staging_job_gate(tmp_path, "success")
+
+    assert result.returncode == 0, result.stderr
+    assert "verify-staging-identity succeeded" in result.stdout
