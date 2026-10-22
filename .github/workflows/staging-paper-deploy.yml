@@ -115,7 +115,7 @@ jobs:
             --timeout=300 \
             --min=0 \
             --max=2 \
-            --set-env-vars="ENVIRONMENT=staging,PROCESS_ROLE=paper,ATLAS_ASGI_APP=app.paper_staging:app,SUPABASE_URL=https://${SUPABASE_PROJECT_REF}.supabase.co,PAPER_TRADING=true,LIVE_TRADING_ENABLED=false,CUSTOMER_LIVE_TRADING_ENABLED=false,PAYOUT_LIVE_ENABLED=false,BROKER_SANDBOX=true,USDT_TRON_ENABLED=false,USDT_TRON_SWEEP_ENABLED=false,DERIV_LIVE_ENABLED=false,CUSTOMER_PAPER_LEDGER_ENABLED=true,CUSTOMER_PAPER_SHARED_DATABASE_ENABLED=true,CUSTOMER_TOTP_REQUIRED=true" \
+            --set-env-vars="ENVIRONMENT=staging,PROCESS_ROLE=paper,ATLAS_ASGI_APP=app.paper_staging:app,SUPABASE_URL=https://${SUPABASE_PROJECT_REF}.supabase.co,PAPER_TRADING=true,LIVE_TRADING_ENABLED=false,CUSTOMER_LIVE_TRADING_ENABLED=false,PAYOUT_LIVE_ENABLED=false,BROKER_SANDBOX=true,USDT_TRON_ENABLED=false,USDT_TRON_SWEEP_ENABLED=false,DERIV_LIVE_ENABLED=false,CUSTOMER_PAPER_LEDGER_ENABLED=true,CUSTOMER_PAPER_SHARED_DATABASE_ENABLED=true,CUSTOMER_TOTP_REQUIRED=true,ADAPTIVE_AI_ENABLED=false" \
             --set-secrets="DATABASE_URL=${DATABASE_SECRET}:latest,CUSTOMER_PAPER_DATABASE_URL=${PAPER_DATABASE_SECRET}:latest,SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY_SECRET}:latest"
           SERVICE_URL="$(gcloud run services describe "$STAGING_SERVICE" --project="$GCP_PROJECT_ID" --region="$GCP_REGION" --format='value(status.url)')"
           [[ "$SERVICE_URL" == https://* ]] || { echo "BLOCKED: deployed Cloud Run service did not return an HTTPS URL"; exit 1; }
