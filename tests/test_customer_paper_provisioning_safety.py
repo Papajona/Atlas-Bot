@@ -256,6 +256,7 @@ def _run_paper_secret_upload_function(
         b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?ssl=require",
         b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:secret@aws-0-eu-west-1.pooler.supabase.com:5432/other?ssl=require",
         b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:secret@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=disable",
+        b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:bad%ZZescape@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require",
     ],
 )
 def test_gcp_paper_url_validation_fails_before_any_secret_manager_call(
