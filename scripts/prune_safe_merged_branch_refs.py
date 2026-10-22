@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Delete only remote branch refs that are provably integrated into main.
 
-Two proofs are accepted:
+Three independent proofs are accepted:
 1. The exact branch tip is an ancestor of origin/main.
 2. A merged PR records that exact branch tip as its head, and that PR's merge
    commit is an ancestor of origin/main (for squash/rebase merges).
+3. With no branch-only merge commits, every branch-only commit has a matching
+   patch in main according to git cherry (no unique '+' patches).
 
 Any open-PR branch, unknown branch history, API failure, or head moved after a
 merge is preserved. This script never deletes main.
@@ -66,6 +68,35 @@ def _is_ancestor(ancestor_sha: str, descendant_sha: str) -> bool:
         "git merge-base failed while checking branch integration: "
         + (result.stderr.strip() or f"exit code {result.returncode}")
     )
+
+def _all_branch_commits_are_patch_equivalent(branch_sha: str, main_sha: str) -> bool:
+    """Accept patch-equivalence only when no branch-only merge commits exist.
+
+    `git cherry` marks patch-equivalent branch commits with '-' and unique
+    patches with '+'. Merge-resolution commits are excluded from that comparison,
+    so any merge commit reachable only from this branch causes conservative
+    preservation.
+    """
+    merges = _run(
+        ["git", "rev-list", "--merges", f"{main_sha}..{branch_sha}"],
+        check=False,
+    )
+    if merges.returncode:
+        raise RuntimeError(
+            "git rev-list failed while checking branch merge commits: "
+            + (merges.stderr.strip() or f"exit code {merges.returncode}")
+        )
+    if merges.stdout.strip():
+        return False
+
+    cherry = _run(["git", "cherry", main_sha, branch_sha], check=False)
+    if cherry.returncode:
+        raise RuntimeError(
+            "git cherry failed while comparing branch patches: "
+            + (cherry.stderr.strip() or f"exit code {cherry.returncode}")
+        )
+    marks = [line[0] for line in cherry.stdout.splitlines() if line and line[0] in "+-"]
+    return bool(marks) and all(mark == "-" for mark in marks)
 
 
 def main() -> int:
@@ -142,6 +173,9 @@ def main() -> int:
                     merged_prs,
                     _is_ancestor,
                 )
+                if not safe and _all_branch_commits_are_patch_equivalent(branch_sha, main_sha):
+                    safe = True
+                    reason = "all non-merge branch commits are patch-equivalent to main"
 
             if not safe:
                 print(f"PRESERVE {branch_name}: {reason}")
