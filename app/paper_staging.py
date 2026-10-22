@@ -22,7 +22,7 @@ from .customer_paper_api import _paper_feature_flags, build_customer_paper_route
 from .customer_paper_ledger import preflight_isolated_customer_paper_ledger
 # Import the existing JWT/MFA verifier and market-data adapter. The main ASGI app is
 # not mounted or served; its startup/lifespan is never executed in this process.
-from .main import MarketRequest, _trusted_client_ip, allow_rate_limit, api_rate_limit, customer_claims, market_data
+from .main import MarketRequest, _trusted_client_ip, api_rate_limit, customer_claims, market_data
 
 
 class PaperMarketRequest(MarketRequest):
