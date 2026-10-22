@@ -50,9 +50,13 @@ def test_paper_staging_asgi_exposes_only_health_and_paper_routes():
     )
     assert all(allowed(route.path) for route in routes)
     assert all(route.path != "/openapi.json" for route in routes)
+    assert all(getattr(route, "methods", None) for route in routes), "non-HTTP or mounted route escaped enumeration"
     assert next(r for r in routes if r.path == "/healthz").methods == {"GET"}
     assert next(r for r in routes if r.path == "/readyz").methods == {"GET"}
-    assert set(paper_staging.app.openapi()["paths"]) == {r.path for r in routes}
+    schema = paper_staging.app.openapi()["paths"]
+    schema_pairs = {(path, method.upper()) for path, methods in schema.items() for method in methods}
+    dispatch_pairs = {(route.path, method) for route in routes for method in route.methods}
+    assert dispatch_pairs == schema_pairs, "a dispatchable method is missing from the public route schema"
     assert paper_staging.app.docs_url is None
     assert paper_staging.app.redoc_url is None
     assert paper_staging.app.openapi_url is None
