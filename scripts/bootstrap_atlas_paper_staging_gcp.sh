@@ -90,6 +90,9 @@ PRINCIPAL_SET="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/loca
 gcloud iam service-accounts add-iam-policy-binding "$DEPLOY_SA" \
   --project="$PROJECT_ID" --member="$PRINCIPAL_SET" \
   --role="roles/iam.workloadIdentityUser"
+gcloud iam service-accounts add-iam-policy-binding "$PREFLIGHT_SA" \
+  --project="$PROJECT_ID" --member="$PRINCIPAL_SET" \
+  --role="roles/iam.workloadIdentityUser"
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${PREFLIGHT_SA}" --role="roles/run.viewer" --quiet
 
