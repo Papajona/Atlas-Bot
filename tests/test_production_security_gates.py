@@ -521,3 +521,24 @@ def test_production_staging_gate_accepts_successful_exact_commit_job(tmp_path: P
 
     assert result.returncode == 0, result.stderr
     assert "verify-staging-identity succeeded" in result.stdout
+
+
+def test_production_deploy_workflow_is_valid_yaml_with_unique_named_steps():
+    workflow_path = ROOT / ".github" / "workflows" / "production-deploy.yml"
+    ruby = r"""
+require "yaml"
+workflow = YAML.load_file(ARGV.fetch(0))
+steps = workflow.fetch("jobs").values.flat_map { |job| job.fetch("steps", []) }
+names = steps.map { |step| step["name"] }.compact
+duplicates = names.group_by(&:itself).select { |_, occurrences| occurrences.length > 1 }.keys
+abort("duplicate production deployment step names: #{duplicates.join(', ')}") unless duplicates.empty?
+abort("exact staging identity job gate missing") unless names.include?("Require all release CI gates on this exact commit")
+"""
+    result = subprocess.run(
+        ["ruby", "-e", ruby, str(workflow_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
