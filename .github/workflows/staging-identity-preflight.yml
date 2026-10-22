@@ -161,6 +161,7 @@ jobs:
                   "CUSTOMER_PAPER_LEDGER_ENABLED": "true",
                   "CUSTOMER_PAPER_SHARED_DATABASE_ENABLED": "true",
                   "CUSTOMER_TOTP_REQUIRED": "true",
+                  "ADAPTIVE_AI_ENABLED": "false",
                   "PROCESS_ROLE": "paper",
               }
               for key, expected in expected_values.items():
