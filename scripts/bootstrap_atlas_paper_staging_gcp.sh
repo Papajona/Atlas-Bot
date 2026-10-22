@@ -192,9 +192,10 @@ put_secret_file() {
 
   # Validate and capture the complete value before any Secret Manager operation.
   # Read bytes first so CRLF is not silently normalized into an accepted LF.
-  if ! validated_uri="$(python - "$secret_path" <<'PY'
+  if ! validated_uri="$(python - "$secret_path" "$SUPABASE_PROJECT_REF" "$SUPABASE_DB_HOST" <<'PY'
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlsplit
 
 try:
     data = Path(sys.argv[1]).read_bytes().decode("utf-8")
@@ -202,11 +203,29 @@ except (OSError, UnicodeDecodeError):
     raise SystemExit("BLOCKED: paper URL file must be readable UTF-8")
 
 # Permit one terminal LF as the file delimiter, but not CRLF or extra lines.
-if data.endswith("\n"):
+if data.endswith("\\n"):
     data = data[:-1]
-
-if not data or "\n" in data or "\r" in data or "\x00" in data:
+if not data or "\\n" in data or "\\r" in data or "\\x00" in data:
     raise SystemExit("BLOCKED: paper URL file must contain exactly one URI line")
+
+expected_ref, expected_host = sys.argv[2:]
+try:
+    parsed = urlsplit(data)
+    port = parsed.port
+except ValueError:
+    raise SystemExit("BLOCKED: paper URL is malformed or does not match the expected TLS-enabled endpoint")
+
+if (
+    parsed.scheme != "postgresql+asyncpg"
+    or parsed.hostname != expected_host
+    or port != 5432
+    or parsed.path != "/postgres"
+    or parsed.fragment
+    or unquote(parsed.username or "") != f"atlas_customer_paper.{expected_ref}"
+    or not parsed.password
+    or parse_qs(parsed.query, keep_blank_values=True) != {"ssl": ["require"]}
+):
+    raise SystemExit("BLOCKED: paper URL does not match the expected TLS-enabled customer-paper session-pooler endpoint")
 
 sys.stdout.write(data)
 PY
