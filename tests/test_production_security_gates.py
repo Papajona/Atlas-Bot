@@ -467,11 +467,10 @@ def test_staging_identity_preflight_remains_manual_only_on_main():
 
 def _run_production_staging_job_gate(tmp_path: Path, job_conclusion: str):
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
-    match = re.search(
-        r"(?ms)^          require_staging_identity_success\(\) \{\n.*?^          require_staging_identity_success$",
-        workflow,
-    )
-    assert match is not None, "production workflow must expose the exact staging job gate"
+    start = workflow.index("          require_staging_identity_success() {")
+    end = workflow.index("\\n          require_staging_identity_success\\n", start)
+    shell_source = workflow[start:end + len("\\n          require_staging_identity_success")]
+    assert start >= 0 and end >= 0, "production workflow must expose the exact staging job gate"
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -492,7 +491,7 @@ def _run_production_staging_job_gate(tmp_path: Path, job_conclusion: str):
     gh.chmod(0o700)
     shell_block = "\n".join(
         line[10:] if line.startswith("          ") else line
-        for line in match.group(0).splitlines()
+        for line in shell_source.splitlines()
     )
     result = subprocess.run(
         ["bash", "-c", "set -euo pipefail\n" + shell_block],
