@@ -74,8 +74,19 @@ def test_api_and_worker_deployments_share_gate_and_keep_sweeps_off():
     example = (ROOT / "deploy" / "cloud-run.env.example").read_text(encoding="utf-8")
     assert "USDT_TRON_ENABLED=false" in example
     assert "USDT_TRON_ENABLED=true" not in example
+    assert "PAPER_TRADING=true" in example
+    assert "LIVE_TRADING_ENABLED=false" in example
+    assert "CUSTOMER_LIVE_TRADING_ENABLED=false" in example
+    assert "PAYOUT_LIVE_ENABLED=false" in example
+    assert "BROKER_SANDBOX=true" in example
     assert "BACKGROUND_RECONCILIATION_ENABLED=false" in example
     assert "USDT_TRONGRID_API_KEY=" in example
+    root_env = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "PAPER_TRADING=true" in root_env
+    assert "LIVE_TRADING_ENABLED=false" in root_env
+    assert "CUSTOMER_LIVE_TRADING_ENABLED=false" in root_env
+    assert "PAYOUT_LIVE_ENABLED=false" in root_env
+    assert "BROKER_SANDBOX=true" in root_env
     assert not any(line.startswith("TRONGRID_API_KEY=") for line in example.splitlines())
     assert not any(line.startswith("MODEL_SIGNING_PRIVATE_KEY=") for line in example.splitlines())
 
