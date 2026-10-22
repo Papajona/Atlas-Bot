@@ -191,7 +191,11 @@ def _extract_shell_function(script: str, name: str) -> str:
 
 
 def _run_paper_bootstrap_subset(
-    tmp_path: Path, file_bytes: bytes, *, fail_paper_add: bool = False
+    tmp_path: Path,
+    file_bytes: bytes,
+    *,
+    fail_paper_add: bool = False,
+    primary_password: str = "primary-not-real",
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
     validator = _extract_shell_function(script, "validate_paper_url_file")
@@ -231,6 +235,7 @@ def _run_paper_bootstrap_subset(
             "PAPER_URL_FILE": str(url_file),
             "PRIMARY_SECRET": "atlas-staging-primary-db-url",
             "PAPER_SECRET": "atlas-staging-customer-paper-db-url",
+            "PRIMARY_PASSWORD": primary_password,
             "PRIMARY_URL": "postgresql+asyncpg://atlas_paper_reader.abcdefghijklmnopqrst:primary-not-real@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require",
         }
     )
@@ -323,65 +328,43 @@ def test_gcp_paper_secret_upload_failure_returns_nonzero(tmp_path: Path):
 
     assert completed.returncode != 0
 
-def _run_bootstrap_file_url_validator(
-    tmp_path: Path, *, paper_password: str, primary_password: str
-) -> subprocess.CompletedProcess[str]:
-    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
-    match = re.search(
-        r"(?ms)^  if ! PRIMARY_PASSWORD=\"\$PRIMARY_PASSWORD\" python - "
-        r"\"\$PAPER_URL_FILE\" \"\$SUPABASE_PROJECT_REF\" \"\$SUPABASE_DB_HOST\" <<'PY'\n"
-        r"(.*?)^PY\n  then$",
-        script,
-    )
-    assert match is not None, "file-backed bootstrap validator must be behavior-tested"
-
-    uri = (
-        "postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:"
-        f"{quote(paper_password, safe='')}@aws-0-eu-west-1.pooler.supabase.com:5432/"
-        "postgres?ssl=require"
-    )
-    url_file = tmp_path / "database-url"
-    url_file.write_text(uri + "\n", encoding="utf-8")
-    url_file.chmod(0o600)
-    env = os.environ.copy()
-    env["PRIMARY_PASSWORD"] = primary_password
-    return subprocess.run(
-        [
-            sys.executable, "-", str(url_file), "abcdefghijklmnopqrst",
-            "aws-0-eu-west-1.pooler.supabase.com",
-        ],
-        input=match.group(1),
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
 
 
-def test_file_backed_bootstrap_rejects_primary_password_reuse_without_disclosing_it(
+
+def test_file_backed_bootstrap_rejects_matching_primary_password_before_secret_writes(
     tmp_path: Path,
 ):
     secret = "same-password-not-for-logs"
-    result = _run_bootstrap_file_url_validator(
-        tmp_path, paper_password=secret, primary_password=secret
+    uri = (
+        "postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:"
+        f"{quote(secret, safe='')}@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require"
+    )
+    result, gcloud_log, _ = _run_paper_bootstrap_subset(
+        tmp_path, uri.encode("utf-8"), primary_password=secret
     )
 
     assert result.returncode != 0
+    assert not gcloud_log.exists() or gcloud_log.read_bytes() == b""
     assert "different passwords" in result.stderr
-    assert secret not in result.stdout
-    assert secret not in result.stderr
+    assert secret not in result.stdout + result.stderr
 
 
-def test_file_backed_bootstrap_accepts_distinct_paper_password_without_disclosing_it(
+def test_file_backed_bootstrap_accepts_distinct_passwords_without_disclosing_them(
     tmp_path: Path,
 ):
-    result = _run_bootstrap_file_url_validator(
-        tmp_path,
-        paper_password="distinct-paper-secret",
-        primary_password="different-primary-secret",
+    paper_password = "distinct-paper-secret"
+    primary_password = "different-primary-secret"
+    uri = (
+        "postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:"
+        f"{quote(paper_password, safe='')}@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require"
+    )
+    result, gcloud_log, payload_dir = _run_paper_bootstrap_subset(
+        tmp_path, (uri + "\n").encode("utf-8"), primary_password=primary_password
     )
 
     assert result.returncode == 0, result.stderr
-    assert "distinct credential" in result.stdout
-    assert "distinct-paper-secret" not in result.stdout + result.stderr
-    assert "different-primary-secret" not in result.stdout + result.stderr
+    assert (payload_dir / "atlas-staging-primary-db-url").exists()
+    assert (payload_dir / "atlas-staging-customer-paper-db-url").read_bytes() == uri.encode("utf-8")
+    assert "distinct credential" not in result.stdout + result.stderr
+    assert paper_password not in result.stdout + result.stderr
+    assert primary_password not in result.stdout + result.stderr
