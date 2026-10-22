@@ -10,7 +10,10 @@ from app import paper_staging
 
 
 def test_paper_staging_asgi_exposes_only_health_and_paper_routes():
-    paths = {route.path for route in paper_staging.app.routes}
+    # Recent FastAPI releases retain included routers as internal router objects
+    # instead of flattening every route into app.routes. OpenAPI's generated path
+    # map is the stable public view of the mounted endpoints.
+    paths = set(paper_staging.app.openapi()["paths"])
 
     assert "/healthz" in paths
     assert "/readyz" in paths
