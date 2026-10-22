@@ -218,6 +218,8 @@ def _run_paper_secret_upload_function(
             "SECRET_PAYLOAD": str(payload_file),
             "PROJECT_ID": "atlas-staging-510915",
             "GCLOUD_FAIL_ADD": "1" if fail_add else "0",
+            "SUPABASE_PROJECT_REF": "abcdefghijklmnopqrst",
+            "SUPABASE_DB_HOST": "aws-0-eu-west-1.pooler.supabase.com",
         }
     )
     command = match.group(0) + '\nput_secret_file "$1" "$2"\n'
@@ -246,6 +248,13 @@ def _run_paper_secret_upload_function(
         b"postgresql://user:pass@host/db\r\n",
         b"postgresql://user:pass@host/db\x00",
         b"\xff",
+        b"not-a-database-url",
+        b"postgresql://atlas_customer_paper.abcdefghijklmnopqrst:secret@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require",
+        b"postgresql+asyncpg://atlas_customer_paper.wrongproject:secret@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require",
+        b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:secret@wronghost.example:5432/postgres?ssl=require",
+        b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?ssl=require",
+        b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:secret@aws-0-eu-west-1.pooler.supabase.com:5432/other?ssl=require",
+        b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:secret@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=disable",
     ],
 )
 def test_gcp_paper_url_validation_fails_before_any_secret_manager_call(
@@ -261,7 +270,7 @@ def test_gcp_paper_url_upload_strips_only_one_terminal_lf_and_keeps_uri_out_of_a
     tmp_path: Path,
 ):
     uri = (
-        "postgresql+asyncpg://atlas_customer_paper:URI_SENTINEL_ONLY_ON_STDIN"
+        "postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:URI_SENTINEL_ONLY_ON_STDIN"
         "@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require"
     )
     completed, gcloud_log, payload_file = _run_paper_secret_upload_function(
