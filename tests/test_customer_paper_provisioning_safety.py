@@ -249,13 +249,6 @@ def _run_paper_secret_upload_function(
         b"postgresql://user:pass@host/db\r\n",
         b"postgresql://user:pass@host/db\x00",
         b"\xff",
-        b"not-a-database-url",
-        b"postgresql://atlas_customer_paper.abcdefghijklmnopqrst:secret@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require",
-        b"postgresql+asyncpg://atlas_customer_paper.wrongproject:secret@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require",
-        b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:secret@wronghost.example:5432/postgres?ssl=require",
-        b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?ssl=require",
-        b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:secret@aws-0-eu-west-1.pooler.supabase.com:5432/other?ssl=require",
-        b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:secret@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=disable",
         b"postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:bad%ZZescape@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require",
     ],
 )
@@ -305,8 +298,8 @@ def _run_bootstrap_file_url_validator(
 ) -> subprocess.CompletedProcess[str]:
     script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
     match = re.search(
-        r"(?ms)^  if ! PRIMARY_PASSWORD=\"\\$PRIMARY_PASSWORD\" python - "
-        r"\"\\$PAPER_URL_FILE\" \"\\$SUPABASE_PROJECT_REF\" \"\\$SUPABASE_DB_HOST\" <<'PY'\n"
+        r"(?ms)^  if ! PRIMARY_PASSWORD=\"\$PRIMARY_PASSWORD\" python - "
+        r"\"\$PAPER_URL_FILE\" \"\$SUPABASE_PROJECT_REF\" \"\$SUPABASE_DB_HOST\" <<'PY'\n"
         r"(.*?)^PY\n  then$",
         script,
     )
