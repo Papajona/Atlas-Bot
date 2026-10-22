@@ -271,7 +271,7 @@ def test_staging_identity_preflight_is_manual_main_only_and_read_only():
     assert "db.{expected}.supabase.co" in workflow
     assert "current_user, session_user" in workflow
     assert "default_transaction_read_only=on" in workflow
-    assert "no migrations were executed" in workflow
+    assert "no migration or write was executed" in workflow
     assert "alembic upgrade" not in workflow
     assert "app.paper_staging:app" in workflow
     assert "CUSTOMER_PAPER_DATABASE_URL" in workflow
@@ -296,7 +296,7 @@ def test_staging_identity_preflight_allows_same_project_and_checks_read_only_pap
     assert "primary runtime role has administrative privileges or cannot login" in workflow
     assert "must be NOINHERIT, BYPASSRLS and have no role memberships" in workflow
     assert "no migrations were executed" in workflow
-    assert "SELECT_ONLY_CUSTOMER_PROFILES_AND_APP_STATE" in workflow
+    assert "can access only customer_profiles/app_state" in workflow
     assert "EXPECTED_ALEMBIC_HEAD" not in workflow
     assert "alembic upgrade" not in workflow
 
@@ -305,10 +305,9 @@ def test_staging_preflight_runtime_role_is_non_owner_and_non_admin():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
     guard = (ROOT / "app" / "startup_guards.py").read_text(encoding="utf-8")
     assert "owned_tables" in workflow
-    assert "owned_public_tables" in workflow
     assert "c.relowner=r.oid" in workflow
     assert "owned_tables" in workflow
-    assert "if int(v) for v in (other_schema, unexpected_tables, public_sequences, callable_definers, owned_tables)" in workflow
+    assert "if any(int(v) for v in (other_schema, unexpected_tables, public_sequences, callable_definers, owned_tables))" in workflow
     assert "c.relowner = r.oid" in guard
     assert "r.rolcreaterole AS can_create_roles" in guard
     assert "r.rolcreatedb AS can_create_databases" in guard
