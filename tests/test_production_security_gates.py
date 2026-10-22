@@ -260,6 +260,8 @@ def test_deployment_selects_a_successful_signed_release_run_for_exact_sha():
 def test_staging_identity_preflight_is_manual_main_only_and_read_only():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
     assert "workflow_dispatch:" in workflow
+    trigger_block = workflow.split("\npermissions:", 1)[0]
+    assert "push:" not in trigger_block
     assert "github.ref == 'refs/heads/main'" in workflow
     assert "environment: staging" in workflow
     assert "ATLAS_STAGING_SUPABASE_PROJECT_REF" in workflow

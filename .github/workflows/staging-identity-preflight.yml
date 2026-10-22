@@ -1,8 +1,6 @@
 name: Supabase Staging Identity Preflight
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -214,33 +212,43 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import os
+          import os, re
           from pathlib import Path
           from urllib.parse import unquote, urlparse
           root = Path(os.environ["RUNNER_TEMP"])
           primary = urlparse((root / "atlas-staging-db-url").read_text().strip())
           paper = urlparse((root / "atlas-staging-paper-db-url").read_text().strip())
           expected = os.environ["STAGING_SUPABASE_PROJECT_REF"]
-          for label, parsed in (("primary", primary), ("paper", paper)):
+          pooler_pattern = re.compile(r"^aws-\d+-[a-z0-9]+(?:-[a-z0-9]+)*\.pooler\.supabase\.com$")
+          def validate(label, parsed, expected_role):
               if parsed.scheme not in ("postgres", "postgresql", "postgresql+asyncpg") or not parsed.hostname:
                   raise SystemExit(f"BLOCKED: {label} DB secret is not a valid PostgreSQL URI")
-              if parsed.hostname.lower() not in {f"db.{expected}.supabase.co", f"{expected}.supabase.co"}:
-                  raise SystemExit(f"BLOCKED: {label} DB hostname does not match the configured Supabase project")
+              host = parsed.hostname.lower()
+              is_pooler = bool(pooler_pattern.fullmatch(host))
+              if host not in {f"db.{expected}.supabase.co", f"{expected}.supabase.co"} and not is_pooler:
+                  raise SystemExit(f"BLOCKED: {label} DB hostname does not match the configured Supabase project or a Supabase session-pooler hostname")
+              if parsed.port not in (None, 5432):
+                  raise SystemExit(f"BLOCKED: {label} DB URL must use port 5432; transaction pooler is not supported")
               if parsed.path.lstrip("/") != "postgres":
                   raise SystemExit(f"BLOCKED: {label} DB name is not postgres")
               if not parsed.password or not parsed.username:
                   raise SystemExit(f"BLOCKED: {label} DB secret lacks dedicated credentials")
-          primary_user, paper_user = unquote(primary.username or ""), unquote(paper.username or "")
-          primary_password, paper_password = unquote(primary.password or ""), unquote(paper.password or "")
+              uri_user = unquote(parsed.username)
+              expected_uri_user = f"{expected_role}.{expected}" if is_pooler else expected_role
+              if uri_user != expected_uri_user:
+                  raise SystemExit(f"BLOCKED: {label} DB URL user does not match the configured runtime role and target type")
+              return expected_role, unquote(parsed.password)
+          primary_user, primary_password = validate("primary", primary, os.environ["EXPECTED_RUNTIME_DB_ROLE"])
+          paper_user, paper_password = validate("paper", paper, os.environ["EXPECTED_PAPER_DB_ROLE"])
           if primary_user != os.environ["EXPECTED_RUNTIME_DB_ROLE"]:
               raise SystemExit("BLOCKED: primary DB URL is not the configured read-only runtime role")
           if paper_user != os.environ["EXPECTED_PAPER_DB_ROLE"]:
               raise SystemExit("BLOCKED: paper DB URL is not the configured isolated ledger role")
           if primary_user == paper_user or primary_password == paper_password:
-              raise SystemExit("BLOCKED: primary and paper database URLs must use distinct roles and passwords")
+              raise SystemExit("BLOCKED: primary and paper database URLs must use distinct runtime roles and passwords")
           if (primary.hostname.lower(), primary.port or 5432, primary.path) != (paper.hostname.lower(), paper.port or 5432, paper.path):
               raise SystemExit("BLOCKED: free single-project mode must use the same database host, port and postgres database")
-          print("PASS: both database URLs target the configured single Supabase project/database, with distinct runtime roles and credentials; values were not printed")
+          print("PASS: both database URLs target the configured single Supabase project/database (direct endpoint or session pooler), with distinct runtime roles and credentials; values were not printed")
           PY
 
       - name: Verify primary runtime role is strictly read-only (read-only SQL)

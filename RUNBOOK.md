@@ -20,7 +20,7 @@ This mode is opt-in and disabled by default. Configure `CUSTOMER_PAPER_SHARED_DA
 
 ### Operator setup sequence (existing project only)
 
-1. Store the current project's administrative database URL in a protected local environment variable such as `ATLAS_ADMIN_DATABASE_URL`; do not paste its password into shell commands, commit it, or print it to logs. Confirm the URL ends in the existing `/postgres` database. Take/confirm a current recoverable backup or export before schema DDL.
+1. Store the current project's administrative database URL in a protected local environment variable such as `ATLAS_ADMIN_DATABASE_URL`; do not paste its password into shell commands, commit it, or print it to logs. For this Free project's IPv6-only direct endpoint, use the dashboard's **Session pooler** values: exact host, port `5432`, username `postgres.<project-ref>`, and database `postgres`. URL-encode the password. Do not use transaction-pooler port `6543`. The provisioner accepts this project-suffixed session-pooler identity or the direct endpoint and generates runtime URLs for the same endpoint. Take/confirm a current recoverable backup or export before schema DDL.
 2. Open an interactive `psql "$ATLAS_ADMIN_DATABASE_URL"` session. Create a dedicated runtime login, then set its password using psql's hidden password prompt (the secret is not part of the command line/history):
 
    ```sql
@@ -250,7 +250,7 @@ It verifies that the existing workload identity provider is restricted to `Papaj
 - `atlas-staging-customer-paper-db-url`: `atlas_customer_paper` credentials.
 - `atlas-staging-supabase-anon-key`: Supabase API key used for customer JWT/MFA verification.
 
-The database URLs are generated for the verified `db.wauaelzyugjuepmrewaw.supabase.co:5432/postgres` target with different URL-encoded passwords and the SQLAlchemy asyncpg driver. The script fails if the role passwords match or a required prompt is empty. Run it only after those exact roles exist and their passwords are saved correctly.
+The database URLs use the session pooler host `aws-0-eu-west-1.pooler.supabase.com:5432/postgres` for this Free-tier project, with usernames `atlas_paper_reader.wauaelzyugjuepmrewaw` and `atlas_customer_paper.wauaelzyugjuepmrewaw`, different URL-encoded passwords, TLS required, and the SQLAlchemy asyncpg driver. Supavisor requires the project-ref suffix on each pooler username. The script fails if role passwords match or any required prompt is empty. Run it only after both exact roles exist and their passwords are saved correctly.
 
 ### 4. Set GitHub's protected `staging` environment variables
 

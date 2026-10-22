@@ -20,7 +20,7 @@ ARTIFACT_REPOSITORY="atlas-staging"
 CLOUD_RUN_SERVICE="atlas-paper-staging"
 
 SUPABASE_PROJECT_REF="wauaelzyugjuepmrewaw"
-SUPABASE_DB_HOST="db.${SUPABASE_PROJECT_REF}.supabase.co"
+SUPABASE_DB_HOST="aws-0-eu-west-1.pooler.supabase.com"
 PRIMARY_SECRET="atlas-staging-primary-db-url"
 PAPER_SECRET="atlas-staging-customer-paper-db-url"
 ANON_KEY_SECRET="atlas-staging-supabase-anon-key"
@@ -96,21 +96,57 @@ gcloud iam service-accounts add-iam-policy-binding "$PREFLIGHT_SA" \
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${PREFLIGHT_SA}" --role="roles/run.viewer" --quiet
 
+PAPER_URL_FILE="${HOME}/.atlas-customer-paper/database-url"
+USE_PAPER_URL_FILE="false"
+
 read -r -s -p "Enter the atlas_paper_reader database password (hidden): " PRIMARY_PASSWORD
 printf '\n'
-read -r -s -p "Enter the atlas_customer_paper database password (hidden): " PAPER_PASSWORD
-printf '\n'
+
+if [[ -L "$PAPER_URL_FILE" ]]; then
+  unset PRIMARY_PASSWORD
+  echo "BLOCKED: the generated paper database URL path must not be a symlink."
+  exit 1
+fi
+
+if [[ -f "$PAPER_URL_FILE" ]]; then
+  python - "$PAPER_URL_FILE" "$SUPABASE_PROJECT_REF" "$SUPABASE_DB_HOST" <<'PY'
+import stat, sys
+from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlsplit
+path = Path(sys.argv[1])
+expected_ref, expected_host = sys.argv[2:]
+mode = stat.S_IMODE(path.stat().st_mode)
+if mode & 0o077:
+    raise SystemExit("BLOCKED: generated paper database URL file must have private permissions (0600 or stricter)")
+uri = path.read_text(encoding="utf-8").strip()
+parsed = urlsplit(uri)
+if parsed.scheme != "postgresql+asyncpg":
+    raise SystemExit("BLOCKED: generated paper database URL must use the SQLAlchemy asyncpg URI scheme")
+if parsed.hostname != expected_host or parsed.port != 5432 or parsed.path != "/postgres":
+    raise SystemExit("BLOCKED: generated paper database URL does not match the configured session pooler endpoint")
+if unquote(parsed.username or "") != f"atlas_customer_paper.{expected_ref}" or not parsed.password:
+    raise SystemExit("BLOCKED: generated paper database URL has the wrong runtime role or missing password")
+if parse_qs(parsed.query).get("ssl") != ["require"]:
+    raise SystemExit("BLOCKED: generated paper database URL must require TLS")
+print("PASS: protected generated paper database URL matches the expected role, project and session pooler; value withheld")
+PY
+  USE_PAPER_URL_FILE="true"
+else
+  read -r -s -p "Enter the atlas_customer_paper database password (hidden): " PAPER_PASSWORD
+  printf '\n'
+fi
+
 read -r -s -p "Enter the Supabase anon/publishable API key (hidden): " SUPABASE_ANON_KEY
 printf '\n'
 
-if [[ -z "$PRIMARY_PASSWORD" || -z "$PAPER_PASSWORD" || -z "$SUPABASE_ANON_KEY" ]]; then
+if [[ -z "$PRIMARY_PASSWORD" || -z "$SUPABASE_ANON_KEY" ]]; then
   unset PRIMARY_PASSWORD PAPER_PASSWORD SUPABASE_ANON_KEY
   echo "BLOCKED: a required value was empty; no secret versions were added."
   exit 1
 fi
-if [[ "$PRIMARY_PASSWORD" == "$PAPER_PASSWORD" ]]; then
+if [[ "$USE_PAPER_URL_FILE" != "true" && -z "$PAPER_PASSWORD" ]]; then
   unset PRIMARY_PASSWORD PAPER_PASSWORD SUPABASE_ANON_KEY
-  echo "BLOCKED: the two database roles must have different passwords."
+  echo "BLOCKED: paper database password was empty; no secret versions were added."
   exit 1
 fi
 
@@ -123,10 +159,20 @@ PY
 }
 
 PRIMARY_ENCODED="$(url_encode_password "$PRIMARY_PASSWORD")"
-PAPER_ENCODED="$(url_encode_password "$PAPER_PASSWORD")"
-PRIMARY_URL="postgresql+asyncpg://atlas_paper_reader:${PRIMARY_ENCODED}@${SUPABASE_DB_HOST}:5432/postgres?ssl=require"
-PAPER_URL="postgresql+asyncpg://atlas_customer_paper:${PAPER_ENCODED}@${SUPABASE_DB_HOST}:5432/postgres?ssl=require"
-unset PRIMARY_PASSWORD PAPER_PASSWORD PRIMARY_ENCODED PAPER_ENCODED
+PRIMARY_URL="postgresql+asyncpg://atlas_paper_reader.${SUPABASE_PROJECT_REF}:${PRIMARY_ENCODED}@${SUPABASE_DB_HOST}:5432/postgres?ssl=require"
+unset PRIMARY_PASSWORD
+
+if [[ "$USE_PAPER_URL_FILE" != "true" ]]; then
+  if [[ "$PRIMARY_ENCODED" == "$(url_encode_password "$PAPER_PASSWORD")" ]]; then
+    unset PRIMARY_ENCODED PAPER_PASSWORD SUPABASE_ANON_KEY
+    echo "BLOCKED: the two database roles must have different passwords."
+    exit 1
+  fi
+  PAPER_ENCODED="$(url_encode_password "$PAPER_PASSWORD")"
+  PAPER_URL="postgresql+asyncpg://atlas_customer_paper.${SUPABASE_PROJECT_REF}:${PAPER_ENCODED}@${SUPABASE_DB_HOST}:5432/postgres?ssl=require"
+  unset PAPER_PASSWORD PAPER_ENCODED
+fi
+unset PRIMARY_ENCODED
 
 put_secret() {
   local secret_name="$1"
@@ -139,10 +185,41 @@ put_secret() {
   unset secret_value
 }
 
+put_secret_file() {
+  local secret_name="$1"
+  local secret_path="$2"
+  if ! gcloud secrets describe "$secret_name" --project="$PROJECT_ID" >/dev/null 2>&1; then
+    gcloud secrets create "$secret_name" --replication-policy=automatic --project="$PROJECT_ID"
+  fi
+  # The operator-generated URL file ends with a newline; remove only that delimiter
+  # so the secret value is exactly the URI the app will parse.
+  python - "$secret_path" <<'PY' | gcloud secrets versions add "$secret_name" --data-file=- --project="$PROJECT_ID" >/dev/null
+import sys
+from pathlib import Path
+data = Path(sys.argv[1]).read_text(encoding="utf-8")
+if data.endswith("\n"):
+    data = data[:-1]
+if not data or "\n" in data or "\r" in data:
+    raise SystemExit("BLOCKED: paper URL file must contain exactly one URI line")
+sys.stdout.write(data)
+PY
+}
+
 put_secret "$PRIMARY_SECRET" "$PRIMARY_URL"
-put_secret "$PAPER_SECRET" "$PAPER_URL"
+if [[ "$USE_PAPER_URL_FILE" == "true" ]]; then
+  put_secret_file "$PAPER_SECRET" "$PAPER_URL_FILE"
+  unset PAPER_URL
+else
+  put_secret "$PAPER_SECRET" "$PAPER_URL"
+  unset PAPER_URL
+fi
 put_secret "$ANON_KEY_SECRET" "$SUPABASE_ANON_KEY"
-unset PRIMARY_URL PAPER_URL SUPABASE_ANON_KEY
+unset PRIMARY_URL SUPABASE_ANON_KEY
+
+if [[ "$USE_PAPER_URL_FILE" == "true" ]]; then
+  echo "PASS: the pre-provisioned paper URL was added to Secret Manager directly from the protected file without printing its contents."
+  echo "Keep $PAPER_URL_FILE private until the read-only staging preflight passes; then delete it securely."
+fi
 
 # Cloud Run can read only its three explicitly referenced secret values.
 for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET" "$ANON_KEY_SECRET"; do

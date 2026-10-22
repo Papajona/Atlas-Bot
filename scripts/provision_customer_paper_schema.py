@@ -18,6 +18,7 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 
 PROJECT_REF_RE = re.compile(r"^[a-z0-9]{20}$")
+SESSION_POOLER_HOST_RE = re.compile(r"^aws-\d+-[a-z0-9]+(?:-[a-z0-9]+)*\.pooler\.supabase\.com$")
 RUNTIME_ROLE = "atlas_customer_paper"
 SCHEMA_FILE = Path(__file__).resolve().with_name("customer_paper_ledger_schema.sql")
 
@@ -92,17 +93,27 @@ def _pgpass_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace(":", "\\:")
 
 
-def _runtime_connection_uri(expected_ref: str, password: str) -> str:
-    """Build the app runtime URL with TLS required and credentials URL-encoded."""
+def _runtime_connection_uri(
+    expected_ref: str, password: str, database_host: str | None = None
+) -> str:
+    """Build a TLS-required runtime URL for the same verified direct or session-pooler endpoint."""
     if not PROJECT_REF_RE.fullmatch(expected_ref):
         raise ValueError("Expected an explicit 20-character Supabase project ref")
     if not password:
         raise ValueError("Runtime database password must not be empty")
-    username = quote(RUNTIME_ROLE, safe="")
+    host = (database_host or f"db.{expected_ref}.supabase.co").lower()
+    if host == f"db.{expected_ref}.supabase.co":
+        username_value = RUNTIME_ROLE
+    elif SESSION_POOLER_HOST_RE.fullmatch(host):
+        # Supavisor requires the project reference suffix in pooler usernames.
+        username_value = f"{RUNTIME_ROLE}.{expected_ref}"
+    else:
+        raise ValueError("Runtime DB host must be the configured project's direct endpoint or a Supabase session pooler host")
+    username = quote(username_value, safe="")
     encoded_password = quote(password, safe="")
     return urlunsplit((
         "postgresql+asyncpg",
-        f"{username}:{encoded_password}@db.{expected_ref}.supabase.co:5432",
+        f"{username}:{encoded_password}@{host}:5432",
         "/postgres",
         "ssl=require",
         "",
@@ -113,14 +124,19 @@ def _connection_env(database_url: str, expected_ref: str, passfile: Path) -> dic
     parsed = urlsplit(database_url)
     if parsed.scheme not in {"postgres", "postgresql", "postgresql+asyncpg", "postgresql+psycopg"}:
         raise ValueError("ATLAS_ADMIN_DATABASE_URL must be a PostgreSQL URI")
-    if parsed.hostname != f"db.{expected_ref}.supabase.co":
-        raise ValueError("Admin database host does not match the explicitly configured existing Supabase project")
+    host = (parsed.hostname or "").lower()
+    direct_host = f"db.{expected_ref}.supabase.co"
+    is_pooler = bool(SESSION_POOLER_HOST_RE.fullmatch(host))
+    if host != direct_host and not is_pooler:
+        raise ValueError("Admin database host must be the configured project's direct endpoint or a Supabase session pooler host")
     if (parsed.path or "").lstrip("/") != "postgres":
         raise ValueError("Admin database URL must target the existing postgres database")
     if not parsed.username or not parsed.password:
         raise ValueError("Admin database URL must include username and password")
     if parsed.port not in (None, 5432):
-        raise ValueError("Provisioning only accepts the direct Supabase PostgreSQL endpoint on port 5432")
+        raise ValueError("Provisioning requires port 5432 (the Supabase session pooler, not transaction pooler)")
+    if is_pooler and unquote(parsed.username) != f"postgres.{expected_ref}":
+        raise ValueError("Session-pooler admin username must be postgres.<configured-project-ref>")
     password = unquote(parsed.password)
     fields = [
         _pgpass_escape(parsed.hostname),
@@ -258,7 +274,7 @@ def main() -> int:
             if output_path.parent.stat().st_mode & 0o077:
                 raise RuntimeError("Credential output directory must be private (permissions 0700 or stricter)")
             password = secrets.token_urlsafe(48)
-            connection_uri = _runtime_connection_uri(staging_ref, password)
+            connection_uri = _runtime_connection_uri(staging_ref, password, urlsplit(admin_url).hostname)
             # Keep a protected copy before attempting role DDL so an ambiguous connection
             # failure cannot leave an orphan role with a lost generated password.
             output_path.write_text(connection_uri + "\n", encoding="utf-8")
