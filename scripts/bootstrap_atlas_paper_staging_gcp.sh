@@ -195,12 +195,11 @@ put_secret() {
   unset secret_value
 }
 
-put_secret_file() {
-  local secret_name="$1"
-  local secret_path="$2"
+validate_paper_url_file() {
+  local secret_path="$1"
   local validated_uri
 
-  # Validate and capture the complete value before any Secret Manager operation.
+  # Validate and capture the complete value without any Secret Manager side effects.
   # Read bytes first so CRLF is not silently normalized into an accepted LF.
   if ! validated_uri="$(python - "$secret_path" "$SUPABASE_PROJECT_REF" "$SUPABASE_DB_HOST" <<'PY'
 import re
@@ -214,9 +213,9 @@ except (OSError, UnicodeDecodeError):
     raise SystemExit("BLOCKED: paper URL file must be readable UTF-8")
 
 # Permit one terminal LF as the file delimiter, but not CRLF or extra lines.
-if data.endswith("\n"):
+if data.endswith("\\n"):
     data = data[:-1]
-if not data or "\n" in data or "\r" in data or "\x00" in data:
+if not data or "\\n" in data or "\\r" in data or "\\x00" in data:
     raise SystemExit("BLOCKED: paper URL file must contain exactly one URI line")
 
 expected_ref, expected_host = sys.argv[2:]
@@ -252,29 +251,28 @@ PY
     return 1
   fi
 
-  # Do not create or version a secret until validation has succeeded.
-  if ! gcloud secrets describe "$secret_name" --project="$PROJECT_ID" >/dev/null 2>&1; then
-    gcloud secrets create "$secret_name" --replication-policy=automatic --project="$PROJECT_ID"
-  fi
-
-  # Keep the URI out of process arguments and send the exact bytes on stdin.
-  if ! printf '%s' "$validated_uri" |
-      gcloud secrets versions add "$secret_name" --data-file=- --project="$PROJECT_ID" >/dev/null; then
-    unset validated_uri
-    return 1
-  fi
-
-  unset validated_uri
+  # stdout is consumed by the caller before either DB secret is touched.
+  printf '%s' "$validated_uri"
 }
 
-put_secret "$PRIMARY_SECRET" "$PRIMARY_URL"
+# Validate and capture the operator-generated paper URL before *any* DB secret
+# is described, created, or versioned. This prevents a malformed paper URL from
+# leaving the primary DB secret partially updated.
 if [[ "$USE_PAPER_URL_FILE" == "true" ]]; then
-  put_secret_file "$PAPER_SECRET" "$PAPER_URL_FILE"
-  unset PAPER_URL
-else
-  put_secret "$PAPER_SECRET" "$PAPER_URL"
-  unset PAPER_URL
+  if ! PAPER_URL="$(validate_paper_url_file "$PAPER_URL_FILE")"; then
+    unset PRIMARY_URL SUPABASE_ANON_KEY
+    exit 1
+  fi
+  if [[ -z "$PAPER_URL" ]]; then
+    unset PRIMARY_URL SUPABASE_ANON_KEY
+    echo "BLOCKED: paper URL is empty." >&2
+    exit 1
+  fi
 fi
+
+put_secret "$PRIMARY_SECRET" "$PRIMARY_URL"
+put_secret "$PAPER_SECRET" "$PAPER_URL"
+unset PAPER_URL
 put_secret "$ANON_KEY_SECRET" "$SUPABASE_ANON_KEY"
 unset PRIMARY_URL SUPABASE_ANON_KEY
 
