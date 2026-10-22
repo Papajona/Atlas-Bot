@@ -394,3 +394,42 @@ def test_supabase_future_default_grants_are_opt_in():
     assert "alembic upgrade 0053_supabase_public_default_acl_lockdown" in workflow
     assert "migration unexpectedly removed service_role access from an existing table" in workflow
     assert "has_table_privilege('service_role', 'public.atlas_default_acl_probe', 'SELECT')" in workflow
+
+def test_paper_staging_deployment_is_restricted_and_keeps_risk_features_off():
+    deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
+    preflight = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
+    assert "github.ref == 'refs/heads/main'" in deploy
+    assert "ATLAS_ASGI_APP=app.paper_staging:app" in deploy
+    for name, value in (
+        ("PAPER_TRADING", "true"),
+        ("LIVE_TRADING_ENABLED", "false"),
+        ("CUSTOMER_LIVE_TRADING_ENABLED", "false"),
+        ("PAYOUT_LIVE_ENABLED", "false"),
+        ("BROKER_SANDBOX", "true"),
+        ("USDT_TRON_ENABLED", "false"),
+        ("USDT_TRON_SWEEP_ENABLED", "false"),
+        ("DERIV_LIVE_ENABLED", "false"),
+        ("CUSTOMER_PAPER_LEDGER_ENABLED", "true"),
+        ("CUSTOMER_PAPER_SHARED_DATABASE_ENABLED", "true"),
+        ("CUSTOMER_TOTP_REQUIRED", "true"),
+        ("ADAPTIVE_AI_ENABLED", "false"),
+    ):
+        assert f"{name}={value}" in deploy
+        assert f'"{name}": "{value}"' in preflight
+    assert "atlas-staging-primary-db-url" not in deploy
+    assert "atlas-staging-customer-paper-db-url" not in deploy
+    assert "atlas-staging-supabase-anon-key" not in deploy
+    assert "set-secrets" in deploy
+
+
+def test_paper_reader_provisioning_is_no_write_and_no_public_schema_create():
+    sql = (ROOT / "scripts" / "provision_atlas_paper_reader.sql").read_text(encoding="utf-8")
+    assert "CREATE ROLE atlas_paper_reader" in sql
+    assert "LOGIN NOINHERIT BYPASSRLS" in sql
+    assert "GRANT SELECT ON TABLE public.customer_profiles, public.app_state" in sql
+    assert "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM atlas_paper_reader" in sql
+    assert "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM atlas_paper_reader" in sql
+    assert "ALTER ROLE atlas_paper_reader SET default_transaction_read_only = on" in sql
+    assert "GRANT INSERT" not in sql
+    assert "GRANT UPDATE" not in sql
+    assert "GRANT DELETE" not in sql
