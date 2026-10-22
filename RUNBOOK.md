@@ -20,30 +20,24 @@ This mode is opt-in and disabled by default. Configure `CUSTOMER_PAPER_SHARED_DA
 
 ### Operator setup sequence (existing project only)
 
-1. Store the current project's administrative database URL in a protected local environment variable such as `ATLAS_ADMIN_DATABASE_URL`; do not paste its password into shell commands, commit it, or print it to logs. For this Free project's IPv6-only direct endpoint, use the dashboard's **Session pooler** values: exact host, port `5432`, username `postgres.<project-ref>`, and database `postgres`. URL-encode the password. Do not use transaction-pooler port `6543`. The provisioner accepts this project-suffixed session-pooler identity or the direct endpoint and generates runtime URLs for the same endpoint. Take/confirm a current recoverable backup or export before schema DDL.
-2. Open an interactive `psql "$ATLAS_ADMIN_DATABASE_URL"` session. Create a dedicated runtime login, then set its password using psql's hidden password prompt (the secret is not part of the command line/history):
-
-   ```sql
-   CREATE ROLE atlas_customer_paper LOGIN NOINHERIT NOBYPASSRLS
-       NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
-   ```
-
-   Then run the psql meta-command `\password atlas_customer_paper` at the prompt and grant database connectivity:
-
-   ```sql
-   GRANT CONNECT ON DATABASE postgres TO atlas_customer_paper;
-   ```
-
-   Do not make this role a member of another role, give it table ownership, schema CREATE, UPDATE/DELETE, or any elevated attribute. Supabase managed Postgres may record one control-plane-only incoming membership (`member=postgres`, grantor `supabase_admin`, ADMIN OPTION true, `inherit_option=false`, `set_option=false`) on a newly created role. The paper role must never be a member of any other role; preflight permits only that exact provider-managed relation and rejects all other membership rows. If the role already exists, stop and inspect its attributes/grants instead of blindly recreating or reusing it.
-3. From the reviewed Atlas-Bot checkout, run the schema file against that same existing database as the reviewed database owner (not as the paper runtime role):
+1. Confirm a current recoverable backup/export is available before applying schema DDL. For this Free-tier project's direct operator commands, use the Session pooler (host `aws-0-eu-west-1.pooler.supabase.com`, port `5432`, admin username `postgres.wauaelzyugjuepmrewaw`, database `postgres`) with `psql -W`. The native prompt hides the password and avoids putting it in the connection URI, command arguments, environment, or a password file. Do not use the transaction pooler port `6543`. This operator path uses the existing project only; it does not create a second Supabase project or paid branch.
+2. Create the restricted paper login through the reviewed helper, which reuses the already-protected runtime URL file if an earlier attempt generated it:
 
    ```bash
-   psql "$ATLAS_ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 \
+   python scripts/setup_customer_paper_role_interactive.py --project-ref wauaelzyugjuepmrewaw
+   ```
+
+   At the native `psql` password prompt, type the existing database password that was verified against this project. The helper creates `atlas_customer_paper` transactionally and verifies its attributes and role-membership contract before commit. Its generated URL is kept at `~/.atlas-customer-paper/database-url` with restrictive permissions; do not display or paste its contents. Do not manually recreate the role or overwrite the URL file after a failed attempt—read the database catalog first.
+3. Apply the reviewed schema using the same native prompt, not an admin URL stored in an environment variable:
+
+   ```bash
+   psql "host=aws-0-eu-west-1.pooler.supabase.com port=5432 dbname=postgres user=postgres.wauaelzyugjuepmrewaw sslmode=require" \
+     -W -X -v ON_ERROR_STOP=1 \
      -v paper_runtime_role=atlas_customer_paper \
      -f scripts/customer_paper_ledger_schema.sql
    ```
 
-   Review the file and the target URL before execution. This creates the `customer_paper` schema/tables and narrowly grants the runtime role. Do not run it against production just to make release checks green.
+   This runs the schema DDL as the reviewed database owner in a transaction, creates the isolated `customer_paper` schema/tables, and grants the narrowly scoped runtime permissions. The schema guard accepts only the exact Supabase-managed incoming membership (member `postgres`, grantor `supabase_admin`, ADMIN OPTION true, and `inherit_option`/`set_option` false); the paper role itself must not be a member of any other role. Any other membership is a hard stop. Do not run this against production just to make release checks green.
 4. Store the paper URL with the same project/host/database but username `atlas_customer_paper` and its separately generated password in the approved secret store. Set `CUSTOMER_PAPER_SHARED_DATABASE_ENABLED=true` only for the preflight. Keep `CUSTOMER_PAPER_LEDGER_ENABLED=false` during this read-only check. Run:
 
    ```bash
