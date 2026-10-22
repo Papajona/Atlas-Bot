@@ -73,6 +73,7 @@ jobs:
           STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
           STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
           STAGING_PAPER_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_PAPER_DATABASE_SECRET }}
+          STAGING_ANON_KEY_SECRET: ${{ vars.ATLAS_STAGING_SUPABASE_ANON_KEY_SECRET }}
           STAGING_CLOUD_RUN_SERVICE: ${{ vars.ATLAS_STAGING_CLOUD_RUN_SERVICE }}
           EXPECTED_RUNTIME_SERVICE_ACCOUNT: ${{ vars.ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT }}
           EXPECTED_RUNTIME_DB_ROLE: ${{ vars.ATLAS_STAGING_RUNTIME_DB_ROLE }}
@@ -85,6 +86,7 @@ jobs:
           : "${STAGING_SUPABASE_PROJECT_REF:?Set staging environment variable ATLAS_STAGING_SUPABASE_PROJECT_REF}"
           : "${STAGING_DATABASE_SECRET:?Set staging environment variable ATLAS_STAGING_DATABASE_SECRET}"
           : "${STAGING_PAPER_DATABASE_SECRET:?Set staging environment variable ATLAS_STAGING_PAPER_DATABASE_SECRET}"
+          : "${STAGING_ANON_KEY_SECRET:?Set staging environment variable ATLAS_STAGING_SUPABASE_ANON_KEY_SECRET}"
           : "${STAGING_CLOUD_RUN_SERVICE:?Set staging environment variable ATLAS_STAGING_CLOUD_RUN_SERVICE}"
           : "${EXPECTED_RUNTIME_SERVICE_ACCOUNT:?Set staging environment variable ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT}"
           : "${EXPECTED_RUNTIME_DB_ROLE:?Set staging environment variable ATLAS_STAGING_RUNTIME_DB_ROLE}"
@@ -97,6 +99,8 @@ jobs:
           [[ "$STAGING_DATABASE_SECRET" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "BLOCKED: invalid primary staging Secret Manager secret name"; exit 1; }
           [[ "$STAGING_PAPER_DATABASE_SECRET" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "BLOCKED: invalid paper staging Secret Manager secret name"; exit 1; }
           [[ "$STAGING_DATABASE_SECRET" != "$STAGING_PAPER_DATABASE_SECRET" ]] || { echo "BLOCKED: primary and paper databases must use two distinct Secret Manager secrets"; exit 1; }
+          [[ "$STAGING_ANON_KEY_SECRET" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "BLOCKED: invalid Supabase anon-key Secret Manager secret name"; exit 1; }
+          [[ "$STAGING_ANON_KEY_SECRET" != "$STAGING_DATABASE_SECRET" && "$STAGING_ANON_KEY_SECRET" != "$STAGING_PAPER_DATABASE_SECRET" ]] || { echo "BLOCKED: Supabase API key and DB URLs must use distinct secrets"; exit 1; }
           [[ "$STAGING_CLOUD_RUN_SERVICE" =~ ^[a-z][a-z0-9-]{0,48}$ ]] || { echo "BLOCKED: invalid staging Cloud Run service name"; exit 1; }
           [[ "$EXPECTED_RUNTIME_SERVICE_ACCOUNT" =~ ^[a-zA-Z0-9._@-]+$ ]] || { echo "BLOCKED: invalid expected staging runtime service account"; exit 1; }
           [[ "$EXPECTED_RUNTIME_DB_ROLE" == "atlas_paper_reader" ]] || { echo "BLOCKED: paper-only API must use the narrowly scoped atlas_paper_reader role"; exit 1; }
@@ -112,6 +116,7 @@ jobs:
           EXPECTED_RUNTIME_SERVICE_ACCOUNT: ${{ vars.ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT }}
           STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
           STAGING_PAPER_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_PAPER_DATABASE_SECRET }}
+          STAGING_ANON_KEY_SECRET: ${{ vars.ATLAS_STAGING_SUPABASE_ANON_KEY_SECRET }}
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -174,7 +179,10 @@ jobs:
               if secret_name(env_by_name.get("CUSTOMER_PAPER_DATABASE_URL", {})) != os.environ["STAGING_PAPER_DATABASE_SECRET"]:
                   print("BLOCKED: CUSTOMER_PAPER_DATABASE_URL must reference the configured atlas_customer_paper secret")
                   sys.exit(1)
-              print("PASS: Cloud Run runtime identity, paper-only entrypoint, safety flags and separate DB-secret references verified.")
+              if secret_name(env_by_name.get("SUPABASE_ANON_KEY", {})) != os.environ["STAGING_ANON_KEY_SECRET"]:
+                  print("BLOCKED: SUPABASE_ANON_KEY must reference the configured Supabase publishable/anon key secret")
+                  sys.exit(1)
+              print("PASS: Cloud Run runtime identity, paper-only entrypoint, safety flags and separate DB/API-key secret references verified.")
               break
           else:
               print("BLOCKED: staging Cloud Run service has no configured application container")
