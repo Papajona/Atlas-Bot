@@ -1,0 +1,134 @@
+name: Deploy Paper-Only Atlas Staging
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: atlas-paper-only-staging-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy-paper-staging:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_STAGING_DEPLOY_SERVICE_ACCOUNT }}
+      STAGING_SERVICE: ${{ vars.ATLAS_STAGING_CLOUD_RUN_SERVICE }}
+      RUNTIME_SERVICE_ACCOUNT: ${{ vars.ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT }}
+      DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
+      PAPER_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_PAPER_DATABASE_SECRET }}
+      SUPABASE_ANON_KEY_SECRET: ${{ vars.ATLAS_STAGING_SUPABASE_ANON_KEY_SECRET }}
+      SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
+    steps:
+      - name: Require exact main ref and successful core CI on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          require_success() {
+            local workflow="$1"
+            local label="$2"
+            local count
+            count="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --commit "$GITHUB_SHA" \
+              --json status,conclusion --jq '[.[] | select(.status=="completed" and .conclusion=="success")] | length')"
+            if [ "${count:-0}" -lt 1 ]; then
+              echo "BLOCKED: $label has not passed on exact commit $GITHUB_SHA"
+              exit 1
+            fi
+            echo "PASS: $label passed on exact commit $GITHUB_SHA"
+          }
+          require_success "ci.yml" "Atlas CI"
+          require_success "ledger-concurrency-check.yml" "PostgreSQL ledger concurrency"
+          require_success "production-verification.yml" "Production Verification Gate"
+
+      - name: Validate staging inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${GCP_PROJECT_ID:?Missing GCP_PROJECT_ID}"
+          : "${GCP_REGION:?Missing GCP_REGION}"
+          : "${WIF_PROVIDER:?Missing GCP_WORKLOAD_IDENTITY_PROVIDER}"
+          : "${DEPLOY_SERVICE_ACCOUNT:?Missing GCP_STAGING_DEPLOY_SERVICE_ACCOUNT}"
+          : "${STAGING_SERVICE:?Missing ATLAS_STAGING_CLOUD_RUN_SERVICE}"
+          : "${RUNTIME_SERVICE_ACCOUNT:?Missing ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT}"
+          : "${DATABASE_SECRET:?Missing ATLAS_STAGING_DATABASE_SECRET}"
+          : "${PAPER_DATABASE_SECRET:?Missing ATLAS_STAGING_PAPER_DATABASE_SECRET}"
+          : "${SUPABASE_ANON_KEY_SECRET:?Missing ATLAS_STAGING_SUPABASE_ANON_KEY_SECRET}"
+          : "${SUPABASE_PROJECT_REF:?Missing ATLAS_STAGING_SUPABASE_PROJECT_REF}"
+          [[ "$GCP_PROJECT_ID" == "atlas-staging-510915" ]] || { echo "BLOCKED: refusing deployment outside the explicit Atlas staging project"; exit 1; }
+          [[ "$SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]] || { echo "BLOCKED: invalid Supabase project ref"; exit 1; }
+          [[ "$STAGING_SERVICE" =~ ^[a-z][a-z0-9-]{0,48}$ ]] || { echo "BLOCKED: invalid staging Cloud Run service name"; exit 1; }
+          [[ "$DATABASE_SECRET" != "$PAPER_DATABASE_SECRET" ]] || { echo "BLOCKED: DB credentials must use distinct secrets"; exit 1; }
+          [[ "$DATABASE_SECRET" != "$SUPABASE_ANON_KEY_SECRET" && "$PAPER_DATABASE_SECRET" != "$SUPABASE_ANON_KEY_SECRET" ]] || { echo "BLOCKED: Supabase key and DB URLs must use distinct secrets"; exit 1; }
+
+      - name: Checkout exact main commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Authenticate to Google Cloud with main-only workload identity
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+
+      - name: Build and push exact commit image to Artifact Registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/atlas-staging/atlas-paper-api:${GITHUB_SHA}"
+          gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+          docker build --pull --tag "$IMAGE" .
+          docker push "$IMAGE"
+          echo "$IMAGE" > "$RUNNER_TEMP/atlas-paper-staging-image"
+          echo "Built and pushed image for ${GITHUB_SHA}"
+
+      - name: Deploy restricted paper-only Cloud Run service
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="$(cat "$RUNNER_TEMP/atlas-paper-staging-image")"
+          gcloud run deploy "$STAGING_SERVICE" \
+            --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" \
+            --image="$IMAGE" \
+            --service-account="$RUNTIME_SERVICE_ACCOUNT" \
+            --allow-unauthenticated \
+            --port=8000 \
+            --cpu=2 \
+            --memory=2Gi \
+            --timeout=300 \
+            --min=0 \
+            --max=2 \
+            --set-env-vars="ENVIRONMENT=staging,PROCESS_ROLE=paper,ATLAS_ASGI_APP=app.paper_staging:app,SUPABASE_URL=https://${SUPABASE_PROJECT_REF}.supabase.co,PAPER_TRADING=true,LIVE_TRADING_ENABLED=false,CUSTOMER_LIVE_TRADING_ENABLED=false,PAYOUT_LIVE_ENABLED=false,BROKER_SANDBOX=true,USDT_TRON_ENABLED=false,USDT_TRON_SWEEP_ENABLED=false,DERIV_LIVE_ENABLED=false,CUSTOMER_PAPER_LEDGER_ENABLED=true,CUSTOMER_PAPER_SHARED_DATABASE_ENABLED=true,CUSTOMER_TOTP_REQUIRED=true,ADAPTIVE_AI_ENABLED=false" \
+            --set-secrets="DATABASE_URL=${DATABASE_SECRET}:latest,CUSTOMER_PAPER_DATABASE_URL=${PAPER_DATABASE_SECRET}:latest,SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY_SECRET}:latest"
+          SERVICE_URL="$(gcloud run services describe "$STAGING_SERVICE" --project="$GCP_PROJECT_ID" --region="$GCP_REGION" --format='value(status.url)')"
+          [[ "$SERVICE_URL" == https://* ]] || { echo "BLOCKED: deployed Cloud Run service did not return an HTTPS URL"; exit 1; }
+          BODY="$RUNNER_TEMP/atlas-paper-staging-health.json"
+          HTTP_CODE="$(curl --silent --show-error --output "$BODY" --write-out '%{http_code}' --max-time 30 "$SERVICE_URL/healthz" || true)"
+          if [[ "$HTTP_CODE" != "200" ]]; then
+            echo "BLOCKED: paper-only staging liveness check failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+          python - "$BODY" <<'PY'
+          import json,sys
+          result=json.load(open(sys.argv[1], encoding="utf-8"))
+          if result.get("status") != "ok" or result.get("mode") != "paper-only":
+              raise SystemExit("BLOCKED: deployed staging service is not the paper-only ASGI app")
+          print("PASS: paper-only staging service is live. Full readiness remains separately gated by the read-only identity and isolated-ledger preflight.")
+          PY

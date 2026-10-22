@@ -15,6 +15,7 @@ from sqlalchemy import text
 from app import customer_paper_api as paper_api
 from app.config import settings
 from app.schemas import MarketRequest
+from app.paper_staging import PaperMarketRequest
 
 
 def _verified_bars(latest_bar_at: datetime, *, volume: str = "100") -> pd.DataFrame:
@@ -106,6 +107,29 @@ def test_customer_paper_order_request_rejects_malformed_limit_orders():
         )
 
 
+def test_unauthenticated_customer_paper_request_rejects_before_state_guard():
+    calls = {"customer": 0, "guard": 0}
+
+    async def get_customer(authorization, _db, require_aal2=True):
+        calls["customer"] += 1
+        raise AssertionError("missing Authorization must be rejected before customer lookup")
+
+    async def state_guard():
+        calls["guard"] += 1
+
+    api_app = FastAPI()
+    api_app.include_router(paper_api.build_customer_paper_router(
+        get_customer=get_customer,
+        market_data=lambda _request: (_ for _ in ()).throw(AssertionError("market data must not be fetched")),
+        market_request_type=MarketRequest,
+        state_guard=state_guard,
+    ))
+    response = TestClient(api_app).get("/api/customer/paper/balances")
+
+    assert response.status_code == 401
+    assert calls == {"customer": 0, "guard": 0}
+
+
 @pytest.mark.postgres
 @pytest.mark.skipif(
     not (os.getenv("ATLAS_PAPER_TEST_DATABASE_URL") and os.getenv("ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL")),
@@ -146,8 +170,10 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
     # deterministically without sleeping and without using future live market data.
     monkeypatch.setattr(paper_api, "datetime", FrozenDateTime)
     market = {"bar_at": now}
+    market_requests = []
 
-    def fake_market_data(_request):
+    def fake_market_data(request):
+        market_requests.append(request)
         return _verified_bars(market["bar_at"], volume="100")
 
     async def fake_get_customer(authorization, _db, require_aal2=True):
@@ -173,7 +199,7 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
     api_app.include_router(paper_api.build_customer_paper_router(
         get_customer=fake_get_customer,
         market_data=fake_market_data,
-        market_request_type=MarketRequest,
+        market_request_type=PaperMarketRequest,
         state_guard=state_guard,
     ))
     client = TestClient(api_app)
@@ -203,6 +229,11 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
         assert submitted.status_code == 200, submitted.text
         assert submitted.json()["order"]["status"] == "SUBMITTED"
         assert submitted.json()["order"]["filled_quantity"] == "0.000000000000000000"
+
+    # A one-minute order requests a one-day history window (two CCXT pages at most),
+    # not the previous 30 days / roughly 44 sequential pages.
+    assert market_requests
+    assert all(request.timeframe == "1m" and request.days == 1 for request in market_requests)
 
     # Both tenants advance against the exact same completed bar. Shared capacity is 1.0:
     # customer A receives 0.6 and customer B can receive only the 0.4 remainder.

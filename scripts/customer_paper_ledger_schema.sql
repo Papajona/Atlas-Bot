@@ -5,6 +5,10 @@
   \quit 2
 \endif
 
+-- All DDL and grants are one PostgreSQL transaction. ON_ERROR_STOP plus this
+-- transaction prevents a failed provisioning run from leaving a partial schema.
+BEGIN;
+
 -- Execute only against the reviewed PostgreSQL target. In the free single-project
 -- setup this is the existing project's postgres database with a dedicated customer_paper
 -- schema. Provision paper_runtime_role separately as LOGIN,
@@ -489,3 +493,5 @@ BEGIN
     EXECUTE format('GRANT USAGE ON ALL SEQUENCES IN SCHEMA customer_paper TO %I', role_name);
 END
 $paper_grants$;
+
+COMMIT;

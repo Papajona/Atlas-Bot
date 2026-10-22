@@ -173,3 +173,112 @@ Disable live trading, preserve the model artifact and metadata, keep its manifes
 ## Release evidence retention
 
 Keep a versioned release folder containing `SIGNOFF_MATRIX.md`, the exact Git commit and workflow URLs, staging identity output, dataset/experiment manifests, DSR/OOS report, restore and provider-reconciliation evidence, Cloud Monitoring policy/notification test evidence, and signed APK evidence. Redact tokens, secret values, database URLs, customer identifiers, and private key material before archiving.
+
+
+## Paper-only Cloud Run staging on the existing Supabase project
+
+This deployment uses the existing project `wauaelzyugjuepmrewaw`; it does not create a second Supabase project or a paid branch. It runs `app.paper_staging:app`, not the normal `app.main:app` ASGI entrypoint. The paper service intentionally omits normal app startup because normal startup initializes the broad public-schema application and writes billing-plan state.
+
+**Safety stop:** before database DDL, confirm a current recoverable backup/export and verify that the intended target is the existing `postgres` database. Do not continue if the backup cannot be restored. Do not use the production database URL or `postgres` credentials as a Cloud Run runtime identity. Keep live trading, funding, withdrawals, payouts and TRON sweeps disabled.
+
+### 1. Provision the read-only primary identity
+
+Use a reviewed checkout containing `scripts/provision_atlas_paper_reader.sql`. In a protected Cloud Shell session, make sure `ATLAS_ADMIN_DATABASE_URL` refers to the existing project's administrative PostgreSQL connection and never print it. Connect interactively:
+
+```bash
+psql "$ATLAS_ADMIN_DATABASE_URL"
+```
+
+At the `psql` prompt, run:
+
+```psql
+\i scripts/provision_atlas_paper_reader.sql
+\password atlas_paper_reader
+\q
+```
+
+The password command prompts without echoing the value. Save that password in the approved password manager; it must be entered later into the GCP bootstrap prompt. The role contract is: `LOGIN NOINHERIT BYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`, no role memberships, no table ownership, no schema creation, and SELECT only on `public.customer_profiles` and `public.app_state`. The role-level default is read-only as defense in depth; the direct object grants are the write barrier.
+
+### 2. Provision the customer paper ledger role and schema
+
+Still connected to the same reviewed database, first run this shell precheck. It aborts before opening an interactive password prompt if the role already exists or the database query fails:
+
+```bash
+set -euo pipefail
+ROLE_EXISTS="$(psql "$ATLAS_ADMIN_DATABASE_URL" -X -At -v ON_ERROR_STOP=1 \
+  -c "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='atlas_customer_paper')")"
+if [[ "$ROLE_EXISTS" != "f" ]]; then
+  echo "BLOCKED: atlas_customer_paper already exists or the role-existence check did not return false; inspect it before proceeding."
+  exit 1
+fi
+psql "$ATLAS_ADMIN_DATABASE_URL" -X -v ON_ERROR_STOP=1
+```
+
+At the resulting `psql` prompt, create the role and set its distinct password using psql's hidden prompt:
+
+```psql
+CREATE ROLE atlas_customer_paper LOGIN NOINHERIT NOBYPASSRLS
+    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+GRANT CONNECT ON DATABASE postgres TO atlas_customer_paper;
+\password atlas_customer_paper
+\q
+```
+
+Do not retry role creation or run `\password` if the precheck blocks. Inspect the existing role attributes, memberships, grants, ownership, and password-management record under the operator process first.
+
+Run the reviewed schema script against that same database as the database owner, not as either runtime role:
+
+```bash
+psql "$ATLAS_ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -v paper_runtime_role=atlas_customer_paper \
+  -f scripts/customer_paper_ledger_schema.sql
+```
+
+Do not reuse an existing role without inspecting every attribute, membership, schema/table/sequence/function grant, and ownership. Do not broaden permissions if the preflight blocks. Schema isolation shares the primary project's compute, availability and backup/restore scope; it is not an independent database failure domain.
+
+### 3. Create staging IAM bindings and Secret Manager versions
+
+After both role passwords are saved and the paper schema has been provisioned, run the bootstrap script from Cloud Shell:
+
+```bash
+bash scripts/bootstrap_atlas_paper_staging_gcp.sh
+```
+
+It verifies that the existing workload identity provider is restricted to `Papajona/Atlas-Bot` on `refs/heads/main`; creates the dedicated deploy and runtime service accounts plus the Artifact Registry repository if missing; grants Cloud Run, image-push and secret-access permissions to the specific identities; and prompts silently for the two database role passwords and the Supabase anon/publishable API key. It creates or versions these three Secret Manager secrets without printing their contents:
+
+- `atlas-staging-primary-db-url`: `atlas_paper_reader` credentials.
+- `atlas-staging-customer-paper-db-url`: `atlas_customer_paper` credentials.
+- `atlas-staging-supabase-anon-key`: Supabase API key used for customer JWT/MFA verification.
+
+The database URLs are generated for the verified `db.wauaelzyugjuepmrewaw.supabase.co:5432/postgres` target with different URL-encoded passwords and the SQLAlchemy asyncpg driver. The script fails if the role passwords match or a required prompt is empty. Run it only after those exact roles exist and their passwords are saved correctly.
+
+### 4. Set GitHub's protected `staging` environment variables
+
+Open [Atlas-Bot staging environment settings](https://github.com/Papajona/Atlas-Bot/settings/environments) and add these variables using the values printed at the end of the bootstrap script:
+
+```text
+GCP_PROJECT_ID=atlas-staging-510915
+GCP_REGION=europe-west1
+GCP_WORKLOAD_IDENTITY_PROVIDER=projects/350896810949/locations/global/workloadIdentityPools/atlas-bot-staging/providers/github-main
+GCP_STAGING_DEPLOY_SERVICE_ACCOUNT=atlas-staging-deploy@atlas-staging-510915.iam.gserviceaccount.com
+GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT=atlas-staging-preflight@atlas-staging-510915.iam.gserviceaccount.com
+ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT=atlas-staging-runtime@atlas-staging-510915.iam.gserviceaccount.com
+ATLAS_STAGING_CLOUD_RUN_SERVICE=atlas-paper-staging
+ATLAS_STAGING_DATABASE_SECRET=atlas-staging-primary-db-url
+ATLAS_STAGING_PAPER_DATABASE_SECRET=atlas-staging-customer-paper-db-url
+ATLAS_STAGING_SUPABASE_ANON_KEY_SECRET=atlas-staging-supabase-anon-key
+ATLAS_PRODUCTION_SUPABASE_PROJECT_REF=wauaelzyugjuepmrewaw
+ATLAS_STAGING_SUPABASE_PROJECT_REF=wauaelzyugjuepmrewaw
+ATLAS_STAGING_RUNTIME_DB_ROLE=atlas_paper_reader
+ATLAS_STAGING_PAPER_DB_ROLE=atlas_customer_paper
+```
+
+These are environment **variables**, not database passwords. The deployment workflow hard-codes paper/sandbox flags and binds the API to the restricted ASGI target. It does not turn on trading, funding, withdrawals, payouts or TRON sweeping.
+
+### 5. Deploy and prove the runtime
+
+Only after the PR containing the paper-only runtime is merged and core CI is green on the exact `main` commit, use GitHub Actions → **Deploy Paper-Only Atlas Staging** → Run workflow on `main`. Once the Cloud Run service exists, run **Supabase Staging Identity Preflight** from `main`.
+
+The preflight must pass end-to-end; a successful authentication step alone is not sufficient. It verifies the Cloud Run image entrypoint and safety flags, the distinct Secret Manager references, the primary role's narrowly scoped read-only access, and the customer paper role's schema/RLS/tenant/sequence guards by calling the deployed `/readyz` endpoint with a purpose-bound bearer token derived from the protected `atlas-staging-customer-paper-db-url` secret. The token is computed in memory by the GitHub runner and service, never printed or stored separately, and invalid callers are rejected before readiness opens a database connection. The preflight does not execute migrations or write to the database.
+
+The paper staging entrypoint exposes only `/healthz`, `/readyz` and `/api/customer/paper/*`; customer routes require Supabase-authenticated AAL2 and an already-active customer profile. It never self-registers a customer or creates a subscription. Keep `CUSTOMER_PAPER_LEDGER_ENABLED=false` in every other deployment until separate review authorizes the isolated paper path. Passing this preflight still does not count as a restore drill, provider-ledger reconciliation, production approval, or evidence that simulated costs are venue-calibrated.

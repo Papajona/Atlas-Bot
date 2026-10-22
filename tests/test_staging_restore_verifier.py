@@ -51,18 +51,24 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     runbook = Path("RUNBOOK.md").read_text(encoding="utf-8")
     expected = "0053_supabase_public_default_acl_lockdown"
 
+    # Restore verification still checks the expected migration revision. The
+    # isolated paper-only runtime intentionally avoids the production Alembic
+    # migration path and verifies its two read-only identities plus ledger readiness.
     assert f"--expected-revision {expected}" in workflow
     assert f'default="{expected}"' in verifier
     assert f"checks for revision `{expected}`" in runbook
     assert "database revision is 0049" not in runbook
     assert "same actual ref" in runbook
-    assert "EXPECTED_ALEMBIC_HEAD" in identity_workflow
-    assert "0053_supabase_public_default_acl_lockdown" in identity_workflow
+    assert "EXPECTED_ALEMBIC_HEAD" not in identity_workflow
+    assert "0053_supabase_public_default_acl_lockdown" not in identity_workflow
+    assert "app.paper_staging:app" in identity_workflow
+    assert "can access only customer_profiles/app_state" in identity_workflow
     assert "no second project or paid branch is required" in runbook
     assert "project refs differ before restoring" not in runbook
     assert "must use a different Supabase project from production" not in identity_workflow
     for source in (workflow, identity_workflow, reconciliation_workflow):
         assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in source
+
 
 def test_restore_audit_rejects_missing_required_schema_objects():
     assert required_table_failures([]) == []
