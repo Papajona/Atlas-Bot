@@ -193,7 +193,9 @@ def main() -> int:
                     f"repos/{repository}/git/refs/heads/{branch_name}",
                 ],
                 check=False,
-            )            deletion = _run(
+            )
+
+            deletion = _run(
                 [
                     "gh", "api", "--method", "DELETE",
                     f"repos/{repository}/git/refs/heads/{branch_name}",
