@@ -84,7 +84,7 @@ CREATE ROLE atlas_customer_paper
   NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 
 -- PostgreSQL 16+ may give the CREATEROLE role membership in a role it creates.
-REVOKE atlas_customer_paper FROM CURRENT_USER;
+-- Supabase owns the control-plane membership grant; do not try to revoke it here.
 ALTER ROLE atlas_customer_paper PASSWORD '{escaped}';
 GRANT CONNECT ON DATABASE postgres TO atlas_customer_paper;
 
@@ -108,9 +108,27 @@ BEGIN
 
   IF EXISTS (
     SELECT 1 FROM pg_auth_members
-    WHERE member = role_id OR roleid = role_id
+    WHERE member = role_id
   ) THEN
-    RAISE EXCEPTION 'Restricted role has unexpected role memberships';
+    RAISE EXCEPTION 'Paper role must not inherit privileges from another role';
+  END IF;
+
+  IF (SELECT count(*) FROM pg_auth_members WHERE roleid = role_id) > 1
+     OR EXISTS (
+       SELECT 1
+       FROM pg_auth_members m
+       JOIN pg_roles member_role ON member_role.oid = m.member
+       JOIN pg_roles grantor_role ON grantor_role.oid = m.grantor
+       WHERE m.roleid = role_id
+         AND NOT (
+           member_role.rolname = 'postgres'
+           AND grantor_role.rolname = 'supabase_admin'
+           AND m.admin_option
+           AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false) = false
+           AND COALESCE((to_jsonb(m)->>'set_option')::boolean, false) = false
+         )
+     ) THEN
+    RAISE EXCEPTION 'Paper role has an unsafe incoming membership';
   END IF;
 END
 $verify$;
