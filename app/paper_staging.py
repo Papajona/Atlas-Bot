@@ -18,7 +18,7 @@ from .customer_paper_api import _paper_feature_flags, build_customer_paper_route
 from .customer_paper_ledger import preflight_isolated_customer_paper_ledger
 # Import the existing JWT/MFA verifier and market-data adapter. The main ASGI app is
 # not mounted or served; its startup/lifespan is never executed in this process.
-from .main import MarketRequest, customer_claims, market_data
+from .main import MarketRequest, api_rate_limit, customer_claims, market_data
 
 
 _EXPECTED_PRIMARY_ROLE = "atlas_paper_reader"
@@ -190,6 +190,10 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+# Preserve the existing per-IP plus per-authenticated-identity rate limiter without
+# mounting the main application's production routes or lifespan.
+app.middleware("http")(api_rate_limit)
 
 
 @app.get("/healthz")
