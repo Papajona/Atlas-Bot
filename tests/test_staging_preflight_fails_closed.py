@@ -30,6 +30,13 @@ def test_staging_preflight_allows_same_project_and_still_binds_database_host():
     assert "expected = os.environ[\"STAGING_SUPABASE_PROJECT_REF\"]" in workflow
     assert "database hostname does not match the explicitly configured staging Supabase project" in workflow
     assert '"gcloud", "run", "services", "describe"' in workflow
+    assert '"PAPER_TRADING": "true"' in workflow
+    assert '"LIVE_TRADING_ENABLED": "false"' in workflow
+    assert '"CUSTOMER_LIVE_TRADING_ENABLED": "false"' in workflow
+    assert '"PAYOUT_LIVE_ENABLED": "false"' in workflow
+    assert '"BROKER_SANDBOX": "true"' in workflow
+    assert '"USDT_TRON_ENABLED": "false"' in workflow
+    assert '"USDT_TRON_SWEEP_ENABLED": "false"' in workflow
 
 
 def test_staging_preflight_decodes_percent_encoded_database_credentials():
