@@ -20,15 +20,30 @@ This mode is opt-in and disabled by default. Configure `CUSTOMER_PAPER_SHARED_DA
 
 ### Operator setup sequence (existing project only)
 
-1. Confirm a current recoverable backup/export is available before applying schema DDL. For this Free-tier project's direct operator commands, use the Session pooler (host `aws-0-eu-west-1.pooler.supabase.com`, port `5432`, admin username `postgres.wauaelzyugjuepmrewaw`, database `postgres`) with `psql -W`. The native prompt hides the password and avoids putting it in the connection URI, command arguments, environment, or a password file. Do not use the transaction pooler port `6543`. This operator path uses the existing project only; it does not create a second Supabase project or paid branch.
-2. Create the restricted paper login through the reviewed helper, which reuses the already-protected runtime URL file if an earlier attempt generated it:
+1. Confirm a current recoverable backup/export is available before applying schema DDL. For this Free-tier project's direct operator commands, use the Session pooler (host `aws-0-eu-west-1.pooler.supabase.com`, port `5432`, admin username `postgres.wauaelzyugjuepmrewaw`, database `postgres`) with the native `psql -W` password prompt. Do not put the password in a URI, shell variable, command argument, or password file. Do not use transaction-pooler port `6543`.
+2. Provision the read-only primary runtime identity from the reviewed checkout:
+
+   ```bash
+   psql "host=aws-0-eu-west-1.pooler.supabase.com port=5432 dbname=postgres user=postgres.wauaelzyugjuepmrewaw sslmode=require" -W -X
+   ```
+
+   At the hidden database-password prompt, enter the existing administrative password. At the `psql` prompt, run:
+
+   ```psql
+   \\i scripts/provision_atlas_paper_reader.sql
+   \\password atlas_paper_reader
+   \\q
+   ```
+
+   Save the newly chosen `atlas_paper_reader` password in the approved password manager; the later staging bootstrap asks for it silently. The reader role is `LOGIN NOINHERIT BYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`, has only SELECT on `public.customer_profiles` and `public.app_state`, and has a read-only default transaction setting. If the role already exists, do not rerun the creation script—inspect it first.
+3. Provision `atlas_customer_paper` only if it does not already exist, using the reviewed helper:
 
    ```bash
    python scripts/setup_customer_paper_role_interactive.py --project-ref wauaelzyugjuepmrewaw
    ```
 
-   At the native `psql` password prompt, type the existing database password that was verified against this project. The helper creates `atlas_customer_paper` transactionally and verifies its attributes and role-membership contract before commit. Its generated URL is kept at `~/.atlas-customer-paper/database-url` with restrictive permissions; do not display or paste its contents. Do not manually recreate the role or overwrite the URL file after a failed attempt—read the database catalog first.
-3. Apply the reviewed schema using the same native prompt, not an admin URL stored in an environment variable:
+   The helper prompts natively for the existing administrative database password and saves its generated runtime URL to `~/.atlas-customer-paper/database-url` with restrictive permissions. If the role already exists, do not rerun role creation: inspect its attributes, membership and grants. Never display or paste the runtime URL. The helper validates the exact Supabase-managed incoming control-plane membership (member `postgres`, grantor `supabase_admin`, ADMIN OPTION true, `inherit_option=false`, `set_option=false`) and rejects all other memberships.
+4. Apply the reviewed paper schema as the administrative database owner. The paper role must already exist and pass the role checks; do not create it manually or run schema DDL as either runtime identity:
 
    ```bash
    psql "host=aws-0-eu-west-1.pooler.supabase.com port=5432 dbname=postgres user=postgres.wauaelzyugjuepmrewaw sslmode=require" \
@@ -37,14 +52,14 @@ This mode is opt-in and disabled by default. Configure `CUSTOMER_PAPER_SHARED_DA
      -f scripts/customer_paper_ledger_schema.sql
    ```
 
-   This runs the schema DDL as the reviewed database owner in a transaction, creates the isolated `customer_paper` schema/tables, and grants the narrowly scoped runtime permissions. The schema guard accepts only the exact Supabase-managed incoming membership (member `postgres`, grantor `supabase_admin`, ADMIN OPTION true, and `inherit_option`/`set_option` false); the paper role itself must not be a member of any other role. Any other membership is a hard stop. Do not run this against production just to make release checks green.
-4. Store the paper URL with the same project/host/database but username `atlas_customer_paper` and its separately generated password in the approved secret store. Set `CUSTOMER_PAPER_SHARED_DATABASE_ENABLED=true` only for the preflight. Keep `CUSTOMER_PAPER_LEDGER_ENABLED=false` during this read-only check. Run:
+   The schema guard requires the paper role not be a member of any other role, permits only the exact Supabase-managed incoming membership described above, and fails closed for any other membership or unsafe privilege. Any failure is a hard stop; do not broaden grants to make it pass.
+5. Run the read-only isolation preflight with the verified primary reader URL and the protected paper URL. Set `CUSTOMER_PAPER_SHARED_DATABASE_ENABLED=true` only for this preflight and keep `CUSTOMER_PAPER_LEDGER_ENABLED=false`:
 
    ```bash
    python -c "import asyncio; from app.customer_paper_ledger import preflight_isolated_customer_paper_ledger; print(asyncio.run(preflight_isolated_customer_paper_ledger(require_enabled=False)))"
    ```
 
-   Proceed with paper-only rehearsal only if the exact endpoint reports `status=PASS`, `isolation_mode=shared_database_schema`, and the runtime role/permissions match this runbook. Any other result is a hard stop; do not broaden grants to make it pass. The preflight is read-only and does not enable paper execution.
+   Proceed with paper-only rehearsal only if the exact endpoint reports `status=PASS`, `isolation_mode=shared_database_schema`, and the runtime roles/permissions match this runbook. A missing or unsafe privilege is a hard stop; do not broaden grants. The preflight is read-only and does not enable paper execution.
 
 The paper role must be `LOGIN NOINHERIT NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`, must not be a member of any role, and may have only the exact Supabase-managed incoming control-plane membership documented above (no other membership rows). It must own no paper tables, have no `CREATE` privilege on any schema, and have privileges only for `SELECT`/`INSERT` on the seven paper tables plus `USAGE` on their identity sequences. It must have no privileges on any real-money table, sequence, or executable `SECURITY DEFINER` function. Forced row-level security and the exact tenant policy are mandatory. The application refuses to proceed if any of these checks fail.
 
