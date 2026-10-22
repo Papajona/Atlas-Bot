@@ -296,7 +296,10 @@ def test_staging_identity_preflight_allows_same_project_and_checks_read_only_pap
     assert "primary DB URL is not the configured read-only runtime role" in workflow
     assert "session_role != role" in workflow
     assert "primary runtime role has administrative privileges or cannot login" in workflow
-    assert "must be NOINHERIT, BYPASSRLS and have no role memberships" in workflow
+    assert "must be NOINHERIT/BYPASSRLS, with no inherited roles or unsafe Supabase-managed membership" in workflow
+    assert "grantor_role.rolname='supabase_admin'" in workflow
+    assert "to_jsonb(m) ? 'inherit_option'" in workflow
+    assert "to_jsonb(m) ? 'set_option'" in workflow
     assert "no migration or write was executed" in workflow
     assert "can access only customer_profiles/app_state" in workflow
     assert "EXPECTED_ALEMBIC_HEAD" not in workflow
