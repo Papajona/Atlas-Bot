@@ -12,7 +12,6 @@ import os
 import secrets
 import stat
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit, urlunsplit
