@@ -9,10 +9,10 @@ from decimal import Decimal
 from sqlalchemy import select
 
 from app.customer_funds import ledger_invariant_report, post_journal
-from app.db import CustomerLedgerAccount, SessionLocal
+from app.db import CustomerLedgerAccount, CustomerProfile, SessionLocal
 
 
-CUSTOMER_ID = 900001
+AUTH_USER_ID = "atlas-postgres-restore-drill"
 CURRENCY = "USDT"
 AMOUNT = Decimal("123.450000")
 IDEM = "restore-drill:customer-900001"
@@ -21,19 +21,30 @@ IDEM = "restore-drill:customer-900001"
 async def seed() -> None:
     async with SessionLocal() as db:
         async with db.begin():
+            profile = (
+                await db.execute(
+                    select(CustomerProfile).where(CustomerProfile.auth_user_id == AUTH_USER_ID)
+                )
+            ).scalar_one_or_none()
+            if profile is None:
+                profile = CustomerProfile(auth_user_id=AUTH_USER_ID, status="ACTIVE")
+                db.add(profile)
+                await db.flush()
+            customer_id = profile.id
+
             existing = (
                 await db.execute(
                     select(CustomerLedgerAccount).where(
-                        CustomerLedgerAccount.customer_id == CUSTOMER_ID,
+                        CustomerLedgerAccount.customer_id == customer_id,
                         CustomerLedgerAccount.currency == CURRENCY,
                     )
                 )
             ).scalar_one_or_none()
             if existing is not None:
-                raise RuntimeError("restore drill seed customer already exists")
+                raise RuntimeError("restore drill seed customer already has a ledger account")
 
             ledger = CustomerLedgerAccount(
-                customer_id=CUSTOMER_ID,
+                customer_id=customer_id,
                 currency=CURRENCY,
                 available=AMOUNT,
                 trading_reserved=Decimal("0"),
@@ -47,7 +58,7 @@ async def seed() -> None:
                 currency=CURRENCY,
                 entry_type="RESTORE_DRILL",
                 reference_type="TEST",
-                reference_id="restore-drill-900001",
+                reference_id=f"restore-drill-customer-{customer_id}",
                 idempotency_key=IDEM,
                 lines=[
                     {
@@ -56,8 +67,8 @@ async def seed() -> None:
                         "credit": Decimal("0"),
                     },
                     {
-                        "account_code": f"LIABILITY:CUSTOMER:{CUSTOMER_ID}:{CURRENCY}:AVAILABLE",
-                        "customer_id": CUSTOMER_ID,
+                        "account_code": f"LIABILITY:CUSTOMER:{customer_id}:{CURRENCY}:AVAILABLE",
+                        "customer_id": customer_id,
                         "debit": Decimal("0"),
                         "credit": AMOUNT,
                     },
@@ -68,15 +79,23 @@ async def seed() -> None:
         report = await ledger_invariant_report(db)
         if not report["ok"]:
             raise RuntimeError(json.dumps(report, sort_keys=True))
-        print(json.dumps({"phase": "seed", "invariant": report}, sort_keys=True))
+        print(json.dumps({"phase": "seed", "customer_id": customer_id, "invariant": report}, sort_keys=True))
 
 
 async def verify() -> None:
     async with SessionLocal() as db:
+        profile = (
+            await db.execute(
+                select(CustomerProfile).where(CustomerProfile.auth_user_id == AUTH_USER_ID)
+            )
+        ).scalar_one_or_none()
+        if profile is None:
+            raise RuntimeError("restore drill customer profile is missing after restore")
+        customer_id = profile.id
         row = (
             await db.execute(
                 select(CustomerLedgerAccount).where(
-                    CustomerLedgerAccount.customer_id == CUSTOMER_ID,
+                    CustomerLedgerAccount.customer_id == customer_id,
                     CustomerLedgerAccount.currency == CURRENCY,
                 )
             )
@@ -96,7 +115,7 @@ async def verify() -> None:
             json.dumps(
                 {
                     "phase": "restore_verify",
-                    "customer_id": CUSTOMER_ID,
+                    "customer_id": customer_id,
                     "available": str(row.available),
                     "invariant": report,
                 },
