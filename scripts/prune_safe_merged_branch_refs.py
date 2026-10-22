@@ -90,8 +90,8 @@ def _object_id_at_commit(commit_sha: str, path: str) -> str | None:
     )
 
 
-def _branch_delta_matches_main(branch_sha: str, main_sha: str) -> bool:
-    """True when every branch-side path change since merge-base is already in main."""
+def _branch_delta_mismatched_paths(branch_sha: str, main_sha: str) -> list[str]:
+    """Return branch-side changed paths whose tip object differs from main."""
     merge_base_result = _run(
         ["git", "merge-base", main_sha, branch_sha],
         check=False,
@@ -116,13 +116,16 @@ def _branch_delta_matches_main(branch_sha: str, main_sha: str) -> bool:
         )
 
     changed_paths = [path for path in diff.stdout.split("\0") if path]
-    for path in changed_paths:
-        branch_object = _object_id_at_commit(branch_sha, path)
-        main_object = _object_id_at_commit(main_sha, path)
-        if branch_object != main_object:
-            return False
-    return True
+    return [
+        path
+        for path in changed_paths
+        if _object_id_at_commit(branch_sha, path) != _object_id_at_commit(main_sha, path)
+    ]
 
+
+def _branch_delta_matches_main(branch_sha: str, main_sha: str) -> bool:
+    """True when every branch-side path change since merge-base is already in main."""
+    return not _branch_delta_mismatched_paths(branch_sha, main_sha)
 
 def _all_branch_commits_are_patch_equivalent(branch_sha: str, main_sha: str) -> bool:
     """Accept patch-equivalence only when no branch-only merge commits exist.
@@ -228,16 +231,21 @@ def main() -> int:
         deleted = 0
         preserved = 0
         failed = 0
+        decisions: list[tuple[str, str, str]] = []
+
+        def record(status: str, branch_name: str, reason: str) -> None:
+            decisions.append((status, branch_name, reason))
+            print(f"{status} {branch_name}: {reason}")
         for branch_name in branches:
             if branch_name in open_pr_heads:
-                print(f"PRESERVE {branch_name}: branch has an open pull request")
+                record("PRESERVE", branch_name, "branch has an open pull request")
                 preserved += 1
                 continue
 
             ref = f"refs/remotes/origin/{branch_name}"
             result = _run(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], check=False)
             if result.returncode:
-                print(f"PRESERVE {branch_name}: remote ref changed or could not be resolved")
+                record("PRESERVE", branch_name, "remote ref changed or could not be resolved")
                 preserved += 1
                 continue
             branch_sha = result.stdout.strip()
@@ -266,7 +274,15 @@ def main() -> int:
                     reason = "all non-merge branch commits are patch-equivalent to main"
 
             if not safe:
-                print(f"PRESERVE {branch_name}: {reason}")
+                mismatch_paths = _branch_delta_mismatched_paths(branch_sha, main_sha)
+                if mismatch_paths:
+                    sample = ", ".join(mismatch_paths[:8])
+                    remainder = f" (+{len(mismatch_paths) - 8} more)" if len(mismatch_paths) > 8 else ""
+                    reason = (
+                        f"{reason}; {len(mismatch_paths)} branch-side path(s) differ from main: "
+                        f"{sample}{remainder}"
+                    )
+                record("PRESERVE", branch_name, reason)
                 preserved += 1
                 continue
 
@@ -277,12 +293,12 @@ def main() -> int:
                 check=False,
             )
             if live.returncode or not live.stdout.strip():
-                print(f"PRESERVE {branch_name}: ref disappeared or could not be re-read")
+                record("PRESERVE", branch_name, "ref disappeared or could not be re-read")
                 preserved += 1
                 continue
             live_sha = live.stdout.split()[0]
             if live_sha != branch_sha:
-                print(f"PRESERVE {branch_name}: branch tip changed during reconciliation")
+                record("PRESERVE", branch_name, "branch tip changed during reconciliation")
                 preserved += 1
                 continue
 
@@ -295,17 +311,17 @@ def main() -> int:
                 check=False,
             )
             if latest_open.returncode:
-                print(f"PRESERVE {branch_name}: could not re-check open pull requests")
+                record("PRESERVE", branch_name, "could not re-check open pull requests")
                 preserved += 1
                 continue
             try:
                 opened = json.loads(latest_open.stdout)
             except json.JSONDecodeError:
-                print(f"PRESERVE {branch_name}: malformed open-pull-request response")
+                record("PRESERVE", branch_name, "malformed open-pull-request response")
                 preserved += 1
                 continue
             if opened:
-                print(f"PRESERVE {branch_name}: an open pull request appeared during reconciliation")
+                record("PRESERVE", branch_name, "an open pull request appeared during reconciliation")
                 preserved += 1
                 continue
 
@@ -317,17 +333,31 @@ def main() -> int:
                 check=False,
             )
             if deletion.returncode:
-                print(
-                    f"ERROR {branch_name}: safe-to-delete proof passed but GitHub ref deletion failed: "
+                record(
+                    "ERROR",
+                    branch_name,
+                    "safe-to-delete proof passed but GitHub ref deletion failed: "
                     + (deletion.stderr.strip() or f"exit code {deletion.returncode}"),
-                    file=sys.stderr,
                 )
                 failed += 1
                 continue
-            print(f"DELETED {branch_name}: {reason}")
+            record("DELETED", branch_name, reason)
             deleted += 1
 
         print(f"Branch prune summary: deleted={deleted}, preserved={preserved}, failed={failed}")
+        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary_path:
+            with open(summary_path, "a", encoding="utf-8") as summary:
+                summary.write("# Atlas-Bot branch reconciliation\n\n")
+                summary.write(
+                    f"Main SHA: `{main_sha}` — deleted **{deleted}**, "
+                    f"preserved **{preserved}**, failed **{failed}**.\n\n"
+                )
+                summary.write("| Branch | Decision | Evidence / reason |\n|---|---|---|\n")
+                for decision, branch_name, reason in decisions:
+                    safe_branch = branch_name.replace("|", "\\|")
+                    safe_reason = reason.replace("|", "\\|").replace("\n", " ")
+                    summary.write(f"| `{safe_branch}` | {decision} | {safe_reason} |\n")
         return 1 if failed else 0
     except (RuntimeError, json.JSONDecodeError) as exc:
         print(f"BLOCKED: safe branch pruning aborted: {exc}", file=sys.stderr)
