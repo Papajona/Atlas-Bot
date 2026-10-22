@@ -9,19 +9,50 @@ from fastapi import HTTPException
 from app import paper_staging
 
 
-def test_paper_staging_asgi_exposes_only_health_and_paper_routes():
-    # Recent FastAPI releases retain included routers as internal router objects
-    # instead of flattening every route into app.routes. OpenAPI's generated path
-    # map is the stable public view of the mounted endpoints.
-    paths = set(paper_staging.app.openapi()["paths"])
+def _concrete_dispatch_routes(app):
+    """Walk actual dispatch routes through FastAPI's lazy included-router wrappers."""
+    pending = list(app.routes)
+    seen = set()
+    concrete = []
+    while pending:
+        route = pending.pop()
+        if id(route) in seen:
+            continue
+        seen.add(id(route))
+        path = getattr(route, "path", None)
+        if isinstance(path, str):
+            concrete.append(route)
+            # A mounted route can itself own an ASGI application with child routes.
+            children = getattr(getattr(route, "app", None), "routes", None)
+            if children:
+                pending.extend(children)
+            continue
+        children = getattr(route, "routes", None)
+        if children is None:
+            for attr in ("router", "original_router", "_router"):
+                nested = getattr(route, attr, None)
+                nested_routes = getattr(nested, "routes", None)
+                if nested_routes is not None:
+                    children = nested_routes
+                    break
+        if children is None:
+            raise AssertionError(f"Cannot enumerate dispatchable route wrapper: {type(route).__name__}")
+        pending.extend(list(children))
+    return concrete
 
-    assert "/healthz" in paths
-    assert "/readyz" in paths
-    assert any(path.startswith("/api/customer/paper/") for path in paths)
-    assert all(
-        path in {"/healthz", "/readyz"} or path.startswith("/api/customer/paper/")
-        for path in paths
+
+def test_paper_staging_asgi_exposes_only_health_and_paper_routes():
+    routes = _concrete_dispatch_routes(paper_staging.app)
+    assert len(routes) >= 3
+    allowed = lambda path: (
+        path in {"/healthz", "/readyz"}
+        or path.startswith("/api/customer/paper/")
     )
+    assert all(allowed(route.path) for route in routes)
+    assert all(route.path != "/openapi.json" for route in routes)
+    assert next(r for r in routes if r.path == "/healthz").methods == {"GET"}
+    assert next(r for r in routes if r.path == "/readyz").methods == {"GET"}
+    assert set(paper_staging.app.openapi()["paths"]) == {r.path for r in routes}
     assert paper_staging.app.docs_url is None
     assert paper_staging.app.redoc_url is None
     assert paper_staging.app.openapi_url is None
@@ -53,7 +84,7 @@ def test_paper_customer_auth_requires_an_existing_profile_and_never_self_registe
         return {"sub": "supabase-user-2", "aal": "aal2"}
 
     class QueryResult:
-        def scalar_one_or_none(self):
+        def one_or_none(self):
             return None
 
     class ReadOnlyDatabase:
@@ -83,18 +114,27 @@ def test_paper_customer_auth_returns_only_an_active_existing_profile(monkeypatch
         return {"sub": "supabase-user-3", "aal": "aal2"}
 
     class QueryResult:
-        def scalar_one_or_none(self):
-            return profile
+        def one_or_none(self):
+            return SimpleNamespace(id=profile.id, auth_user_id=profile.auth_user_id, status=profile.status)
 
     class ReadOnlyDatabase:
-        async def execute(self, _query):
+        statement = None
+
+        async def execute(self, query):
+            self.statement = query
             return QueryResult()
 
+    db = ReadOnlyDatabase()
     monkeypatch.setattr(paper_staging, "customer_claims", fake_customer_claims)
 
     result_profile, claims = asyncio.run(
-        paper_staging.get_existing_customer("Bearer test", ReadOnlyDatabase())
+        paper_staging.get_existing_customer("Bearer test", db)
     )
 
-    assert result_profile is profile
+    assert result_profile.id == profile.id
+    assert result_profile.auth_user_id == profile.auth_user_id
+    assert result_profile.status == profile.status
     assert claims["aal"] == "aal2"
+    selected = {column.name for column in db.statement.selected_columns}
+    assert selected == {"id", "auth_user_id", "status"}
+    assert "email" not in selected and "display_name" not in selected
