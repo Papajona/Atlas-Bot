@@ -62,6 +62,34 @@ def test_paper_staging_asgi_exposes_only_health_and_paper_routes():
     assert paper_staging.app.openapi_url is None
 
 
+
+def test_readyz_memory_limiter_enforces_quota_and_expires_old_requests(monkeypatch):
+    limiter = paper_staging._readyz_request_times
+    limiter.clear()
+    monkeypatch.setattr(paper_staging, "_READYZ_RATE_LIMIT_PER_MINUTE", 2)
+    monkeypatch.setattr(paper_staging, "_READYZ_RATE_MAX_CLIENTS", 10)
+
+    assert paper_staging._allow_paper_readyz_request("client-a", now=100.0)
+    assert paper_staging._allow_paper_readyz_request("client-a", now=101.0)
+    assert not paper_staging._allow_paper_readyz_request("client-a", now=102.0)
+    assert paper_staging._allow_paper_readyz_request("client-b", now=102.0)
+    assert paper_staging._allow_paper_readyz_request("client-a", now=161.0)
+
+
+def test_readyz_memory_limiter_bounds_client_state_and_fails_closed(monkeypatch):
+    limiter = paper_staging._readyz_request_times
+    limiter.clear()
+    monkeypatch.setattr(paper_staging, "_READYZ_RATE_LIMIT_PER_MINUTE", 10)
+    monkeypatch.setattr(paper_staging, "_READYZ_RATE_MAX_CLIENTS", 2)
+
+    assert paper_staging._allow_paper_readyz_request("client-a", now=10.0)
+    assert paper_staging._allow_paper_readyz_request("client-b", now=10.0)
+    assert not paper_staging._allow_paper_readyz_request("client-c", now=11.0)
+    assert len(limiter) == 2
+    assert paper_staging._allow_paper_readyz_request("client-c", now=71.0)
+    assert len(limiter) <= 2
+
+
 def test_paper_customer_auth_rejects_aal1_before_querying_database(monkeypatch):
     async def fake_customer_claims(_authorization, require_aal2=True):
         return {"sub": "supabase-user-1", "aal": "aal1"}
