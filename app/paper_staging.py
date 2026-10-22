@@ -134,6 +134,14 @@ def _allow_paper_api_request(bucket_key: str, *, limit: int, now: float | None =
     return True
 
 
+def _primary_reader_membership_gate_passes(member_count: Any) -> bool:
+    """Only zero non-allowlisted incoming memberships may pass primary-reader preflight."""
+    try:
+        return int(member_count) == 0
+    except (TypeError, ValueError):
+        return False
+
+
 async def _primary_reader_preflight() -> dict[str, Any]:
     """Permit only read-only access to the two existing tables required for paper auth/kill switch."""
     try:
@@ -212,7 +220,7 @@ async def _primary_reader_preflight() -> dict[str, Any]:
         or not bool(row["rolbypassrls"])
         or bool(row["rolinherit"])
         or int(row["memberships"]) != 0
-        or int(row["member_count"]) != 0
+        or not _primary_reader_membership_gate_passes(row["member_count"])
         or not bool(row["public_usage"])
         or bool(row["public_create"])
         or int(row["other_schema_privileges"]) != 0
