@@ -194,14 +194,6 @@ def main() -> int:
                 ],
                 check=False,
             )
-
-            deletion = _run(
-                [
-                    "gh", "api", "--method", "DELETE",
-                    f"repos/{repository}/git/refs/heads/{branch_name}",
-                ],
-                check=False,
-            )
             if deletion.returncode:
                 print(
                     f"ERROR {branch_name}: safe-to-delete proof passed but GitHub ref deletion failed: "
