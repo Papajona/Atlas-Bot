@@ -33,6 +33,8 @@ jobs:
     env:
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
       GCP_REGION: ${{ vars.GCP_REGION || secrets.GCP_REGION }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER || secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT: ${{ vars.GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT || secrets.GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT }}
       STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
       PRODUCTION_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}
       STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
@@ -49,7 +51,17 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REF" = "refs/heads/main"
           : "${GCP_PROJECT_ID:?Missing GCP_PROJECT_ID}"
-          : "${GCP_REGION:?Missing GCP_REGION}"
+          : "${GCP_REGION:?Missing GCP_REGION variable or secret}"
+          : "${GCP_WORKLOAD_IDENTITY_PROVIDER:?Missing GCP_WORKLOAD_IDENTITY_PROVIDER variable or secret}"
+          : "${GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT:?Missing GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT variable or secret}"
+          [[ "$GCP_WORKLOAD_IDENTITY_PROVIDER" == projects/*/locations/global/workloadIdentityPools/*/providers/* ]] || {
+            echo "BLOCKED: workload identity provider must be a full Google Cloud resource name" >&2
+            exit 1
+          }
+          [[ "$GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT" == *@*.iam.gserviceaccount.com ]] || {
+            echo "BLOCKED: staging restore audit identity must be a Google service-account email" >&2
+            exit 1
+          }
           : "${STAGING_SUPABASE_PROJECT_REF:?Missing ATLAS_STAGING_SUPABASE_PROJECT_REF}"
           : "${PRODUCTION_SUPABASE_PROJECT_REF:?Set ATLAS_PRODUCTION_SUPABASE_PROJECT_REF to the current project ref (same as staging for the free single-project setup)}"
           : "${STAGING_DATABASE_SECRET:?Missing ATLAS_STAGING_DATABASE_SECRET}"
