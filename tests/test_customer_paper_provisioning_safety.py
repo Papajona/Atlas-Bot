@@ -145,6 +145,14 @@ def test_runtime_customer_paper_uri_rejects_invalid_project_ref_or_empty_passwor
         _runtime_connection_uri(PROJECT_REF, "")
 
 
+def test_gcp_bootstrap_reuses_provisioner_generated_paper_url_without_retyping_password():
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    assert 'PAPER_URL_FILE="${HOME}/.atlas-customer-paper/database-url"' in script
+    assert 'put_secret_file "$PAPER_SECRET" "$PAPER_URL_FILE"' in script
+    assert 'atlas_customer_paper.${SUPABASE_PROJECT_REF}' in script
+    assert 'db.${SUPABASE_PROJECT_REF}.supabase.co' not in script
+
+
 def test_provision_verifier_matches_all_nine_current_schema_tables_and_policy_types():
     schema = Path("scripts/customer_paper_ledger_schema.sql").read_text(encoding="utf-8")
     expected_tables = {
