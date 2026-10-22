@@ -422,6 +422,7 @@ def test_paper_staging_deployment_is_restricted_and_keeps_risk_features_off():
     assert "atlas-staging-supabase-anon-key" not in deploy
     assert "set-secrets" in deploy
     assert "current_setting('transaction_read_only')" in paper_app
+    assert 'app.middleware("http")(api_rate_limit)' in paper_app
     assert '"transaction_read_only"] or "").lower() not in {"on", "true", "t"}' in paper_app
     assert "Customer profile must already exist" in paper_app
     assert "app.main:app" not in deploy
