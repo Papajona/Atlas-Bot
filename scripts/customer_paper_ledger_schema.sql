@@ -38,7 +38,9 @@ BEGIN
                 member_role.rolname = 'postgres'
                 AND grantor_role.rolname = 'supabase_admin'
                 AND m.admin_option
+                AND (to_jsonb(m) ? 'inherit_option')
                 AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false) = false
+                AND (to_jsonb(m) ? 'set_option')
                 AND COALESCE((to_jsonb(m)->>'set_option')::boolean, false) = false
               )
           )
