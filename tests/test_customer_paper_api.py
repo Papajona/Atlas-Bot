@@ -146,8 +146,10 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
     # deterministically without sleeping and without using future live market data.
     monkeypatch.setattr(paper_api, "datetime", FrozenDateTime)
     market = {"bar_at": now}
+    market_requests = []
 
-    def fake_market_data(_request):
+    def fake_market_data(request):
+        market_requests.append(request)
         return _verified_bars(market["bar_at"], volume="100")
 
     async def fake_get_customer(authorization, _db, require_aal2=True):
@@ -203,6 +205,11 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
         assert submitted.status_code == 200, submitted.text
         assert submitted.json()["order"]["status"] == "SUBMITTED"
         assert submitted.json()["order"]["filled_quantity"] == "0.000000000000000000"
+
+    # A one-minute order requests a one-day history window (two CCXT pages at most),
+    # not the previous 30 days / roughly 44 sequential pages.
+    assert market_requests
+    assert all(request.timeframe == "1m" and request.days == 1 for request in market_requests)
 
     # Both tenants advance against the exact same completed bar. Shared capacity is 1.0:
     # customer A receives 0.6 and customer B can receive only the 0.4 remainder.
