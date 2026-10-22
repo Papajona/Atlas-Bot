@@ -106,7 +106,7 @@ def _branch_delta_mismatched_paths(branch_sha: str, main_sha: str) -> list[str]:
         raise RuntimeError("git merge-base returned an empty merge base")
 
     diff = _run(
-        ["git", "diff", "--name-only", "-z", merge_base, branch_sha],
+        ["git", "diff", "--no-renames", "--name-only", "-z", merge_base, branch_sha],
         check=False,
     )
     if diff.returncode:
