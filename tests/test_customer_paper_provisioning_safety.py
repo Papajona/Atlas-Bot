@@ -40,6 +40,36 @@ def test_admin_connection_uses_private_pgpass_not_argv_or_environment(tmp_path: 
     assert _pgpass_escape("colon:backslash\\") == "colon\\:backslash\\\\"
 
 
+
+
+def test_admin_connection_accepts_project_bound_session_pooler_uri(tmp_path: Path):
+    passfile = tmp_path / "pgpass-pooler"
+    uri = (
+        f"postgresql://postgres.{PROJECT_REF}:pass%3Aword@"
+        "aws-0-eu-west-1.pooler.supabase.com:5432/postgres"
+    )
+    env = _connection_env(uri, PROJECT_REF, passfile)
+    assert env["PGHOST"] == "aws-0-eu-west-1.pooler.supabase.com"
+    assert env["PGPORT"] == "5432"
+    assert env["PGUSER"] == f"postgres.{PROJECT_REF}"
+    assert passfile.read_text(encoding="utf-8").startswith(
+        f"aws-0-eu-west-1.pooler.supabase.com:5432:postgres:postgres.{PROJECT_REF}:"
+    )
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        f"postgresql://postgres.wrongproject:secret@aws-0-eu-west-1.pooler.supabase.com:5432/postgres",
+        f"postgresql://postgres.{PROJECT_REF}:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres",
+        f"postgresql://postgres.{PROJECT_REF}:secret@not-a-pooler.supabase.com:5432/postgres",
+    ],
+)
+def test_admin_connection_rejects_wrong_session_pooler_target(uri: str, tmp_path: Path):
+    with pytest.raises(ValueError):
+        _connection_env(uri, PROJECT_REF, tmp_path / "pgpass-invalid")
+
+
 @pytest.mark.parametrize(
     "uri",
     [
@@ -90,6 +120,22 @@ def test_runtime_customer_paper_uri_requires_tls_and_encodes_credentials():
     assert unquote(parsed.username or "") == "atlas_customer_paper"
     assert unquote(parsed.password or "") == password
     assert parse_qs(parsed.query) == {"ssl": ["require"]}
+
+
+
+def test_runtime_uri_uses_session_pooler_username_suffix():
+    host = "aws-0-eu-west-1.pooler.supabase.com"
+    uri = _runtime_connection_uri(PROJECT_REF, "another secret", host)
+    parsed = urlsplit(uri)
+    assert parsed.hostname == host
+    assert parsed.port == 5432
+    assert unquote(parsed.username or "") == f"atlas_customer_paper.{PROJECT_REF}"
+    assert parse_qs(parsed.query) == {"ssl": ["require"]}
+
+
+def test_runtime_uri_rejects_unverified_host():
+    with pytest.raises(ValueError):
+        _runtime_connection_uri(PROJECT_REF, "secret", "pooler.invalid.example")
 
 
 def test_runtime_customer_paper_uri_rejects_invalid_project_ref_or_empty_password():

@@ -20,7 +20,7 @@ ARTIFACT_REPOSITORY="atlas-staging"
 CLOUD_RUN_SERVICE="atlas-paper-staging"
 
 SUPABASE_PROJECT_REF="wauaelzyugjuepmrewaw"
-SUPABASE_DB_HOST="db.${SUPABASE_PROJECT_REF}.supabase.co"
+SUPABASE_DB_HOST="aws-0-eu-west-1.pooler.supabase.com"
 PRIMARY_SECRET="atlas-staging-primary-db-url"
 PAPER_SECRET="atlas-staging-customer-paper-db-url"
 ANON_KEY_SECRET="atlas-staging-supabase-anon-key"
@@ -124,8 +124,8 @@ PY
 
 PRIMARY_ENCODED="$(url_encode_password "$PRIMARY_PASSWORD")"
 PAPER_ENCODED="$(url_encode_password "$PAPER_PASSWORD")"
-PRIMARY_URL="postgresql+asyncpg://atlas_paper_reader:${PRIMARY_ENCODED}@${SUPABASE_DB_HOST}:5432/postgres?ssl=require"
-PAPER_URL="postgresql+asyncpg://atlas_customer_paper:${PAPER_ENCODED}@${SUPABASE_DB_HOST}:5432/postgres?ssl=require"
+PRIMARY_URL="postgresql+asyncpg://atlas_paper_reader.${SUPABASE_PROJECT_REF}:${PRIMARY_ENCODED}@${SUPABASE_DB_HOST}:5432/postgres?ssl=require"
+PAPER_URL="postgresql+asyncpg://atlas_customer_paper.${SUPABASE_PROJECT_REF}:${PAPER_ENCODED}@${SUPABASE_DB_HOST}:5432/postgres?ssl=require"
 unset PRIMARY_PASSWORD PAPER_PASSWORD PRIMARY_ENCODED PAPER_ENCODED
 
 put_secret() {
