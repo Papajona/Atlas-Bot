@@ -60,7 +60,7 @@ def test_admin_connection_accepts_project_bound_session_pooler_uri(tmp_path: Pat
 @pytest.mark.parametrize(
     "uri",
     [
-        f"postgresql://postgres.wrongproject:secret@aws-0-eu-west-1.pooler.supabase.com:5432/postgres",
+        "postgresql://postgres.wrongproject:secret@aws-0-eu-west-1.pooler.supabase.com:5432/postgres",
         f"postgresql://postgres.{PROJECT_REF}:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres",
         f"postgresql://postgres.{PROJECT_REF}:secret@not-a-pooler.supabase.com:5432/postgres",
     ],
