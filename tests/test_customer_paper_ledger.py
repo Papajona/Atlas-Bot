@@ -163,7 +163,10 @@ def test_primary_privilege_preflight_tolerates_paper_role_absent_from_primary_cl
     assert "has_sequence_privilege(CAST(:paper_role AS name)" not in source
     assert "has_function_privilege(CAST(:paper_role AS name)" not in source
     assert "WHERE r.rolname=current_user), \"" in source
-    assert "r.oid=m.roleid" in source
+    assert "m.roleid=(SELECT oid FROM pg_roles WHERE rolname=current_user)" in source
+    assert "grantor_role.rolname='supabase_admin'" in source
+    assert "to_jsonb(m) ? 'inherit_option'" in source
+    assert "to_jsonb(m) ? 'set_option'" in source
 
 
 def test_customer_paper_journal_validation_is_exact_and_balanced():
