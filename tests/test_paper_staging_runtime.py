@@ -67,6 +67,18 @@ def test_paper_staging_asgi_exposes_only_health_and_paper_routes():
 
 
 
+
+def test_primary_reader_preflight_allows_only_supabase_managed_non_inheriting_membership():
+    source = paper_staging._primary_reader_preflight.__doc__ or ""
+    module_source = __import__("inspect").getsource(paper_staging._primary_reader_preflight)
+    assert "pg_auth_members m WHERE m.member = r.oid" in module_source
+    assert "grantor_role.rolname='supabase_admin'" in module_source
+    assert "member_role.rolname='postgres'" in module_source
+    assert "m.admin_option" in module_source
+    assert "to_jsonb(m) ? 'inherit_option'" in module_source
+    assert "to_jsonb(m) ? 'set_option'" in module_source
+    assert "NOINHERIT" not in source
+
 def test_staging_paper_request_accepts_short_history_without_relaxing_public_model():
     with pytest.raises(ValidationError):
         MarketRequest(days=1)
