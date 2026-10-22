@@ -110,7 +110,7 @@ def _allow_paper_api_request(bucket_key: str, *, limit: int, now: float | None =
 
     recent = [
         seen for seen in _paper_api_request_times.get(key, [])
-        if 0 <= current - seen < _READYZ_RATE_WINDOW_SECONDS
+        if 0 <= current - seen < _PAPER_API_RATE_WINDOW_SECONDS
     ]
     if len(recent) >= limit:
         _paper_api_request_times[key] = recent
