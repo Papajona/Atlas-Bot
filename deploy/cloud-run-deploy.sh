@@ -26,6 +26,10 @@ set -euo pipefail
 : "${RESEARCH_FEE_EVIDENCE_ID:?Set RESEARCH_FEE_EVIDENCE_ID to an immutable evidence identifier}"
 : "${RESEARCH_MIN_DEFLATED_SHARPE:?Set RESEARCH_MIN_DEFLATED_SHARPE to at least 0.95}"
 
+# The API deploy uses @ as the custom --set-env-vars delimiter; reject ambiguous research values.
+python "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/validate_research_deploy_env.py" \
+  "$RESEARCH_FEE_SOURCE" "$RESEARCH_FEE_EVIDENCE_ID" "$RESEARCH_MIN_DEFLATED_SHARPE" "@"
+
 python - "${ADMIN_SUPABASE_USER_IDS}" "${ADMIN_ROLE_ASSIGNMENTS}" <<'PY'
 import sys
 from uuid import UUID
