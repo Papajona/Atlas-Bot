@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Delete only remote branch refs that are provably integrated into main.
 
-Four independent proofs are accepted:
+Three proofs are accepted:
 1. The exact branch tip is an ancestor of origin/main.
 2. A merged PR records that exact branch tip as its head, and that PR's merge
    commit is an ancestor of origin/main (for squash/rebase merges).
 3. Every path changed on the branch side since the merge base has the same
    object/content in main. This recognizes squash-merged or otherwise integrated
    changes even when commit history differs.
-4. With no branch-only merge commits, every branch-only commit has a matching
-   patch in main according to git cherry (no unique '+' patches).
+
+A historical patch-ID match alone is deliberately insufficient; if current branch
+content differs from main, the branch is preserved for manual review.
 
 Any open-PR branch, unknown branch history, API failure, or head moved after a
 merge is preserved. This script never deletes main.
@@ -127,36 +128,6 @@ def _branch_delta_matches_main(branch_sha: str, main_sha: str) -> bool:
     """True when every branch-side path change since merge-base is already in main."""
     return not _branch_delta_mismatched_paths(branch_sha, main_sha)
 
-def _all_branch_commits_are_patch_equivalent(branch_sha: str, main_sha: str) -> bool:
-    """Accept patch-equivalence only when no branch-only merge commits exist.
-
-    `git cherry` marks patch-equivalent branch commits with '-' and unique
-    patches with '+'. Merge-resolution commits are excluded from that comparison,
-    so any merge commit reachable only from this branch causes conservative
-    preservation.
-    """
-    merges = _run(
-        ["git", "rev-list", "--merges", f"{main_sha}..{branch_sha}"],
-        check=False,
-    )
-    if merges.returncode:
-        raise RuntimeError(
-            "git rev-list failed while checking branch merge commits: "
-            + (merges.stderr.strip() or f"exit code {merges.returncode}")
-        )
-    if merges.stdout.strip():
-        return False
-
-    cherry = _run(["git", "cherry", main_sha, branch_sha], check=False)
-    if cherry.returncode:
-        raise RuntimeError(
-            "git cherry failed while comparing branch patches: "
-            + (cherry.stderr.strip() or f"exit code {cherry.returncode}")
-        )
-    marks = [line[0] for line in cherry.stdout.splitlines() if line and line[0] in "+-"]
-    return bool(marks) and all(mark == "-" for mark in marks)
-
-
 def main() -> int:
     repository = os.environ.get("GITHUB_REPOSITORY", "").strip()
     if not repository or "/" not in repository:
@@ -269,9 +240,6 @@ def main() -> int:
                 if not safe and _branch_delta_matches_main(branch_sha, main_sha):
                     safe = True
                     reason = "all branch-side changed paths match main"
-                if not safe and _all_branch_commits_are_patch_equivalent(branch_sha, main_sha):
-                    safe = True
-                    reason = "all non-merge branch commits are patch-equivalent to main"
 
             if not safe:
                 mismatch_paths = _branch_delta_mismatched_paths(branch_sha, main_sha)
