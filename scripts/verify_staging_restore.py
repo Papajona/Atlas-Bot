@@ -28,6 +28,14 @@ SELECT jsonb_build_object(
     SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='public' AND c.relkind IN ('r','p')
   ),
+  'required_tables_missing', (
+    SELECT coalesce(jsonb_agg(required.table_name ORDER BY required.table_name), '[]'::jsonb)
+    FROM unnest(ARRAY[
+      'paper_order_states', 'paper_bar_states', 'paper_fill_events',
+      'research_trial_archive'
+    ]::text[]) AS required(table_name)
+    WHERE to_regclass(format('public.%I', required.table_name)) IS NULL
+  ),
   'tables_without_rls', (
     SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relrowsecurity
@@ -137,6 +145,19 @@ def read_database_uri(value: str, staging_ref: str, production_ref: str) -> tupl
     return env, parsed.hostname.lower()
 
 
+def required_table_failures(value: object) -> list[str]:
+    """Fail closed if restore SQL did not report required tables or found any missing."""
+    if not isinstance(value, list):
+        return ["required_tables_missing was not reported as a JSON array"]
+    failures = []
+    for table_name in value:
+        if not isinstance(table_name, str) or not table_name.strip():
+            failures.append("required_tables_missing contained a malformed table name")
+        else:
+            failures.append(f"required staging table missing: {table_name}")
+    return failures
+
+
 def truthy(value: object) -> bool:
     return value is True or str(value).strip().lower() in {"t", "true", "1", "yes"}
 
@@ -156,6 +177,12 @@ def audit(args: argparse.Namespace) -> dict:
     evidence_url = urlparse(evidence)
     if evidence_url.scheme not in {"https", "gs"} or not evidence_url.netloc:
         raise ValueError("A provider restore-operation evidence URI (https:// or gs://) is required")
+    evidence_sha256 = str(args.restore_evidence_sha256 or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", evidence_sha256):
+        raise ValueError("The downloaded provider restore-operation record must have a verified SHA-256")
+    verified_target_ref = str(args.verified_target_project_ref or "").strip()
+    if verified_target_ref != os.environ.get("STAGING_SUPABASE_PROJECT_REF", ""):
+        raise ValueError("Provider restore-operation evidence was not verified against the configured staging project")
     proc = subprocess.run(
         ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", QUERY],
         capture_output=True, text=True, env=env, check=False,
@@ -207,6 +234,7 @@ def audit(args: argparse.Namespace) -> dict:
         failures.append(f"restored database revision must be exactly {expected_revision}")
     if int(observed.get("public_table_count", 0)) < 1:
         failures.append("public schema has no tables")
+    failures.extend(required_table_failures(observed.get("required_tables_missing")))
     for key in ("tables_without_rls", "negative_customer_ledger_buckets", "unbalanced_or_empty_journals",
                 "invalid_journal_lines", "orphan_journal_lines", "duplicate_journal_idempotency_keys",
                 "negative_ledger_entries"):
@@ -223,6 +251,8 @@ def audit(args: argparse.Namespace) -> dict:
         "restore_operation_id": args.restore_operation_id,
         "backup_reference": args.backup_reference,
         "restore_evidence_uri": evidence,
+        "restore_evidence_sha256": evidence_sha256,
+        "verified_restore_target_project_ref": verified_target_ref,
         "production_supabase_ref": os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", ""),
         "staging_supabase_ref": os.environ["STAGING_SUPABASE_PROJECT_REF"],
         "same_project_staging": (
@@ -249,6 +279,8 @@ def main() -> int:
     parser.add_argument("--restore-operation-id", required=True)
     parser.add_argument("--backup-reference", required=True, help="Provider backup ID or immutable backup object URI")
     parser.add_argument("--restore-evidence-uri", required=True, help="Provider restore operation evidence URL or immutable audit-log URI")
+    parser.add_argument("--restore-evidence-sha256", required=True, help="SHA-256 of the downloaded provider-native JSON restore record")
+    parser.add_argument("--verified-target-project-ref", required=True, help="Target ref verified from that provider record")
     parser.add_argument("--expected-runtime-role", required=True)
     parser.add_argument("--expected-revision", default="0053_supabase_public_default_acl_lockdown")
     parser.add_argument("--output", default="staging-restore-audit.json")
