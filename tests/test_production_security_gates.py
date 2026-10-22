@@ -334,9 +334,14 @@ def test_production_deploy_checks_database_role_before_any_deployment():
     assert 'db_url_file="$RUNNER_TEMP/atlas-production-db-url"' in block
     assert "trap 'rm -f \"$db_url_file\"' EXIT" in block
 
-def test_production_deploy_requires_staging_identity_preflight():
+def test_production_deploy_requires_successful_staging_identity_job_for_exact_main_commit():
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
-    assert 'require_success "staging-identity-preflight.yml" "Supabase staging identity preflight"' in workflow
+    assert 'require_success_job "staging-identity-preflight.yml" "verify-staging-identity" "Supabase staging identity preflight"' in workflow
+    assert 'require_success "staging-identity-preflight.yml" "Supabase staging identity preflight"' not in workflow
+    assert "job_conclusion" in workflow
+    assert '[.jobs[] | select(.name == \\"$job_name\\")][0].conclusion // \\"missing\\"' in workflow
+    assert 'select(.headSha == \\"$GITHUB_SHA\\" and .headBranch == \\"main\\")' in workflow
+    assert 'if [ "$job_conclusion" != "success" ]; then' in workflow
 
 
 def test_production_startup_smoke_uses_non_admin_runtime_role_fixture():
