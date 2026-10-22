@@ -468,7 +468,7 @@ def test_staging_identity_preflight_remains_manual_only_on_main():
 def _run_production_staging_job_gate(tmp_path: Path, job_conclusion: str):
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
     match = re.search(
-        r"(?ms)^          require_staging_identity_success\\(\\) \\{\\n.*?^          require_staging_identity_success$",
+        r"(?ms)^          require_staging_identity_success\(\) \{\n.*?^          require_staging_identity_success$",
         workflow,
     )
     assert match is not None, "production workflow must expose the exact staging job gate"
