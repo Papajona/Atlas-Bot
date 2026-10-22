@@ -102,7 +102,7 @@ jobs:
           if url.scheme != "https" or not allowed:
               raise SystemExit("BLOCKED: HTTPS restore evidence host is not an approved Supabase/GCS provider host")
           PY
-            curl --fail --silent --show-error --location --max-redirs 3 \
+            curl --fail --silent --show-error --location --max-redirs 0 \
               --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 30 \
               "$RESTORE_EVIDENCE_URI" -o "$RUNNER_TEMP/restore-operation-evidence.json"
           else
