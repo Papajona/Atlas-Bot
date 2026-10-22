@@ -68,6 +68,8 @@ def test_api_and_worker_deployments_share_gate_and_keep_sweeps_off():
         assert "atlas_configure_tron_funding" in script
         assert "USDT_TRON_ENABLED=${USDT_TRON_ENABLED}" in script
         assert "USDT_TRON_SWEEP_ENABLED=false" in script
+        assert "CUSTOMER_LIVE_TRADING_ENABLED=false" in script
+        assert "PAYOUT_LIVE_ENABLED=false" in script
         assert "USDT_TRON_ENABLED=true" not in script
     example = (ROOT / "deploy" / "cloud-run.env.example").read_text(encoding="utf-8")
     assert "USDT_TRON_ENABLED=false" in example
