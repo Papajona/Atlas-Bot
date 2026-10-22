@@ -72,7 +72,7 @@ jobs:
             local workflow="$1"
             local job_name="$2"
             local label="$3"
-            local run_id inspection run_status run_conclusion job_conclusion
+            local run_id run_status run_conclusion job_conclusion
 
             run_id="$(gh run list \
               --repo "$GITHUB_REPOSITORY" \
@@ -87,11 +87,23 @@ jobs:
               exit 1
             fi
 
-            inspection="$(gh run view "$run_id" \
-              --repo "$GITHUB_REPOSITORY" \
-              --json status,conclusion,jobs \
-              --jq "[.status, (.conclusion // \\"\\"), ([.jobs[] | select(.name == \\"$job_name\\")][0].conclusion // \\"missing\\")] | @tsv")"
-            IFS=          require_success "android-release.yml" "Protected signed Android release"
+            run_status="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json status --jq '.status')"
+            run_conclusion="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json conclusion --jq '.conclusion // empty')"
+            job_conclusion="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json jobs --jq "[.jobs[] | select(.name == \\"$job_name\\")][0].conclusion // \\"missing\\"")"
+
+            if [ "$run_status" != "completed" ] \
+              || [ "$run_conclusion" != "success" ] \
+              || [ "$job_conclusion" != "success" ]; then
+              echo "BLOCKED: $label requires job $job_name to succeed on exact commit $GITHUB_SHA"
+              echo "Observed run status=$run_status, workflow conclusion=$run_conclusion, job conclusion=$job_conclusion"
+              exit 1
+            fi
+            echo "PASS: $label job $job_name succeeded on exact main commit $GITHUB_SHA"
+          }
+
+          require_success_job "staging-identity-preflight.yml" "verify-staging-identity" "Supabase staging identity preflight"
+
+          require_success "android-release.yml" "Protected signed Android release"
 
           # A green Android workflow is insufficient when its signing job was skipped.
           # Require the successful signed-release job and the non-expired APK evidence
