@@ -58,6 +58,9 @@ AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false)=false
 AND (to_jsonb(m) ? 'set_option')
 AND COALESCE((to_jsonb(m)->>'set_option')::boolean, false)=false
 """
+_UNSAFE_SUPABASE_MANAGED_MEMBERSHIP_PREDICATE = (
+    f"NOT ({_SAFE_SUPABASE_MANAGED_MEMBERSHIP_PREDICATE})"
+)
 
 
 def _readiness_bearer_token(paper_database_url: str) -> str:
@@ -156,9 +159,8 @@ async def _primary_reader_preflight() -> dict[str, Any]:
                          JOIN pg_roles member_role ON member_role.oid=m.member
                          JOIN pg_roles grantor_role ON grantor_role.oid=m.grantor
                          WHERE m.roleid=r.oid
-                           AND NOT (
-                             {_SAFE_SUPABASE_MANAGED_MEMBERSHIP_PREDICATE}
-                           )) AS member_count,
+                           AND {_UNSAFE_SUPABASE_MANAGED_MEMBERSHIP_PREDICATE}
+                       ) AS member_count,
                        has_schema_privilege(current_user, 'public', 'USAGE') AS public_usage,
                        has_schema_privilege(current_user, 'public', 'CREATE') AS public_create,
                        (SELECT count(*) FROM pg_namespace n
