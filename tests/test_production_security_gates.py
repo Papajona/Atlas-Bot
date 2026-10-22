@@ -295,7 +295,7 @@ def test_staging_identity_preflight_allows_same_project_and_checks_read_only_pap
     assert "session_role != role" in workflow
     assert "primary runtime role has administrative privileges or cannot login" in workflow
     assert "must be NOINHERIT, BYPASSRLS and have no role memberships" in workflow
-    assert "No migration or write was executed" in workflow
+    assert "no migration or write was executed" in workflow
     assert "can access only customer_profiles/app_state" in workflow
     assert "EXPECTED_ALEMBIC_HEAD" not in workflow
     assert "alembic upgrade" not in workflow
