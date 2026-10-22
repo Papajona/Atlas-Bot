@@ -130,7 +130,19 @@ async def _primary_reader_preflight() -> dict[str, Any]:
                        r.rolcanlogin, r.rolsuper, r.rolcreaterole, r.rolcreatedb,
                        r.rolreplication, r.rolbypassrls, r.rolinherit,
                        (SELECT count(*) FROM pg_auth_members m WHERE m.member = r.oid) AS memberships,
-                       (SELECT count(*) FROM pg_auth_members m WHERE m.roleid = r.oid) AS member_count,
+                       (SELECT count(*) FROM pg_auth_members m
+                         JOIN pg_roles member_role ON member_role.oid=m.member
+                         JOIN pg_roles grantor_role ON grantor_role.oid=m.grantor
+                         WHERE m.roleid=r.oid
+                           AND NOT (
+                             member_role.rolname='postgres'
+                             AND grantor_role.rolname='supabase_admin'
+                             AND m.admin_option
+                             AND (to_jsonb(m) ? 'inherit_option')
+                             AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false)=false
+                             AND (to_jsonb(m) ? 'set_option')
+                             AND COALESCE((to_jsonb(m)->>'set_option')::boolean, false)=false
+                           )) AS member_count,
                        has_schema_privilege(current_user, 'public', 'USAGE') AS public_usage,
                        has_schema_privilege(current_user, 'public', 'CREATE') AS public_create,
                        (SELECT count(*) FROM pg_namespace n
