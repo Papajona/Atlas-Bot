@@ -21,6 +21,13 @@ set -euo pipefail
 : "${MODEL_BUCKET:?Set MODEL_BUCKET}"
 : "${MODEL_STAGING_BUCKET:?Set MODEL_STAGING_BUCKET}"
 : "${BACKUP_RECOVERY_URL:?Set BACKUP_RECOVERY_URL (startup refuses to run in production without it)}"
+: "${RESEARCH_FEE_SOURCE:?Set RESEARCH_FEE_SOURCE to a traceable research-fee source}"
+: "${RESEARCH_FEE_EVIDENCE_ID:?Set RESEARCH_FEE_EVIDENCE_ID to an immutable evidence identifier}"
+: "${RESEARCH_MIN_DEFLATED_SHARPE:?Set RESEARCH_MIN_DEFLATED_SHARPE to a finite number >= 0.95}"
+
+# Validate the comma-delimited environment values and production DSR floor before deployment.
+python "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/validate_research_deploy_env.py" \
+  "$RESEARCH_FEE_SOURCE" "$RESEARCH_FEE_EVIDENCE_ID" "$RESEARCH_MIN_DEFLATED_SHARPE" ","
 
 # Worker runs the TRON listener/sweeper; share the API gate to avoid config drift.
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/tron-funding-gate.sh"
