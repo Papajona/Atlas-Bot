@@ -78,7 +78,7 @@ fi
 # The deploy identity can deploy Cloud Run services in the staging project and write
 # only to the single staging Artifact Registry repository.
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:\${DEPLOY_SA}" --role="roles/run.developer" --quiet
+  --member="serviceAccount:\${DEPLOY_SA}" --role="roles/run.admin" --quiet
 gcloud artifacts repositories add-iam-policy-binding "$ARTIFACT_REPOSITORY" \
   --location="$REGION" --project="$PROJECT_ID" \
   --member="serviceAccount:\${DEPLOY_SA}" --role="roles/artifactregistry.writer" --quiet
