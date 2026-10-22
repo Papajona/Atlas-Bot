@@ -37,11 +37,11 @@ def validate_runtime_url(uri: str, project_ref: str, expected_host: str = POOLER
     return unquote(parsed.password)
 
 
-def role_setup_sql(password: str) -> str:
+def role_setup_sql(runtime_credential: str) -> str:
     """Build one transactional, guarded role setup; never print this SQL."""
-    if not password:
-        raise ValueError("Role password cannot be empty")
-    escaped = password.replace("'", "''")
+    if not runtime_credential:
+        raise ValueError("Role credential cannot be empty")
+    escaped = runtime_credential.replace("'", "''")
     return f"""
 \\set ON_ERROR_STOP on
 BEGIN;
@@ -146,13 +146,13 @@ def main() -> int:
         if not url_file.is_file() or stat.S_IMODE(url_file.stat().st_mode) & 0o077:
             raise RuntimeError("Existing runtime URL file must be a regular file with mode 0600 or stricter")
         uri = url_file.read_text(encoding="utf-8").strip()
-        password = validate_runtime_url(uri, project_ref)
+        runtime_credential = validate_runtime_url(uri, project_ref)
         print("Reusing the existing protected runtime URL file; its contents are withheld.")
     else:
-        password = secrets.token_urlsafe(48)
+        runtime_credential = secrets.token_urlsafe(48)
         uri = urlunsplit((
             "postgresql+asyncpg",
-            f"{RUNTIME_ROLE}.{project_ref}:{quote(password, safe='')}@{POOLER_HOST}:5432",
+            f"{RUNTIME_ROLE}.{project_ref}:{quote(runtime_credential, safe='')}@{POOLER_HOST}:5432",
             "/postgres",
             "ssl=require",
             "",
@@ -166,7 +166,7 @@ def main() -> int:
         sql_path = Path(temp_dir) / "role-setup.sql"
         sql_fd = os.open(sql_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(sql_fd, "w", encoding="utf-8") as stream:
-            stream.write(role_setup_sql(password))
+            stream.write(role_setup_sql(runtime_credential))
 
         # Force native interactive password prompting. Do not inherit saved password
         # env vars, .pgpass overrides, or service definitions from earlier attempts.
