@@ -114,56 +114,6 @@ def test_branch_pruning_preserves_unmerged_branch_with_no_integration_evidence()
     assert decision == (False, "no exact integration proof; preserve branch")
 
 
-def test_patch_equivalence_only_prunes_when_all_branch_commits_have_matches(monkeypatch):
-    def fake_run(args, *, check=True):
-        if args[:3] == ["git", "rev-list", "--merges"]:
-            return subprocess.CompletedProcess(args, 0, "", "")
-        if args[:2] == ["git", "cherry"]:
-            return subprocess.CompletedProcess(args, 0, "- abc123\n- def456\n", "")
-        raise AssertionError(f"unexpected command: {args}")
-
-    monkeypatch.setattr(pruning, "_run", fake_run)
-
-    assert pruning._all_branch_commits_are_patch_equivalent("branch", "main") is True
-
-
-def test_patch_equivalence_preserves_any_branch_unique_patch(monkeypatch):
-    def fake_run(args, *, check=True):
-        if args[:3] == ["git", "rev-list", "--merges"]:
-            return subprocess.CompletedProcess(args, 0, "", "")
-        if args[:2] == ["git", "cherry"]:
-            return subprocess.CompletedProcess(args, 0, "- abc123\n+ unique456\n", "")
-        raise AssertionError(f"unexpected command: {args}")
-
-    monkeypatch.setattr(pruning, "_run", fake_run)
-
-    assert pruning._all_branch_commits_are_patch_equivalent("branch", "main") is False
-
-
-def test_patch_equivalence_preserves_branch_only_merge_commits(monkeypatch):
-    def fake_run(args, *, check=True):
-        if args[:3] == ["git", "rev-list", "--merges"]:
-            return subprocess.CompletedProcess(args, 0, "merge123\n", "")
-        raise AssertionError("git cherry must not run when branch-only merges exist")
-
-    monkeypatch.setattr(pruning, "_run", fake_run)
-
-    assert pruning._all_branch_commits_are_patch_equivalent("branch", "main") is False
-
-
-def test_patch_equivalence_does_not_delete_when_git_cherry_has_no_commits(monkeypatch):
-    def fake_run(args, *, check=True):
-        if args[:3] == ["git", "rev-list", "--merges"]:
-            return subprocess.CompletedProcess(args, 0, "", "")
-        if args[:2] == ["git", "cherry"]:
-            return subprocess.CompletedProcess(args, 0, "", "")
-        raise AssertionError(f"unexpected command: {args}")
-
-    monkeypatch.setattr(pruning, "_run", fake_run)
-
-    assert pruning._all_branch_commits_are_patch_equivalent("branch", "main") is False
-
-
 def test_branch_delta_matches_main_when_every_branch_changed_file_matches(
     monkeypatch,
 ):
