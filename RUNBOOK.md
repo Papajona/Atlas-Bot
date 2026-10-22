@@ -190,62 +190,13 @@ This deployment uses the existing project `wauaelzyugjuepmrewaw`; it does not cr
 
 **Safety stop:** before database DDL, confirm a current recoverable backup/export and verify that the intended target is the existing `postgres` database. Do not continue if the backup cannot be restored. Do not use the production database URL or `postgres` credentials as a Cloud Run runtime identity. Keep live trading, funding, withdrawals, payouts and TRON sweeps disabled.
 
-### 1. Provision the read-only primary identity
+### 1. Provision both runtime roles and the paper schema
 
-Use a reviewed checkout containing `scripts/provision_atlas_paper_reader.sql`. In a protected Cloud Shell session, make sure `ATLAS_ADMIN_DATABASE_URL` refers to the existing project's administrative PostgreSQL connection and never print it. Connect interactively:
+Use the canonical **Operator setup sequence (existing project only)** near the top of this runbook. It is the reviewed procedure for this Supabase project and uses native `psql -W` prompts. Do not use the older `ATLAS_ADMIN_DATABASE_URL` steps, do not manually recreate `atlas_customer_paper`, and do not run the paper schema before both roles are verified. The sequence provisions `atlas_paper_reader`, reuses the existing protected paper URL created by `scripts/setup_customer_paper_role_interactive.py`, and then applies `scripts/customer_paper_ledger_schema.sql`.
 
-```bash
-psql "$ATLAS_ADMIN_DATABASE_URL"
-```
+After schema commit, verify the catalog contracts and run the read-only application preflight with separate passwords for the two roles. The preflight must report `status=PASS` and `isolation_mode=shared_database_schema` before continuing. Keep `CUSTOMER_PAPER_LEDGER_ENABLED=false`.
 
-At the `psql` prompt, run:
-
-```psql
-\i scripts/provision_atlas_paper_reader.sql
-\password atlas_paper_reader
-\q
-```
-
-The password command prompts without echoing the value. Save that password in the approved password manager; it must be entered later into the GCP bootstrap prompt. The role contract is: `LOGIN NOINHERIT BYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`, no outgoing/inherited memberships and at most the exact Supabase-managed incoming control-plane membership documented above, no table ownership, no schema creation, and SELECT only on `public.customer_profiles` and `public.app_state`. The role-level default is read-only as defense in depth; the direct object grants are the write barrier.
-
-### 2. Provision the customer paper ledger role and schema
-
-Still connected to the same reviewed database, first run this shell precheck. It aborts before opening an interactive password prompt if the role already exists or the database query fails:
-
-```bash
-set -euo pipefail
-ROLE_EXISTS="$(psql "$ATLAS_ADMIN_DATABASE_URL" -X -At -v ON_ERROR_STOP=1 \
-  -c "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='atlas_customer_paper')")"
-if [[ "$ROLE_EXISTS" != "f" ]]; then
-  echo "BLOCKED: atlas_customer_paper already exists or the role-existence check did not return false; inspect it before proceeding."
-  exit 1
-fi
-psql "$ATLAS_ADMIN_DATABASE_URL" -X -v ON_ERROR_STOP=1
-```
-
-At the resulting `psql` prompt, create the role and set its distinct password using psql's hidden prompt:
-
-```psql
-CREATE ROLE atlas_customer_paper LOGIN NOINHERIT NOBYPASSRLS
-    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
-GRANT CONNECT ON DATABASE postgres TO atlas_customer_paper;
-\password atlas_customer_paper
-\q
-```
-
-Do not retry role creation or run `\password` if the precheck blocks. Inspect the existing role attributes, memberships, grants, ownership, and password-management record under the operator process first.
-
-Run the reviewed schema script against that same database as the database owner, not as either runtime role:
-
-```bash
-psql "$ATLAS_ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 \
-  -v paper_runtime_role=atlas_customer_paper \
-  -f scripts/customer_paper_ledger_schema.sql
-```
-
-Do not reuse an existing role without inspecting every attribute, membership, schema/table/sequence/function grant, and ownership. Do not broaden permissions if the preflight blocks. Schema isolation shares the primary project's compute, availability and backup/restore scope; it is not an independent database failure domain.
-
-### 3. Create staging IAM bindings and Secret Manager versions
+### 2. Create staging IAM bindings and Secret Manager versions
 
 After both role passwords are saved and the paper schema has been provisioned, run the bootstrap script from Cloud Shell:
 
@@ -261,7 +212,7 @@ It verifies that the existing workload identity provider is restricted to `Papaj
 
 The database URLs use the session pooler host `aws-0-eu-west-1.pooler.supabase.com:5432/postgres` for this Free-tier project, with usernames `atlas_paper_reader.wauaelzyugjuepmrewaw` and `atlas_customer_paper.wauaelzyugjuepmrewaw`, different URL-encoded passwords, TLS required, and the SQLAlchemy asyncpg driver. Supavisor requires the project-ref suffix on each pooler username. The script fails if role passwords match or any required prompt is empty. Run it only after both exact roles exist and their passwords are saved correctly.
 
-### 4. Set GitHub's protected `staging` environment variables
+### 3. Set GitHub's protected `staging` environment variables
 
 Open [Atlas-Bot staging environment settings](https://github.com/Papajona/Atlas-Bot/settings/environments) and add these variables using the values printed at the end of the bootstrap script:
 
@@ -284,7 +235,7 @@ ATLAS_STAGING_PAPER_DB_ROLE=atlas_customer_paper
 
 These are environment **variables**, not database passwords. The deployment workflow hard-codes paper/sandbox flags and binds the API to the restricted ASGI target. It does not turn on trading, funding, withdrawals, payouts or TRON sweeping.
 
-### 5. Deploy and prove the runtime
+### 4. Deploy and prove the runtime
 
 Only after the PR containing the paper-only runtime is merged and core CI is green on the exact `main` commit, use GitHub Actions → **Deploy Paper-Only Atlas Staging** → Run workflow on `main`. Once the Cloud Run service exists, run **Supabase Staging Identity Preflight** from `main`.
 
