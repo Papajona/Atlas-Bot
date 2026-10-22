@@ -233,7 +233,21 @@ def build_customer_paper_router(
             await state_guard()
 
     async def _fetch_bar(symbol: str, timeframe: str) -> tuple[Any, dict[str, Any]]:
-        req = market_request_type(asset="crypto", symbol=symbol, exchange="binance", timeframe=timeframe, days=30)
+        # The execution model needs the most recent closed bar and enough history for
+        # its 20-return volatility estimate. Do not fetch a fixed 30-day window:
+        # that meant 43,200 candles / ~44 sequential CCXT pages for a 1-minute order.
+        timeframe_seconds = _TIMEFRAME_SECONDS.get(str(timeframe))
+        if not timeframe_seconds:
+            raise HTTPException(422, "Unsupported paper-order timeframe")
+        required_bars = 25
+        days = max(1, (required_bars * timeframe_seconds + 86_399) // 86_400)
+        req = market_request_type(
+            asset="crypto",
+            symbol=symbol,
+            exchange="binance",
+            timeframe=timeframe,
+            days=days,
+        )
         df = await asyncio.to_thread(market_data, req)
         return df, _market_bar_context(df, symbol=symbol, timeframe=timeframe)
 
@@ -245,8 +259,8 @@ def build_customer_paper_router(
 
     @router.post("/account/initialize")
     async def initialize_paper_account(authorization: str | None = Header(default=None)):
-        await _guard()
         profile = await _profile(authorization)
+        await _guard()
         try:
             # Use the autonomous controller's exact seed key, configured amount and
             # currency. Concurrent API/controller initialization must be one event.
@@ -278,8 +292,8 @@ def build_customer_paper_router(
 
     @router.get("/balances")
     async def customer_paper_balances(authorization: str | None = Header(default=None)):
-        await _guard()
         profile = await _profile(authorization)
+        await _guard()
         try:
             return {"virtual_only": True, "balances": await get_customer_paper_balances(customer_id=profile.id)}
         except Exception as exc:
@@ -287,8 +301,8 @@ def build_customer_paper_router(
 
     @router.get("/positions")
     async def customer_paper_positions(authorization: str | None = Header(default=None)):
-        await _guard()
         profile = await _profile(authorization)
+        await _guard()
         try:
             return {"virtual_only": True, "positions": await get_customer_paper_positions(customer_id=profile.id)}
         except Exception as exc:
@@ -296,8 +310,8 @@ def build_customer_paper_router(
 
     @router.get("/orders")
     async def customer_paper_open_orders(authorization: str | None = Header(default=None)):
-        await _guard()
         profile = await _profile(authorization)
+        await _guard()
         try:
             return {"virtual_only": True, "orders": await list_open_customer_paper_orders(customer_id=profile.id)}
         except Exception as exc:
@@ -308,8 +322,8 @@ def build_customer_paper_router(
         req: CustomerPaperOrderRequest,
         authorization: str | None = Header(default=None),
     ):
-        await _guard()
         profile = await _profile(authorization)
+        await _guard()
         try:
             existing = await get_customer_paper_order(
                 customer_id=profile.id, client_order_id=req.client_order_id
@@ -371,8 +385,8 @@ def build_customer_paper_router(
 
     @router.get("/orders/{client_order_id}")
     async def get_paper_order(client_order_id: str, authorization: str | None = Header(default=None)):
-        await _guard()
         profile = await _profile(authorization)
+        await _guard()
         try:
             return {"virtual_only": True, "order": await _order_detail(profile.id, client_order_id)}
         except HTTPException:
@@ -382,8 +396,8 @@ def build_customer_paper_router(
 
     @router.post("/orders/{client_order_id}/advance")
     async def advance_paper_order(client_order_id: str, authorization: str | None = Header(default=None)):
-        await _guard()
         profile = await _profile(authorization)
+        await _guard()
         try:
             order = await _order_detail(profile.id, client_order_id)
             if order["status"] not in {"SUBMITTED", "PARTIALLY_FILLED"}:
@@ -634,8 +648,8 @@ def build_customer_paper_router(
         req: CustomerPaperCancelRequest,
         authorization: str | None = Header(default=None),
     ):
-        await _guard()
         profile = await _profile(authorization)
+        await _guard()
         try:
             result = await cancel_customer_paper_order(
                 customer_id=profile.id,
