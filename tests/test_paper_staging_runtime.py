@@ -4,7 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -126,6 +126,39 @@ def test_customer_api_limiter_caps_per_ip_and_per_auth_identity(monkeypatch):
     assert not paper_staging._allow_paper_api_request("paper:ip:client-a", limit=2, now=7.0)
     assert not paper_staging._allow_paper_api_request("paper:auth:token-a", limit=2, now=7.0)
     assert paper_staging._allow_paper_api_request("paper:ip:client-a", limit=2, now=66.0)
+
+
+def test_customer_middleware_separates_read_and_order_quotas_and_normalizes_tokens(monkeypatch):
+    paper_staging._paper_api_request_times.clear()
+    monkeypatch.setattr(paper_staging, "_PAPER_API_RATE_LIMIT_PER_MINUTE", 2)
+    monkeypatch.setattr(paper_staging, "_PAPER_ORDER_RATE_LIMIT_PER_MINUTE", 1)
+    monkeypatch.setattr(paper_staging, "_PAPER_API_IP_RATE_LIMIT_PER_MINUTE", 100)
+    monkeypatch.setattr(paper_staging, "_trusted_client_ip", lambda _request: "shared-cloud-run-peer")
+
+    test_app = FastAPI()
+    test_app.middleware("http")(paper_staging._paper_customer_api_rate_limit)
+
+    @test_app.get("/api/customer/paper/balances")
+    async def balances():
+        return {"ok": True}
+
+    @test_app.post("/api/customer/paper/orders")
+    async def create_order():
+        return {"ok": True}
+
+    client = TestClient(test_app)
+    headers = {"Authorization": "Bearer stable-token"}
+
+    assert client.get("/api/customer/paper/balances", headers=headers).status_code == 200
+    assert client.get("/api/customer/paper/balances", headers=headers).status_code == 200
+
+    # Reads exhausting their own quota must not consume the separate order quota.
+    assert client.post("/api/customer/paper/orders", headers=headers).status_code == 200
+    # Equivalent accepted Bearer formatting maps to the same token bucket.
+    assert client.post(
+        "/api/customer/paper/orders",
+        headers={"Authorization": "bearer  stable-token "},
+    ).status_code == 429
 
 
 def test_paper_customer_auth_rejects_aal1_before_querying_database(monkeypatch):
