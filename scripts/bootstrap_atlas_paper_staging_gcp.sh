@@ -236,15 +236,16 @@ PY
 # leaving the primary DB secret partially updated.
 if [[ "$USE_PAPER_URL_FILE" == "true" ]]; then
   if ! PAPER_URL="$(validate_paper_url_file "$PAPER_URL_FILE")"; then
-    unset PRIMARY_URL SUPABASE_ANON_KEY
+    unset PRIMARY_URL PRIMARY_PASSWORD SUPABASE_ANON_KEY
     exit 1
   fi
   if [[ -z "$PAPER_URL" ]]; then
-    unset PRIMARY_URL SUPABASE_ANON_KEY
+    unset PRIMARY_URL PRIMARY_PASSWORD SUPABASE_ANON_KEY
     echo "BLOCKED: paper URL is empty." >&2
     exit 1
   fi
 fi
+unset PRIMARY_PASSWORD
 
 put_secret "$PRIMARY_SECRET" "$PRIMARY_URL"
 put_secret "$PAPER_SECRET" "$PAPER_URL"
