@@ -37,6 +37,7 @@ _EXPECTED_PRIMARY_ROLE = "atlas_paper_reader"
 _PAPER_PREFLIGHT_CACHE_TTL_SECONDS = 5.0
 _PAPER_API_RATE_WINDOW_SECONDS = 60.0
 _PAPER_API_RATE_LIMIT_PER_MINUTE = 60
+_PAPER_API_IP_RATE_LIMIT_PER_MINUTE = 600
 _PAPER_ORDER_RATE_LIMIT_PER_MINUTE = 12
 _PAPER_API_RATE_MAX_BUCKETS = 8192
 _paper_preflight_cache_result: dict[str, Any] | None = None
@@ -306,17 +307,29 @@ app.middleware("http")(api_rate_limit)
 async def _paper_customer_api_rate_limit(request: Request, call_next):
     path = request.url.path
     if path.startswith("/api/customer/paper/"):
-        ip_bucket = f"ip:{_trusted_client_ip(request)}"
-        raw_authorization = str(request.headers.get("authorization") or "")
-        authorization_id = hashlib.sha256(raw_authorization.encode("utf-8")).hexdigest()[:24] if raw_authorization else "anon"
-        identity_bucket = f"auth:{authorization_id}"
+        request_class = (
+            "order"
+            if request.method.upper() == "POST" and "/orders" in path
+            else "general"
+        )
+        raw_authorization = str(request.headers.get("authorization") or "").strip()
+        if raw_authorization.lower().startswith("bearer "):
+            # Match _bearer_token exactly: case-insensitive scheme, split once, trim token.
+            normalized_token = raw_authorization.split(" ", 1)[1].strip()
+            authorization_id = hashlib.sha256(normalized_token.encode("utf-8")).hexdigest()[:24] if normalized_token else "anonymous"
+        else:
+            authorization_id = "anonymous"
+        ip_bucket = f"paper:ip:{_trusted_client_ip(request)}:{request_class}"
+        identity_bucket = f"paper:auth:{authorization_id}:{request_class}"
         limit = (
             _PAPER_ORDER_RATE_LIMIT_PER_MINUTE
-            if request.method.upper() == "POST" and "/orders" in path
+            if request_class == "order"
             else _PAPER_API_RATE_LIMIT_PER_MINUTE
         )
-        if not _allow_paper_api_request(f"paper:{ip_bucket}", limit=limit) or not _allow_paper_api_request(
-            f"paper:{identity_bucket}", limit=limit
+        if not _allow_paper_api_request(
+            ip_bucket, limit=_PAPER_API_IP_RATE_LIMIT_PER_MINUTE
+        ) or not _allow_paper_api_request(
+            identity_bucket, limit=limit
         ):
             return JSONResponse(
                 {"detail": "Rate limit exceeded"},
