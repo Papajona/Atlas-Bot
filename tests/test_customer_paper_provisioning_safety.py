@@ -286,7 +286,10 @@ def test_gcp_paper_url_upload_strips_only_one_terminal_lf_and_keeps_uri_out_of_a
 
 
 def test_gcp_paper_url_upload_failure_returns_nonzero(tmp_path: Path):
-    uri = "postgresql://atlas_customer_paper:dummy@host:5432/postgres"
+    uri = (
+        "postgresql+asyncpg://atlas_customer_paper.abcdefghijklmnopqrst:dummy"
+        "@aws-0-eu-west-1.pooler.supabase.com:5432/postgres?ssl=require"
+    )
     completed, _, _ = _run_paper_secret_upload_function(
         tmp_path, uri.encode("utf-8"), fail_add=True
     )
