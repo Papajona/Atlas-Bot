@@ -213,9 +213,9 @@ except (OSError, UnicodeDecodeError):
     raise SystemExit("BLOCKED: paper URL file must be readable UTF-8")
 
 # Permit one terminal LF as the file delimiter, but not CRLF or extra lines.
-if data.endswith("\\n"):
+if data.endswith("\n"):
     data = data[:-1]
-if not data or "\\n" in data or "\\r" in data or "\\x00" in data:
+if not data or "\n" in data or "\r" in data or "\x00" in data:
     raise SystemExit("BLOCKED: paper URL file must contain exactly one URI line")
 
 expected_ref, expected_host = sys.argv[2:]
