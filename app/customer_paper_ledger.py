@@ -193,8 +193,10 @@ async def preflight_isolated_customer_paper_ledger(
                 " WHERE r.rolname=current_user), "
                 "(SELECT count(*) FROM pg_auth_members m "
                 "JOIN pg_roles member_role ON member_role.oid=m.member "
+                "JOIN pg_roles grantor_role ON grantor_role.oid=m.grantor "
                 "WHERE m.roleid=(SELECT oid FROM pg_roles WHERE rolname=current_user) "
-                "AND NOT (member_role.rolname='postgres' AND m.admin_option "
+                "AND NOT (member_role.rolname='postgres' AND grantor_role.rolname='supabase_admin' "
+                "AND m.admin_option "
                 "AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false)=false "
                 "AND COALESCE((to_jsonb(m)->>'set_option')::boolean, false)=false)), "
                 "has_schema_privilege(current_user, 'public', 'USAGE'), "
@@ -404,9 +406,11 @@ async def preflight_isolated_customer_paper_ledger(
                             (SELECT count(*) FROM pg_auth_members m WHERE m.member = r.oid) AS memberships,
                             (SELECT count(*) FROM pg_auth_members m
                              JOIN pg_roles member_role ON member_role.oid = m.member
+                             JOIN pg_roles grantor_role ON grantor_role.oid = m.grantor
                              WHERE m.roleid = r.oid
                                AND NOT (
                                  member_role.rolname = 'postgres'
+                                 AND grantor_role.rolname = 'supabase_admin'
                                  AND m.admin_option
                                  AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false) = false
                                  AND COALESCE((to_jsonb(m)->>'set_option')::boolean, false) = false
