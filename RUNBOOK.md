@@ -34,7 +34,7 @@ This mode is opt-in and disabled by default. Configure `CUSTOMER_PAPER_SHARED_DA
    GRANT CONNECT ON DATABASE postgres TO atlas_customer_paper;
    ```
 
-   Do not give this role membership in another role, ownership of tables, schema CREATE, UPDATE/DELETE, or any elevated attribute. If the role already exists, stop and inspect its attributes/grants instead of blindly recreating or reusing it.
+   Do not make this role a member of another role, give it table ownership, schema CREATE, UPDATE/DELETE, or any elevated attribute. Supabase managed Postgres may record one control-plane-only incoming membership (`member=postgres`, grantor `supabase_admin`, ADMIN OPTION true, `inherit_option=false`, `set_option=false`) on a newly created role. The paper role must never be a member of any other role; preflight permits only that exact provider-managed relation and rejects all other membership rows. If the role already exists, stop and inspect its attributes/grants instead of blindly recreating or reusing it.
 3. From the reviewed Atlas-Bot checkout, run the schema file against that same existing database as the reviewed database owner (not as the paper runtime role):
 
    ```bash
@@ -52,7 +52,7 @@ This mode is opt-in and disabled by default. Configure `CUSTOMER_PAPER_SHARED_DA
 
    Proceed with paper-only rehearsal only if the exact endpoint reports `status=PASS`, `isolation_mode=shared_database_schema`, and the runtime role/permissions match this runbook. Any other result is a hard stop; do not broaden grants to make it pass. The preflight is read-only and does not enable paper execution.
 
-The paper role must be `LOGIN NOINHERIT NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`, have no role memberships, own no paper tables, have no `CREATE` privilege on any schema, and have privileges only for `SELECT`/`INSERT` on the seven paper tables plus `USAGE` on their identity sequences. It must have no privileges on any real-money table, sequence, or executable `SECURITY DEFINER` function. Forced row-level security and the exact tenant policy are mandatory. The application refuses to proceed if any of these checks fail.
+The paper role must be `LOGIN NOINHERIT NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`, must not be a member of any role, and may have only the exact Supabase-managed incoming control-plane membership documented above (no other membership rows). It must own no paper tables, have no `CREATE` privilege on any schema, and have privileges only for `SELECT`/`INSERT` on the seven paper tables plus `USAGE` on their identity sequences. It must have no privileges on any real-money table, sequence, or executable `SECURITY DEFINER` function. Forced row-level security and the exact tenant policy are mandatory. The application refuses to proceed if any of these checks fail.
 
 Provisioning `scripts/customer_paper_ledger_schema.sql` is DDL against the existing database; it is **not** run automatically by the application. Before a human operator runs it, confirm a usable backup/export exists and review the target database and role. This change does not modify the connected Supabase database.
 
@@ -197,7 +197,7 @@ At the `psql` prompt, run:
 \q
 ```
 
-The password command prompts without echoing the value. Save that password in the approved password manager; it must be entered later into the GCP bootstrap prompt. The role contract is: `LOGIN NOINHERIT BYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`, no role memberships, no table ownership, no schema creation, and SELECT only on `public.customer_profiles` and `public.app_state`. The role-level default is read-only as defense in depth; the direct object grants are the write barrier.
+The password command prompts without echoing the value. Save that password in the approved password manager; it must be entered later into the GCP bootstrap prompt. The role contract is: `LOGIN NOINHERIT BYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`, no outgoing/inherited memberships and at most the exact Supabase-managed incoming control-plane membership documented above, no table ownership, no schema creation, and SELECT only on `public.customer_profiles` and `public.app_state`. The role-level default is read-only as defense in depth; the direct object grants are the write barrier.
 
 ### 2. Provision the customer paper ledger role and schema
 
