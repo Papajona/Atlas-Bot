@@ -361,10 +361,14 @@ jobs:
           # Seed a deterministic balanced customer-ledger journal before backup,
           # then verify both the row and global ledger invariants after restore.
           PYTHONPATH=. python scripts/postgres_restore_drill.py --phase seed
-          PGPASSWORD=test_password pg_dump -Fc --no-owner --no-acl \
+          # Match the service's PostgreSQL 15 major version. Newer pg_restore clients
+          # emit SET transaction_timeout, which PostgreSQL 15 does not support.
+          docker run --rm --network host -e PGPASSWORD=test_password -v /tmp:/tmp \
+            docker.io/library/postgres:15-alpine pg_dump -Fc --no-owner --no-acl \
             -h 127.0.0.1 -U atlas -d atlas_test -f /tmp/atlas-ci.dump
           PGPASSWORD=test_password createdb -h 127.0.0.1 -U atlas atlas_restore
-          PGPASSWORD=test_password pg_restore --exit-on-error --no-owner --no-acl \
+          docker run --rm --network host -e PGPASSWORD=test_password -v /tmp:/tmp \
+            docker.io/library/postgres:15-alpine pg_restore --exit-on-error --no-owner --no-acl \
             -h 127.0.0.1 -U atlas -d atlas_restore /tmp/atlas-ci.dump
           restored_head="$(PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -At \
             -h 127.0.0.1 -U atlas -d atlas_restore -c 'SELECT version_num FROM alembic_version')"
