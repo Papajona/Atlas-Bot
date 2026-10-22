@@ -68,9 +68,22 @@ def _is_ancestor(ancestor_sha: str, descendant_sha: str) -> bool:
         return True
     if result.returncode == 1:
         return False
+    detail = result.stderr.strip()
+    # A closed PR may refer to a merge commit whose object is no longer present
+    # in this checkout (for example, older rewritten/garbage-collected history).
+    # Treat that commit as *unproven*, then let the caller use current tree parity.
+    # Other Git failures still abort reconciliation.
+    missing_commit_markers = (
+        "not a valid commit name",
+        "unknown revision or path not in the working tree",
+        "bad object ",
+        "needed a single revision",
+    )
+    if any(marker in detail.lower() for marker in missing_commit_markers):
+        return False
     raise RuntimeError(
         "git merge-base failed while checking branch integration: "
-        + (result.stderr.strip() or f"exit code {result.returncode}")
+        + (detail or f"exit code {result.returncode}")
     )
 
 def _object_id_at_commit(commit_sha: str, path: str) -> str | None:
