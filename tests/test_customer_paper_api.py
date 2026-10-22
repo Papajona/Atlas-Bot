@@ -106,6 +106,29 @@ def test_customer_paper_order_request_rejects_malformed_limit_orders():
         )
 
 
+def test_unauthenticated_customer_paper_request_rejects_before_state_guard():
+    calls = {"customer": 0, "guard": 0}
+
+    async def get_customer(authorization, _db, require_aal2=True):
+        calls["customer"] += 1
+        raise AssertionError("missing Authorization must be rejected before customer lookup")
+
+    async def state_guard():
+        calls["guard"] += 1
+
+    api_app = FastAPI()
+    api_app.include_router(paper_api.build_customer_paper_router(
+        get_customer=get_customer,
+        market_data=lambda _request: (_ for _ in ()).throw(AssertionError("market data must not be fetched")),
+        market_request_type=MarketRequest,
+        state_guard=state_guard,
+    ))
+    response = TestClient(api_app).get("/api/customer/paper/balances")
+
+    assert response.status_code == 401
+    assert calls == {"customer": 0, "guard": 0}
+
+
 @pytest.mark.postgres
 @pytest.mark.skipif(
     not (os.getenv("ATLAS_PAPER_TEST_DATABASE_URL") and os.getenv("ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL")),
