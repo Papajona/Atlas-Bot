@@ -272,6 +272,7 @@ def test_staging_identity_preflight_has_marker_push_and_manual_main_dispatch():
     # A default merge commit's subject is generic; the PR title appears after it.
     merge_message = "Merge pull request #999 from owner/branch\n\n[atlas-staging-identity-preflight-once-20261022] Run staging identity preflight"
     assert "[atlas-staging-identity-preflight-once-20261022]" in merge_message
+    assert not merge_message.startswith("[atlas-staging-identity-preflight-once-20261022]")
     assert "github.ref == 'refs/heads/main'" in workflow
     assert "environment: staging" in workflow
     assert "ATLAS_STAGING_SUPABASE_PROJECT_REF" in workflow
@@ -472,6 +473,7 @@ def test_staging_identity_preflight_marker_push_keeps_manual_dispatch():
     assert "verify-staging-identity:" in workflow
     assert "github.event_name == 'workflow_dispatch'" in workflow
     assert "contains(github.event.head_commit.message, '[atlas-staging-identity-preflight-once-20261022]')" in workflow
+
 
 def _run_production_staging_job_gate(tmp_path: Path, job_conclusion: str):
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
