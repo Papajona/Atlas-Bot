@@ -78,7 +78,7 @@ def main() -> int:
         return 2
 
     try:
-        _run(["git", "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*", "--prune"])
+        _run(["git", "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"])
         main_sha = _run(
             ["git", "rev-parse", "--verify", "refs/remotes/origin/main^{commit}"]
         ).stdout.strip()
@@ -129,7 +129,7 @@ def main() -> int:
                 payload = _run(
                     [
                         "gh", "pr", "list", "--repo", repository, "--state", "merged",
-                        "--head", branch_name, "--limit", "1000",
+                        "--head", f"{repository.split('/', 1)[0]}:{branch_name}", "--limit", "1000",
                         "--json", "headRefName,headRefOid,mergeCommit",
                     ]
                 ).stdout
@@ -148,7 +148,52 @@ def main() -> int:
                 preserved += 1
                 continue
 
+            # Re-read the live ref immediately before deletion. The GitHub ref-delete
+            # endpoint has no expected-SHA parameter, so a moved ref is always preserved.
+            live = _run(
+                ["git", "ls-remote", "--heads", "origin", f"refs/heads/{branch_name}"],
+                check=False,
+            )
+            if live.returncode or not live.stdout.strip():
+                print(f"PRESERVE {branch_name}: ref disappeared or could not be re-read")
+                preserved += 1
+                continue
+            live_sha = live.stdout.split()[0]
+            if live_sha != branch_sha:
+                print(f"PRESERVE {branch_name}: branch tip changed during reconciliation")
+                preserved += 1
+                continue
+
+            latest_open = _run(
+                [
+                    "gh", "pr", "list", "--repo", repository, "--state", "open",
+                    "--head", f"{repository.split('/', 1)[0]}:{branch_name}",
+                    "--limit", "1000", "--json", "number",
+                ],
+                check=False,
+            )
+            if latest_open.returncode:
+                print(f"PRESERVE {branch_name}: could not re-check open pull requests")
+                preserved += 1
+                continue
+            try:
+                opened = json.loads(latest_open.stdout)
+            except json.JSONDecodeError:
+                print(f"PRESERVE {branch_name}: malformed open-pull-request response")
+                preserved += 1
+                continue
+            if opened:
+                print(f"PRESERVE {branch_name}: an open pull request appeared during reconciliation")
+                preserved += 1
+                continue
+
             deletion = _run(
+                [
+                    "gh", "api", "--method", "DELETE",
+                    f"repos/{repository}/git/refs/heads/{branch_name}",
+                ],
+                check=False,
+            )            deletion = _run(
                 [
                     "gh", "api", "--method", "DELETE",
                     f"repos/{repository}/git/refs/heads/{branch_name}",
