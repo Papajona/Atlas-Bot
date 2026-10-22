@@ -8,14 +8,17 @@ def test_staging_identity_preflight_fails_closed_on_rls_migration_blockers():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(
         encoding="utf-8"
     )
-    assert 'role in {"postgres", "service_role", "supabase_admin", "supabase_auth_admin", "authenticator", "anon", "authenticated"}' in workflow
-    assert 'role has administrative privileges' in workflow
-    assert "if not is_true(bypass_rls)" in workflow
-    assert 'if int(owned_count) > 0' in workflow
-    assert "role_membership_count" in workflow
-    assert "runtime DB role inherits other PostgreSQL roles" in workflow
-    assert 'raise SystemExit("BLOCKED: public tables without RLS remain' in workflow
-    assert 'print("PASS: read-only target identity' in workflow
+    # The paper runtime has a different contract from the production app: it may
+    # connect only as the dedicated reader, in read-only mode, with no inherited
+    # memberships, writable grants, extra schemas, callable public definer functions,
+    # sequences, or owned tables.
+    assert 'if db != "postgres" or role != os.environ["STAGING_RUNTIME_DB_ROLE"] or session_role != role:' in workflow
+    assert "primary runtime role has administrative privileges or cannot login" in workflow
+    assert "if not truth(bypass_rls) or truth(inherit) or int(memberships) or int(member_count):" in workflow
+    assert "primary runtime role must be NOINHERIT, BYPASSRLS and have no role memberships" in workflow
+    assert "if any(int(v) for v in (other_schema, unexpected_tables, public_sequences, callable_definers, owned_tables)):" in workflow
+    assert "primary runtime role can access non-allowlisted objects or owns public tables" in workflow
+    assert 'print(f"PASS: primary identity {role} is read-only, non-owner/non-admin, and can access only customer_profiles/app_state.' in workflow
 
 
 def test_staging_preflight_allows_same_project_and_still_binds_database_host():
@@ -24,11 +27,11 @@ def test_staging_preflight_allows_same_project_and_still_binds_database_host():
     )
     assert "ATLAS_PRODUCTION_SUPABASE_PROJECT_REF" in workflow
     assert "ATLAS_STAGING_SUPABASE_PROJECT_REF" in workflow
-    assert "same-project supported" in workflow
+    assert "Same-project staging selected; paper/live/payout safety flags and the dedicated paper schema remain mandatory." in workflow
     assert 'if [[ "$STAGING_SUPABASE_PROJECT_REF" == "$PRODUCTION_SUPABASE_PROJECT_REF" ]]; then' in workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in workflow
-    assert "expected = os.environ[\"STAGING_SUPABASE_PROJECT_REF\"]" in workflow
-    assert "database hostname does not match the explicitly configured staging Supabase project" in workflow
+    assert 'expected = os.environ["STAGING_SUPABASE_PROJECT_REF"]' in workflow
+    assert "DB hostname does not match the configured Supabase project" in workflow
     assert '"gcloud", "run", "services", "describe"' in workflow
     assert '"PAPER_TRADING": "true"' in workflow
     assert '"LIVE_TRADING_ENABLED": "false"' in workflow
@@ -37,6 +40,8 @@ def test_staging_preflight_allows_same_project_and_still_binds_database_host():
     assert '"BROKER_SANDBOX": "true"' in workflow
     assert '"USDT_TRON_ENABLED": "false"' in workflow
     assert '"USDT_TRON_SWEEP_ENABLED": "false"' in workflow
+    assert '"ATLAS_ASGI_APP": "app.paper_staging:app"' in workflow
+    assert '"CUSTOMER_PAPER_DATABASE_URL"' in workflow
 
 
 def test_staging_preflight_decodes_percent_encoded_database_credentials():
