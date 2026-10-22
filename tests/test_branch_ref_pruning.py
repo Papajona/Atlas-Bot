@@ -190,3 +190,26 @@ def test_branch_delta_does_not_ignore_unreadable_git_state(monkeypatch):
 
     with pytest.raises(RuntimeError, match="merge-base failed"):
         pruning._branch_delta_matches_main("branch-sha", "main-sha")
+
+
+def test_missing_merged_pr_commit_is_unproven_not_fatal(monkeypatch):
+    def fake_run(args, *, check=True):
+        return subprocess.CompletedProcess(
+            args, 128, "", "fatal: Not a valid commit name deadbeef"
+        )
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+
+    assert pruning._is_ancestor("deadbeef", "main-sha") is False
+
+
+def test_unexpected_merge_base_error_still_aborts(monkeypatch):
+    def fake_run(args, *, check=True):
+        return subprocess.CompletedProcess(
+            args, 128, "", "fatal: repository object database corrupted"
+        )
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+
+    with pytest.raises(RuntimeError, match="merge-base failed"):
+        pruning._is_ancestor("merge-sha", "main-sha")
