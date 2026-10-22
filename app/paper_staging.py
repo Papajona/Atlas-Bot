@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-import os
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -46,8 +45,21 @@ _paper_preflight_cache_lock = asyncio.Lock()
 _paper_api_request_times: dict[str, list[float]] = {}
 
 
-def _readiness_token_matches(authorization: str | None, expected_token: str) -> bool:
-    """Constant-time Bearer-token check for the externally reachable release readiness probe."""
+def _readiness_bearer_token(paper_database_url: str) -> str:
+    """Derive a purpose-bound probe credential from the already-protected paper DB secret."""
+    secret = str(paper_database_url or "").strip()
+    if not secret:
+        return ""
+    return hmac.new(
+        secret.encode("utf-8"),
+        b"atlas-paper-staging-readiness-v1",
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _readiness_token_matches(authorization: str | None, paper_database_url: str) -> bool:
+    """Constant-time Bearer-token check using the protected paper DB secret as the HMAC key."""
+    expected_token = _readiness_bearer_token(paper_database_url)
     if not expected_token:
         return False
     scheme, separator, supplied = str(authorization or "").partition(" ")
@@ -324,13 +336,13 @@ async def healthz():
 async def readyz(request: Request):
     # Cloud Run is public for liveness and customer routes, but readiness is a
     # release-gate endpoint. Reject unauthenticated probes before touching Supabase.
-    expected_token = os.environ.get("ATLAS_STAGING_READINESS_TOKEN", "")
-    if not expected_token:
+    paper_database_url = str(getattr(settings, "customer_paper_database_url", "") or "")
+    if not paper_database_url:
         return JSONResponse(
-            {"status": "BLOCKED", "reason": "READINESS_TOKEN_NOT_CONFIGURED"},
+            {"status": "BLOCKED", "reason": "PAPER_DATABASE_CREDENTIAL_NOT_CONFIGURED"},
             status_code=503,
         )
-    if not _readiness_token_matches(request.headers.get("authorization"), expected_token):
+    if not _readiness_token_matches(request.headers.get("authorization"), paper_database_url):
         return JSONResponse(
             {"status": "BLOCKED", "reason": "READINESS_AUTHENTICATION_REQUIRED"},
             status_code=401,
