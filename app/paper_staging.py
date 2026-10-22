@@ -21,7 +21,6 @@ from .customer_paper_ledger import preflight_isolated_customer_paper_ledger
 from .main import MarketRequest, customer_claims, market_data
 
 
-_ALLOWED_PRIMARY_TABLES = {"app_state", "customer_profiles"}
 _EXPECTED_PRIMARY_ROLE = "atlas_paper_reader"
 
 
@@ -87,6 +86,7 @@ async def _primary_reader_preflight() -> dict[str, Any]:
     if (
         str(row["current_database"] or "") != "postgres"
         or str(row["session_user"] or "") != observed_role
+        or str(row["transaction_read_only"] or "").lower() not in {"on", "true", "t"}
         or observed_role != _EXPECTED_PRIMARY_ROLE
         or not bool(row["rolcanlogin"])
         or bool(row["rolsuper"])
