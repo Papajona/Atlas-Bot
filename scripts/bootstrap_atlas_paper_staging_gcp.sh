@@ -110,7 +110,7 @@ fi
 
 if [[ -f "$PAPER_URL_FILE" ]]; then
   python - "$PAPER_URL_FILE" "$SUPABASE_PROJECT_REF" "$SUPABASE_DB_HOST" <<'PY'
-import os, stat, sys
+import stat, sys
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 path = Path(sys.argv[1])
@@ -191,8 +191,18 @@ put_secret_file() {
   if ! gcloud secrets describe "$secret_name" --project="$PROJECT_ID" >/dev/null 2>&1; then
     gcloud secrets create "$secret_name" --replication-policy=automatic --project="$PROJECT_ID"
   fi
-  gcloud secrets versions add "$secret_name" --data-file="$secret_path" \
-    --project="$PROJECT_ID" >/dev/null
+  # The operator-generated URL file ends with a newline; remove only that delimiter
+  # so the secret value is exactly the URI the app will parse.
+  python - "$secret_path" <<'PY' | gcloud secrets versions add "$secret_name" --data-file=- --project="$PROJECT_ID" >/dev/null
+import sys
+from pathlib import Path
+data = Path(sys.argv[1]).read_text(encoding="utf-8")
+if data.endswith("\n"):
+    data = data[:-1]
+if not data or "\n" in data or "\r" in data:
+    raise SystemExit("BLOCKED: paper URL file must contain exactly one URI line")
+sys.stdout.write(data)
+PY
 }
 
 put_secret "$PRIMARY_SECRET" "$PRIMARY_URL"
