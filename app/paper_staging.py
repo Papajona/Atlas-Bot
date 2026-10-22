@@ -33,9 +33,43 @@ class PaperMarketRequest(MarketRequest):
 
 _EXPECTED_PRIMARY_ROLE = "atlas_paper_reader"
 _PAPER_PREFLIGHT_CACHE_TTL_SECONDS = 5.0
+_READYZ_RATE_LIMIT_PER_MINUTE = 12
+_READYZ_RATE_WINDOW_SECONDS = 60.0
+_READYZ_RATE_MAX_CLIENTS = 4096
 _paper_preflight_cache_result: dict[str, Any] | None = None
 _paper_preflight_cache_at = 0.0
 _paper_preflight_cache_lock = asyncio.Lock()
+_readyz_request_times: dict[str, list[float]] = {}
+
+
+def _allow_paper_readyz_request(client_identity: str, *, now: float | None = None) -> bool:
+    """Bound unauthenticated readiness traffic without requiring optional Redis in staging."""
+    current = time.monotonic() if now is None else float(now)
+    identity = str(client_identity or "").strip()[:128]
+    if not identity:
+        return False
+
+    # Periodically prune old clients before admitting a new key; fail closed at the cap.
+    if identity not in _readyz_request_times and len(_readyz_request_times) >= _READYZ_RATE_MAX_CLIENTS:
+        expired = [
+            key for key, entries in _readyz_request_times.items()
+            if not any(current - seen < _READYZ_RATE_WINDOW_SECONDS for seen in entries)
+        ]
+        for key in expired:
+            _readyz_request_times.pop(key, None)
+        if len(_readyz_request_times) >= _READYZ_RATE_MAX_CLIENTS:
+            return False
+
+    recent = [
+        seen for seen in _readyz_request_times.get(identity, [])
+        if 0 <= current - seen < _READYZ_RATE_WINDOW_SECONDS
+    ]
+    if len(recent) >= _READYZ_RATE_LIMIT_PER_MINUTE:
+        _readyz_request_times[identity] = recent
+        return False
+    recent.append(current)
+    _readyz_request_times[identity] = recent
+    return True
 
 
 async def _cached_paper_runtime_preflight() -> dict[str, Any]:
@@ -245,23 +279,12 @@ app.middleware("http")(api_rate_limit)
 
 @app.middleware("http")
 async def _paper_readyz_rate_limit(request: Request, call_next):
-    if request.url.path == "/readyz":
-        try:
-            allowed, _ = await allow_rate_limit(
-                f"paper-readyz:ip:{_trusted_client_ip(request)}",
-                max(1, int(settings.expensive_api_rate_limit_per_minute)),
-            )
-        except Exception:
-            return JSONResponse(
-                {"status": "BLOCKED", "reason": "READINESS_RATE_LIMIT_UNAVAILABLE"},
-                status_code=503,
-            )
-        if not allowed:
-            return JSONResponse(
-                {"status": "BLOCKED", "reason": "READINESS_RATE_LIMITED"},
-                status_code=429,
-                headers={"Retry-After": "60"},
-            )
+    if request.url.path == "/readyz" and not _allow_paper_readyz_request(_trusted_client_ip(request)):
+        return JSONResponse(
+            {"status": "BLOCKED", "reason": "READINESS_RATE_LIMITED"},
+            status_code=429,
+            headers={"Retry-After": "60"},
+        )
     return await call_next(request)
 
 
