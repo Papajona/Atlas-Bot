@@ -76,17 +76,27 @@ def test_staging_paper_request_accepts_short_history_without_relaxing_public_mod
         paper_staging.PaperMarketRequest(days=31)
 
 
-def test_readiness_bearer_token_fails_closed():
-    assert not paper_staging._readiness_token_matches(None, "correct-secret")
-    assert not paper_staging._readiness_token_matches("Bearer wrong-secret", "correct-secret")
-    assert not paper_staging._readiness_token_matches("Basic correct-secret", "correct-secret")
-    assert not paper_staging._readiness_token_matches("Bearer correct-secret", "")
-    assert paper_staging._readiness_token_matches("Bearer correct-secret", "correct-secret")
-    assert paper_staging._readiness_token_matches("bearer  correct-secret ", "correct-secret")
+def test_readiness_bearer_token_is_purpose_bound_and_fails_closed():
+    database_url = "postgresql+asyncpg://atlas_customer_paper:private-test-password@db.example/postgres"
+    token = paper_staging._readiness_bearer_token(database_url)
+    assert len(token) == 64
+    assert not paper_staging._readiness_token_matches(None, database_url)
+    assert not paper_staging._readiness_token_matches("Bearer wrong-secret", database_url)
+    assert not paper_staging._readiness_token_matches("Basic " + token, database_url)
+    assert not paper_staging._readiness_token_matches("Bearer " + token, "")
+    assert paper_staging._readiness_token_matches("Bearer " + token, database_url)
+    assert paper_staging._readiness_token_matches("bearer  " + token + " ", database_url)
+    assert not paper_staging._readiness_token_matches(
+        "Bearer " + token, database_url + "?different-secret-version"
+    )
 
 
 def test_readyz_rejects_unauthenticated_probe_before_database(monkeypatch):
-    monkeypatch.setenv("ATLAS_STAGING_READINESS_TOKEN", "correct-secret")
+    monkeypatch.setattr(
+        paper_staging.settings,
+        "customer_paper_database_url",
+        "postgresql+asyncpg://atlas_customer_paper:private-test-password@db.example/postgres",
+    )
 
     async def forbidden_preflight():
         raise AssertionError("unauthenticated readiness must be rejected before DB preflight")
