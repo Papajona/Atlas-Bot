@@ -188,21 +188,51 @@ put_secret() {
 put_secret_file() {
   local secret_name="$1"
   local secret_path="$2"
+  local validated_uri
+
+  # Validate and capture the complete value before any Secret Manager operation.
+  # Read bytes first so CRLF is not silently normalized into an accepted LF.
+  if ! validated_uri="$(python - "$secret_path" <<'PY'
+import sys
+from pathlib import Path
+
+try:
+    data = Path(sys.argv[1]).read_bytes().decode("utf-8")
+except (OSError, UnicodeDecodeError):
+    raise SystemExit("BLOCKED: paper URL file must be readable UTF-8")
+
+# Permit one terminal LF as the file delimiter, but not CRLF or extra lines.
+if data.endswith("\n"):
+    data = data[:-1]
+
+if not data or "\n" in data or "\r" in data or "\x00" in data:
+    raise SystemExit("BLOCKED: paper URL file must contain exactly one URI line")
+
+sys.stdout.write(data)
+PY
+)"; then
+    return 1
+  fi
+
+  # Command substitution cannot safely preserve an empty value or NUL bytes.
+  if [[ -z "$validated_uri" ]]; then
+    echo "BLOCKED: paper URL is empty." >&2
+    return 1
+  fi
+
+  # Do not create or version a secret until validation has succeeded.
   if ! gcloud secrets describe "$secret_name" --project="$PROJECT_ID" >/dev/null 2>&1; then
     gcloud secrets create "$secret_name" --replication-policy=automatic --project="$PROJECT_ID"
   fi
-  # The operator-generated URL file ends with a newline; remove only that delimiter
-  # so the secret value is exactly the URI the app will parse.
-  python - "$secret_path" <<'PY' | gcloud secrets versions add "$secret_name" --data-file=- --project="$PROJECT_ID" >/dev/null
-import sys
-from pathlib import Path
-data = Path(sys.argv[1]).read_text(encoding="utf-8")
-if data.endswith("\n"):
-    data = data[:-1]
-if not data or "\n" in data or "\r" in data:
-    raise SystemExit("BLOCKED: paper URL file must contain exactly one URI line")
-sys.stdout.write(data)
-PY
+
+  # Keep the URI out of process arguments and send the exact bytes on stdin.
+  if ! printf '%s' "$validated_uri" |
+      gcloud secrets versions add "$secret_name" --data-file=- --project="$PROJECT_ID" >/dev/null; then
+    unset validated_uri
+    return 1
+  fi
+
+  unset validated_uri
 }
 
 put_secret "$PRIMARY_SECRET" "$PRIMARY_URL"
