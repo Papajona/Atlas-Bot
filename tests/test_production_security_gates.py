@@ -295,7 +295,7 @@ def test_staging_identity_preflight_allows_same_project_and_checks_read_only_pap
     assert "session_role != role" in workflow
     assert "primary runtime role has administrative privileges or cannot login" in workflow
     assert "must be NOINHERIT, BYPASSRLS and have no role memberships" in workflow
-    assert "no migrations were executed" in workflow
+    assert "No migration or write was executed" in workflow
     assert "can access only customer_profiles/app_state" in workflow
     assert "EXPECTED_ALEMBIC_HEAD" not in workflow
     assert "alembic upgrade" not in workflow
@@ -306,7 +306,6 @@ def test_staging_preflight_runtime_role_is_non_owner_and_non_admin():
     guard = (ROOT / "app" / "startup_guards.py").read_text(encoding="utf-8")
     assert "owned_tables" in workflow
     assert "c.relowner=r.oid" in workflow
-    assert "owned_tables" in workflow
     assert "if any(int(v) for v in (other_schema, unexpected_tables, public_sequences, callable_definers, owned_tables))" in workflow
     assert "c.relowner = r.oid" in guard
     assert "r.rolcreaterole AS can_create_roles" in guard
