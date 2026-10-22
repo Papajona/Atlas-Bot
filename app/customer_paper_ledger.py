@@ -197,8 +197,8 @@ async def preflight_isolated_customer_paper_ledger(
                 "WHERE m.roleid=(SELECT oid FROM pg_roles WHERE rolname=current_user) "
                 "AND NOT (member_role.rolname='postgres' AND grantor_role.rolname='supabase_admin' "
                 "AND m.admin_option "
-                "AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false)=false "
-                "AND COALESCE((to_jsonb(m)->>'set_option')::boolean, false)=false)), "
+                "AND (to_jsonb(m) ? 'inherit_option') AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false)=false "
+                "AND (to_jsonb(m) ? 'set_option') AND COALESCE((to_jsonb(m)->>'set_option')::boolean, false)=false)), "
                 "has_schema_privilege(current_user, 'public', 'USAGE'), "
                 "has_schema_privilege(current_user, 'public', 'CREATE'), "
                 "(SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname='customer_paper')), "
@@ -412,8 +412,8 @@ async def preflight_isolated_customer_paper_ledger(
                                  member_role.rolname = 'postgres'
                                  AND grantor_role.rolname = 'supabase_admin'
                                  AND m.admin_option
-                                 AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false) = false
-                                 AND COALESCE((to_jsonb(m)->>'set_option')::boolean, false) = false
+                                 AND (to_jsonb(m) ? 'inherit_option') AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false) = false
+                                 AND (to_jsonb(m) ? 'set_option') AND COALESCE((to_jsonb(m)->>'set_option')::boolean, false) = false
                                )) AS member_count
                         FROM pg_roles r
                         WHERE r.rolname = CAST(:paper_role AS name)
