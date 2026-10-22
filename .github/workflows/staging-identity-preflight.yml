@@ -131,20 +131,46 @@ jobs:
           if not observed_sa or observed_sa != os.environ["EXPECTED_RUNTIME_SERVICE_ACCOUNT"]:
               print("BLOCKED: deployed staging service account differs from ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT")
               sys.exit(1)
-          refs = []
+          database_secret_refs = []
+          database_container_env = None
+          required_safety = {
+              "PAPER_TRADING": "true",
+              "LIVE_TRADING_ENABLED": "false",
+              "CUSTOMER_LIVE_TRADING_ENABLED": "false",
+              "PAYOUT_LIVE_ENABLED": "false",
+              "BROKER_SANDBOX": "true",
+              "USDT_TRON_ENABLED": "false",
+              "USDT_TRON_SWEEP_ENABLED": "false",
+          }
           for container in spec.get("containers", []) or []:
-              for item in container.get("env", []) or []:
-                  if item.get("name") != "DATABASE_URL":
-                      continue
-                  value_from = item.get("valueFrom") or {}
-                  value_source = item.get("valueSource") or {}
-                  ref = value_from.get("secretKeyRef") or value_source.get("secretKeyRef") or {}
-                  refs.append(ref.get("name") or "")
+              env_items = container.get("env", []) or []
+              env_by_name = {item.get("name"): item for item in env_items if item.get("name")}
+              database_item = env_by_name.get("DATABASE_URL")
+              if database_item is None:
+                  continue
+              value_from = database_item.get("valueFrom") or {}
+              value_source = database_item.get("valueSource") or {}
+              ref = value_from.get("secretKeyRef") or value_source.get("secretKeyRef") or {}
+              database_secret_refs.append(ref.get("name") or "")
+              database_container_env = {
+                  name: (env_by_name[name].get("value") if name in env_by_name else None)
+                  for name in required_safety
+              }
           expected_secret = os.environ["STAGING_DATABASE_SECRET"]
-          if len(refs) != 1 or refs[0] != expected_secret:
+          if len(database_secret_refs) != 1 or database_secret_refs[0] != expected_secret:
               print("BLOCKED: the deployed service DATABASE_URL must reference exactly the configured staging database secret")
               sys.exit(1)
-          print("PASS: deployed staging runtime service account and DATABASE_URL secret reference match the protected staging configuration.")
+          missing_or_unsafe = [
+              f"{name} expected {expected!r}, observed {None if database_container_env is None else database_container_env.get(name)!r}"
+              for name, expected in required_safety.items()
+              if database_container_env is None or database_container_env.get(name) != expected
+          ]
+          if missing_or_unsafe:
+              print("BLOCKED: staging runtime safety flags are missing or unsafe:")
+              for item in missing_or_unsafe:
+                  print(f" - {item}")
+              sys.exit(1)
+          print("PASS: staging runtime identity, database secret wiring, paper mode, sandbox broker, disabled live trading/payouts, and disabled TRON sweeps verified.")
           PY
 
       - name: Read staging database secret without printing credentials
