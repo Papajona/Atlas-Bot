@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Delete only remote branch refs that are provably integrated into main.
 
-Three independent proofs are accepted:
+Four independent proofs are accepted:
 1. The exact branch tip is an ancestor of origin/main.
 2. A merged PR records that exact branch tip as its head, and that PR's merge
    commit is an ancestor of origin/main (for squash/rebase merges).
-3. With no branch-only merge commits, every branch-only commit has a matching
+3. Every path changed on the branch side since the merge base has the same
+   object/content in main. This recognizes squash-merged or otherwise integrated
+   changes even when commit history differs.
+4. With no branch-only merge commits, every branch-only commit has a matching
    patch in main according to git cherry (no unique '+' patches).
 
 Any open-PR branch, unknown branch history, API failure, or head moved after a
@@ -68,6 +71,58 @@ def _is_ancestor(ancestor_sha: str, descendant_sha: str) -> bool:
         "git merge-base failed while checking branch integration: "
         + (result.stderr.strip() or f"exit code {result.returncode}")
     )
+
+def _object_id_at_commit(commit_sha: str, path: str) -> str | None:
+    result = _run(
+        ["git", "rev-parse", "--verify", f"{commit_sha}:{path}"],
+        check=False,
+    )
+    if result.returncode == 0:
+        return result.stdout.strip()
+    # Missing/deleted paths are expected when comparing branch trees. Other
+    # errors abort reconciliation rather than being misread as missing files.
+    detail = result.stderr.strip()
+    if "does not exist in" in detail or "Needed a single revision" in detail:
+        return None
+    raise RuntimeError(
+        f"git rev-parse could not inspect path {path!r} at {commit_sha}: "
+        + (detail or f"exit code {result.returncode}")
+    )
+
+
+def _branch_delta_matches_main(branch_sha: str, main_sha: str) -> bool:
+    """True when every branch-side path change since merge-base is already in main."""
+    merge_base_result = _run(
+        ["git", "merge-base", main_sha, branch_sha],
+        check=False,
+    )
+    if merge_base_result.returncode:
+        raise RuntimeError(
+            "git merge-base failed while comparing branch trees: "
+            + (merge_base_result.stderr.strip() or f"exit code {merge_base_result.returncode}")
+        )
+    merge_base = merge_base_result.stdout.strip()
+    if not merge_base:
+        raise RuntimeError("git merge-base returned an empty merge base")
+
+    diff = _run(
+        ["git", "diff", "--name-only", "-z", merge_base, branch_sha],
+        check=False,
+    )
+    if diff.returncode:
+        raise RuntimeError(
+            "git diff failed while comparing branch trees: "
+            + (diff.stderr.strip() or f"exit code {diff.returncode}")
+        )
+
+    changed_paths = [path for path in diff.stdout.split("\0") if path]
+    for path in changed_paths:
+        branch_object = _object_id_at_commit(branch_sha, path)
+        main_object = _object_id_at_commit(main_sha, path)
+        if branch_object != main_object:
+            return False
+    return True
+
 
 def _all_branch_commits_are_patch_equivalent(branch_sha: str, main_sha: str) -> bool:
     """Accept patch-equivalence only when no branch-only merge commits exist.
@@ -136,6 +191,40 @@ def main() -> int:
             if item.get("headRefName")
         }
 
+        # Read closed PRs through the GitHub REST API. `gh pr list --state merged`
+        # is not consistently supported across CLI versions; an empty result must
+        # never be mistaken for evidence that no merged PR exists.
+        closed_pr_result = _run(
+            [
+                "gh", "api", "--paginate", "--slurp",
+                f"repos/{repository}/pulls?state=closed&per_page=100",
+            ],
+            check=False,
+        )
+        if closed_pr_result.returncode:
+            raise RuntimeError(
+                "Unable to list all closed pull requests for reconciliation: "
+                + (closed_pr_result.stderr.strip() or f"exit code {closed_pr_result.returncode}")
+            )
+        raw_pages = json.loads(closed_pr_result.stdout)
+        if not isinstance(raw_pages, list):
+            raise RuntimeError("GitHub returned an unexpected closed-pull-request response")
+        if raw_pages and isinstance(raw_pages[0], list):
+            closed_prs = [item for page in raw_pages for item in page]
+        else:
+            closed_prs = raw_pages
+        merged_prs = [
+            {
+                "headRefName": item.get("head", {}).get("ref"),
+                "headRefOid": item.get("head", {}).get("sha"),
+                "mergeCommit": {"oid": item.get("merge_commit_sha")},
+            }
+            for item in closed_prs
+            if isinstance(item, dict)
+            and item.get("merged_at")
+            and isinstance(item.get("head"), dict)
+        ]
+
         deleted = 0
         preserved = 0
         failed = 0
@@ -157,22 +246,21 @@ def main() -> int:
                 safe = True
                 reason = "exact branch tip is an ancestor of main"
             else:
-                payload = _run(
-                    [
-                        "gh", "pr", "list", "--repo", repository, "--state", "merged",
-                        "--head", f"{repository.split('/', 1)[0]}:{branch_name}", "--limit", "1000",
-                        "--json", "headRefName,headRefOid,mergeCommit",
-                    ]
-                ).stdout
-                merged_prs = json.loads(payload)
+                branch_merged_prs = [
+                    item for item in merged_prs
+                    if item.get("headRefName") == branch_name
+                ]
                 safe, reason = should_delete_ref(
                     branch_name,
                     branch_sha,
                     main_sha,
                     open_pr_heads,
-                    merged_prs,
+                    branch_merged_prs,
                     _is_ancestor,
                 )
+                if not safe and _branch_delta_matches_main(branch_sha, main_sha):
+                    safe = True
+                    reason = "all branch-side changed paths match main"
                 if not safe and _all_branch_commits_are_patch_equivalent(branch_sha, main_sha):
                     safe = True
                     reason = "all non-merge branch commits are patch-equivalent to main"
