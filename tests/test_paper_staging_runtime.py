@@ -5,6 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
+from pydantic import ValidationError
+
+from app.schemas import MarketRequest
 
 from app import paper_staging
 
@@ -63,31 +67,40 @@ def test_paper_staging_asgi_exposes_only_health_and_paper_routes():
 
 
 
-def test_readyz_memory_limiter_enforces_quota_and_expires_old_requests(monkeypatch):
-    limiter = paper_staging._readyz_request_times
-    limiter.clear()
-    monkeypatch.setattr(paper_staging, "_READYZ_RATE_LIMIT_PER_MINUTE", 2)
-    monkeypatch.setattr(paper_staging, "_READYZ_RATE_MAX_CLIENTS", 10)
-
-    assert paper_staging._allow_paper_readyz_request("client-a", now=100.0)
-    assert paper_staging._allow_paper_readyz_request("client-a", now=101.0)
-    assert not paper_staging._allow_paper_readyz_request("client-a", now=102.0)
-    assert paper_staging._allow_paper_readyz_request("client-b", now=102.0)
-    assert paper_staging._allow_paper_readyz_request("client-a", now=161.0)
+def test_staging_paper_request_accepts_short_history_without_relaxing_public_model():
+    with pytest.raises(ValidationError):
+        MarketRequest(days=1)
+    assert paper_staging.PaperMarketRequest(days=1).days == 1
+    assert paper_staging.PaperMarketRequest(days=30).days == 30
+    with pytest.raises(ValidationError):
+        paper_staging.PaperMarketRequest(days=31)
 
 
-def test_readyz_memory_limiter_bounds_client_state_and_fails_closed(monkeypatch):
-    limiter = paper_staging._readyz_request_times
-    limiter.clear()
-    monkeypatch.setattr(paper_staging, "_READYZ_RATE_LIMIT_PER_MINUTE", 10)
-    monkeypatch.setattr(paper_staging, "_READYZ_RATE_MAX_CLIENTS", 2)
+def test_readiness_bearer_token_fails_closed():
+    assert not paper_staging._readiness_token_matches(None, "correct-secret")
+    assert not paper_staging._readiness_token_matches("Bearer wrong-secret", "correct-secret")
+    assert not paper_staging._readiness_token_matches("Basic correct-secret", "correct-secret")
+    assert not paper_staging._readiness_token_matches("Bearer correct-secret", "")
+    assert paper_staging._readiness_token_matches("Bearer correct-secret", "correct-secret")
+    assert paper_staging._readiness_token_matches("bearer  correct-secret ", "correct-secret")
 
-    assert paper_staging._allow_paper_readyz_request("client-a", now=10.0)
-    assert paper_staging._allow_paper_readyz_request("client-b", now=10.0)
-    assert not paper_staging._allow_paper_readyz_request("client-c", now=11.0)
-    assert len(limiter) == 2
-    assert paper_staging._allow_paper_readyz_request("client-c", now=71.0)
-    assert len(limiter) <= 2
+
+def test_readyz_rejects_unauthenticated_probe_before_database(monkeypatch):
+    monkeypatch.setenv("ATLAS_STAGING_READINESS_TOKEN", "correct-secret")
+
+    async def forbidden_preflight():
+        raise AssertionError("unauthenticated readiness must be rejected before DB preflight")
+
+    monkeypatch.setattr(paper_staging, "_cached_paper_runtime_preflight", forbidden_preflight)
+    client = TestClient(paper_staging.app)
+
+    missing = client.get("/readyz")
+    invalid = client.get("/readyz", headers={"Authorization": "Bearer wrong-secret"})
+
+    assert missing.status_code == 401
+    assert invalid.status_code == 401
+    assert missing.json()["reason"] == "READINESS_AUTHENTICATION_REQUIRED"
+    assert invalid.json()["reason"] == "READINESS_AUTHENTICATION_REQUIRED"
 
 
 def test_customer_api_limiter_caps_per_ip_and_per_auth_identity(monkeypatch):
