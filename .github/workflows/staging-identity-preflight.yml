@@ -278,7 +278,19 @@ jobs:
                  r.rolcanlogin, r.rolsuper, r.rolcreaterole, r.rolcreatedb, r.rolreplication,
                  r.rolbypassrls, r.rolinherit,
                  (SELECT count(*) FROM pg_auth_members m WHERE m.member=r.oid),
-                 (SELECT count(*) FROM pg_auth_members m WHERE m.roleid=r.oid),
+                 (SELECT count(*) FROM pg_auth_members m
+                   JOIN pg_roles member_role ON member_role.oid=m.member
+                   JOIN pg_roles grantor_role ON grantor_role.oid=m.grantor
+                   WHERE m.roleid=r.oid
+                     AND NOT (
+                       member_role.rolname='postgres'
+                       AND grantor_role.rolname='supabase_admin'
+                       AND m.admin_option
+                       AND (to_jsonb(m) ? 'inherit_option')
+                       AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false)=false
+                       AND (to_jsonb(m) ? 'set_option')
+                       AND COALESCE((to_jsonb(m)->>'set_option')::boolean, false)=false
+                     )),
                  has_schema_privilege(current_user,'public','USAGE'),
                  has_schema_privilege(current_user,'public','CREATE'),
                  has_table_privilege(current_user,'public.customer_profiles','SELECT'),
@@ -327,7 +339,7 @@ jobs:
           if not truth(can_login) or truth(superuser) or truth(create_role) or truth(create_db) or truth(replication):
               raise SystemExit("BLOCKED: primary runtime role has administrative privileges or cannot login")
           if not truth(bypass_rls) or truth(inherit) or int(memberships) or int(member_count):
-              raise SystemExit("BLOCKED: primary runtime role must be NOINHERIT, BYPASSRLS and have no role memberships")
+              raise SystemExit("BLOCKED: primary runtime role must be NOINHERIT/BYPASSRLS, with no inherited roles or unsafe Supabase-managed membership")
           if not truth(public_usage) or truth(public_create) or not truth(read_profiles) or not truth(read_app_state):
               raise SystemExit("BLOCKED: primary runtime role lacks exact public-schema read-only access")
           if any(int(v) for v in (other_schema, unexpected_tables, public_sequences, callable_definers, owned_tables)):
