@@ -52,3 +52,17 @@ def test_restore_operation_evidence_requires_machine_readable_object():
             backup_reference="immutable-backup-123",
             target_project_ref="abcdefghijklmnopqrst",
         )
+
+def test_restore_operation_evidence_prefers_complete_root_record_over_nested_metadata():
+    record = {
+        **OP,
+        "data": {"status": "RUNNING", "id": "unrelated-metadata"},
+    }
+    result = verify(
+        record,
+        operation_id="restore-2026-10-16-01",
+        backup_reference="immutable-backup-123",
+        target_project_ref="abcdefghijklmnopqrst",
+    )
+    assert result["status"] == "PASS"
+    assert result["restore_operation_id"] == "restore-2026-10-16-01"
