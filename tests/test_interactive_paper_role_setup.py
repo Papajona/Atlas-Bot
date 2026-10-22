@@ -140,6 +140,14 @@ def test_atomic_url_file_write_cleans_up_after_interrupted_write(tmp_path: Path,
     assert not final_path.exists()
     assert list(tmp_path.glob(".database-url.*.tmp")) == []
 
+    # A later run must be able to recover normally after the interrupted write.
+    monkeypatch.setattr(setup_role.os, "fdopen", real_fdopen)
+    retry_uri = runtime_url("successful-retry-secret")
+    _create_url_file_atomically(final_path, retry_uri)
+    assert final_path.read_text(encoding="utf-8") == retry_uri + "\n"
+    assert final_path.stat().st_mode & 0o777 == 0o600
+    assert list(tmp_path.glob(".database-url.*.tmp")) == []
+
 
 def test_atomic_url_file_publication_never_overwrites_existing_file(tmp_path: Path):
     final_path = tmp_path / "database-url"
