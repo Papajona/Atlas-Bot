@@ -26,6 +26,35 @@ jobs:
           test "$GITHUB_REF" = "refs/heads/main"
           test -n "${GITHUB_SHA}"
 
+      - name: Validate Google Cloud staging identity configuration before authentication
+        shell: bash
+        env:
+          WIF_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          PREFLIGHT_SERVICE_ACCOUNT: ${{ secrets.GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -n "$WIF_PROVIDER" ]] || missing+=("staging environment secret GCP_WORKLOAD_IDENTITY_PROVIDER")
+          [[ -n "$PREFLIGHT_SERVICE_ACCOUNT" ]] || missing+=("staging environment secret GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT")
+          [[ -n "$GCP_PROJECT_ID" ]] || missing+=("GCP_PROJECT_ID secret")
+          [[ -n "$GCP_REGION" ]] || missing+=("GCP_REGION secret")
+          if (("${#missing[@]}" > 0)); then
+            printf 'BLOCKED: Google Cloud staging authentication cannot start; missing configuration:\n'
+            printf ' - %s\n' "${missing[@]}"
+            exit 1
+          fi
+          [[ "$WIF_PROVIDER" == projects/*/locations/global/workloadIdentityPools/*/providers/* ]] || {
+            echo "BLOCKED: GCP_WORKLOAD_IDENTITY_PROVIDER must be a full workload identity provider resource name."
+            exit 1
+          }
+          [[ "$PREFLIGHT_SERVICE_ACCOUNT" == *@*.iam.gserviceaccount.com ]] || {
+            echo "BLOCKED: GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT must be a Google service-account email."
+            exit 1
+          }
+          echo "PASS: required staging identity inputs are present and structurally valid."
+
       - name: Authenticate to Google Cloud using protected staging environment
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
