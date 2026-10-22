@@ -15,6 +15,7 @@ from sqlalchemy import text
 from app import customer_paper_api as paper_api
 from app.config import settings
 from app.schemas import MarketRequest
+from app.paper_staging import PaperMarketRequest
 
 
 def _verified_bars(latest_bar_at: datetime, *, volume: str = "100") -> pd.DataFrame:
@@ -198,7 +199,7 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
     api_app.include_router(paper_api.build_customer_paper_router(
         get_customer=fake_get_customer,
         market_data=fake_market_data,
-        market_request_type=MarketRequest,
+        market_request_type=PaperMarketRequest,
         state_guard=state_guard,
     ))
     client = TestClient(api_app)
