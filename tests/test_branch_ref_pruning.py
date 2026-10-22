@@ -170,7 +170,7 @@ def test_branch_delta_matches_main_when_every_branch_changed_file_matches(
     def fake_run(args, *, check=True):
         if args[:2] == ["git", "merge-base"]:
             return subprocess.CompletedProcess(args, 0, "base-sha\n", "")
-        if args[:4] == ["git", "diff", "--name-only", "-z"]:
+        if args[:5] == ["git", "diff", "--no-renames", "--name-only", "-z"]:
             return subprocess.CompletedProcess(
                 args, 0, "app/module.py\0docs/readme.md\0", ""
             )
@@ -198,7 +198,7 @@ def test_branch_delta_preserves_any_changed_file_not_matching_main(monkeypatch):
     def fake_run(args, *, check=True):
         if args[:2] == ["git", "merge-base"]:
             return subprocess.CompletedProcess(args, 0, "base-sha\n", "")
-        if args[:4] == ["git", "diff", "--name-only", "-z"]:
+        if args[:5] == ["git", "diff", "--no-renames", "--name-only", "-z"]:
             return subprocess.CompletedProcess(args, 0, "app/module.py\0", "")
         if args[:3] == ["git", "rev-parse", "--verify"]:
             return subprocess.CompletedProcess(
@@ -217,7 +217,7 @@ def test_branch_delta_accepts_same_deleted_path_on_both_sides(monkeypatch):
     def fake_run(args, *, check=True):
         if args[:2] == ["git", "merge-base"]:
             return subprocess.CompletedProcess(args, 0, "base-sha\n", "")
-        if args[:4] == ["git", "diff", "--name-only", "-z"]:
+        if args[:5] == ["git", "diff", "--no-renames", "--name-only", "-z"]:
             return subprocess.CompletedProcess(args, 0, "old-module.py\0", "")
         if args[:3] == ["git", "rev-parse", "--verify"]:
             return subprocess.CompletedProcess(
