@@ -173,12 +173,19 @@ validate_paper_url_file() {
 import hmac
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
+path = Path(sys.argv[1])
+if path.is_symlink():
+    raise SystemExit("BLOCKED: paper URL file must not be a symlink")
 try:
-    data = Path(sys.argv[1]).read_bytes().decode("utf-8")
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & 0o077:
+        raise SystemExit("BLOCKED: generated paper database URL file must have private permissions (0600 or stricter)")
+    data = path.read_bytes().decode("utf-8")
 except (OSError, UnicodeDecodeError):
     raise SystemExit("BLOCKED: paper URL file must be readable UTF-8")
 
