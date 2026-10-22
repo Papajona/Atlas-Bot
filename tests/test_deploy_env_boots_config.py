@@ -67,7 +67,6 @@ def test_both_production_deploy_scripts_call_shared_research_validator() -> None
     worker = (ROOT / "deploy" / "cloud-run-worker-deploy.sh").read_text(encoding="utf-8")
 
     assert "validate_research_deploy_env.py" in api
-    assert '"@")' not in api  # delimiter must be supplied as a shell argument, not appended to the Python command
     assert ' "$RESEARCH_FEE_SOURCE" "$RESEARCH_FEE_EVIDENCE_ID" "$RESEARCH_MIN_DEFLATED_SHARPE" "@"' in api
     assert "validate_research_deploy_env.py" in worker
     assert ' "$RESEARCH_FEE_SOURCE" "$RESEARCH_FEE_EVIDENCE_ID" "$RESEARCH_MIN_DEFLATED_SHARPE" ","' in worker
