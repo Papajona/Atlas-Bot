@@ -90,6 +90,21 @@ def test_readyz_memory_limiter_bounds_client_state_and_fails_closed(monkeypatch)
     assert len(limiter) <= 2
 
 
+def test_customer_api_limiter_caps_per_ip_and_per_auth_identity(monkeypatch):
+    limiter = paper_staging._paper_api_request_times
+    limiter.clear()
+    monkeypatch.setattr(paper_staging, "_PAPER_ORDER_RATE_LIMIT_PER_MINUTE", 2)
+    monkeypatch.setattr(paper_staging, "_PAPER_API_RATE_MAX_BUCKETS", 4)
+
+    assert paper_staging._allow_paper_api_request("paper:ip:client-a", limit=2, now=5.0)
+    assert paper_staging._allow_paper_api_request("paper:auth:token-a", limit=2, now=5.0)
+    assert paper_staging._allow_paper_api_request("paper:ip:client-a", limit=2, now=6.0)
+    assert paper_staging._allow_paper_api_request("paper:auth:token-a", limit=2, now=6.0)
+    assert not paper_staging._allow_paper_api_request("paper:ip:client-a", limit=2, now=7.0)
+    assert not paper_staging._allow_paper_api_request("paper:auth:token-a", limit=2, now=7.0)
+    assert paper_staging._allow_paper_api_request("paper:ip:client-a", limit=2, now=66.0)
+
+
 def test_paper_customer_auth_rejects_aal1_before_querying_database(monkeypatch):
     async def fake_customer_claims(_authorization, require_aal2=True):
         return {"sub": "supabase-user-1", "aal": "aal1"}
