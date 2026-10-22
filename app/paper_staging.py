@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
+import os
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -34,47 +36,24 @@ class PaperMarketRequest(MarketRequest):
 
 _EXPECTED_PRIMARY_ROLE = "atlas_paper_reader"
 _PAPER_PREFLIGHT_CACHE_TTL_SECONDS = 5.0
-_READYZ_RATE_LIMIT_PER_MINUTE = 12
-_READYZ_RATE_WINDOW_SECONDS = 60.0
-_READYZ_RATE_MAX_CLIENTS = 4096
+_PAPER_API_RATE_WINDOW_SECONDS = 60.0
 _PAPER_API_RATE_LIMIT_PER_MINUTE = 60
 _PAPER_ORDER_RATE_LIMIT_PER_MINUTE = 12
 _PAPER_API_RATE_MAX_BUCKETS = 8192
 _paper_preflight_cache_result: dict[str, Any] | None = None
 _paper_preflight_cache_at = 0.0
 _paper_preflight_cache_lock = asyncio.Lock()
-_readyz_request_times: dict[str, list[float]] = {}
 _paper_api_request_times: dict[str, list[float]] = {}
 
 
-def _allow_paper_readyz_request(client_identity: str, *, now: float | None = None) -> bool:
-    """Bound unauthenticated readiness traffic without requiring optional Redis in staging."""
-    current = time.monotonic() if now is None else float(now)
-    identity = str(client_identity or "").strip()[:128]
-    if not identity:
+def _readiness_token_matches(authorization: str | None, expected_token: str) -> bool:
+    """Constant-time Bearer-token check for the externally reachable release readiness probe."""
+    if not expected_token:
         return False
-
-    # Periodically prune old clients before admitting a new key; fail closed at the cap.
-    if identity not in _readyz_request_times and len(_readyz_request_times) >= _READYZ_RATE_MAX_CLIENTS:
-        expired = [
-            key for key, entries in _readyz_request_times.items()
-            if not any(current - seen < _READYZ_RATE_WINDOW_SECONDS for seen in entries)
-        ]
-        for key in expired:
-            _readyz_request_times.pop(key, None)
-        if len(_readyz_request_times) >= _READYZ_RATE_MAX_CLIENTS:
-            return False
-
-    recent = [
-        seen for seen in _readyz_request_times.get(identity, [])
-        if 0 <= current - seen < _READYZ_RATE_WINDOW_SECONDS
-    ]
-    if len(recent) >= _READYZ_RATE_LIMIT_PER_MINUTE:
-        _readyz_request_times[identity] = recent
+    scheme, separator, supplied = str(authorization or "").partition(" ")
+    if not separator or scheme.lower() != "bearer" or not supplied.strip():
         return False
-    recent.append(current)
-    _readyz_request_times[identity] = recent
-    return True
+    return hmac.compare_digest(supplied.strip().encode("utf-8"), expected_token.encode("utf-8"))
 
 
 async def _cached_paper_runtime_preflight() -> dict[str, Any]:
@@ -109,7 +88,7 @@ def _allow_paper_api_request(bucket_key: str, *, limit: int, now: float | None =
     if key not in _paper_api_request_times and len(_paper_api_request_times) >= _PAPER_API_RATE_MAX_BUCKETS:
         expired = [
             existing for existing, entries in _paper_api_request_times.items()
-            if not any(0 <= current - seen < _READYZ_RATE_WINDOW_SECONDS for seen in entries)
+            if not any(0 <= current - seen < _PAPER_API_RATE_WINDOW_SECONDS for seen in entries)
         ]
         for existing in expired:
             _paper_api_request_times.pop(existing, None)
@@ -335,17 +314,6 @@ async def _paper_customer_api_rate_limit(request: Request, call_next):
     return await call_next(request)
 
 
-@app.middleware("http")
-async def _paper_readyz_rate_limit(request: Request, call_next):
-    if request.url.path == "/readyz" and not _allow_paper_readyz_request(_trusted_client_ip(request)):
-        return JSONResponse(
-            {"status": "BLOCKED", "reason": "READINESS_RATE_LIMITED"},
-            status_code=429,
-            headers={"Retry-After": "60"},
-        )
-    return await call_next(request)
-
-
 @app.get("/healthz")
 async def healthz():
     # Liveness only: don't make the container restart merely because provisioning is pending.
@@ -353,7 +321,20 @@ async def healthz():
 
 
 @app.get("/readyz")
-async def readyz():
+async def readyz(request: Request):
+    # Cloud Run is public for liveness and customer routes, but readiness is a
+    # release-gate endpoint. Reject unauthenticated probes before touching Supabase.
+    expected_token = os.environ.get("ATLAS_STAGING_READINESS_TOKEN", "")
+    if not expected_token:
+        return JSONResponse(
+            {"status": "BLOCKED", "reason": "READINESS_TOKEN_NOT_CONFIGURED"},
+            status_code=503,
+        )
+    if not _readiness_token_matches(request.headers.get("authorization"), expected_token):
+        return JSONResponse(
+            {"status": "BLOCKED", "reason": "READINESS_AUTHENTICATION_REQUIRED"},
+            status_code=401,
+        )
     result = await _cached_paper_runtime_preflight()
     if result.get("status") != "PASS":
         return JSONResponse(result, status_code=503)
