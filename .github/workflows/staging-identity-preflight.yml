@@ -101,7 +101,7 @@ jobs:
           [[ "$EXPECTED_RUNTIME_SERVICE_ACCOUNT" =~ ^[a-zA-Z0-9._@-]+$ ]] || { echo "BLOCKED: invalid expected staging runtime service account"; exit 1; }
           [[ "$EXPECTED_RUNTIME_DB_ROLE" == "atlas_paper_reader" ]] || { echo "BLOCKED: paper-only API must use the narrowly scoped atlas_paper_reader role"; exit 1; }
           [[ "$EXPECTED_PAPER_DB_ROLE" == "atlas_customer_paper" ]] || { echo "BLOCKED: paper ledger must use atlas_customer_paper"; exit 1; }
-          echo "PASS: same-project staging identity is configured for a read-only public-schema identity and isolated paper ledger."          echo "Explicit staging identity configuration is present; same-project staging is allowed."
+          echo "PASS: same-project staging identity is configured for a read-only public-schema identity and isolated paper ledger."
 
       - name: Verify deployed staging Cloud Run identity, paper-only entrypoint, and secret wiring
         shell: bash
