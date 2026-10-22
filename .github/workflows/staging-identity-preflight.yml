@@ -29,10 +29,10 @@ jobs:
       - name: Validate Google Cloud staging identity configuration before authentication
         shell: bash
         env:
-          WIF_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          PREFLIGHT_SERVICE_ACCOUNT: ${{ secrets.GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT }}
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-          GCP_REGION: ${{ secrets.GCP_REGION }}
+          WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER || secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          PREFLIGHT_SERVICE_ACCOUNT: ${{ vars.GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT || secrets.GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ vars.GCP_REGION || secrets.GCP_REGION }}
         run: |
           set -euo pipefail
           missing=()
@@ -58,8 +58,8 @@ jobs:
       - name: Authenticate to Google Cloud using protected staging environment
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER || secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT || secrets.GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
@@ -67,8 +67,8 @@ jobs:
       - name: Require explicit staging target configuration (same-project supported)
         shell: bash
         env:
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-          GCP_REGION: ${{ secrets.GCP_REGION }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ vars.GCP_REGION || secrets.GCP_REGION }}
           PRODUCTION_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}
           STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
           STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
@@ -100,8 +100,8 @@ jobs:
       - name: Verify deployed staging Cloud Run identity and database secret wiring
         shell: bash
         env:
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-          GCP_REGION: ${{ secrets.GCP_REGION }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ vars.GCP_REGION || secrets.GCP_REGION }}
           STAGING_CLOUD_RUN_SERVICE: ${{ vars.ATLAS_STAGING_CLOUD_RUN_SERVICE }}
           EXPECTED_RUNTIME_SERVICE_ACCOUNT: ${{ vars.ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT }}
           STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
@@ -176,7 +176,7 @@ jobs:
       - name: Read staging database secret without printing credentials
         shell: bash
         env:
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
           STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
         run: |
           set -euo pipefail
