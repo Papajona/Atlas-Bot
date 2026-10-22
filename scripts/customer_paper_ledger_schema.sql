@@ -12,7 +12,8 @@ BEGIN;
 -- Execute only against the reviewed PostgreSQL target. In the free single-project
 -- setup this is the existing project's postgres database with a dedicated customer_paper
 -- schema. Provision paper_runtime_role separately as LOGIN,
--- NOINHERIT, NOBYPASSRLS, non-superuser, with no memberships or admin privileges.
+-- NOINHERIT, NOBYPASSRLS, non-superuser. The paper role may not belong to any role;
+-- Supabase managed Postgres adds one control-plane-only membership to new roles.
 SELECT set_config('app.paper_runtime_role', :'paper_runtime_role', false);
 
 DO $paper_role_check$
@@ -27,7 +28,23 @@ BEGIN
           AND NOT r.rolsuper AND NOT r.rolcreaterole AND NOT r.rolcreatedb
           AND NOT r.rolreplication AND NOT r.rolinherit AND NOT r.rolbypassrls
           AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid)
-          AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.roleid = r.oid)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM pg_auth_members m
+            JOIN pg_roles member_role ON member_role.oid = m.member
+            JOIN pg_roles grantor_role ON grantor_role.oid = m.grantor
+            WHERE m.roleid = r.oid
+              AND NOT (
+                member_role.rolname = 'postgres'
+                AND grantor_role.rolname = 'supabase_admin'
+                AND m.admin_option
+                AND (to_jsonb(m) ? 'inherit_option')
+                AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false) = false
+                AND (to_jsonb(m) ? 'set_option')
+                AND COALESCE((to_jsonb(m)->>'set_option')::boolean, false) = false
+              )
+          )
+          AND (SELECT count(*) FROM pg_auth_members m WHERE m.roleid = r.oid) <= 1
     ) THEN
         RAISE EXCEPTION 'paper runtime role does not have the required least-privilege attributes';
     END IF;

@@ -49,9 +49,12 @@ def test_builds_transactional_least_privilege_role_setup_without_printing_secret
     assert "CREATE ROLE atlas_customer_paper" in sql
     assert "LOGIN NOINHERIT NOBYPASSRLS" in sql
     assert "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION" in sql
-    assert "REVOKE atlas_customer_paper FROM CURRENT_USER;" in sql
+    assert "REVOKE atlas_customer_paper FROM CURRENT_USER;" not in sql
     assert "PASSWORD 'password''with quote';" in sql
-    assert "unexpected role memberships" in sql.lower()
+    assert "supabase_admin" in sql
+    assert "to_jsonb(m) ? 'inherit_option'" in sql
+    assert "to_jsonb(m) ? 'set_option'" in sql
+    assert "unsafe incoming membership" in sql.lower()
     assert sql.rstrip().endswith("SELECT 'PASS: restricted atlas_customer_paper role created and verified';")
     assert "DROP ROLE" not in sql
     assert "BYPASSRLS" in sql

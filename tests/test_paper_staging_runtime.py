@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -66,6 +67,16 @@ def test_paper_staging_asgi_exposes_only_health_and_paper_routes():
     assert paper_staging.app.openapi_url is None
 
 
+
+
+def test_primary_reader_preflight_allows_only_supabase_managed_non_inheriting_membership():
+    source = inspect.getsource(paper_staging._primary_reader_preflight)
+    assert "pg_auth_members m WHERE m.member = r.oid" in source
+    assert "grantor_role.rolname='supabase_admin'" in source
+    assert "member_role.rolname='postgres'" in source
+    assert "m.admin_option" in source
+    assert "to_jsonb(m) ? 'inherit_option'" in source
+    assert "to_jsonb(m) ? 'set_option'" in source
 
 def test_staging_paper_request_accepts_short_history_without_relaxing_public_model():
     with pytest.raises(ValidationError):

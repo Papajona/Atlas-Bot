@@ -38,7 +38,23 @@ SELECT current_database() || '|' || current_user || '|' ||
             AND NOT r.rolcreatedb AND NOT r.rolcreaterole
             AND NOT r.rolreplication AND NOT r.rolbypassrls
             AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid)
-            AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.roleid=r.oid)
+            AND NOT EXISTS (
+              SELECT 1
+              FROM pg_auth_members m
+              JOIN pg_roles member_role ON member_role.oid=m.member
+              JOIN pg_roles grantor_role ON grantor_role.oid=m.grantor
+              WHERE m.roleid=r.oid
+                AND NOT (
+                  member_role.rolname='postgres'
+                  AND grantor_role.rolname='supabase_admin'
+                  AND m.admin_option
+                  AND (to_jsonb(m) ? 'inherit_option')
+                  AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false)=false
+                  AND (to_jsonb(m) ? 'set_option')
+                  AND COALESCE((to_jsonb(m)->>'set_option')::boolean, false)=false
+                )
+            )
+            AND (SELECT count(*) FROM pg_auth_members m WHERE m.roleid=r.oid) <= 1
        )::text || '|' ||
        (SELECT (rolsuper OR rolcreaterole)::text FROM pg_roles WHERE rolname=current_user);
 """
@@ -167,21 +183,19 @@ def _connection_env(database_url: str, expected_ref: str, passfile: Path) -> dic
 
 
 def _role_setup_sql(password: str) -> str:
-    """Create the restricted role and remove PostgreSQL 16+ creator membership."""
+    """Create the restricted role under Supabase's managed CREATEROLE behavior."""
     escaped_password = password.replace("'", "''")
     return (
         "BEGIN;\n"
         "CREATE ROLE atlas_customer_paper LOGIN NOINHERIT NOBYPASSRLS "
         "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;\n"
-        # PostgreSQL 16+ grants a non-superuser CREATEROLE creator membership
-        # with ADMIN OPTION. Remove it inside the transaction so the runtime
-        # role satisfies the no-memberships invariant before read-back checks.
-        "REVOKE atlas_customer_paper FROM CURRENT_USER;\n"
+        # Supabase adds postgres as a non-inheriting, non-settable ADMIN OPTION
+        # member, granted by supabase_admin. The postgres role cannot revoke that
+        # platform-managed membership; IDENTITY_SQL validates its safe shape.
         f"ALTER ROLE atlas_customer_paper PASSWORD '{escaped_password}';\n"
         "GRANT CONNECT ON DATABASE postgres TO atlas_customer_paper;\n"
         "COMMIT;\n"
     )
-
 
 def _psql(env: dict[str, str], *args: str) -> str:
     result = subprocess.run(

@@ -15,7 +15,10 @@ def test_staging_identity_preflight_fails_closed_on_rls_migration_blockers():
     assert 'if db != "postgres" or role != os.environ["STAGING_RUNTIME_DB_ROLE"] or session_role != role:' in workflow
     assert "primary runtime role has administrative privileges or cannot login" in workflow
     assert "if not truth(bypass_rls) or truth(inherit) or int(memberships) or int(member_count):" in workflow
-    assert "primary runtime role must be NOINHERIT, BYPASSRLS and have no role memberships" in workflow
+    assert "primary runtime role must be NOINHERIT/BYPASSRLS, with no inherited roles or unsafe Supabase-managed membership" in workflow
+    assert "grantor_role.rolname='supabase_admin'" in workflow
+    assert "to_jsonb(m) ? 'inherit_option'" in workflow
+    assert "to_jsonb(m) ? 'set_option'" in workflow
     assert "if any(int(v) for v in (other_schema, unexpected_tables, public_sequences, callable_definers, owned_tables)):" in workflow
     assert "primary runtime role can access non-allowlisted objects or owns public tables" in workflow
     assert 'print(f"PASS: primary identity {role} is read-only, non-owner/non-admin, and can access only customer_profiles/app_state.' in workflow
