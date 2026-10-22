@@ -220,11 +220,11 @@ At the resulting `psql` prompt, create the role and set its distinct password us
 CREATE ROLE atlas_customer_paper LOGIN NOINHERIT NOBYPASSRLS
     NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 GRANT CONNECT ON DATABASE postgres TO atlas_customer_paper;
-\\password atlas_customer_paper
-\\q
+\password atlas_customer_paper
+\q
 ```
 
-Do not retry role creation or run `\\password` if the precheck blocks. Inspect the existing role attributes, memberships, grants, ownership, and password-management record under the operator process first.
+Do not retry role creation or run `\password` if the precheck blocks. Inspect the existing role attributes, memberships, grants, ownership, and password-management record under the operator process first.
 
 Run the reviewed schema script against that same database as the database owner, not as either runtime role:
 
