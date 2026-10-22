@@ -336,12 +336,13 @@ def test_production_deploy_checks_database_role_before_any_deployment():
 
 def test_production_deploy_requires_successful_staging_identity_job_for_exact_main_commit():
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
-    assert 'require_success_job "staging-identity-preflight.yml" "verify-staging-identity" "Supabase staging identity preflight"' in workflow
+    assert "require_staging_identity_success" in workflow
     assert 'require_success "staging-identity-preflight.yml" "Supabase staging identity preflight"' not in workflow
-    assert "job_conclusion" in workflow
-    assert '[.jobs[] | select(.name == \\"$job_name\\")][0].conclusion // \\"missing\\"' in workflow
-    assert 'select(.headSha == \\"$GITHUB_SHA\\" and .headBranch == \\"main\\")' in workflow
-    assert '|| [ "$job_conclusion" != "success" ]' in workflow
+    assert '--workflow "staging-identity-preflight.yml"' in workflow
+    assert '--commit "$GITHUB_SHA"' in workflow
+    assert 'select(.headBranch == "main")' in workflow
+    assert 'select(.name == "verify-staging-identity")][0].conclusion // "missing"' in workflow
+    assert '[ "$job_conclusion" != "success" ]' in workflow
 
 
 def test_production_startup_smoke_uses_non_admin_runtime_role_fixture():
