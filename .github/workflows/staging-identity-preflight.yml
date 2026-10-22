@@ -72,9 +72,11 @@ jobs:
           PRODUCTION_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}
           STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
           STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
+          STAGING_PAPER_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_PAPER_DATABASE_SECRET }}
           STAGING_CLOUD_RUN_SERVICE: ${{ vars.ATLAS_STAGING_CLOUD_RUN_SERVICE }}
           EXPECTED_RUNTIME_SERVICE_ACCOUNT: ${{ vars.ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT }}
           EXPECTED_RUNTIME_DB_ROLE: ${{ vars.ATLAS_STAGING_RUNTIME_DB_ROLE }}
+          EXPECTED_PAPER_DB_ROLE: ${{ vars.ATLAS_STAGING_PAPER_DB_ROLE }}
         run: |
           set -euo pipefail
           : "${GCP_PROJECT_ID:?Missing protected GCP_PROJECT_ID secret}"
@@ -82,22 +84,26 @@ jobs:
           : "${PRODUCTION_SUPABASE_PROJECT_REF:?Set ATLAS_PRODUCTION_SUPABASE_PROJECT_REF to the current project ref (same as staging for the free single-project setup)}"
           : "${STAGING_SUPABASE_PROJECT_REF:?Set staging environment variable ATLAS_STAGING_SUPABASE_PROJECT_REF}"
           : "${STAGING_DATABASE_SECRET:?Set staging environment variable ATLAS_STAGING_DATABASE_SECRET}"
+          : "${STAGING_PAPER_DATABASE_SECRET:?Set staging environment variable ATLAS_STAGING_PAPER_DATABASE_SECRET}"
           : "${STAGING_CLOUD_RUN_SERVICE:?Set staging environment variable ATLAS_STAGING_CLOUD_RUN_SERVICE}"
           : "${EXPECTED_RUNTIME_SERVICE_ACCOUNT:?Set staging environment variable ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT}"
           : "${EXPECTED_RUNTIME_DB_ROLE:?Set staging environment variable ATLAS_STAGING_RUNTIME_DB_ROLE}"
+          : "${EXPECTED_PAPER_DB_ROLE:?Set staging environment variable ATLAS_STAGING_PAPER_DB_ROLE}"
           [[ "$PRODUCTION_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]] || { echo "BLOCKED: production project ref must be an explicit 20-character Supabase project ref"; exit 1; }
           [[ "$STAGING_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]] || { echo "BLOCKED: staging project ref must be an explicit 20-character Supabase project ref"; exit 1; }
           if [[ "$STAGING_SUPABASE_PROJECT_REF" == "$PRODUCTION_SUPABASE_PROJECT_REF" ]]; then
             echo "Same-project staging selected; paper/live/payout safety flags and the dedicated paper schema remain mandatory."
           fi
-          [[ "$STAGING_DATABASE_SECRET" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "BLOCKED: invalid staging Secret Manager secret name"; exit 1; }
+          [[ "$STAGING_DATABASE_SECRET" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "BLOCKED: invalid primary staging Secret Manager secret name"; exit 1; }
+          [[ "$STAGING_PAPER_DATABASE_SECRET" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "BLOCKED: invalid paper staging Secret Manager secret name"; exit 1; }
+          [[ "$STAGING_DATABASE_SECRET" != "$STAGING_PAPER_DATABASE_SECRET" ]] || { echo "BLOCKED: primary and paper databases must use two distinct Secret Manager secrets"; exit 1; }
           [[ "$STAGING_CLOUD_RUN_SERVICE" =~ ^[a-z][a-z0-9-]{0,48}$ ]] || { echo "BLOCKED: invalid staging Cloud Run service name"; exit 1; }
           [[ "$EXPECTED_RUNTIME_SERVICE_ACCOUNT" =~ ^[a-zA-Z0-9._@-]+$ ]] || { echo "BLOCKED: invalid expected staging runtime service account"; exit 1; }
-          [[ "$EXPECTED_RUNTIME_DB_ROLE" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || { echo "BLOCKED: invalid expected runtime database role"; exit 1; }
-          [[ ! "$EXPECTED_RUNTIME_DB_ROLE" =~ ^(postgres|service_role|supabase_admin|supabase_auth_admin|authenticator|anon|authenticated)$ ]] || { echo "BLOCKED: reserved or privileged role is not an approved runtime database role"; exit 1; }
-          echo "Explicit staging identity configuration is present; same-project staging is allowed."
+          [[ "$EXPECTED_RUNTIME_DB_ROLE" == "atlas_paper_reader" ]] || { echo "BLOCKED: paper-only API must use the narrowly scoped atlas_paper_reader role"; exit 1; }
+          [[ "$EXPECTED_PAPER_DB_ROLE" == "atlas_customer_paper" ]] || { echo "BLOCKED: paper ledger must use atlas_customer_paper"; exit 1; }
+          echo "PASS: same-project staging identity is configured for a read-only public-schema identity and isolated paper ledger."          echo "Explicit staging identity configuration is present; same-project staging is allowed."
 
-      - name: Verify deployed staging Cloud Run identity and database secret wiring
+      - name: Verify deployed staging Cloud Run identity, paper-only entrypoint, and secret wiring
         shell: bash
         env:
           GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
@@ -105,6 +111,7 @@ jobs:
           STAGING_CLOUD_RUN_SERVICE: ${{ vars.ATLAS_STAGING_CLOUD_RUN_SERVICE }}
           EXPECTED_RUNTIME_SERVICE_ACCOUNT: ${{ vars.ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT }}
           STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
+          STAGING_PAPER_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_PAPER_DATABASE_SECRET }}
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -131,98 +138,115 @@ jobs:
           if not observed_sa or observed_sa != os.environ["EXPECTED_RUNTIME_SERVICE_ACCOUNT"]:
               print("BLOCKED: deployed staging service account differs from ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT")
               sys.exit(1)
-          database_secret_refs = []
-          database_container_env = None
-          required_safety = {
-              "PAPER_TRADING": "true",
-              "LIVE_TRADING_ENABLED": "false",
-              "CUSTOMER_LIVE_TRADING_ENABLED": "false",
-              "PAYOUT_LIVE_ENABLED": "false",
-              "BROKER_SANDBOX": "true",
-              "USDT_TRON_ENABLED": "false",
-              "USDT_TRON_SWEEP_ENABLED": "false",
-          }
           for container in spec.get("containers", []) or []:
               env_items = container.get("env", []) or []
               env_by_name = {item.get("name"): item for item in env_items if item.get("name")}
-              database_item = env_by_name.get("DATABASE_URL")
-              if database_item is None:
+              if not env_by_name:
                   continue
-              value_from = database_item.get("valueFrom") or {}
-              value_source = database_item.get("valueSource") or {}
-              ref = value_from.get("secretKeyRef") or value_source.get("secretKeyRef") or {}
-              database_secret_refs.append(ref.get("name") or "")
-              database_container_env = {
-                  name: (env_by_name[name].get("value") if name in env_by_name else None)
-                  for name in required_safety
+              expected_values = {
+                  "ATLAS_ASGI_APP": "app.paper_staging:app",
+                  "PAPER_TRADING": "true",
+                  "LIVE_TRADING_ENABLED": "false",
+                  "CUSTOMER_LIVE_TRADING_ENABLED": "false",
+                  "PAYOUT_LIVE_ENABLED": "false",
+                  "BROKER_SANDBOX": "true",
+                  "USDT_TRON_ENABLED": "false",
+                  "USDT_TRON_SWEEP_ENABLED": "false",
+                  "DERIV_LIVE_ENABLED": "false",
+                  "CUSTOMER_PAPER_LEDGER_ENABLED": "true",
+                  "CUSTOMER_PAPER_SHARED_DATABASE_ENABLED": "true",
+                  "CUSTOMER_TOTP_REQUIRED": "true",
+                  "PROCESS_ROLE": "paper",
               }
-          expected_secret = os.environ["STAGING_DATABASE_SECRET"]
-          if len(database_secret_refs) != 1 or database_secret_refs[0] != expected_secret:
-              print("BLOCKED: the deployed service DATABASE_URL must reference exactly the configured staging database secret")
+              for key, expected in expected_values.items():
+                  item = env_by_name.get(key, {})
+                  if item.get("value") != expected:
+                      print(f"BLOCKED: staging runtime has missing/unsafe {key}; expected {expected!r}")
+                      sys.exit(1)
+              def secret_name(item):
+                  value_from = item.get("valueFrom") or {}
+                  value_source = item.get("valueSource") or {}
+                  ref = value_from.get("secretKeyRef") or value_source.get("secretKeyRef") or {}
+                  return ref.get("name") or ref.get("secret") or ""
+              if secret_name(env_by_name.get("DATABASE_URL", {})) != os.environ["STAGING_DATABASE_SECRET"]:
+                  print("BLOCKED: DATABASE_URL must reference the configured atlas_paper_reader secret")
+                  sys.exit(1)
+              if secret_name(env_by_name.get("CUSTOMER_PAPER_DATABASE_URL", {})) != os.environ["STAGING_PAPER_DATABASE_SECRET"]:
+                  print("BLOCKED: CUSTOMER_PAPER_DATABASE_URL must reference the configured atlas_customer_paper secret")
+                  sys.exit(1)
+              print("PASS: Cloud Run runtime identity, paper-only entrypoint, safety flags and separate DB-secret references verified.")
+              break
+          else:
+              print("BLOCKED: staging Cloud Run service has no configured application container")
               sys.exit(1)
-          missing_or_unsafe = [
-              f"{name} expected {expected!r}, observed {None if database_container_env is None else database_container_env.get(name)!r}"
-              for name, expected in required_safety.items()
-              if database_container_env is None or database_container_env.get(name) != expected
-          ]
-          if missing_or_unsafe:
-              print("BLOCKED: staging runtime safety flags are missing or unsafe:")
-              for item in missing_or_unsafe:
-                  print(f" - {item}")
-              sys.exit(1)
-          print("PASS: staging runtime identity, database secret wiring, paper mode, sandbox broker, disabled live trading/payouts, and disabled TRON sweeps verified.")
           PY
 
-      - name: Read staging database secret without printing credentials
+      - name: Read both staging database secrets without printing credentials
         shell: bash
         env:
           GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
           STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
+          STAGING_PAPER_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_PAPER_DATABASE_SECRET }}
         run: |
           set -euo pipefail
           umask 077
-          gcloud secrets versions access latest \
-            --secret="$STAGING_DATABASE_SECRET" \
-            --project="$GCP_PROJECT_ID" > "$RUNNER_TEMP/atlas-staging-db-url"
+          gcloud secrets versions access latest --secret="$STAGING_DATABASE_SECRET" --project="$GCP_PROJECT_ID" > "$RUNNER_TEMP/atlas-staging-db-url"
+          gcloud secrets versions access latest --secret="$STAGING_PAPER_DATABASE_SECRET" --project="$GCP_PROJECT_ID" > "$RUNNER_TEMP/atlas-staging-paper-db-url"
           test -s "$RUNNER_TEMP/atlas-staging-db-url"
-          chmod 600 "$RUNNER_TEMP/atlas-staging-db-url"
+          test -s "$RUNNER_TEMP/atlas-staging-paper-db-url"
+          chmod 600 "$RUNNER_TEMP/atlas-staging-db-url" "$RUNNER_TEMP/atlas-staging-paper-db-url"
 
-      - name: Verify Supabase project, runtime role, and migration revision (read-only)
+      - name: Verify Supabase target and distinct database identities (read-only)
         shell: bash
         env:
           STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
           EXPECTED_RUNTIME_DB_ROLE: ${{ vars.ATLAS_STAGING_RUNTIME_DB_ROLE }}
-          EXPECTED_ALEMBIC_HEAD: "0053_supabase_public_default_acl_lockdown"
+          EXPECTED_PAPER_DB_ROLE: ${{ vars.ATLAS_STAGING_PAPER_DB_ROLE }}
         run: |
           set -euo pipefail
           python - <<'PY'
           import os
           from pathlib import Path
           from urllib.parse import unquote, urlparse
-          path = Path(os.environ["RUNNER_TEMP"]) / "atlas-staging-db-url"
-          uri = path.read_text().strip()
-          parsed = urlparse(uri)
-          if parsed.scheme not in ("postgres", "postgresql") or not parsed.hostname:
-              raise SystemExit("BLOCKED: staging database secret is not a valid PostgreSQL URI")
+          root = Path(os.environ["RUNNER_TEMP"])
+          primary = urlparse((root / "atlas-staging-db-url").read_text().strip())
+          paper = urlparse((root / "atlas-staging-paper-db-url").read_text().strip())
           expected = os.environ["STAGING_SUPABASE_PROJECT_REF"]
-          host = parsed.hostname.lower()
-          allowed_hosts = {f"db.{expected}.supabase.co", f"{expected}.supabase.co"}
-          if host not in allowed_hosts:
-              raise SystemExit("BLOCKED: database hostname does not match the explicitly configured staging Supabase project")
-          if parsed.path.lstrip("/") != "postgres":
-              raise SystemExit("BLOCKED: staging database name is not the expected postgres database")
-          print("PASS: database URI hostname matches configured staging Supabase project; credentials were not printed")
+          for label, parsed in (("primary", primary), ("paper", paper)):
+              if parsed.scheme not in ("postgres", "postgresql") or not parsed.hostname:
+                  raise SystemExit(f"BLOCKED: {label} DB secret is not a valid PostgreSQL URI")
+              if parsed.hostname.lower() not in {f"db.{expected}.supabase.co", f"{expected}.supabase.co"}:
+                  raise SystemExit(f"BLOCKED: {label} DB hostname does not match the configured Supabase project")
+              if parsed.path.lstrip("/") != "postgres":
+                  raise SystemExit(f"BLOCKED: {label} DB name is not postgres")
+              if not parsed.password or not parsed.username:
+                  raise SystemExit(f"BLOCKED: {label} DB secret lacks dedicated credentials")
+          primary_user, paper_user = unquote(primary.username or ""), unquote(paper.username or "")
+          primary_password, paper_password = unquote(primary.password or ""), unquote(paper.password or "")
+          if primary_user != os.environ["EXPECTED_RUNTIME_DB_ROLE"]:
+              raise SystemExit("BLOCKED: primary DB URL is not the configured read-only runtime role")
+          if paper_user != os.environ["EXPECTED_PAPER_DB_ROLE"]:
+              raise SystemExit("BLOCKED: paper DB URL is not the configured isolated ledger role")
+          if primary_user == paper_user or primary_password == paper_password:
+              raise SystemExit("BLOCKED: primary and paper database URLs must use distinct roles and passwords")
+          if (primary.hostname.lower(), primary.port or 5432, primary.path) != (paper.hostname.lower(), paper.port or 5432, paper.path):
+              raise SystemExit("BLOCKED: free single-project mode must use the same database host, port and postgres database")
+          print("PASS: both database URLs target the configured single Supabase project/database, with distinct runtime roles and credentials; values were not printed")
           PY
 
+      - name: Verify primary runtime role is strictly read-only (read-only SQL)
+        shell: bash
+        env:
+          STAGING_RUNTIME_DB_ROLE: ${{ vars.ATLAS_STAGING_RUNTIME_DB_ROLE }}
+        run: |
+          set -euo pipefail
           python - <<'PY'
           import os, subprocess, sys
           from pathlib import Path
           from urllib.parse import unquote, urlparse
-          uri = Path(os.environ["RUNNER_TEMP"], "atlas-staging-db-url").read_text().strip()
+          uri = (Path(os.environ["RUNNER_TEMP"]) / "atlas-staging-db-url").read_text().strip()
           parsed = urlparse(uri)
-          expected_role = os.environ["EXPECTED_RUNTIME_DB_ROLE"]
-          # Put parsed credentials only in the child environment, never argv or logs.
-          env = {k:v for k,v in os.environ.items() if k not in {"DATABASE_URL","PGPASSWORD","PGHOST","PGPORT","PGUSER","PGDATABASE"}}
+          env = {k:v for k,v in os.environ.items() if k not in {"DATABASE_URL","PGPASSWORD","PGHOST","PGPORT","PGUSER","PGDATABASE","PGOPTIONS"}}
           env.update({
               "PGHOST": parsed.hostname or "",
               "PGPORT": str(parsed.port or 5432),
@@ -233,98 +257,92 @@ jobs:
               "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=10000",
           })
           query = """
-          SELECT current_database(), current_user, session_user,
-                 (SELECT string_agg(version_num, ',' ORDER BY version_num) FROM public.alembic_version),
+          SELECT current_database(), current_user, session_user, current_setting('transaction_read_only'),
+                 r.rolcanlogin, r.rolsuper, r.rolcreaterole, r.rolcreatedb, r.rolreplication,
+                 r.rolbypassrls, r.rolinherit,
+                 (SELECT count(*) FROM pg_auth_members m WHERE m.member=r.oid),
+                 (SELECT count(*) FROM pg_auth_members m WHERE m.roleid=r.oid),
+                 has_schema_privilege(current_user,'public','USAGE'),
+                 has_schema_privilege(current_user,'public','CREATE'),
+                 has_table_privilege(current_user,'public.customer_profiles','SELECT'),
+                 has_table_privilege(current_user,'public.app_state','SELECT'),
+                 (SELECT count(*) FROM pg_namespace n WHERE n.nspname NOT LIKE 'pg_%'
+                   AND n.nspname <> 'information_schema' AND n.nspname <> 'public'
+                   AND (has_schema_privilege(current_user,n.oid,'USAGE') OR has_schema_privilege(current_user,n.oid,'CREATE'))),
                  (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                   WHERE n.nspname='public' AND c.relkind IN ('r','p')),
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f') AND (
+                     (c.relname IN ('customer_profiles','app_state') AND (
+                       has_table_privilege(current_user,c.oid,'INSERT') OR has_table_privilege(current_user,c.oid,'UPDATE')
+                       OR has_table_privilege(current_user,c.oid,'DELETE') OR has_table_privilege(current_user,c.oid,'TRUNCATE')
+                       OR has_table_privilege(current_user,c.oid,'REFERENCES') OR has_table_privilege(current_user,c.oid,'TRIGGER')))
+                     OR (c.relname NOT IN ('customer_profiles','app_state') AND (
+                       has_table_privilege(current_user,c.oid,'SELECT') OR has_table_privilege(current_user,c.oid,'INSERT')
+                       OR has_table_privilege(current_user,c.oid,'UPDATE') OR has_table_privilege(current_user,c.oid,'DELETE')
+                       OR has_table_privilege(current_user,c.oid,'TRUNCATE') OR has_table_privilege(current_user,c.oid,'REFERENCES')
+                       OR has_table_privilege(current_user,c.oid,'TRIGGER'))))),
+                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'
+                   AND c.relkind='S' AND (has_sequence_privilege(current_user,c.oid,'USAGE')
+                     OR has_sequence_privilege(current_user,c.oid,'SELECT') OR has_sequence_privilege(current_user,c.oid,'UPDATE'))),
+                 (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+                   WHERE n.nspname='public' AND p.prosecdef AND has_function_privilege(current_user,p.oid,'EXECUTE')),
                  (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relrowsecurity),
-                 COALESCE((SELECT rolsuper FROM pg_roles WHERE rolname=current_user), false),
-                 COALESCE((SELECT rolcreaterole FROM pg_roles WHERE rolname=current_user), false),
-                 COALESCE((SELECT rolcreatedb FROM pg_roles WHERE rolname=current_user), false),
-                 COALESCE((SELECT rolreplication FROM pg_roles WHERE rolname=current_user), false),
-                 COALESCE((SELECT rolbypassrls FROM pg_roles WHERE rolname=current_user), false),
-                 COALESCE((SELECT rolcanlogin FROM pg_roles WHERE rolname=current_user), false),
-                 COALESCE((SELECT rolinherit FROM pg_roles WHERE rolname=current_user), true),
-                 has_schema_privilege(current_user, 'public', 'USAGE'),
-                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT has_table_privilege(current_user,c.oid,'SELECT')),
-                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner)=current_user),
-                 (SELECT count(*) FROM pg_auth_members membership
-                   WHERE membership.member=(SELECT oid FROM pg_roles WHERE rolname=current_user)),
-                 has_schema_privilege(current_user, 'public', 'CREATE'),
-                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                   WHERE n.nspname='public' AND c.relkind IN ('r','p')
-                     AND NOT (has_table_privilege(current_user,c.oid,'INSERT')
-                          AND has_table_privilege(current_user,c.oid,'UPDATE')
-                          AND has_table_privilege(current_user,c.oid,'DELETE'))),
-                 (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                   WHERE n.nspname='public' AND c.relkind='S'
-                     AND NOT has_sequence_privilege(current_user,c.oid,'USAGE'));
+                   WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relowner=r.oid),
+                 (SELECT string_agg(version_num, ',' ORDER BY version_num) FROM public.alembic_version)
+          FROM pg_roles r WHERE r.rolname=current_user;
           """
-          p = subprocess.run(
-              ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", query],
-              check=False, capture_output=True, text=True, env=env,
-          )
-          if p.returncode:
-              print("BLOCKED: read-only database identity query failed; database output withheld")
+          result = subprocess.run(["psql","-X","-A","-t","-v","ON_ERROR_STOP=1","-c",query],
+                                  capture_output=True,text=True,check=False,env=env)
+          if result.returncode:
+              print("BLOCKED: read-only primary identity query failed; DB output withheld")
               sys.exit(1)
-          fields = p.stdout.strip().split("|")
-          if len(fields) != 20:
-              raise SystemExit("BLOCKED: unexpected identity query output")
-          (db, role, login_role, revision, table_count, unprotected_count, is_superuser,
-           can_create_roles, can_create_databases, can_replicate, bypass_rls, can_login,
-           can_inherit, public_schema_usage, tables_missing_select, owned_count,
-           role_membership_count, public_schema_create, tables_missing_dml,
-           sequences_missing_usage) = fields
-          def is_true(value):
-              # psql's default unaligned boolean representation is "t"/"f", not "true"/"false".
-              return str(value).strip().lower() in {"t", "true", "1", "yes"}
-          print(f"Observed database={db}, current_role={role}, login_role={login_role}, revision={revision or 'missing'}, public_tables={table_count}, tables_without_rls={unprotected_count}, superuser={is_superuser}, create_role={can_create_roles}, create_database={can_create_databases}, replication={can_replicate}, bypass_rls={bypass_rls}, can_login={can_login}, inherit={can_inherit}, public_schema_usage={public_schema_usage}, tables_missing_select={tables_missing_select}, tables_missing_dml={tables_missing_dml}, sequences_missing_usage={sequences_missing_usage}, public_schema_create={public_schema_create}, owned_public_tables={owned_count}, role_memberships={role_membership_count}")
-          if db != "postgres":
-              raise SystemExit("BLOCKED: unexpected staging database name")
-          if login_role != role:
-              raise SystemExit("BLOCKED: PostgreSQL session_user differs from current_user; SET ROLE or privileged login indirection is not permitted")
-          if role != expected_role:
-              raise SystemExit("BLOCKED: connected database role does not match configured staging runtime role")
-          if role in {"postgres", "service_role", "supabase_admin", "supabase_auth_admin", "authenticator", "anon", "authenticated"}:
-              raise SystemExit("BLOCKED: privileged, gateway, or public API role is not approved for Cloud Run runtime")
-          if any(is_true(value) for value in (is_superuser, can_create_roles, can_create_databases, can_replicate)):
-              raise SystemExit("BLOCKED: runtime database role has administrative privileges")
-          if not is_true(can_login):
-              raise SystemExit("BLOCKED: runtime database role is not a LOGIN role")
-          if is_true(can_inherit):
-              raise SystemExit("BLOCKED: runtime database role must be NOINHERIT; permissions must be directly granted")
-          if not is_true(public_schema_usage):
-              raise SystemExit("BLOCKED: runtime database role lacks USAGE on public schema")
-          if not revision:
-              raise SystemExit("BLOCKED: Alembic revision is missing or ambiguous")
-          expected_head = os.environ["EXPECTED_ALEMBIC_HEAD"]
-          if revision != expected_head:
-              raise SystemExit(
-                  f"BLOCKED: database revision must equal repository head {expected_head}; "
-                  "apply the reviewed migration only to the approved staging target, then rerun this read-only preflight"
-              )
-          if int(table_count) == 0:
-              raise SystemExit("BLOCKED: public schema table inventory is empty")
-          if int(unprotected_count) > 0:
-              raise SystemExit("BLOCKED: public tables without RLS remain; do not deploy until isolated staging migration tests pass")
-          if not is_true(bypass_rls):
-              raise SystemExit("BLOCKED: no table-specific RLS policies are installed; a reviewed trusted runtime role with BYPASSRLS is required for this backend-only access model")
-          if int(tables_missing_select) > 0:
-              raise SystemExit("BLOCKED: runtime role lacks direct SELECT privileges on one or more application tables")
-          if is_true(public_schema_create):
-              raise SystemExit("BLOCKED: runtime role must not have CREATE privilege on public schema")
-          if int(tables_missing_dml) > 0:
-              raise SystemExit("BLOCKED: runtime role lacks direct INSERT/UPDATE/DELETE on one or more application tables")
-          if int(sequences_missing_usage) > 0:
-              raise SystemExit("BLOCKED: runtime role lacks USAGE on one or more public identity/serial sequences")
-          if int(owned_count) > 0:
-              raise SystemExit("BLOCKED: runtime DB role owns public tables; use a non-owner runtime role with explicit grants")
-          if int(role_membership_count) > 0:
-              raise SystemExit("BLOCKED: runtime DB role inherits other PostgreSQL roles; grant only explicit privileges directly")
-          print("IDENTITY PASS: direct non-owner/non-admin login with NOINHERIT, explicit table DML and sequence grants, no schema CREATE, BYPASSRLS, and RLS enabled on all inventoried tables.")
-          print("PASS: read-only target identity and current migration revision were verified; no migration or write was executed")
+          fields = result.stdout.strip().split("|")
+          if len(fields) != 23:
+              print("BLOCKED: primary identity query returned an unexpected shape")
+              sys.exit(1)
+          (db, role, session_role, read_only, can_login, superuser, create_role, create_db, replication,
+           bypass_rls, inherit, memberships, member_count, public_usage, public_create, read_profiles,
+           read_app_state, other_schema, unexpected_tables, public_sequences, callable_definers,
+           owned_tables, revision) = fields
+          def truth(v): return str(v).strip().lower() in {"t","true","1","yes"}
+          if db != "postgres" or role != os.environ["STAGING_RUNTIME_DB_ROLE"] or session_role != role:
+              raise SystemExit("BLOCKED: connected primary identity does not match the configured runtime role")
+          if read_only.lower() not in {"on","true","t"}:
+              raise SystemExit("BLOCKED: database session is not read-only")
+          if not truth(can_login) or truth(superuser) or truth(create_role) or truth(create_db) or truth(replication):
+              raise SystemExit("BLOCKED: primary runtime role has administrative privileges or cannot login")
+          if not truth(bypass_rls) or truth(inherit) or int(memberships) or int(member_count):
+              raise SystemExit("BLOCKED: primary runtime role must be NOINHERIT, BYPASSRLS and have no role memberships")
+          if not truth(public_usage) or truth(public_create) or not truth(read_profiles) or not truth(read_app_state):
+              raise SystemExit("BLOCKED: primary runtime role lacks exact public-schema read-only access")
+          if any(int(v) for v in (other_schema, unexpected_tables, public_sequences, callable_definers, owned_tables)):
+              raise SystemExit("BLOCKED: primary runtime role can access non-allowlisted objects or owns public tables")
+          if not revision or "," in revision:
+              raise SystemExit("BLOCKED: public Alembic revision is missing or ambiguous; no migrations were executed")
+          print(f"PASS: primary identity {role} is read-only, non-owner/non-admin, and can access only customer_profiles/app_state; observed existing Alembic revision {revision} (not modified).")
           PY
-          rm -f "$RUNNER_TEMP/atlas-staging-db-url"
+
+      - name: Require deployed service readiness and full isolated-ledger preflight
+        shell: bash
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ vars.GCP_REGION || secrets.GCP_REGION }}
+          STAGING_CLOUD_RUN_SERVICE: ${{ vars.ATLAS_STAGING_CLOUD_RUN_SERVICE }}
+        run: |
+          set -euo pipefail
+          SERVICE_JSON="$(gcloud run services describe "$STAGING_CLOUD_RUN_SERVICE" --project="$GCP_PROJECT_ID" --region="$GCP_REGION" --format=json)"
+          SERVICE_URL="$(python -c 'import json,sys; print(json.load(sys.stdin).get("status",{}).get("url",""))' <<< "$SERVICE_JSON")"
+          [[ "$SERVICE_URL" == https://* ]] || { echo "BLOCKED: staging service has no valid HTTPS URL"; exit 1; }
+          BODY="$RUNNER_TEMP/atlas-paper-staging-ready.json"
+          HTTP_CODE="$(curl --silent --show-error --output "$BODY" --write-out '%{http_code}' --max-time 30 "$SERVICE_URL/readyz" || true)"
+          if [[ "$HTTP_CODE" != "200" ]]; then
+            echo "BLOCKED: paper-only staging /readyz did not pass (HTTP $HTTP_CODE); response body withheld"
+            exit 1
+          fi
+          python - "$BODY" <<'PY'
+          import json,sys
+          result=json.load(open(sys.argv[1], encoding="utf-8"))
+          if result.get("status") != "PASS" or result.get("mode") != "paper-only":
+              raise SystemExit("BLOCKED: deployed paper-only staging readiness did not report PASS")
+          print("PASS: deployed paper-only service and isolated customer-paper ledger preflight.")
+          PY
+          rm -f "$RUNNER_TEMP/atlas-staging-db-url" "$RUNNER_TEMP/atlas-staging-paper-db-url" "$BODY"
