@@ -268,6 +268,22 @@ jobs:
                     reviewed_reason="reviewed superseded public customer_simulation_* implementation; exact branch tip is the legacy primary-database design, replaced by the isolated customer_paper schema/credentials implementation on main"
                   fi
                   ;;
+                "hardening/postgres-restore-drill:05524a6b7225bdaceac16456f8cc4348ece90964")
+                  if git show "$main_sha:scripts/postgres_restore_drill.py" | grep -F 'AUTH_USER_ID = "atlas-postgres-restore-drill"' >/dev/null \
+                    && git show "$main_sha:scripts/postgres_restore_drill.py" | grep -F 'ledger_invariant_report(db)' >/dev/null \
+                    && git show "$main_sha:.github/workflows/ci.yml" | grep -F 'python scripts/postgres_restore_drill.py --phase seed' >/dev/null \
+                    && git show "$main_sha:.github/workflows/ci.yml" | grep -F 'python scripts/postgres_restore_drill.py --phase verify' >/dev/null \
+                    && git show "$sha:.github/workflows/postgres-restore-drill.yml" | grep -F 'pip install -r requirements-dev.txt' >/dev/null; then
+                    reviewed_reason="reviewed restore-drill branch superseded by the locked-dependency main CI restore drill, which now restores and verifies real customer-ledger state plus ledger invariants"
+                  fi
+                  ;;
+                "test/deriv-readiness-drill:4496fb2e729654218913a5011d763bab51e63c94")
+                  if git show "$main_sha:tests/test_deriv_customer_live.py" | grep -F 'for operation, args in ((broker.buy, ("proposal-1", 1.0)), (broker.sell, ("contract-1", 1.0))):' >/dev/null \
+                    && git show "$main_sha:tests/test_deriv_customer_live.py" | grep -F 'assert [payload.get("req_id") for payload, _ in calls] == [1, 2, 3]' >/dev/null \
+                    && git show "$sha:tests/test_deriv_customer_live.py" | grep -F 'await broker.buy("proposal-1", 1.0)' >/dev/null; then
+                    reviewed_reason="reviewed superseded Deriv readiness test; main retains the same read-only preflight and execution-denial checks with stronger shared operation and request-ID assertions"
+                  fi
+                  ;;
               esac
               if [[ -n "$reviewed_reason" ]]; then
                 reason="$reviewed_reason"
