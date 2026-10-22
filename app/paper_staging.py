@@ -7,6 +7,7 @@ Only health/readiness and /api/customer/paper are exposed by this ASGI app.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -36,10 +37,14 @@ _PAPER_PREFLIGHT_CACHE_TTL_SECONDS = 5.0
 _READYZ_RATE_LIMIT_PER_MINUTE = 12
 _READYZ_RATE_WINDOW_SECONDS = 60.0
 _READYZ_RATE_MAX_CLIENTS = 4096
+_PAPER_API_RATE_LIMIT_PER_MINUTE = 60
+_PAPER_ORDER_RATE_LIMIT_PER_MINUTE = 12
+_PAPER_API_RATE_MAX_BUCKETS = 8192
 _paper_preflight_cache_result: dict[str, Any] | None = None
 _paper_preflight_cache_at = 0.0
 _paper_preflight_cache_lock = asyncio.Lock()
 _readyz_request_times: dict[str, list[float]] = {}
+_paper_api_request_times: dict[str, list[float]] = {}
 
 
 def _allow_paper_readyz_request(client_identity: str, *, now: float | None = None) -> bool:
@@ -92,6 +97,35 @@ async def _cached_paper_runtime_preflight() -> dict[str, Any]:
         _paper_preflight_cache_result = dict(result)
         _paper_preflight_cache_at = time.monotonic()
         return dict(result)
+
+
+def _allow_paper_api_request(bucket_key: str, *, limit: int, now: float | None = None) -> bool:
+    """Enforce per-IP and per-token request limits without Redis, with bounded state."""
+    current = time.monotonic() if now is None else float(now)
+    key = str(bucket_key or "").strip()[:180]
+    if not key or limit < 1:
+        return False
+
+    if key not in _paper_api_request_times and len(_paper_api_request_times) >= _PAPER_API_RATE_MAX_BUCKETS:
+        expired = [
+            existing for existing, entries in _paper_api_request_times.items()
+            if not any(0 <= current - seen < _READYZ_RATE_WINDOW_SECONDS for seen in entries)
+        ]
+        for existing in expired:
+            _paper_api_request_times.pop(existing, None)
+        if len(_paper_api_request_times) >= _PAPER_API_RATE_MAX_BUCKETS:
+            return False
+
+    recent = [
+        seen for seen in _paper_api_request_times.get(key, [])
+        if 0 <= current - seen < _READYZ_RATE_WINDOW_SECONDS
+    ]
+    if len(recent) >= limit:
+        _paper_api_request_times[key] = recent
+        return False
+    recent.append(current)
+    _paper_api_request_times[key] = recent
+    return True
 
 
 async def _primary_reader_preflight() -> dict[str, Any]:
@@ -275,6 +309,30 @@ app = FastAPI(
 # Preserve the existing per-IP plus per-authenticated-identity rate limiter without
 # mounting the main application's production routes or lifespan.
 app.middleware("http")(api_rate_limit)
+
+
+@app.middleware("http")
+async def _paper_customer_api_rate_limit(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/customer/paper/"):
+        ip_bucket = f"ip:{_trusted_client_ip(request)}"
+        raw_authorization = str(request.headers.get("authorization") or "")
+        authorization_id = hashlib.sha256(raw_authorization.encode("utf-8")).hexdigest()[:24] if raw_authorization else "anon"
+        identity_bucket = f"auth:{authorization_id}"
+        limit = (
+            _PAPER_ORDER_RATE_LIMIT_PER_MINUTE
+            if request.method.upper() == "POST" and "/orders" in path
+            else _PAPER_API_RATE_LIMIT_PER_MINUTE
+        )
+        if not _allow_paper_api_request(f"paper:{ip_bucket}", limit=limit) or not _allow_paper_api_request(
+            f"paper:{identity_bucket}", limit=limit
+        ):
+            return JSONResponse(
+                {"detail": "Rate limit exceeded"},
+                status_code=429,
+                headers={"Retry-After": "60"},
+            )
+    return await call_next(request)
 
 
 @app.middleware("http")
