@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.verify_staging_restore import read_database_uri, truthy
+from scripts.verify_staging_restore import read_database_uri, required_table_failures, truthy
 
 
 STAGING = "abcdefghijklmnopqrst"
@@ -63,3 +63,12 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     assert "must use a different Supabase project from production" not in identity_workflow
     for source in (workflow, identity_workflow, reconciliation_workflow):
         assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in source
+
+def test_restore_audit_rejects_missing_required_schema_objects():
+    assert required_table_failures([]) == []
+    assert required_table_failures(["research_trial_archive"]) == [
+        "required staging table missing: research_trial_archive"
+    ]
+    assert required_table_failures(None) == [
+        "required_tables_missing was not reported as a JSON array"
+    ]
