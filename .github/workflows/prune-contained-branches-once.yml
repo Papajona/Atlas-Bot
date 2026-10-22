@@ -291,7 +291,7 @@ jobs:
                     && git show "$main_sha:tests/test_customer_paper_flow.py" | grep -F 'def test_customer_paper_request_fill_protective_exit_and_restart_recovery' >/dev/null \
                     && git show "$main_sha:tests/test_customer_paper_flow.py" | grep -F 'def test_concurrent_paper_cash_spend_expires_unaffordable_pending_buy' >/dev/null \
                     && git show "$main_sha:tests/test_customer_paper_provisioning_safety.py" | grep -F 'test_runtime_customer_paper_uri_requires_tls_and_encodes_credentials' >/dev/null \
-                    && git show "$main_sha:scripts/provision_customer_paper_schema.py" | grep -F 'backup_evidence_uri' >/dev/null \
+                    && git show "$main_sha:scripts/provision_customer_paper_schema.py" | grep -F 'ATLAS_CUSTOMER_PAPER_BACKUP_EVIDENCE_URI' >/dev/null \
                     && git show "$sha:app/customer_paper_flow.py" | grep -F 'async def execute_customer_paper_spot_signal' >/dev/null; then
                     reviewed_reason="reviewed superseded customer paper integration branch; main contains the evolved isolated flow/lifecycle, immediate entitlement rechecks, expanded fill/recovery tests, and guarded backup-evidence provisioning"
                   fi
