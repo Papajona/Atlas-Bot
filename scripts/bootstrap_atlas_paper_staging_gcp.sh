@@ -109,37 +109,6 @@ if [[ -L "$PAPER_URL_FILE" ]]; then
 fi
 
 if [[ -f "$PAPER_URL_FILE" ]]; then
-  if ! PRIMARY_PASSWORD="$PRIMARY_PASSWORD" python - "$PAPER_URL_FILE" "$SUPABASE_PROJECT_REF" "$SUPABASE_DB_HOST" <<'PY'
-import hmac, os, stat, sys
-from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
-path = Path(sys.argv[1])
-expected_ref, expected_host = sys.argv[2:]
-mode = stat.S_IMODE(path.stat().st_mode)
-if mode & 0o077:
-    raise SystemExit("BLOCKED: generated paper database URL file must have private permissions (0600 or stricter)")
-uri = path.read_text(encoding="utf-8").strip()
-parsed = urlsplit(uri)
-if parsed.scheme != "postgresql+asyncpg":
-    raise SystemExit("BLOCKED: generated paper database URL must use the SQLAlchemy asyncpg URI scheme")
-if parsed.hostname != expected_host or parsed.port != 5432 or parsed.path != "/postgres":
-    raise SystemExit("BLOCKED: generated paper database URL does not match the configured session pooler endpoint")
-if unquote(parsed.username or "") != f"atlas_customer_paper.{expected_ref}" or not parsed.password:
-    raise SystemExit("BLOCKED: generated paper database URL has the wrong runtime role or missing password")
-if parse_qs(parsed.query).get("ssl") != ["require"]:
-    raise SystemExit("BLOCKED: generated paper database URL must require TLS")
-primary_password = os.environ.get("PRIMARY_PASSWORD", "")
-paper_password = unquote(parsed.password or "")
-if not primary_password or hmac.compare_digest(
-    primary_password.encode("utf-8"), paper_password.encode("utf-8")
-):
-    raise SystemExit("BLOCKED: primary and paper database roles must have different passwords")
-print("PASS: protected generated paper database URL matches the expected role, project, session pooler and distinct credential; values withheld")
-PY
-  then
-    unset PRIMARY_PASSWORD
-    exit 1
-  fi
   USE_PAPER_URL_FILE="true"
 else
   read -r -s -p "Enter the atlas_customer_paper database password (hidden): " PAPER_PASSWORD
@@ -170,7 +139,6 @@ PY
 
 PRIMARY_ENCODED="$(url_encode_password "$PRIMARY_PASSWORD")"
 PRIMARY_URL="postgresql+asyncpg://atlas_paper_reader.${SUPABASE_PROJECT_REF}:${PRIMARY_ENCODED}@${SUPABASE_DB_HOST}:5432/postgres?ssl=require"
-unset PRIMARY_PASSWORD
 
 if [[ "$USE_PAPER_URL_FILE" != "true" ]]; then
   if [[ "$PRIMARY_ENCODED" == "$(url_encode_password "$PAPER_PASSWORD")" ]]; then
@@ -199,9 +167,11 @@ validate_paper_url_file() {
   local secret_path="$1"
   local validated_uri
 
-  # Validate and capture the complete value without any Secret Manager side effects.
-  # Read bytes first so CRLF is not silently normalized into an accepted LF.
-  if ! validated_uri="$(python - "$secret_path" "$SUPABASE_PROJECT_REF" "$SUPABASE_DB_HOST" <<'PY'
+  # Validate and capture the complete value before any Secret Manager side effect.
+  # Keep the primary password in the child environment only, never in argv or output.
+  if ! validated_uri="$(PRIMARY_PASSWORD="$PRIMARY_PASSWORD" python - "$secret_path" "$SUPABASE_PROJECT_REF" "$SUPABASE_DB_HOST" <<'PY'
+import hmac
+import os
 import re
 import sys
 from pathlib import Path
@@ -212,7 +182,7 @@ try:
 except (OSError, UnicodeDecodeError):
     raise SystemExit("BLOCKED: paper URL file must be readable UTF-8")
 
-# Permit one terminal LF as the file delimiter, but not CRLF or extra lines.
+# Permit exactly one terminal LF as the file delimiter, but not CRLF or extra lines.
 if data.endswith("\n"):
     data = data[:-1]
 if not data or "\n" in data or "\r" in data or "\x00" in data:
@@ -239,19 +209,25 @@ if (
 ):
     raise SystemExit("BLOCKED: paper URL does not match the expected TLS-enabled customer-paper session-pooler endpoint")
 
+primary_password = os.environ.get("PRIMARY_PASSWORD", "")
+paper_password = unquote(parsed.password or "")
+if not primary_password or hmac.compare_digest(
+    primary_password.encode("utf-8"), paper_password.encode("utf-8")
+):
+    raise SystemExit("BLOCKED: primary and paper database roles must have different passwords")
+
+# Return the original single-line URI without its file delimiter. Nothing is logged.
 sys.stdout.write(data)
 PY
 )"; then
     return 1
   fi
 
-  # Command substitution cannot safely preserve an empty value or NUL bytes.
   if [[ -z "$validated_uri" ]]; then
     echo "BLOCKED: paper URL is empty." >&2
     return 1
   fi
 
-  # stdout is consumed by the caller before either DB secret is touched.
   printf '%s' "$validated_uri"
 }
 
