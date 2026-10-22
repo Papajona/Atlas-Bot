@@ -358,6 +358,9 @@ jobs:
       - name: Disposable PostgreSQL backup and restore smoke test
         run: |
           set -euo pipefail
+          # Seed a deterministic balanced customer-ledger journal before backup,
+          # then verify both the row and global ledger invariants after restore.
+          python scripts/postgres_restore_drill.py --phase seed
           PGPASSWORD=test_password pg_dump -Fc --no-owner --no-acl \
             -h 127.0.0.1 -U atlas -d atlas_test -f /tmp/atlas-ci.dump
           PGPASSWORD=test_password createdb -h 127.0.0.1 -U atlas atlas_restore
@@ -381,6 +384,9 @@ jobs:
               FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
               WHERE n.nspname = 'public' AND c.relkind IN ('r','p')
             " | grep -qx RLS_OK
+          DATABASE_URL=postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_restore \
+            ATLAS_POSTGRES_URL=postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_restore \
+            python scripts/postgres_restore_drill.py --phase verify
           PGPASSWORD=test_password dropdb -h 127.0.0.1 -U atlas atlas_restore
           rm -f /tmp/atlas-ci.dump
       - name: Python lint (strict)
