@@ -166,8 +166,9 @@ def test_primary_reader_preflight_membership_allowlist_is_behaviorally_exact():
                     ).mappings().one()
                     member_count = int(row["member_count"])
                     assert member_count == expected_member_count, membership
-                    # This is the same fail-closed gate used by _primary_reader_preflight.
-                    assert (member_count == 0) is (expected_member_count == 0)
+                    assert paper_staging._primary_reader_membership_gate_passes(
+                        member_count
+                    ) is (expected_member_count == 0)
         finally:
             await engine.dispose()
 
