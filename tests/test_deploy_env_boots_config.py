@@ -65,6 +65,13 @@ def test_research_deploy_settings_reject_active_delimiter(
 def test_both_production_deploy_scripts_call_shared_research_validator() -> None:
     api = (ROOT / "deploy" / "cloud-run-deploy.sh").read_text(encoding="utf-8")
     worker = (ROOT / "deploy" / "cloud-run-worker-deploy.sh").read_text(encoding="utf-8")
+    guide = (ROOT / "deploy" / "DEPLOY_WORKFLOW.md").read_text(encoding="utf-8")
+    worker_step = guide[guide.index("### Step 7: Deploy the worker pool"):]
+
+    for name in ("RESEARCH_FEE_SOURCE", "RESEARCH_FEE_EVIDENCE_ID", "RESEARCH_MIN_DEFLATED_SHARPE"):
+        assert name in worker_step, f"manual worker deployment guide must supply {name}"
+    assert "actual fee source" in worker_step
+    assert "immutable evidence ID" in worker_step
 
     assert "validate_research_deploy_env.py" in api
     assert ' "$RESEARCH_FEE_SOURCE" "$RESEARCH_FEE_EVIDENCE_ID" "$RESEARCH_MIN_DEFLATED_SHARPE" "@"' in api
