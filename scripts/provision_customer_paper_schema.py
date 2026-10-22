@@ -38,7 +38,19 @@ SELECT current_database() || '|' || current_user || '|' ||
             AND NOT r.rolcreatedb AND NOT r.rolcreaterole
             AND NOT r.rolreplication AND NOT r.rolbypassrls
             AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid)
-            AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.roleid=r.oid)
+            AND NOT EXISTS (
+              SELECT 1
+              FROM pg_auth_members m
+              JOIN pg_roles member_role ON member_role.oid=m.member
+              WHERE m.roleid=r.oid
+                AND NOT (
+                  member_role.rolname='postgres'
+                  AND m.admin_option
+                  AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false)=false
+                  AND COALESCE((to_jsonb(m)->>'set_option')::boolean, false)=false
+                )
+            )
+            AND (SELECT count(*) FROM pg_auth_members m WHERE m.roleid=r.oid) <= 1
        )::text || '|' ||
        (SELECT (rolsuper OR rolcreaterole)::text FROM pg_roles WHERE rolname=current_user);
 """
