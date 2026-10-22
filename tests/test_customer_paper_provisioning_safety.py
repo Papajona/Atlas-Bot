@@ -221,6 +221,7 @@ def _run_paper_bootstrap_subset(
 
     url_file = tmp_path / "database-url"
     url_file.write_bytes(file_bytes)
+    url_file.chmod(0o600)
     env = os.environ.copy()
     env.update(
         {
