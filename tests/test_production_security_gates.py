@@ -259,11 +259,19 @@ def test_deployment_selects_a_successful_signed_release_run_for_exact_sha():
     assert '-ne 1' in block
 
 
-def test_staging_identity_preflight_is_manual_main_only_and_read_only():
+def test_staging_identity_preflight_has_marker_push_and_manual_main_dispatch():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
     assert "workflow_dispatch:" in workflow
     trigger_block = workflow.split("\npermissions:", 1)[0]
-    assert "push:" not in trigger_block
+    assert "push:" in trigger_block
+    assert "branches:\\n      - main" in trigger_block
+    assert "github.event_name == 'workflow_dispatch'" in workflow
+    assert "github.event_name == 'push'" in workflow
+    assert "contains(github.event.head_commit.message, '[atlas-staging-identity-preflight-once-20261022]')" in workflow
+    assert "startsWith(github.event.head_commit.message" not in workflow
+    # A default merge commit's subject is generic; the PR title appears after it.
+    merge_message = "Merge pull request #999 from owner/branch\\n\\n[atlas-staging-identity-preflight-once-20261022] Run staging identity preflight"
+    assert "[atlas-staging-identity-preflight-once-20261022]" in merge_message
     assert "github.ref == 'refs/heads/main'" in workflow
     assert "environment: staging" in workflow
     assert "ATLAS_STAGING_SUPABASE_PROJECT_REF" in workflow
@@ -455,14 +463,15 @@ def test_paper_reader_provisioning_is_no_write_and_no_public_schema_create():
 
 
 
-def test_staging_identity_preflight_remains_manual_only_on_main():
+def test_staging_identity_preflight_marker_push_keeps_manual_dispatch():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
     trigger_header = workflow.split("\npermissions:", 1)[0]
     assert "workflow_dispatch:" in trigger_header
-    assert "\n  push:" not in trigger_header
+    assert "\\n  push:" in trigger_header
+    assert "branches:\\n      - main" in trigger_header
     assert "verify-staging-identity:" in workflow
-    assert "if: github.ref == 'refs/heads/main'" in workflow
-
+    assert "github.event_name == 'workflow_dispatch'" in workflow
+    assert "contains(github.event.head_commit.message, '[atlas-staging-identity-preflight-once-20261022]')" in workflow
 
 def _run_production_staging_job_gate(tmp_path: Path, job_conclusion: str):
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
