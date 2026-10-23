@@ -58,7 +58,7 @@ from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
 from .incidents import open_incident
 from .model_registry import verify_model_file, rollback_champion
-from .correlation_risk import adjusted_group_exposure, risk_group
+from .correlation_risk import adjusted_group_exposure, cap_quantity_preserving_reduction, risk_group
 from .custody_signer import validate_signer_config
 from .custody_reconciliation import reconcile_usdt_custody
 from .meta_labeling import meta_label_gate, meta_label_walk_forward
@@ -162,6 +162,7 @@ async def _customer_paper_positions_for_exposure(
             }
 
         open_positions.append(SimpleNamespace(
+            exchange=venue,
             symbol=symbol,
             quantity=quantity,
             average_entry_price=average,
@@ -1219,6 +1220,7 @@ async def _run_persisted_adaptive_bot_cycle(
         # SELL/exit behavior is unchanged: no extra marks are requested for exits.
         open_positions = [
             SimpleNamespace(
+                exchange=str(row.get("venue") or "").strip().lower(),
                 symbol=str(row.get("symbol") or ""),
                 quantity=float(row.get("quantity") or 0),
                 average_entry_price=float(row.get("average_entry_price") or 0),
@@ -1259,11 +1261,18 @@ async def _run_persisted_adaptive_bot_cycle(
             "group_exposure": group_check,
         }
     group_side = str(plan.get("side") or "").upper()
-    candidate_symbol = str(req.symbol or "").upper().replace(":USDT", "")
+    candidate_symbol = str(req.symbol or "").strip().upper().replace(":USDT", "")
+    requested_exchange = str(req.exchange or "").strip().lower()
+    opposing_positions = []
     opposing_quantity = 0.0
     for position in open_positions:
-        position_symbol = str(getattr(position, "symbol", "") or "").upper().replace(":USDT", "")
-        if position_symbol != candidate_symbol:
+        position_symbol = str(getattr(position, "symbol", "") or "").strip().upper().replace(":USDT", "")
+        position_exchange = str(
+            getattr(position, "exchange", getattr(position, "venue", "")) or ""
+        ).strip().lower()
+        # A reduction on a different venue cannot satisfy the requested order's reduce-only
+        # proof; it must not bypass this venue's correlation-group limit.
+        if position_symbol != candidate_symbol or position_exchange != requested_exchange:
             continue
         try:
             position_quantity = float(getattr(position, "quantity", 0) or 0)
@@ -1274,12 +1283,51 @@ async def _run_persisted_adaptive_bot_cycle(
             or (group_side == "SELL" and position_quantity > 0)
         ):
             opposing_quantity += abs(position_quantity)
-    # A position-reducing order must still be allowed when existing exposure is over cap.
-    # Customer-paper SELL execution is separately clamped to its held long quantity.
-    group_reduce_only = opposing_quantity > 0 and (
-        quantity <= opposing_quantity + 1e-9
-        or (needs_customer_paper and group_side == "SELL")
-    )
+            opposing_positions.append((position, abs(position_quantity)))
+
+    reducing_quantity = min(max(0.0, quantity), opposing_quantity)
+    group_reduce_only = False
+    if reducing_quantity > 0:
+        if needs_customer_paper and group_side == "SELL":
+            # The isolated spot fill path is clamped to positive holdings on the matching
+            # venue. Submit only that reducing quantity; do not leave a short remainder open.
+            quantity = reducing_quantity
+            group_reduce_only = True
+        else:
+            remaining_to_close = reducing_quantity
+            reducing_notional = 0.0
+            reduction_valuation_complete = True
+            for position, position_quantity in opposing_positions:
+                close_quantity = min(remaining_to_close, position_quantity)
+                if close_quantity <= 0:
+                    continue
+                try:
+                    mark = float(getattr(position, "mark_price", 0) or 0)
+                    if not math.isfinite(mark) or mark <= 0:
+                        mark = float(getattr(position, "average_entry_price", 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    mark = 0.0
+                if not math.isfinite(mark) or mark <= 0:
+                    reduction_valuation_complete = False
+                    break
+                reducing_notional += close_quantity * mark
+                remaining_to_close -= close_quantity
+                if remaining_to_close <= 1e-9:
+                    break
+            if reduction_valuation_complete and remaining_to_close <= 1e-9:
+                quantity = cap_quantity_preserving_reduction(
+                    quantity,
+                    reducing_quantity,
+                    existing_notional=float(group_check["existing_notional"]),
+                    reducing_notional=reducing_notional,
+                    cap_usd=float(settings.correlation_group_cap_usd),
+                    unit_price=exposure_price,
+                )
+            else:
+                # Preserve the known close, but never guess headroom for an increase when
+                # the notional released by that close cannot be established.
+                quantity = reducing_quantity
+            group_reduce_only = True
     if not group_check["allowed"] and not group_reduce_only:
         headroom = max(0.0, settings.correlation_group_cap_usd - group_check["existing_notional"])
         quantity = min(quantity, headroom / max(exposure_price, 1e-12))
