@@ -8,6 +8,9 @@ on:
       - "settings.gradle.kts"
       - "gradle.properties"
       - ".github/workflows/android-release.yml"
+      - ".github/workflows/production-deploy.yml"
+      - "scripts/verify_android_apk_backend_origin.py"
+      - "tests/test_android_release_origin_evidence.py"
   workflow_dispatch:
     inputs:
       production_backend_url:
@@ -109,9 +112,10 @@ jobs:
             exit 1
           }
           gradle --no-daemon :app:assembleRelease
-      - name: Independently verify APK signature, certificate, and package
+      - name: Independently verify APK signature, certificate, package, and backend origin
         env:
           EXPECTED_CERT_SHA256: ${{ secrets.ATLAS_RELEASE_CERT_SHA256 }}
+          ATLAS_PROD_BACKEND_URL: ${{ inputs.production_backend_url || vars.ATLAS_PROD_BACKEND_URL }}
         shell: bash
         run: |
           set -euo pipefail
@@ -140,6 +144,10 @@ jobs:
             echo "BLOCKED: APK package identity is not com.atlas.trading"
             exit 1
           }
+          test -n "$ATLAS_PROD_BACKEND_URL"
+          BACKEND_EVIDENCE="$(python scripts/verify_android_apk_backend_origin.py --apk "$APK" --expected-url "$ATLAS_PROD_BACKEND_URL")"
+          BACKEND_URL_FOR_EVIDENCE=$(jq -er .backend_url <<< "$BACKEND_EVIDENCE")
+          BACKEND_ORIGIN=$(jq -er .backend_origin <<< "$BACKEND_EVIDENCE")
           mkdir -p "$RUNNER_TEMP/atlas-release-evidence"
           cp "$APK" "$RUNNER_TEMP/atlas-release-evidence/atlas-release.apk"
           cp "$RUNNER_TEMP/atlas-signing-report.txt" "$RUNNER_TEMP/atlas-release-evidence/atlas-signing-report.txt"
@@ -147,13 +155,17 @@ jobs:
           cat > "$RUNNER_TEMP/atlas-release-evidence/atlas-release-metadata.txt" <<EOF
           commit=$GITHUB_SHA
           ref=$GITHUB_REF
+          run_id=$GITHUB_RUN_ID
+          run_attempt=$GITHUB_RUN_ATTEMPT
           package=com.atlas.trading
           certificate_sha256=$ACTUAL_CERT
+          backend_url=$BACKEND_URL_FOR_EVIDENCE
+          backend_origin=$BACKEND_ORIGIN
           apk=atlas-release.apk
           checksum=atlas-release.sha256
           signing_report=atlas-signing-report.txt
           EOF
-          echo "PASS: APK signature, expected certificate, package identity, and checksum evidence verified."
+          echo "PASS: APK signature, expected certificate, package identity, backend URL/origin, and checksum evidence verified."
       - name: Upload complete signed release evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
