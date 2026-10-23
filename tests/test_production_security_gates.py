@@ -280,6 +280,9 @@ def test_staging_identity_preflight_is_manual_main_only_and_read_only():
     assert "app.paper_staging:app" in workflow
     assert "CUSTOMER_PAPER_DATABASE_URL" in workflow
     assert "ATLAS_STAGING_SUPABASE_ANON_KEY_SECRET" in workflow
+    assert "service not found in the configured project/region" in workflow
+    assert "roles/run.viewer" in workflow
+    assert "raw output withheld" in workflow
 
 
 def test_staging_identity_preflight_allows_same_project_and_checks_read_only_paper_runtime():
@@ -458,6 +461,27 @@ def test_staging_deployment_is_marker_gated_and_waits_for_exact_commit_gates():
     assert "no completed exact-commit workflow_dispatch staging preflight" in deploy
     assert "timeout-minutes: 60" in deploy
     assert "actions: write" in deploy
+
+
+def test_staging_workflows_are_valid_yaml_with_the_expected_named_jobs():
+    ruby = r"""
+require "yaml"
+deploy = YAML.load_file(ARGV.fetch(0))
+preflight = YAML.load_file(ARGV.fetch(1))
+abort("paper staging deploy job missing") unless deploy.fetch("jobs").key?("deploy-paper-staging")
+abort("staging identity preflight job missing") unless preflight.fetch("jobs").key?("verify-staging-identity")
+"""
+    result = subprocess.run(
+        [
+            "ruby", "-e", ruby,
+            str(ROOT / ".github" / "workflows" / "staging-paper-deploy.yml"),
+            str(ROOT / ".github" / "workflows" / "staging-identity-preflight.yml"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
 
 def test_paper_reader_provisioning_is_no_write_and_no_public_schema_create():
     sql = (ROOT / "scripts" / "provision_atlas_paper_reader.sql").read_text(encoding="utf-8")
