@@ -157,3 +157,71 @@ def test_direct_start_bot_applies_paper_group_cap_before_submission():
     assert route.index("adjusted_group_exposure(") < route.index("execute_customer_paper_spot_signal(")
     assert "paper_exposure_mark_unavailable" in route
 
+
+
+def test_customer_paper_buy_skips_unrelated_position_mark_requests(monkeypatch):
+    """A broken quote for BTC must not block an ETH BUY in the L1 risk bucket."""
+    import asyncio
+    from types import SimpleNamespace
+    from app import main
+    import app.customer_paper_lifecycle as lifecycle
+
+    async def positions(**_kwargs):
+        return [{
+            "symbol": "BTC/USDT",
+            "venue": "binance",
+            "quantity": "1",
+            "average_entry_price": "60000",
+        }]
+
+    def forbidden_mark_request(*_args, **_kwargs):
+        raise AssertionError("unrelated BTC must be filtered before requesting market data")
+
+    class Request:
+        symbol = "ETH/USDT"
+        exchange = "binance"
+
+        def model_copy(self, update):
+            return SimpleNamespace(**{**vars(self), **update})
+
+    monkeypatch.setattr(lifecycle, "get_customer_paper_positions", positions)
+    monkeypatch.setattr(main, "market_data", forbidden_mark_request)
+    result = asyncio.run(main._customer_paper_positions_for_exposure(
+        customer_id=771, req=Request(), market_context={"bid": 2000},
+    ))
+
+    assert result == {"ok": True, "positions": []}
+
+
+def test_customer_paper_buy_still_fails_closed_on_unpriced_same_group_position(monkeypatch):
+    """A same-bucket SOL exposure must be marked before an ETH BUY can be approved."""
+    import asyncio
+    from types import SimpleNamespace
+    from app import main
+    import app.customer_paper_lifecycle as lifecycle
+
+    async def positions(**_kwargs):
+        return [{
+            "symbol": "SOL/USDT",
+            "venue": "binance",
+            "quantity": "2",
+            "average_entry_price": "100",
+        }]
+
+    class Request:
+        symbol = "ETH/USDT"
+        exchange = "binance"
+
+        def model_copy(self, update):
+            return SimpleNamespace(**{**vars(self), **update})
+
+    monkeypatch.setattr(lifecycle, "get_customer_paper_positions", positions)
+    monkeypatch.setattr(main, "market_data", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(main, "_server_paper_market_context", lambda *_args, **_kwargs: None)
+    result = asyncio.run(main._customer_paper_positions_for_exposure(
+        customer_id=772, req=Request(), market_context={"bid": 2000},
+    ))
+
+    assert result["ok"] is False
+    assert result["stage"] == "paper_exposure_mark_unavailable"
+    assert result["symbol"] == "SOL/USDT"
