@@ -255,17 +255,15 @@ def build_customer_paper_router(
     async def _fresh_correlation_group_marks(
         customer_id: int, target_symbol: str, timeframe: str, current_df: Any
     ) -> dict[str, str]:
-        """Fetch fresh validated bids for each nonzero position in the BUY's risk group."""
+        """Use each open group's fresh verified bar high as a conservative risk mark."""
         from .correlation_risk import risk_group
-        from .main import _server_paper_market_context
 
         target_group = risk_group(target_symbol)
         positions = await get_customer_paper_positions(customer_id=customer_id)
-        timeframe_seconds = _TIMEFRAME_SECONDS.get(str(timeframe))
-        if not timeframe_seconds:
+        if timeframe not in _TIMEFRAME_SECONDS:
             raise CustomerPaperLedgerBlocked("Correlation-group marks require a supported timeframe")
-        days = max(1, (25 * timeframe_seconds + 86_399) // 86_400)
         marks: dict[str, str] = {}
+        target_symbol_normalized = str(target_symbol).strip().upper()
         for position in positions:
             symbol = str(position.get("symbol") or "").strip().upper()
             if risk_group(symbol) != target_group:
@@ -282,14 +280,17 @@ def build_customer_paper_router(
                 )
             if quantity == 0:
                 continue
-            mark_request = market_request_type(
-                asset="crypto", symbol=symbol, exchange="binance",
-                timeframe=timeframe, days=days,
-            )
             try:
-                mark_df = current_df if symbol == str(target_symbol).strip().upper() else (await _fetch_bar(symbol, timeframe))[0]
-                context = await asyncio.to_thread(_server_paper_market_context, mark_request, mark_df)
-                mark = Decimal(str((context or {}).get("bid") or "0"))
+                # The customer paper API executes from verified completed OHLCV bars.
+                # Use the observed high, rather than a missing/unavailable ticker bid,
+                # to avoid understating current exposure between order submission/fill.
+                mark_df = (
+                    current_df
+                    if symbol == target_symbol_normalized
+                    else (await _fetch_bar(symbol, timeframe))[0]
+                )
+                context = _market_bar_context(mark_df, symbol=symbol, timeframe=timeframe)
+                mark = Decimal(str(context["values"]["high"]))
             except Exception as exc:
                 raise CustomerPaperLedgerBlocked(
                     f"Fresh same-group paper mark is unavailable for {symbol} ({type(exc).__name__})"
