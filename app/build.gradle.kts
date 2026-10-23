@@ -98,7 +98,7 @@ android {
         targetSdk = 35
         versionCode = 1047
         versionName = "3.10.47"
-        buildConfigField("String", "BACKEND_URL", "\"" + debugBackendUrl + "\"")
+        resValue("string", "atlas_backend_url", debugBackendUrl)
     }
 
     buildFeatures {
@@ -144,13 +144,13 @@ android {
 
     buildTypes {
         debug {
-            buildConfigField("String", "BACKEND_URL", "\"" + debugBackendUrl + "\"")
+
             signingConfigs.findByName("debugConfig")?.let {
                 signingConfig = it
             }
         }
         release {
-            buildConfigField("String", "BACKEND_URL", "\"" + (configuredBackendUrl ?: "") + "\"")
+            resValue("string", "atlas_backend_url", configuredBackendUrl ?: "")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
