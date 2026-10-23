@@ -63,7 +63,7 @@ jobs:
 
           aapt, apk = sys.argv[1:]
           result = subprocess.run(
-              [aapt, "dump", "resources", "--values", apk],
+              [aapt, "dump", "--values", "resources", apk],
               check=False,
               capture_output=True,
               text=True,
