@@ -37,9 +37,13 @@ def test_cloud_run_pins_secret_versions_and_uses_lb_ingress():
 
 def test_android_webview_has_domain_allowlist():
     src=(ROOT/"app/src/main/java/com/atlas/trading/MainActivity.kt").read_text()
-    assert 'trusted_web_host' in src
-    assert 'trusted_checkout_host' not in (ROOT/"app/src/main/res/values/strings.xml").read_text()
+    resources=(ROOT/"app/src/main/res/values/strings.xml").read_text()
+    assert 'Uri.parse(BuildConfig.BACKEND_URL).host.orEmpty().lowercase()' in src
     assert 'host == trustedHost' in src
+    assert 'backendUrl.startsWith("https://")' in src
+    assert 'R.string.trusted_web_host' not in src
+    assert 'name="trusted_web_host"' not in resources
+    assert 'trusted_checkout_host' not in resources
     assert 'host.endsWith(".run.app")' not in src
 
 def test_customer_ui_no_direct_api_value_innerhtml():
