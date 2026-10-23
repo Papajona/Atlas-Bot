@@ -23,7 +23,7 @@ _NON_PRODUCTION_HOST = re.compile(
     re.IGNORECASE,
 )
 _RESOURCE_HEADER = re.compile(
-    r"^\s*resource\s+0x[0-9a-fA-F]+\s+.*\bstring/atlas_backend_url\s*$"
+    r"^\s*resource\s+0x[0-9a-fA-F]+\s+.*\bstring/atlas_backend_url(?::.*)?\s*$"
 )
 _NEXT_RESOURCE = re.compile(r"^\s*resource\s+0x[0-9a-fA-F]+\s+")
 _STRING_VALUE = re.compile(r'\((?:string8|string16)\)\s+"([^"\r\n]*)"\s*$')
@@ -104,7 +104,7 @@ def extract_runtime_backend_url_from_resource_dump(resource_dump: str) -> str:
             break
 
     values: list[str] = []
-    for line in lines[start + 1 : end]:
+    for line in lines[start:end]:
         match = _STRING_VALUE.search(line.strip())
         if match:
             values.append(match.group(1))
