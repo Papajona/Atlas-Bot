@@ -259,20 +259,11 @@ def test_deployment_selects_a_successful_signed_release_run_for_exact_sha():
     assert '-ne 1' in block
 
 
-def test_staging_identity_preflight_has_marker_push_and_manual_main_dispatch():
+def test_staging_identity_preflight_is_manual_main_only_and_read_only():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
     assert "workflow_dispatch:" in workflow
     trigger_block = workflow.split("\npermissions:", 1)[0]
-    assert "push:" in trigger_block
-    assert "branches:\n      - main" in trigger_block
-    assert "github.event_name == 'workflow_dispatch'" in workflow
-    assert "github.event_name == 'push'" in workflow
-    assert "contains(github.event.head_commit.message, '[atlas-staging-identity-preflight-once-20261022]')" in workflow
-    assert "startsWith(github.event.head_commit.message" not in workflow
-    # A default merge commit's subject is generic; the PR title appears after it.
-    merge_message = "Merge pull request #999 from owner/branch\n\n[atlas-staging-identity-preflight-once-20261022] Run staging identity preflight"
-    assert "[atlas-staging-identity-preflight-once-20261022]" in merge_message
-    assert not merge_message.startswith("[atlas-staging-identity-preflight-once-20261022]")
+    assert "push:" not in trigger_block
     assert "github.ref == 'refs/heads/main'" in workflow
     assert "environment: staging" in workflow
     assert "ATLAS_STAGING_SUPABASE_PROJECT_REF" in workflow
@@ -289,6 +280,9 @@ def test_staging_identity_preflight_has_marker_push_and_manual_main_dispatch():
     assert "app.paper_staging:app" in workflow
     assert "CUSTOMER_PAPER_DATABASE_URL" in workflow
     assert "ATLAS_STAGING_SUPABASE_ANON_KEY_SECRET" in workflow
+    assert "service not found in the configured project/region" in workflow
+    assert "roles/run.viewer" in workflow
+    assert "raw output withheld" in workflow
 
 
 def test_staging_identity_preflight_allows_same_project_and_checks_read_only_paper_runtime():
@@ -450,6 +444,45 @@ def test_paper_staging_deployment_is_restricted_and_keeps_risk_features_off():
     assert "app.main:app" not in deploy
 
 
+
+def test_staging_deployment_is_marker_gated_and_waits_for_exact_commit_gates():
+    deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
+    trigger_header = deploy.split("\npermissions:", 1)[0]
+    assert "workflow_dispatch:" in trigger_header
+    assert "push:" in trigger_header
+    assert "branches:\n      - main" in trigger_header
+    assert "contains(github.event.head_commit.message, '[atlas-paper-staging-deploy-once-20261023]')" in deploy
+    assert "github.ref == 'refs/heads/main'" in deploy
+    assert "Wait for required CI gates to pass on this exact commit" in deploy
+    assert '--commit "$GITHUB_SHA"' in deploy
+    for required_workflow in ("ci.yml", "ledger-concurrency-check.yml", "production-verification.yml"):
+        assert f'"{required_workflow}"' in deploy
+    assert "gh workflow run staging-identity-preflight.yml" in deploy
+    assert "no completed exact-commit workflow_dispatch staging preflight" in deploy
+    assert "timeout-minutes: 60" in deploy
+    assert "actions: write" in deploy
+
+
+def test_staging_workflows_are_valid_yaml_with_the_expected_named_jobs():
+    ruby = r"""
+require "yaml"
+deploy = YAML.load_file(ARGV.fetch(0))
+preflight = YAML.load_file(ARGV.fetch(1))
+abort("paper staging deploy job missing") unless deploy.fetch("jobs").key?("deploy-paper-staging")
+abort("staging identity preflight job missing") unless preflight.fetch("jobs").key?("verify-staging-identity")
+"""
+    result = subprocess.run(
+        [
+            "ruby", "-e", ruby,
+            str(ROOT / ".github" / "workflows" / "staging-paper-deploy.yml"),
+            str(ROOT / ".github" / "workflows" / "staging-identity-preflight.yml"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
 def test_paper_reader_provisioning_is_no_write_and_no_public_schema_create():
     sql = (ROOT / "scripts" / "provision_atlas_paper_reader.sql").read_text(encoding="utf-8")
     assert "CREATE ROLE atlas_paper_reader" in sql
@@ -464,15 +497,15 @@ def test_paper_reader_provisioning_is_no_write_and_no_public_schema_create():
 
 
 
-def test_staging_identity_preflight_marker_push_keeps_manual_dispatch():
+def test_staging_identity_preflight_is_dispatched_after_paper_service_deployment():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
     trigger_header = workflow.split("\npermissions:", 1)[0]
     assert "workflow_dispatch:" in trigger_header
-    assert "\n  push:" in trigger_header
-    assert "branches:\n      - main" in trigger_header
+    assert "\n  push:" not in trigger_header
     assert "verify-staging-identity:" in workflow
-    assert "github.event_name == 'workflow_dispatch'" in workflow
-    assert "contains(github.event.head_commit.message, '[atlas-staging-identity-preflight-once-20261022]')" in workflow
+    deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
+    assert "gh workflow run staging-identity-preflight.yml" in deploy
+    assert deploy.index("Deploy restricted paper-only Cloud Run service") < deploy.index("Dispatch and require read-only staging identity preflight")
 
 
 def _run_production_staging_job_gate(tmp_path: Path, job_conclusion: str):

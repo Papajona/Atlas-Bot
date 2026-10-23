@@ -1,9 +1,6 @@
 name: Supabase Staging Identity Preflight
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
@@ -16,16 +13,7 @@ concurrency:
 
 jobs:
   verify-staging-identity:
-    # Default merge commits use a generic subject; inspect the complete head message.
-    if: >-
-      github.ref == 'refs/heads/main' &&
-      (
-        github.event_name == 'workflow_dispatch' ||
-        (
-          github.event_name == 'push' &&
-          contains(github.event.head_commit.message, '[atlas-staging-identity-preflight-once-20261022]')
-        )
-      )
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: staging
     steps:
@@ -140,7 +128,20 @@ jobs:
           ]
           result = subprocess.run(args, check=False, capture_output=True, text=True)
           if result.returncode:
-              print("BLOCKED: unable to inspect the configured staging Cloud Run service; service output withheld")
+              # Classify only the Google Cloud error type. Do not print service JSON,
+              # secret values, or raw command output from a failed resource lookup.
+              diagnostic = (result.stderr or result.stdout or "").lower()
+              if "not_found" in diagnostic or "not found" in diagnostic:
+                  reason = "service not found in the configured project/region; the paper-staging deploy must complete first"
+              elif "permission_denied" in diagnostic or "permission denied" in diagnostic or "does not have permission" in diagnostic:
+                  reason = "the preflight identity lacks Cloud Run service-inspection permission; verify roles/run.viewer for atlas-staging-preflight"
+              elif "service_disabled" in diagnostic or "service disabled" in diagnostic or "has not been used in project" in diagnostic:
+                  reason = "the Cloud Run API is disabled or unavailable in the configured staging project"
+              elif "unauthenticated" in diagnostic or "authentication" in diagnostic:
+                  reason = "Google Cloud authentication/impersonation failed for the preflight identity"
+              else:
+                  reason = "gcloud run services describe failed; review the job's redacted Google Cloud error class"
+              print(f"BLOCKED: {reason} (gcloud exit code {result.returncode}; raw output withheld)")
               sys.exit(1)
           try:
               service = json.loads(result.stdout)

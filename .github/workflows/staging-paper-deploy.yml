@@ -1,11 +1,14 @@
 name: Deploy Paper-Only Atlas Staging
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
   contents: read
-  actions: read
+  actions: write
   id-token: write
 
 concurrency:
@@ -14,8 +17,17 @@ concurrency:
 
 jobs:
   deploy-paper-staging:
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'push' &&
+          contains(github.event.head_commit.message, '[atlas-paper-staging-deploy-once-20261023]')
+        )
+      )
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     environment: staging
     env:
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
@@ -29,28 +41,62 @@ jobs:
       SUPABASE_ANON_KEY_SECRET: ${{ vars.ATLAS_STAGING_SUPABASE_ANON_KEY_SECRET }}
       SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
     steps:
-      - name: Require exact main ref and successful core CI on this commit
+      - name: Wait for required CI gates to pass on this exact commit
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = "refs/heads/main"
-          require_success() {
-            local workflow="$1"
-            local label="$2"
-            local count
-            count="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --commit "$GITHUB_SHA" \
-              --json status,conclusion --jq '[.[] | select(.status=="completed" and .conclusion=="success")] | length')"
-            if [ "${count:-0}" -lt 1 ]; then
-              echo "BLOCKED: $label has not passed on exact commit $GITHUB_SHA"
-              exit 1
+
+          workflows=("ci.yml" "ledger-concurrency-check.yml" "production-verification.yml")
+          labels=("Atlas CI" "PostgreSQL ledger concurrency" "Production Verification Gate")
+          declare -A passed=()
+
+          for attempt in $(seq 1 90); do
+            all_passed=true
+            for index in "${!workflows[@]}"; do
+              workflow="${workflows[$index]}"
+              label="${labels[$index]}"
+              if [[ "${passed[$workflow]:-}" == "yes" ]]; then
+                continue
+              fi
+
+              run_json="$(gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow "$workflow" \
+                --commit "$GITHUB_SHA" \
+                --limit 100 \
+                --json databaseId,headSha,status,conclusion \
+                --jq 'sort_by(.databaseId) | last // {}')"
+              run_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
+              run_status="$(jq -r '.status // "missing"' <<< "$run_json")"
+              run_conclusion="$(jq -r '.conclusion // ""' <<< "$run_json")"
+
+              if [[ "$run_sha" != "$GITHUB_SHA" ]]; then
+                all_passed=false
+                continue
+              fi
+              if [[ "$run_status" == "completed" ]]; then
+                if [[ "$run_conclusion" != "success" ]]; then
+                  echo "BLOCKED: $label completed with conclusion '${run_conclusion:-missing}' on exact commit $GITHUB_SHA"
+                  exit 1
+                fi
+                passed[$workflow]="yes"
+                echo "PASS: $label succeeded on exact commit $GITHUB_SHA"
+              else
+                all_passed=false
+              fi
+            done
+            if [[ "$all_passed" == "true" ]]; then
+              echo "PASS: all required exact-commit CI gates passed; staging deployment may proceed."
+              exit 0
             fi
-            echo "PASS: $label passed on exact commit $GITHUB_SHA"
-          }
-          require_success "ci.yml" "Atlas CI"
-          require_success "ledger-concurrency-check.yml" "PostgreSQL ledger concurrency"
-          require_success "production-verification.yml" "Production Verification Gate"
+            sleep 10
+          done
+
+          echo "BLOCKED: timed out waiting for Atlas CI, PostgreSQL concurrency, and Production Verification to finish successfully on exact commit $GITHUB_SHA"
+          exit 1
 
       - name: Validate staging inputs
         shell: bash
@@ -132,3 +178,58 @@ jobs:
               raise SystemExit("BLOCKED: deployed staging service is not the paper-only ASGI app")
           print("PASS: paper-only staging service is live. Full readiness remains separately gated by the read-only identity and isolated-ledger preflight.")
           PY
+
+      - name: Dispatch and require read-only staging identity preflight on this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_main_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
+            echo "BLOCKED: main advanced during staging deployment; refusing to certify a different commit."
+            exit 1
+          fi
+
+          previous_run_id="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow "staging-identity-preflight.yml" \
+            --event workflow_dispatch \
+            --commit "$GITHUB_SHA" \
+            --limit 100 \
+            --json databaseId \
+            --jq '[.[].databaseId] | max // 0')"
+
+          gh workflow run staging-identity-preflight.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main
+
+          for attempt in $(seq 1 90); do
+            run_json="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "staging-identity-preflight.yml" \
+              --event workflow_dispatch \
+              --commit "$GITHUB_SHA" \
+              --limit 100 \
+              --json databaseId,headSha,status,conclusion \
+              --jq 'sort_by(.databaseId) | last // {}')"
+            run_id="$(jq -r '.databaseId // 0' <<< "$run_json")"
+            run_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
+            run_status="$(jq -r '.status // "missing"' <<< "$run_json")"
+            run_conclusion="$(jq -r '.conclusion // ""' <<< "$run_json")"
+
+            if [[ "$run_id" -gt "$previous_run_id" && "$run_sha" == "$GITHUB_SHA" ]]; then
+              if [[ "$run_status" == "completed" ]]; then
+                if [[ "$run_conclusion" == "success" ]]; then
+                  echo "PASS: read-only staging identity and isolated-ledger preflight succeeded on exact commit $GITHUB_SHA"
+                  exit 0
+                fi
+                echo "BLOCKED: exact-commit staging preflight completed with conclusion '${run_conclusion:-missing}'. Review its workflow run; deployment remains paper-only."
+                exit 1
+              fi
+            fi
+            sleep 10
+          done
+
+          echo "BLOCKED: no completed exact-commit workflow_dispatch staging preflight was observed after deployment."
+          exit 1
