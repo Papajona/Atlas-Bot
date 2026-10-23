@@ -72,3 +72,16 @@ def test_model_integrity_is_runtime_fail_closed():
     assert "verify_artifact_signature" in src
     assert 'settings.environment in {"staging", "production"}' in src
     assert "return False" in src
+
+
+def test_live_signal_timestamp_policy_defaults_to_required_and_can_be_explicitly_overridden():
+    from app.config import Settings
+
+    safe_default = Settings(environment="test")
+    assert safe_default.require_signal_timestamp_for_live is True
+
+    explicitly_relaxed = Settings(
+        environment="test",
+        require_signal_timestamp_for_live=False,
+    )
+    assert explicitly_relaxed.require_signal_timestamp_for_live is False
