@@ -1,3 +1,5 @@
+import java.net.URI
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -9,7 +11,7 @@ val configuredBackendUrl = configuredBackendUrlRaw
     ?.takeIf { value -> value.none { char -> char == '"' || char == '\\' || char == '\n' || char == '\r' } }
     ?.trimEnd('/')
 val releaseTaskRequested = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
-val parsedBackendUri = configuredBackendUrl?.let { runCatching { java.net.URI(it) }.getOrNull() }
+val parsedBackendUri = configuredBackendUrl?.let { runCatching { URI(it) }.getOrNull() }
 val backendHost = parsedBackendUri?.host?.lowercase().orEmpty()
 val nonProductionHostPattern = Regex("(^|[.-])(dev|development|staging|test|sandbox|localhost)([.-]|$)", RegexOption.IGNORE_CASE)
 val privateIpv4Pattern = Regex("^(10\\.|127\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)")
