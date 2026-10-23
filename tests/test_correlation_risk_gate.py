@@ -123,3 +123,36 @@ def test_correlation_gate_queries_positions_scoped_to_the_customer():
     preceding = src[max(0, i - 400):i]
     assert "Position.customer_id == profile.id" in preceding
     assert "Position.quantity != 0" in preceding
+
+
+def test_customer_paper_buy_filters_unrelated_markets_before_valuation():
+    """Unrelated risk groups must be discarded before any provider mark is requested."""
+    from pathlib import Path
+
+    source = Path("app/main.py").read_text(encoding="utf-8")
+    helper_start = source.index("async def _customer_paper_positions_for_exposure(")
+    helper_end = source.index("\ndef _stepup_token(", helper_start)
+    helper = source[helper_start:helper_end]
+
+    assert "target_group = risk_group(req.symbol)" in helper
+    assert "relevant_positions = [" in helper
+    assert "risk_group(str(row.get(\\"symbol\\") or \\"\\")) == target_group" in helper
+    assert helper.index("relevant_positions = [") < helper.index("market_data, mark_req")
+    assert '"stage": "paper_exposure_mark_unavailable"' in helper
+
+
+def test_direct_start_bot_applies_paper_group_cap_before_submission():
+    """Direct paper start must share the isolated-position BUY headroom gate."""
+    from pathlib import Path
+
+    source = Path("app/main.py").read_text(encoding="utf-8")
+    route_start = source.index("async def customer_start_bot(")
+    route_end = source.index("\\n\\nasync def _require_feature", route_start)
+    route = source[route_start:route_end]
+
+    assert "_customer_paper_positions_for_exposure(" in route
+    assert "adjusted_group_exposure(" in route
+    assert "correlation_group_cap_usd" in route
+    assert "quantity = min(" in route
+    assert route.index("adjusted_group_exposure(") < route.index("execute_customer_paper_spot_signal(")
+    assert "paper_exposure_mark_unavailable" in route
