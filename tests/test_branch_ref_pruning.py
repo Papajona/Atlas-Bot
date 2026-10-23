@@ -133,7 +133,7 @@ def test_branch_delta_matches_main_when_every_branch_changed_file_matches(
                 "main-sha:docs/readme.md": ("100644", "blob", "blob-two"),
             }
             entry = entries.get(expression)
-            output = f"{entry[0]} {entry[1]} {entry[2]}\\t{args[7]}\\0" if entry else ""
+            output = f"{entry[0]} {entry[1]} {entry[2]}\t{args[7]}\0" if entry else ""
             return subprocess.CompletedProcess(args, 0, output, "")
         raise AssertionError(f"unexpected command: {args}")
 
@@ -155,7 +155,7 @@ def test_branch_delta_preserves_any_changed_file_not_matching_main(monkeypatch):
                 "main-sha:app/module.py": ("100644", "blob", "main-blob"),
             }
             entry = entries.get(expression)
-            output = f"{entry[0]} {entry[1]} {entry[2]}\\t{args[7]}\\0" if entry else ""
+            output = f"{entry[0]} {entry[1]} {entry[2]}\t{args[7]}\0" if entry else ""
             return subprocess.CompletedProcess(args, 0, output, "")
         raise AssertionError(f"unexpected command: {args}")
 
@@ -209,7 +209,7 @@ def test_missing_commit_marker_mixed_with_object_database_error_aborts(monkeypat
             args,
             128,
             "",
-            "fatal: Not a valid commit name deadbeef\\nfatal: loose object deadbeef is corrupt",
+            "fatal: Not a valid commit name deadbeef\nfatal: loose object deadbeef is corrupt",
         )
 
     monkeypatch.setattr(pruning, "_run", fake_run)
@@ -221,7 +221,7 @@ def test_missing_commit_marker_mixed_with_object_database_error_aborts(monkeypat
 def test_branch_protection_status_is_parsed_and_protected_branches_are_identified(monkeypatch):
     def fake_run(args, *, check=True):
         assert args[:2] == ["gh", "api"]
-        return subprocess.CompletedProcess(args, 0, "main\\tfalse\\nfeature/keep\\ttrue\\n", "")
+        return subprocess.CompletedProcess(args, 0, "main\tfalse\nfeature/keep\ttrue\n", "")
 
     monkeypatch.setattr(pruning, "_run", fake_run)
 
@@ -244,7 +244,7 @@ def test_branch_protection_status_fails_closed_on_api_error(monkeypatch):
 
 def test_branch_protection_status_rejects_malformed_data(monkeypatch):
     def fake_run(args, *, check=True):
-        return subprocess.CompletedProcess(args, 0, "main\\tfalse\\nfeature\\tunknown\\n", "")
+        return subprocess.CompletedProcess(args, 0, "main\tfalse\nfeature\tunknown\n", "")
 
     monkeypatch.setattr(pruning, "_run", fake_run)
 
@@ -329,7 +329,7 @@ def test_mode_only_executable_bit_change_preserves_branch(tmp_path, monkeypatch)
     _git(repo, "config", "user.email", "atlas-mode@example.invalid")
     check_script = repo / "scripts" / "check.sh"
     check_script.parent.mkdir()
-    check_script.write_text("#!/bin/sh\\necho safe\\n", encoding="utf-8")
+    check_script.write_text("#!/bin/sh\necho safe\n", encoding="utf-8")
     check_script.chmod(0o644)
     _git(repo, "add", "scripts/check.sh")
     _git(repo, "commit", "-m", "base non-executable script")
