@@ -362,6 +362,8 @@ async def _expire_open_order_if_ttl(
 async def _fill_open_order(
     customer_id: int, order: dict, market: dict, df, *,
     group_mark_prices: Mapping[tuple[str, str, str], object] | None = None,
+    group_mark_price_loader: Callable[[int, object, Mapping], object] | None = None,
+    request: object | None = None,
 ) -> dict:
     client_id = str(order.get("client_order_id") or "")
     if not client_id:
@@ -588,6 +590,20 @@ async def _fill_open_order(
             }
         fill_price, fee, costs = _fill_price_and_fee(side, remaining, market)
 
+    if side == "BUY" and group_mark_prices is None and group_mark_price_loader is not None:
+        if request is None:
+            raise CustomerPaperFlowBlocked("Paper BUY group-mark request context is unavailable")
+        try:
+            group_mark_prices = await group_mark_price_loader(
+                customer_id, request, market["market_context"]
+            )
+        except CustomerPaperFlowBlocked:
+            raise
+        except Exception as exc:
+            raise CustomerPaperFlowBlocked(
+                f"Current correlation-group marks could not be verified ({type(exc).__name__})"
+            ) from exc
+
     try:
         result = await _paper_call(record_customer_paper_fill(
             customer_id=customer_id,
@@ -722,18 +738,10 @@ async def process_customer_paper_orders(
 
     if str(meta.get("timeframe") or "") != str(req.timeframe):
         raise CustomerPaperFlowBlocked("Open paper order timeframe differs from the current request; reconcile before execution")
-    group_mark_prices = None
-    if order_side == "BUY" and group_mark_price_loader is not None:
-        try:
-            group_mark_prices = await group_mark_price_loader(customer_id, req, market_context)
-        except CustomerPaperFlowBlocked:
-            raise
-        except Exception as exc:
-            raise CustomerPaperFlowBlocked(
-                f"Current correlation-group marks could not be verified ({type(exc).__name__})"
-            ) from exc
     return await _fill_open_order(
-        customer_id, order, market, df, group_mark_prices=group_mark_prices
+        customer_id, order, market, df,
+        group_mark_price_loader=group_mark_price_loader,
+        request=req,
     )
 
 
