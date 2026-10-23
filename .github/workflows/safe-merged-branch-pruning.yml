@@ -11,12 +11,23 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: atlas-safe-merged-branch-pruning
+  group: atlas-branch-pruning
   cancel-in-progress: false
 
 jobs:
   prune:
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'push' &&
+          !startsWith(github.event.head_commit.message, '[atlas-branch-prune-once-20261020]') &&
+          !startsWith(github.event.head_commit.message, '[atlas-branch-prune-content-once-20261020]') &&
+          !startsWith(github.event.head_commit.message, '[atlas-branch-prune-reviewed-once-20261020]') &&
+          !startsWith(github.event.head_commit.message, '[atlas-branch-prune-verified-duplicates-once-20261020]')
+        )
+      )
     runs-on: ubuntu-latest
     steps:
       - name: Check out main with complete history
