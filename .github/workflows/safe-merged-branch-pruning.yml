@@ -10,10 +10,6 @@ permissions:
   contents: write
   pull-requests: read
 
-concurrency:
-  group: atlas-branch-pruning
-  cancel-in-progress: false
-
 jobs:
   prune:
     if: >-
@@ -28,6 +24,10 @@ jobs:
           !startsWith(github.event.head_commit.message, '[atlas-branch-prune-verified-duplicates-once-20261020]')
         )
       )
+    concurrency:
+      group: atlas-branch-pruning
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     steps:
       - name: Check out main with complete history

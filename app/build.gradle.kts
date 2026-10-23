@@ -10,14 +10,38 @@ val configuredBackendUrlRaw = providers.environmentVariable("ATLAS_PROD_BACKEND_
 val configuredBackendUrl = configuredBackendUrlRaw
     ?.takeIf { value -> value.none { char -> char == '"' || char == '\\' || char == '\n' || char == '\r' } }
     ?.trimEnd('/')
-val configuredDevBackendUrlRaw = providers.environmentVariable("ATLAS_DEV_BACKEND_URL").orNull?.trim()
-val configuredDevBackendUrl = configuredDevBackendUrlRaw
-    ?.takeIf { value -> value.isNotEmpty() && value.none { char -> char == '"' || char == '\\' || char == '\n' || char == '\r' } }
-    ?.trimEnd('/')
+val configuredDevBackendUrlRaw = providers.environmentVariable("ATLAS_DEV_BACKEND_URL").orNull
+val configuredDevBackendUrl = configuredDevBackendUrlRaw?.trim()
+val normalizedDevBackendUrl = configuredDevBackendUrl?.trimEnd('/')
 // Debug APKs must never receive a blank backend URL or silently inherit production.
 // Developers can provide an explicit development/staging origin; otherwise this reserved
 // non-routable origin fails visibly instead of sending traffic to an unintended service.
-val debugBackendUrl = configuredDevBackendUrl ?: "https://atlas-debug-backend.invalid"
+val debugBackendUrl = if (configuredDevBackendUrl.isNullOrEmpty()) {
+    "https://atlas-debug-backend.invalid"
+} else {
+    check(!normalizedDevBackendUrl.isNullOrEmpty()) {
+        "ATLAS_DEV_BACKEND_URL normalizes to an empty value; provide an HTTP(S) origin with a host."
+    }
+    check(configuredDevBackendUrl.none { char ->
+        char == '"' || char == '\\' || char == '\n' || char == '\r'
+    }) {
+        "ATLAS_DEV_BACKEND_URL contains invalid characters."
+    }
+    val explicitDevUri = runCatching { URI(configuredDevBackendUrl) }.getOrNull()
+    check(
+        explicitDevUri != null &&
+            explicitDevUri.scheme?.lowercase() in setOf("http", "https") &&
+            !explicitDevUri.host.isNullOrBlank() &&
+            explicitDevUri.rawUserInfo == null &&
+            explicitDevUri.rawQuery == null &&
+            explicitDevUri.rawFragment == null &&
+            (explicitDevUri.rawPath.isNullOrEmpty() || explicitDevUri.rawPath == "/") &&
+            explicitDevUri.port in -1..65535
+    ) {
+        "ATLAS_DEV_BACKEND_URL must be a valid HTTP(S) origin with a host, and no credentials, path, query, or fragment."
+    }
+    normalizedDevBackendUrl
+}
 val parsedBackendUri = configuredBackendUrl?.let { runCatching { URI(it) }.getOrNull() }
 val rawBackendHost = parsedBackendUri?.host?.lowercase().orEmpty()
 val backendHost = rawBackendHost.removeSuffix(".")

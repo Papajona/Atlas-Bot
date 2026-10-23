@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_EVEN, ROUND_UP, localcontext
 
@@ -335,9 +335,35 @@ def conservative_customer_paper_buy_price(market_context: Mapping) -> Decimal:
     return Decimal(price)
 
 
+async def _expire_open_order_if_ttl(
+    customer_id: int, client_id: str, *, elapsed_bars: int, ttl_bars: int,
+    is_protective_exit: bool, bar_identity: str,
+) -> bool:
+    """Expire an open remainder at the TTL boundary; protective exits never expire."""
+    if is_protective_exit or elapsed_bars < ttl_bars:
+        return False
+    current = await _paper_call(
+        get_customer_paper_order(customer_id=customer_id, client_order_id=client_id),
+        "recheck autonomous paper order before TTL expiry",
+    )
+    if not current or current.get("status") not in {"SUBMITTED", "PARTIALLY_FILLED"}:
+        return False
+    await _paper_call(
+        expire_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id=client_id,
+            idempotency_key="paper-ttl-" + _sha(f"{client_id}|{bar_identity}")[:48],
+        ),
+        "expire autonomous paper order remainder at TTL",
+    )
+    return True
+
+
 async def _fill_open_order(
-    customer_id: int, order: dict, market: dict, df,
-    correlation_group_marks: Mapping[str, object] | None = None,
+    customer_id: int, order: dict, market: dict, df, *,
+    group_mark_prices: Mapping[tuple[str, str, str], object] | None = None,
+    group_mark_price_loader: Callable[[int, object, Mapping], object] | None = None,
+    request: object | None = None,
 ) -> dict:
     client_id = str(order.get("client_order_id") or "")
     if not client_id:
@@ -407,6 +433,16 @@ async def _fill_open_order(
             "fill": {"status": "EXPIRED"}, "recovered_pending_order": True,
         }
     if not is_protective_exit and elapsed_bars < max(1, int(settings.paper_fill_latency_bars)):
+        ttl_expired = await _expire_open_order_if_ttl(
+            customer_id, client_id, elapsed_bars=elapsed_bars, ttl_bars=ttl_bars,
+            is_protective_exit=False, bar_identity=current_bar_dt.isoformat(),
+        )
+        if ttl_expired:
+            return {
+                "status": "EXPIRED_TTL", "client_order_id": client_id,
+                "order_id": str(state["order_id"]), "elapsed_bars": elapsed_bars,
+                "fill": {"status": "EXPIRED"}, "recovered_pending_order": True,
+            }
         return {
             "status": "WAITING_FOR_FILL_LATENCY", "client_order_id": client_id,
             "order_id": str(state["order_id"]), "elapsed_bars": elapsed_bars,
@@ -425,7 +461,7 @@ async def _fill_open_order(
             get_customer_paper_positions(customer_id=customer_id), "read paper position for fill"
         )
         if str(p.get("venue") or "").lower() == str(state.get("venue") or "").lower()
-        and str(p.get("symbol") or "") == str(state.get("symbol") or "")
+        and str(p.get("symbol") or "").strip().upper() == str(state.get("symbol") or "").strip().upper()
     ]
     if side == "SELL":
         held = Decimal(str(position_matches[0]["quantity"])) if position_matches else Decimal("0")
@@ -474,6 +510,14 @@ async def _fill_open_order(
         "read same-bar paper fill",
     )
     if prior_fill is not None:
+        ttl_expired = await _expire_open_order_if_ttl(
+            customer_id, client_id, elapsed_bars=elapsed_bars, ttl_bars=ttl_bars,
+            is_protective_exit=is_protective_exit, bar_identity=bar_key,
+        )
+        current = await _paper_call(
+            get_customer_paper_order(customer_id=customer_id, client_order_id=client_id),
+            "recheck replayed autonomous paper order",
+        ) if ttl_expired else state
         return {
             "status": "REPLAYED",
             "client_order_id": client_id,
@@ -482,6 +526,7 @@ async def _fill_open_order(
             "bar_at": budget.get("bar_at"),
             "bar_capacity": budget.get("capacity"),
             "fill": prior_fill,
+            "order_status_after_ttl": current.get("status") if ttl_expired else None,
             "cost_model": {"cost_model_status": "REPLAYED_FROM_IMMUTABLE_LEDGER"},
             "recovered_pending_order": True,
         }
@@ -492,12 +537,16 @@ async def _fill_open_order(
         if side == "SELL" and "Rounded simulated fill price is invalid" in str(exc):
             # Keep the immutable exit intent pending until a representable positive
             # quote exists. Never write a zero-price fill or overstate proceeds.
+            ttl_expired = await _expire_open_order_if_ttl(
+                customer_id, client_id, elapsed_bars=elapsed_bars, ttl_bars=ttl_bars,
+                is_protective_exit=is_protective_exit, bar_identity=bar_key,
+            )
             return {
-                "status": "WAITING_FOR_PRICE_PRECISION",
+                "status": "EXPIRED_TTL" if ttl_expired else "WAITING_FOR_PRICE_PRECISION",
                 "client_order_id": client_id,
                 "order_id": state["order_id"],
                 "bar_key": bar_key,
-                "fill": {"status": "NOT_FILLED"},
+                "fill": {"status": "EXPIRED" if ttl_expired else "NOT_FILLED"},
                 "reason": "Positive SELL quote rounds to zero at numeric(38,18) precision",
                 "recovered_pending_order": True,
             }
@@ -541,6 +590,20 @@ async def _fill_open_order(
             }
         fill_price, fee, costs = _fill_price_and_fee(side, remaining, market)
 
+    if side == "BUY" and group_mark_prices is None and group_mark_price_loader is not None:
+        if request is None:
+            raise CustomerPaperFlowBlocked("Paper BUY group-mark request context is unavailable")
+        try:
+            group_mark_prices = await group_mark_price_loader(
+                customer_id, request, market["market_context"]
+            )
+        except CustomerPaperFlowBlocked:
+            raise
+        except Exception as exc:
+            raise CustomerPaperFlowBlocked(
+                f"Current correlation-group marks could not be verified ({type(exc).__name__})"
+            ) from exc
+
     try:
         result = await _paper_call(record_customer_paper_fill(
             customer_id=customer_id,
@@ -550,8 +613,8 @@ async def _fill_open_order(
             quantity=format(remaining, "f"),
             price=fill_price,
             fee_amount=fee,
-            correlation_group_marks=correlation_group_marks,
             enforce_market_bar_budget=True,
+            group_mark_prices=group_mark_prices,
         ), "append isolated paper fill")
     except CustomerPaperFlowBlocked as exc:
         # The paper-cash advisory lock can reveal a concurrent spend after the
@@ -575,8 +638,30 @@ async def _fill_open_order(
                 "cost_model": costs,
             }
         raise
+    ttl_expired = await _expire_open_order_if_ttl(
+        customer_id, client_id, elapsed_bars=elapsed_bars, ttl_bars=ttl_bars,
+        is_protective_exit=is_protective_exit, bar_identity=bar_key,
+    )
+    current_after_ttl = await _paper_call(
+        get_customer_paper_order(customer_id=customer_id, client_order_id=client_id),
+        "read autonomous order after TTL expiry",
+    ) if ttl_expired else None
+    if ttl_expired and str(result.get("status") or "").upper() in {
+        "NO_LIQUIDITY", "NO_CORRELATION_GROUP_HEADROOM"
+    }:
+        return {
+            "status": "EXPIRED_TTL",
+            "client_order_id": client_id,
+            "order_id": state["order_id"],
+            "bar_key": bar_key,
+            "fill": {"status": "EXPIRED"},
+            "order_status_after_ttl": (current_after_ttl or {}).get("status"),
+            "recovered_pending_order": True,
+            "cost_model": costs,
+        }
     return {
         "status": result.get("status"),
+        "order_status_after_ttl": (current_after_ttl or {}).get("status") if ttl_expired else None,
         "client_order_id": client_id,
         "order_id": state["order_id"],
         "bar_key": bar_key,
@@ -590,8 +675,9 @@ async def _fill_open_order(
 
 
 async def process_customer_paper_orders(
-    customer_id: int, req, df, market_context: Mapping,
-    correlation_group_marks: Mapping[str, object] | None = None,
+    customer_id: int, req, df, market_context: Mapping, *,
+    history_loader: Callable[[datetime, datetime], object] | None = None,
+    group_mark_price_loader: Callable[[int, object, Mapping], object] | None = None,
 ) -> dict | None:
     """Recover autonomous orders only and protect existing positions before pending BUY refills."""
     market = validate_customer_paper_market(req, df, market_context)
@@ -601,7 +687,7 @@ async def process_customer_paper_orders(
     matching = [
         order for order in pending
         if str(order.get("venue") or "").lower() == str(req.exchange).lower()
-        and str(order.get("symbol") or "").upper() == str(req.symbol).upper()
+        and str(order.get("symbol") or "").strip().upper() == str(req.symbol).strip().upper()
     ]
     if not matching:
         return None
@@ -615,7 +701,7 @@ async def process_customer_paper_orders(
     # Before refusing ownership, let a pending manual BUY yield to an existing stop.
     if meta.get("paper_flow_version") != 1:
         if order_side == "BUY":
-            protective = await _protective_exit(customer_id, req, df, market)
+            protective = await _protective_exit(customer_id, req, df, market, history_loader=history_loader)
             if protective is not None:
                 await _paper_call(
                     expire_customer_paper_order(
@@ -636,7 +722,7 @@ async def process_customer_paper_orders(
     # remainder is pending. Check all subsequent candles before another fill can move
     # the position-event cursor past a stop/target breach.
     if order_side == "BUY":
-        protective = await _protective_exit(customer_id, req, df, market)
+        protective = await _protective_exit(customer_id, req, df, market, history_loader=history_loader)
         if protective is not None:
             await _paper_call(
                 expire_customer_paper_order(
@@ -653,17 +739,22 @@ async def process_customer_paper_orders(
     if str(meta.get("timeframe") or "") != str(req.timeframe):
         raise CustomerPaperFlowBlocked("Open paper order timeframe differs from the current request; reconcile before execution")
     return await _fill_open_order(
-        customer_id, order, market, df, correlation_group_marks=correlation_group_marks
+        customer_id, order, market, df,
+        group_mark_price_loader=group_mark_price_loader,
+        request=req,
     )
 
 
-async def _protective_exit(customer_id: int, req, df, market: dict) -> dict | None:
+async def _protective_exit(
+    customer_id: int, req, df, market: dict, *,
+    history_loader: Callable[[datetime, datetime], object] | None = None,
+) -> dict | None:
     positions = [
         p for p in await _paper_call(
             get_customer_paper_positions(customer_id=customer_id), "read paper positions"
         )
         if str(p.get("venue") or "").lower() == str(req.exchange).lower()
-        and str(p.get("symbol") or "") == str(req.symbol)
+        and str(p.get("symbol") or "").strip().upper() == str(req.symbol).strip().upper()
         and Decimal(str(p.get("quantity") or "0")) > 0
     ]
     if not positions:
@@ -693,23 +784,75 @@ async def _protective_exit(customer_id: int, req, df, market: dict) -> dict | No
     if span_seconds % timeframe_seconds != 0:
         raise CustomerPaperFlowBlocked("Protective-exit history does not align to the position timeframe")
     bars_to_cover = int(span_seconds // timeframe_seconds)
-    if bars_to_cover > len(df.index):
-        raise CustomerPaperFlowBlocked("Protective-exit candle history is incomplete; fetch missing bars before proceeding")
-    observed_bars = set()
-    for raw_bar_at in df.index:
-        try:
-            bar_dt = datetime.fromisoformat(
-                str(getattr(raw_bar_at, "isoformat", lambda: raw_bar_at)()).replace("Z", "+00:00")
+
+    def observed_completed_bars(frame) -> set[datetime]:
+        observed = set()
+        for raw_bar_at in frame.index:
+            try:
+                bar_dt = datetime.fromisoformat(
+                    str(getattr(raw_bar_at, "isoformat", lambda: raw_bar_at)()).replace("Z", "+00:00")
+                )
+            except (TypeError, ValueError) as exc:
+                raise CustomerPaperFlowBlocked(
+                    "Protective-exit candle history contains an invalid timestamp"
+                ) from exc
+            if bar_dt.tzinfo is None or bar_dt.utcoffset() is None:
+                raise CustomerPaperFlowBlocked(
+                    "Protective-exit candle history contains a naive timestamp"
+                )
+            observed.add(bar_dt.astimezone(timezone.utc))
+        return observed
+
+    expected_bars = [
+        latest_position_bar + timedelta(seconds=bar_number * timeframe_seconds)
+        for bar_number in range(1, bars_to_cover + 1)
+    ]
+    observed_bars = observed_completed_bars(df)
+    if any(expected_bar not in observed_bars for expected_bar in expected_bars):
+        if history_loader is None:
+            raise CustomerPaperFlowBlocked(
+                "Protective-exit candle history is incomplete; fetch missing bars before proceeding"
             )
-        except (TypeError, ValueError) as exc:
-            raise CustomerPaperFlowBlocked("Protective-exit candle history contains an invalid timestamp") from exc
-        if bar_dt.tzinfo is None or bar_dt.utcoffset() is None:
-            raise CustomerPaperFlowBlocked("Protective-exit candle history contains a naive timestamp")
-        observed_bars.add(bar_dt.astimezone(timezone.utc))
-    for bar_number in range(1, bars_to_cover + 1):
-        expected_bar = latest_position_bar + timedelta(seconds=bar_number * timeframe_seconds)
-        if expected_bar not in observed_bars:
-            raise CustomerPaperFlowBlocked("Protective-exit candle history is incomplete; a completed bar is missing")
+        try:
+            historical_df = await history_loader(latest_position_bar, current_bar)
+        except CustomerPaperFlowBlocked:
+            raise
+        except Exception as exc:
+            raise CustomerPaperFlowBlocked(
+                f"Protective-exit historical candle fetch failed ({type(exc).__name__})"
+            ) from exc
+        provenance = _json_mapping(getattr(historical_df, "attrs", {}).get("data_provenance"))
+        if (
+            provenance.get("source") != "ccxt_ohlcv"
+            or str(provenance.get("symbol") or "").strip().upper() != str(req.symbol).strip().upper()
+            or str(provenance.get("exchange") or "").lower() != str(req.exchange).lower()
+            or str(provenance.get("timeframe") or "") != str(req.timeframe)
+            or str(provenance.get("asset_class") or "").lower() != "crypto"
+            or str(provenance.get("market_type") or "").lower() != "spot"
+            or str(provenance.get("volume_unit") or "").lower() != "base_asset"
+            or provenance.get("volume_unit_verified") is not True
+            or int(provenance.get("row_count") or 0) != len(historical_df)
+        ):
+            raise CustomerPaperFlowBlocked(
+                "Protective-exit historical candles lack matching verified spot provenance"
+            )
+        digest = str(provenance.get("sha256") or "").lower()
+        if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+            raise CustomerPaperFlowBlocked("Protective-exit historical candle digest is invalid")
+        if (
+            not getattr(historical_df.index, "is_monotonic_increasing", False)
+            or getattr(historical_df.index, "has_duplicates", True)
+            or not {"open", "high", "low", "close", "volume"}.issubset(set(historical_df.columns))
+        ):
+            raise CustomerPaperFlowBlocked("Protective-exit historical candles are not a valid completed series")
+        # A fetch can finish after a newer candle closes. Evaluate only through this
+        # request's validated current bar, not any later bar fetched in the meantime.
+        df = historical_df.loc[historical_df.index <= current_bar]
+        observed_bars = observed_completed_bars(df)
+        if any(expected_bar not in observed_bars for expected_bar in expected_bars):
+            raise CustomerPaperFlowBlocked(
+                "Protective-exit candle history remains incomplete after historical fetch"
+            )
     stop = _finite_decimal(position.get("stop_loss_price"), "position stop loss") if position.get("stop_loss_price") else Decimal("0")
     target = _finite_decimal(position.get("take_profit_price"), "position take profit") if position.get("take_profit_price") else Decimal("0")
     reason = None
@@ -785,14 +928,15 @@ async def _protective_exit(customer_id: int, req, df, market: dict) -> dict | No
 
 async def recover_customer_paper_spot_flow(
     *, customer_id: int, req, df, market_context: Mapping,
-    correlation_group_marks: Mapping[str, object] | None = None,
+    history_loader: Callable[[datetime, datetime], object] | None = None,
+    group_mark_price_loader: Callable[[int, object, Mapping], object] | None = None,
 ) -> dict | None:
     """Recover a durable pending order or trigger a protective exit before new signals."""
     market = validate_customer_paper_market(req, df, market_context)
     account = await ensure_customer_paper_account(customer_id, market["currency"])
     recovered = await process_customer_paper_orders(
         customer_id, req, df, market_context,
-        correlation_group_marks=correlation_group_marks,
+        history_loader=history_loader, group_mark_price_loader=group_mark_price_loader,
     )
     if recovered is not None:
         fill_status = (recovered.get("fill") or {}).get("status") or recovered.get("status")
@@ -804,7 +948,7 @@ async def recover_customer_paper_spot_flow(
             "execution": recovered,
             "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
         }
-    protective = await _protective_exit(customer_id, req, df, market)
+    protective = await _protective_exit(customer_id, req, df, market, history_loader=history_loader)
     if protective is not None:
         executed = protective.get("status") in {"APPENDED", "REPLAYED"}
         return {
@@ -829,7 +973,8 @@ async def execute_customer_paper_spot_signal(
     take_profit_price: str | int | Decimal | None,
     strategy: str,
     signal_metadata: Mapping | None = None,
-    correlation_group_marks: Mapping[str, object] | None = None,
+    history_loader: Callable[[datetime, datetime], object] | None = None,
+    group_mark_price_loader: Callable[[int, object, Mapping], object] | None = None,
 ) -> dict:
     """Seed virtual cash, recover pending intents, honor long-only exits, then submit/fill.
 
@@ -839,7 +984,10 @@ async def execute_customer_paper_spot_signal(
     market = validate_customer_paper_market(req, df, market_context)
     account = await ensure_customer_paper_account(customer_id, market["currency"])
 
-    recovered = await process_customer_paper_orders(customer_id, req, df, market_context)
+    recovered = await process_customer_paper_orders(
+        customer_id, req, df, market_context,
+        history_loader=history_loader, group_mark_price_loader=group_mark_price_loader,
+    )
     if recovered is not None:
         return {
             "mode": "CUSTOMER_PAPER",
@@ -849,7 +997,7 @@ async def execute_customer_paper_spot_signal(
             "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
         }
 
-    protective = await _protective_exit(customer_id, req, df, market)
+    protective = await _protective_exit(customer_id, req, df, market, history_loader=history_loader)
     if protective is not None:
         protective_fill_status = str(
             (protective.get("fill") or {}).get("status") or protective.get("status") or ""
@@ -871,7 +1019,7 @@ async def execute_customer_paper_spot_signal(
             get_customer_paper_positions(customer_id=customer_id), "read paper positions"
         )
         if str(p.get("venue") or "").lower() == str(req.exchange).lower()
-        and str(p.get("symbol") or "") == str(req.symbol)
+        and str(p.get("symbol") or "").strip().upper() == str(req.symbol).strip().upper()
         and Decimal(str(p.get("quantity") or "0")) > 0
     ]
     if normalized_side == "BUY" and positions:
@@ -965,9 +1113,7 @@ async def execute_customer_paper_spot_signal(
     ]
     if len(match) != 1:
         raise CustomerPaperFlowBlocked("Submitted paper order was not visible to the recovery query")
-    execution = await _fill_open_order(
-        customer_id, match[0], market, df, correlation_group_marks=correlation_group_marks
-    )
+    execution = await _fill_open_order(customer_id, match[0], market, df)
     return {
         "mode": "CUSTOMER_PAPER",
         "status": execution.get("status", "UNKNOWN"),

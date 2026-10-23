@@ -12,7 +12,7 @@ import json
 import re
 import uuid
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_EVEN, localcontext
 from typing import Any
 
@@ -464,13 +464,22 @@ async def submit_customer_paper_order(
                     ) latest ON TRUE
                     WHERE o.customer_id=:customer_id AND o.side='BUY'
                       AND o.created_at >= :day_start
-                      AND latest.event_type IN ('SUBMITTED','PARTIALLY_FILLED','FILLED')
+                      AND (
+                          latest.event_type IN ('SUBMITTED','PARTIALLY_FILLED','FILLED')
+                          OR EXISTS (
+                              SELECT 1 FROM customer_paper.fills f
+                              WHERE f.customer_id=o.customer_id AND f.order_id=o.id
+                          )
+                      )
                     """
                 ), {"customer_id": customer_id, "day_start": day_start})).scalar_one()
                 if int(todays_entries or 0) >= int(settings.discipline_max_entries_per_day):
                     raise CustomerPaperOrderConflict(
                         "Trading-discipline daily entry limit reached for isolated paper ledger"
                     )
+                cooldown_start = now - timedelta(
+                    seconds=int(settings.discipline_entry_cooldown_seconds)
+                )
                 last_entry = (await conn.execute(text(
                     """
                     SELECT o.created_at
@@ -481,12 +490,18 @@ async def submit_customer_paper_order(
                         ORDER BY id DESC LIMIT 1
                     ) latest ON TRUE
                     WHERE o.customer_id=:customer_id AND o.side='BUY'
-                      AND o.created_at >= :day_start
-                      AND latest.event_type IN ('SUBMITTED','PARTIALLY_FILLED','FILLED')
+                      AND o.created_at >= :cooldown_start
+                      AND (
+                          latest.event_type IN ('SUBMITTED','PARTIALLY_FILLED','FILLED')
+                          OR EXISTS (
+                              SELECT 1 FROM customer_paper.fills f
+                              WHERE f.customer_id=o.customer_id AND f.order_id=o.id
+                          )
+                      )
                     ORDER BY o.created_at DESC, o.client_order_id DESC
                     LIMIT 1
                     """
-                ), {"customer_id": customer_id, "day_start": day_start})).scalar_one_or_none()
+                ), {"customer_id": customer_id, "cooldown_start": cooldown_start})).scalar_one_or_none()
                 if last_entry is not None:
                     if last_entry.tzinfo is None or last_entry.utcoffset() is None:
                         last_entry = last_entry.replace(tzinfo=timezone.utc)
@@ -702,8 +717,8 @@ async def record_customer_paper_fill(
     quantity: str | int | Decimal,
     price: str | int | Decimal,
     fee_amount: str | int | Decimal = "0",
-    correlation_group_marks: Mapping[str, str | int | Decimal] | None = None,
     enforce_market_bar_budget: bool = False,
+    group_mark_prices: Mapping[tuple[str, str, str], object] | None = None,
 ) -> dict[str, Any]:
     """Atomically append one simulated fill, fee, position event and balanced journal.
 
@@ -867,7 +882,8 @@ async def record_customer_paper_fill(
                 """), {"customer_id": customer_id})).mappings().all()
                 existing_group_notional = Decimal("0")
                 for current_position in latest_positions:
-                    if risk_group(str(current_position["symbol"] or "")) != target_group:
+                    current_symbol = str(current_position["symbol"] or "")
+                    if risk_group(current_symbol) != target_group:
                         continue
                     current_quantity = Decimal(str(current_position["quantity_after"] or "0"))
                     if not current_quantity.is_finite():
@@ -881,28 +897,36 @@ async def record_customer_paper_fill(
                         raise CustomerPaperLedgerBlocked(
                             "current correlation-group position has no valid entry valuation"
                         )
-                    position_symbol = str(current_position["symbol"] or "").strip().upper()
-                    raw_mark = None
-                    if isinstance(correlation_group_marks, Mapping):
-                        for mark_symbol, mark_value in correlation_group_marks.items():
-                            if str(mark_symbol or "").strip().upper() == position_symbol:
-                                raw_mark = mark_value
-                                break
+                    mark_key = (
+                        str(current_position["venue"] or "").strip().lower(),
+                        str(current_position["market_type"] or "").strip().lower(),
+                        current_symbol.strip().upper(),
+                    )
+                    raw_mark = (group_mark_prices or {}).get(mark_key)
+                    if raw_mark is None and (
+                        mark_key[0] == venue.strip().lower()
+                        and mark_key[1] == market_type.strip().lower()
+                        and mark_key[2] == symbol.strip().upper()
+                    ):
+                        # The order's actual fill price is a validated current price for
+                        # the same market and is conservative relative to the BUY fill.
+                        raw_mark = fill_price
                     if raw_mark is None:
                         raise CustomerPaperLedgerBlocked(
-                            f"current correlation-group position has no fresh validated mark: {position_symbol}"
+                            "current mark is missing for an open correlation-group position; refusing to add exposure"
                         )
                     try:
                         mark_price = Decimal(str(raw_mark))
-                    except (InvalidOperation, TypeError, ValueError, OverflowError) as exc:
+                    except (InvalidOperation, TypeError, ValueError) as exc:
                         raise CustomerPaperLedgerBlocked(
-                            f"current correlation-group position has an invalid mark: {position_symbol}"
+                            "current correlation-group position mark is invalid"
                         ) from exc
                     if not mark_price.is_finite() or mark_price <= 0:
                         raise CustomerPaperLedgerBlocked(
-                            f"current correlation-group position has no fresh validated mark: {position_symbol}"
+                            "current correlation-group position mark is not finite and positive"
                         )
-                    # Never value existing exposure below historical entry after a price rise.
+                    # Risk may have risen since entry; never value an open holding below
+                    # either its booked average entry or its latest verified market mark.
                     existing_group_notional += abs(current_quantity) * max(average_entry, mark_price)
 
                 projected_notional = existing_group_notional + amount * fill_price

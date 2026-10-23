@@ -57,3 +57,14 @@ def test_admin_authentication_has_bounded_network_timeouts_and_screen_is_secure(
 def test_android_biometric_dependency_is_stable_not_alpha():
     assert 'implementation("androidx.biometric:biometric:1.1.0")' in GRADLE
     assert "biometric:1.2.0-alpha05" not in GRADLE
+
+
+def test_explicit_debug_backend_url_is_normalized_then_validated_as_an_origin():
+    assert 'val normalizedDevBackendUrl = configuredDevBackendUrl?.trimEnd(\'/\')' in GRADLE
+    assert 'check(!normalizedDevBackendUrl.isNullOrEmpty())' in GRADLE
+    assert 'explicitDevUri.scheme?.lowercase() in setOf("http", "https")' in GRADLE
+    assert '!explicitDevUri.host.isNullOrBlank()' in GRADLE
+    assert 'explicitDevUri.rawUserInfo == null' in GRADLE
+    assert 'explicitDevUri.rawQuery == null' in GRADLE
+    assert 'explicitDevUri.rawFragment == null' in GRADLE
+    assert '(explicitDevUri.rawPath.isNullOrEmpty() || explicitDevUri.rawPath == "/")' in GRADLE

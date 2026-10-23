@@ -87,6 +87,29 @@ def test_customer_paper_market_context_rejects_unverified_or_incomplete_candle(m
     assert rejected_bar.value.status_code == 409
 
 
+def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_api.py").read_text(
+        encoding="utf-8"
+    )
+    route_start = source.index('    @router.post("/orders/{client_order_id}/advance")')
+    replay_start = source.index("            if prior_fill is not None:", route_start)
+    replay_end = source.index('            values = bar["values"]', replay_start)
+    replay_block = source[replay_start:replay_end]
+
+    # Do not make a TTL decision from the stale order row read before the fill lookup.
+    assert 'replay_order = await _order_detail(profile.id, client_order_id)' in replay_block
+    assert replay_block.index('replay_order = await _order_detail(profile.id, client_order_id)') < replay_block.index(
+        'and replay_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}'
+    )
+    # If a concurrent fill wins between the re-read and expiry, inspect the current state
+    # and replay the immutable fill if the order is now terminal.
+    assert "except CustomerPaperOrderConflict:" in replay_block
+    assert replay_block.count('replay_order = await _order_detail(profile.id, client_order_id)') >= 3
+    assert 'if replay_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}:' in replay_block
+
+
 def test_customer_paper_order_request_rejects_malformed_limit_orders():
     with pytest.raises(ValueError):
         paper_api.CustomerPaperOrderRequest(
@@ -150,6 +173,7 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
     monkeypatch.setattr(settings, "usdt_tron_enabled", False)
     monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
     monkeypatch.setattr(settings, "paper_order_ttl_bars", 24)
+    monkeypatch.setattr(settings, "discipline_enabled", False)
     monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.01)
     monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
     monkeypatch.setattr(settings, "paper_rejection_probability", 0.0)
@@ -295,4 +319,28 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
             await engine.dispose()
 
     asyncio.run(assert_database_capacity_guard())
+
+    # A stale pending manual order must expire even when fill latency would otherwise
+    # return early before the TTL check.
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 3)
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 1)
+    market["bar_at"] = now + timedelta(minutes=2)
+    ttl_submitted = post("/api/customer/paper/orders", "customer-a", {
+        "client_order_id": "manual-order-ttl-boundary",
+        "symbol": "BTC/USDT",
+        "side": "BUY",
+        "quantity": "0.1",
+        "order_type": "MARKET",
+        "timeframe": "1m",
+    })
+    assert ttl_submitted.status_code == 200, ttl_submitted.text
+    assert ttl_submitted.json()["order"]["status"] == "SUBMITTED"
+    market["bar_at"] = now + timedelta(minutes=3)
+    frozen_now = now + timedelta(minutes=4)
+    ttl_advance = post(
+        "/api/customer/paper/orders/manual-order-ttl-boundary/advance", "customer-a"
+    )
+    assert ttl_advance.status_code == 200, ttl_advance.text
+    assert ttl_advance.json()["status"] == "EXPIRED_TTL"
+    assert ttl_advance.json()["order"]["status"] == "EXPIRED"
     client.close()
