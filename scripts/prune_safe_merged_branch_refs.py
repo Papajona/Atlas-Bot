@@ -158,7 +158,7 @@ def _delete_remote_ref_with_lease(branch_name: str, expected_sha: str) -> tuple[
         ],
         check=False,
     )
-    output = "\\n".join(
+    output = "\n".join(
         part.strip() for part in (result.stderr, result.stdout) if part and part.strip()
     )
     if result.returncode == 0:
