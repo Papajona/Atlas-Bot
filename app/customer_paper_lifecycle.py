@@ -718,6 +718,7 @@ async def record_customer_paper_fill(
     price: str | int | Decimal,
     fee_amount: str | int | Decimal = "0",
     enforce_market_bar_budget: bool = False,
+    group_mark_prices: Mapping[tuple[str, str, str], object] | None = None,
 ) -> dict[str, Any]:
     """Atomically append one simulated fill, fee, position event and balanced journal.
 
@@ -881,7 +882,8 @@ async def record_customer_paper_fill(
                 """), {"customer_id": customer_id})).mappings().all()
                 existing_group_notional = Decimal("0")
                 for current_position in latest_positions:
-                    if risk_group(str(current_position["symbol"] or "")) != target_group:
+                    current_symbol = str(current_position["symbol"] or "")
+                    if risk_group(current_symbol) != target_group:
                         continue
                     current_quantity = Decimal(str(current_position["quantity_after"] or "0"))
                     if not current_quantity.is_finite():
@@ -895,7 +897,37 @@ async def record_customer_paper_fill(
                         raise CustomerPaperLedgerBlocked(
                             "current correlation-group position has no valid entry valuation"
                         )
-                    existing_group_notional += abs(current_quantity) * average_entry
+                    mark_key = (
+                        str(current_position["venue"] or "").strip().lower(),
+                        str(current_position["market_type"] or "").strip().lower(),
+                        current_symbol.strip().upper(),
+                    )
+                    raw_mark = (group_mark_prices or {}).get(mark_key)
+                    if raw_mark is None and (
+                        mark_key[0] == venue.strip().lower()
+                        and mark_key[1] == market_type.strip().lower()
+                        and mark_key[2] == symbol.strip().upper()
+                    ):
+                        # The order's actual fill price is a validated current price for
+                        # the same market and is conservative relative to the BUY fill.
+                        raw_mark = fill_price
+                    if raw_mark is None:
+                        raise CustomerPaperLedgerBlocked(
+                            "current mark is missing for an open correlation-group position; refusing to add exposure"
+                        )
+                    try:
+                        mark_price = Decimal(str(raw_mark))
+                    except (InvalidOperation, TypeError, ValueError) as exc:
+                        raise CustomerPaperLedgerBlocked(
+                            "current correlation-group position mark is invalid"
+                        ) from exc
+                    if not mark_price.is_finite() or mark_price <= 0:
+                        raise CustomerPaperLedgerBlocked(
+                            "current correlation-group position mark is not finite and positive"
+                        )
+                    # Risk may have risen since entry; never value an open holding below
+                    # either its booked average entry or its latest verified market mark.
+                    existing_group_notional += abs(current_quantity) * max(average_entry, mark_price)
 
                 projected_notional = existing_group_notional + amount * fill_price
                 if projected_notional > cap:
