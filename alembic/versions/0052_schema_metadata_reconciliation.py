@@ -198,6 +198,161 @@ def _create_index(bind, table: str, name: str, columns: list[str]) -> None:
         op.create_index(name, table, columns, unique=False)
 
 
+# Downgrade must know which canonical-name indexes were present before upgrade.
+# Alembic may execute upgrade and downgrade in different processes, so this provenance
+# is stored in a private, migration-owned schema instead of module-level Python state.
+_INDEX_STATE_SCHEMA = "atlas_migration_meta"
+_INDEX_STATE_TABLE = "schema_metadata_reconciliation_0052_index_state"
+
+
+def _visible_index_definition(bind, name: str):
+    row = bind.execute(sa.text("""
+        SELECT pg_get_indexdef(c.oid) AS definition,
+               obj_description(c.oid, 'pg_class') AS comment
+        FROM pg_class c
+        WHERE c.relkind IN ('i', 'I')
+          AND c.relname = :name
+          AND pg_table_is_visible(c.oid)
+    """), {"name": name}).mappings().first()
+    return dict(row) if row is not None else None
+
+
+def _capture_rename_index_state(bind) -> None:
+    schema_created = bool(bind.execute(
+        sa.text("SELECT to_regnamespace(:schema_name) IS NULL"),
+        {"schema_name": _INDEX_STATE_SCHEMA},
+    ).scalar_one())
+    if not schema_created:
+        raise RuntimeError(
+            "Schema reconciliation blocked: reserved migration schema atlas_migration_meta already exists; "
+            "refusing to alter its permissions or reuse unverified objects."
+        )
+    qualified_table = f"{_INDEX_STATE_SCHEMA}.{_INDEX_STATE_TABLE}"
+    if bind.execute(
+        sa.text("SELECT to_regclass(:qualified_name) IS NOT NULL"),
+        {"qualified_name": qualified_table},
+    ).scalar_one():
+        raise RuntimeError(
+            "Schema reconciliation blocked: migration 0052 index provenance table already exists; "
+            "refusing to overwrite potentially stale rollback state."
+        )
+    if schema_created:
+        op.execute(sa.text(f'CREATE SCHEMA "{_INDEX_STATE_SCHEMA}"'))
+    op.execute(sa.text(f"""
+        CREATE TABLE "{_INDEX_STATE_SCHEMA}"."{_INDEX_STATE_TABLE}" (
+            table_name text NOT NULL,
+            old_name text NOT NULL,
+            new_name text NOT NULL,
+            old_existed boolean NOT NULL,
+            new_existed boolean NOT NULL,
+            old_definition text,
+            old_comment text,
+            new_definition text,
+            new_comment text,
+            schema_created boolean NOT NULL,
+            PRIMARY KEY (table_name, old_name, new_name)
+        )
+    """))
+    op.execute(sa.text(f'REVOKE ALL ON SCHEMA "{_INDEX_STATE_SCHEMA}" FROM PUBLIC'))
+    op.execute(sa.text(
+        f'REVOKE ALL ON TABLE "{_INDEX_STATE_SCHEMA}"."{_INDEX_STATE_TABLE}" FROM PUBLIC'
+    ))
+
+    for table, old, new in _RENAME_INDEXES:
+        names = _index_names(bind, table)
+        old_existed = old in names
+        new_existed = new in names
+        old_info = _visible_index_definition(bind, old) if old_existed else None
+        new_info = _visible_index_definition(bind, new) if new_existed else None
+        if (old_existed and old_info is None) or (new_existed and new_info is None):
+            raise RuntimeError(
+                f"Schema reconciliation blocked: unable to capture exact index definition for {table}.{old}/{new}."
+            )
+        bind.execute(sa.text(f"""
+            INSERT INTO "{_INDEX_STATE_SCHEMA}"."{_INDEX_STATE_TABLE}" (
+                table_name, old_name, new_name, old_existed, new_existed,
+                old_definition, old_comment, new_definition, new_comment, schema_created
+            ) VALUES (
+                :table_name, :old_name, :new_name, :old_existed, :new_existed,
+                :old_definition, :old_comment, :new_definition, :new_comment, :schema_created
+            )
+        """), {
+            "table_name": table,
+            "old_name": old,
+            "new_name": new,
+            "old_existed": old_existed,
+            "new_existed": new_existed,
+            "old_definition": old_info.get("definition") if old_info else None,
+            "old_comment": old_info.get("comment") if old_info else None,
+            "new_definition": new_info.get("definition") if new_info else None,
+            "new_comment": new_info.get("comment") if new_info else None,
+            "schema_created": schema_created,
+        })
+
+
+def _restore_index_definition(bind, name: str, definition: str | None, comment: str | None) -> None:
+    if not definition:
+        raise RuntimeError(
+            f"Schema reconciliation blocked: rollback lacks the original definition for index {name}."
+        )
+    op.execute(sa.text(definition))
+    if comment is not None:
+        escaped_name = name.replace('"', '""')
+        escaped_comment = comment.replace("'", "''")
+        bind.exec_driver_sql(
+            f"""COMMENT ON INDEX "{escaped_name}" IS '{escaped_comment}'"""
+        )
+
+def _restore_rename_index_state(bind, state) -> None:
+    """Restore one rename pair to the exact existence state recorded before upgrade."""
+    table = str(state["table_name"])
+    old = str(state["old_name"])
+    new = str(state["new_name"])
+    old_before = bool(state["old_existed"])
+    new_before = bool(state["new_existed"])
+    names = _index_names(bind, table)
+    old_now = old in names
+    new_now = new in names
+
+    if old_before and new_before:
+        # Upgrade drops the legacy name when both names existed; recreate that index
+        # from its captured definition while preserving the pre-existing canonical one.
+        if not old_now:
+            _restore_index_definition(
+                bind, old, state.get("old_definition"), state.get("old_comment")
+            )
+        if not new_now:
+            _restore_index_definition(
+                bind, new, state.get("new_definition"), state.get("new_comment")
+            )
+    elif old_before:
+        if old_now and new_now:
+            raise RuntimeError(
+                f"Schema reconciliation blocked: unexpected duplicate rollback indexes {table}.{old}/{new}."
+            )
+        if new_now:
+            op.execute(sa.text(f'ALTER INDEX "{new}" RENAME TO "{old}"'))
+        elif not old_now:
+            _restore_index_definition(
+                bind, old, state.get("old_definition"), state.get("old_comment")
+            )
+    elif new_before:
+        # A canonical-name index that existed before upgrade must remain canonical;
+        # it was not a renamed legacy index.
+        if old_now:
+            raise RuntimeError(
+                f"Schema reconciliation blocked: unexpected legacy index {table}.{old} appeared during downgrade."
+            )
+        if not new_now:
+            _restore_index_definition(
+                bind, new, state.get("new_definition"), state.get("new_comment")
+            )
+    else:
+        # Neither name existed before upgrade. Remove either name if the upgrade created it.
+        _drop_index(bind, table, new)
+        _drop_index(bind, table, old)
+
+
 def _assert_no_nulls(bind, columns) -> None:
     issues = []
     for table, column, _column_type in columns:
@@ -316,6 +471,10 @@ def upgrade() -> None:
         if name in _foreign_key_names(bind, table):
             op.drop_constraint(name, table_name=table, type_="foreignkey")
 
+    # Save durable index provenance before any rename/create operations. The marker is
+    # removed by downgrade; it is private and inaccessible to application roles.
+    _capture_rename_index_state(bind)
+
     # Rename established indexes where the columns match. This avoids a build/drop cycle.
     for table, old, new in _RENAME_INDEXES:
         _rename_index(bind, table, old, new)
@@ -333,6 +492,27 @@ def downgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
+
+    qualified_state_table = f"{_INDEX_STATE_SCHEMA}.{_INDEX_STATE_TABLE}"
+    if not bind.execute(
+        sa.text("SELECT to_regclass(:qualified_name) IS NOT NULL"),
+        {"qualified_name": qualified_state_table},
+    ).scalar_one():
+        raise RuntimeError(
+            "Refusing schema-reconciliation downgrade: migration 0052 has no recorded index "
+            "provenance, so the pre-upgrade index state cannot be restored safely."
+        )
+    index_state = bind.execute(sa.text(f"""
+        SELECT table_name, old_name, new_name, old_existed, new_existed,
+               old_definition, old_comment, new_definition, new_comment, schema_created
+        FROM "{_INDEX_STATE_SCHEMA}"."{_INDEX_STATE_TABLE}"
+        ORDER BY table_name, old_name, new_name
+    """)).mappings().all()
+    if len(index_state) != len(_RENAME_INDEXES):
+        raise RuntimeError(
+            "Refusing schema-reconciliation downgrade: recorded index provenance is incomplete."
+        )
+    state_schema_created = bool(index_state[0]["schema_created"])
 
     # Do not silently truncate any 18-scale values written after this migration.
     for column in ("pilot_max_position_notional_usd", "pilot_max_total_exposure_usd"):
@@ -356,18 +536,16 @@ def downgrade() -> None:
             op.create_foreign_key(name, table, parent_table, local_cols, parent_cols)
             op.execute(sa.text(f'ALTER TABLE "{table}" VALIDATE CONSTRAINT "{name}"'))
 
-    # Drop indexes introduced by this revision, but not targets of index renames.
-    # A renamed legacy index is still the pre-existing index and must be renamed back
-    # below rather than dropped here. Some names occur in both lists because the ORM
-    # requires the normalized name while the historical schema already had the index.
-    renamed_index_targets = {(table, new) for table, _old, new in _RENAME_INDEXES}
+    # Drop ordinary indexes created by this revision. Rename-pair targets are handled
+    # from captured provenance below so a target created from an initially absent pair
+    # is dropped, while a genuinely renamed legacy index is restored under its old name.
+    rename_pair_targets = {(table, name) for table, _old, name in _RENAME_INDEXES}
     for table, name, _columns in reversed(_CREATE_INDEXES):
-        if (table, name) not in renamed_index_targets:
+        if (table, name) not in rename_pair_targets:
             _drop_index(bind, table, name)
 
-    # Restore old index names exactly as they were.
-    for table, old, new in reversed(_RENAME_INDEXES):
-        _rename_index(bind, table, new, old)
+    for state in reversed(index_state):
+        _restore_rename_index_state(bind, state)
 
     # Recreate stand-alone indexes dropped because a unique/composite index already covered them.
     restore_indexes = [
@@ -394,6 +572,12 @@ def downgrade() -> None:
     ]
     for table, name, columns in restore_indexes:
         _create_index(bind, table, name, columns)
+
+    op.execute(sa.text(
+        f'DROP TABLE "{_INDEX_STATE_SCHEMA}"."{_INDEX_STATE_TABLE}"'
+    ))
+    if state_schema_created:
+        op.execute(sa.text(f'DROP SCHEMA "{_INDEX_STATE_SCHEMA}"'))
 
     # Restore the historical monetary precision after the explicit losslessness guard above.
     for column in ("pilot_max_position_notional_usd", "pilot_max_total_exposure_usd"):

@@ -58,7 +58,7 @@ from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
 from .incidents import open_incident
 from .model_registry import verify_model_file, rollback_champion
-from .correlation_risk import adjusted_group_exposure
+from .correlation_risk import adjusted_group_exposure, risk_group
 from .custody_signer import validate_signer_config
 from .custody_reconciliation import reconcile_usdt_custody
 from .meta_labeling import meta_label_gate, meta_label_walk_forward
@@ -79,6 +79,95 @@ from .admin_rbac import require_role, get_roles, upsert_role, ROLES
 from .transaction_policy import register_or_check_destination, verify_destination
 from .audit_chain import append_audit
 from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current, assert_database_role_compatible_with_rls_lockdown
+
+
+async def _customer_paper_positions_for_exposure(
+    *, customer_id: int, req, market_context: dict | None
+) -> dict[str, Any]:
+    """Load only same-correlation-group paper positions and mark them before a BUY cap check.
+
+    Unrelated markets must not veto a proposed BUY merely because their quote is
+    unavailable. Any nonzero position in the proposed risk group must have a fresh,
+    validated server bid; otherwise the exposure check fails closed.
+    """
+    from types import SimpleNamespace
+    from .customer_paper_lifecycle import get_customer_paper_positions
+
+    try:
+        paper_positions = await get_customer_paper_positions(customer_id=customer_id)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "stage": "paper_exposure_positions_unavailable",
+            "reason": f"isolated paper positions could not be verified ({type(exc).__name__})",
+        }
+
+    target_group = risk_group(req.symbol)
+    # Filter BEFORE requesting any marks. Different risk buckets do not consume
+    # this candidate's correlation-group budget.
+    relevant_positions = [
+        row for row in paper_positions
+        if risk_group(str(row.get("symbol") or "")) == target_group
+    ]
+    open_positions = []
+    for row in relevant_positions:
+        symbol = str(row.get("symbol") or "")
+        venue = str(row.get("venue") or "").lower()
+        try:
+            quantity = float(row.get("quantity") or 0)
+            average = float(row.get("average_entry_price") or 0)
+        except (TypeError, ValueError, OverflowError):
+            return {
+                "ok": False,
+                "stage": "paper_exposure_mark_unavailable",
+                "reason": f"same-group paper exposure is malformed for {symbol or 'unknown symbol'}",
+            }
+        if not math.isfinite(quantity):
+            return {
+                "ok": False,
+                "stage": "paper_exposure_mark_unavailable",
+                "reason": f"same-group paper quantity is not finite for {symbol or 'unknown symbol'}",
+            }
+        if quantity == 0:
+            continue
+
+        try:
+            if (
+                venue == str(req.exchange).lower()
+                and symbol.upper() == str(req.symbol).upper()
+                and market_context is not None
+            ):
+                mark = float(market_context.get("bid", 0))
+                if not math.isfinite(mark) or mark <= 0:
+                    raise ValueError("no fresh validated bid for the proposed market")
+            else:
+                mark_req = req.model_copy(update={"symbol": symbol, "exchange": venue})
+                mark_df = await asyncio.to_thread(market_data, mark_req)
+                mark_context = await asyncio.to_thread(
+                    _server_paper_market_context, mark_req, mark_df
+                )
+                if (
+                    mark_context is None
+                    or not math.isfinite(float(mark_context.get("bid", 0)))
+                    or float(mark_context.get("bid", 0)) <= 0
+                ):
+                    raise ValueError("no fresh validated bid")
+                mark = float(mark_context["bid"])
+        except Exception as exc:
+            return {
+                "ok": False,
+                "stage": "paper_exposure_mark_unavailable",
+                "reason": f"current server mark unavailable for same-group position {symbol} ({type(exc).__name__})",
+                "symbol": symbol,
+            }
+
+        open_positions.append(SimpleNamespace(
+            symbol=symbol,
+            quantity=quantity,
+            average_entry_price=average,
+            mark_price=mark,
+        ))
+    return {"ok": True, "positions": open_positions}
 
 def _stepup_token(uid: str, purpose: str = "withdrawal", destination_fingerprint: str = "", proposal_digest_value: str = "") -> tuple[str, str, int]:
     if not settings.secret_key:
@@ -1105,10 +1194,19 @@ async def _run_persisted_adaptive_bot_cycle(
         quantity *= max(0.0, min(1.0, settings.derivatives_elevated_size_multiplier))
     if quantity <= 0:
         return {"decision": "NO_TRADE", "stage": "risk_quantity"}
-    # Apply the portfolio correlation-group cap before submitting this candidate.
-    # This check scales the proposed quantity to remaining headroom; execute_signal()
-    # performs its own authoritative execution/risk-state checks before the broker call.
-    if needs_customer_paper:
+    # Apply the correlation-group cap before the runtime and execution gates.
+    if needs_customer_paper and str(plan.get("side") or "").upper() == "BUY":
+        paper_exposure = await _customer_paper_positions_for_exposure(
+            customer_id=profile.id, req=req, market_context=customer_paper_market_context
+        )
+        if not paper_exposure.get("ok"):
+            return {
+                "decision": "NO_TRADE",
+                "stage": paper_exposure.get("stage", "paper_exposure_mark_unavailable"),
+                "reason": paper_exposure.get("reason", "same-group paper exposure could not be valued"),
+            }
+        open_positions = paper_exposure["positions"]
+    elif needs_customer_paper:
         from types import SimpleNamespace
         from .customer_paper_lifecycle import get_customer_paper_positions
         try:
@@ -1118,51 +1216,37 @@ async def _run_persisted_adaptive_bot_cycle(
                 "decision": "NO_TRADE", "stage": "paper_exposure_positions_unavailable",
                 "reason": f"isolated paper positions could not be verified ({type(exc).__name__})",
             }
-        open_positions = []
-        for row in paper_positions:
-            symbol = str(row.get("symbol") or "")
-            venue = str(row.get("venue") or "").lower()
-            average = float(row.get("average_entry_price") or 0)
-            mark = average
-            # Exposure-increasing paper BUYs require current server marks for every
-            # open asset in the correlation group. If a mark cannot be proved, block.
-            if str(plan.get("side") or "").upper() == "BUY":
-                if (
-                    venue == str(req.exchange).lower()
-                    and symbol.upper() == str(req.symbol).upper()
-                    and customer_paper_market_context is not None
-                ):
-                    mark = float(customer_paper_market_context["bid"])
-                else:
-                    try:
-                        mark_req = req.model_copy(update={"symbol": symbol, "exchange": venue})
-                        mark_df = await asyncio.to_thread(market_data, mark_req)
-                        mark_context = await asyncio.to_thread(_server_paper_market_context, mark_req, mark_df)
-                        if mark_context is None or not math.isfinite(float(mark_context.get("bid", 0))) or float(mark_context.get("bid", 0)) <= 0:
-                            raise ValueError("no fresh validated bid")
-                        mark = float(mark_context["bid"])
-                    except Exception as exc:
-                        return {
-                            "decision": "NO_TRADE", "stage": "paper_exposure_mark_unavailable",
-                            "symbol": symbol,
-                            "reason": f"current server mark unavailable ({type(exc).__name__})",
-                        }
-            open_positions.append(SimpleNamespace(
-                symbol=symbol,
+        # SELL/exit behavior is unchanged: no extra marks are requested for exits.
+        open_positions = [
+            SimpleNamespace(
+                symbol=str(row.get("symbol") or ""),
                 quantity=float(row.get("quantity") or 0),
-                average_entry_price=average,
-                mark_price=mark,
-            ))
+                average_entry_price=float(row.get("average_entry_price") or 0),
+                mark_price=float(row.get("average_entry_price") or 0),
+            )
+            for row in paper_positions
+        ]
     else:
         async with SessionLocal() as db2:
             open_positions = (await db2.execute(select(Position).where(
                 Position.customer_id == profile.id, Position.quantity != 0,
             ))).scalars().all()
+
     proposed_notional = quantity * float(plan["entry_price"])
     group_check = adjusted_group_exposure(
         open_positions, proposed_symbol=req.symbol, proposed_notional=proposed_notional,
         cap_usd=settings.correlation_group_cap_usd,
     )
+    if (
+        needs_customer_paper
+        and str(plan.get("side") or "").upper() == "BUY"
+        and not group_check.get("valuation_complete", False)
+    ):
+        return {
+            "decision": "NO_TRADE", "stage": "paper_exposure_mark_unavailable",
+            "reason": "one or more same-group paper positions could not be valued",
+            "group_exposure": group_check,
+        }
     if not group_check["allowed"] and str(plan.get("side") or "").upper() == "BUY":
         headroom = max(0.0, settings.correlation_group_cap_usd - group_check["existing_notional"])
         quantity = min(quantity, headroom / max(float(plan["entry_price"]), 1e-12))
@@ -4619,6 +4703,59 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                         or "automated_entry_exit" not in latest_plan.get("features", [])
                     ):
                         raise HTTPException(409, "Customer paper runtime, risk, or entitlement recheck blocked execution")
+            if str(plan.get("side") or "").upper() == "BUY":
+                paper_exposure = await _customer_paper_positions_for_exposure(
+                    customer_id=profile.id, req=req, market_context=fresh_paper_context
+                )
+                if not paper_exposure.get("ok"):
+                    return await _record_customer_decision({
+                        "decision": "NO_TRADE",
+                        "stage": paper_exposure.get("stage", "paper_exposure_mark_unavailable"),
+                        "reason": paper_exposure.get("reason", "same-group paper exposure could not be valued"),
+                        "mode": "CUSTOMER_PAPER",
+                        "analysis": deterministic,
+                        "execution": None,
+                    })
+                group_check = adjusted_group_exposure(
+                    paper_exposure["positions"],
+                    proposed_symbol=req.symbol,
+                    proposed_notional=quantity * float(plan["entry_price"]),
+                    cap_usd=settings.correlation_group_cap_usd,
+                )
+                if not group_check.get("valuation_complete", False):
+                    return await _record_customer_decision({
+                        "decision": "NO_TRADE",
+                        "stage": "paper_exposure_mark_unavailable",
+                        "reason": "one or more same-group paper positions could not be valued",
+                        "group_exposure": group_check,
+                        "mode": "CUSTOMER_PAPER",
+                        "analysis": deterministic,
+                        "execution": None,
+                    })
+                if not group_check["allowed"]:
+                    headroom = max(
+                        0.0,
+                        settings.correlation_group_cap_usd - group_check["existing_notional"],
+                    )
+                    quantity = min(
+                        quantity, headroom / max(float(plan["entry_price"]), 1e-12)
+                    )
+                if quantity <= 0:
+                    await _audit("CUSTOMER_BOT_CORRELATION_CAP", {
+                        "customer_id": profile.id,
+                        "trading_account_id": account_id,
+                        "symbol": req.symbol,
+                        "group_exposure": group_check,
+                    })
+                    return await _record_customer_decision({
+                        "decision": "NO_TRADE",
+                        "stage": "correlation_group_cap",
+                        "group_exposure": group_check,
+                        "mode": "CUSTOMER_PAPER",
+                        "analysis": deterministic,
+                        "execution": None,
+                    })
+
             try:
                 execution = await execute_customer_paper_spot_signal(
                     customer_id=profile.id, req=req, df=df,
