@@ -222,6 +222,11 @@ def _capture_rename_index_state(bind) -> None:
         sa.text("SELECT to_regnamespace(:schema_name) IS NULL"),
         {"schema_name": _INDEX_STATE_SCHEMA},
     ).scalar_one())
+    if not schema_created:
+        raise RuntimeError(
+            "Schema reconciliation blocked: reserved migration schema atlas_migration_meta already exists; "
+            "refusing to alter its permissions or reuse unverified objects."
+        )
     qualified_table = f"{_INDEX_STATE_SCHEMA}.{_INDEX_STATE_TABLE}"
     if bind.execute(
         sa.text("SELECT to_regclass(:qualified_name) IS NOT NULL"),
