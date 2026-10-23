@@ -214,6 +214,75 @@ def _branch_delta_matches_main(branch_sha: str, main_sha: str) -> bool:
     return not _branch_delta_mismatched_paths(branch_sha, main_sha)
 
 
+_SUPERSEDED_ANDROID_RELEASE_BRANCHES = {
+    # Exact historical branch tips; never match a branch name alone.
+    "fix/android-release-trigger-gating-20261023":
+        "fc84eac73078c65a8c253101c40e963958b74e60",
+    "fix/android-release-trigger-gating-followup-20261023":
+        "6b9feef6b55be4ef06eef630d4b558e0ffad35b7",
+}
+_ANDROID_RELEASE_GATE_PATHS = {
+    ".github/workflows/android-release.yml",
+    "tests/test_android_production_backend_wiring.py",
+}
+
+
+def _git_file_text_at_commit(commit_sha: str, path: str) -> str:
+    result = _run(["git", "show", f"{commit_sha}:{path}"], check=False)
+    if result.returncode:
+        raise RuntimeError(
+            f"Cannot verify superseding Android release gate at {commit_sha}:{path}: "
+            + (result.stderr.strip() or f"exit code {result.returncode}")
+        )
+    return result.stdout
+
+
+def _main_has_explicit_android_release_gate(main_sha: str) -> bool:
+    """Require both production workflow restrictions and the committed regression test."""
+    workflow = _git_file_text_at_commit(
+        main_sha, ".github/workflows/android-release.yml"
+    )
+    test_source = _git_file_text_at_commit(
+        main_sha, "tests/test_android_production_backend_wiring.py"
+    )
+    if "\n  push:\n" not in workflow or "\n  android-release:\n" not in workflow:
+        return False
+    push_trigger = workflow.split("\n  push:\n", 1)[1].split(
+        "\npermissions:\n", 1
+    )[0]
+    release_job = workflow.split("  android-release:\n", 1)[1].split(
+        "\n    runs-on:", 1
+    )[0]
+    return (
+        'tags:\n      - "android-v*"' in push_trigger
+        and "branches:" not in push_trigger
+        and "paths:" not in push_trigger
+        and "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
+        in release_job
+        and "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v')"
+        in release_job
+        and "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+        not in release_job
+        and "test_signed_release_is_only_triggered_by_an_explicit_release_tag_or_manual_main_dispatch"
+        in test_source
+    )
+
+
+def _is_explicitly_superseded_android_release_ref(
+    branch_name: str,
+    branch_sha: str,
+    main_sha: str,
+    mismatch_paths: list[str],
+) -> bool:
+    """Allow only two exact, audited Android branches after main proves the stronger gate."""
+    expected_sha = _SUPERSEDED_ANDROID_RELEASE_BRANCHES.get(branch_name)
+    if expected_sha is None or branch_sha != expected_sha:
+        return False
+    if not mismatch_paths or not set(mismatch_paths).issubset(_ANDROID_RELEASE_GATE_PATHS):
+        return False
+    return _main_has_explicit_android_release_gate(main_sha)
+
+
 def _resolve_branch_integration(
     branch_name: str,
     branch_sha: str,
