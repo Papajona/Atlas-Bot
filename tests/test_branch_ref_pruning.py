@@ -445,8 +445,8 @@ def test_android_gate_supersession_preserves_branch_if_main_workflow_is_not_safe
     branch_name = "fix/android-release-trigger-gating-followup-20261023"
     branch_sha = "6b9feef6b55be4ef06eef630d4b558e0ffad35b7"
     unsafe_workflow = _safe_android_release_workflow().replace(
-        'tags:\\n      - "android-v*"',
-        'branches:\\n      - main\\n    tags:\\n      - "android-v*"',
+        'tags:\n      - "android-v*"',
+        'branches:\n      - main\n    tags:\n      - "android-v*"',
     ).replace(
         " || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v'))",
         " || (github.event_name == 'push' && github.ref == 'refs/heads/main') || "
