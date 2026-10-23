@@ -68,44 +68,81 @@ def _is_ancestor(ancestor_sha: str, descendant_sha: str) -> bool:
         return True
     if result.returncode == 1:
         return False
+
     detail = result.stderr.strip()
-    # A closed PR may refer to a merge commit whose object is no longer present
-    # in this checkout (for example, older rewritten/garbage-collected history).
-    # Treat that commit as *unproven*, then let the caller use current tree parity.
-    # Other Git failures still abort reconciliation.
-    missing_commit_markers = (
-        "not a valid commit name",
-        "unknown revision or path not in the working tree",
-        "bad object ",
-        "needed a single revision",
+    requested = ancestor_sha.lower()
+    diagnostic_lines = [line.strip().lower() for line in detail.splitlines() if line.strip()]
+
+    # Only tolerate a narrowly recognized diagnostic that names the exact
+    # requested historical commit as unavailable. Mixed diagnostics, including
+    # any object database/read/corruption error, must stop reconciliation.
+    storage_fault_markers = (
+        "object database",
+        "corrupt",
+        "unable to read",
+        "failed to read",
+        "packfile",
+        "loose object",
+        "missing object",
+        "hash mismatch",
+        "object file",
+        "invalid object",
     )
-    if any(marker in detail.lower() for marker in missing_commit_markers):
+    has_storage_fault = any(marker in detail.lower() for marker in storage_fault_markers)
+    known_missing_lines = {
+        (f"fatal: not a valid commit name {requested}",),
+        (f"fatal: bad object {requested}",),
+        (
+            f"fatal: ambiguous argument '{requested}': unknown revision or path not in the working tree.",
+        ),
+        (
+            f"fatal: ambiguous argument '{requested}': unknown revision or path not in the working tree.",
+            "use '--' to separate paths from revisions, like this:",
+            "'git <command> [<revision>...] -- [<file>...]'",
+        ),
+    }
+    if not has_storage_fault and tuple(diagnostic_lines) in known_missing_lines:
         return False
+
     raise RuntimeError(
         "git merge-base failed while checking branch integration: "
         + (detail or f"exit code {result.returncode}")
     )
 
-def _object_id_at_commit(commit_sha: str, path: str) -> str | None:
+
+def _tree_entry_at_commit(
+    commit_sha: str, path: str
+) -> tuple[str, str, str] | None:
+    """Return a path's Git mode, object type, and object ID, or None if absent."""
     result = _run(
-        ["git", "rev-parse", "--verify", f"{commit_sha}:{path}"],
+        ["git", "--literal-pathspecs", "ls-tree", "-z", "-r", "--full-tree", commit_sha, "--", path],
         check=False,
     )
-    if result.returncode == 0:
-        return result.stdout.strip()
-    # Missing/deleted paths are expected when comparing branch trees. Other
-    # errors abort reconciliation rather than being misread as missing files.
-    detail = result.stderr.strip()
-    if "does not exist in" in detail or "Needed a single revision" in detail:
+    if result.returncode:
+        raise RuntimeError(
+            f"git ls-tree could not inspect path {path!r} at {commit_sha}: "
+            + (result.stderr.strip() or f"exit code {result.returncode}")
+        )
+
+    entries = [entry for entry in result.stdout.split("\0") if entry]
+    if not entries:
         return None
-    raise RuntimeError(
-        f"git rev-parse could not inspect path {path!r} at {commit_sha}: "
-        + (detail or f"exit code {result.returncode}")
-    )
+    if len(entries) != 1:
+        raise RuntimeError(
+            f"git ls-tree returned multiple entries for exact path {path!r} at {commit_sha}"
+        )
+    metadata, separator, returned_path = entries[0].partition("\t")
+    fields = metadata.split()
+    if not separator or len(fields) != 3 or returned_path != path:
+        raise RuntimeError(
+            f"git ls-tree returned an unexpected tree entry for path {path!r} at {commit_sha}"
+        )
+    mode, object_type, object_id = fields
+    return mode, object_type, object_id
 
 
 def _branch_delta_mismatched_paths(branch_sha: str, main_sha: str) -> list[str]:
-    """Return branch-side changed paths whose tip object differs from main."""
+    """Return branch-side changed paths whose complete tree entries differ from main."""
     merge_base_result = _run(
         ["git", "merge-base", main_sha, branch_sha],
         check=False,
@@ -133,13 +170,80 @@ def _branch_delta_mismatched_paths(branch_sha: str, main_sha: str) -> list[str]:
     return [
         path
         for path in changed_paths
-        if _object_id_at_commit(branch_sha, path) != _object_id_at_commit(main_sha, path)
+        if _tree_entry_at_commit(branch_sha, path) != _tree_entry_at_commit(main_sha, path)
     ]
 
 
 def _branch_delta_matches_main(branch_sha: str, main_sha: str) -> bool:
     """True when every branch-side path change since merge-base is already in main."""
     return not _branch_delta_mismatched_paths(branch_sha, main_sha)
+
+
+def _resolve_branch_integration(
+    branch_name: str,
+    branch_sha: str,
+    main_sha: str,
+    open_pr_heads: set[str],
+    merged_prs: Iterable[Mapping[str, Any]],
+) -> tuple[bool, str, list[str]]:
+    """Resolve deletion proof and compute tree mismatches at most once."""
+    safe, reason = should_delete_ref(
+        branch_name,
+        branch_sha,
+        main_sha,
+        open_pr_heads,
+        merged_prs,
+        _is_ancestor,
+    )
+    if safe or reason != "no exact integration proof; preserve branch":
+        return safe, reason, []
+
+    mismatch_paths = _branch_delta_mismatched_paths(branch_sha, main_sha)
+    if not mismatch_paths:
+        return True, "all branch-side changed paths match main", []
+    return False, reason, mismatch_paths
+
+
+def _load_branch_protection_status(repository: str) -> dict[str, bool]:
+    """Load complete GitHub branch protection status or abort without deleting refs."""
+    result = _run(
+        [
+            "gh",
+            "api",
+            "--paginate",
+            f"repos/{repository}/branches?per_page=100",
+            "--jq",
+            ".[] | [.name, (.protected | tostring)] | @tsv",
+        ],
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(
+            "Unable to determine GitHub branch protection status; refusing all deletions: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}")
+        )
+
+    statuses: dict[str, bool] = {}
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) != 2 or not fields[0] or fields[1] not in {"true", "false"}:
+            raise RuntimeError(
+                "GitHub returned malformed branch protection status; refusing all deletions"
+            )
+        name, status = fields
+        if name in statuses and statuses[name] != (status == "true"):
+            raise RuntimeError(
+                f"Conflicting GitHub branch protection status for {name!r}; refusing all deletions"
+            )
+        statuses[name] = status == "true"
+
+    if not statuses or "main" not in statuses:
+        raise RuntimeError(
+            "GitHub branch-protection enumeration was empty or omitted main; refusing all deletions"
+        )
+    return statuses
 
 
 def _delete_remote_ref_with_lease(branch_name: str, expected_sha: str) -> tuple[str, str]:
@@ -163,6 +267,19 @@ def _delete_remote_ref_with_lease(branch_name: str, expected_sha: str) -> tuple[
     )
     if result.returncode == 0:
         return "DELETED", "conditional deletion succeeded with an explicit expected-SHA lease"
+
+    # Another cleanup may have removed the ref after enumeration. A successful
+    # read-back proving absence means the desired state already holds; report a
+    # safe no-op, not a job failure.
+    remote_ref = _run(
+        ["git", "ls-remote", "--heads", "origin", f"refs/heads/{branch_name}"],
+        check=False,
+    )
+    if remote_ref.returncode == 0 and not remote_ref.stdout.strip():
+        return (
+            "PRESERVE",
+            "remote ref was already removed by another cleanup; treating deletion as a successful no-op",
+        )
 
     lowered = output.lower()
     if "stale info" in lowered or (
@@ -202,6 +319,16 @@ def main() -> int:
                 if item.strip() and item.strip() not in {"HEAD", "main"}
             }
         )
+
+        branch_protection = _load_branch_protection_status(repository)
+        unknown_protection = sorted(set(branches).difference(branch_protection))
+        if unknown_protection:
+            sample = ", ".join(unknown_protection[:8])
+            remainder = f" (+{len(unknown_protection) - 8} more)" if len(unknown_protection) > 8 else ""
+            raise RuntimeError(
+                "GitHub did not return protection status for every enumerated branch; "
+                f"refusing all deletions: {sample}{remainder}"
+            )
 
         open_pr_payload = _run(
             [
@@ -258,6 +385,15 @@ def main() -> int:
             decisions.append((status, branch_name, reason))
             print(f"{status} {branch_name}: {reason}")
         for branch_name in branches:
+            if branch_protection[branch_name]:
+                record(
+                    "PRESERVE",
+                    branch_name,
+                    "GitHub marks this branch protected; deletion was not attempted",
+                )
+                preserved += 1
+                continue
+
             if branch_name in open_pr_heads:
                 record("PRESERVE", branch_name, "branch has an open pull request")
                 preserved += 1
@@ -271,28 +407,19 @@ def main() -> int:
                 continue
             branch_sha = result.stdout.strip()
 
-            if _is_ancestor(branch_sha, main_sha):
-                safe = True
-                reason = "exact branch tip is an ancestor of main"
-            else:
-                branch_merged_prs = [
-                    item for item in merged_prs
-                    if item.get("headRefName") == branch_name
-                ]
-                safe, reason = should_delete_ref(
-                    branch_name,
-                    branch_sha,
-                    main_sha,
-                    open_pr_heads,
-                    branch_merged_prs,
-                    _is_ancestor,
-                )
-                if not safe and _branch_delta_matches_main(branch_sha, main_sha):
-                    safe = True
-                    reason = "all branch-side changed paths match main"
+            branch_merged_prs = [
+                item for item in merged_prs
+                if item.get("headRefName") == branch_name
+            ]
+            safe, reason, mismatch_paths = _resolve_branch_integration(
+                branch_name,
+                branch_sha,
+                main_sha,
+                open_pr_heads,
+                branch_merged_prs,
+            )
 
             if not safe:
-                mismatch_paths = _branch_delta_mismatched_paths(branch_sha, main_sha)
                 if mismatch_paths:
                     sample = ", ".join(mismatch_paths[:8])
                     remainder = f" (+{len(mismatch_paths) - 8} more)" if len(mismatch_paths) > 8 else ""
@@ -304,8 +431,8 @@ def main() -> int:
                 preserved += 1
                 continue
 
-            # Re-read the live ref immediately before deletion. The GitHub ref-delete
-            # endpoint has no expected-SHA parameter, so a moved ref is always preserved.
+            # Re-read the live ref immediately before deletion. The subsequent
+            # force-with-lease push atomically refuses to delete a moved ref.
             live = _run(
                 ["git", "ls-remote", "--heads", "origin", f"refs/heads/{branch_name}"],
                 check=False,

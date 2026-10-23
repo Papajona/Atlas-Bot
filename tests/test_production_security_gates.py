@@ -458,7 +458,11 @@ def test_staging_deployment_is_marker_gated_and_waits_for_exact_commit_gates():
     for required_workflow in ("ci.yml", "ledger-concurrency-check.yml", "production-verification.yml"):
         assert f'"{required_workflow}"' in deploy
     assert "gh workflow run staging-identity-preflight.yml" in deploy
-    assert "no completed exact-commit workflow_dispatch staging preflight" in deploy
+    assert '-f "request_id=$request_id"' in deploy
+    assert 'gh run view "$preflight_run_id"' in deploy
+    assert "select(.displayTitle == $expected)" in deploy
+    assert "uniquely correlated staging preflight run was not observed" in deploy
+    assert "main advanced during staging preflight" in deploy
     assert "timeout-minutes: 60" in deploy
     assert "actions: write" in deploy
 

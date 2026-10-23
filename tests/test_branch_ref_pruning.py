@@ -124,19 +124,17 @@ def test_branch_delta_matches_main_when_every_branch_changed_file_matches(
             return subprocess.CompletedProcess(
                 args, 0, "app/module.py\0docs/readme.md\0", ""
             )
-        if args[:3] == ["git", "rev-parse", "--verify"]:
-            expression = args[3]
-            object_ids = {
-                "branch-sha:app/module.py": "blob-one",
-                "main-sha:app/module.py": "blob-one",
-                "branch-sha:docs/readme.md": "blob-two",
-                "main-sha:docs/readme.md": "blob-two",
+        if args[:4] == ["git", "--literal-pathspecs", "ls-tree", "-z"]:
+            expression = f"{args[6]}:{args[8]}"
+            entries = {
+                "branch-sha:app/module.py": ("100644", "blob", "blob-one"),
+                "main-sha:app/module.py": ("100644", "blob", "blob-one"),
+                "branch-sha:docs/readme.md": ("100644", "blob", "blob-two"),
+                "main-sha:docs/readme.md": ("100644", "blob", "blob-two"),
             }
-            if expression in object_ids:
-                return subprocess.CompletedProcess(args, 0, object_ids[expression] + "\n", "")
-            return subprocess.CompletedProcess(
-                args, 128, "", "fatal: path 'missing' does not exist in commit"
-            )
+            entry = entries.get(expression)
+            output = f"{entry[0]} {entry[1]} {entry[2]}\t{args[8]}\0" if entry else ""
+            return subprocess.CompletedProcess(args, 0, output, "")
         raise AssertionError(f"unexpected command: {args}")
 
     monkeypatch.setattr(pruning, "_run", fake_run)
@@ -150,12 +148,15 @@ def test_branch_delta_preserves_any_changed_file_not_matching_main(monkeypatch):
             return subprocess.CompletedProcess(args, 0, "base-sha\n", "")
         if args[:5] == ["git", "diff", "--no-renames", "--name-only", "-z"]:
             return subprocess.CompletedProcess(args, 0, "app/module.py\0", "")
-        if args[:3] == ["git", "rev-parse", "--verify"]:
-            return subprocess.CompletedProcess(
-                args, 0,
-                "branch-blob\n" if args[3] == "branch-sha:app/module.py" else "main-blob\n",
-                ""
-            )
+        if args[:4] == ["git", "--literal-pathspecs", "ls-tree", "-z"]:
+            expression = f"{args[6]}:{args[8]}"
+            entries = {
+                "branch-sha:app/module.py": ("100644", "blob", "branch-blob"),
+                "main-sha:app/module.py": ("100644", "blob", "main-blob"),
+            }
+            entry = entries.get(expression)
+            output = f"{entry[0]} {entry[1]} {entry[2]}\t{args[8]}\0" if entry else ""
+            return subprocess.CompletedProcess(args, 0, output, "")
         raise AssertionError(f"unexpected command: {args}")
 
     monkeypatch.setattr(pruning, "_run", fake_run)
@@ -169,10 +170,9 @@ def test_branch_delta_accepts_same_deleted_path_on_both_sides(monkeypatch):
             return subprocess.CompletedProcess(args, 0, "base-sha\n", "")
         if args[:5] == ["git", "diff", "--no-renames", "--name-only", "-z"]:
             return subprocess.CompletedProcess(args, 0, "old-module.py\0", "")
-        if args[:3] == ["git", "rev-parse", "--verify"]:
-            return subprocess.CompletedProcess(
-                args, 128, "", "fatal: path 'old-module.py' does not exist in commit"
-            )
+        if args[:4] == ["git", "--literal-pathspecs", "ls-tree", "-z"]:
+            # A deleted path has no entry in either commit tree.
+            return subprocess.CompletedProcess(args, 0, "", "")
         raise AssertionError(f"unexpected command: {args}")
 
     monkeypatch.setattr(pruning, "_run", fake_run)
@@ -203,6 +203,97 @@ def test_missing_merged_pr_commit_is_unproven_not_fatal(monkeypatch):
     assert pruning._is_ancestor("deadbeef", "main-sha") is False
 
 
+def test_missing_commit_marker_mixed_with_object_database_error_aborts(monkeypatch):
+    def fake_run(args, *, check=True):
+        return subprocess.CompletedProcess(
+            args,
+            128,
+            "",
+            "fatal: Not a valid commit name deadbeef\nfatal: loose object deadbeef is corrupt",
+        )
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+
+    with pytest.raises(RuntimeError, match="merge-base failed"):
+        pruning._is_ancestor("deadbeef", "main-sha")
+
+
+def test_branch_protection_status_is_parsed_and_protected_branches_are_identified(monkeypatch):
+    def fake_run(args, *, check=True):
+        assert args[:2] == ["gh", "api"]
+        return subprocess.CompletedProcess(args, 0, "main\tfalse\nfeature/keep\ttrue\n", "")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+
+    assert pruning._load_branch_protection_status("Papajona/Atlas-Bot") == {
+        "main": False,
+        "feature/keep": True,
+    }
+
+
+def test_branch_protection_status_fails_closed_on_api_error(monkeypatch):
+    def fake_run(args, *, check=True):
+        assert args[:2] == ["gh", "api"]
+        return subprocess.CompletedProcess(args, 1, "", "permission denied")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+
+    with pytest.raises(RuntimeError, match="protection status"):
+        pruning._load_branch_protection_status("Papajona/Atlas-Bot")
+
+
+def test_branch_protection_status_rejects_malformed_data(monkeypatch):
+    def fake_run(args, *, check=True):
+        return subprocess.CompletedProcess(args, 0, "main\tfalse\nfeature\tunknown\n", "")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+
+    with pytest.raises(RuntimeError, match="malformed"):
+        pruning._load_branch_protection_status("Papajona/Atlas-Bot")
+
+
+def test_branch_parity_mismatches_are_computed_once_for_preserved_branch(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda ancestor, descendant: False)
+
+    def mismatches(branch_sha, main_sha):
+        calls.append((branch_sha, main_sha))
+        return ["scripts/check.sh"]
+
+    monkeypatch.setattr(pruning, "_branch_delta_mismatched_paths", mismatches)
+
+    safe, reason, mismatch_paths = pruning._resolve_branch_integration(
+        "mode-only",
+        "branch-sha",
+        "main-sha",
+        set(),
+        [],
+    )
+
+    assert safe is False
+    assert reason == "no exact integration proof; preserve branch"
+    assert mismatch_paths == ["scripts/check.sh"]
+    assert calls == [("branch-sha", "main-sha")]
+
+
+def test_deletion_of_already_absent_remote_ref_is_a_successful_noop(monkeypatch):
+    def fake_run(args, *, check=True):
+        if args[:2] == ["git", "push"]:
+            return subprocess.CompletedProcess(args, 1, "", "remote rejected deletion")
+        if args[:3] == ["git", "ls-remote", "--heads"]:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(f"unexpected command: {args}")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+
+    status, reason = pruning._delete_remote_ref_with_lease("feature/already-gone", "abc123")
+
+    assert status == "PRESERVE"
+    assert "already removed" in reason
+    assert "successful no-op" in reason
+
+
 def test_unexpected_merge_base_error_still_aborts(monkeypatch):
     def fake_run(args, *, check=True):
         return subprocess.CompletedProcess(
@@ -229,6 +320,40 @@ def _git(cwd, *args: str) -> str:
         f"{result.stderr.strip() or result.stdout.strip()}"
     )
     return result.stdout.strip()
+
+
+def test_mode_only_executable_bit_change_preserves_branch(tmp_path, monkeypatch):
+    repo = tmp_path / "mode-repo"
+    _git(tmp_path, "init", "-b", "main", repo)
+    _git(repo, "config", "user.name", "Atlas mode regression")
+    _git(repo, "config", "user.email", "atlas-mode@example.invalid")
+    check_script = repo / "scripts" / "check.sh"
+    check_script.parent.mkdir()
+    check_script.write_text("#!/bin/sh\necho safe\n", encoding="utf-8")
+    check_script.chmod(0o644)
+    _git(repo, "add", "scripts/check.sh")
+    _git(repo, "commit", "-m", "base non-executable script")
+    main_sha = _git(repo, "rev-parse", "HEAD")
+
+    _git(repo, "checkout", "-b", "mode-only")
+    check_script.chmod(0o755)
+    _git(repo, "add", "scripts/check.sh")
+    _git(repo, "commit", "-m", "change executable bit only")
+    branch_sha = _git(repo, "rev-parse", "HEAD")
+    monkeypatch.chdir(repo)
+
+    mismatch_paths = pruning._branch_delta_mismatched_paths(branch_sha, main_sha)
+    assert mismatch_paths == ["scripts/check.sh"]
+    safe, reason, observed_mismatches = pruning._resolve_branch_integration(
+        "mode-only",
+        branch_sha,
+        main_sha,
+        set(),
+        [],
+    )
+    assert safe is False
+    assert observed_mismatches == ["scripts/check.sh"]
+    assert "preserve branch" in reason
 
 
 def test_lease_rejection_preserves_branch_updated_after_proof(tmp_path, monkeypatch):
