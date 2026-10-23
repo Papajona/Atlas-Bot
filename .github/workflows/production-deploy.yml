@@ -113,6 +113,7 @@ jobs:
           expected_workflow_id="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/android-release.yml" --jq '.id')"
           run_workflow_id="$(gh api "$run_endpoint" --jq '.workflow_id')"
           run_sha="$(gh api "$run_endpoint" --jq '.head_sha')"
+          run_attempt="$(gh api "$run_endpoint" --jq '.run_attempt')"
           run_status="$(gh api "$run_endpoint" --jq '.status')"
           run_conclusion="$(gh api "$run_endpoint" --jq '.conclusion // empty')"
           run_event="$(gh api "$run_endpoint" --jq '.event')"
@@ -163,6 +164,7 @@ jobs:
           }
           run_endpoint="/repos/$GITHUB_REPOSITORY/actions/runs/$android_run"
           selected_sha="$(gh api "$run_endpoint" --jq '.head_sha')"
+          selected_attempt="$(gh api "$run_endpoint" --jq '.run_attempt')"
           selected_workflow="$(gh api "$run_endpoint" --jq '.workflow_id')"
           expected_workflow="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/android-release.yml" --jq '.id')"
           test "$selected_sha" = "$GITHUB_SHA" || {
@@ -209,11 +211,15 @@ jobs:
           test "$package_name" = "com.atlas.trading"
 
           metadata_commit="$(sed -n 's/^commit=//p' "$bundle/atlas-release-metadata.txt")"
+          metadata_run_id="$(sed -n 's/^run_id=//p' "$bundle/atlas-release-metadata.txt")"
+          metadata_run_attempt="$(sed -n 's/^run_attempt=//p' "$bundle/atlas-release-metadata.txt")"
           metadata_backend_url="$(sed -n 's/^backend_url=//p' "$bundle/atlas-release-metadata.txt")"
           metadata_backend_origin="$(sed -n 's/^backend_origin=//p' "$bundle/atlas-release-metadata.txt")"
           metadata_package="$(sed -n 's/^package=//p' "$bundle/atlas-release-metadata.txt")"
           metadata_cert="$(sed -n 's/^certificate_sha256=//p' "$bundle/atlas-release-metadata.txt" | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
           test "$metadata_commit" = "$GITHUB_SHA" || { echo "BLOCKED: release metadata commit differs from deployment commit"; exit 1; }
+          test "$metadata_run_id" = "$ANDROID_RELEASE_RUN_ID" || { echo "BLOCKED: release metadata run ID differs from explicitly selected run"; exit 1; }
+          test "$metadata_run_attempt" = "$selected_attempt" || { echo "BLOCKED: release evidence belongs to a different run attempt"; exit 1; }
           test "$metadata_package" = "$package_name"
           test "$metadata_cert" = "$actual_cert"
           test -n "$metadata_backend_url" && test -n "$metadata_backend_origin" || { echo "BLOCKED: signed release evidence is missing backend URL/origin"; exit 1; }
