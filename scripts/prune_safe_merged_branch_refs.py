@@ -115,7 +115,7 @@ def _tree_entry_at_commit(
 ) -> tuple[str, str, str] | None:
     """Return a path's Git mode, object type, and object ID, or None if absent."""
     result = _run(
-        ["git", "--literal-pathspecs", "ls-tree", "-z", "--full-tree", commit_sha, "--", path],
+        ["git", "--literal-pathspecs", "ls-tree", "-z", "-r", "--full-tree", commit_sha, "--", path],
         check=False,
     )
     if result.returncode:
