@@ -210,6 +210,7 @@ def build_customer_paper_router(
     market_data: Callable[..., Any],
     market_request_type: type,
     state_guard: Callable[[], Awaitable[None]] | None = None,
+    group_mark_price_loader: Callable[..., Awaitable[Any]] | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/customer/paper", tags=["customer-paper"])
 
@@ -474,6 +475,30 @@ def build_customer_paper_router(
                 if execution_profile is None:
                     raise HTTPException(503, "Crypto paper execution profile is not configured")
 
+                group_mark_prices = None
+                if str(side or "").upper() == "BUY" and group_mark_price_loader is not None:
+                    timeframe_seconds = _TIMEFRAME_SECONDS.get(str(timeframe))
+                    if not timeframe_seconds:
+                        raise HTTPException(422, "Unsupported paper-order timeframe")
+                    mark_days = max(1, (25 * timeframe_seconds + 86_399) // 86_400)
+                    mark_req = market_request_type(
+                        asset="crypto",
+                        symbol=str(order["symbol"]),
+                        exchange=order_venue,
+                        timeframe=timeframe,
+                        days=mark_days,
+                    )
+                    try:
+                        # Candle-only order state is not a current market mark. Fetch fresh
+                        # validated quotes for every open holding in the candidate's group.
+                        group_mark_prices = await group_mark_price_loader(
+                            profile.id, mark_req, None
+                        )
+                    except Exception as mark_exc:
+                        raise HTTPException(
+                            409, "Current paper correlation-group marks could not be verified"
+                        ) from mark_exc
+
                 remaining_quantity = Decimal(str(order.get("remaining_quantity") or order["quantity"]))
                 fill_quantity = min(remaining_quantity, max(Decimal("0"), Decimal(str(budget["available"]))))
                 if side == "SELL":
@@ -579,6 +604,7 @@ def build_customer_paper_router(
                             price=price_text,
                             fee_amount=_decimal_text(fee),
                             enforce_market_bar_budget=True,
+                            group_mark_prices=group_mark_prices,
                         )
                     except CustomerPaperOrderConflict as exc:
                         # A concurrent fill can invalidate the earlier cash pre-read.
@@ -629,6 +655,7 @@ def build_customer_paper_router(
                                     price=price_text,
                                     fee_amount=_decimal_text(retry_fee),
                                     enforce_market_bar_budget=True,
+                                    group_mark_prices=group_mark_prices,
                                 )
                                 fill_quantity = retry_quantity
                             except CustomerPaperOrderConflict as retry_exc:
