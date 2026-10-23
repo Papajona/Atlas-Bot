@@ -18,6 +18,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from .config import settings
 from .customer_paper_ledger import (
     CustomerPaperIdempotencyConflict,
     CustomerPaperLedgerBlocked,
@@ -329,6 +330,170 @@ async def submit_customer_paper_order(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
                 {"lock_key": f"paper-order-intent:{customer_id}:{client_id}"},
             )
+            # Resolve idempotent retries before evaluating entry controls.
+            existing_intent = (await conn.execute(text(
+                """
+                SELECT id, payload_sha256 FROM customer_paper.orders
+                WHERE customer_id=:customer_id AND client_order_id=:client_order_id
+                """
+            ), {"customer_id": customer_id, "client_order_id": client_id})).first()
+            if existing_intent is not None:
+                if str(existing_intent[1]) != digest:
+                    raise CustomerPaperIdempotencyConflict(
+                        "client_order_id already exists for a different immutable order intent"
+                    )
+                return {"status": "REPLAYED", "order_id": str(existing_intent[0]), "client_order_id": client_id}
+
+            new_owner = str(
+                safe_metadata.get("execution_owner")
+                or ("autonomous_customer_bot" if safe_metadata.get("paper_flow_version") == 1 else "manual_customer_api")
+            )
+            protective_exit = str(safe_metadata.get("order_role") or "").upper() == "PROTECTIVE_EXIT"
+            await conn.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"paper-market-intents:{customer_id}:{normalized_venue}:{normalized_market}:{normalized_symbol}"},
+            )
+            if not protective_exit:
+                existing_market_orders = (await conn.execute(text(
+                    """
+                    SELECT o.client_order_id, o.metadata_json
+                    FROM customer_paper.orders o
+                    JOIN LATERAL (
+                        SELECT event_type FROM customer_paper.order_events
+                        WHERE customer_id=o.customer_id AND order_id=o.id
+                        ORDER BY id DESC LIMIT 1
+                    ) latest ON TRUE
+                    WHERE o.customer_id=:customer_id
+                      AND o.venue=:venue AND o.market_type=:market_type AND o.symbol=:symbol
+                      AND latest.event_type IN ('SUBMITTED','PARTIALLY_FILLED')
+                    """
+                ), {
+                    "customer_id": customer_id, "venue": normalized_venue,
+                    "market_type": normalized_market, "symbol": normalized_symbol,
+                })).mappings().all()
+                for market_order in existing_market_orders:
+                    if str(market_order["client_order_id"]) == client_id:
+                        continue
+                    raw_owner = market_order["metadata_json"]
+                    if isinstance(raw_owner, str):
+                        try:
+                            raw_owner = json.loads(raw_owner)
+                        except ValueError:
+                            raw_owner = {}
+                    prior_metadata = dict(raw_owner) if isinstance(raw_owner, Mapping) else {}
+                    prior_owner = str(
+                        prior_metadata.get("execution_owner")
+                        or ("autonomous_customer_bot" if prior_metadata.get("paper_flow_version") == 1 else "manual_customer_api")
+                    )
+                    if prior_owner != new_owner:
+                        raise CustomerPaperOrderConflict(
+                            "Manual and autonomous customer paper orders cannot coexist for the same market; reconcile the pending order first"
+                        )
+
+            # Ownership applies to open positions as well as pending orders. Without
+            # this gate a manual API BUY could add to a bot-owned position (or a manual
+            # SELL could interfere with the bot's position lifecycle), even if no order
+            # happened to remain pending. Protective exits are the sole explicit bypass.
+            if not protective_exit:
+                position_owner_row = (await conn.execute(text(
+                    """
+                    SELECT pe.quantity_after, entry_order.metadata_json
+                    FROM customer_paper.position_events AS pe
+                    LEFT JOIN LATERAL (
+                        SELECT entry_order.metadata_json
+                        FROM customer_paper.position_events AS entry_event
+                        JOIN customer_paper.fills AS entry_fill
+                          ON entry_fill.id = entry_event.fill_id
+                         AND entry_fill.customer_id = entry_event.customer_id
+                        JOIN customer_paper.orders AS entry_order
+                          ON entry_order.id = entry_fill.order_id
+                         AND entry_order.customer_id = entry_fill.customer_id
+                        WHERE entry_event.customer_id = pe.customer_id
+                          AND entry_event.venue = pe.venue
+                          AND entry_event.market_type = pe.market_type
+                          AND entry_event.symbol = pe.symbol
+                          AND entry_event.id <= pe.id
+                          AND entry_event.quantity_before = 0
+                          AND entry_event.quantity_after > 0
+                          AND entry_order.side = 'BUY'
+                        ORDER BY entry_event.id DESC
+                        LIMIT 1
+                    ) AS entry_order ON TRUE
+                    WHERE pe.customer_id=:customer_id AND pe.venue=:venue
+                      AND pe.market_type=:market_type AND pe.symbol=:symbol
+                    ORDER BY pe.id DESC
+                    LIMIT 1
+                    """
+                ), {
+                    "customer_id": customer_id, "venue": normalized_venue,
+                    "market_type": normalized_market, "symbol": normalized_symbol,
+                })).first()
+                if position_owner_row is not None and Decimal(position_owner_row[0]) > 0:
+                    prior_position_metadata = position_owner_row[1]
+                    if isinstance(prior_position_metadata, str):
+                        try:
+                            prior_position_metadata = json.loads(prior_position_metadata)
+                        except ValueError:
+                            prior_position_metadata = {}
+                    prior_position_metadata = dict(prior_position_metadata) if isinstance(prior_position_metadata, Mapping) else {}
+                    position_owner = str(
+                        prior_position_metadata.get("execution_owner")
+                        or ("autonomous_customer_bot" if prior_position_metadata.get("paper_flow_version") == 1 else "manual_customer_api")
+                    )
+                    if position_owner != new_owner:
+                        raise CustomerPaperOrderConflict(
+                            "Manual and autonomous customer paper flows cannot operate on the same open position; reconcile/close it through its owning flow"
+                        )
+
+            if normalized_side == "BUY" and bool(settings.discipline_enabled):
+                await conn.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                    {"lock_key": f"paper-entry-discipline:{customer_id}"},
+                )
+                now = datetime.now(timezone.utc)
+                day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                todays_entries = (await conn.execute(text(
+                    """
+                    SELECT COUNT(*)
+                    FROM customer_paper.orders o
+                    JOIN LATERAL (
+                        SELECT event_type FROM customer_paper.order_events
+                        WHERE customer_id=o.customer_id AND order_id=o.id
+                        ORDER BY id DESC LIMIT 1
+                    ) latest ON TRUE
+                    WHERE o.customer_id=:customer_id AND o.side='BUY'
+                      AND o.created_at >= :day_start
+                      AND latest.event_type IN ('SUBMITTED','PARTIALLY_FILLED','FILLED')
+                    """
+                ), {"customer_id": customer_id, "day_start": day_start})).scalar_one()
+                if int(todays_entries or 0) >= int(settings.discipline_max_entries_per_day):
+                    raise CustomerPaperOrderConflict(
+                        "Trading-discipline daily entry limit reached for isolated paper ledger"
+                    )
+                last_entry = (await conn.execute(text(
+                    """
+                    SELECT o.created_at
+                    FROM customer_paper.orders o
+                    JOIN LATERAL (
+                        SELECT event_type FROM customer_paper.order_events
+                        WHERE customer_id=o.customer_id AND order_id=o.id
+                        ORDER BY id DESC LIMIT 1
+                    ) latest ON TRUE
+                    WHERE o.customer_id=:customer_id AND o.side='BUY'
+                      AND o.created_at >= :day_start
+                      AND latest.event_type IN ('SUBMITTED','PARTIALLY_FILLED','FILLED')
+                    ORDER BY o.created_at DESC, o.client_order_id DESC
+                    LIMIT 1
+                    """
+                ), {"customer_id": customer_id, "day_start": day_start})).scalar_one_or_none()
+                if last_entry is not None:
+                    if last_entry.tzinfo is None or last_entry.utcoffset() is None:
+                        last_entry = last_entry.replace(tzinfo=timezone.utc)
+                    if (now - last_entry.astimezone(timezone.utc)).total_seconds() < int(settings.discipline_entry_cooldown_seconds):
+                        raise CustomerPaperOrderConflict(
+                            "Trading-discipline entry cooldown is active for isolated paper ledger"
+                        )
+
             row = (await conn.execute(text(
                 """
                 INSERT INTO customer_paper.orders
@@ -1037,7 +1202,12 @@ async def get_customer_paper_positions(*, customer_id: int) -> list[dict[str, st
                     COALESCE(o.metadata_json ->> 'timeframe', '') AS timeframe,
                     COALESCE(mb.bar_at::text, o.metadata_json ->> 'signal_bar_timestamp', '') AS last_event_bar_key,
                     COALESCE(entry_order.metadata_json ->> 'stop_loss_price', '') AS stop_loss_price,
-                    COALESCE(entry_order.metadata_json ->> 'take_profit_price', '') AS take_profit_price
+                    COALESCE(entry_order.metadata_json ->> 'take_profit_price', '') AS take_profit_price,
+                    COALESCE(
+                        entry_order.metadata_json ->> 'execution_owner',
+                        CASE WHEN entry_order.metadata_json ->> 'paper_flow_version' = '1'
+                             THEN 'autonomous_customer_bot' ELSE 'manual_customer_api' END
+                    ) AS execution_owner
                 FROM customer_paper.position_events AS pe
                 JOIN customer_paper.fills AS f
                   ON f.id = pe.fill_id AND f.customer_id = pe.customer_id
@@ -1079,6 +1249,7 @@ async def get_customer_paper_positions(*, customer_id: int) -> list[dict[str, st
             "last_event_bar_key": _canonical_timestamp_text(row["last_event_bar_key"]),
             "stop_loss_price": str(row["stop_loss_price"] or ""),
             "take_profit_price": str(row["take_profit_price"] or ""),
+            "execution_owner": str(row["execution_owner"] or "manual_customer_api"),
         } for row in rows if Decimal(row["quantity_after"]) > 0]
     finally:
         await engine.dispose()

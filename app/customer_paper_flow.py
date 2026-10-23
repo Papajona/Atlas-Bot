@@ -359,6 +359,38 @@ async def _fill_open_order(customer_id: int, order: dict, market: dict, df) -> d
             "recovered_pending_order": True,
         }
 
+    timeframe = str(meta.get("timeframe") or "")
+    timeframe_seconds = _TIMEFRAME_SECONDS.get(timeframe)
+    if not timeframe_seconds:
+        raise CustomerPaperFlowBlocked("Pending paper order has an unsupported timeframe")
+    elapsed_seconds = (current_bar_dt - submission_dt).total_seconds()
+    if elapsed_seconds < 0 or elapsed_seconds % timeframe_seconds != 0:
+        raise CustomerPaperFlowBlocked("Pending paper order bars are not aligned to its timeframe")
+    elapsed_bars = int(elapsed_seconds // timeframe_seconds)
+    is_protective_exit = str(meta.get("order_role") or "").upper() == "PROTECTIVE_EXIT"
+    ttl_bars = max(1, int(settings.paper_order_ttl_bars))
+    if not is_protective_exit and elapsed_bars >= ttl_bars:
+        await _paper_call(
+            expire_customer_paper_order(
+                customer_id=customer_id,
+                client_order_id=client_id,
+                idempotency_key="paper-ttl-" + _sha(f"{client_id}|{submission_dt.isoformat()}")[:48],
+            ),
+            "expire stale autonomous paper order",
+        )
+        return {
+            "status": "EXPIRED_TTL", "client_order_id": client_id,
+            "order_id": str(state["order_id"]), "elapsed_bars": elapsed_bars,
+            "fill": {"status": "EXPIRED"}, "recovered_pending_order": True,
+        }
+    if not is_protective_exit and elapsed_bars < max(1, int(settings.paper_fill_latency_bars)):
+        return {
+            "status": "WAITING_FOR_FILL_LATENCY", "client_order_id": client_id,
+            "order_id": str(state["order_id"]), "elapsed_bars": elapsed_bars,
+            "required_latency_bars": max(1, int(settings.paper_fill_latency_bars)),
+            "recovered_pending_order": True,
+        }
+
     remaining = Decimal(str(state["remaining_quantity"]))
     if remaining <= 0:
         raise CustomerPaperFlowBlocked("Pending order has no positive remaining quantity")
@@ -431,7 +463,22 @@ async def _fill_open_order(customer_id: int, order: dict, market: dict, df) -> d
             "recovered_pending_order": True,
         }
 
-    fill_price, fee, costs = _fill_price_and_fee(side, remaining, market)
+    try:
+        fill_price, fee, costs = _fill_price_and_fee(side, remaining, market)
+    except CustomerPaperFlowBlocked as exc:
+        if side == "SELL" and "Rounded simulated fill price is invalid" in str(exc):
+            # Keep the immutable exit intent pending until a representable positive
+            # quote exists. Never write a zero-price fill or overstate proceeds.
+            return {
+                "status": "WAITING_FOR_PRICE_PRECISION",
+                "client_order_id": client_id,
+                "order_id": state["order_id"],
+                "bar_key": bar_key,
+                "fill": {"status": "NOT_FILLED"},
+                "reason": "Positive SELL quote rounds to zero at numeric(38,18) precision",
+                "recovered_pending_order": True,
+            }
+        raise
     if side == "BUY":
         balances = await _paper_call(
             get_customer_paper_balances(customer_id=customer_id), "read paper cash for fill"
@@ -519,7 +566,7 @@ async def _fill_open_order(customer_id: int, order: dict, market: dict, df) -> d
 
 
 async def process_customer_paper_orders(customer_id: int, req, df, market_context: Mapping) -> dict | None:
-    """Recover one pending order for this customer/market using a fresh quote."""
+    """Recover autonomous orders only and protect existing positions before pending BUY refills."""
     market = validate_customer_paper_market(req, df, market_context)
     pending = await _paper_call(
         list_open_customer_paper_orders(customer_id=customer_id), "list pending paper orders"
@@ -527,19 +574,58 @@ async def process_customer_paper_orders(customer_id: int, req, df, market_contex
     matching = [
         order for order in pending
         if str(order.get("venue") or "").lower() == str(req.exchange).lower()
-        and str(order.get("symbol") or "") == str(req.symbol)
+        and str(order.get("symbol") or "").upper() == str(req.symbol).upper()
     ]
     if not matching:
         return None
-    # Timeframe is part of the durable order identity. Never recover an old pending
-    # order using bars from a reconfigured bot/timeframe.
-    for order in matching:
-        meta = _json_mapping(order.get("metadata"))
-        if str(meta.get("timeframe") or "") != str(req.timeframe):
-            raise CustomerPaperFlowBlocked("Open paper order timeframe differs from the current request; reconcile before execution")
     if len(matching) > 1:
         raise CustomerPaperFlowBlocked("Multiple open customer paper orders exist for this market; reconcile before proceeding")
-    return await _fill_open_order(customer_id, matching[0], market, df)
+    order = matching[0]
+    meta = _json_mapping(order.get("metadata"))
+    order_side = str(order.get("side") or "").upper()
+
+    # Manual API and autonomous-controller order intents are not interchangeable.
+    # Before refusing ownership, let a pending manual BUY yield to an existing stop.
+    if meta.get("paper_flow_version") != 1:
+        if order_side == "BUY":
+            protective = await _protective_exit(customer_id, req, df, market)
+            if protective is not None:
+                await _paper_call(
+                    expire_customer_paper_order(
+                        customer_id=customer_id,
+                        client_order_id=str(order.get("client_order_id") or ""),
+                        idempotency_key="paper-manual-buy-expired-for-stop-" + _sha(
+                            f"{order.get('client_order_id')}|{market['bar_timestamp']}"
+                        )[:40],
+                    ),
+                    "expire manual pending BUY before protective exit",
+                )
+                return protective
+        raise CustomerPaperFlowBlocked(
+            "A manual paper order is open for this market; the autonomous flow will not take ownership or advance it"
+        )
+
+    # A partially filled autonomous BUY can leave a protected position while the
+    # remainder is pending. Check all subsequent candles before another fill can move
+    # the position-event cursor past a stop/target breach.
+    if order_side == "BUY":
+        protective = await _protective_exit(customer_id, req, df, market)
+        if protective is not None:
+            await _paper_call(
+                expire_customer_paper_order(
+                    customer_id=customer_id,
+                    client_order_id=str(order.get("client_order_id") or ""),
+                    idempotency_key="paper-entry-remainder-expired-for-stop-" + _sha(
+                        f"{order.get('client_order_id')}|{market['bar_timestamp']}"
+                    )[:40],
+                ),
+                "expire pending autonomous BUY remainder after protective exit",
+            )
+            return protective
+
+    if str(meta.get("timeframe") or "") != str(req.timeframe):
+        raise CustomerPaperFlowBlocked("Open paper order timeframe differs from the current request; reconcile before execution")
+    return await _fill_open_order(customer_id, order, market, df)
 
 
 async def _protective_exit(customer_id: int, req, df, market: dict) -> dict | None:
@@ -563,8 +649,38 @@ async def _protective_exit(customer_id: int, req, df, market: dict) -> dict | No
         current_bar = datetime.fromisoformat(market["bar_timestamp"].replace("Z", "+00:00"))
     except ValueError:
         raise CustomerPaperFlowBlocked("Position event lacks a valid completed-bar identity")
-    if latest_position_bar.tzinfo is None or current_bar <= latest_position_bar:
+    if latest_position_bar.tzinfo is None or latest_position_bar.utcoffset() is None:
+        raise CustomerPaperFlowBlocked("Position event timestamp must be timezone-aware")
+    if current_bar.tzinfo is None or current_bar.utcoffset() is None:
+        raise CustomerPaperFlowBlocked("Current paper bar timestamp must be timezone-aware")
+    latest_position_bar = latest_position_bar.astimezone(timezone.utc)
+    current_bar = current_bar.astimezone(timezone.utc)
+    if current_bar <= latest_position_bar:
         return None
+    timeframe_seconds = _TIMEFRAME_SECONDS.get(str(req.timeframe))
+    if not timeframe_seconds:
+        raise CustomerPaperFlowBlocked("Protective-exit timeframe is unsupported")
+    span_seconds = (current_bar - latest_position_bar).total_seconds()
+    if span_seconds % timeframe_seconds != 0:
+        raise CustomerPaperFlowBlocked("Protective-exit history does not align to the position timeframe")
+    bars_to_cover = int(span_seconds // timeframe_seconds)
+    if bars_to_cover > len(df.index):
+        raise CustomerPaperFlowBlocked("Protective-exit candle history is incomplete; fetch missing bars before proceeding")
+    observed_bars = set()
+    for raw_bar_at in df.index:
+        try:
+            bar_dt = datetime.fromisoformat(
+                str(getattr(raw_bar_at, "isoformat", lambda: raw_bar_at)()).replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError) as exc:
+            raise CustomerPaperFlowBlocked("Protective-exit candle history contains an invalid timestamp") from exc
+        if bar_dt.tzinfo is None or bar_dt.utcoffset() is None:
+            raise CustomerPaperFlowBlocked("Protective-exit candle history contains a naive timestamp")
+        observed_bars.add(bar_dt.astimezone(timezone.utc))
+    for bar_number in range(1, bars_to_cover + 1):
+        expected_bar = latest_position_bar + timedelta(seconds=bar_number * timeframe_seconds)
+        if expected_bar not in observed_bars:
+            raise CustomerPaperFlowBlocked("Protective-exit candle history is incomplete; a completed bar is missing")
     stop = _finite_decimal(position.get("stop_loss_price"), "position stop loss") if position.get("stop_loss_price") else Decimal("0")
     target = _finite_decimal(position.get("take_profit_price"), "position take profit") if position.get("take_profit_price") else Decimal("0")
     reason = None
@@ -612,6 +728,7 @@ async def _protective_exit(customer_id: int, req, df, market: dict) -> dict | No
         order_type="MARKET",
         metadata={
             "paper_flow_version": 1,
+            "execution_owner": "autonomous_customer_bot",
             "exchange": str(req.exchange).lower(),
             "market_type": "spot",
             "order_role": "PROTECTIVE_EXIT",
@@ -693,7 +810,7 @@ async def execute_customer_paper_spot_signal(
         return {
             "mode": "CUSTOMER_PAPER",
             "status": "RECOVERY_PROCESSED",
-            "decision": "TRADE" if recovered.get("fill", {}).get("status") == "APPENDED" else "NO_TRADE",
+            "decision": "TRADE" if str(recovered.get("fill", {}).get("status") or "").upper() in {"APPENDED", "REPLAYED"} else "NO_TRADE",
             "execution": recovered,
             "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
         }
@@ -760,6 +877,7 @@ async def execute_customer_paper_spot_signal(
     # metadata; identical retries within the same bar must have an identical payload.
     meta = {
         "paper_flow_version": 1,
+        "execution_owner": "autonomous_customer_bot",
         "exchange": str(req.exchange).lower(),
         "market_type": "spot",
         "order_role": role,

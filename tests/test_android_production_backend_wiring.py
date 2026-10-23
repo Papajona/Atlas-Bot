@@ -16,12 +16,19 @@ RELEASE_WORKFLOW = (ROOT / ".github" / "workflows" / "android-release.yml").read
 def test_release_build_requires_an_explicit_approved_https_backend_origin():
     assert GRADLE.startswith("import java.net.URI\n\nplugins {")
     assert 'providers.environmentVariable("ATLAS_PROD_BACKEND_URL")' in GRADLE
-    assert "releaseTaskRequested" in GRADLE
     assert "runCatching { URI(it) }" in GRADLE
+    assert "tasks.configureEach" in GRADLE
+    assert 'if (name == "preReleaseBuild") dependsOn(verifyProductionReleaseConfiguration)' in GRADLE
+    assert 'group = "verification"' in GRADLE
     assert 'check(approvedProductionBackend)' in GRADLE
     assert 'parsedBackendUri.scheme == "https"' in GRADLE
     assert "nonProductionHostPattern.containsMatchIn(backendHost)" in GRADLE
     assert "privateIpv4Pattern.containsMatchIn(backendHost)" in GRADLE
+    assert r'169\\.254\\.' in GRADLE
+    assert "rawBackendHost.removeSuffix(\".\")" in GRADLE
+    assert "hostHasMultipleTerminalDots" in GRADLE
+    assert 'ATLAS_DEV_BACKEND_URL' in GRADLE
+    assert 'https://atlas-debug-backend.invalid' in GRADLE
     assert 'buildConfigField("String", "BACKEND_URL"' in GRADLE
 
 

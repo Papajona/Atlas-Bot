@@ -10,14 +10,24 @@ val configuredBackendUrlRaw = providers.environmentVariable("ATLAS_PROD_BACKEND_
 val configuredBackendUrl = configuredBackendUrlRaw
     ?.takeIf { value -> value.none { char -> char == '"' || char == '\\' || char == '\n' || char == '\r' } }
     ?.trimEnd('/')
-val releaseTaskRequested = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
+val configuredDevBackendUrlRaw = providers.environmentVariable("ATLAS_DEV_BACKEND_URL").orNull?.trim()
+val configuredDevBackendUrl = configuredDevBackendUrlRaw
+    ?.takeIf { value -> value.isNotEmpty() && value.none { char -> char == '"' || char == '\\' || char == '\n' || char == '\r' } }
+    ?.trimEnd('/')
+// Debug APKs must never receive a blank backend URL or silently inherit production.
+// Developers can provide an explicit development/staging origin; otherwise this reserved
+// non-routable origin fails visibly instead of sending traffic to an unintended service.
+val debugBackendUrl = configuredDevBackendUrl ?: "https://atlas-debug-backend.invalid"
 val parsedBackendUri = configuredBackendUrl?.let { runCatching { URI(it) }.getOrNull() }
-val backendHost = parsedBackendUri?.host?.lowercase().orEmpty()
+val rawBackendHost = parsedBackendUri?.host?.lowercase().orEmpty()
+val backendHost = rawBackendHost.removeSuffix(".")
+val hostHasMultipleTerminalDots = rawBackendHost.endsWith("..")
 val nonProductionHostPattern = Regex("(^|[.-])(dev|development|staging|test|sandbox|localhost)([.-]|$)", RegexOption.IGNORE_CASE)
-val privateIpv4Pattern = Regex("^(10\\.|127\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)")
+val privateIpv4Pattern = Regex("^(10\\.|127\\.|169\\.254\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)")
 val approvedProductionBackend = parsedBackendUri != null &&
     parsedBackendUri.scheme == "https" &&
     backendHost.contains(".") &&
+    !hostHasMultipleTerminalDots &&
     parsedBackendUri.rawUserInfo == null &&
     parsedBackendUri.rawQuery == null &&
     parsedBackendUri.rawFragment == null &&
@@ -30,10 +40,28 @@ val approvedProductionBackend = parsedBackendUri != null &&
     !backendHost.endsWith(".invalid") &&
     !backendHost.endsWith(".local") &&
     !backendHost.endsWith(".internal")
-if (releaseTaskRequested) {
-    check(approvedProductionBackend) {
-        "BLOCKED: ATLAS_PROD_BACKEND_URL must be configured as an approved HTTPS production origin; development, staging, test, local/private, example, and non-root URLs are rejected."
+
+// The release check is attached to AGP's release pre-build task, not to the requested
+// task-name strings. It therefore runs for assembleRelease, bundleRelease, build, and
+// any aggregate task whose dependency graph includes the release variant.
+val verifyProductionReleaseConfiguration = tasks.register("verifyProductionReleaseConfiguration") {
+    group = "verification"
+    doLast {
+        check(approvedProductionBackend) {
+            "BLOCKED: ATLAS_PROD_BACKEND_URL must be configured as an approved HTTPS production origin; development, staging, test, link-local/private, example, and non-root URLs are rejected."
+        }
+        check(
+            !providers.environmentVariable("ATLAS_RELEASE_STORE_FILE").orNull.isNullOrBlank() &&
+                !providers.environmentVariable("ATLAS_RELEASE_STORE_PASSWORD").orNull.isNullOrBlank() &&
+                !providers.environmentVariable("ATLAS_RELEASE_KEY_ALIAS").orNull.isNullOrBlank() &&
+                !providers.environmentVariable("ATLAS_RELEASE_KEY_PASSWORD").orNull.isNullOrBlank()
+        ) {
+            "Production release signing is not configured. Provide the ATLAS_RELEASE_* signing environment variables."
+        }
     }
+}
+tasks.configureEach {
+    if (name == "preReleaseBuild") dependsOn(verifyProductionReleaseConfiguration)
 }
 
 android {
@@ -46,7 +74,7 @@ android {
         targetSdk = 35
         versionCode = 1047
         versionName = "3.10.47"
-        buildConfigField("String", "BACKEND_URL", "\"" + (configuredBackendUrl ?: "") + "\"")
+        buildConfigField("String", "BACKEND_URL", "\"" + debugBackendUrl + "\"")
     }
 
     buildFeatures {
@@ -92,30 +120,19 @@ android {
 
     buildTypes {
         debug {
+            buildConfigField("String", "BACKEND_URL", "\"" + debugBackendUrl + "\"")
             signingConfigs.findByName("debugConfig")?.let {
                 signingConfig = it
             }
         }
         release {
+            buildConfigField("String", "BACKEND_URL", "\"" + (configuredBackendUrl ?: "") + "\"")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Evaluate the release-signing guard only when a release task is actually requested.
-            // This keeps CI/debug compilation independent of production keystore secrets while
-            // preserving a hard fail for every release build.
-            if (gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }) {
-                check(
-                    !releaseStoreFile.isNullOrBlank() &&
-                    !releaseStorePassword.isNullOrBlank() &&
-                    !releaseKeyAlias.isNullOrBlank() &&
-                    !releaseKeyPassword.isNullOrBlank()
-                ) {
-                    "Production release signing is not configured. Provide the ATLAS_RELEASE_* signing environment variables."
-                }
-            }
             signingConfig = signingConfigs.getByName("releaseConfig")
         }
     }
