@@ -124,14 +124,14 @@ def _tree_entry_at_commit(
             + (result.stderr.strip() or f"exit code {result.returncode}")
         )
 
-    entries = [entry for entry in result.stdout.split("\\0") if entry]
+    entries = [entry for entry in result.stdout.split("\0") if entry]
     if not entries:
         return None
     if len(entries) != 1:
         raise RuntimeError(
             f"git ls-tree returned multiple entries for exact path {path!r} at {commit_sha}"
         )
-    metadata, separator, returned_path = entries[0].partition("\\t")
+    metadata, separator, returned_path = entries[0].partition("\t")
     fields = metadata.split()
     if not separator or len(fields) != 3 or returned_path != path:
         raise RuntimeError(
@@ -166,7 +166,7 @@ def _branch_delta_mismatched_paths(branch_sha: str, main_sha: str) -> list[str]:
             + (diff.stderr.strip() or f"exit code {diff.returncode}")
         )
 
-    changed_paths = [path for path in diff.stdout.split("\\0") if path]
+    changed_paths = [path for path in diff.stdout.split("\0") if path]
     return [
         path
         for path in changed_paths
@@ -227,7 +227,7 @@ def _load_branch_protection_status(repository: str) -> dict[str, bool]:
     for line in result.stdout.splitlines():
         if not line.strip():
             continue
-        fields = line.split("\\t")
+        fields = line.split("\t")
         if len(fields) != 2 or not fields[0] or fields[1] not in {"true", "false"}:
             raise RuntimeError(
                 "GitHub returned malformed branch protection status; refusing all deletions"
