@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -173,3 +176,72 @@ def test_release_and_deployment_both_verify_the_effective_runtime_resource():
     assert 'python scripts/verify_android_apk_backend_origin.py --apk "$apk" --aapt "$aapt" --expected-url "$metadata_backend_url" --compare-origin "$ATLAS_BASE_URL"' in PRODUCTION_DEPLOY_WORKFLOW
     assert 'test "$verified_backend_origin" = "$metadata_backend_origin"' in PRODUCTION_DEPLOY_WORKFLOW
     assert PRODUCTION_DEPLOY_WORKFLOW.index("--compare-origin") < PRODUCTION_DEPLOY_WORKFLOW.index("      - name: Authenticate to Google Cloud with GitHub OIDC")
+
+
+def test_cli_entrypoint_executes_verification_and_rejects_other_active_backend(tmp_path: Path):
+    apk = tmp_path / "release.apk"
+    apk.write_bytes(b"fixture; aapt is mocked")
+    aapt = tmp_path / "aapt"
+    resource_dump = _resource_dump(
+        [
+            ("diagnostic_example", "https://atlas.example.com"),
+            ("atlas_backend_url", "https://unrelated.example.com"),
+        ]
+    )
+    aapt.write_text(
+        "#!/usr/bin/env python3\nprint(" + repr(resource_dump) + ")\n",
+        encoding="utf-8",
+    )
+    aapt.chmod(0o755)
+
+    command = [
+        sys.executable,
+        str(ROOT / "scripts" / "verify_android_apk_backend_origin.py"),
+        "--apk",
+        str(apk),
+        "--aapt",
+        str(aapt),
+        "--expected-url",
+        "https://atlas.example.com",
+        "--compare-origin",
+        "https://atlas.example.com",
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert "effective runtime backend resource does not match" in result.stderr
+    assert "backend_origin" not in result.stdout
+
+
+def test_cli_entrypoint_succeeds_for_the_effective_runtime_backend(tmp_path: Path):
+    apk = tmp_path / "release.apk"
+    apk.write_bytes(b"fixture; aapt is mocked")
+    aapt = tmp_path / "aapt"
+    resource_dump = _resource_dump([("atlas_backend_url", "https://atlas.example.com")])
+    aapt.write_text(
+        "#!/usr/bin/env python3\nprint(" + repr(resource_dump) + ")\n",
+        encoding="utf-8",
+    )
+    aapt.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "verify_android_apk_backend_origin.py"),
+            "--apk",
+            str(apk),
+            "--aapt",
+            str(aapt),
+            "--expected-url",
+            "https://atlas.example.com",
+            "--compare-origin",
+            "https://atlas.example.com/",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "backend_url": "https://atlas.example.com",
+        "backend_origin": "https://atlas.example.com",
+    }
