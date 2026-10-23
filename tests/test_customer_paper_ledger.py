@@ -23,6 +23,7 @@ from app.customer_paper_lifecycle import (
 )
 from app.customer_paper_ledger import (
     CustomerPaperIdempotencyConflict,
+    CustomerPaperLedgerBlocked,
     _tenant_policy_expression_is_exact,
     _tenant_policy_validation_error,
     _validated_paper_journal,
@@ -590,12 +591,19 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
         assert by_code["PAPER_EQUITY"] == Decimal("-1000")
 
 
-        # Same-risk-group exposure rises in mark price after its original entry.
-        # A new SOL fill must be capped using the ETH mark, not its historical entry.
+
+        # Submit the SOL BUY before the later bar fills an existing ETH BUY.
+        # The ETH market mark rises before SOL's pending order fills, so the
+        # final atomic cap must value ETH at the fresh mark rather than entry.
         monkeypatch.setattr(settings, "correlation_group_cap_usd", 250.0)
         await submit_customer_paper_order(
             customer_id=customer_id, client_order_id="risk-eth-entry-92001",
             venue="binance", market_type="spot", symbol="ETH/USDT", side="BUY",
+            quantity="1", currency="USDT", order_type="LIMIT", limit_price="100",
+        )
+        await submit_customer_paper_order(
+            customer_id=customer_id, client_order_id="risk-sol-entry-92001",
+            venue="binance", market_type="spot", symbol="SOL/USDT", side="BUY",
             quantity="1", currency="USDT", order_type="LIMIT", limit_price="100",
         )
         eth_fill = await record_customer_paper_fill(
@@ -605,11 +613,6 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
         )
         assert eth_fill["status"] == "APPENDED"
 
-        await submit_customer_paper_order(
-            customer_id=customer_id, client_order_id="risk-sol-entry-92001",
-            venue="binance", market_type="spot", symbol="SOL/USDT", side="BUY",
-            quantity="1", currency="USDT", order_type="LIMIT", limit_price="100",
-        )
         sol_fill = await record_customer_paper_fill(
             customer_id=customer_id, client_order_id="risk-sol-entry-92001",
             idempotency_key="risk-sol-fill-92001", bar_key="risk-sol-bar-92001",
@@ -618,6 +621,20 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
         assert sol_fill["status"] == "APPENDED"
         assert sol_fill["filled_quantity"] == "0.500000000000000000"
         assert sol_fill["position_quantity"] == "0.500000000000000000"
+
+        # A current same-group position missing from the validated mark map must
+        # fail closed rather than being omitted from the correlated cap calculation.
+        await submit_customer_paper_order(
+            customer_id=customer_id, client_order_id="risk-bnb-entry-92001",
+            venue="binance", market_type="spot", symbol="BNB/USDT", side="BUY",
+            quantity="1", currency="USDT", order_type="LIMIT", limit_price="100",
+        )
+        with pytest.raises(CustomerPaperLedgerBlocked, match="no fresh validated mark: SOL/USDT"):
+            await record_customer_paper_fill(
+                customer_id=customer_id, client_order_id="risk-bnb-entry-92001",
+                idempotency_key="risk-bnb-fill-92001", bar_key="risk-bnb-bar-92001",
+                quantity="1", price="100", correlation_group_marks={"ETH/USDT": "200"},
+            )
 
         # Queries are tenant-filtered; a different customer cannot inspect this order.
         assert await get_customer_paper_order(
