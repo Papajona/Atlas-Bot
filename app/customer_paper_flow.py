@@ -598,6 +598,7 @@ async def _fill_open_order(
             price=fill_price,
             fee_amount=fee,
             enforce_market_bar_budget=True,
+            group_mark_prices=group_mark_prices,
         ), "append isolated paper fill")
     except CustomerPaperFlowBlocked as exc:
         # The paper-cash advisory lock can reveal a concurrent spend after the
