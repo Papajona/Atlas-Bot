@@ -937,6 +937,83 @@ def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monke
         assert group_notional <= Decimal("50")
         assert {p["symbol"] for p in positions} == {"ETH/USDT", "SOL/USDT"}
 
+        # Regression for the reported rising-market gap: ETH is entered near $100,
+        # but before a pending SOL BUY fills its verified current mark rises to $200.
+        # The fill-time transaction must value the existing ETH holding at $200, not
+        # its historical average entry, and reduce the SOL fill to remaining headroom.
+        rising_customer_id = customer_id + 1
+        rise_eth_req_1, rise_eth_frame_1, rise_eth_context_1 = _market_fixture(
+            timestamp=first_at, symbol="ETH/USDT", bid=100.0, ask=100.1,
+        )
+        submitted_rise_eth = await execute_customer_paper_spot_signal(
+            customer_id=rising_customer_id, req=rise_eth_req_1, df=rise_eth_frame_1,
+            market_context=rise_eth_context_1, side="BUY", quantity="0.2",
+            stop_loss_price="95", take_profit_price="110",
+            strategy="rising-market-group-cap-regression",
+        )
+        assert submitted_rise_eth["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
+
+        second_at = first_at + timedelta(hours=1)
+        rise_eth_req_2, rise_eth_frame_2, rise_eth_context_2 = _market_fixture(
+            timestamp=second_at, symbol="ETH/USDT", bid=100.0, ask=100.1,
+        )
+        eth_entry = await recover_customer_paper_spot_flow(
+            customer_id=rising_customer_id, req=rise_eth_req_2,
+            df=rise_eth_frame_2, market_context=rise_eth_context_2,
+        )
+        assert eth_entry is not None
+        assert eth_entry["execution"]["fill"]["status"] == "APPENDED"
+        assert Decimal(eth_entry["execution"]["fill"]["filled_quantity"]) == Decimal(
+            "0.200000000000000000"
+        )
+
+        rise_sol_req_2, rise_sol_frame_2, rise_sol_context_2 = _market_fixture(
+            timestamp=second_at, symbol="SOL/USDT", bid=100.0, ask=100.1,
+        )
+        submitted_rise_sol = await execute_customer_paper_spot_signal(
+            customer_id=rising_customer_id, req=rise_sol_req_2, df=rise_sol_frame_2,
+            market_context=rise_sol_context_2, side="BUY", quantity="0.2",
+            stop_loss_price="95", take_profit_price="110",
+            strategy="rising-market-group-cap-regression",
+        )
+        assert submitted_rise_sol["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
+
+        third_at = second_at + timedelta(hours=1)
+        rise_sol_req_3, rise_sol_frame_3, rise_sol_context_3 = _market_fixture(
+            timestamp=third_at, symbol="SOL/USDT", bid=100.0, ask=100.1,
+        )
+
+        async def rising_group_marks(_customer_id, _req, _context):
+            return {
+                ("binance", "spot", "ETH/USDT"): "200",
+                ("binance", "spot", "SOL/USDT"): "100",
+            }
+
+        sol_after_rise = await recover_customer_paper_spot_flow(
+            customer_id=rising_customer_id, req=rise_sol_req_3,
+            df=rise_sol_frame_3, market_context=rise_sol_context_3,
+            group_mark_price_loader=rising_group_marks,
+        )
+        assert sol_after_rise is not None
+        rise_fill = sol_after_rise["execution"]["fill"]
+        assert rise_fill["status"] == "APPENDED"
+        rise_quantity = Decimal(rise_fill["filled_quantity"])
+        assert Decimal("0") < rise_quantity < Decimal("0.2")
+        rising_positions = await get_customer_paper_positions(customer_id=rising_customer_id)
+        conservative_group_notional = sum(
+            (
+                abs(Decimal(str(position["quantity"])))
+                * max(
+                    Decimal(str(position["average_entry_price"])),
+                    Decimal("200") if position["symbol"] == "ETH/USDT" else Decimal("100"),
+                )
+                for position in rising_positions
+                if risk_group(str(position["symbol"])) == "L1_BETA"
+            ),
+            Decimal("0"),
+        )
+        assert conservative_group_notional <= Decimal("50")
+
     asyncio.run(run())
 
 
