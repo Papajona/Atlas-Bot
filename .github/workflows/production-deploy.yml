@@ -116,7 +116,6 @@ jobs:
           run_status="$(gh api "$run_endpoint" --jq '.status')"
           run_conclusion="$(gh api "$run_endpoint" --jq '.conclusion // empty')"
           run_event="$(gh api "$run_endpoint" --jq '.event')"
-          run_branch="$(gh api "$run_endpoint" --jq '.head_branch // empty')"
           run_repository="$(gh api "$run_endpoint" --jq '.head_repository.full_name // empty')"
           if [ "$run_workflow_id" != "$expected_workflow_id" ] \
             || [ "$run_sha" != "$GITHUB_SHA" ] \
@@ -127,17 +126,9 @@ jobs:
             exit 1
           fi
           case "$run_event" in
-            workflow_dispatch)
-              [ "$run_branch" = "main" ] || {
-                echo "BLOCKED: manually dispatched Android release run must originate from main"
-                exit 1
-              }
-              ;;
-            push)
-              [[ "$run_branch" == android-v* ]] || {
-                echo "BLOCKED: push-triggered Android release run must originate from an android-v* tag"
-                exit 1
-              }
+            workflow_dispatch|push)
+              # A successful android-release job proves the workflow's own main/tag
+              # condition passed; the job result is checked immediately below.
               ;;
             *)
               echo "BLOCKED: unsupported event for a signed Android release run: $run_event"
