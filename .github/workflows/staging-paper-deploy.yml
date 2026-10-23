@@ -191,45 +191,82 @@ jobs:
             exit 1
           fi
 
-          previous_run_id="$(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow "staging-identity-preflight.yml" \
-            --event workflow_dispatch \
-            --commit "$GITHUB_SHA" \
-            --limit 100 \
-            --json databaseId \
-            --jq '[.[].databaseId] | max // 0')"
+          request_id="atlas-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s%N)"
+          expected_run_name="Staging identity preflight ($request_id)"
 
           gh workflow run staging-identity-preflight.yml \
             --repo "$GITHUB_REPOSITORY" \
-            --ref main
+            --ref main \
+            -f "request_id=$request_id"
 
+          # Discover only the run carrying this dispatch's unique request ID.
+          preflight_run_id=0
           for attempt in $(seq 1 90); do
-            run_json="$(gh run list \
+            run_list="$(gh run list \
               --repo "$GITHUB_REPOSITORY" \
               --workflow "staging-identity-preflight.yml" \
               --event workflow_dispatch \
               --commit "$GITHUB_SHA" \
               --limit 100 \
-              --json databaseId,headSha,status,conclusion \
-              --jq 'sort_by(.databaseId) | last // {}')"
-            run_id="$(jq -r '.databaseId // 0' <<< "$run_json")"
-            run_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
-            run_status="$(jq -r '.status // "missing"' <<< "$run_json")"
-            run_conclusion="$(jq -r '.conclusion // ""' <<< "$run_json")"
-
-            if [[ "$run_id" -gt "$previous_run_id" && "$run_sha" == "$GITHUB_SHA" ]]; then
-              if [[ "$run_status" == "completed" ]]; then
-                if [[ "$run_conclusion" == "success" ]]; then
-                  echo "PASS: read-only staging identity and isolated-ledger preflight succeeded on exact commit $GITHUB_SHA"
-                  exit 0
-                fi
-                echo "BLOCKED: exact-commit staging preflight completed with conclusion '${run_conclusion:-missing}'. Review its workflow run; deployment remains paper-only."
+              --json databaseId,headSha,displayTitle)"
+            run_json="$(jq --arg expected "$expected_run_name" '[.[] | select(.displayTitle == $expected)] | sort_by(.databaseId) | last // {}' <<< "$run_list")"
+            candidate_id="$(jq -r '.databaseId // 0' <<< "$run_json")"
+            candidate_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
+            if [[ "$candidate_id" -gt 0 ]]; then
+              if [[ "$candidate_sha" != "$GITHUB_SHA" ]]; then
+                echo "BLOCKED: correlated staging preflight run is not on exact commit $GITHUB_SHA."
                 exit 1
               fi
+              preflight_run_id="$candidate_id"
+              break
             fi
             sleep 10
           done
 
-          echo "BLOCKED: no completed exact-commit workflow_dispatch staging preflight was observed after deployment."
+          if [[ "$preflight_run_id" -eq 0 ]]; then
+            echo "BLOCKED: the uniquely correlated staging preflight run was not observed after dispatch."
+            exit 1
+          fi
+
+          # From this point onward, poll the same run ID, never the newest same-SHA run.
+          for attempt in $(seq 1 90); do
+            run_json="$(gh run view "$preflight_run_id" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json databaseId,headSha,status,conclusion,displayTitle)"
+            run_id="$(jq -r '.databaseId // 0' <<< "$run_json")"
+            run_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
+            run_name="$(jq -r '.displayTitle // ""' <<< "$run_json")"
+            run_status="$(jq -r '.status // "missing"' <<< "$run_json")"
+            run_conclusion="$(jq -r '.conclusion // ""' <<< "$run_json")"
+
+            if [[ "$run_id" != "$preflight_run_id" || "$run_name" != "$expected_run_name" ]]; then
+              echo "BLOCKED: the tracked staging preflight run identity changed unexpectedly."
+              exit 1
+            fi
+            if [[ "$run_sha" != "$GITHUB_SHA" ]]; then
+              echo "BLOCKED: the tracked staging preflight is not on exact commit $GITHUB_SHA."
+              exit 1
+            fi
+            if [[ "$run_status" == "completed" ]]; then
+              if [[ "$run_conclusion" != "success" ]]; then
+                echo "BLOCKED: correlated staging preflight completed with conclusion '${run_conclusion:-missing}'. Review run $preflight_run_id; deployment remains paper-only."
+                exit 1
+              fi
+
+              # Re-check after preflight completion, immediately before certifying readiness.
+              if ! current_main_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"; then
+                echo "BLOCKED: unable to re-read main after the staging preflight; deployment readiness is not certified."
+                exit 1
+              fi
+              if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
+                echo "BLOCKED: main advanced during staging preflight; refusing to certify commit $GITHUB_SHA."
+                exit 1
+              fi
+              echo "PASS: read-only staging identity and isolated-ledger preflight run $preflight_run_id succeeded on exact current-main commit $GITHUB_SHA"
+              exit 0
+            fi
+            sleep 10
+          done
+
+          echo "BLOCKED: correlated staging preflight run $preflight_run_id did not complete within the allowed polling window."
           exit 1
