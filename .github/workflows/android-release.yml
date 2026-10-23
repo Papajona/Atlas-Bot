@@ -45,6 +45,41 @@ jobs:
         run: gradle --no-daemon :app:testDebugUnitTest
       - name: Assemble debug APK
         run: gradle --no-daemon :app:assembleDebug
+      - name: Verify packaged runtime backend resource in debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          test -x "$AAPT"
+          python - "$AAPT" "$APK" <<'PY'
+          import subprocess
+          import sys
+
+          from scripts.verify_android_apk_backend_origin import (
+              extract_runtime_backend_url_from_resource_dump,
+          )
+
+          aapt, apk = sys.argv[1:]
+          result = subprocess.run(
+              [aapt, "dump", "resources", "--values", apk],
+              check=False,
+              capture_output=True,
+              text=True,
+              encoding="utf-8",
+              errors="replace",
+          )
+          if result.returncode != 0:
+              raise SystemExit("BLOCKED: aapt could not decode the packaged APK resource table")
+          actual = extract_runtime_backend_url_from_resource_dump(result.stdout)
+          expected = "https://atlas-debug-backend.invalid"
+          if actual != expected:
+              raise SystemExit(
+                  f"BLOCKED: packaged runtime backend resource mismatch: expected {expected!r}, got {actual!r}"
+              )
+          print("PASS: packaged APK resource table matches MainActivity's runtime backend resource")
+          PY
 
   android-release:
     if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v'))
