@@ -29,7 +29,7 @@ def normalize_backend_url(value: str) -> tuple[str, str]:
     """Return (Gradle-normalized URL literal, canonical HTTPS origin)."""
     if not isinstance(value, str) or not value:
         raise ValueError("backend URL is empty")
-    if any(ord(char) < 0x20 or char in {'"', "\\\\", "\\r", "\\n"} for char in value):
+    if any(ord(char) < 0x20 or char in {'"', "\\", "\r", "\n"} for char in value):
         raise ValueError("backend URL contains invalid control or quoting characters")
 
     # Match app/build.gradle.kts: trim surrounding whitespace and trailing root slashes.
@@ -101,7 +101,7 @@ def _read_uleb128(data: bytes, offset: int) -> tuple[int, int]:
 
 def dex_strings(data: bytes) -> list[str]:
     """Read DEX string_ids with bounds checks; URLs are ASCII in DEX MUTF-8."""
-    if len(data) < 0x70 or not data.startswith(b"dex\\n") or data[7:8] != b"\\0":
+    if len(data) < 0x70 or not data.startswith(b"dex\n") or data[7:8] != b"\0":
         raise ValueError("APK contains an invalid or unsupported DEX file")
     size, offset = struct.unpack_from("<II", data, 0x38)
     if size > 1_000_000 or offset > len(data) or size * 4 > len(data) - offset:
@@ -113,7 +113,7 @@ def dex_strings(data: bytes) -> list[str]:
         if string_offset >= len(data):
             raise ValueError("DEX string data offset is outside file bounds")
         _, cursor = _read_uleb128(data, string_offset)
-        end = data.find(b"\\0", cursor)
+        end = data.find(b"\0", cursor)
         if end < 0:
             raise ValueError("DEX string is not null terminated")
         result.append(data[cursor:end].decode("utf-8", errors="replace"))
@@ -127,7 +127,7 @@ def apk_dex_strings(apk_path: str | Path) -> set[str]:
             dex_names = sorted(
                 name
                 for name in apk.namelist()
-                if re.fullmatch(r"classes(?:[0-9]+)?\\.dex", name)
+                if re.fullmatch(r"classes(?:[0-9]+)?\.dex", name)
             )
             if not dex_names:
                 raise ValueError("APK has no classes*.dex files")
