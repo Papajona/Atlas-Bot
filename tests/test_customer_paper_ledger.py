@@ -550,6 +550,7 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
             quantity="1",
             price="100",
             fee_amount="1",
+            correlation_group_marks={"BTC/USDT": "100"},
         )
         assert second["order_status"] == "FILLED"
         final_order = await get_customer_paper_order(
@@ -587,6 +588,36 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
         assert by_code["PAPER_POSITION"] == Decimal("95")
         assert by_code["PAPER_FEES"] == Decimal("1")
         assert by_code["PAPER_EQUITY"] == Decimal("-1000")
+
+
+        # Same-risk-group exposure rises in mark price after its original entry.
+        # A new SOL fill must be capped using the ETH mark, not its historical entry.
+        monkeypatch.setattr(settings, "correlation_group_cap_usd", 250.0)
+        await submit_customer_paper_order(
+            customer_id=customer_id, client_order_id="risk-eth-entry-92001",
+            venue="binance", market_type="spot", symbol="ETH/USDT", side="BUY",
+            quantity="1", currency="USDT", order_type="LIMIT", limit_price="100",
+        )
+        eth_fill = await record_customer_paper_fill(
+            customer_id=customer_id, client_order_id="risk-eth-entry-92001",
+            idempotency_key="risk-eth-fill-92001", bar_key="risk-eth-bar-92001",
+            quantity="1", price="90",
+        )
+        assert eth_fill["status"] == "APPENDED"
+
+        await submit_customer_paper_order(
+            customer_id=customer_id, client_order_id="risk-sol-entry-92001",
+            venue="binance", market_type="spot", symbol="SOL/USDT", side="BUY",
+            quantity="1", currency="USDT", order_type="LIMIT", limit_price="100",
+        )
+        sol_fill = await record_customer_paper_fill(
+            customer_id=customer_id, client_order_id="risk-sol-entry-92001",
+            idempotency_key="risk-sol-fill-92001", bar_key="risk-sol-bar-92001",
+            quantity="1", price="100", correlation_group_marks={"ETH/USDT": "200"},
+        )
+        assert sol_fill["status"] == "APPENDED"
+        assert sol_fill["filled_quantity"] == "0.500000000000000000"
+        assert sol_fill["position_quantity"] == "0.500000000000000000"
 
         # Queries are tenant-filtered; a different customer cannot inspect this order.
         assert await get_customer_paper_order(

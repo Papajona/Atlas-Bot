@@ -702,6 +702,7 @@ async def record_customer_paper_fill(
     quantity: str | int | Decimal,
     price: str | int | Decimal,
     fee_amount: str | int | Decimal = "0",
+    correlation_group_marks: Mapping[str, str | int | Decimal] | None = None,
     enforce_market_bar_budget: bool = False,
 ) -> dict[str, Any]:
     """Atomically append one simulated fill, fee, position event and balanced journal.
@@ -880,7 +881,29 @@ async def record_customer_paper_fill(
                         raise CustomerPaperLedgerBlocked(
                             "current correlation-group position has no valid entry valuation"
                         )
-                    existing_group_notional += abs(current_quantity) * average_entry
+                    position_symbol = str(current_position["symbol"] or "").strip().upper()
+                    raw_mark = None
+                    if isinstance(correlation_group_marks, Mapping):
+                        for mark_symbol, mark_value in correlation_group_marks.items():
+                            if str(mark_symbol or "").strip().upper() == position_symbol:
+                                raw_mark = mark_value
+                                break
+                    if raw_mark is None:
+                        raise CustomerPaperLedgerBlocked(
+                            f"current correlation-group position has no fresh validated mark: {position_symbol}"
+                        )
+                    try:
+                        mark_price = Decimal(str(raw_mark))
+                    except (InvalidOperation, TypeError, ValueError, OverflowError) as exc:
+                        raise CustomerPaperLedgerBlocked(
+                            f"current correlation-group position has an invalid mark: {position_symbol}"
+                        ) from exc
+                    if not mark_price.is_finite() or mark_price <= 0:
+                        raise CustomerPaperLedgerBlocked(
+                            f"current correlation-group position has no fresh validated mark: {position_symbol}"
+                        )
+                    # Never value existing exposure below historical entry after a price rise.
+                    existing_group_notional += abs(current_quantity) * max(average_entry, mark_price)
 
                 projected_notional = existing_group_notional + amount * fill_price
                 if projected_notional > cap:
