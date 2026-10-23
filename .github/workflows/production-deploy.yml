@@ -3,8 +3,12 @@ name: Production API Deployment
 on:
   workflow_dispatch:
     inputs:
+      android_release_run_id:
+        description: "Explicit approved GitHub Actions run ID for the signed Android release artifact"
+        required: true
+        type: string
       base_url:
-        description: "Public/load-balanced Atlas HTTPS base URL used for post-deploy /healthz verification"
+        description: "Approved public/load-balanced Atlas HTTPS base URL; must match the origin embedded in the selected APK"
         required: true
         type: string
 
@@ -37,6 +41,7 @@ jobs:
       - name: Require all release CI gates on this exact commit
         env:
           GH_TOKEN: ${{ github.token }}
+          ANDROID_RELEASE_RUN_ID: ${{ inputs.android_release_run_id }}
         run: |
           set -euo pipefail
 
@@ -98,62 +103,85 @@ jobs:
           require_staging_identity_success
           require_success "android-release.yml" "Protected signed Android release"
 
-          # A green Android workflow is insufficient when its signing job was skipped.
-          # Require the successful signed-release job and the non-expired APK evidence
-          # artifact for this exact commit before touching production.
-          android_run=""
-          while IFS= read -r candidate; do
-            [ -n "$candidate" ] || continue
-            job_conclusion="$(gh run view "$candidate" \
-              --repo "$GITHUB_REPOSITORY" \
-              --json jobs \
-              --jq '[.jobs[] | select(.name=="android-release")][0].conclusion // empty')"
-            if [ "$job_conclusion" = "success" ]; then
-              android_run="$candidate"
-              break
-            fi
-          done < <(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow "android-release.yml" \
-            --commit "$GITHUB_SHA" \
-            --json databaseId,status,conclusion \
-            --jq '.[] | select(.status=="completed" and .conclusion=="success") | .databaseId')
-
-          if [ -z "$android_run" ]; then
-            echo "BLOCKED: no successful signed Android release job exists for exact commit $GITHUB_SHA"
+          # Require an explicitly chosen signed run; never select the first run by commit.
+          android_run="$ANDROID_RELEASE_RUN_ID"
+          [[ "$android_run" =~ ^[0-9]+$ ]] || {
+            echo "BLOCKED: provide a numeric, explicitly approved android_release_run_id"
+            exit 1
+          }
+          run_endpoint="/repos/$GITHUB_REPOSITORY/actions/runs/$android_run"
+          expected_workflow_id="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/android-release.yml" --jq '.id')"
+          run_workflow_id="$(gh api "$run_endpoint" --jq '.workflow_id')"
+          run_sha="$(gh api "$run_endpoint" --jq '.head_sha')"
+          run_status="$(gh api "$run_endpoint" --jq '.status')"
+          run_conclusion="$(gh api "$run_endpoint" --jq '.conclusion // empty')"
+          run_event="$(gh api "$run_endpoint" --jq '.event')"
+          run_branch="$(gh api "$run_endpoint" --jq '.head_branch // empty')"
+          run_repository="$(gh api "$run_endpoint" --jq '.head_repository.full_name // empty')"
+          if [ "$run_workflow_id" != "$expected_workflow_id" ] \
+            || [ "$run_sha" != "$GITHUB_SHA" ] \
+            || [ "$run_status" != "completed" ] \
+            || [ "$run_conclusion" != "success" ] \
+            || [ "$run_repository" != "$GITHUB_REPOSITORY" ]; then
+            echo "BLOCKED: selected run must be a successful Android release workflow run for this exact commit and repository"
             exit 1
           fi
-
-          artifact_count="$(gh api \
-            "/repos/$GITHUB_REPOSITORY/actions/runs/$android_run/artifacts" \
-            --jq '[.artifacts[] | select(.name=="atlas-release-apk" and .expired==false and .size_in_bytes>0)] | length')"
-          if [ "${artifact_count:-0}" -lt 1 ]; then
-            echo "BLOCKED: signed Android artifact is missing, expired, or empty"
+          case "$run_event" in
+            workflow_dispatch)
+              [ "$run_branch" = "main" ] || {
+                echo "BLOCKED: manually dispatched Android release run must originate from main"
+                exit 1
+              }
+              ;;
+            push)
+              [[ "$run_branch" == android-v* ]] || {
+                echo "BLOCKED: push-triggered Android release run must originate from an android-v* tag"
+                exit 1
+              }
+              ;;
+            *)
+              echo "BLOCKED: unsupported event for a signed Android release run: $run_event"
+              exit 1
+              ;;
+          esac
+          android_job_conclusion="$(gh run view "$android_run" --repo "$GITHUB_REPOSITORY" --json jobs --jq '[.jobs[] | select(.name=="android-release")][0].conclusion // empty')"
+          [ "$android_job_conclusion" = "success" ] || {
+            echo "BLOCKED: selected run's android-release signing job did not succeed"
+            exit 1
+          }
+          artifact_count="$(gh api "$run_endpoint/artifacts" --jq '[.artifacts[] | select(.name=="atlas-release-apk" and .expired==false and .size_in_bytes>0)] | length')"
+          if [ "$artifact_count" -ne 1 ]; then
+            echo "BLOCKED: selected release run must contain exactly one non-expired, non-empty atlas-release-apk artifact"
             exit 1
           fi
-          echo "PASS: signed Android release and evidence artifact verified for $GITHUB_SHA"
+          echo "PASS: explicitly selected Android run $android_run is successful, signed, exact-commit, and has one artifact"
 
-      - name: Download and independently verify signed Android artifact for this exact commit
+      - name: Download and independently verify selected Android artifact and backend origin
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_CERT_SHA256: ${{ secrets.ATLAS_RELEASE_CERT_SHA256 }}
+          ANDROID_RELEASE_RUN_ID: ${{ inputs.android_release_run_id }}
+          ATLAS_BASE_URL: ${{ inputs.base_url }}
         run: |
           set -euo pipefail
-          # Select only a successful run whose signing job succeeded. A newer successful
-          # debug-only run must not mask an older valid signed-release run.
-          android_run=""
-          while IFS= read -r candidate; do
-            [ -n "$candidate" ] || continue
-            job_conclusion="$(gh run view "$candidate" --repo "$GITHUB_REPOSITORY" --json jobs --jq '[.jobs[] | select(.name=="android-release")][0].conclusion // empty')"
-            if [ "$job_conclusion" = "success" ]; then
-              android_run="$candidate"
-              break
-            fi
-          done < <(gh run list --repo "$GITHUB_REPOSITORY" --workflow "android-release.yml" --commit "$GITHUB_SHA" --status success --json databaseId --jq '.[].databaseId')
-          if [ -z "$android_run" ]; then
-            echo "BLOCKED: no successful signed Android release job exists for exact commit $GITHUB_SHA"
+          # Re-use the explicitly selected run validated above; do not reselect by commit.
+          android_run="$ANDROID_RELEASE_RUN_ID"
+          [[ "$android_run" =~ ^[0-9]+$ ]] || {
+            echo "BLOCKED: android_release_run_id must be numeric"
             exit 1
-          fi
+          }
+          run_endpoint="/repos/$GITHUB_REPOSITORY/actions/runs/$android_run"
+          selected_sha="$(gh api "$run_endpoint" --jq '.head_sha')"
+          selected_workflow="$(gh api "$run_endpoint" --jq '.workflow_id')"
+          expected_workflow="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/android-release.yml" --jq '.id')"
+          test "$selected_sha" = "$GITHUB_SHA" || {
+            echo "BLOCKED: selected Android run no longer matches the exact deployment commit"
+            exit 1
+          }
+          test "$selected_workflow" = "$expected_workflow" || {
+            echo "BLOCKED: selected run is not the Android release workflow"
+            exit 1
+          }
 
           artifact_count="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$android_run/artifacts" --jq '[.artifacts[] | select(.name=="atlas-release-apk" and .expired==false and .size_in_bytes>0)] | length')"
           if [ "${artifact_count:-0}" -ne 1 ]; then
@@ -189,14 +217,24 @@ jobs:
           package_name="$("$aapt" dump badging "$apk" | sed -n "s/^package: name='\\([^']*\\)'.*/\\1/p" | head -n 1)"
           test "$package_name" = "com.atlas.trading"
 
+          metadata_commit="$(sed -n 's/^commit=//p' "$bundle/atlas-release-metadata.txt")"
+          metadata_backend_url="$(sed -n 's/^backend_url=//p' "$bundle/atlas-release-metadata.txt")"
+          metadata_backend_origin="$(sed -n 's/^backend_origin=//p' "$bundle/atlas-release-metadata.txt")"
           metadata_package="$(sed -n 's/^package=//p' "$bundle/atlas-release-metadata.txt")"
           metadata_cert="$(sed -n 's/^certificate_sha256=//p' "$bundle/atlas-release-metadata.txt" | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+          test "$metadata_commit" = "$GITHUB_SHA" || { echo "BLOCKED: release metadata commit differs from deployment commit"; exit 1; }
           test "$metadata_package" = "$package_name"
           test "$metadata_cert" = "$actual_cert"
+          test -n "$metadata_backend_url" && test -n "$metadata_backend_origin" || { echo "BLOCKED: signed release evidence is missing backend URL/origin"; exit 1; }
 
           report_cert="$(sed -n 's/.*certificate SHA-256 digest: //p' "$bundle/atlas-signing-report.txt" | head -n 1 | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
           test "$report_cert" = "$actual_cert"
-          echo "PASS: exact-commit APK checksum, APK signature, actual package identity, metadata, and expected certificate all agree"
+          backend_evidence="$(python scripts/verify_android_apk_backend_origin.py --apk "$apk" --expected-url "$metadata_backend_url" --compare-origin "$ATLAS_BASE_URL")"
+          verified_backend_url=$(jq -er .backend_url <<< "$backend_evidence")
+          verified_backend_origin=$(jq -er .backend_origin <<< "$backend_evidence")
+          test "$verified_backend_url" = "$metadata_backend_url" || { echo "BLOCKED: backend URL evidence differs from the embedded APK URL"; exit 1; }
+          test "$verified_backend_origin" = "$metadata_backend_origin" || { echo "BLOCKED: metadata backend origin differs from the origin independently extracted from the APK"; exit 1; }
+          echo "PASS: explicit release run, commit, checksum, signature, package, metadata, embedded backend URL, and intended production origin agree"
       - name: Authenticate to Google Cloud with GitHub OIDC
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
