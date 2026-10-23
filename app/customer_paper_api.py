@@ -422,6 +422,19 @@ def build_customer_paper_router(
                 }
             elapsed_bars = int((bar["timestamp"] - submitted_at).total_seconds() // _TIMEFRAME_SECONDS[timeframe])
             if elapsed_bars < max(1, int(settings.paper_fill_latency_bars)):
+                if elapsed_bars >= max(1, int(settings.paper_order_ttl_bars)):
+                    await expire_customer_paper_order(
+                        customer_id=profile.id,
+                        client_order_id=client_order_id,
+                        idempotency_key=f"paper-ttl:{bar['timestamp'].isoformat()}",
+                    )
+                    expired_order = await _order_detail(profile.id, client_order_id)
+                    return {
+                        "status": "EXPIRED_TTL",
+                        "virtual_only": True,
+                        "elapsed_bars": elapsed_bars,
+                        "order": expired_order,
+                    }
                 return {
                     "status": "WAITING_FOR_FILL_LATENCY",
                     "virtual_only": True,
