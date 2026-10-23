@@ -335,6 +335,30 @@ def conservative_customer_paper_buy_price(market_context: Mapping) -> Decimal:
     return Decimal(price)
 
 
+async def _expire_open_order_if_ttl(
+    customer_id: int, client_id: str, *, elapsed_bars: int, ttl_bars: int,
+    is_protective_exit: bool, bar_identity: str,
+) -> bool:
+    """Expire an open remainder at the TTL boundary; protective exits never expire."""
+    if is_protective_exit or elapsed_bars < ttl_bars:
+        return False
+    current = await _paper_call(
+        get_customer_paper_order(customer_id=customer_id, client_order_id=client_id),
+        "recheck autonomous paper order before TTL expiry",
+    )
+    if not current or current.get("status") not in {"SUBMITTED", "PARTIALLY_FILLED"}:
+        return False
+    await _paper_call(
+        expire_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id=client_id,
+            idempotency_key="paper-ttl-" + _sha(f"{client_id}|{bar_identity}")[:48],
+        ),
+        "expire autonomous paper order remainder at TTL",
+    )
+    return True
+
+
 async def _fill_open_order(
     customer_id: int, order: dict, market: dict, df, *,
     group_mark_prices: Mapping[tuple[str, str, str], object] | None = None,
@@ -392,7 +416,7 @@ async def _fill_open_order(
     elapsed_bars = int(elapsed_seconds // timeframe_seconds)
     is_protective_exit = str(meta.get("order_role") or "").upper() == "PROTECTIVE_EXIT"
     ttl_bars = max(1, int(settings.paper_order_ttl_bars))
-    if not is_protective_exit and elapsed_bars >= ttl_bars:
+    if not is_protective_exit and elapsed_bars > ttl_bars:
         await _paper_call(
             expire_customer_paper_order(
                 customer_id=customer_id,
@@ -407,6 +431,16 @@ async def _fill_open_order(
             "fill": {"status": "EXPIRED"}, "recovered_pending_order": True,
         }
     if not is_protective_exit and elapsed_bars < max(1, int(settings.paper_fill_latency_bars)):
+        ttl_expired = await _expire_open_order_if_ttl(
+            customer_id, client_id, elapsed_bars=elapsed_bars, ttl_bars=ttl_bars,
+            is_protective_exit=False, bar_identity=current_bar_dt.isoformat(),
+        )
+        if ttl_expired:
+            return {
+                "status": "EXPIRED_TTL", "client_order_id": client_id,
+                "order_id": str(state["order_id"]), "elapsed_bars": elapsed_bars,
+                "fill": {"status": "EXPIRED"}, "recovered_pending_order": True,
+            }
         return {
             "status": "WAITING_FOR_FILL_LATENCY", "client_order_id": client_id,
             "order_id": str(state["order_id"]), "elapsed_bars": elapsed_bars,
@@ -474,6 +508,14 @@ async def _fill_open_order(
         "read same-bar paper fill",
     )
     if prior_fill is not None:
+        ttl_expired = await _expire_open_order_if_ttl(
+            customer_id, client_id, elapsed_bars=elapsed_bars, ttl_bars=ttl_bars,
+            is_protective_exit=is_protective_exit, bar_identity=bar_key,
+        )
+        current = await _paper_call(
+            get_customer_paper_order(customer_id=customer_id, client_order_id=client_id),
+            "recheck replayed autonomous paper order",
+        ) if ttl_expired else state
         return {
             "status": "REPLAYED",
             "client_order_id": client_id,
@@ -482,6 +524,7 @@ async def _fill_open_order(
             "bar_at": budget.get("bar_at"),
             "bar_capacity": budget.get("capacity"),
             "fill": prior_fill,
+            "order_status_after_ttl": current.get("status") if ttl_expired else None,
             "cost_model": {"cost_model_status": "REPLAYED_FROM_IMMUTABLE_LEDGER"},
             "recovered_pending_order": True,
         }
@@ -492,12 +535,16 @@ async def _fill_open_order(
         if side == "SELL" and "Rounded simulated fill price is invalid" in str(exc):
             # Keep the immutable exit intent pending until a representable positive
             # quote exists. Never write a zero-price fill or overstate proceeds.
+            ttl_expired = await _expire_open_order_if_ttl(
+                customer_id, client_id, elapsed_bars=elapsed_bars, ttl_bars=ttl_bars,
+                is_protective_exit=is_protective_exit, bar_identity=bar_key,
+            )
             return {
-                "status": "WAITING_FOR_PRICE_PRECISION",
+                "status": "EXPIRED_TTL" if ttl_expired else "WAITING_FOR_PRICE_PRECISION",
                 "client_order_id": client_id,
                 "order_id": state["order_id"],
                 "bar_key": bar_key,
-                "fill": {"status": "NOT_FILLED"},
+                "fill": {"status": "EXPIRED" if ttl_expired else "NOT_FILLED"},
                 "reason": "Positive SELL quote rounds to zero at numeric(38,18) precision",
                 "recovered_pending_order": True,
             }
@@ -574,8 +621,30 @@ async def _fill_open_order(
                 "cost_model": costs,
             }
         raise
+    ttl_expired = await _expire_open_order_if_ttl(
+        customer_id, client_id, elapsed_bars=elapsed_bars, ttl_bars=ttl_bars,
+        is_protective_exit=is_protective_exit, bar_identity=bar_key,
+    )
+    current_after_ttl = await _paper_call(
+        get_customer_paper_order(customer_id=customer_id, client_order_id=client_id),
+        "read autonomous order after TTL expiry",
+    ) if ttl_expired else None
+    if ttl_expired and str(result.get("status") or "").upper() in {
+        "NO_LIQUIDITY", "NO_CORRELATION_GROUP_HEADROOM"
+    }:
+        return {
+            "status": "EXPIRED_TTL",
+            "client_order_id": client_id,
+            "order_id": state["order_id"],
+            "bar_key": bar_key,
+            "fill": {"status": "EXPIRED"},
+            "order_status_after_ttl": (current_after_ttl or {}).get("status"),
+            "recovered_pending_order": True,
+            "cost_model": costs,
+        }
     return {
         "status": result.get("status"),
+        "order_status_after_ttl": (current_after_ttl or {}).get("status") if ttl_expired else None,
         "client_order_id": client_id,
         "order_id": state["order_id"],
         "bar_key": bar_key,
