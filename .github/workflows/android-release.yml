@@ -81,6 +81,34 @@ jobs:
           print("PASS: packaged APK resource table matches MainActivity's runtime backend resource")
           PY
 
+      - name: Verify backend resource survives release shrinking and optimization
+        env:
+          ATLAS_PROD_BACKEND_URL: https://atlas-ci-release-check.com
+          ATLAS_RELEASE_STORE_FILE: ${{ runner.temp }}/atlas-release-verification.jks
+          ATLAS_RELEASE_STORE_PASSWORD: ci-only-keystore-password
+          ATLAS_RELEASE_KEY_ALIAS: release-verification
+          ATLAS_RELEASE_KEY_PASSWORD: ci-only-key-password
+        shell: bash
+        run: |
+          set -euo pipefail
+          keytool -genkeypair -noprompt \
+            -keystore "$ATLAS_RELEASE_STORE_FILE" \
+            -storetype JKS \
+            -storepass "$ATLAS_RELEASE_STORE_PASSWORD" \
+            -keypass "$ATLAS_RELEASE_KEY_PASSWORD" \
+            -alias "$ATLAS_RELEASE_KEY_ALIAS" \
+            -dname "CN=Atlas CI Only Release Verification" \
+            -keyalg RSA -keysize 2048 -validity 2
+          gradle --no-daemon :app:assembleRelease
+          APK="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -s "$APK"
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          test -x "$AAPT"
+          python scripts/verify_android_apk_backend_origin.py \
+            --apk "$APK" --aapt "$AAPT" --expected-url "$ATLAS_PROD_BACKEND_URL"
+          rm -f "$ATLAS_RELEASE_STORE_FILE"
+          echo "PASS: optimized release APK retains the effective runtime backend resource."
+
   android-release:
     if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v'))
     runs-on: ubuntu-latest
