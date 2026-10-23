@@ -77,6 +77,6 @@ def test_signed_release_is_only_triggered_by_an_explicit_release_tag_or_manual_m
     assert 'tags:\n      - "android-v*"' in push_trigger
     assert "branches:" not in push_trigger
     assert "paths:" not in push_trigger
-    assert "github.event_name == \\'workflow_dispatch\\' && github.ref == \\'refs/heads/main\\'" in release_job
-    assert "github.event_name == \\'push\\' && startsWith(github.ref, \\'refs/tags/android-v\\')" in release_job
-    assert "github.event_name == \\'push\\' && github.ref == \\'refs/heads/main\\'" not in release_job
+    assert "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'" in release_job
+    assert "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v')" in release_job
+    assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" not in release_job
