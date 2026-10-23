@@ -226,7 +226,7 @@ jobs:
 
           report_cert="$(sed -n 's/.*certificate SHA-256 digest: //p' "$bundle/atlas-signing-report.txt" | head -n 1 | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
           test "$report_cert" = "$actual_cert"
-          backend_evidence="$(python scripts/verify_android_apk_backend_origin.py --apk "$apk" --expected-url "$metadata_backend_url" --compare-origin "$ATLAS_BASE_URL")"
+          backend_evidence="$(python scripts/verify_android_apk_backend_origin.py --apk "$apk" --aapt "$aapt" --expected-url "$metadata_backend_url" --compare-origin "$ATLAS_BASE_URL")"
           verified_backend_url=$(jq -er .backend_url <<< "$backend_evidence")
           verified_backend_origin=$(jq -er .backend_origin <<< "$backend_evidence")
           test "$verified_backend_url" = "$metadata_backend_url" || { echo "BLOCKED: backend URL evidence differs from the embedded APK URL"; exit 1; }

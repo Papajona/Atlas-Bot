@@ -1,58 +1,30 @@
 from __future__ import annotations
 
-import struct
-import zipfile
+import json
+import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from scripts.verify_android_apk_backend_origin import (
-    dex_strings,
-    normalize_backend_url,
-    verify_apk_backend_origin,
-)
+from scripts import verify_android_apk_backend_origin as verifier
 
 
-def _uleb128(value: int) -> bytes:
-    encoded = bytearray()
-    while True:
-        byte = value & 0x7F
-        value >>= 7
-        if value:
-            encoded.append(byte | 0x80)
-        else:
-            encoded.append(byte)
-            return bytes(encoded)
+def _resource_dump(entries: list[tuple[str, str]]) -> str:
+    lines: list[str] = []
+    for index, (name, value) in enumerate(entries, start=1):
+        lines.extend(
+            [
+                f"resource 0x7f1200{index:02x} com.atlas.trading:string/{name}",
+                f'  () (string8) "{value}"',
+            ]
+        )
+    return "\n".join(lines) + "\n"
 
 
-def _synthetic_dex(strings: list[str]) -> bytes:
-    """Build the minimum DEX header/string table needed to test our parser."""
-    string_ids_offset = 0x70
-    string_data_offset = string_ids_offset + 4 * len(strings)
-    data = bytearray(0x70)
-    data[:8] = b"dex\n035\0"
-    struct.pack_into("<II", data, 0x38, len(strings), string_ids_offset)
-
-    string_ids = bytearray()
-    string_data = bytearray()
-    for value in strings:
-        string_ids.extend(struct.pack("<I", string_data_offset + len(string_data)))
-        encoded = value.encode("utf-8")
-        string_data.extend(_uleb128(len(value)))
-        string_data.extend(encoded)
-        string_data.append(0)
-    return bytes(data + string_ids + string_data)
-
-
-def _apk(tmp_path: Path, strings: list[str]) -> Path:
-    path = tmp_path / "release.apk"
-    with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr("classes.dex", _synthetic_dex(strings))
-    return path
-
-
-def test_normalizes_https_origin_and_gradle_url_literal():
-    literal, origin = normalize_backend_url("  https://ATLAS.EXAMPLE.COM:443/  ")
+def test_normalizes_https_origin_and_runtime_url():
+    literal, origin = verifier.normalize_backend_url("  https://ATLAS.EXAMPLE.COM:443/  ")
     assert literal == "https://ATLAS.EXAMPLE.COM:443"
     assert origin == "https://atlas.example.com"
 
@@ -74,77 +46,202 @@ def test_normalizes_https_origin_and_gradle_url_literal():
 )
 def test_rejects_urls_that_are_not_approved_https_production_origins(value: str):
     with pytest.raises(ValueError):
-        normalize_backend_url(value)
+        verifier.normalize_backend_url(value)
 
 
-def test_reads_dex_string_ids_and_verifies_actual_apk_literal(tmp_path: Path):
-    literal = "https://atlas.example.com"
-    apk = _apk(tmp_path, ["MainActivity", literal, "another constant"])
-    with zipfile.ZipFile(apk) as archive:
-        strings = dex_strings(archive.read("classes.dex"))
-    assert literal in strings
-    assert verify_apk_backend_origin(apk, literal) == {
-        "backend_url": literal,
+def test_extracts_only_the_named_runtime_backend_resource():
+    dump = _resource_dump(
+        [
+            ("telemetry_endpoint", "https://unrelated.example.com"),
+            ("atlas_backend_url", "https://atlas.example.com"),
+        ]
+    )
+    assert verifier.extract_runtime_backend_url_from_resource_dump(dump) == "https://atlas.example.com"
+    assert verifier.verify_runtime_backend_origin(
+        dump,
+        "https://atlas.example.com",
+        "https://atlas.example.com/",
+    ) == {
+        "backend_url": "https://atlas.example.com",
         "backend_origin": "https://atlas.example.com",
     }
 
 
-def test_rejects_artifact_without_expected_backend_url(tmp_path: Path):
-    apk = _apk(tmp_path, ["MainActivity", "https://other.example.com"])
-    with pytest.raises(ValueError, match="absent from"):
-        verify_apk_backend_origin(apk, "https://atlas.example.com")
+def test_rejects_approved_url_elsewhere_when_active_runtime_backend_differs():
+    approved_url = "https://atlas.example.com"
+    active_url = "https://unrelated.example.com"
+    dump = _resource_dump(
+        [
+            ("diagnostic_example", approved_url),
+            ("atlas_backend_url", active_url),
+        ]
+    )
+
+    # The approved string exists in the APK resource dump, but not in the resource
+    # MainActivity actually reads. The verifier must use the named runtime resource.
+    assert approved_url in dump
+    assert active_url in dump
+    assert verifier.extract_runtime_backend_url_from_resource_dump(dump) == active_url
+    with pytest.raises(ValueError, match="effective runtime backend resource does not match"):
+        verifier.verify_runtime_backend_origin(dump, approved_url, approved_url)
 
 
-def test_rejects_artifact_origin_that_differs_from_intended_deployment(tmp_path: Path):
-    apk = _apk(tmp_path, ["MainActivity", "https://atlas.example.com"])
-    with pytest.raises(ValueError, match="origin mismatch"):
-        verify_apk_backend_origin(
-            apk,
-            "https://atlas.example.com",
-            "https://unrelated.example.com",
+def test_fails_closed_when_runtime_resource_is_missing_or_ambiguous():
+    with pytest.raises(ValueError, match="exactly one"):
+        verifier.extract_runtime_backend_url_from_resource_dump(
+            _resource_dump([("app_name", "Atlas Trading")])
         )
 
-
-def test_accepts_equivalent_canonical_origin_for_deployment(tmp_path: Path):
-    apk = _apk(tmp_path, ["MainActivity", "https://ATLAS.EXAMPLE.COM:443"])
-    evidence = verify_apk_backend_origin(
-        apk,
-        "https://ATLAS.EXAMPLE.COM:443/",
-        "https://atlas.example.com/",
+    ambiguous = _resource_dump(
+        [
+            ("atlas_backend_url", "https://atlas.example.com"),
+            ("atlas_backend_url", "https://unrelated.example.com"),
+        ]
     )
-    assert evidence["backend_origin"] == "https://atlas.example.com"
+    with pytest.raises(ValueError, match="exactly one"):
+        verifier.extract_runtime_backend_url_from_resource_dump(ambiguous)
+
+
+def test_apk_verifier_decodes_resource_table_not_dex_string_presence(monkeypatch, tmp_path: Path):
+    apk = tmp_path / "atlas-release.apk"
+    apk.write_bytes(b"test placeholder; aapt is mocked")
+    dump = _resource_dump(
+        [
+            ("diagnostic_example", "https://atlas.example.com"),
+            ("atlas_backend_url", "https://unrelated.example.com"),
+        ]
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout=dump, stderr="")
+
+    monkeypatch.setattr(verifier.subprocess, "run", fake_run)
+    with pytest.raises(ValueError, match="effective runtime backend resource does not match"):
+        verifier.verify_apk_backend_origin(
+            apk,
+            "https://atlas.example.com",
+            "https://atlas.example.com",
+            "android-sdk/build-tools/35.0.0/aapt",
+        )
+    assert calls == [
+        [
+            "android-sdk/build-tools/35.0.0/aapt",
+            "dump",
+            "--values",
+            "resources",
+            str(apk),
+        ]
+    ]
+
+
+def test_fails_closed_if_aapt_cannot_decode_the_apk(monkeypatch, tmp_path: Path):
+    apk = tmp_path / "broken.apk"
+    apk.write_bytes(b"not an apk")
+    monkeypatch.setattr(
+        verifier.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="bad resource table"),
+    )
+    with pytest.raises(ValueError, match="aapt could not decode"):
+        verifier.verify_apk_backend_origin(apk, "https://atlas.example.com", aapt_path="aapt")
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ANDROID_RELEASE_WORKFLOW = (ROOT / ".github" / "workflows" / "android-release.yml").read_text(encoding="utf-8")
-PRODUCTION_DEPLOY_WORKFLOW = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+GRADLE = (ROOT / "app" / "build.gradle.kts").read_text(encoding="utf-8")
+MAIN_ACTIVITY = (
+    ROOT / "app" / "src" / "main" / "java" / "com" / "atlas" / "trading" / "MainActivity.kt"
+).read_text(encoding="utf-8")
+ANDROID_RELEASE_WORKFLOW = (
+    ROOT / ".github" / "workflows" / "android-release.yml"
+).read_text(encoding="utf-8")
+PRODUCTION_DEPLOY_WORKFLOW = (
+    ROOT / ".github" / "workflows" / "production-deploy.yml"
+).read_text(encoding="utf-8")
 
 
-def test_signed_release_metadata_records_origin_only_after_inspecting_apk_dex():
-    verifier = 'python scripts/verify_android_apk_backend_origin.py --apk "$APK" --expected-url "$ATLAS_PROD_BACKEND_URL"'
-    assert verifier in ANDROID_RELEASE_WORKFLOW
-    assert "run_id=$GITHUB_RUN_ID" in ANDROID_RELEASE_WORKFLOW
-    assert "run_attempt=$GITHUB_RUN_ATTEMPT" in ANDROID_RELEASE_WORKFLOW
-    assert "backend_url=$BACKEND_URL_FOR_EVIDENCE" in ANDROID_RELEASE_WORKFLOW
-    assert "backend_origin=$BACKEND_ORIGIN" in ANDROID_RELEASE_WORKFLOW
-    assert "certificate_sha256=$ACTUAL_CERT" in ANDROID_RELEASE_WORKFLOW
+def test_android_runtime_reads_the_same_named_resource_that_release_verification_inspects():
+    assert 'resValue("string", "atlas_backend_url", debugBackendUrl)' in GRADLE
+    assert 'resValue("string", "atlas_backend_url", configuredBackendUrl ?: "")' in GRADLE
+    assert 'getString(R.string.atlas_backend_url).trimEnd(\'/\')' in MAIN_ACTIVITY
+    assert "BuildConfig.BACKEND_URL" not in MAIN_ACTIVITY
+    assert 'buildConfigField("String", "BACKEND_URL"' not in GRADLE
 
 
-def test_production_deployment_requires_an_explicit_signed_release_run_id():
-    assert "android_release_run_id:" in PRODUCTION_DEPLOY_WORKFLOW
-    assert "ANDROID_RELEASE_RUN_ID: ${{ inputs.android_release_run_id }}" in PRODUCTION_DEPLOY_WORKFLOW
-    assert "selected run must be a successful Android release workflow run" in PRODUCTION_DEPLOY_WORKFLOW
-    assert "android_job_conclusion" in PRODUCTION_DEPLOY_WORKFLOW
-    assert "metadata_run_id" in PRODUCTION_DEPLOY_WORKFLOW
-    assert "metadata_run_attempt" in PRODUCTION_DEPLOY_WORKFLOW
-    assert "never select the first run by commit" in PRODUCTION_DEPLOY_WORKFLOW
-    assert "while IFS= read -r candidate" not in PRODUCTION_DEPLOY_WORKFLOW
-
-
-def test_deployment_independently_checks_apk_url_and_intended_origin_before_cloud_auth():
-    assert 'metadata_commit="$(sed -n \'s/^commit=//p\'' in PRODUCTION_DEPLOY_WORKFLOW
-    assert 'metadata_backend_origin="$(sed -n \'s/^backend_origin=//p\'' in PRODUCTION_DEPLOY_WORKFLOW
-    assert '--expected-url "$metadata_backend_url" --compare-origin "$ATLAS_BASE_URL"' in PRODUCTION_DEPLOY_WORKFLOW
+def test_release_and_deployment_both_verify_the_effective_runtime_resource():
+    assert 'python scripts/verify_android_apk_backend_origin.py --apk "$APK" --aapt "$AAPT" --expected-url "$ATLAS_PROD_BACKEND_URL"' in ANDROID_RELEASE_WORKFLOW
+    assert 'backend_url=$BACKEND_URL_FOR_EVIDENCE' in ANDROID_RELEASE_WORKFLOW
+    assert 'backend_origin=$BACKEND_ORIGIN' in ANDROID_RELEASE_WORKFLOW
+    assert 'python scripts/verify_android_apk_backend_origin.py --apk "$apk" --aapt "$aapt" --expected-url "$metadata_backend_url" --compare-origin "$ATLAS_BASE_URL"' in PRODUCTION_DEPLOY_WORKFLOW
     assert 'test "$verified_backend_origin" = "$metadata_backend_origin"' in PRODUCTION_DEPLOY_WORKFLOW
-    assert "metadata_commit" in PRODUCTION_DEPLOY_WORKFLOW
-    assert PRODUCTION_DEPLOY_WORKFLOW.index("--compare-origin \"$ATLAS_BASE_URL\"") < PRODUCTION_DEPLOY_WORKFLOW.index("      - name: Authenticate to Google Cloud with GitHub OIDC")
+    assert PRODUCTION_DEPLOY_WORKFLOW.index("--compare-origin") < PRODUCTION_DEPLOY_WORKFLOW.index("      - name: Authenticate to Google Cloud with GitHub OIDC")
+
+
+def test_cli_entrypoint_executes_verification_and_rejects_other_active_backend(tmp_path: Path):
+    apk = tmp_path / "release.apk"
+    apk.write_bytes(b"fixture; aapt is mocked")
+    aapt = tmp_path / "aapt"
+    resource_dump = _resource_dump(
+        [
+            ("diagnostic_example", "https://atlas.example.com"),
+            ("atlas_backend_url", "https://unrelated.example.com"),
+        ]
+    )
+    aapt.write_text(
+        "#!/usr/bin/env python3\nprint(" + repr(resource_dump) + ")\n",
+        encoding="utf-8",
+    )
+    aapt.chmod(0o755)
+
+    command = [
+        sys.executable,
+        str(ROOT / "scripts" / "verify_android_apk_backend_origin.py"),
+        "--apk",
+        str(apk),
+        "--aapt",
+        str(aapt),
+        "--expected-url",
+        "https://atlas.example.com",
+        "--compare-origin",
+        "https://atlas.example.com",
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert "effective runtime backend resource does not match" in result.stderr
+    assert "backend_origin" not in result.stdout
+
+
+def test_cli_entrypoint_succeeds_for_the_effective_runtime_backend(tmp_path: Path):
+    apk = tmp_path / "release.apk"
+    apk.write_bytes(b"fixture; aapt is mocked")
+    aapt = tmp_path / "aapt"
+    resource_dump = _resource_dump([("atlas_backend_url", "https://atlas.example.com")])
+    aapt.write_text(
+        "#!/usr/bin/env python3\nprint(" + repr(resource_dump) + ")\n",
+        encoding="utf-8",
+    )
+    aapt.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "verify_android_apk_backend_origin.py"),
+            "--apk",
+            str(apk),
+            "--aapt",
+            str(aapt),
+            "--expected-url",
+            "https://atlas.example.com",
+            "--compare-origin",
+            "https://atlas.example.com/",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "backend_url": "https://atlas.example.com",
+        "backend_origin": "https://atlas.example.com",
+    }

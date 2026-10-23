@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Fail-closed evidence check for the backend origin embedded in a signed Android APK.
+"""Verify the effective Android runtime backend string resource in a built APK.
 
-The check searches DEX string tables in the APK for the exact URL that Gradle receives
-for BuildConfig.BACKEND_URL, canonicalizes its origin, and optionally compares it with
-the origin intended for deployment. It never trusts release metadata as proof that the
-APK contains the requested URL.
+MainActivity obtains its API/portal base URL from R.string.atlas_backend_url at
+runtime. This verifier asks Android's aapt resource-table decoder for that exact
+resource symbol. It intentionally does not search DEX-wide strings, because an
+unused approved URL string can coexist with a different active backend.
 """
 from __future__ import annotations
 
@@ -12,9 +12,8 @@ import argparse
 import ipaddress
 import json
 import re
-import struct
+import subprocess
 import sys
-import zipfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -23,16 +22,21 @@ _NON_PRODUCTION_HOST = re.compile(
     r"(^|[.-])(dev|development|staging|test|sandbox|localhost)([.-]|$)",
     re.IGNORECASE,
 )
+_RESOURCE_HEADER = re.compile(
+    r"^\s*resource\s+0x[0-9a-fA-F]+\s+.*\bstring/atlas_backend_url(?::.*)?\s*$"
+)
+_NEXT_RESOURCE = re.compile(r"^\s*resource\s+0x[0-9a-fA-F]+\s+")
+_STRING_VALUE = re.compile(r'\((?:string8|string16)\)\s+"([^"\r\n]*)"\s*$')
 
 
 def normalize_backend_url(value: str) -> tuple[str, str]:
-    """Return (Gradle-normalized URL literal, canonical HTTPS origin)."""
+    """Return (normalized URL string, canonical HTTPS origin)."""
     if not isinstance(value, str) or not value:
         raise ValueError("backend URL is empty")
     if any(ord(char) < 0x20 or char in {'"', "\\", "\r", "\n"} for char in value):
         raise ValueError("backend URL contains invalid control or quoting characters")
 
-    # Match app/build.gradle.kts: trim surrounding whitespace and trailing root slashes.
+    # Match app/build.gradle.kts and MainActivity: trim whitespace and trailing slashes.
     literal = value.strip().rstrip("/")
     if not literal:
         raise ValueError("backend URL normalizes to an empty value")
@@ -53,7 +57,7 @@ def normalize_backend_url(value: str) -> tuple[str, str]:
 
     host = parsed.hostname.lower().rstrip(".")
     if not host or host.startswith("[") or ":" in host:
-        raise ValueError("backend URL must use an approved DNS hostname, not an IP literal")
+        raise ValueError("backend URL must use a DNS hostname, not an IP literal")
     try:
         ipaddress.ip_address(host)
     except ValueError:
@@ -80,102 +84,112 @@ def normalize_backend_url(value: str) -> tuple[str, str]:
     ):
         raise ValueError("backend URL uses a reserved or example hostname")
 
-    origin = f"https://{ascii_host}"
-    return literal, origin
+    return literal, f"https://{ascii_host}"
 
 
-def _read_uleb128(data: bytes, offset: int) -> tuple[int, int]:
-    result = 0
-    shift = 0
-    for _ in range(5):
-        if offset >= len(data):
-            raise ValueError("truncated DEX ULEB128 value")
-        byte = data[offset]
-        offset += 1
-        result |= (byte & 0x7F) << shift
-        if not byte & 0x80:
-            return result, offset
-        shift += 7
-    raise ValueError("invalid DEX ULEB128 value")
+def extract_runtime_backend_url_from_resource_dump(resource_dump: str) -> str:
+    """Extract only the value of the resource that MainActivity reads at runtime."""
+    lines = resource_dump.splitlines()
+    headers = [index for index, line in enumerate(lines) if _RESOURCE_HEADER.fullmatch(line)]
+    if len(headers) != 1:
+        raise ValueError(
+            "APK must expose exactly one resources-table entry for string/atlas_backend_url"
+        )
+
+    start = headers[0]
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if _NEXT_RESOURCE.match(lines[index]):
+            end = index
+            break
+
+    values: list[str] = []
+    for line in lines[start:end]:
+        match = _STRING_VALUE.search(line.strip())
+        if match:
+            values.append(match.group(1))
+
+    # Resource configurations may repeat a value, but divergent configurations would
+    # make the runtime choice device-dependent and cannot be approved by one origin.
+    distinct_values = set(values)
+    if not distinct_values:
+        raise ValueError("runtime string/atlas_backend_url has no decoded string value")
+    if len(distinct_values) != 1:
+        raise ValueError("runtime string/atlas_backend_url has ambiguous configuration values")
+    return distinct_values.pop()
 
 
-def dex_strings(data: bytes) -> list[str]:
-    """Read DEX string_ids with bounds checks; URLs are ASCII in DEX MUTF-8."""
-    if len(data) < 0x70 or not data.startswith(b"dex\n") or data[7:8] != b"\0":
-        raise ValueError("APK contains an invalid or unsupported DEX file")
-    size, offset = struct.unpack_from("<II", data, 0x38)
-    if size > 1_000_000 or offset > len(data) or size * 4 > len(data) - offset:
-        raise ValueError("DEX string table is outside file bounds")
+def verify_runtime_backend_origin(
+    resource_dump: str,
+    expected_url: str,
+    compare_origin: str | None = None,
+) -> dict[str, str]:
+    """Verify actual resource value, expected build input, and optional intended origin."""
+    expected_literal, expected_origin = normalize_backend_url(expected_url)
+    actual_url = extract_runtime_backend_url_from_resource_dump(resource_dump)
+    actual_literal, actual_origin = normalize_backend_url(actual_url)
 
-    result: list[str] = []
-    for index in range(size):
-        (string_offset,) = struct.unpack_from("<I", data, offset + index * 4)
-        if string_offset >= len(data):
-            raise ValueError("DEX string data offset is outside file bounds")
-        _, cursor = _read_uleb128(data, string_offset)
-        end = data.find(b"\0", cursor)
-        if end < 0:
-            raise ValueError("DEX string is not null terminated")
-        result.append(data[cursor:end].decode("utf-8", errors="replace"))
-    return result
+    if actual_literal != expected_literal:
+        raise ValueError(
+            "effective runtime backend resource does not match the expected release URL"
+        )
+    if actual_origin != expected_origin:
+        raise ValueError("effective runtime backend resource origin does not match expected origin")
 
-
-def apk_dex_strings(apk_path: str | Path) -> set[str]:
-    """Read strings from every classes*.dex file in an APK."""
-    try:
-        with zipfile.ZipFile(apk_path) as apk:
-            dex_names = sorted(
-                name
-                for name in apk.namelist()
-                if re.fullmatch(r"classes(?:[0-9]+)?\.dex", name)
+    if compare_origin is not None:
+        _, intended_origin = normalize_backend_url(compare_origin)
+        if intended_origin != actual_origin:
+            raise ValueError(
+                f"APK runtime backend origin mismatch: artifact={actual_origin}, intended={intended_origin}"
             )
-            if not dex_names:
-                raise ValueError("APK has no classes*.dex files")
-            all_strings: set[str] = set()
-            for name in dex_names:
-                all_strings.update(dex_strings(apk.read(name)))
-            return all_strings
-    except (OSError, zipfile.BadZipFile) as exc:
-        raise ValueError("APK could not be read as a valid ZIP archive") from exc
+
+    return {"backend_url": actual_literal, "backend_origin": actual_origin}
 
 
 def verify_apk_backend_origin(
     apk_path: str | Path,
     expected_url: str,
     compare_origin: str | None = None,
+    aapt_path: str | Path = "aapt",
 ) -> dict[str, str]:
-    """Prove the configured URL literal exists in DEX and matches any intended origin."""
-    literal, origin = normalize_backend_url(expected_url)
-    strings = apk_dex_strings(apk_path)
-    if literal not in strings:
-        raise ValueError(
-            "the expected backend URL literal is absent from the downloaded APK DEX string tables"
+    """Decode resources.arsc and verify the exact runtime resource before release/deploy."""
+    try:
+        result = subprocess.run(
+            [str(aapt_path), "dump", "--values", "resources", str(apk_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
-    if compare_origin is not None:
-        _, intended_origin = normalize_backend_url(compare_origin)
-        if intended_origin != origin:
-            raise ValueError(
-                f"APK backend origin mismatch: artifact={origin}, intended={intended_origin}"
-            )
-    return {"backend_url": literal, "backend_origin": origin}
+    except OSError as exc:
+        raise ValueError(f"could not execute Android aapt resource-table decoder: {exc}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip()
+        raise ValueError(
+            "aapt could not decode the APK resource table"
+            + (f": {detail}" if detail else "")
+        )
+    return verify_runtime_backend_origin(result.stdout, expected_url, compare_origin)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--apk", required=True, help="Signed APK to inspect")
+    parser.add_argument("--apk", required=True, help="APK to inspect")
+    parser.add_argument("--aapt", required=True, help="Android SDK aapt executable")
     parser.add_argument(
         "--expected-url",
         required=True,
-        help="URL supplied to Gradle (or the corresponding value recorded in release evidence)",
+        help="Backend URL supplied to Gradle and recorded in release evidence",
     )
     parser.add_argument(
         "--compare-origin",
-        help="Intended production base URL; its canonical origin must match the APK",
+        help="Intended production base URL; its canonical origin must match the runtime resource",
     )
     args = parser.parse_args()
     try:
         evidence = verify_apk_backend_origin(
-            args.apk, args.expected_url, args.compare_origin
+            args.apk, args.expected_url, args.compare_origin, args.aapt
         )
     except ValueError as exc:
         print(f"BLOCKED: {exc}", file=sys.stderr)

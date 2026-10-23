@@ -43,7 +43,7 @@ class MainActivity : AppCompatActivity() {
 
         cleanLegacyCache()
 
-        val backendUrl = BuildConfig.BACKEND_URL.trimEnd('/')
+        val backendUrl = getString(R.string.atlas_backend_url).trimEnd('/')
 
         setContent {
             var themeMode by remember { mutableStateOf(ThemePreferences.getThemeMode(this@MainActivity)) }
@@ -205,8 +205,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openPortal() {
-        val backendUrl = BuildConfig.BACKEND_URL.trimEnd('/')
-        val trustedHost = Uri.parse(BuildConfig.BACKEND_URL).host.orEmpty().lowercase()
+        val backendUrl = getString(R.string.atlas_backend_url).trimEnd('/')
+        val trustedHost = Uri.parse(backendUrl).host.orEmpty().lowercase()
 
         val targetUri = Uri.parse(backendUrl)
         val host = targetUri.host.orEmpty().lowercase()
