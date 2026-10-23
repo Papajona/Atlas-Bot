@@ -85,3 +85,20 @@ def test_downgrade_preserves_preexisting_canonical_index_when_legacy_name_was_ab
     })
 
     assert current == {canonical}
+
+
+
+def test_upgrade_refuses_to_reuse_preexisting_migration_provenance_schema():
+    """Do not change ACLs or trust rollback metadata in a pre-existing reserved schema."""
+    import pytest
+
+    class ScalarResult:
+        def scalar_one(self):
+            return False  # to_regnamespace() IS NULL => false, schema already exists
+
+    class ExistingSchemaBind:
+        def execute(self, *_args, **_kwargs):
+            return ScalarResult()
+
+    with pytest.raises(RuntimeError, match="reserved migration schema atlas_migration_meta already exists"):
+        _migration._capture_rename_index_state(ExistingSchemaBind())
