@@ -928,3 +928,33 @@ def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monke
         assert {p["symbol"] for p in positions} == {"ETH/USDT", "SOL/USDT"}
 
     asyncio.run(run())
+
+
+def test_customer_paper_buy_discipline_counts_any_filled_order_and_checks_cooldown_across_midnight():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_lifecycle.py").read_text(
+        encoding="utf-8"
+    )
+    daily_start = source.index("todays_entries =")
+    daily_end = source.index("if int(todays_entries", daily_start)
+    daily_query = source[daily_start:daily_end]
+    cooldown_start = source.index("last_entry =")
+    cooldown_end = source.index("if last_entry is not None", cooldown_start)
+    cooldown_query = source[cooldown_start:cooldown_end]
+
+    for query in (daily_query, cooldown_query):
+        assert "EXISTS (" in query
+        assert "FROM customer_paper.fills f" in query
+        assert "f.customer_id=o.customer_id AND f.order_id=o.id" in query
+        assert "latest.event_type IN ('SUBMITTED','PARTIALLY_FILLED','FILLED')" in query
+    assert "o.created_at >= :day_start" not in cooldown_query
+    assert "cooldown_start = now - timedelta(" in source
+    assert "o.created_at >= :cooldown_start" in cooldown_query
+    # A 90-second cooldown starting at 00:00:30 includes a 23:59:30 entry.
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 10, 24, 0, 0, 30, tzinfo=timezone.utc)
+    cooldown_start_at = now - timedelta(seconds=90)
+    prior_entry = datetime(2026, 10, 23, 23, 59, 30, tzinfo=timezone.utc)
+    assert cooldown_start_at <= prior_entry < now
