@@ -841,7 +841,7 @@ def test_conservative_buy_sizing_price_matches_actual_paper_fill_price(monkeypat
     reason="requires CI-provisioned isolated customer paper and primary PostgreSQL databases",
 )
 def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monkeypatch):
-    """Two same-group symbols cannot both consume the same pre-fill headroom."""
+    """Concurrent same-group fills cannot both consume the same pre-fill headroom."""
     from app.correlation_risk import risk_group
 
     monkeypatch.setattr(settings, "database_url", os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"])
@@ -856,59 +856,61 @@ def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monke
     monkeypatch.setattr(settings, "research_taker_bps", 0)
 
     async def run():
-        customer_id = 99232
         first_at = datetime.now(timezone.utc) - timedelta(hours=8)
+        # Use a fresh customer ID per run so rerunning the test cannot inherit old positions.
+        customer_id = 990000000 + int(first_at.timestamp()) % 90000000
 
-        # First L1_BETA position uses $30.03 of the $50 group budget.
         eth_req, eth_frame_1, eth_context_1 = _market_fixture(
             timestamp=first_at, symbol="ETH/USDT", bid=100.0, ask=100.1,
+        )
+        sol_req, sol_frame_1, sol_context_1 = _market_fixture(
+            timestamp=first_at, symbol="SOL/USDT", bid=100.0, ask=100.1,
         )
         submitted_eth = await execute_customer_paper_spot_signal(
             customer_id=customer_id, req=eth_req, df=eth_frame_1,
             market_context=eth_context_1, side="BUY", quantity="0.3",
             stop_loss_price="95", take_profit_price="110",
-            strategy="group-cap-fill-regression",
-        )
-        assert submitted_eth["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
-
-        second_at = first_at + timedelta(hours=1)
-        eth_req_2, eth_frame_2, eth_context_2 = _market_fixture(
-            timestamp=second_at, symbol="ETH/USDT", bid=100.0, ask=100.1,
-        )
-        first_fill = await recover_customer_paper_spot_flow(
-            customer_id=customer_id, req=eth_req_2,
-            df=eth_frame_2, market_context=eth_context_2,
-        )
-        assert first_fill is not None
-        assert first_fill["execution"]["fill"]["status"] == "APPENDED"
-        assert Decimal(first_fill["execution"]["fill"]["filled_quantity"]) == Decimal("0.300000000000000000")
-
-        # Submit a separate L1_BETA market. Its pre-submit snapshot sees the ETH
-        # position, but the authoritative test is the atomic DB check at fill time.
-        third_at = second_at + timedelta(hours=1)
-        sol_req, sol_frame_1, sol_context_1 = _market_fixture(
-            timestamp=third_at, symbol="SOL/USDT", bid=100.0, ask=100.1,
+            strategy="group-cap-concurrency-regression",
         )
         submitted_sol = await execute_customer_paper_spot_signal(
             customer_id=customer_id, req=sol_req, df=sol_frame_1,
             market_context=sol_context_1, side="BUY", quantity="0.3",
             stop_loss_price="95", take_profit_price="110",
-            strategy="group-cap-fill-regression",
+            strategy="group-cap-concurrency-regression",
         )
+        assert submitted_eth["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
         assert submitted_sol["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
 
-        fourth_at = third_at + timedelta(hours=1)
+        # Both intents are pending before either fill starts. They race into the same
+        # L1_BETA budget on the next bar; the group advisory lock must serialize them.
+        second_at = first_at + timedelta(hours=1)
+        eth_req_2, eth_frame_2, eth_context_2 = _market_fixture(
+            timestamp=second_at, symbol="ETH/USDT", bid=100.0, ask=100.1,
+        )
         sol_req_2, sol_frame_2, sol_context_2 = _market_fixture(
-            timestamp=fourth_at, symbol="SOL/USDT", bid=100.0, ask=100.1,
+            timestamp=second_at, symbol="SOL/USDT", bid=100.0, ask=100.1,
         )
-        second_fill = await recover_customer_paper_spot_flow(
-            customer_id=customer_id, req=sol_req_2,
-            df=sol_frame_2, market_context=sol_context_2,
+        eth_result, sol_result = await asyncio.gather(
+            recover_customer_paper_spot_flow(
+                customer_id=customer_id, req=eth_req_2,
+                df=eth_frame_2, market_context=eth_context_2,
+            ),
+            recover_customer_paper_spot_flow(
+                customer_id=customer_id, req=sol_req_2,
+                df=sol_frame_2, market_context=sol_context_2,
+            ),
         )
-        assert second_fill is not None
-        assert second_fill["execution"]["fill"]["status"] == "APPENDED"
-        second_quantity = Decimal(second_fill["execution"]["fill"]["filled_quantity"])
-        assert Decimal("0") < second_quantity < Decimal("0.3")
+        assert eth_result is not None and sol_result is not None
+        eth_fill = eth_result["execution"]["fill"]
+        sol_fill = sol_result["execution"]["fill"]
+        assert eth_fill["status"] == sol_fill["status"] == "APPENDED"
+        filled_quantities = [
+            Decimal(eth_fill["filled_quantity"]),
+            Decimal(sol_fill["filled_quantity"]),
+        ]
+        # At the $100.10 fill price, only one 0.3-unit order fits in full under $50.
+        assert max(filled_quantities) == Decimal("0.300000000000000000")
+        assert Decimal("0") < min(filled_quantities) < Decimal("0.3")
 
         positions = await get_customer_paper_positions(customer_id=customer_id)
         group_notional = sum(
