@@ -22,16 +22,18 @@ _NON_PRODUCTION_HOST = re.compile(
     r"(^|[.-])(dev|development|staging|test|sandbox|localhost)([.-]|$)",
     re.IGNORECASE,
 )
-_RESOURCE_HEADER = re.compile(r"^\s*resource\s+0x[0-9a-fA-F]+\s+.*\bstring/atlas_backend_url\s*$")
+_RESOURCE_HEADER = re.compile(
+    r"^\s*resource\s+0x[0-9a-fA-F]+\s+.*\bstring/atlas_backend_url\s*$"
+)
 _NEXT_RESOURCE = re.compile(r"^\s*resource\s+0x[0-9a-fA-F]+\s+")
-_STRING_VALUE = re.compile(r'\((?:string8|string16)\)\s+"([^"\\r\\n]*)"\s*$')
+_STRING_VALUE = re.compile(r'\((?:string8|string16)\)\s+"([^"\r\n]*)"\s*$')
 
 
 def normalize_backend_url(value: str) -> tuple[str, str]:
     """Return (normalized URL string, canonical HTTPS origin)."""
     if not isinstance(value, str) or not value:
         raise ValueError("backend URL is empty")
-    if any(ord(char) < 0x20 or char in {'"', "\\\\", "\\r", "\\n"} for char in value):
+    if any(ord(char) < 0x20 or char in {'"', "\\", "\r", "\n"} for char in value):
         raise ValueError("backend URL contains invalid control or quoting characters")
 
     # Match app/build.gradle.kts and MainActivity: trim whitespace and trailing slashes.
@@ -197,4 +199,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main)
