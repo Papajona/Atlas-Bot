@@ -17,6 +17,8 @@ def test_release_build_requires_an_explicit_approved_https_backend_origin():
     assert GRADLE.startswith("plugins {")
     assert 'providers.environmentVariable("ATLAS_PROD_BACKEND_URL")' in GRADLE
     assert "releaseTaskRequested" in GRADLE
+    assert GRADLE.startswith("import java.net.URI\\n\\nplugins {")
+    assert "runCatching { URI(it) }" in GRADLE
     assert 'check(approvedProductionBackend)' in GRADLE
     assert 'parsedBackendUri.scheme == "https"' in GRADLE
     assert "nonProductionHostPattern.containsMatchIn(backendHost)" in GRADLE
