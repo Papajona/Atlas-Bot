@@ -1,7 +1,13 @@
 name: Supabase Staging Identity Preflight
+run-name: Staging identity preflight (${{ inputs.request_id || 'manual' }})
 
 on:
   workflow_dispatch:
+    inputs:
+      request_id:
+        description: Unique caller-generated ID for correlating a deployment's preflight
+        required: false
+        type: string
 
 permissions:
   contents: read
