@@ -47,6 +47,7 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     workflow = Path(".github/workflows/staging-restore-audit.yml").read_text(encoding="utf-8")
     identity_workflow = Path(".github/workflows/staging-identity-preflight.yml").read_text(encoding="utf-8")
     reconciliation_workflow = Path(".github/workflows/provider-ledger-reconciliation.yml").read_text(encoding="utf-8")
+    provider_verifier = Path("scripts/verify_provider_ledger_reconciliation.py").read_text(encoding="utf-8")
     verifier = Path("scripts/verify_staging_restore.py").read_text(encoding="utf-8")
     runbook = Path("RUNBOOK.md").read_text(encoding="utf-8")
     expected = "0053_supabase_public_default_acl_lockdown"
@@ -55,7 +56,9 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     # isolated paper-only runtime intentionally avoids the production Alembic
     # migration path and verifies its two read-only identities plus ledger readiness.
     assert f"--expected-revision {expected}" in workflow
+    assert f"--expected-revision {expected}" in reconciliation_workflow
     assert f'default="{expected}"' in verifier
+    assert f'default="{expected}"' in provider_verifier
     assert f"checks for revision `{expected}`" in runbook
     assert "database revision is 0049" not in runbook
     assert "same actual ref" in runbook
