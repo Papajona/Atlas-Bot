@@ -1,3 +1,9 @@
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
+}
+
 val configuredBackendUrlRaw = providers.environmentVariable("ATLAS_PROD_BACKEND_URL").orNull?.trim()
 val configuredBackendUrl = configuredBackendUrlRaw
     ?.takeIf { value -> value.none { char -> char == '"' || char == '\\' || char == '\n' || char == '\r' } }
@@ -26,12 +32,6 @@ if (releaseTaskRequested) {
     check(approvedProductionBackend) {
         "BLOCKED: ATLAS_PROD_BACKEND_URL must be configured as an approved HTTPS production origin; development, staging, test, local/private, example, and non-root URLs are rejected."
     }
-}
-
-plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
