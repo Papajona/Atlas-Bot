@@ -854,6 +854,9 @@ def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monke
     monkeypatch.setattr(settings, "correlation_group_cap_usd", 50.0)
     monkeypatch.setattr(settings, "research_slippage_bps", 0)
     monkeypatch.setattr(settings, "research_taker_bps", 0)
+    # This test isolates the fill-time exposure gate; same-day entry discipline is
+    # exercised by separate tests and should not block the two pending intents here.
+    monkeypatch.setattr(settings, "discipline_enabled", False)
 
     async def run():
         first_at = datetime.now(timezone.utc) - timedelta(hours=8)
