@@ -46,7 +46,7 @@ def normalize_backend_url(value: str) -> tuple[str, str]:
         raise ValueError("backend URL must be an absolute HTTPS origin")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("backend URL must not contain credentials")
-    if parsed.query or parsed.fragment or parsed.path not in ("", "/"):
+    if "?" in literal or "#" in literal or parsed.path not in ("", "/"):
         raise ValueError("backend URL must be an origin without a path, query, or fragment")
     if port not in (None, 443):
         raise ValueError("backend URL may use only the default HTTPS port")
