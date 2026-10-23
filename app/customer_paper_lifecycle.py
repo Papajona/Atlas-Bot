@@ -13,12 +13,13 @@ import re
 import uuid
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_EVEN, localcontext
 from typing import Any
 
 from sqlalchemy import text
 
 from .config import settings
+from .correlation_risk import risk_group
 from .customer_paper_ledger import (
     CustomerPaperIdempotencyConflict,
     CustomerPaperLedgerBlocked,
@@ -843,6 +844,69 @@ async def record_customer_paper_fill(
             side = str(order["side"])
             if limit is not None and ((side == "BUY" and fill_price > limit) or (side == "SELL" and fill_price < limit)):
                 raise CustomerPaperOrderConflict("fill price violates the immutable limit price")
+
+            if side == "BUY":
+                # A per-symbol position lock cannot protect a shared risk budget across
+                # different markets. Serialize all BUY fills for this customer's group,
+                # then reread the latest committed position events inside this transaction.
+                target_group = risk_group(symbol)
+                await conn.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                    {"lock_key": f"paper-correlation-group:{customer_id}:{target_group}"},
+                )
+                cap = Decimal(str(settings.correlation_group_cap_usd))
+                if not cap.is_finite() or cap < 0:
+                    raise CustomerPaperLedgerBlocked("correlation-group cap is not a finite non-negative amount")
+                latest_positions = (await conn.execute(text("""
+                    SELECT DISTINCT ON (venue, market_type, symbol)
+                           venue, market_type, symbol, quantity_after, average_entry_after
+                    FROM customer_paper.position_events
+                    WHERE customer_id = :customer_id
+                    ORDER BY venue, market_type, symbol, id DESC
+                """), {"customer_id": customer_id})).mappings().all()
+                existing_group_notional = Decimal("0")
+                for current_position in latest_positions:
+                    if risk_group(str(current_position["symbol"] or "")) != target_group:
+                        continue
+                    current_quantity = Decimal(str(current_position["quantity_after"] or "0"))
+                    if not current_quantity.is_finite():
+                        raise CustomerPaperLedgerBlocked(
+                            "current correlation-group position quantity is not finite"
+                        )
+                    if current_quantity == 0:
+                        continue
+                    average_entry = Decimal(str(current_position["average_entry_after"] or "0"))
+                    if not average_entry.is_finite() or average_entry <= 0:
+                        raise CustomerPaperLedgerBlocked(
+                            "current correlation-group position has no valid entry valuation"
+                        )
+                    existing_group_notional += abs(current_quantity) * average_entry
+
+                projected_notional = existing_group_notional + amount * fill_price
+                if projected_notional > cap:
+                    # Preserve safe partial fills where there is headroom; never append a
+                    # fill whose actual fill-price notional would exceed the shared cap.
+                    headroom = max(Decimal("0"), cap - existing_group_notional)
+                    with localcontext() as calculation:
+                        calculation.prec = 50
+                        cap_quantity = (headroom / fill_price).quantize(
+                            _AMOUNT_QUANTUM, rounding=ROUND_DOWN
+                        )
+                    previous_amount = amount
+                    amount = min(amount, cap_quantity)
+                    if amount <= 0:
+                        return {
+                            "status": "NO_CORRELATION_GROUP_HEADROOM",
+                            "order_id": order_id,
+                            "bar_key": normalized_bar_key,
+                            "existing_group_notional": _fmt(existing_group_notional),
+                            "cap_usd": _fmt(cap),
+                        }
+                    if amount < previous_amount:
+                        fee = _money(
+                            fee * amount / previous_amount,
+                            "correlation-cap prorated fill fee",
+                        )
 
             await conn.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
