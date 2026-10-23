@@ -691,3 +691,29 @@ def test_paper_fill_money_fields_round_conservatively_to_numeric_38_18(monkeypat
     assert Decimal(buy_fee).as_tuple().exponent == -18
     assert Decimal(sell_fee).as_tuple().exponent == -18
 
+
+
+def test_fractional_paper_fill_at_supported_quantity_uses_rounded_money_values(monkeypatch):
+    """Regression for a realistic 18-place quantity paired with a non-round quote."""
+    import app.customer_paper_flow as flow
+
+    monkeypatch.setattr(settings, "research_taker_bps", 10)
+    monkeypatch.setattr(settings, "research_slippage_bps", 0)
+    market = {
+        "ask": Decimal("123.4567891234567891234"),
+        "bid": Decimal("123.4567891234567891229"),
+        "spread_bps": Decimal("0.0000000000000001"),
+        "quote_timestamp": "2026-10-23T00:00:00+00:00",
+        "data_sha256": "b" * 64,
+    }
+    quantity = Decimal("0.016666666666666666")
+
+    buy_price, buy_fee, _ = flow._fill_price_and_fee("BUY", quantity, market)
+    sell_price, sell_fee, _ = flow._fill_price_and_fee("SELL", quantity, market)
+
+    assert Decimal(buy_price) == Decimal("123.456789123456789124")
+    assert Decimal(sell_price) == Decimal("123.456789123456789122")
+    for submitted_value in (buy_price, buy_fee, sell_price, sell_fee):
+        parsed = Decimal(submitted_value)
+        assert parsed.is_finite()
+        assert parsed.as_tuple().exponent == -18
