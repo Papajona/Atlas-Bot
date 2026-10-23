@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Fail-closed evidence check for the backend origin embedded in a signed Android APK.
 
-The check searches DEX string tables in the APK for the exact URL that Gradle receives
-for BuildConfig.BACKEND_URL, canonicalizes its origin, and optionally compares it with
+The check inspects executable code for MainActivity's reference to the exact URL that
+Gradle receives for BuildConfig.BACKEND_URL, canonicalizes its origin, and optionally compares it with
 the origin intended for deployment. It never trusts release metadata as proof that the
 APK contains the requested URL.
 """
@@ -120,21 +120,92 @@ def dex_strings(data: bytes) -> list[str]:
     return result
 
 
-def apk_dex_strings(apk_path: str | Path) -> set[str]:
-    """Read strings from every classes*.dex file in an APK."""
+def _class_uses_string(data: bytes, class_def_offset: int, string_index: int, strings: list[str]) -> bool:
+    """Return whether a class' executable code contains a const-string reference."""
+    class_data_offset = struct.unpack_from("<I", data, class_def_offset + 24)[0]
+    if not class_data_offset:
+        return False
+    cursor = class_data_offset
+    counts = []
+    for _ in range(4):
+        value, cursor = _read_uleb128(data, cursor)
+        counts.append(value)
+    method_count = counts[2] + counts[3]
+    method_index = 0
+    for _ in range(counts[0] + counts[1]):
+        _, cursor = _read_uleb128(data, cursor)
+        _, cursor = _read_uleb128(data, cursor)
+    for _ in range(method_count):
+        delta, cursor = _read_uleb128(data, cursor)
+        _, cursor = _read_uleb128(data, cursor)
+        code_offset, cursor = _read_uleb128(data, cursor)
+        method_index += delta
+        if not code_offset:
+            continue
+        if code_offset + 16 > len(data):
+            raise ValueError("DEX method code is outside file bounds")
+        instruction_count = struct.unpack_from("<I", data, code_offset + 12)[0]
+        instruction_end = code_offset + 16 + instruction_count * 2
+        if instruction_end > len(data):
+            raise ValueError("DEX method instructions are outside file bounds")
+        for position in range(code_offset + 16, instruction_end, 2):
+            opcode = data[position] & 0xff
+            if opcode == 0x1A:
+                referenced = struct.unpack_from("<H", data, position + 2)[0]
+                if referenced == string_index:
+                    return True
+            elif opcode == 0x1B:
+                referenced = struct.unpack_from("<I", data, position + 2)[0]
+                if referenced == string_index:
+                    return True
+    return False
+
+
+def apk_uses_backend_url(apk_path: str | Path, literal: str) -> bool:
+    """Check that MainActivity executable code, rather than another DEX string, uses URL."""
     try:
         with zipfile.ZipFile(apk_path) as apk:
             dex_names = sorted(
-                name
-                for name in apk.namelist()
+                name for name in apk.namelist()
                 if re.fullmatch(r"classes(?:[0-9]+)?\.dex", name)
             )
             if not dex_names:
                 raise ValueError("APK has no classes*.dex files")
-            all_strings: set[str] = set()
             for name in dex_names:
-                all_strings.update(dex_strings(apk.read(name)))
-            return all_strings
+                data = apk.read(name)
+                strings = dex_strings(data)
+                try:
+                    string_index = strings.index(literal)
+                except ValueError:
+                    continue
+                if len(data) < 0x70:
+                    continue
+                class_count, class_offset = struct.unpack_from("<II", data, 0x60)
+                if class_offset + class_count * 32 > len(data):
+                    raise ValueError("DEX class definitions are outside file bounds")
+                string_ids_offset = struct.unpack_from("<I", data, 0x3c)[0]
+                type_ids_offset = struct.unpack_from("<I", data, 0x44)[0]
+                for index in range(class_count):
+                    class_def = class_offset + index * 32
+                    class_index = struct.unpack_from("<I", data, class_def)[0]
+                    if type_ids_offset + class_index * 4 + 4 > len(data):
+                        raise ValueError("DEX type definition is outside file bounds")
+                    descriptor_index = struct.unpack_from(
+                        "<I", data, type_ids_offset + class_index * 4
+                    )[0]
+                    if string_ids_offset + descriptor_index * 4 + 4 > len(data):
+                        raise ValueError("DEX class descriptor is outside file bounds")
+                    descriptor_offset = struct.unpack_from(
+                        "<I", data, string_ids_offset + descriptor_index * 4
+                    )[0]
+                    _, descriptor_cursor = _read_uleb128(data, descriptor_offset)
+                    end = data.find(b"\\0", descriptor_cursor)
+                    descriptor = data[descriptor_cursor:end].decode("utf-8", errors="replace")
+                    if descriptor.endswith("/MainActivity;") and _class_uses_string(
+                        data, class_def, string_index, strings
+                    ):
+                        return True
+            return False
     except (OSError, zipfile.BadZipFile) as exc:
         raise ValueError("APK could not be read as a valid ZIP archive") from exc
 
@@ -144,12 +215,11 @@ def verify_apk_backend_origin(
     expected_url: str,
     compare_origin: str | None = None,
 ) -> dict[str, str]:
-    """Prove the configured URL literal exists in DEX and matches any intended origin."""
+    """Prove MainActivity executable code uses the configured URL literal."""
     literal, origin = normalize_backend_url(expected_url)
-    strings = apk_dex_strings(apk_path)
-    if literal not in strings:
+    if not apk_uses_backend_url(apk_path, literal):
         raise ValueError(
-            "the expected backend URL literal is absent from the downloaded APK DEX string tables"
+            "the expected backend URL is not referenced by MainActivity executable code"
         )
     if compare_origin is not None:
         _, intended_origin = normalize_backend_url(compare_origin)

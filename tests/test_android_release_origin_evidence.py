@@ -26,13 +26,16 @@ def _uleb128(value: int) -> bytes:
 
 
 def _synthetic_dex(strings: list[str]) -> bytes:
-    """Build the minimum DEX header/string table needed to test our parser."""
+    """Build a tiny DEX whose MainActivity loads the requested URL at runtime."""
+    strings = list(strings)
+    descriptor = "Lcom/atlas/trading/MainActivity;"
+    if descriptor not in strings:
+        strings.append(descriptor)
+    descriptor_index = strings.index(descriptor)
     string_ids_offset = 0x70
-    string_data_offset = string_ids_offset + 4 * len(strings)
-    data = bytearray(0x70)
-    data[:8] = b"dex\n035\0"
-    struct.pack_into("<II", data, 0x38, len(strings), string_ids_offset)
-
+    type_ids_offset = string_ids_offset + 4 * len(strings)
+    class_defs_offset = type_ids_offset + 4
+    string_data_offset = class_defs_offset + 32
     string_ids = bytearray()
     string_data = bytearray()
     for value in strings:
@@ -41,7 +44,28 @@ def _synthetic_dex(strings: list[str]) -> bytes:
         string_data.extend(_uleb128(len(value)))
         string_data.extend(encoded)
         string_data.append(0)
-    return bytes(data + string_ids + string_data)
+    class_data_offset = string_data_offset + len(string_data)
+    class_data = bytearray(b"\0\0\1\0\0\0")
+    code_offset = class_data_offset + len(class_data)
+    class_data.extend(_uleb128(code_offset))
+    code = bytearray(16 + 4)
+    struct.pack_into("<I", code, 12, 2)
+    # const-string v0, <the first URL-like string in the fixture>
+    url_index = next((strings.index(value) for value in strings if value.startswith("https://")), 0)
+    struct.pack_into("<HH", code, 16, 0x001A, url_index)
+    data = bytearray(0x70)
+    data[:8] = b"dex\n035\0"
+    struct.pack_into("<II", data, 0x38, len(strings), string_ids_offset)
+    struct.pack_into("<II", data, 0x40, 1, type_ids_offset)
+    struct.pack_into("<II", data, 0x60, 1, class_defs_offset)
+    data.extend(string_ids)
+    data.extend(struct.pack("<I", descriptor_index))
+    data.extend(struct.pack("<I", 0) * 5)
+    data.extend(struct.pack("<I", class_data_offset))
+    data.extend(string_data)
+    data.extend(class_data)
+    data.extend(code)
+    return bytes(data)
 
 
 def _apk(tmp_path: Path, strings: list[str]) -> Path:
@@ -91,7 +115,13 @@ def test_reads_dex_string_ids_and_verifies_actual_apk_literal(tmp_path: Path):
 
 def test_rejects_artifact_without_expected_backend_url(tmp_path: Path):
     apk = _apk(tmp_path, ["MainActivity", "https://other.example.com"])
-    with pytest.raises(ValueError, match="absent from"):
+    with pytest.raises(ValueError, match="not referenced by MainActivity"):
+        verify_apk_backend_origin(apk, "https://atlas.example.com")
+
+
+def test_rejects_approved_url_present_but_not_used_by_main_activity(tmp_path: Path):
+    apk = _apk(tmp_path, ["https://other.example.com", "https://atlas.example.com"])
+    with pytest.raises(ValueError, match="not referenced by MainActivity"):
         verify_apk_backend_origin(apk, "https://atlas.example.com")
 
 
