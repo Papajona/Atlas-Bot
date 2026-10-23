@@ -250,8 +250,12 @@ def test_customer_paper_buy_uses_effective_price_and_atomic_fill_cap():
     # The actual database transaction serializes group fills, rereads current positions,
     # and sizes the fill against its actual price before inserting the fill row.
     assert 'paper-correlation-group:{customer_id}:{target_group}' in lifecycle_source
+    assert "correlation_group_marks" in lifecycle_source
+    assert "max(average_entry, mark_price)" in lifecycle_source
     assert "existing_group_notional + amount * fill_price" in lifecycle_source
     assert "NO_CORRELATION_GROUP_HEADROOM" in lifecycle_source
     assert lifecycle_source.index("paper-correlation-group:") < lifecycle_source.index(
         "INSERT INTO customer_paper.fills"
     )
+    assert "correlation_group_marks=correlation_group_marks" in flow_source
+    assert "correlation_group_marks=paper_correlation_group_marks" in main_source

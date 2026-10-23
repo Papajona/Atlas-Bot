@@ -335,7 +335,10 @@ def conservative_customer_paper_buy_price(market_context: Mapping) -> Decimal:
     return Decimal(price)
 
 
-async def _fill_open_order(customer_id: int, order: dict, market: dict, df) -> dict:
+async def _fill_open_order(
+    customer_id: int, order: dict, market: dict, df,
+    correlation_group_marks: Mapping[str, object] | None = None,
+) -> dict:
     client_id = str(order.get("client_order_id") or "")
     if not client_id:
         raise CustomerPaperFlowBlocked("Pending paper order is missing its client identifier")
@@ -547,6 +550,7 @@ async def _fill_open_order(customer_id: int, order: dict, market: dict, df) -> d
             quantity=format(remaining, "f"),
             price=fill_price,
             fee_amount=fee,
+            correlation_group_marks=correlation_group_marks,
             enforce_market_bar_budget=True,
         ), "append isolated paper fill")
     except CustomerPaperFlowBlocked as exc:
@@ -585,7 +589,10 @@ async def _fill_open_order(customer_id: int, order: dict, market: dict, df) -> d
     }
 
 
-async def process_customer_paper_orders(customer_id: int, req, df, market_context: Mapping) -> dict | None:
+async def process_customer_paper_orders(
+    customer_id: int, req, df, market_context: Mapping,
+    correlation_group_marks: Mapping[str, object] | None = None,
+) -> dict | None:
     """Recover autonomous orders only and protect existing positions before pending BUY refills."""
     market = validate_customer_paper_market(req, df, market_context)
     pending = await _paper_call(
@@ -645,7 +652,9 @@ async def process_customer_paper_orders(customer_id: int, req, df, market_contex
 
     if str(meta.get("timeframe") or "") != str(req.timeframe):
         raise CustomerPaperFlowBlocked("Open paper order timeframe differs from the current request; reconcile before execution")
-    return await _fill_open_order(customer_id, order, market, df)
+    return await _fill_open_order(
+        customer_id, order, market, df, correlation_group_marks=correlation_group_marks
+    )
 
 
 async def _protective_exit(customer_id: int, req, df, market: dict) -> dict | None:
@@ -775,12 +784,16 @@ async def _protective_exit(customer_id: int, req, df, market: dict) -> dict | No
 
 
 async def recover_customer_paper_spot_flow(
-    *, customer_id: int, req, df, market_context: Mapping
+    *, customer_id: int, req, df, market_context: Mapping,
+    correlation_group_marks: Mapping[str, object] | None = None,
 ) -> dict | None:
     """Recover a durable pending order or trigger a protective exit before new signals."""
     market = validate_customer_paper_market(req, df, market_context)
     account = await ensure_customer_paper_account(customer_id, market["currency"])
-    recovered = await process_customer_paper_orders(customer_id, req, df, market_context)
+    recovered = await process_customer_paper_orders(
+        customer_id, req, df, market_context,
+        correlation_group_marks=correlation_group_marks,
+    )
     if recovered is not None:
         fill_status = (recovered.get("fill") or {}).get("status") or recovered.get("status")
         executed = fill_status in {"APPENDED", "REPLAYED"}
@@ -816,6 +829,7 @@ async def execute_customer_paper_spot_signal(
     take_profit_price: str | int | Decimal | None,
     strategy: str,
     signal_metadata: Mapping | None = None,
+    correlation_group_marks: Mapping[str, object] | None = None,
 ) -> dict:
     """Seed virtual cash, recover pending intents, honor long-only exits, then submit/fill.
 
@@ -951,7 +965,9 @@ async def execute_customer_paper_spot_signal(
     ]
     if len(match) != 1:
         raise CustomerPaperFlowBlocked("Submitted paper order was not visible to the recovery query")
-    execution = await _fill_open_order(customer_id, match[0], market, df)
+    execution = await _fill_open_order(
+        customer_id, match[0], market, df, correlation_group_marks=correlation_group_marks
+    )
     return {
         "mode": "CUSTOMER_PAPER",
         "status": execution.get("status", "UNKNOWN"),

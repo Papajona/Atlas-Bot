@@ -1070,6 +1070,19 @@ async def _run_persisted_adaptive_bot_cycle(
             return {"decision": "NO_TRADE", "stage": "customer_paper_market_context",
                     "reason": "Verified completed spot candles and a fresh server quote are required"}
         spread_bps = float(customer_paper_market_context["spread_bps"])
+        paper_correlation_group_marks: dict[str, str] = {}
+        try:
+            paper_exposure_snapshot = await _customer_paper_positions_for_exposure(
+                customer_id=profile.id, req=req, market_context=customer_paper_market_context
+            )
+            if paper_exposure_snapshot.get("ok"):
+                paper_correlation_group_marks = {
+                    str(position.symbol).strip().upper(): str(position.mark_price)
+                    for position in paper_exposure_snapshot["positions"]
+                }
+        except Exception:
+            # A missing snapshot is not zero exposure; the atomic writer fails closed.
+            paper_correlation_group_marks = {}
         allowed, confirmed_paper_mode, gate_reason = await _adaptive_bot_runtime_gate(
             bot_id, profile.id, account.id
         )
@@ -1080,6 +1093,7 @@ async def _run_persisted_adaptive_bot_cycle(
             recovered = await recover_customer_paper_spot_flow(
                 customer_id=profile.id, req=req, df=df,
                 market_context=customer_paper_market_context,
+                correlation_group_marks=paper_correlation_group_marks,
             )
         except CustomerPaperFlowBlocked as exc:
             return {"decision": "NO_TRADE", "stage": "customer_paper_recovery",
@@ -1206,6 +1220,10 @@ async def _run_persisted_adaptive_bot_cycle(
                 "reason": paper_exposure.get("reason", "same-group paper exposure could not be valued"),
             }
         open_positions = paper_exposure["positions"]
+        paper_correlation_group_marks = {
+            str(position.symbol).strip().upper(): str(position.mark_price)
+            for position in paper_exposure["positions"]
+        }
     elif needs_customer_paper:
         from types import SimpleNamespace
         from .customer_paper_lifecycle import get_customer_paper_positions
@@ -1328,6 +1346,7 @@ async def _run_persisted_adaptive_bot_cycle(
                 stop_loss_price=str(plan["stop_loss_price"]),
                 take_profit_price=str(plan["take_profit_price"]),
                 strategy="atlas-adaptive-autonomous-v1",
+                correlation_group_marks=paper_correlation_group_marks,
                 signal_metadata={
                     "model_version": str(ml_signal.get("model_version") or model_meta.get("model_version") or ""),
                     "strategy_version": "atlas-adaptive-autonomous-v1",
@@ -4424,6 +4443,19 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     "execution": None,
                 })
             spread_bps = float(customer_paper_market_context["spread_bps"])
+            paper_correlation_group_marks: dict[str, str] = {}
+            try:
+                paper_exposure_snapshot = await _customer_paper_positions_for_exposure(
+                    customer_id=profile.id, req=req, market_context=customer_paper_market_context
+                )
+                if paper_exposure_snapshot.get("ok"):
+                    paper_correlation_group_marks = {
+                        str(position.symbol).strip().upper(): str(position.mark_price)
+                        for position in paper_exposure_snapshot["positions"]
+                    }
+            except Exception:
+                # Missing marks are not interpreted as zero exposure by the writer.
+                paper_correlation_group_marks = {}
             if bot_id:
                 allowed, confirmed_paper_mode, gate_reason = await _adaptive_bot_runtime_gate(
                     bot_id, profile.id, account_id
@@ -4453,6 +4485,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 recovered = await recover_customer_paper_spot_flow(
                     customer_id=profile.id, req=req, df=df,
                     market_context=customer_paper_market_context,
+                    correlation_group_marks=paper_correlation_group_marks,
                 )
             except CustomerPaperFlowBlocked as exc:
                 return await _record_customer_decision({
@@ -4760,6 +4793,10 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                         "analysis": deterministic,
                         "execution": None,
                     })
+                paper_correlation_group_marks = {
+                    str(position.symbol).strip().upper(): str(position.mark_price)
+                    for position in paper_exposure["positions"]
+                }
                 group_check = adjusted_group_exposure(
                     paper_exposure["positions"],
                     proposed_symbol=req.symbol,
@@ -4808,6 +4845,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     stop_loss_price=str(plan["stop_loss_price"]),
                     take_profit_price=str(plan["take_profit_price"]),
                     strategy=str(router.get("strategy") or plan.get("strategy") or "atlas-gated-entry-exit-v2"),
+                    correlation_group_marks=paper_correlation_group_marks,
                     signal_metadata={
                         "model_version": str((adaptive or {}).get("model_version") or ""),
                         "strategy_candidate_id": req.strategy_candidate_id,

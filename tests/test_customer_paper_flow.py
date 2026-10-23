@@ -897,10 +897,12 @@ def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monke
             recover_customer_paper_spot_flow(
                 customer_id=customer_id, req=eth_req_2,
                 df=eth_frame_2, market_context=eth_context_2,
+                correlation_group_marks={"ETH/USDT": "100", "SOL/USDT": "100"},
             ),
             recover_customer_paper_spot_flow(
                 customer_id=customer_id, req=sol_req_2,
                 df=sol_frame_2, market_context=sol_context_2,
+                correlation_group_marks={"ETH/USDT": "100", "SOL/USDT": "100"},
             ),
         )
         assert eth_result is not None and sol_result is not None

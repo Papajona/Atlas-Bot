@@ -251,6 +251,55 @@ def build_customer_paper_router(
         df = await asyncio.to_thread(market_data, req)
         return df, _market_bar_context(df, symbol=symbol, timeframe=timeframe)
 
+
+    async def _fresh_correlation_group_marks(
+        customer_id: int, target_symbol: str, timeframe: str, current_df: Any
+    ) -> dict[str, str]:
+        """Use each open group's fresh verified bar high as a conservative risk mark."""
+        from .correlation_risk import risk_group
+
+        target_group = risk_group(target_symbol)
+        positions = await get_customer_paper_positions(customer_id=customer_id)
+        if timeframe not in _TIMEFRAME_SECONDS:
+            raise CustomerPaperLedgerBlocked("Correlation-group marks require a supported timeframe")
+        marks: dict[str, str] = {}
+        target_symbol_normalized = str(target_symbol).strip().upper()
+        for position in positions:
+            symbol = str(position.get("symbol") or "").strip().upper()
+            if risk_group(symbol) != target_group:
+                continue
+            try:
+                quantity = Decimal(str(position.get("quantity") or "0"))
+            except (InvalidOperation, TypeError, ValueError, OverflowError) as exc:
+                raise CustomerPaperLedgerBlocked(
+                    f"Same-group paper position quantity is invalid: {symbol or 'unknown'}"
+                ) from exc
+            if not quantity.is_finite():
+                raise CustomerPaperLedgerBlocked(
+                    f"Same-group paper position quantity is not finite: {symbol or 'unknown'}"
+                )
+            if quantity == 0:
+                continue
+            try:
+                # The customer paper API executes from verified completed OHLCV bars.
+                # Use the observed high, rather than a missing/unavailable ticker bid,
+                # to avoid understating current exposure between order submission/fill.
+                mark_df = (
+                    current_df
+                    if symbol == target_symbol_normalized
+                    else (await _fetch_bar(symbol, timeframe))[0]
+                )
+                context = _market_bar_context(mark_df, symbol=symbol, timeframe=timeframe)
+                mark = Decimal(str(context["values"]["high"]))
+            except Exception as exc:
+                raise CustomerPaperLedgerBlocked(
+                    f"Fresh same-group paper mark is unavailable for {symbol} ({type(exc).__name__})"
+                ) from exc
+            if not mark.is_finite() or mark <= 0:
+                raise CustomerPaperLedgerBlocked(f"Fresh same-group paper mark is unavailable for {symbol}")
+            marks[symbol] = format(mark, "f")
+        return marks
+
     async def _order_detail(customer_id: int, client_order_id: str) -> dict[str, Any]:
         order = await get_customer_paper_order(customer_id=customer_id, client_order_id=client_order_id)
         if order is None:
@@ -570,6 +619,11 @@ def build_customer_paper_router(
                     fee = fill_quantity * Decimal(price_text) * fee_bps / Decimal("10000")
                     fill_key = "bar-fill:" + hashlib.sha256(f"{client_order_id}|{budget['bar_key']}".encode("utf-8")).hexdigest()
                     try:
+                        correlation_group_marks = (
+                            await _fresh_correlation_group_marks(
+                                profile.id, str(order["symbol"]), timeframe, df
+                            ) if side == "BUY" else {}
+                        )
                         fill = await record_customer_paper_fill(
                             customer_id=profile.id,
                             client_order_id=client_order_id,
@@ -578,6 +632,7 @@ def build_customer_paper_router(
                             quantity=_decimal_text(fill_quantity),
                             price=price_text,
                             fee_amount=_decimal_text(fee),
+                            correlation_group_marks=correlation_group_marks,
                             enforce_market_bar_budget=True,
                         )
                     except CustomerPaperOrderConflict as exc:
@@ -628,6 +683,7 @@ def build_customer_paper_router(
                                     quantity=_decimal_text(retry_quantity),
                                     price=price_text,
                                     fee_amount=_decimal_text(retry_fee),
+                                    correlation_group_marks=correlation_group_marks,
                                     enforce_market_bar_budget=True,
                                 )
                                 fill_quantity = retry_quantity
