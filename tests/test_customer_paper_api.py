@@ -87,6 +87,29 @@ def test_customer_paper_market_context_rejects_unverified_or_incomplete_candle(m
     assert rejected_bar.value.status_code == 409
 
 
+def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_api.py").read_text(
+        encoding="utf-8"
+    )
+    route_start = source.index('    @router.post("/orders/{client_order_id}/advance")')
+    replay_start = source.index("            if prior_fill is not None:", route_start)
+    replay_end = source.index('            values = bar["values"]', replay_start)
+    replay_block = source[replay_start:replay_end]
+
+    # Do not make a TTL decision from the stale order row read before the fill lookup.
+    assert 'replay_order = await _order_detail(profile.id, client_order_id)' in replay_block
+    assert replay_block.index('replay_order = await _order_detail(profile.id, client_order_id)') < replay_block.index(
+        'and replay_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}'
+    )
+    # If a concurrent fill wins between the re-read and expiry, inspect the current state
+    # and replay the immutable fill if the order is now terminal.
+    assert "except CustomerPaperOrderConflict:" in replay_block
+    assert replay_block.count('replay_order = await _order_detail(profile.id, client_order_id)') >= 3
+    assert 'if replay_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}:' in replay_block
+
+
 def test_customer_paper_order_request_rejects_malformed_limit_orders():
     with pytest.raises(ValueError):
         paper_api.CustomerPaperOrderRequest(
