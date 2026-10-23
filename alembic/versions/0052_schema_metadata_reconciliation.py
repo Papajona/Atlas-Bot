@@ -379,7 +379,7 @@ def _restore_rename_index_state(bind, state) -> None:
             op.execute(sa.text(f'ALTER INDEX "{_DEFAULT_SCHEMA}"."{new}" RENAME TO "{old}"'))
         elif not old_now:
             _restore_index_definition(
-                bind, old, state.get("old_definition"), state.get("old_comment")
+                bind, table, old, state.get("old_definition"), state.get("old_comment")
             )
     elif new_before:
         # A canonical-name index that existed before upgrade must remain canonical;
@@ -390,7 +390,7 @@ def _restore_rename_index_state(bind, state) -> None:
             )
         if not new_now:
             _restore_index_definition(
-                bind, new, state.get("new_definition"), state.get("new_comment")
+                bind, table, new, state.get("new_definition"), state.get("new_comment")
             )
     else:
         # Neither name existed before upgrade. Remove either name if the upgrade created it.
