@@ -416,7 +416,7 @@ async def _fill_open_order(
     elapsed_bars = int(elapsed_seconds // timeframe_seconds)
     is_protective_exit = str(meta.get("order_role") or "").upper() == "PROTECTIVE_EXIT"
     ttl_bars = max(1, int(settings.paper_order_ttl_bars))
-    if not is_protective_exit and elapsed_bars > ttl_bars:
+    if not is_protective_exit and elapsed_bars >= ttl_bars:
         await _paper_call(
             expire_customer_paper_order(
                 customer_id=customer_id,
