@@ -141,6 +141,43 @@ def _branch_delta_matches_main(branch_sha: str, main_sha: str) -> bool:
     """True when every branch-side path change since merge-base is already in main."""
     return not _branch_delta_mismatched_paths(branch_sha, main_sha)
 
+
+def _delete_remote_ref_with_lease(branch_name: str, expected_sha: str) -> tuple[str, str]:
+    """Delete a remote branch only if its current tip still equals the proven SHA.
+
+    Return (status, reason), where status is DELETED, PRESERVE, or ERROR.
+    A stale lease is a preservation outcome; other push errors remain failures.
+    """
+    result = _run(
+        [
+            "git",
+            "push",
+            "origin",
+            f"--force-with-lease=refs/heads/{branch_name}:{expected_sha}",
+            f":refs/heads/{branch_name}",
+        ],
+        check=False,
+    )
+    output = "\n".join(
+        part.strip() for part in (result.stderr, result.stdout) if part and part.strip()
+    )
+    if result.returncode == 0:
+        return "DELETED", "conditional deletion succeeded with an explicit expected-SHA lease"
+
+    lowered = output.lower()
+    if "stale info" in lowered or (
+        "cannot lock ref" in lowered
+        and ("expected" in lowered or "but is at" in lowered)
+    ):
+        return (
+            "PRESERVE",
+            "conditional deletion lease was rejected because the remote ref changed; branch preserved",
+        )
+
+    detail = output or f"exit code {result.returncode}"
+    return "ERROR", f"conditional branch deletion failed: {detail}"
+
+
 def main() -> int:
     repository = os.environ.get("GITHUB_REPOSITORY", "").strip()
     if not repository or "/" not in repository:
@@ -306,23 +343,21 @@ def main() -> int:
                 preserved += 1
                 continue
 
-            deletion = _run(
-                [
-                    "gh", "api", "--method", "DELETE",
-                    f"repos/{repository}/git/refs/heads/{branch_name}",
-                ],
-                check=False,
+            # The earlier ls-remote check is diagnostic only. The explicit
+            # force-with-lease on this push is the atomic guard against a ref
+            # update between proof and deletion.
+            deletion_status, deletion_reason = _delete_remote_ref_with_lease(
+                branch_name, branch_sha
             )
-            if deletion.returncode:
-                record(
-                    "ERROR",
-                    branch_name,
-                    "safe-to-delete proof passed but GitHub ref deletion failed: "
-                    + (deletion.stderr.strip() or f"exit code {deletion.returncode}"),
-                )
+            if deletion_status == "PRESERVE":
+                record("PRESERVE", branch_name, deletion_reason)
+                preserved += 1
+                continue
+            if deletion_status == "ERROR":
+                record("ERROR", branch_name, deletion_reason)
                 failed += 1
                 continue
-            record("DELETED", branch_name, reason)
+            record("DELETED", branch_name, f"{reason}; {deletion_reason}")
             deleted += 1
 
         print(f"Branch prune summary: deleted={deleted}, preserved={preserved}, failed={failed}")
