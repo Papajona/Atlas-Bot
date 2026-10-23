@@ -96,6 +96,7 @@ jobs:
           chmod 600 "$RUNNER_TEMP/atlas-release.jks"
       - name: Build signed release APK
         env:
+          ATLAS_PROD_BACKEND_URL: ${{ vars.ATLAS_PROD_BACKEND_URL }}
           ATLAS_RELEASE_STORE_FILE: ${{ runner.temp }}/atlas-release.jks
           ATLAS_RELEASE_STORE_PASSWORD: ${{ secrets.ATLAS_RELEASE_STORE_PASSWORD }}
           ATLAS_RELEASE_KEY_ALIAS: ${{ secrets.ATLAS_RELEASE_KEY_ALIAS }}
@@ -106,6 +107,10 @@ jobs:
           test -n "$ATLAS_RELEASE_STORE_PASSWORD"
           test -n "$ATLAS_RELEASE_KEY_ALIAS"
           test -n "$ATLAS_RELEASE_KEY_PASSWORD"
+          test -n "$ATLAS_PROD_BACKEND_URL" || {
+            echo "BLOCKED: ATLAS_PROD_BACKEND_URL repository variable is required for a signed release."
+            exit 1
+          }
           gradle --no-daemon :app:assembleRelease
       - name: Independently verify APK signature, certificate, and package
         env:
