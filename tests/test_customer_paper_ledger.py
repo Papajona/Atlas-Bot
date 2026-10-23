@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import os
 from decimal import Decimal
 from pathlib import Path
@@ -395,6 +396,9 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
     monkeypatch.setattr(settings, "database_url", os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"])
     monkeypatch.setattr(settings, "customer_paper_database_url", os.environ["ATLAS_PAPER_TEST_DATABASE_URL"])
     monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
+    # This test targets immutable lifecycle/recovery semantics. The separate discipline
+    # regression below verifies rate limits with the configured controls enabled.
+    monkeypatch.setattr(settings, "discipline_enabled", False)
 
     async def run():
         await post_customer_paper_journal(
@@ -641,6 +645,8 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
     reason="requires the isolated disposable PostgreSQL customer paper databases provisioned by CI",
 )
 def test_customer_paper_cash_is_serialized_across_symbols(monkeypatch):
+    # These tests cover ledger lifecycle/cash invariants; discipline is asserted separately.
+    monkeypatch.setattr(settings, "discipline_enabled", False)
     customer_id = 92003
     monkeypatch.setattr(settings, "database_url", os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"])
     monkeypatch.setattr(settings, "customer_paper_database_url", os.environ["ATLAS_PAPER_TEST_DATABASE_URL"])
@@ -737,6 +743,8 @@ def test_customer_paper_cash_is_serialized_across_symbols(monkeypatch):
     reason="requires the isolated disposable PostgreSQL customer paper databases provisioned by CI",
 )
 def test_customer_paper_sell_pnl_terminal_events_and_reversal_cash_guard(monkeypatch):
+    # These tests cover ledger lifecycle/cash invariants; discipline is asserted separately.
+    monkeypatch.setattr(settings, "discipline_enabled", False)
     customer_id = 92004
     monkeypatch.setattr(settings, "database_url", os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"])
     monkeypatch.setattr(settings, "customer_paper_database_url", os.environ["ATLAS_PAPER_TEST_DATABASE_URL"])
@@ -889,3 +897,97 @@ def test_pooler_login_rejects_wrong_project_suffix(monkeypatch):
     )
     with pytest.raises(ValueError, match="configured project reference"):
         _configured_database_role(wrong_project_url)
+
+
+@pytest.mark.skipif(
+    not (os.getenv("ATLAS_PAPER_TEST_DATABASE_URL") and os.getenv("ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL")),
+    reason="requires the disposable isolated PostgreSQL paper ledger provisioned by CI",
+)
+def test_customer_paper_entry_discipline_and_position_ownership_are_enforced(monkeypatch):
+    customer_id = 925551
+    monkeypatch.setattr(settings, "database_url", os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"])
+    monkeypatch.setattr(settings, "customer_paper_database_url", os.environ["ATLAS_PAPER_TEST_DATABASE_URL"])
+    monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
+    monkeypatch.setattr(settings, "discipline_enabled", True)
+    monkeypatch.setattr(settings, "discipline_max_entries_per_day", 20)
+    monkeypatch.setattr(settings, "discipline_entry_cooldown_seconds", 900)
+
+    async def run():
+        await post_customer_paper_journal(
+            customer_id=customer_id,
+            idempotency_key="discipline-seed-925551",
+            event_type="PAPER_SEED",
+            currency="USDT",
+            lines=_seed_lines("1000"),
+            reference="paper-entry-discipline-regression",
+            metadata={"environment": "disposable-ci"},
+        )
+        common = {
+            "customer_id": customer_id,
+            "venue": "binance",
+            "market_type": "spot",
+            "currency": "USDT",
+            "order_type": "MARKET",
+        }
+        bot_entry = {
+            "paper_flow_version": 1,
+            "execution_owner": "autonomous_customer_bot",
+            "order_role": "ENTRY",
+            "timeframe": "1h",
+            "signal_bar_timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        first = await submit_customer_paper_order(
+            **common, client_order_id="discipline-btc-entry-925551",
+            symbol="BTC/USDT", side="BUY", quantity="1", metadata=bot_entry,
+        )
+        assert first["status"] == "APPENDED"
+
+        with pytest.raises(CustomerPaperOrderConflict, match="cooldown is active"):
+            await submit_customer_paper_order(
+                **common, client_order_id="discipline-eth-entry-925551",
+                symbol="ETH/USDT", side="BUY", quantity="1", metadata=bot_entry,
+            )
+
+        # Exercise the daily count independently of cooldown.
+        monkeypatch.setattr(settings, "discipline_entry_cooldown_seconds", 0)
+        monkeypatch.setattr(settings, "discipline_max_entries_per_day", 1)
+        with pytest.raises(CustomerPaperOrderConflict, match="daily entry limit reached"):
+            await submit_customer_paper_order(
+                **common, client_order_id="discipline-sol-entry-925551",
+                symbol="SOL/USDT", side="BUY", quantity="1", metadata=bot_entry,
+            )
+
+        fill = await record_customer_paper_fill(
+            customer_id=customer_id,
+            client_order_id="discipline-btc-entry-925551",
+            idempotency_key="discipline-btc-fill-925551",
+            bar_key="discipline-btc-bar-925551",
+            quantity="1",
+            price="100",
+            fee_amount="0",
+        )
+        assert fill["status"] == "APPENDED"
+
+        manual_exit = {
+            "execution_owner": "manual_customer_api",
+            "order_role": "STRATEGY_EXIT",
+            "timeframe": "1h",
+        }
+        with pytest.raises(CustomerPaperOrderConflict, match="same open position"):
+            await submit_customer_paper_order(
+                **common, client_order_id="discipline-manual-sell-925551",
+                symbol="BTC/USDT", side="SELL", quantity="1", metadata=manual_exit,
+            )
+
+        # Entry cooldown/daily caps never block a protective exit from its owning flow.
+        protection = await submit_customer_paper_order(
+            **common, client_order_id="discipline-protective-exit-925551",
+            symbol="BTC/USDT", side="SELL", quantity="1",
+            metadata={
+                **bot_entry,
+                "order_role": "PROTECTIVE_EXIT",
+            },
+        )
+        assert protection["status"] == "APPENDED"
+
+    asyncio.run(run())

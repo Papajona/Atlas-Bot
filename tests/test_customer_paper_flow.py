@@ -717,3 +717,94 @@ def test_fractional_paper_fill_at_supported_quantity_uses_rounded_money_values(m
         parsed = Decimal(submitted_value)
         assert parsed.is_finite()
         assert parsed.as_tuple().exponent == -18
+
+def test_autonomous_paper_order_waits_for_configured_fill_latency(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    _, state, order, market = _paper_fill_test_context()
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 2)
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 5)
+
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=12001, order=order, market=market, df=pd.DataFrame()
+    ))
+    assert result["status"] == "WAITING_FOR_FILL_LATENCY"
+    assert result["elapsed_bars"] == 1
+
+
+def test_autonomous_paper_order_expires_at_ttl_boundary(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    _, state, order, market = _paper_fill_test_context()
+    market["bar_timestamp"] = (
+        pd.Timestamp(order["metadata"]["submission_bar_at"]) + pd.Timedelta(hours=3)
+    ).isoformat()
+    market["quote_timestamp"] = (
+        pd.Timestamp(market["bar_timestamp"]) + pd.Timedelta(seconds=2)
+    ).isoformat()
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 3)
+    expired = {}
+
+    async def expire(**kwargs):
+        expired.update(kwargs)
+        return {"status": "EXPIRED"}
+
+    monkeypatch.setattr(flow, "expire_customer_paper_order", expire)
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=12002, order=order, market=market, df=pd.DataFrame()
+    ))
+    assert result["status"] == "EXPIRED_TTL"
+    assert result["elapsed_bars"] == 3
+    assert expired["client_order_id"] == order["client_order_id"]
+
+
+def test_paper_protective_exit_fails_closed_when_intervening_candle_is_missing(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    now = pd.Timestamp.now(tz="UTC").floor("h")
+    prior, latest = now - pd.Timedelta(hours=3), now - pd.Timedelta(hours=1)
+    frame = pd.DataFrame(
+        {"open": [100.0, 100.0], "high": [101.0, 101.0],
+         "low": [99.0, 99.0], "close": [100.0, 100.0],
+         "volume": [1000.0, 1000.0]},
+        index=pd.DatetimeIndex([prior, latest]),
+    )
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    market = {"bar_timestamp": latest.isoformat(), "currency": "USDT", "data_sha256": "d" * 64}
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([{
+        "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
+        "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
+        "stop_loss_price": "95", "take_profit_price": "110",
+    }]))
+    with pytest.raises(CustomerPaperFlowBlocked, match="history is incomplete"):
+        asyncio.run(flow._protective_exit(12003, req, frame, market))
+
+
+def test_tiny_positive_paper_sell_quote_never_writes_zero_price_fill(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    _, state, order, market = _paper_fill_test_context()
+    state["side"] = "SELL"
+    market["bid"] = Decimal("0.0000000000000000009")
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([{
+        "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
+    }]))
+    monkeypatch.setattr(flow, "register_customer_paper_market_bar", _async_value({
+        "bar_key": "tiny-sell-bar", "bar_at": market["bar_timestamp"],
+        "capacity": "10", "available": "10",
+    }))
+    monkeypatch.setattr(flow, "get_customer_paper_fill_for_bar", _async_value(None))
+
+    async def must_not_write(**kwargs):
+        raise AssertionError("zero-price SELL must never be written")
+
+    monkeypatch.setattr(flow, "record_customer_paper_fill", must_not_write)
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=12004, order=order, market=market, df=pd.DataFrame()
+    ))
+    assert result["status"] == "WAITING_FOR_PRICE_PRECISION"
+    assert result["fill"]["status"] == "NOT_FILLED"

@@ -369,6 +369,7 @@ def build_customer_paper_router(
                     "volume_unit": "base_asset",
                     "market_type": "spot",
                     "execution_model": "completed_bar_volume_capped_heuristic_v1",
+                    "execution_owner": "manual_customer_api",
                     "execution_cost_evidence": "UNVALIDATED_HEURISTIC",
                 },
             )
@@ -580,24 +581,69 @@ def build_customer_paper_router(
                             enforce_market_bar_budget=True,
                         )
                     except CustomerPaperOrderConflict as exc:
-                        # Another order may have consumed virtual cash after the pre-read.
+                        # A concurrent fill can invalidate the earlier cash pre-read.
+                        # Re-read virtual cash and retry once at the affordable size.
                         if side == "BUY" and "overdraw" in str(exc).lower():
-                            await expire_customer_paper_order(
-                                customer_id=profile.id,
-                                client_order_id=client_order_id,
-                                idempotency_key="paper-cash-race-api:" + hashlib.sha256(
-                                    f"{client_order_id}|{budget['bar_key']}".encode("utf-8")
-                                ).hexdigest()[:40],
+                            fresh_balances = await get_customer_paper_balances(customer_id=profile.id)
+                            fresh_cash = sum(
+                                (
+                                    Decimal(str(row.get("balance") or "0"))
+                                    for row in fresh_balances
+                                    if str(row.get("account_code") or "") == "PAPER_CASH"
+                                    and str(row.get("currency") or "").upper()
+                                    == str(order.get("currency") or "USDT").upper()
+                                ),
+                                Decimal("0"),
                             )
-                            return {
-                                "status": "EXPIRED_INSUFFICIENT_PAPER_CASH",
-                                "virtual_only": True,
-                                "bar_at": bar["timestamp"].isoformat(),
-                                "bar_key": budget["bar_key"],
-                                "fill": {"status": "EXPIRED"},
-                                "order": await _order_detail(profile.id, client_order_id),
-                            }
-                        raise
+                            unit_cost = Decimal(price_text) * (Decimal("1") + fee_bps / Decimal("10000"))
+                            with localcontext() as context:
+                                context.prec = 50
+                                retry_affordable = max(Decimal("0"), fresh_cash / unit_cost).quantize(
+                                    _DECIMAL_QUANTUM, rounding=ROUND_DOWN
+                                )
+                            retry_quantity = min(fill_quantity, retry_affordable)
+                            if retry_quantity <= 0:
+                                await expire_customer_paper_order(
+                                    customer_id=profile.id,
+                                    client_order_id=client_order_id,
+                                    idempotency_key="paper-cash-race-empty-api:" + hashlib.sha256(
+                                        f"{client_order_id}|{budget['bar_key']}".encode("utf-8")
+                                    ).hexdigest()[:40],
+                                )
+                                return {
+                                    "status": "EXPIRED_INSUFFICIENT_PAPER_CASH",
+                                    "virtual_only": True,
+                                    "bar_at": bar["timestamp"].isoformat(),
+                                    "bar_key": budget["bar_key"],
+                                    "fill": {"status": "EXPIRED"},
+                                    "order": await _order_detail(profile.id, client_order_id),
+                                }
+                            retry_fee = retry_quantity * Decimal(price_text) * fee_bps / Decimal("10000")
+                            try:
+                                fill = await record_customer_paper_fill(
+                                    customer_id=profile.id,
+                                    client_order_id=client_order_id,
+                                    idempotency_key=fill_key,
+                                    bar_key=budget["bar_key"],
+                                    quantity=_decimal_text(retry_quantity),
+                                    price=price_text,
+                                    fee_amount=_decimal_text(retry_fee),
+                                    enforce_market_bar_budget=True,
+                                )
+                                fill_quantity = retry_quantity
+                            except CustomerPaperOrderConflict as retry_exc:
+                                if "overdraw" in str(retry_exc).lower():
+                                    return {
+                                        "status": "WAITING_FOR_PAPER_CASH",
+                                        "virtual_only": True,
+                                        "bar_at": bar["timestamp"].isoformat(),
+                                        "bar_key": budget["bar_key"],
+                                        "fill": {"status": "NOT_FILLED"},
+                                        "order": await _order_detail(profile.id, client_order_id),
+                                    }
+                                raise
+                        else:
+                            raise
                     fresh_order = await _order_detail(profile.id, client_order_id)
                     if (
                         elapsed_bars >= max(1, int(settings.paper_order_ttl_bars))
