@@ -71,7 +71,7 @@ jobs:
               errors="replace",
           )
           if result.returncode != 0:
-              raise SystemExit("BLOCKED: aapt could not decode the packaged APK resource table")
+              raise SystemExit(f"BLOCKED: aapt could not decode the packaged APK resource table: {result.stderr.strip()}")
           actual = extract_runtime_backend_url_from_resource_dump(result.stdout)
           expected = "https://atlas-debug-backend.invalid"
           if actual != expected:
