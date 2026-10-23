@@ -14,10 +14,9 @@ RELEASE_WORKFLOW = (ROOT / ".github" / "workflows" / "android-release.yml").read
 
 
 def test_release_build_requires_an_explicit_approved_https_backend_origin():
-    assert GRADLE.startswith("import java.net.URI\\n\\nplugins {")
+    assert GRADLE.startswith("import java.net.URI\n\nplugins {")
     assert 'providers.environmentVariable("ATLAS_PROD_BACKEND_URL")' in GRADLE
     assert "releaseTaskRequested" in GRADLE
-    assert GRADLE.startswith("import java.net.URI\\n\\nplugins {")
     assert "runCatching { URI(it) }" in GRADLE
     assert 'check(approvedProductionBackend)' in GRADLE
     assert 'parsedBackendUri.scheme == "https"' in GRADLE
