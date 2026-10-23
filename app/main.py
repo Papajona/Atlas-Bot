@@ -1434,6 +1434,10 @@ async def _run_persisted_adaptive_bot_cycle(
                     "model_version": str(ml_signal.get("model_version") or model_meta.get("model_version") or ""),
                     "strategy_version": "atlas-adaptive-autonomous-v1",
                 },
+                history_loader=lambda start_bar, end_bar: _customer_paper_protective_history(
+                    req, start_bar, end_bar
+                ),
+                group_mark_price_loader=_customer_paper_group_mark_prices,
             )
         except CustomerPaperFlowBlocked as exc:
             return {"decision": "NO_TRADE", "stage": "customer_paper_execution",
@@ -4916,6 +4920,10 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                         "model_version": str((adaptive or {}).get("model_version") or ""),
                         "strategy_candidate_id": req.strategy_candidate_id,
                     },
+                    history_loader=lambda start_bar, end_bar: _customer_paper_protective_history(
+                        req, start_bar, end_bar
+                    ),
+                    group_mark_price_loader=_customer_paper_group_mark_prices,
                 )
             except CustomerPaperFlowBlocked as exc:
                 raise HTTPException(409, f"Customer paper execution blocked: {exc}") from exc
@@ -7770,5 +7778,6 @@ app.include_router(build_customer_paper_router(
     get_customer=get_customer,
     market_data=market_data,
     market_request_type=MarketRequest,
+    group_mark_price_loader=_customer_paper_group_mark_prices,
 ))
 
