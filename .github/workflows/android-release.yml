@@ -155,6 +155,8 @@ jobs:
           cat > "$RUNNER_TEMP/atlas-release-evidence/atlas-release-metadata.txt" <<EOF
           commit=$GITHUB_SHA
           ref=$GITHUB_REF
+          run_id=$GITHUB_RUN_ID
+          run_attempt=$GITHUB_RUN_ATTEMPT
           package=com.atlas.trading
           certificate_sha256=$ACTUAL_CERT
           backend_url=$BACKEND_URL_FOR_EVIDENCE
