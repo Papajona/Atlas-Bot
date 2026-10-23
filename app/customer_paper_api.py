@@ -456,19 +456,27 @@ def build_customer_paper_router(
                 bar_key=budget["bar_key"],
             )
             if prior_fill is not None:
-                replay_order = order
+                # Re-read after the immutable fill lookup: another request can have
+                # completed the order since the initial status read above.
+                replay_order = await _order_detail(profile.id, client_order_id)
                 if (
                     elapsed_bars >= max(1, int(settings.paper_order_ttl_bars))
-                    and order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}
+                    and replay_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}
                 ):
-                    await expire_customer_paper_order(
-                        customer_id=profile.id,
-                        client_order_id=client_order_id,
-                        idempotency_key=f"paper-ttl:{budget['bar_key']}",
-                    )
-                    replay_order = await _order_detail(profile.id, client_order_id)
-                else:
-                    replay_order = await _order_detail(profile.id, client_order_id)
+                    try:
+                        await expire_customer_paper_order(
+                            customer_id=profile.id,
+                            client_order_id=client_order_id,
+                            idempotency_key=f"paper-ttl:{budget['bar_key']}",
+                        )
+                    except CustomerPaperOrderConflict:
+                        # A concurrent fill/expiry can win between the re-read and
+                        # expiry. Return the replay if the latest order is now terminal.
+                        replay_order = await _order_detail(profile.id, client_order_id)
+                        if replay_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}:
+                            raise
+                    else:
+                        replay_order = await _order_detail(profile.id, client_order_id)
                 return {
                     "status": "REPLAYED",
                     "virtual_only": True,
