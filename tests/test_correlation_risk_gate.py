@@ -117,12 +117,13 @@ def test_correlation_gate_is_wired_into_the_live_decision_pipeline():
 
 
 def test_correlation_gate_queries_positions_scoped_to_the_customer():
-    """The gate must only look at *this* customer's open positions, never cross-customer."""
+    """The non-paper gate must only load this customer's open positions."""
     src = open("app/main.py").read()
-    i = src.index("group_check = adjusted_group_exposure(")
-    preceding = src[max(0, i - 400):i]
-    assert "Position.customer_id == profile.id" in preceding
-    assert "Position.quantity != 0" in preceding
+    query_start = src.index("open_positions = (await db2.execute(select(Position).where(")
+    query_end = src.index("))).scalars().all()", query_start)
+    position_query = src[query_start:query_end]
+    assert "Position.customer_id == profile.id" in position_query
+    assert "Position.quantity != 0" in position_query
 
 
 def test_customer_paper_buy_filters_unrelated_markets_before_valuation():
