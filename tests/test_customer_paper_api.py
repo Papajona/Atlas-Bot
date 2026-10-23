@@ -150,6 +150,7 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
     monkeypatch.setattr(settings, "usdt_tron_enabled", False)
     monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
     monkeypatch.setattr(settings, "paper_order_ttl_bars", 24)
+    monkeypatch.setattr(settings, "discipline_enabled", False)
     monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.01)
     monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
     monkeypatch.setattr(settings, "paper_rejection_probability", 0.0)
@@ -295,4 +296,28 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
             await engine.dispose()
 
     asyncio.run(assert_database_capacity_guard())
+
+    # A stale pending manual order must expire even when fill latency would otherwise
+    # return early before the TTL check.
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 3)
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 1)
+    market["bar_at"] = now + timedelta(minutes=2)
+    ttl_submitted = post("/api/customer/paper/orders", "customer-a", {
+        "client_order_id": "manual-order-ttl-boundary",
+        "symbol": "BTC/USDT",
+        "side": "BUY",
+        "quantity": "0.1",
+        "order_type": "MARKET",
+        "timeframe": "1m",
+    })
+    assert ttl_submitted.status_code == 200, ttl_submitted.text
+    assert ttl_submitted.json()["order"]["status"] == "SUBMITTED"
+    market["bar_at"] = now + timedelta(minutes=3)
+    frozen_now = now + timedelta(minutes=4)
+    ttl_advance = post(
+        "/api/customer/paper/orders/manual-order-ttl-boundary/advance", "customer-a"
+    )
+    assert ttl_advance.status_code == 200, ttl_advance.text
+    assert ttl_advance.json()["status"] == "EXPIRED_TTL"
+    assert ttl_advance.json()["order"]["status"] == "EXPIRED"
     client.close()
