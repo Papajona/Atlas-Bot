@@ -29,7 +29,8 @@ def test_release_build_requires_an_explicit_approved_https_backend_origin():
     assert "hostHasMultipleTerminalDots" in GRADLE
     assert 'ATLAS_DEV_BACKEND_URL' in GRADLE
     assert 'https://atlas-debug-backend.invalid' in GRADLE
-    assert 'buildConfigField("String", "BACKEND_URL"' in GRADLE
+    assert 'resValue("string", "atlas_backend_url", configuredBackendUrl ?: "")' in GRADLE
+    assert 'buildConfigField("String", "BACKEND_URL"' not in GRADLE
 
 
 def test_signed_release_workflow_accepts_verified_dispatch_origin_and_fails_closed_if_missing():
@@ -47,9 +48,11 @@ def test_android_does_not_ship_or_reference_the_checked_in_development_service_u
     assert 'name="backend_url"' not in STRINGS
     assert 'name="trusted_web_host"' not in STRINGS
     assert "R.string.backend_url" not in MAIN_ACTIVITY
+    assert "R.string.atlas_backend_url" in MAIN_ACTIVITY
     assert "R.string.trusted_web_host" not in MAIN_ACTIVITY
-    assert "BuildConfig.BACKEND_URL.trimEnd('/')" in MAIN_ACTIVITY
-    assert "Uri.parse(BuildConfig.BACKEND_URL).host.orEmpty().lowercase()" in MAIN_ACTIVITY
+    assert "getString(R.string.atlas_backend_url).trimEnd('/')" in MAIN_ACTIVITY
+    assert "BuildConfig.BACKEND_URL" not in MAIN_ACTIVITY
+    assert "Uri.parse(backendUrl).host.orEmpty().lowercase()" in MAIN_ACTIVITY
 
 
 def test_admin_authentication_has_bounded_network_timeouts_and_screen_is_secure():
