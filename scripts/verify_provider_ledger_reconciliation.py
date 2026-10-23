@@ -367,7 +367,7 @@ def main() -> int:
     parser.add_argument("--staging-ref", default="")
     parser.add_argument("--production-ref", default="")
     parser.add_argument("--expected-runtime-role", required=True)
-    parser.add_argument("--expected-revision", default="0049_public_schema_rls_lockdown")
+    parser.add_argument("--expected-revision", default="0053_supabase_public_default_acl_lockdown")
     parser.add_argument("--output", default="provider-ledger-reconciliation.json")
     args = parser.parse_args()
     import os
