@@ -163,7 +163,10 @@ def test_customer_paper_entry_discipline_is_isolated_and_serialized():
 def test_customer_paper_group_marks_are_filtered_before_fetching():
     source = Path("app/main.py").read_text(encoding="utf-8")
     assert "from .correlation_risk import adjusted_group_exposure, risk_group" in source
-    assert "if risk_group(symbol) != target_risk_group:" in source
+    # The current helper filters by the target risk group before it fetches any marks.
+    assert "relevant_positions = [" in source
+    assert 'if risk_group(str(row.get("symbol") or "")) == target_group' in source
+    assert source.index("relevant_positions = [") < source.index("for row in relevant_positions:")
     assert "if not group_check[\"allowed\"] and not group_reduce_only:" in source
 
 
