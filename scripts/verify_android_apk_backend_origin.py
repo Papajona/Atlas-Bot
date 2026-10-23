@@ -155,7 +155,7 @@ def verify_apk_backend_origin(
     """Decode resources.arsc and verify the exact runtime resource before release/deploy."""
     try:
         result = subprocess.run(
-            [str(aapt_path), "dump", "resources", str(apk_path)],
+            [str(aapt_path), "dump", "resources", "--values", str(apk_path)],
             check=False,
             capture_output=True,
             text=True,
