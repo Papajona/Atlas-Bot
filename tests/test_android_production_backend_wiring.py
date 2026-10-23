@@ -32,9 +32,13 @@ def test_release_build_requires_an_explicit_approved_https_backend_origin():
     assert 'buildConfigField("String", "BACKEND_URL"' in GRADLE
 
 
-def test_signed_release_workflow_passes_the_backend_and_fails_closed_if_missing():
-    assert "ATLAS_PROD_BACKEND_URL: ${{ vars.ATLAS_PROD_BACKEND_URL }}" in RELEASE_WORKFLOW
+def test_signed_release_workflow_accepts_verified_dispatch_origin_and_fails_closed_if_missing():
+    assert "production_backend_url:" in RELEASE_WORKFLOW
+    assert 'description: "Verified public HTTPS Atlas origin behind the configured Cloudflare/Google HTTPS load balancer; do not use a staging URL."' in RELEASE_WORKFLOW
+    assert "required: true" in RELEASE_WORKFLOW
+    assert "ATLAS_PROD_BACKEND_URL: ${{ inputs.production_backend_url || vars.ATLAS_PROD_BACKEND_URL }}" in RELEASE_WORKFLOW
     assert 'test -n "$ATLAS_PROD_BACKEND_URL"' in RELEASE_WORKFLOW
+    assert "configure ATLAS_PROD_BACKEND_URL for a signed release tag" in RELEASE_WORKFLOW
     assert "gradle --no-daemon :app:assembleRelease" in RELEASE_WORKFLOW
 
 
