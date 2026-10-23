@@ -8,14 +8,14 @@ permissions:
   contents: write
   pull-requests: read
 
-concurrency:
-  group: atlas-branch-pruning
-  cancel-in-progress: false
-
 jobs:
   prune-contained-branches:
     # This unique marker is used only on the explicit cleanup merge.
     if: startsWith(github.event.head_commit.message, '[atlas-branch-prune-once-20261020]') || startsWith(github.event.head_commit.message, '[atlas-branch-prune-content-once-20261020]') || startsWith(github.event.head_commit.message, '[atlas-branch-prune-reviewed-once-20261020]') || startsWith(github.event.head_commit.message, '[atlas-branch-prune-verified-duplicates-once-20261020]')
+    concurrency:
+      group: atlas-branch-pruning
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     steps:
       - name: Checkout complete history
