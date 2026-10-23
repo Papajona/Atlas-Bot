@@ -295,9 +295,8 @@ def _restore_index_definition(bind, name: str, definition: str | None, comment: 
         escaped_name = name.replace('"', '""')
         escaped_comment = comment.replace("'", "''")
         bind.exec_driver_sql(
-            f"COMMENT ON INDEX \"{escaped_name}\" IS '{escaped_comment}'"
+            f"""COMMENT ON INDEX "{escaped_name}" IS '{escaped_comment}'"""
         )
-
 
 def _restore_rename_index_state(bind, state) -> None:
     """Restore one rename pair to the exact existence state recorded before upgrade."""
