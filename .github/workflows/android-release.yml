@@ -10,16 +10,8 @@ on:
       - ".github/workflows/android-release.yml"
   workflow_dispatch:
   push:
-    branches:
-      - main
     tags:
       - "android-v*"
-    paths:
-      - "app/**"
-      - "build.gradle.kts"
-      - "settings.gradle.kts"
-      - "gradle.properties"
-      - ".github/workflows/android-release.yml"
 
 permissions:
   contents: read
