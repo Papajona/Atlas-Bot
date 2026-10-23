@@ -150,3 +150,41 @@ def test_live_risk_path_passes_stop_to_portfolio_gate():
     # per-trade risk budget; the portfolio gate independently enforces stop and account limits.
     assert "equity=risk_equity, risk_per_trade=settings.risk_per_trade" in source
     assert "risk_gate(symbol, quote, quantity, live=live" in source
+
+def test_customer_paper_entry_discipline_is_isolated_and_serialized():
+    lifecycle = Path("app/customer_paper_lifecycle.py").read_text(encoding="utf-8")
+    assert "paper-entry-discipline:" in lifecycle
+    assert "Trading-discipline daily entry limit reached for isolated paper ledger" in lifecycle
+    assert "Trading-discipline entry cooldown is active for isolated paper ledger" in lifecycle
+    assert "customer_paper.orders" in lifecycle
+    assert "Trade.customer_id" not in lifecycle
+
+
+def test_customer_paper_group_marks_are_filtered_before_fetching():
+    source = Path("app/main.py").read_text(encoding="utf-8")
+    assert "from .correlation_risk import adjusted_group_exposure, risk_group" in source
+    assert "if risk_group(symbol) != target_risk_group:" in source
+    assert "if not group_check[\"allowed\"] and not group_reduce_only:" in source
+
+
+def test_customer_paper_recovery_does_not_misclassify_replays_or_take_manual_orders():
+    flow = Path("app/customer_paper_flow.py").read_text(encoding="utf-8")
+    assert '{"APPENDED", "REPLAYED"}' in flow
+    assert "the autonomous flow will not take ownership or advance it" in flow
+    assert "Protective-exit candle history is incomplete" in flow
+    assert "WAITING_FOR_FILL_LATENCY" in flow
+    assert "EXPIRED_TTL" in flow
+
+
+def test_manual_paper_cash_race_uses_bounded_reaffordability_retry():
+    api = Path("app/customer_paper_api.py").read_text(encoding="utf-8")
+    assert "retry_affordable" in api
+    assert "WAITING_FOR_PAPER_CASH" in api
+    assert "paper-cash-race-api" not in api
+
+
+def test_manual_and_autonomous_paper_position_ownership_is_enforced():
+    lifecycle = Path("app/customer_paper_lifecycle.py").read_text(encoding="utf-8")
+    assert "Manual and autonomous customer paper flows cannot operate on the same open position" in lifecycle
+    assert '"execution_owner": str(row["execution_owner"] or "manual_customer_api")' in lifecycle
+    assert "if not protective_exit:" in lifecycle

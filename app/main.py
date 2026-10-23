@@ -1247,7 +1247,29 @@ async def _run_persisted_adaptive_bot_cycle(
             "reason": "one or more same-group paper positions could not be valued",
             "group_exposure": group_check,
         }
-    if not group_check["allowed"] and str(plan.get("side") or "").upper() == "BUY":
+    group_side = str(plan.get("side") or "").upper()
+    candidate_symbol = str(req.symbol or "").upper().replace(":USDT", "")
+    opposing_quantity = 0.0
+    for position in open_positions:
+        position_symbol = str(getattr(position, "symbol", "") or "").upper().replace(":USDT", "")
+        if position_symbol != candidate_symbol:
+            continue
+        try:
+            position_quantity = float(getattr(position, "quantity", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(position_quantity) and (
+            (group_side == "BUY" and position_quantity < 0)
+            or (group_side == "SELL" and position_quantity > 0)
+        ):
+            opposing_quantity += abs(position_quantity)
+    # A position-reducing order must still be allowed when existing exposure is over cap.
+    # Customer-paper SELL execution is separately clamped to its held long quantity.
+    group_reduce_only = opposing_quantity > 0 and (
+        quantity <= opposing_quantity + 1e-9
+        or (needs_customer_paper and group_side == "SELL")
+    )
+    if not group_check["allowed"] and not group_reduce_only:
         headroom = max(0.0, settings.correlation_group_cap_usd - group_check["existing_notional"])
         quantity = min(quantity, headroom / max(float(plan["entry_price"]), 1e-12))
     if quantity <= 0:
