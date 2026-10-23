@@ -633,13 +633,34 @@ def build_customer_paper_router(
                                 fill_quantity = retry_quantity
                             except CustomerPaperOrderConflict as retry_exc:
                                 if "overdraw" in str(retry_exc).lower():
+                                    ttl_reached = elapsed_bars >= max(
+                                        1, int(settings.paper_order_ttl_bars)
+                                    )
+                                    retry_order = await _order_detail(profile.id, client_order_id)
+                                    if ttl_reached and retry_order["status"] in {
+                                        "SUBMITTED", "PARTIALLY_FILLED"
+                                    }:
+                                        await expire_customer_paper_order(
+                                            customer_id=profile.id,
+                                            client_order_id=client_order_id,
+                                            idempotency_key=f"paper-ttl:{budget['bar_key']}",
+                                        )
+                                        retry_order = await _order_detail(profile.id, client_order_id)
+                                        return {
+                                            "status": "EXPIRED_TTL",
+                                            "virtual_only": True,
+                                            "bar_at": bar["timestamp"].isoformat(),
+                                            "bar_key": budget["bar_key"],
+                                            "fill": {"status": "EXPIRED"},
+                                            "order": retry_order,
+                                        }
                                     return {
                                         "status": "WAITING_FOR_PAPER_CASH",
                                         "virtual_only": True,
                                         "bar_at": bar["timestamp"].isoformat(),
                                         "bar_key": budget["bar_key"],
                                         "fill": {"status": "NOT_FILLED"},
-                                        "order": await _order_detail(profile.id, client_order_id),
+                                        "order": retry_order,
                                     }
                                 raise
                         else:
