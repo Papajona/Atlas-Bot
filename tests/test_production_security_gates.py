@@ -233,7 +233,7 @@ def test_production_deploy_requires_verified_signed_android_artifact_for_exact_c
 
 def test_deployment_independently_verifies_downloaded_apk_not_only_metadata():
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
-    block_start = workflow.index("Download and independently verify signed Android artifact")
+    block_start = workflow.index("Download and independently verify selected Android artifact and backend origin")
     block_end = workflow.index("Authenticate to Google Cloud with GitHub OIDC", block_start)
     block = workflow[block_start:block_end]
     assert ' -name apksigner' in block
@@ -248,15 +248,19 @@ def test_deployment_independently_verifies_downloaded_apk_not_only_metadata():
     assert 'expected certificate fingerprint must be 64 hex characters' in block
 
 
-def test_deployment_selects_a_successful_signed_release_run_for_exact_sha():
+def test_deployment_selects_an_explicit_successful_signed_release_run_for_exact_sha():
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
-    block_start = workflow.index("Download and independently verify signed Android artifact")
-    block_end = workflow.index("Authenticate to Google Cloud with GitHub OIDC", block_start)
+    block_start = workflow.index("Require all release CI gates on this exact commit")
+    block_end = workflow.index("Download and independently verify selected Android artifact and backend origin", block_start)
     block = workflow[block_start:block_end]
-    assert '--commit "$GITHUB_SHA"' in block
+    assert "android_release_run_id:" in workflow
+    assert 'android_run="$ANDROID_RELEASE_RUN_ID"' in block
+    assert "run_sha" in block
+    assert '"$run_sha" != "$GITHUB_SHA"' in block
     assert 'select(.name=="android-release")' in block
-    assert 'if [ "$job_conclusion" = "success" ]' in block
-    assert '-ne 1' in block
+    assert 'if [ "$artifact_count" -ne 1 ]' in block
+    assert "never select the first run by commit" in block
+    assert "while IFS= read -r candidate" not in block
 
 
 def test_staging_identity_preflight_is_manual_main_only_and_read_only():
