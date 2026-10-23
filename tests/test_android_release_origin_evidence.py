@@ -127,6 +127,7 @@ def test_apk_verifier_decodes_resource_table_not_dex_string_presence(monkeypatch
             "android-sdk/build-tools/35.0.0/aapt",
             "dump",
             "resources",
+            "--values",
             str(apk),
         ]
     ]
