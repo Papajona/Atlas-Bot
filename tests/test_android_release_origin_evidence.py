@@ -111,3 +111,34 @@ def test_accepts_equivalent_canonical_origin_for_deployment(tmp_path: Path):
         "https://atlas.example.com/",
     )
     assert evidence["backend_origin"] == "https://atlas.example.com"
+
+
+ROOT = Path(__file__).resolve().parents[1]
+ANDROID_RELEASE_WORKFLOW = (ROOT / ".github" / "workflows" / "android-release.yml").read_text(encoding="utf-8")
+PRODUCTION_DEPLOY_WORKFLOW = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+
+
+def test_signed_release_metadata_records_origin_only_after_inspecting_apk_dex():
+    verifier = 'python scripts/verify_android_apk_backend_origin.py --apk "$APK" --expected-url "$ATLAS_PROD_BACKEND_URL"'
+    assert verifier in ANDROID_RELEASE_WORKFLOW
+    assert "backend_url=$BACKEND_URL_FOR_EVIDENCE" in ANDROID_RELEASE_WORKFLOW
+    assert "backend_origin=$BACKEND_ORIGIN" in ANDROID_RELEASE_WORKFLOW
+    assert "certificate_sha256=$ACTUAL_CERT" in ANDROID_RELEASE_WORKFLOW
+
+
+def test_production_deployment_requires_an_explicit_signed_release_run_id():
+    assert "android_release_run_id:" in PRODUCTION_DEPLOY_WORKFLOW
+    assert "ANDROID_RELEASE_RUN_ID: ${{ inputs.android_release_run_id }}" in PRODUCTION_DEPLOY_WORKFLOW
+    assert "selected run must be a successful Android release workflow run" in PRODUCTION_DEPLOY_WORKFLOW
+    assert "android_job_conclusion" in PRODUCTION_DEPLOY_WORKFLOW
+    assert "never select the first run by commit" in PRODUCTION_DEPLOY_WORKFLOW
+    assert "while IFS= read -r candidate" not in PRODUCTION_DEPLOY_WORKFLOW
+
+
+def test_deployment_independently_checks_apk_url_and_intended_origin_before_cloud_auth():
+    assert 'metadata_commit="$(sed -n \'s/^commit=//p\'' in PRODUCTION_DEPLOY_WORKFLOW
+    assert 'metadata_backend_origin="$(sed -n \'s/^backend_origin=//p\'' in PRODUCTION_DEPLOY_WORKFLOW
+    assert '--expected-url "$metadata_backend_url" --compare-origin "$ATLAS_BASE_URL"' in PRODUCTION_DEPLOY_WORKFLOW
+    assert 'test "$verified_backend_origin" = "$metadata_backend_origin"' in PRODUCTION_DEPLOY_WORKFLOW
+    assert "metadata_commit" in PRODUCTION_DEPLOY_WORKFLOW
+    assert PRODUCTION_DEPLOY_WORKFLOW.index("--compare-origin \"$ATLAS_BASE_URL\"") < PRODUCTION_DEPLOY_WORKFLOW.index("      - name: Authenticate to Google Cloud with GitHub OIDC")
