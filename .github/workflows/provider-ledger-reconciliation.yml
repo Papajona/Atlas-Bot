@@ -111,7 +111,7 @@ jobs:
             --from-utc "$FROM_UTC" \
             --to-utc "$TO_UTC" \
             --expected-runtime-role "$EXPECTED_RUNTIME_DB_ROLE" \
-            --expected-revision 0049_public_schema_rls_lockdown \
+            --expected-revision 0053_supabase_public_default_acl_lockdown \
             --output "$RUNNER_TEMP/provider-ledger-reconciliation.json"
       - name: Archive restricted reconciliation report even if a mismatch is found
         if: always()
