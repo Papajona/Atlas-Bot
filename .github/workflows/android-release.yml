@@ -145,7 +145,7 @@ jobs:
             exit 1
           }
           test -n "$ATLAS_PROD_BACKEND_URL"
-          BACKEND_EVIDENCE="$(python scripts/verify_android_apk_backend_origin.py --apk "$APK" --expected-url "$ATLAS_PROD_BACKEND_URL")"
+          BACKEND_EVIDENCE="$(python scripts/verify_android_apk_backend_origin.py --apk "$APK" --aapt "$AAPT" --expected-url "$ATLAS_PROD_BACKEND_URL")"
           BACKEND_URL_FOR_EVIDENCE=$(jq -er .backend_url <<< "$BACKEND_EVIDENCE")
           BACKEND_ORIGIN=$(jq -er .backend_origin <<< "$BACKEND_EVIDENCE")
           mkdir -p "$RUNNER_TEMP/atlas-release-evidence"
