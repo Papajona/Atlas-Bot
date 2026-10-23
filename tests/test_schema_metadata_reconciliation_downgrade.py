@@ -4,6 +4,8 @@ import importlib.util
 import os
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_PATH = ROOT / "alembic" / "versions" / "0052_schema_metadata_reconciliation.py"
