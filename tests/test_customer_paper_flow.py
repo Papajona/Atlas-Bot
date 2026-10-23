@@ -893,14 +893,24 @@ def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monke
         sol_req_2, sol_frame_2, sol_context_2 = _market_fixture(
             timestamp=second_at, symbol="SOL/USDT", bid=100.0, ask=100.1,
         )
+        async def same_group_current_marks(_customer_id, _req, _context):
+            # Both symbols have fresh, independently verified quotes in this controlled
+            # integration fixture. The production provider fetches one quote per holding.
+            return {
+                ("binance", "spot", "ETH/USDT"): "100",
+                ("binance", "spot", "SOL/USDT"): "100",
+            }
+
         eth_result, sol_result = await asyncio.gather(
             recover_customer_paper_spot_flow(
                 customer_id=customer_id, req=eth_req_2,
                 df=eth_frame_2, market_context=eth_context_2,
+                group_mark_price_loader=same_group_current_marks,
             ),
             recover_customer_paper_spot_flow(
                 customer_id=customer_id, req=sol_req_2,
                 df=sol_frame_2, market_context=sol_context_2,
+                group_mark_price_loader=same_group_current_marks,
             ),
         )
         assert eth_result is not None and sol_result is not None
