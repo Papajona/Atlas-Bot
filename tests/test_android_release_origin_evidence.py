@@ -64,6 +64,8 @@ def test_normalizes_https_origin_and_gradle_url_literal():
         "https://user:pass@atlas.example.com",
         "https://atlas.example.com/api",
         "https://atlas.example.com?other=1",
+        "https://atlas.example.com?",
+        "https://atlas.example.com#",
         "https://atlas.example.com:8443",
         "https://localhost",
         "https://staging.atlas.example.com",
@@ -121,6 +123,8 @@ PRODUCTION_DEPLOY_WORKFLOW = (ROOT / ".github" / "workflows" / "production-deplo
 def test_signed_release_metadata_records_origin_only_after_inspecting_apk_dex():
     verifier = 'python scripts/verify_android_apk_backend_origin.py --apk "$APK" --expected-url "$ATLAS_PROD_BACKEND_URL"'
     assert verifier in ANDROID_RELEASE_WORKFLOW
+    assert "run_id=$GITHUB_RUN_ID" in ANDROID_RELEASE_WORKFLOW
+    assert "run_attempt=$GITHUB_RUN_ATTEMPT" in ANDROID_RELEASE_WORKFLOW
     assert "backend_url=$BACKEND_URL_FOR_EVIDENCE" in ANDROID_RELEASE_WORKFLOW
     assert "backend_origin=$BACKEND_ORIGIN" in ANDROID_RELEASE_WORKFLOW
     assert "certificate_sha256=$ACTUAL_CERT" in ANDROID_RELEASE_WORKFLOW
@@ -131,6 +135,8 @@ def test_production_deployment_requires_an_explicit_signed_release_run_id():
     assert "ANDROID_RELEASE_RUN_ID: ${{ inputs.android_release_run_id }}" in PRODUCTION_DEPLOY_WORKFLOW
     assert "selected run must be a successful Android release workflow run" in PRODUCTION_DEPLOY_WORKFLOW
     assert "android_job_conclusion" in PRODUCTION_DEPLOY_WORKFLOW
+    assert "metadata_run_id" in PRODUCTION_DEPLOY_WORKFLOW
+    assert "metadata_run_attempt" in PRODUCTION_DEPLOY_WORKFLOW
     assert "never select the first run by commit" in PRODUCTION_DEPLOY_WORKFLOW
     assert "while IFS= read -r candidate" not in PRODUCTION_DEPLOY_WORKFLOW
 
