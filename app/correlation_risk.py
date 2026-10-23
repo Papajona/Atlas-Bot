@@ -70,3 +70,41 @@ def adjusted_group_exposure(positions, *, proposed_symbol: str, proposed_notiona
         "valuation_complete": valuation_complete,
         "members": members,
     }
+
+
+def cap_quantity_preserving_reduction(
+    quantity: float,
+    opposing_quantity: float,
+    *,
+    existing_notional: float,
+    reducing_notional: float,
+    cap_usd: float,
+    unit_price: float,
+) -> float:
+    """Cap only the increasing part of an order; never shrink its reducing part."""
+    try:
+        requested = float(quantity)
+        opposing = float(opposing_quantity)
+        existing = float(existing_notional)
+        closing = float(reducing_notional)
+        cap = float(cap_usd)
+        price = float(unit_price)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if not math.isfinite(requested) or not math.isfinite(opposing):
+        return 0.0
+    reducing = min(max(0.0, requested), max(0.0, opposing))
+    increasing = max(0.0, requested - reducing)
+    if increasing <= 0:
+        return reducing
+    # Unknown cap/valuation/price is not a reason to block risk reduction, but it
+    # must not authorize the increasing portion.
+    if (
+        not all(math.isfinite(value) for value in (existing, closing, cap, price))
+        or existing < 0 or closing < 0 or cap < 0 or price <= 0
+    ):
+        return reducing
+    exposure_after_close = max(0.0, existing - min(existing, closing))
+    increasing_headroom = max(0.0, cap - exposure_after_close)
+    allowed_increasing = min(increasing, increasing_headroom / price)
+    return reducing + allowed_increasing

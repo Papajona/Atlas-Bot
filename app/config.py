@@ -270,8 +270,8 @@ class Settings(BaseSettings):
     ai_gateway_model: str = ""
     gemini_api_key: str = ""
     # gemini-2.5-* is scheduled to shut down in Oct 2026 (Google lists 16 and 20 Oct in different places); verify IDs with scripts/check_ai_models.py.
-    gemini_model: str = "gemini-3.5-flash-lite"
-    gemini_strategy_model: str = "gemini-3.5-flash-lite"
+    gemini_model: str = "gemini-3.5-flash"
+    gemini_strategy_model: str = "gemini-3.5-flash"
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-20b"
     groq_strategy_model: str = "openai/gpt-oss-20b"

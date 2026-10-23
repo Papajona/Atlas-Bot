@@ -58,7 +58,7 @@ from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
 from .incidents import open_incident
 from .model_registry import verify_model_file, rollback_champion
-from .correlation_risk import adjusted_group_exposure, risk_group
+from .correlation_risk import adjusted_group_exposure, cap_quantity_preserving_reduction, risk_group
 from .custody_signer import validate_signer_config
 from .custody_reconciliation import reconcile_usdt_custody
 from .meta_labeling import meta_label_gate, meta_label_walk_forward
@@ -162,12 +162,65 @@ async def _customer_paper_positions_for_exposure(
             }
 
         open_positions.append(SimpleNamespace(
+            exchange=venue,
             symbol=symbol,
             quantity=quantity,
             average_entry_price=average,
             mark_price=mark,
         ))
     return {"ok": True, "positions": open_positions}
+
+
+async def _customer_paper_group_mark_prices(
+    customer_id: int, req, market_context: dict | None
+) -> dict[tuple[str, str, str], str]:
+    """Return fresh marks for each nonzero holding in the candidate's correlation group."""
+    context = market_context
+    try:
+        bid = float(context.get("bid", 0)) if isinstance(context, dict) else 0.0
+    except (TypeError, ValueError, OverflowError):
+        bid = 0.0
+    if not math.isfinite(bid) or bid <= 0:
+        # The manual API uses a candle-only context. Force fresh server marks rather
+        # than interpreting a candle close as a current quote.
+        context = None
+    exposure = await _customer_paper_positions_for_exposure(
+        customer_id=customer_id, req=req, market_context=context
+    )
+    if not exposure.get("ok"):
+        raise CustomerPaperFlowBlocked(
+            str(exposure.get("reason") or "current correlation-group marks could not be verified")
+        )
+    marks: dict[tuple[str, str, str], str] = {}
+    for position in exposure["positions"]:
+        venue = str(getattr(position, "exchange", "") or "").strip().lower()
+        symbol = str(getattr(position, "symbol", "") or "").strip().upper()
+        price = float(getattr(position, "mark_price", 0) or 0)
+        if not venue or not symbol or not math.isfinite(price) or price <= 0:
+            raise CustomerPaperFlowBlocked("current correlation-group position mark is invalid")
+        marks[(venue, "spot", symbol)] = format(price, ".18f")
+    return marks
+
+
+async def _customer_paper_protective_history(req, start_bar: datetime, end_bar: datetime):
+    """Fetch a larger verified spot-candle window when a held position predates req.days."""
+    span_days = math.ceil(max(0.0, (end_bar - start_bar).total_seconds()) / 86_400) + 2
+    try:
+        requested_days = max(int(getattr(req, "days", 1)), span_days)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise CustomerPaperFlowBlocked("Protective history window is invalid") from exc
+    if requested_days > 1500:
+        raise CustomerPaperFlowBlocked(
+            "Protective history exceeds the maximum supported verified candle window"
+        )
+    historical_req = req.model_copy(update={"days": requested_days})
+    try:
+        return await asyncio.to_thread(market_data, historical_req)
+    except Exception as exc:
+        raise CustomerPaperFlowBlocked(
+            f"Protective history fetch failed ({type(exc).__name__})"
+        ) from exc
+
 
 def _stepup_token(uid: str, purpose: str = "withdrawal", destination_fingerprint: str = "", proposal_digest_value: str = "") -> tuple[str, str, int]:
     if not settings.secret_key:
@@ -1070,19 +1123,6 @@ async def _run_persisted_adaptive_bot_cycle(
             return {"decision": "NO_TRADE", "stage": "customer_paper_market_context",
                     "reason": "Verified completed spot candles and a fresh server quote are required"}
         spread_bps = float(customer_paper_market_context["spread_bps"])
-        paper_correlation_group_marks: dict[str, str] = {}
-        try:
-            paper_exposure_snapshot = await _customer_paper_positions_for_exposure(
-                customer_id=profile.id, req=req, market_context=customer_paper_market_context
-            )
-            if paper_exposure_snapshot.get("ok"):
-                paper_correlation_group_marks = {
-                    str(position.symbol).strip().upper(): str(position.mark_price)
-                    for position in paper_exposure_snapshot["positions"]
-                }
-        except Exception:
-            # A missing snapshot is not zero exposure; the atomic writer fails closed.
-            paper_correlation_group_marks = {}
         allowed, confirmed_paper_mode, gate_reason = await _adaptive_bot_runtime_gate(
             bot_id, profile.id, account.id
         )
@@ -1093,7 +1133,8 @@ async def _run_persisted_adaptive_bot_cycle(
             recovered = await recover_customer_paper_spot_flow(
                 customer_id=profile.id, req=req, df=df,
                 market_context=customer_paper_market_context,
-                correlation_group_marks=paper_correlation_group_marks,
+                history_loader=lambda start_bar, end_bar: _customer_paper_protective_history(req, start_bar, end_bar),
+                group_mark_price_loader=_customer_paper_group_mark_prices,
             )
         except CustomerPaperFlowBlocked as exc:
             return {"decision": "NO_TRADE", "stage": "customer_paper_recovery",
@@ -1220,10 +1261,6 @@ async def _run_persisted_adaptive_bot_cycle(
                 "reason": paper_exposure.get("reason", "same-group paper exposure could not be valued"),
             }
         open_positions = paper_exposure["positions"]
-        paper_correlation_group_marks = {
-            str(position.symbol).strip().upper(): str(position.mark_price)
-            for position in paper_exposure["positions"]
-        }
     elif needs_customer_paper:
         from types import SimpleNamespace
         from .customer_paper_lifecycle import get_customer_paper_positions
@@ -1237,6 +1274,7 @@ async def _run_persisted_adaptive_bot_cycle(
         # SELL/exit behavior is unchanged: no extra marks are requested for exits.
         open_positions = [
             SimpleNamespace(
+                exchange=str(row.get("venue") or "").strip().lower(),
                 symbol=str(row.get("symbol") or ""),
                 quantity=float(row.get("quantity") or 0),
                 average_entry_price=float(row.get("average_entry_price") or 0),
@@ -1277,11 +1315,18 @@ async def _run_persisted_adaptive_bot_cycle(
             "group_exposure": group_check,
         }
     group_side = str(plan.get("side") or "").upper()
-    candidate_symbol = str(req.symbol or "").upper().replace(":USDT", "")
+    candidate_symbol = str(req.symbol or "").strip().upper().replace(":USDT", "")
+    requested_exchange = str(req.exchange or "").strip().lower()
+    opposing_positions = []
     opposing_quantity = 0.0
     for position in open_positions:
-        position_symbol = str(getattr(position, "symbol", "") or "").upper().replace(":USDT", "")
-        if position_symbol != candidate_symbol:
+        position_symbol = str(getattr(position, "symbol", "") or "").strip().upper().replace(":USDT", "")
+        position_exchange = str(
+            getattr(position, "exchange", getattr(position, "venue", "")) or ""
+        ).strip().lower()
+        # A reduction on a different venue cannot satisfy the requested order's reduce-only
+        # proof; it must not bypass this venue's correlation-group limit.
+        if position_symbol != candidate_symbol or position_exchange != requested_exchange:
             continue
         try:
             position_quantity = float(getattr(position, "quantity", 0) or 0)
@@ -1292,12 +1337,51 @@ async def _run_persisted_adaptive_bot_cycle(
             or (group_side == "SELL" and position_quantity > 0)
         ):
             opposing_quantity += abs(position_quantity)
-    # A position-reducing order must still be allowed when existing exposure is over cap.
-    # Customer-paper SELL execution is separately clamped to its held long quantity.
-    group_reduce_only = opposing_quantity > 0 and (
-        quantity <= opposing_quantity + 1e-9
-        or (needs_customer_paper and group_side == "SELL")
-    )
+            opposing_positions.append((position, abs(position_quantity)))
+
+    reducing_quantity = min(max(0.0, quantity), opposing_quantity)
+    group_reduce_only = False
+    if reducing_quantity > 0:
+        if needs_customer_paper and group_side == "SELL":
+            # The isolated spot fill path is clamped to positive holdings on the matching
+            # venue. Submit only that reducing quantity; do not leave a short remainder open.
+            quantity = reducing_quantity
+            group_reduce_only = True
+        else:
+            remaining_to_close = reducing_quantity
+            reducing_notional = 0.0
+            reduction_valuation_complete = True
+            for position, position_quantity in opposing_positions:
+                close_quantity = min(remaining_to_close, position_quantity)
+                if close_quantity <= 0:
+                    continue
+                try:
+                    mark = float(getattr(position, "mark_price", 0) or 0)
+                    if not math.isfinite(mark) or mark <= 0:
+                        mark = float(getattr(position, "average_entry_price", 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    mark = 0.0
+                if not math.isfinite(mark) or mark <= 0:
+                    reduction_valuation_complete = False
+                    break
+                reducing_notional += close_quantity * mark
+                remaining_to_close -= close_quantity
+                if remaining_to_close <= 1e-9:
+                    break
+            if reduction_valuation_complete and remaining_to_close <= 1e-9:
+                quantity = cap_quantity_preserving_reduction(
+                    quantity,
+                    reducing_quantity,
+                    existing_notional=float(group_check["existing_notional"]),
+                    reducing_notional=reducing_notional,
+                    cap_usd=float(settings.correlation_group_cap_usd),
+                    unit_price=exposure_price,
+                )
+            else:
+                # Preserve the known close, but never guess headroom for an increase when
+                # the notional released by that close cannot be established.
+                quantity = reducing_quantity
+            group_reduce_only = True
     if not group_check["allowed"] and not group_reduce_only:
         headroom = max(0.0, settings.correlation_group_cap_usd - group_check["existing_notional"])
         quantity = min(quantity, headroom / max(exposure_price, 1e-12))
@@ -1346,11 +1430,14 @@ async def _run_persisted_adaptive_bot_cycle(
                 stop_loss_price=str(plan["stop_loss_price"]),
                 take_profit_price=str(plan["take_profit_price"]),
                 strategy="atlas-adaptive-autonomous-v1",
-                correlation_group_marks=paper_correlation_group_marks,
                 signal_metadata={
                     "model_version": str(ml_signal.get("model_version") or model_meta.get("model_version") or ""),
                     "strategy_version": "atlas-adaptive-autonomous-v1",
                 },
+                history_loader=lambda start_bar, end_bar: _customer_paper_protective_history(
+                    req, start_bar, end_bar
+                ),
+                group_mark_price_loader=_customer_paper_group_mark_prices,
             )
         except CustomerPaperFlowBlocked as exc:
             return {"decision": "NO_TRADE", "stage": "customer_paper_execution",
@@ -4443,19 +4530,6 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     "execution": None,
                 })
             spread_bps = float(customer_paper_market_context["spread_bps"])
-            paper_correlation_group_marks: dict[str, str] = {}
-            try:
-                paper_exposure_snapshot = await _customer_paper_positions_for_exposure(
-                    customer_id=profile.id, req=req, market_context=customer_paper_market_context
-                )
-                if paper_exposure_snapshot.get("ok"):
-                    paper_correlation_group_marks = {
-                        str(position.symbol).strip().upper(): str(position.mark_price)
-                        for position in paper_exposure_snapshot["positions"]
-                    }
-            except Exception:
-                # Missing marks are not interpreted as zero exposure by the writer.
-                paper_correlation_group_marks = {}
             if bot_id:
                 allowed, confirmed_paper_mode, gate_reason = await _adaptive_bot_runtime_gate(
                     bot_id, profile.id, account_id
@@ -4485,7 +4559,8 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 recovered = await recover_customer_paper_spot_flow(
                     customer_id=profile.id, req=req, df=df,
                     market_context=customer_paper_market_context,
-                    correlation_group_marks=paper_correlation_group_marks,
+                    history_loader=lambda start_bar, end_bar: _customer_paper_protective_history(req, start_bar, end_bar),
+                    group_mark_price_loader=_customer_paper_group_mark_prices,
                 )
             except CustomerPaperFlowBlocked as exc:
                 return await _record_customer_decision({
@@ -4793,10 +4868,6 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                         "analysis": deterministic,
                         "execution": None,
                     })
-                paper_correlation_group_marks = {
-                    str(position.symbol).strip().upper(): str(position.mark_price)
-                    for position in paper_exposure["positions"]
-                }
                 group_check = adjusted_group_exposure(
                     paper_exposure["positions"],
                     proposed_symbol=req.symbol,
@@ -4845,11 +4916,14 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     stop_loss_price=str(plan["stop_loss_price"]),
                     take_profit_price=str(plan["take_profit_price"]),
                     strategy=str(router.get("strategy") or plan.get("strategy") or "atlas-gated-entry-exit-v2"),
-                    correlation_group_marks=paper_correlation_group_marks,
                     signal_metadata={
                         "model_version": str((adaptive or {}).get("model_version") or ""),
                         "strategy_candidate_id": req.strategy_candidate_id,
                     },
+                    history_loader=lambda start_bar, end_bar: _customer_paper_protective_history(
+                        req, start_bar, end_bar
+                    ),
+                    group_mark_price_loader=_customer_paper_group_mark_prices,
                 )
             except CustomerPaperFlowBlocked as exc:
                 raise HTTPException(409, f"Customer paper execution blocked: {exc}") from exc
@@ -7704,5 +7778,6 @@ app.include_router(build_customer_paper_router(
     get_customer=get_customer,
     market_data=market_data,
     market_request_type=MarketRequest,
+    group_mark_price_loader=_customer_paper_group_mark_prices,
 ))
 

@@ -113,9 +113,9 @@ def _is_ancestor(ancestor_sha: str, descendant_sha: str) -> bool:
 def _tree_entry_at_commit(
     commit_sha: str, path: str
 ) -> tuple[str, str, str] | None:
-    """Return a path's Git mode, object type, and object ID, or None if absent."""
+    """Return the exact path's Git mode, object type, and object ID, or None if absent."""
     result = _run(
-        ["git", "--literal-pathspecs", "ls-tree", "-z", "-r", "--full-tree", commit_sha, "--", path],
+        ["git", "--literal-pathspecs", "ls-tree", "-z", "-tr", "--full-tree", commit_sha, "--", path],
         check=False,
     )
     if result.returncode:
@@ -124,21 +124,56 @@ def _tree_entry_at_commit(
             + (result.stderr.strip() or f"exit code {result.returncode}")
         )
 
-    entries = [entry for entry in result.stdout.split("\0") if entry]
-    if not entries:
+    exact_entries = []
+    for entry in (entry for entry in result.stdout.split("\0") if entry):
+        metadata, separator, returned_path = entry.partition("\t")
+        if not separator:
+            raise RuntimeError(
+                f"git ls-tree returned malformed output for path {path!r} at {commit_sha}"
+            )
+        # Recursive lookup may include the requested tree and its descendants.
+        # Only the exact path describes the object being reconciled.
+        if returned_path == path:
+            exact_entries.append(metadata)
+    if not exact_entries:
         return None
-    if len(entries) != 1:
+    if len(exact_entries) != 1:
         raise RuntimeError(
-            f"git ls-tree returned multiple entries for exact path {path!r} at {commit_sha}"
+            f"git ls-tree returned duplicate exact entries for path {path!r} at {commit_sha}"
         )
-    metadata, separator, returned_path = entries[0].partition("\t")
-    fields = metadata.split()
-    if not separator or len(fields) != 3 or returned_path != path:
+    fields = exact_entries[0].split()
+    if len(fields) != 3:
         raise RuntimeError(
             f"git ls-tree returned an unexpected tree entry for path {path!r} at {commit_sha}"
         )
     mode, object_type, object_id = fields
     return mode, object_type, object_id
+
+
+def _reconcile_unknown_protection_branches(
+    branches: list[str], branch_protection: dict[str, bool]
+) -> list[str]:
+    """Discard only stale refs whose absence was verified against origin."""
+    remaining = list(branches)
+    unknown_protection = sorted(set(remaining).difference(branch_protection))
+    for name in unknown_protection:
+        remote = _run(
+            ["git", "ls-remote", "--heads", "origin", f"refs/heads/{name}"],
+            check=False,
+        )
+        if remote.returncode != 0:
+            detail = remote.stderr.strip() or f"exit code {remote.returncode}"
+            raise RuntimeError(
+                f"Unable to read remote status for branch {name!r}; refusing pruning: {detail}"
+            )
+        if remote.stdout.strip():
+            raise RuntimeError(
+                f"GitHub did not return protection status for branch {name!r}, "
+                "and the branch still exists remotely; refusing pruning."
+            )
+        remaining.remove(name)
+        print(f"ALREADY ABSENT (remote ref verified missing): {name}")
+    return remaining
 
 
 def _branch_delta_mismatched_paths(branch_sha: str, main_sha: str) -> list[str]:
@@ -321,14 +356,7 @@ def main() -> int:
         )
 
         branch_protection = _load_branch_protection_status(repository)
-        unknown_protection = sorted(set(branches).difference(branch_protection))
-        if unknown_protection:
-            sample = ", ".join(unknown_protection[:8])
-            remainder = f" (+{len(unknown_protection) - 8} more)" if len(unknown_protection) > 8 else ""
-            raise RuntimeError(
-                "GitHub did not return protection status for every enumerated branch; "
-                f"refusing all deletions: {sample}{remainder}"
-            )
+        branches = _reconcile_unknown_protection_branches(branches, branch_protection)
 
         open_pr_payload = _run(
             [

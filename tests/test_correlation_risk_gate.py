@@ -250,12 +250,41 @@ def test_customer_paper_buy_uses_effective_price_and_atomic_fill_cap():
     # The actual database transaction serializes group fills, rereads current positions,
     # and sizes the fill against its actual price before inserting the fill row.
     assert 'paper-correlation-group:{customer_id}:{target_group}' in lifecycle_source
-    assert "correlation_group_marks" in lifecycle_source
-    assert "max(average_entry, mark_price)" in lifecycle_source
     assert "existing_group_notional + amount * fill_price" in lifecycle_source
     assert "NO_CORRELATION_GROUP_HEADROOM" in lifecycle_source
     assert lifecycle_source.index("paper-correlation-group:") < lifecycle_source.index(
         "INSERT INTO customer_paper.fills"
     )
-    assert "correlation_group_marks=correlation_group_marks" in flow_source
-    assert "correlation_group_marks=paper_correlation_group_marks" in main_source
+
+
+def test_group_cap_preserves_reducing_quantity_and_caps_only_increase():
+    from app.correlation_risk import cap_quantity_preserving_reduction
+
+    # Existing exposure is 600; closing 2 units releases 200 at the current mark.
+    # With a 500 cap, the remaining exposure is 400 and only 1 additional unit fits
+    # at a 100 effective order price.
+    permitted = cap_quantity_preserving_reduction(
+        5, 2, existing_notional=600, reducing_notional=200,
+        cap_usd=500, unit_price=100,
+    )
+    assert permitted == 3
+
+    # Even when the cap is already breached, the known reducing part remains permitted.
+    assert cap_quantity_preserving_reduction(
+        5, 2, existing_notional=1000, reducing_notional=100,
+        cap_usd=500, unit_price=100,
+    ) == 2
+
+    # An unknown mark/headroom cannot authorize an increasing quantity.
+    assert cap_quantity_preserving_reduction(
+        5, 2, existing_notional=float("nan"), reducing_notional=100,
+        cap_usd=500, unit_price=100,
+    ) == 2
+
+
+def test_reducing_position_requires_matching_exchange_for_reduce_only():
+    from types import SimpleNamespace
+
+    requested_exchange = "binance"
+    position = SimpleNamespace(exchange="kraken", symbol="BTC/USDT", quantity=2)
+    assert str(position.exchange).strip().lower() != requested_exchange

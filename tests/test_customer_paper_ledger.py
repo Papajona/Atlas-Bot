@@ -551,7 +551,7 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
             quantity="1",
             price="100",
             fee_amount="1",
-            correlation_group_marks={"BTC/USDT": "100"},
+            group_mark_prices={("binance", "spot", "BTC/USDT"): "100"},
         )
         assert second["order_status"] == "FILLED"
         final_order = await get_customer_paper_order(
@@ -616,7 +616,7 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
         sol_fill = await record_customer_paper_fill(
             customer_id=customer_id, client_order_id="risk-sol-entry-92001",
             idempotency_key="risk-sol-fill-92001", bar_key="risk-sol-bar-92001",
-            quantity="1", price="100", correlation_group_marks={"ETH/USDT": "200"},
+            quantity="1", price="100", group_mark_prices={("binance", "spot", "ETH/USDT"): "200"},
         )
         assert sol_fill["status"] == "APPENDED"
         assert sol_fill["filled_quantity"] == "0.500000000000000000"
@@ -629,11 +629,11 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
             venue="binance", market_type="spot", symbol="BNB/USDT", side="BUY",
             quantity="1", currency="USDT", order_type="LIMIT", limit_price="100",
         )
-        with pytest.raises(CustomerPaperLedgerBlocked, match="no fresh validated mark: SOL/USDT"):
+        with pytest.raises(CustomerPaperLedgerBlocked, match="current mark is missing for an open correlation-group position"):
             await record_customer_paper_fill(
                 customer_id=customer_id, client_order_id="risk-bnb-entry-92001",
                 idempotency_key="risk-bnb-fill-92001", bar_key="risk-bnb-bar-92001",
-                quantity="1", price="100", correlation_group_marks={"ETH/USDT": "200"},
+                quantity="1", price="100", group_mark_prices={("binance", "spot", "ETH/USDT"): "200"},
             )
 
         # Queries are tenant-filtered; a different customer cannot inspect this order.

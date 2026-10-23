@@ -210,6 +210,7 @@ def build_customer_paper_router(
     market_data: Callable[..., Any],
     market_request_type: type,
     state_guard: Callable[[], Awaitable[None]] | None = None,
+    group_mark_price_loader: Callable[..., Awaitable[Any]] | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/customer/paper", tags=["customer-paper"])
 
@@ -250,55 +251,6 @@ def build_customer_paper_router(
         )
         df = await asyncio.to_thread(market_data, req)
         return df, _market_bar_context(df, symbol=symbol, timeframe=timeframe)
-
-
-    async def _fresh_correlation_group_marks(
-        customer_id: int, target_symbol: str, timeframe: str, current_df: Any
-    ) -> dict[str, str]:
-        """Use each open group's fresh verified bar high as a conservative risk mark."""
-        from .correlation_risk import risk_group
-
-        target_group = risk_group(target_symbol)
-        positions = await get_customer_paper_positions(customer_id=customer_id)
-        if timeframe not in _TIMEFRAME_SECONDS:
-            raise CustomerPaperLedgerBlocked("Correlation-group marks require a supported timeframe")
-        marks: dict[str, str] = {}
-        target_symbol_normalized = str(target_symbol).strip().upper()
-        for position in positions:
-            symbol = str(position.get("symbol") or "").strip().upper()
-            if risk_group(symbol) != target_group:
-                continue
-            try:
-                quantity = Decimal(str(position.get("quantity") or "0"))
-            except (InvalidOperation, TypeError, ValueError, OverflowError) as exc:
-                raise CustomerPaperLedgerBlocked(
-                    f"Same-group paper position quantity is invalid: {symbol or 'unknown'}"
-                ) from exc
-            if not quantity.is_finite():
-                raise CustomerPaperLedgerBlocked(
-                    f"Same-group paper position quantity is not finite: {symbol or 'unknown'}"
-                )
-            if quantity == 0:
-                continue
-            try:
-                # The customer paper API executes from verified completed OHLCV bars.
-                # Use the observed high, rather than a missing/unavailable ticker bid,
-                # to avoid understating current exposure between order submission/fill.
-                mark_df = (
-                    current_df
-                    if symbol == target_symbol_normalized
-                    else (await _fetch_bar(symbol, timeframe))[0]
-                )
-                context = _market_bar_context(mark_df, symbol=symbol, timeframe=timeframe)
-                mark = Decimal(str(context["values"]["high"]))
-            except Exception as exc:
-                raise CustomerPaperLedgerBlocked(
-                    f"Fresh same-group paper mark is unavailable for {symbol} ({type(exc).__name__})"
-                ) from exc
-            if not mark.is_finite() or mark <= 0:
-                raise CustomerPaperLedgerBlocked(f"Fresh same-group paper mark is unavailable for {symbol}")
-            marks[symbol] = format(mark, "f")
-        return marks
 
     async def _order_detail(customer_id: int, client_order_id: str) -> dict[str, Any]:
         order = await get_customer_paper_order(customer_id=customer_id, client_order_id=client_order_id)
@@ -470,6 +422,19 @@ def build_customer_paper_router(
                 }
             elapsed_bars = int((bar["timestamp"] - submitted_at).total_seconds() // _TIMEFRAME_SECONDS[timeframe])
             if elapsed_bars < max(1, int(settings.paper_fill_latency_bars)):
+                if elapsed_bars >= max(1, int(settings.paper_order_ttl_bars)):
+                    await expire_customer_paper_order(
+                        customer_id=profile.id,
+                        client_order_id=client_order_id,
+                        idempotency_key=f"paper-ttl:{bar['timestamp'].isoformat()}",
+                    )
+                    expired_order = await _order_detail(profile.id, client_order_id)
+                    return {
+                        "status": "EXPIRED_TTL",
+                        "virtual_only": True,
+                        "elapsed_bars": elapsed_bars,
+                        "order": expired_order,
+                    }
                 return {
                     "status": "WAITING_FOR_FILL_LATENCY",
                     "virtual_only": True,
@@ -491,13 +456,34 @@ def build_customer_paper_router(
                 bar_key=budget["bar_key"],
             )
             if prior_fill is not None:
+                # Re-read after the immutable fill lookup: another request can have
+                # completed the order since the initial status read above.
+                replay_order = await _order_detail(profile.id, client_order_id)
+                if (
+                    elapsed_bars >= max(1, int(settings.paper_order_ttl_bars))
+                    and replay_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}
+                ):
+                    try:
+                        await expire_customer_paper_order(
+                            customer_id=profile.id,
+                            client_order_id=client_order_id,
+                            idempotency_key=f"paper-ttl:{budget['bar_key']}",
+                        )
+                    except CustomerPaperOrderConflict:
+                        # A concurrent fill/expiry can win between the re-read and
+                        # expiry. Return the replay if the latest order is now terminal.
+                        replay_order = await _order_detail(profile.id, client_order_id)
+                        if replay_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}:
+                            raise
+                    else:
+                        replay_order = await _order_detail(profile.id, client_order_id)
                 return {
                     "status": "REPLAYED",
                     "virtual_only": True,
                     "bar_at": bar["timestamp"].isoformat(),
                     "bar_key": budget["bar_key"],
                     "fill": prior_fill,
-                    "order": await _order_detail(profile.id, client_order_id),
+                    "order": replay_order,
                 }
             values = bar["values"]
             limit = Decimal(order["limit_price"]) if order["limit_price"] is not None else None
@@ -522,6 +508,30 @@ def build_customer_paper_router(
                 execution_profile = PROFILES.get("crypto")
                 if execution_profile is None:
                     raise HTTPException(503, "Crypto paper execution profile is not configured")
+
+                group_mark_prices = None
+                if str(side or "").upper() == "BUY" and group_mark_price_loader is not None:
+                    timeframe_seconds = _TIMEFRAME_SECONDS.get(str(timeframe))
+                    if not timeframe_seconds:
+                        raise HTTPException(422, "Unsupported paper-order timeframe")
+                    mark_days = max(1, (25 * timeframe_seconds + 86_399) // 86_400)
+                    mark_req = market_request_type(
+                        asset="crypto",
+                        symbol=str(order["symbol"]),
+                        exchange=order_venue,
+                        timeframe=timeframe,
+                        days=mark_days,
+                    )
+                    try:
+                        # Candle-only order state is not a current market mark. Fetch fresh
+                        # validated quotes for every open holding in the candidate's group.
+                        group_mark_prices = await group_mark_price_loader(
+                            profile.id, mark_req, None
+                        )
+                    except Exception as mark_exc:
+                        raise HTTPException(
+                            409, "Current paper correlation-group marks could not be verified"
+                        ) from mark_exc
 
                 remaining_quantity = Decimal(str(order.get("remaining_quantity") or order["quantity"]))
                 fill_quantity = min(remaining_quantity, max(Decimal("0"), Decimal(str(budget["available"]))))
@@ -619,11 +629,6 @@ def build_customer_paper_router(
                     fee = fill_quantity * Decimal(price_text) * fee_bps / Decimal("10000")
                     fill_key = "bar-fill:" + hashlib.sha256(f"{client_order_id}|{budget['bar_key']}".encode("utf-8")).hexdigest()
                     try:
-                        correlation_group_marks = (
-                            await _fresh_correlation_group_marks(
-                                profile.id, str(order["symbol"]), timeframe, df
-                            ) if side == "BUY" else {}
-                        )
                         fill = await record_customer_paper_fill(
                             customer_id=profile.id,
                             client_order_id=client_order_id,
@@ -632,8 +637,8 @@ def build_customer_paper_router(
                             quantity=_decimal_text(fill_quantity),
                             price=price_text,
                             fee_amount=_decimal_text(fee),
-                            correlation_group_marks=correlation_group_marks,
                             enforce_market_bar_budget=True,
+                            group_mark_prices=group_mark_prices,
                         )
                     except CustomerPaperOrderConflict as exc:
                         # A concurrent fill can invalidate the earlier cash pre-read.
@@ -683,19 +688,40 @@ def build_customer_paper_router(
                                     quantity=_decimal_text(retry_quantity),
                                     price=price_text,
                                     fee_amount=_decimal_text(retry_fee),
-                                    correlation_group_marks=correlation_group_marks,
                                     enforce_market_bar_budget=True,
+                                    group_mark_prices=group_mark_prices,
                                 )
                                 fill_quantity = retry_quantity
                             except CustomerPaperOrderConflict as retry_exc:
                                 if "overdraw" in str(retry_exc).lower():
+                                    ttl_reached = elapsed_bars >= max(
+                                        1, int(settings.paper_order_ttl_bars)
+                                    )
+                                    retry_order = await _order_detail(profile.id, client_order_id)
+                                    if ttl_reached and retry_order["status"] in {
+                                        "SUBMITTED", "PARTIALLY_FILLED"
+                                    }:
+                                        await expire_customer_paper_order(
+                                            customer_id=profile.id,
+                                            client_order_id=client_order_id,
+                                            idempotency_key=f"paper-ttl:{budget['bar_key']}",
+                                        )
+                                        retry_order = await _order_detail(profile.id, client_order_id)
+                                        return {
+                                            "status": "EXPIRED_TTL",
+                                            "virtual_only": True,
+                                            "bar_at": bar["timestamp"].isoformat(),
+                                            "bar_key": budget["bar_key"],
+                                            "fill": {"status": "EXPIRED"},
+                                            "order": retry_order,
+                                        }
                                     return {
                                         "status": "WAITING_FOR_PAPER_CASH",
                                         "virtual_only": True,
                                         "bar_at": bar["timestamp"].isoformat(),
                                         "bar_key": budget["bar_key"],
                                         "fill": {"status": "NOT_FILLED"},
-                                        "order": await _order_detail(profile.id, client_order_id),
+                                        "order": retry_order,
                                     }
                                 raise
                         else:
