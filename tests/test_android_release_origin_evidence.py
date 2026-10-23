@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import stat
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -143,6 +146,38 @@ def test_fails_closed_if_aapt_cannot_decode_the_apk(monkeypatch, tmp_path: Path)
     )
     with pytest.raises(ValueError, match="aapt could not decode"):
         verifier.verify_apk_backend_origin(apk, "https://atlas.example.com", aapt_path="aapt")
+
+
+def test_cli_entry_point_executes_and_emits_evidence(tmp_path: Path):
+    apk = tmp_path / "atlas-release.apk"
+    apk.write_bytes(b"test placeholder")
+    aapt = tmp_path / "aapt"
+    aapt.write_text(
+        "#!/usr/bin/env python3\n"
+        "print('resource 0x7f120001 com.atlas.trading:string/atlas_backend_url')\n"
+        "print('  () (string8) \\\"https://atlas.example.com\\\"')\n",
+        encoding="utf-8",
+    )
+    aapt.chmod(aapt.stat().st_mode | stat.S_IXUSR)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(verifier.__file__).resolve()),
+            "--apk",
+            str(apk),
+            "--aapt",
+            str(aapt),
+            "--expected-url",
+            "https://atlas.example.com",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == '{"backend_origin": "https://atlas.example.com", "backend_url": "https://atlas.example.com"}'
+    assert result.stderr == ""
 
 
 ROOT = Path(__file__).resolve().parents[1]
