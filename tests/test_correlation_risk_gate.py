@@ -136,7 +136,7 @@ def test_customer_paper_buy_filters_unrelated_markets_before_valuation():
 
     assert "target_group = risk_group(req.symbol)" in helper
     assert "relevant_positions = [" in helper
-    assert "risk_group(str(row.get(\\"symbol\\") or \\"\\")) == target_group" in helper
+    assert 'risk_group(str(row.get("symbol") or "")) == target_group' in helper
     assert helper.index("relevant_positions = [") < helper.index("market_data, mark_req")
     assert '"stage": "paper_exposure_mark_unavailable"' in helper
 
@@ -147,7 +147,7 @@ def test_direct_start_bot_applies_paper_group_cap_before_submission():
 
     source = Path("app/main.py").read_text(encoding="utf-8")
     route_start = source.index("async def customer_start_bot(")
-    route_end = source.index("\\n\\nasync def _require_feature", route_start)
+    route_end = source.index("\n\nasync def _require_feature", route_start)
     route = source[route_start:route_end]
 
     assert "_customer_paper_positions_for_exposure(" in route
@@ -156,3 +156,4 @@ def test_direct_start_bot_applies_paper_group_cap_before_submission():
     assert "quantity = min(" in route
     assert route.index("adjusted_group_exposure(") < route.index("execute_customer_paper_spot_signal(")
     assert "paper_exposure_mark_unavailable" in route
+
