@@ -1,9 +1,6 @@
 name: Supabase Staging Identity Preflight
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
@@ -16,16 +13,7 @@ concurrency:
 
 jobs:
   verify-staging-identity:
-    # Default merge commits use a generic subject; inspect the complete head message.
-    if: >-
-      github.ref == 'refs/heads/main' &&
-      (
-        github.event_name == 'workflow_dispatch' ||
-        (
-          github.event_name == 'push' &&
-          contains(github.event.head_commit.message, '[atlas-staging-identity-preflight-once-20261022]')
-        )
-      )
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: staging
     steps:
