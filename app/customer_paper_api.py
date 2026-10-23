@@ -456,13 +456,26 @@ def build_customer_paper_router(
                 bar_key=budget["bar_key"],
             )
             if prior_fill is not None:
+                replay_order = order
+                if (
+                    elapsed_bars >= max(1, int(settings.paper_order_ttl_bars))
+                    and order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}
+                ):
+                    await expire_customer_paper_order(
+                        customer_id=profile.id,
+                        client_order_id=client_order_id,
+                        idempotency_key=f"paper-ttl:{budget['bar_key']}",
+                    )
+                    replay_order = await _order_detail(profile.id, client_order_id)
+                else:
+                    replay_order = await _order_detail(profile.id, client_order_id)
                 return {
                     "status": "REPLAYED",
                     "virtual_only": True,
                     "bar_at": bar["timestamp"].isoformat(),
                     "bar_key": budget["bar_key"],
                     "fill": prior_fill,
-                    "order": await _order_detail(profile.id, client_order_id),
+                    "order": replay_order,
                 }
             values = bar["values"]
             limit = Decimal(order["limit_price"]) if order["limit_price"] is not None else None
