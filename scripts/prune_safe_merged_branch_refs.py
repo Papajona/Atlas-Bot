@@ -305,6 +305,15 @@ def _resolve_branch_integration(
     mismatch_paths = _branch_delta_mismatched_paths(branch_sha, main_sha)
     if not mismatch_paths:
         return True, "all branch-side changed paths match main", []
+    if _is_explicitly_superseded_android_release_ref(
+        branch_name, branch_sha, main_sha, mismatch_paths
+    ):
+        return (
+            True,
+            "exact historical Android release-trigger branch superseded by main's "
+            "verified tag/manual-dispatch-only release gate",
+            [],
+        )
     return False, reason, mismatch_paths
 
 
