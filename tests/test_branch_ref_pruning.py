@@ -125,7 +125,7 @@ def test_branch_delta_matches_main_when_every_branch_changed_file_matches(
                 args, 0, "app/module.py\0docs/readme.md\0", ""
             )
         if args[:4] == ["git", "--literal-pathspecs", "ls-tree", "-z"]:
-            expression = f"{args[5]}:{args[7]}"
+            expression = f"{args[6]}:{args[8]}"
             entries = {
                 "branch-sha:app/module.py": ("100644", "blob", "blob-one"),
                 "main-sha:app/module.py": ("100644", "blob", "blob-one"),
@@ -133,7 +133,7 @@ def test_branch_delta_matches_main_when_every_branch_changed_file_matches(
                 "main-sha:docs/readme.md": ("100644", "blob", "blob-two"),
             }
             entry = entries.get(expression)
-            output = f"{entry[0]} {entry[1]} {entry[2]}\t{args[7]}\0" if entry else ""
+            output = f"{entry[0]} {entry[1]} {entry[2]}\t{args[8]}\0" if entry else ""
             return subprocess.CompletedProcess(args, 0, output, "")
         raise AssertionError(f"unexpected command: {args}")
 
@@ -149,13 +149,13 @@ def test_branch_delta_preserves_any_changed_file_not_matching_main(monkeypatch):
         if args[:5] == ["git", "diff", "--no-renames", "--name-only", "-z"]:
             return subprocess.CompletedProcess(args, 0, "app/module.py\0", "")
         if args[:4] == ["git", "--literal-pathspecs", "ls-tree", "-z"]:
-            expression = f"{args[5]}:{args[7]}"
+            expression = f"{args[6]}:{args[8]}"
             entries = {
                 "branch-sha:app/module.py": ("100644", "blob", "branch-blob"),
                 "main-sha:app/module.py": ("100644", "blob", "main-blob"),
             }
             entry = entries.get(expression)
-            output = f"{entry[0]} {entry[1]} {entry[2]}\t{args[7]}\0" if entry else ""
+            output = f"{entry[0]} {entry[1]} {entry[2]}\t{args[8]}\0" if entry else ""
             return subprocess.CompletedProcess(args, 0, output, "")
         raise AssertionError(f"unexpected command: {args}")
 
