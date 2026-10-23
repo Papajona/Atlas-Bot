@@ -1,3 +1,33 @@
+val configuredBackendUrlRaw = providers.environmentVariable("ATLAS_PROD_BACKEND_URL").orNull?.trim()
+val configuredBackendUrl = configuredBackendUrlRaw
+    ?.takeIf { value -> value.none { char -> char == '"' || char == '\\' || char == '\n' || char == '\r' } }
+    ?.trimEnd('/')
+val releaseTaskRequested = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
+val parsedBackendUri = configuredBackendUrl?.let { runCatching { java.net.URI(it) }.getOrNull() }
+val backendHost = parsedBackendUri?.host?.lowercase().orEmpty()
+val nonProductionHostPattern = Regex("(^|[.-])(dev|development|staging|test|sandbox|localhost)([.-]|$)", RegexOption.IGNORE_CASE)
+val privateIpv4Pattern = Regex("^(10\\.|127\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)")
+val approvedProductionBackend = parsedBackendUri != null &&
+    parsedBackendUri.scheme == "https" &&
+    backendHost.contains(".") &&
+    parsedBackendUri.rawUserInfo == null &&
+    parsedBackendUri.rawQuery == null &&
+    parsedBackendUri.rawFragment == null &&
+    parsedBackendUri.port in listOf(-1, 443) &&
+    (parsedBackendUri.rawPath.isNullOrEmpty() || parsedBackendUri.rawPath == "/") &&
+    !nonProductionHostPattern.containsMatchIn(backendHost) &&
+    !privateIpv4Pattern.containsMatchIn(backendHost) &&
+    !backendHost.startsWith("[") &&
+    backendHost !in setOf("example.com", "example.org", "example.net") &&
+    !backendHost.endsWith(".invalid") &&
+    !backendHost.endsWith(".local") &&
+    !backendHost.endsWith(".internal")
+if (releaseTaskRequested) {
+    check(approvedProductionBackend) {
+        "BLOCKED: ATLAS_PROD_BACKEND_URL must be configured as an approved HTTPS production origin; development, staging, test, local/private, example, and non-root URLs are rejected."
+    }
+}
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -14,6 +44,7 @@ android {
         targetSdk = 35
         versionCode = 1047
         versionName = "3.10.47"
+        buildConfigField("String", "BACKEND_URL", "\"" + (configuredBackendUrl ?: "") + "\"")
     }
 
     buildFeatures {
@@ -99,7 +130,7 @@ dependencies {
     implementation("androidx.compose.material3:material3:1.3.1")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
-    implementation("androidx.biometric:biometric:1.2.0-alpha05")
+    implementation("androidx.biometric:biometric:1.1.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
