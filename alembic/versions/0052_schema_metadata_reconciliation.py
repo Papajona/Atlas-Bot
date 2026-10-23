@@ -172,30 +172,41 @@ def _inspector(bind):
     return sa.inspect(bind)
 
 
-def _index_names(bind, table: str) -> set[str]:
-    return {item.get("name") for item in _inspector(bind).get_indexes(table) if item.get("name")}
+_DEFAULT_SCHEMA = "public"
 
 
-def _foreign_key_names(bind, table: str) -> set[str]:
-    return {item.get("name") for item in _inspector(bind).get_foreign_keys(table) if item.get("name")}
+def _index_names(bind, table: str, schema: str = _DEFAULT_SCHEMA) -> set[str]:
+    return {
+        item.get("name")
+        for item in _inspector(bind).get_indexes(table, schema=schema)
+        if item.get("name")
+    }
 
 
-def _rename_index(bind, table: str, old: str, new: str) -> None:
-    names = _index_names(bind, table)
+def _foreign_key_names(bind, table: str, schema: str = _DEFAULT_SCHEMA) -> set[str]:
+    return {
+        item.get("name")
+        for item in _inspector(bind).get_foreign_keys(table, schema=schema)
+        if item.get("name")
+    }
+
+
+def _rename_index(bind, table: str, old: str, new: str, schema: str = _DEFAULT_SCHEMA) -> None:
+    names = _index_names(bind, table, schema)
     if old in names and new not in names:
-        op.execute(sa.text(f'ALTER INDEX "{old}" RENAME TO "{new}"'))
+        op.execute(sa.text(f'ALTER INDEX "{schema}"."{old}" RENAME TO "{new}"'))
     elif old in names and new in names:
-        op.drop_index(old, table_name=table)
+        op.drop_index(old, table_name=table, schema=schema)
 
 
-def _drop_index(bind, table: str, name: str) -> None:
-    if name in _index_names(bind, table):
-        op.drop_index(name, table_name=table)
+def _drop_index(bind, table: str, name: str, schema: str = _DEFAULT_SCHEMA) -> None:
+    if name in _index_names(bind, table, schema):
+        op.drop_index(name, table_name=table, schema=schema)
 
 
-def _create_index(bind, table: str, name: str, columns: list[str]) -> None:
-    if name not in _index_names(bind, table):
-        op.create_index(name, table, columns, unique=False)
+def _create_index(bind, table: str, name: str, columns: list[str], schema: str = _DEFAULT_SCHEMA) -> None:
+    if name not in _index_names(bind, table, schema):
+        op.create_index(name, table, columns, unique=False, schema=schema)
 
 
 # Downgrade must know which canonical-name indexes were present before upgrade.
@@ -205,33 +216,62 @@ _INDEX_STATE_SCHEMA = "atlas_migration_meta"
 _INDEX_STATE_TABLE = "schema_metadata_reconciliation_0052_index_state"
 
 
-def _visible_index_definition(bind, name: str):
+def _visible_index_definition(
+    bind, table: str, name: str, schema: str = _DEFAULT_SCHEMA
+):
+    # Identify the index through its parent relation OID, not search-path visibility.
+    # Two schemas may legally contain indexes with identical names.
     row = bind.execute(sa.text("""
-        SELECT pg_get_indexdef(c.oid) AS definition,
-               obj_description(c.oid, 'pg_class') AS comment
-        FROM pg_class c
-        WHERE c.relkind IN ('i', 'I')
-          AND c.relname = :name
-          AND pg_table_is_visible(c.oid)
-    """), {"name": name}).mappings().first()
+        SELECT pg_get_indexdef(idx.oid) AS definition,
+               obj_description(idx.oid, 'pg_class') AS comment
+        FROM pg_class AS idx
+        JOIN pg_index AS ix ON ix.indexrelid = idx.oid
+        JOIN pg_class AS tbl ON tbl.oid = ix.indrelid
+        JOIN pg_namespace AS ns ON ns.oid = tbl.relnamespace
+        WHERE idx.relkind IN ('i', 'I')
+          AND idx.relname = :index_name
+          AND tbl.relname = :table_name
+          AND ns.nspname = :schema_name
+    """), {
+        "index_name": name,
+        "table_name": table,
+        "schema_name": schema,
+    }).mappings().first()
     return dict(row) if row is not None else None
 
 
-def _capture_rename_index_state(bind) -> None:
-    schema_created = bool(bind.execute(
-        sa.text("SELECT to_regnamespace(:schema_name) IS NULL"),
-        {"schema_name": _INDEX_STATE_SCHEMA},
-    ).scalar_one())
-    if not schema_created:
+def _assert_provenance_schema_available(bind) -> None:
+    # Query pg_namespace directly: to_regnamespace('name') can return NULL when
+    # the existing schema is outside search_path, which is not an ownership check.
+    schema_exists = bool(bind.execute(sa.text("""
+        SELECT EXISTS (
+            SELECT 1 FROM pg_namespace WHERE nspname = :schema_name
+        )
+    """), {"schema_name": _INDEX_STATE_SCHEMA}).scalar_one())
+    if schema_exists:
         raise RuntimeError(
             "Schema reconciliation blocked: reserved migration schema atlas_migration_meta already exists; "
             "refusing to alter its permissions or reuse unverified objects."
         )
-    qualified_table = f"{_INDEX_STATE_SCHEMA}.{_INDEX_STATE_TABLE}"
-    if bind.execute(
-        sa.text("SELECT to_regclass(:qualified_name) IS NOT NULL"),
-        {"qualified_name": qualified_table},
-    ).scalar_one():
+
+
+def _capture_rename_index_state(bind) -> None:
+    # Recheck immediately before creating provenance in case the schema changed after
+    # upgrade() performed its read-only preflight.
+    _assert_provenance_schema_available(bind)
+    schema_created = True
+    existing_table = bool(bind.execute(sa.text("""
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_class AS c
+            JOIN pg_namespace AS ns ON ns.oid = c.relnamespace
+            WHERE ns.nspname = :schema_name AND c.relname = :table_name
+        )
+    """), {
+        "schema_name": _INDEX_STATE_SCHEMA,
+        "table_name": _INDEX_STATE_TABLE,
+    }).scalar_one())
+    if existing_table:
         raise RuntimeError(
             "Schema reconciliation blocked: migration 0052 index provenance table already exists; "
             "refusing to overwrite potentially stale rollback state."
@@ -262,8 +302,8 @@ def _capture_rename_index_state(bind) -> None:
         names = _index_names(bind, table)
         old_existed = old in names
         new_existed = new in names
-        old_info = _visible_index_definition(bind, old) if old_existed else None
-        new_info = _visible_index_definition(bind, new) if new_existed else None
+        old_info = _visible_index_definition(bind, table, old) if old_existed else None
+        new_info = _visible_index_definition(bind, table, new) if new_existed else None
         if (old_existed and old_info is None) or (new_existed and new_info is None):
             raise RuntimeError(
                 f"Schema reconciliation blocked: unable to capture exact index definition for {table}.{old}/{new}."
@@ -290,17 +330,22 @@ def _capture_rename_index_state(bind) -> None:
         })
 
 
-def _restore_index_definition(bind, name: str, definition: str | None, comment: str | None) -> None:
+def _restore_index_definition(
+    bind, table: str, name: str, definition: str | None, comment: str | None,
+    schema: str = _DEFAULT_SCHEMA,
+) -> None:
     if not definition:
         raise RuntimeError(
-            f"Schema reconciliation blocked: rollback lacks the original definition for index {name}."
+            f"Schema reconciliation blocked: rollback lacks the original definition for index {schema}.{name}."
         )
+    # pg_get_indexdef was captured for this exact parent table and schema.
     op.execute(sa.text(definition))
     if comment is not None:
+        escaped_schema = schema.replace('"', '""')
         escaped_name = name.replace('"', '""')
         escaped_comment = comment.replace("'", "''")
         bind.exec_driver_sql(
-            f"""COMMENT ON INDEX "{escaped_name}" IS '{escaped_comment}'"""
+            f'''COMMENT ON INDEX "{escaped_schema}"."{escaped_name}" IS '{escaped_comment}' '''
         )
 
 def _restore_rename_index_state(bind, state) -> None:
@@ -310,7 +355,7 @@ def _restore_rename_index_state(bind, state) -> None:
     new = str(state["new_name"])
     old_before = bool(state["old_existed"])
     new_before = bool(state["new_existed"])
-    names = _index_names(bind, table)
+    names = _index_names(bind, table, _DEFAULT_SCHEMA)
     old_now = old in names
     new_now = new in names
 
@@ -319,11 +364,11 @@ def _restore_rename_index_state(bind, state) -> None:
         # from its captured definition while preserving the pre-existing canonical one.
         if not old_now:
             _restore_index_definition(
-                bind, old, state.get("old_definition"), state.get("old_comment")
+                bind, table, old, state.get("old_definition"), state.get("old_comment")
             )
         if not new_now:
             _restore_index_definition(
-                bind, new, state.get("new_definition"), state.get("new_comment")
+                bind, table, new, state.get("new_definition"), state.get("new_comment")
             )
     elif old_before:
         if old_now and new_now:
@@ -331,7 +376,7 @@ def _restore_rename_index_state(bind, state) -> None:
                 f"Schema reconciliation blocked: unexpected duplicate rollback indexes {table}.{old}/{new}."
             )
         if new_now:
-            op.execute(sa.text(f'ALTER INDEX "{new}" RENAME TO "{old}"'))
+            op.execute(sa.text(f'ALTER INDEX "{_DEFAULT_SCHEMA}"."{new}" RENAME TO "{old}"'))
         elif not old_now:
             _restore_index_definition(
                 bind, old, state.get("old_definition"), state.get("old_comment")
@@ -349,8 +394,8 @@ def _restore_rename_index_state(bind, state) -> None:
             )
     else:
         # Neither name existed before upgrade. Remove either name if the upgrade created it.
-        _drop_index(bind, table, new)
-        _drop_index(bind, table, old)
+        _drop_index(bind, table, new, _DEFAULT_SCHEMA)
+        _drop_index(bind, table, old, _DEFAULT_SCHEMA)
 
 
 def _assert_no_nulls(bind, columns) -> None:
@@ -395,6 +440,9 @@ def upgrade() -> None:
         # The production schema contract is PostgreSQL. SQLite unit tests use create_all
         # for ORM metadata and must not pretend to validate the production migration graph.
         return
+
+    # Refuse a reserved-schema collision before any UPDATE, DDL, constraint, or FK work.
+    _assert_provenance_schema_available(bind)
 
     # The 0044 migration intended all pilot controls to have defaults but updated other fields
     # only when pilot_status was NULL. Normalize each default-bearing field independently.

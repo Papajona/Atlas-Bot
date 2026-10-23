@@ -44,7 +44,7 @@ from .research_validation import oos_promotion_gate, monte_carlo_bootstrap
 from .daily_research import run_daily_research, latest_macro_context
 from .execution import execute_signal, advance_platform_paper_orders, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits
 from .customer_paper_api import build_customer_paper_router
-from .customer_paper_flow import CustomerPaperFlowBlocked, ensure_customer_paper_account, recover_customer_paper_spot_flow, execute_customer_paper_spot_signal
+from .customer_paper_flow import CustomerPaperFlowBlocked, ensure_customer_paper_account, recover_customer_paper_spot_flow, execute_customer_paper_spot_signal, conservative_customer_paper_buy_price
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
 from .payout import get_payout_provider, PayoutError, PayoutUnknown, PayoutNotFound
 from .withdrawal_security import destination_allowed, destination_fingerprint, proposal_digest, release_separation_violation, verify_release_operator
@@ -1232,7 +1232,18 @@ async def _run_persisted_adaptive_bot_cycle(
                 Position.customer_id == profile.id, Position.quantity != 0,
             ))).scalars().all()
 
-    proposed_notional = quantity * float(plan["entry_price"])
+    exposure_price = float(plan["entry_price"])
+    if needs_customer_paper and str(plan.get("side") or "").upper() == "BUY":
+        try:
+            # Match the simulator's ask + configured slippage + upward rounding.
+            exposure_price = float(conservative_customer_paper_buy_price(customer_paper_market_context))
+        except Exception as exc:
+            return {
+                "decision": "NO_TRADE",
+                "stage": "paper_exposure_price_unavailable",
+                "reason": f"conservative paper BUY price could not be verified ({type(exc).__name__})",
+            }
+    proposed_notional = quantity * exposure_price
     group_check = adjusted_group_exposure(
         open_positions, proposed_symbol=req.symbol, proposed_notional=proposed_notional,
         cap_usd=settings.correlation_group_cap_usd,
@@ -1271,7 +1282,7 @@ async def _run_persisted_adaptive_bot_cycle(
     )
     if not group_check["allowed"] and not group_reduce_only:
         headroom = max(0.0, settings.correlation_group_cap_usd - group_check["existing_notional"])
-        quantity = min(quantity, headroom / max(float(plan["entry_price"]), 1e-12))
+        quantity = min(quantity, headroom / max(exposure_price, 1e-12))
     if quantity <= 0:
         await _audit("ADAPTIVE_BOT_CORRELATION_CAP", {"bot_id": bot_id, "customer_id": profile.id, "symbol": req.symbol, "group_exposure": group_check})
         return {"decision": "NO_TRADE", "stage": "correlation_group_cap", "group_exposure": group_check}
@@ -4738,10 +4749,21 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                         "analysis": deterministic,
                         "execution": None,
                     })
+                try:
+                    effective_buy_price = conservative_customer_paper_buy_price(fresh_paper_context)
+                except Exception as exc:
+                    return await _record_customer_decision({
+                        "decision": "NO_TRADE",
+                        "stage": "paper_exposure_price_unavailable",
+                        "reason": f"conservative paper BUY price could not be verified ({type(exc).__name__})",
+                        "mode": "CUSTOMER_PAPER",
+                        "analysis": deterministic,
+                        "execution": None,
+                    })
                 group_check = adjusted_group_exposure(
                     paper_exposure["positions"],
                     proposed_symbol=req.symbol,
-                    proposed_notional=quantity * float(plan["entry_price"]),
+                    proposed_notional=quantity * float(effective_buy_price),
                     cap_usd=settings.correlation_group_cap_usd,
                 )
                 if not group_check.get("valuation_complete", False):
@@ -4760,7 +4782,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                         settings.correlation_group_cap_usd - group_check["existing_notional"],
                     )
                     quantity = min(
-                        quantity, headroom / max(float(plan["entry_price"]), 1e-12)
+                        quantity, headroom / max(float(effective_buy_price), 1e-12)
                     )
                 if quantity <= 0:
                     await _audit("CUSTOMER_BOT_CORRELATION_CAP", {

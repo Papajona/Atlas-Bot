@@ -315,6 +315,26 @@ def _fill_price_and_fee(side: str, quantity: Decimal, market: dict) -> tuple[str
     return format(price, "f"), format(fee, "f"), cost_details
 
 
+def conservative_customer_paper_buy_price(market_context: Mapping) -> Decimal:
+    """Price a BUY with the exact ask/slippage/rounding model used by paper fills.
+
+    Used only for pre-submission sizing. The database fill transaction independently
+    rechecks the actual eventual fill price against remaining correlation-group headroom.
+    """
+    context = dict(market_context)
+    market = {
+        "ask": _finite_decimal(context.get("ask"), "ask"),
+        "bid": _finite_decimal(context.get("bid"), "bid"),
+        "spread_bps": _finite_decimal(context.get("spread_bps"), "spread_bps", non_negative=True),
+        "quote_timestamp": str(context.get("quote_timestamp_utc") or ""),
+        "data_sha256": str(context.get("ohlcv_sha256") or ""),
+    }
+    if market["ask"] <= 0 or market["bid"] <= 0:
+        raise CustomerPaperFlowBlocked("Fresh BUY sizing quote requires a positive bid and ask")
+    price, _fee, _costs = _fill_price_and_fee("BUY", Decimal("1"), market)
+    return Decimal(price)
+
+
 async def _fill_open_order(customer_id: int, order: dict, market: dict, df) -> dict:
     client_id = str(order.get("client_order_id") or "")
     if not client_id:

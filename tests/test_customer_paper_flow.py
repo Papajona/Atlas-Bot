@@ -808,3 +808,123 @@ def test_tiny_positive_paper_sell_quote_never_writes_zero_price_fill(monkeypatch
     ))
     assert result["status"] == "WAITING_FOR_PRICE_PRECISION"
     assert result["fill"]["status"] == "NOT_FILLED"
+
+
+
+def test_conservative_buy_sizing_price_matches_actual_paper_fill_price(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    monkeypatch.setattr(settings, "research_slippage_bps", 37)
+    monkeypatch.setattr(settings, "research_taker_bps", 10)
+    context = {
+        "ask": "120.123456789012345678",
+        "bid": "120.0",
+        "spread_bps": "10.2",
+        "quote_timestamp_utc": "2026-10-23T09:00:00+00:00",
+        "ohlcv_sha256": "c" * 64,
+    }
+    price = flow.conservative_customer_paper_buy_price(context)
+    expected, _fee, _costs = flow._fill_price_and_fee("BUY", Decimal("1"), {
+        "ask": Decimal(context["ask"]),
+        "bid": Decimal(context["bid"]),
+        "spread_bps": Decimal(context["spread_bps"]),
+        "quote_timestamp": context["quote_timestamp_utc"],
+        "data_sha256": context["ohlcv_sha256"],
+    })
+    assert price == Decimal(expected)
+    assert price > Decimal(context["ask"])
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not (os.getenv("ATLAS_PAPER_TEST_DATABASE_URL") and os.getenv("ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL")),
+    reason="requires CI-provisioned isolated customer paper and primary PostgreSQL databases",
+)
+def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monkeypatch):
+    """Concurrent same-group fills cannot both consume the same pre-fill headroom."""
+    from app.correlation_risk import risk_group
+
+    monkeypatch.setattr(settings, "database_url", os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"])
+    monkeypatch.setattr(settings, "customer_paper_database_url", os.environ["ATLAS_PAPER_TEST_DATABASE_URL"])
+    monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
+    monkeypatch.setattr(settings, "customer_paper_shared_database_enabled", False)
+    monkeypatch.setattr(settings, "customer_paper_initial_balance", 10000.0)
+    monkeypatch.setattr(settings, "customer_paper_initial_currency", "USDT")
+    monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.01)
+    monkeypatch.setattr(settings, "correlation_group_cap_usd", 50.0)
+    monkeypatch.setattr(settings, "research_slippage_bps", 0)
+    monkeypatch.setattr(settings, "research_taker_bps", 0)
+    # This test isolates the fill-time exposure gate; same-day entry discipline is
+    # exercised by separate tests and should not block the two pending intents here.
+    monkeypatch.setattr(settings, "discipline_enabled", False)
+
+    async def run():
+        first_at = datetime.now(timezone.utc) - timedelta(hours=8)
+        # Use a fresh customer ID per run so rerunning the test cannot inherit old positions.
+        customer_id = 990000000 + int(first_at.timestamp()) % 90000000
+
+        eth_req, eth_frame_1, eth_context_1 = _market_fixture(
+            timestamp=first_at, symbol="ETH/USDT", bid=100.0, ask=100.1,
+        )
+        sol_req, sol_frame_1, sol_context_1 = _market_fixture(
+            timestamp=first_at, symbol="SOL/USDT", bid=100.0, ask=100.1,
+        )
+        submitted_eth = await execute_customer_paper_spot_signal(
+            customer_id=customer_id, req=eth_req, df=eth_frame_1,
+            market_context=eth_context_1, side="BUY", quantity="0.3",
+            stop_loss_price="95", take_profit_price="110",
+            strategy="group-cap-concurrency-regression",
+        )
+        submitted_sol = await execute_customer_paper_spot_signal(
+            customer_id=customer_id, req=sol_req, df=sol_frame_1,
+            market_context=sol_context_1, side="BUY", quantity="0.3",
+            stop_loss_price="95", take_profit_price="110",
+            strategy="group-cap-concurrency-regression",
+        )
+        assert submitted_eth["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
+        assert submitted_sol["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
+
+        # Both intents are pending before either fill starts. They race into the same
+        # L1_BETA budget on the next bar; the group advisory lock must serialize them.
+        second_at = first_at + timedelta(hours=1)
+        eth_req_2, eth_frame_2, eth_context_2 = _market_fixture(
+            timestamp=second_at, symbol="ETH/USDT", bid=100.0, ask=100.1,
+        )
+        sol_req_2, sol_frame_2, sol_context_2 = _market_fixture(
+            timestamp=second_at, symbol="SOL/USDT", bid=100.0, ask=100.1,
+        )
+        eth_result, sol_result = await asyncio.gather(
+            recover_customer_paper_spot_flow(
+                customer_id=customer_id, req=eth_req_2,
+                df=eth_frame_2, market_context=eth_context_2,
+            ),
+            recover_customer_paper_spot_flow(
+                customer_id=customer_id, req=sol_req_2,
+                df=sol_frame_2, market_context=sol_context_2,
+            ),
+        )
+        assert eth_result is not None and sol_result is not None
+        eth_fill = eth_result["execution"]["fill"]
+        sol_fill = sol_result["execution"]["fill"]
+        assert eth_fill["status"] == sol_fill["status"] == "APPENDED"
+        filled_quantities = [
+            Decimal(eth_fill["filled_quantity"]),
+            Decimal(sol_fill["filled_quantity"]),
+        ]
+        # At the $100.10 fill price, only one 0.3-unit order fits in full under $50.
+        assert max(filled_quantities) == Decimal("0.300000000000000000")
+        assert Decimal("0") < min(filled_quantities) < Decimal("0.3")
+
+        positions = await get_customer_paper_positions(customer_id=customer_id)
+        group_notional = sum(
+            (
+                abs(Decimal(str(p["quantity"]))) * Decimal(str(p["average_entry_price"]))
+                for p in positions
+                if risk_group(str(p["symbol"])) == "L1_BETA"
+            ),
+            Decimal("0"),
+        )
+        assert group_notional <= Decimal("50")
+        assert {p["symbol"] for p in positions} == {"ETH/USDT", "SOL/USDT"}
+
+    asyncio.run(run())

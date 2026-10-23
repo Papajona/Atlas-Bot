@@ -117,12 +117,13 @@ def test_correlation_gate_is_wired_into_the_live_decision_pipeline():
 
 
 def test_correlation_gate_queries_positions_scoped_to_the_customer():
-    """The gate must only look at *this* customer's open positions, never cross-customer."""
+    """The non-paper gate must only load this customer's open positions."""
     src = open("app/main.py").read()
-    i = src.index("group_check = adjusted_group_exposure(")
-    preceding = src[max(0, i - 400):i]
-    assert "Position.customer_id == profile.id" in preceding
-    assert "Position.quantity != 0" in preceding
+    query_start = src.index("open_positions = (await db2.execute(select(Position).where(")
+    query_end = src.index("))).scalars().all()", query_start)
+    position_query = src[query_start:query_end]
+    assert "Position.customer_id == profile.id" in position_query
+    assert "Position.quantity != 0" in position_query
 
 
 def test_customer_paper_buy_filters_unrelated_markets_before_valuation():
@@ -225,3 +226,32 @@ def test_customer_paper_buy_still_fails_closed_on_unpriced_same_group_position(m
     assert result["ok"] is False
     assert result["stage"] == "paper_exposure_mark_unavailable"
     assert result["symbol"] == "SOL/USDT"
+
+
+
+def test_customer_paper_buy_uses_effective_price_and_atomic_fill_cap():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    main_source = (root / "app" / "main.py").read_text(encoding="utf-8")
+    flow_source = (root / "app" / "customer_paper_flow.py").read_text(encoding="utf-8")
+    lifecycle_source = (root / "app" / "customer_paper_lifecycle.py").read_text(encoding="utf-8")
+
+    assert "conservative_customer_paper_buy_price" in main_source
+    assert "proposed_notional = quantity * exposure_price" in main_source
+    assert "headroom / max(exposure_price, 1e-12)" in main_source
+    assert 'proposed_notional=quantity * float(effective_buy_price)' in main_source
+    assert "headroom / max(float(effective_buy_price), 1e-12)" in main_source
+
+    # The sizing price calls the same pricing routine used to record the eventual fill.
+    assert 'top_of_book = market["ask"] if side == "BUY" else market["bid"]' in flow_source
+    assert 'price, _fee, _costs = _fill_price_and_fee("BUY", Decimal("1"), market)' in flow_source
+
+    # The actual database transaction serializes group fills, rereads current positions,
+    # and sizes the fill against its actual price before inserting the fill row.
+    assert 'paper-correlation-group:{customer_id}:{target_group}' in lifecycle_source
+    assert "existing_group_notional + amount * fill_price" in lifecycle_source
+    assert "NO_CORRELATION_GROUP_HEADROOM" in lifecycle_source
+    assert lifecycle_source.index("paper-correlation-group:") < lifecycle_source.index(
+        "INSERT INTO customer_paper.fills"
+    )
