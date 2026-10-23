@@ -294,6 +294,70 @@ def test_deletion_of_already_absent_remote_ref_is_a_successful_noop(monkeypatch)
     assert "successful no-op" in reason
 
 
+
+
+def test_unknown_protection_branch_is_removed_only_when_remote_absence_is_verified(monkeypatch):
+    def fake_run(args, *, check=True):
+        assert args == ["git", "ls-remote", "--heads", "origin", "refs/heads/stale/branch"]
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+
+    assert pruning._reconcile_unknown_protection_branches(
+        ["active/branch", "stale/branch"],
+        {"active/branch": False},
+    ) == ["active/branch"]
+
+
+def test_unknown_protection_branch_still_remote_aborts_pruning(monkeypatch):
+    def fake_run(args, *, check=True):
+        return subprocess.CompletedProcess(args, 0, "abc123\\trefs/heads/stale/branch\\n", "")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+
+    with pytest.raises(RuntimeError, match="still exists remotely"):
+        pruning._reconcile_unknown_protection_branches(
+            ["stale/branch"], {}
+        )
+
+
+def test_unknown_protection_branch_unreadable_remote_status_aborts_pruning(monkeypatch):
+    def fake_run(args, *, check=True):
+        return subprocess.CompletedProcess(args, 128, "", "network unavailable")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Unable to read remote status"):
+        pruning._reconcile_unknown_protection_branches(["stale/branch"], {})
+
+
+def test_branch_tree_lookup_ignores_descendants_when_path_is_a_directory_on_main(monkeypatch):
+    def fake_run(args, *, check=True):
+        if args[:2] == ["git", "merge-base"]:
+            return subprocess.CompletedProcess(args, 0, "base-sha\\n", "")
+        if args[:5] == ["git", "diff", "--no-renames", "--name-only", "-z"]:
+            return subprocess.CompletedProcess(args, 0, "app/module.py\\0", "")
+        if args[:4] == ["git", "--literal-pathspecs", "ls-tree", "-z"]:
+            commit_sha = args[6]
+            path = args[8]
+            if commit_sha == "branch-sha":
+                return subprocess.CompletedProcess(
+                    args, 0, f"100644 blob branch-blob\\t{path}\\0", ""
+                )
+            if commit_sha == "main-sha":
+                return subprocess.CompletedProcess(
+                    args, 0,
+                    f"040000 tree main-tree\\t{path}\\0"
+                    f"100644 blob descendant\\t{path}/child.txt\\0",
+                    "",
+                )
+        raise AssertionError(f"unexpected command: {args}")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+
+    assert pruning._branch_delta_matches_main("branch-sha", "main-sha") is False
+
+
 def test_unexpected_merge_base_error_still_aborts(monkeypatch):
     def fake_run(args, *, check=True):
         return subprocess.CompletedProcess(
