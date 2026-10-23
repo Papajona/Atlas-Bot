@@ -60,10 +60,10 @@ def test_android_biometric_dependency_is_stable_not_alpha():
 
 
 def test_signed_release_is_only_triggered_by_an_explicit_release_tag_or_manual_main_dispatch():
-    push_trigger = RELEASE_WORKFLOW.split("  push:\\n", 1)[1].split("\\npermissions:", 1)[0]
-    release_job = RELEASE_WORKFLOW.split("  android-release:\\n", 1)[1].split("    runs-on:", 1)[0]
+    push_trigger = RELEASE_WORKFLOW.split("  push:\n", 1)[1].split("\npermissions:", 1)[0]
+    release_job = RELEASE_WORKFLOW.split("  android-release:\n", 1)[1].split("    runs-on:", 1)[0]
 
-    assert 'tags:\\n      - "android-v*"' in push_trigger
+    assert 'tags:\n      - "android-v*"' in push_trigger
     assert "branches:" not in push_trigger
     assert "paths:" not in push_trigger
     assert "github.event_name == \'workflow_dispatch\' && github.ref == \'refs/heads/main\'" in release_job
