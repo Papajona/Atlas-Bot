@@ -213,3 +213,64 @@ def test_unexpected_merge_base_error_still_aborts(monkeypatch):
 
     with pytest.raises(RuntimeError, match="merge-base failed"):
         pruning._is_ancestor("merge-sha", "main-sha")
+
+
+
+def _git(cwd, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *map(str, args)],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"git {' '.join(map(str, args))} failed: "
+        f"{result.stderr.strip() or result.stdout.strip()}"
+    )
+    return result.stdout.strip()
+
+
+def test_lease_rejection_preserves_branch_updated_after_proof(tmp_path, monkeypatch):
+    """A newer remote tip must survive if it advances after the proof SHA was read."""
+    remote = tmp_path / "origin.git"
+    checkout = tmp_path / "checkout"
+    advancer = tmp_path / "advancer"
+    branch_name = "feature/lease-race"
+
+    _git(tmp_path, "init", "--bare", remote)
+    _git(tmp_path, "init", "-b", "main", checkout)
+    _git(checkout, "config", "user.name", "Atlas regression test")
+    _git(checkout, "config", "user.email", "atlas-test@example.invalid")
+    (checkout / "README.md").write_text("base\\n", encoding="utf-8")
+    _git(checkout, "add", "README.md")
+    _git(checkout, "commit", "-m", "test base")
+    _git(checkout, "remote", "add", "origin", remote)
+    _git(checkout, "push", "-u", "origin", "main")
+
+    _git(checkout, "checkout", "-b", branch_name)
+    (checkout / "feature.txt").write_text("integrated version\\n", encoding="utf-8")
+    _git(checkout, "add", "feature.txt")
+    _git(checkout, "commit", "-m", "branch version used for proof")
+    _git(checkout, "push", "-u", "origin", branch_name)
+    proven_sha = _git(checkout, "rev-parse", "HEAD")
+
+    # An independent writer advances the remote after the cleanup proof was made.
+    _git(tmp_path, "clone", "--branch", branch_name, remote, advancer)
+    _git(advancer, "config", "user.name", "Atlas branch advancer")
+    _git(advancer, "config", "user.email", "atlas-advancer@example.invalid")
+    with (advancer / "feature.txt").open("a", encoding="utf-8") as feature_file:
+        feature_file.write("unreviewed update that must survive\\n")
+    _git(advancer, "commit", "-am", "advance branch after proof")
+    _git(advancer, "push", "origin", branch_name)
+    advanced_sha = _git(advancer, "rev-parse", "HEAD")
+    assert advanced_sha != proven_sha
+
+    # Run the actual lease-protected push from the stale cleanup checkout.
+    monkeypatch.chdir(checkout)
+    status, reason = pruning._delete_remote_ref_with_lease(branch_name, proven_sha)
+
+    assert status == "PRESERVE"
+    assert "lease was rejected" in reason
+    remote_listing = _git(advancer, "ls-remote", "origin", f"refs/heads/{branch_name}")
+    assert remote_listing.split()[0] == advanced_sha
