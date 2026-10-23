@@ -515,8 +515,14 @@ def test_same_bar_paper_fill_retry_replays_immutable_fill_without_resubmitting(m
         raise AssertionError("same-bar retry must replay the immutable fill")
 
     monkeypatch.setattr(flow, "record_customer_paper_fill", must_not_append)
+
+    async def must_not_fetch_group_marks(*_args, **_kwargs):
+        raise AssertionError("immutable same-bar replay must not fetch current group marks")
+
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
     result = asyncio.run(flow._fill_open_order(
-        customer_id=1002, order=order, market=market, df=pd.DataFrame()
+        customer_id=1002, order=order, market=market, df=pd.DataFrame(),
+        group_mark_price_loader=must_not_fetch_group_marks, request=req,
     ))
     assert result["status"] == "REPLAYED"
     assert result["fill"]["fill_id"] == "existing-fill"
@@ -753,12 +759,44 @@ def test_autonomous_paper_order_expires_at_ttl_boundary(monkeypatch):
         return {"status": "EXPIRED"}
 
     monkeypatch.setattr(flow, "expire_customer_paper_order", expire)
+
+    async def must_not_fetch_group_marks(*_args, **_kwargs):
+        raise AssertionError("TTL expiry must not fetch current group marks")
+
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
     result = asyncio.run(flow._fill_open_order(
-        customer_id=12002, order=order, market=market, df=pd.DataFrame()
+        customer_id=12002, order=order, market=market, df=pd.DataFrame(),
+        group_mark_price_loader=must_not_fetch_group_marks, request=req,
     ))
     assert result["status"] == "EXPIRED_TTL"
     assert result["elapsed_bars"] == 3
     assert expired["client_order_id"] == order["client_order_id"]
+
+
+def test_pending_paper_buy_waits_for_latency_without_fetching_group_marks(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    _, state, order, market = _paper_fill_test_context()
+    market["bar_timestamp"] = (
+        pd.Timestamp(order["metadata"]["submission_bar_at"]) + pd.Timedelta(hours=1)
+    ).isoformat()
+    market["quote_timestamp"] = (
+        pd.Timestamp(market["bar_timestamp"]) + pd.Timedelta(seconds=2)
+    ).isoformat()
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 2)
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 5)
+
+    async def must_not_fetch_group_marks(*_args, **_kwargs):
+        raise AssertionError("fill latency wait must not fetch current group marks")
+
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=12005, order=order, market=market, df=pd.DataFrame(),
+        group_mark_price_loader=must_not_fetch_group_marks, request=req,
+    ))
+    assert result["status"] == "WAITING_FOR_FILL_LATENCY"
+    assert result["elapsed_bars"] == 1
 
 
 def test_paper_protective_exit_fails_closed_when_intervening_candle_is_missing(monkeypatch):
