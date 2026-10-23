@@ -12,7 +12,7 @@ import json
 import re
 import uuid
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_EVEN, localcontext
 from typing import Any
 
@@ -464,13 +464,22 @@ async def submit_customer_paper_order(
                     ) latest ON TRUE
                     WHERE o.customer_id=:customer_id AND o.side='BUY'
                       AND o.created_at >= :day_start
-                      AND latest.event_type IN ('SUBMITTED','PARTIALLY_FILLED','FILLED')
+                      AND (
+                          latest.event_type IN ('SUBMITTED','PARTIALLY_FILLED','FILLED')
+                          OR EXISTS (
+                              SELECT 1 FROM customer_paper.fills f
+                              WHERE f.customer_id=o.customer_id AND f.order_id=o.id
+                          )
+                      )
                     """
                 ), {"customer_id": customer_id, "day_start": day_start})).scalar_one()
                 if int(todays_entries or 0) >= int(settings.discipline_max_entries_per_day):
                     raise CustomerPaperOrderConflict(
                         "Trading-discipline daily entry limit reached for isolated paper ledger"
                     )
+                cooldown_start = now - timedelta(
+                    seconds=int(settings.discipline_entry_cooldown_seconds)
+                )
                 last_entry = (await conn.execute(text(
                     """
                     SELECT o.created_at
@@ -481,12 +490,18 @@ async def submit_customer_paper_order(
                         ORDER BY id DESC LIMIT 1
                     ) latest ON TRUE
                     WHERE o.customer_id=:customer_id AND o.side='BUY'
-                      AND o.created_at >= :day_start
-                      AND latest.event_type IN ('SUBMITTED','PARTIALLY_FILLED','FILLED')
+                      AND o.created_at >= :cooldown_start
+                      AND (
+                          latest.event_type IN ('SUBMITTED','PARTIALLY_FILLED','FILLED')
+                          OR EXISTS (
+                              SELECT 1 FROM customer_paper.fills f
+                              WHERE f.customer_id=o.customer_id AND f.order_id=o.id
+                          )
+                      )
                     ORDER BY o.created_at DESC, o.client_order_id DESC
                     LIMIT 1
                     """
-                ), {"customer_id": customer_id, "day_start": day_start})).scalar_one_or_none()
+                ), {"customer_id": customer_id, "cooldown_start": cooldown_start})).scalar_one_or_none()
                 if last_entry is not None:
                     if last_entry.tzinfo is None or last_entry.utcoffset() is None:
                         last_entry = last_entry.replace(tzinfo=timezone.utc)
