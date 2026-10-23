@@ -92,6 +92,57 @@ def test_downgrade_preserves_preexisting_canonical_index_when_legacy_name_was_ab
 
 
 
+def test_downgrade_restores_missing_indexes_with_table_and_schema_context(monkeypatch):
+    restored = []
+    monkeypatch.setattr(
+        _migration,
+        "_index_names",
+        lambda _bind, _table, schema="public": set(),
+    )
+
+    def capture_restore(bind, table, name, definition, comment, schema="public"):
+        restored.append((bind, table, name, definition, comment, schema))
+
+    monkeypatch.setattr(_migration, "_restore_index_definition", capture_restore)
+    legacy_state = {
+        "table_name": "order_commands",
+        "old_name": "ix_order_command_customer_id",
+        "new_name": "ix_order_commands_customer_id",
+        "old_existed": True,
+        "new_existed": False,
+        "old_definition": "CREATE INDEX ix_order_command_customer_id ON public.order_commands (customer_id)",
+        "old_comment": "legacy",
+        "new_definition": None,
+        "new_comment": None,
+    }
+    canonical_state = {
+        "table_name": "adaptive_trading_bots",
+        "old_name": "ix_adaptive_bot_strategy_candidate_id",
+        "new_name": "ix_adaptive_trading_bots_strategy_candidate_id",
+        "old_existed": False,
+        "new_existed": True,
+        "old_definition": None,
+        "old_comment": None,
+        "new_definition": "CREATE INDEX ix_adaptive_trading_bots_strategy_candidate_id ON public.adaptive_trading_bots (strategy_candidate_id)",
+        "new_comment": "canonical",
+    }
+
+    _migration._restore_rename_index_state(None, legacy_state)
+    _migration._restore_rename_index_state(None, canonical_state)
+
+    assert restored == [
+        (
+            None, "order_commands", "ix_order_command_customer_id",
+            legacy_state["old_definition"], "legacy", "public",
+        ),
+        (
+            None, "adaptive_trading_bots",
+            "ix_adaptive_trading_bots_strategy_candidate_id",
+            canonical_state["new_definition"], "canonical", "public",
+        ),
+    ]
+
+
 def test_upgrade_refuses_to_reuse_preexisting_migration_provenance_schema():
     """Do not change ACLs or trust rollback metadata in a pre-existing reserved schema."""
     import pytest
