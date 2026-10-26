@@ -5,7 +5,9 @@ import math
 import numpy as np
 import pandas as pd
 from .strategy_engine import next_open_returns, _annualization_factor
-from .execution_aware_research import costed_execution_returns, execution_turnover
+from .execution_aware_research import (
+    costed_execution_returns, execution_turnover, simulate_execution_aware_strategy,
+)
 
 
 @dataclass(frozen=True)
@@ -487,6 +489,14 @@ def fixed_signal_walk_forward_oos(
     carry_evidence_id: str | None = None,
     max_hold_bars: int | None = None,
     embargo_bars: int | None = None,
+    benchmark_entry_signal: pd.Series | None = None,
+    benchmark_atr_for_entry: pd.Series | None = None,
+    benchmark_stop_atr: float | None = None,
+    benchmark_take_profit_atr: float | None = None,
+    benchmark_drawdown_limit: float | None = None,
+    benchmark_daily_loss_limit: float | None = None,
+    benchmark_loss_event_threshold: int = 0,
+    benchmark_cooldown_bars: int = 0,
 ) -> dict:
     """Evaluate held-out returns with the same executable position/stop/carry stream.
 
@@ -550,6 +560,21 @@ def fixed_signal_walk_forward_oos(
         if ret.isna().any():
             return {"status": "INVALID_DATA", "reason": "bar_returns_contains_missing_or_nonfinite_values", "folds": []}
     exit_flags = None if intrabar_exit is None else pd.Series(intrabar_exit, index=df.index).fillna(False).astype(bool)
+    if benchmark_entry_signal is None:
+        # Legacy non-execution-aware callers already have an executable target stream.
+        # A precomputed final-position stream must supply its independent requested path.
+        benchmark_signal = None if positions_are_final else position.copy()
+    else:
+        if not isinstance(benchmark_entry_signal, pd.Series) or not benchmark_entry_signal.index.equals(df.index):
+            return {"status": "INVALID_DATA", "reason": "benchmark_entry_signal_index_mismatch", "folds": []}
+        benchmark_signal = benchmark_entry_signal.astype(float).replace([np.inf, -np.inf], np.nan)
+        if benchmark_signal.isna().any():
+            return {"status": "INVALID_DATA", "reason": "benchmark_entry_signal_nonfinite", "folds": []}
+    benchmark_atr = None
+    if benchmark_atr_for_entry is not None:
+        if not isinstance(benchmark_atr_for_entry, pd.Series) or not benchmark_atr_for_entry.index.equals(df.index):
+            return {"status": "INVALID_DATA", "reason": "benchmark_atr_index_mismatch", "folds": []}
+        benchmark_atr = benchmark_atr_for_entry.astype(float)
     gross = position * ret
     turnover = execution_turnover(position, exit_flags)
     net = costed_execution_returns(
@@ -563,8 +588,9 @@ def fixed_signal_walk_forward_oos(
     oos_gross_returns = []
     oos_turnover = []
     oos_fixed_costs = []
-    oos_market_return_blocks = []
-    oos_position_blocks = []
+    oos_ohlc_blocks: list[pd.DataFrame] = []
+    oos_benchmark_entry_signal_blocks: list[np.ndarray] = []
+    oos_benchmark_atr_blocks: list[np.ndarray] = []
     oos_candidate_net_blocks = []
     trades = 0
     for fold in splits:
@@ -574,8 +600,11 @@ def fixed_signal_walk_forward_oos(
         oos_returns.append(x)
         oos_gross_returns.append(gross.iloc[start:end])
         oos_turnover.append(turnover.iloc[start:end])
-        oos_market_return_blocks.append(ret.iloc[start:end].to_numpy(dtype=float))
-        oos_position_blocks.append(p.to_numpy(dtype=float))
+        oos_ohlc_blocks.append(df.iloc[start:end].copy())
+        if benchmark_signal is not None:
+            oos_benchmark_entry_signal_blocks.append(benchmark_signal.iloc[start:end].to_numpy(dtype=float))
+        if benchmark_atr is not None:
+            oos_benchmark_atr_blocks.append(benchmark_atr.iloc[start:end].to_numpy(dtype=float))
         oos_candidate_net_blocks.append(x.to_numpy(dtype=float))
         if fixed_cost is not None:
             oos_fixed_costs.append(fixed_cost.iloc[start:end])
@@ -640,11 +669,26 @@ def fixed_signal_walk_forward_oos(
         )
 
     inference = newey_west_mean_inference(values)
-    benchmark_comparison = oos_benchmark_comparison(
-        oos_market_return_blocks, oos_position_blocks, oos_candidate_net_blocks,
-        transaction_cost_bps=total_cost_bps,
-        carry_bps_per_bar=carry,
-    )
+    if benchmark_signal is None:
+        benchmark_comparison = {
+            "status": "INSUFFICIENT_DATA",
+            "reason": "independent_entry_signal_missing",
+        }
+    else:
+        benchmark_comparison = oos_benchmark_comparison(
+            oos_ohlc_blocks,
+            oos_benchmark_entry_signal_blocks,
+            oos_candidate_net_blocks,
+            oos_benchmark_atr_blocks if benchmark_atr is not None else None,
+            transaction_cost_bps=total_cost_bps,
+            carry_bps_per_bar=carry,
+            stop_atr=benchmark_stop_atr,
+            take_profit_atr=benchmark_take_profit_atr,
+            drawdown_limit=benchmark_drawdown_limit,
+            daily_loss_limit=benchmark_daily_loss_limit,
+            loss_event_threshold=benchmark_loss_event_threshold,
+            cooldown_bars=benchmark_cooldown_bars,
+        )
     return {
         "status": "OK",
         "folds": fold_rows,
