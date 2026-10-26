@@ -404,3 +404,19 @@ def test_customer_paper_trigger_functions_pin_search_path_and_account_key_is_not
     assert constraint_drop in sql
     assert sql.index(constraint_drop) < sql.index(index_create)
 
+    # The tenant GUC is statement-constant. The scalar subquery prevents a
+    # per-row current_setting() evaluation without changing fail-closed NULL behavior.
+    assert "USING (customer_id = (SELECT NULLIF(current_setting(" in sql
+    assert "WITH CHECK (customer_id = (SELECT NULLIF(current_setting(" in sql
+
+    # Each child-side composite foreign key has a leading-column index.
+    for index_name in (
+        "ix_customer_paper_fills_order_customer",
+        "ix_customer_paper_journal_lines_account_customer_currency",
+        "ix_customer_paper_journal_lines_journal_customer",
+        "ix_customer_paper_order_events_order_customer",
+        "ix_customer_paper_position_events_fill_customer",
+        "ix_customer_paper_position_events_reversal_fill_customer",
+    ):
+        assert f"CREATE INDEX IF NOT EXISTS {index_name}" in sql
+
