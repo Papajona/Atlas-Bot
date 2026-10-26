@@ -405,6 +405,10 @@ def oos_benchmark_comparison(
                 valid_shifts.append(int(shift))
         if not valid_shifts:
             return {"status": "INSUFFICIENT_DATA", "reason": "no_valid_shifted_entry_atr_control"}
+        valid_shift_offsets.append(valid_shifts)
+
+    if len(valid_shift_offsets) != len(frame_blocks):
+        return {"status": "INVALID_DATA", "reason": "random_control_shift_plan_incomplete"}
 
     buy_hold_values = []
     buy_hold_turnover = 0.0
