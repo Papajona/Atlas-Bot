@@ -55,15 +55,25 @@ def test_staging_preflight_decodes_percent_encoded_database_credentials():
     assert '"PGUSER": unquote(parsed.username or "")' in workflow
     assert '"PGPASSWORD": unquote(parsed.password or "")' in workflow
 
-def test_staging_preflight_classifies_bad_primary_password_without_exposing_database_output():
+def test_staging_preflight_classifies_authentication_failure_without_exposing_database_output():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(
         encoding="utf-8"
     )
     assert 'diagnostic = (result.stderr or result.stdout or "").lower()' in workflow
     assert '"password authentication failed" in diagnostic' in workflow
-    assert "existing atlas_paper_reader role" in workflow
-    assert "without resetting the database role" in workflow
+    assert "database authentication failed; verify the configured primary database target" in workflow
+    assert "atlas_paper_reader exists on it" in workflow
+    assert "Secret Manager contains its established password" in workflow
+    assert "does not match the existing atlas_paper_reader role" not in workflow
     assert "raw DB output and credentials withheld" in workflow
     assert "print(result.stderr" not in workflow
     assert "print(result.stdout" not in workflow
+
+
+def test_staging_preflight_collapses_policy_diagnostic_whitespace_correctly():
+    ledger = (ROOT / "app" / "customer_paper_ledger.py").read_text(encoding="utf-8")
+    assert r're.sub(r"\\s+", " ", str(row.get("qual") or ""))' not in ledger
+    assert r're.sub(r"\\s+", " ", str(row.get("with_check") or ""))' not in ledger
+    assert r're.sub(r"\s+", " ", str(row.get("qual") or ""))' in ledger
+    assert r're.sub(r"\s+", " ", str(row.get("with_check") or ""))' in ledger
 

@@ -342,7 +342,7 @@ jobs:
           if result.returncode:
               diagnostic = (result.stderr or result.stdout or "").lower()
               if "password authentication failed" in diagnostic or "authentication failed for user" in diagnostic:
-                  reason = "the configured primary DB secret password does not match the existing atlas_paper_reader role; update Secret Manager with the already-established role password, without resetting the database role"
+                  reason = "database authentication failed; verify the configured primary database target, that atlas_paper_reader exists on it, and that Secret Manager contains its established password; do not reset the database role"
               elif "could not translate host name" in diagnostic or "connection timed out" in diagnostic or "could not connect to server" in diagnostic:
                   reason = "the configured primary database endpoint could not be reached; check the existing session-pooler endpoint and network path"
               elif "permission denied" in diagnostic or "insufficient privilege" in diagnostic:

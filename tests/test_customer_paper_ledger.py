@@ -1119,3 +1119,18 @@ def test_customer_paper_policy_validator_accepts_exact_statement_constant_subque
     )
     assert _tenant_policy_expression_is_exact(wrong_guc) is False
 
+    # Whitespace and case inside SQL string literals are significant. They must not
+    # be normalized into the expected tenant GUC, or preflight could accept a policy
+    # that reads a different setting from the one paper transactions actually set.
+    wrong_guc_with_trailing_space = (
+        "(customer_id = (SELECT NULLIF(current_setting('app.customer_id '::text, true), "
+        "''::text)::bigint))"
+    )
+    assert _tenant_policy_expression_is_exact(wrong_guc_with_trailing_space) is False
+
+    wrong_guc_with_uppercase = (
+        "(customer_id = (SELECT NULLIF(current_setting('APP.customer_id'::text, true), "
+        "''::text)::bigint))"
+    )
+    assert _tenant_policy_expression_is_exact(wrong_guc_with_uppercase) is False
+
