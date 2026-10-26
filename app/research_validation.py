@@ -18,7 +18,13 @@ class WalkForwardFold:
     embargo: int
 
 
-def validate_ohlcv_frame(df: pd.DataFrame, require_volume: bool = False) -> dict:
+def validate_ohlcv_frame(
+    df: pd.DataFrame,
+    require_volume: bool = False,
+    *,
+    timeframe: str | None = None,
+    asset: str | None = None,
+) -> dict:
     required = {"open", "high", "low", "close"}
     missing = sorted(required - set(df.columns))
     issues: list[str] = []
@@ -33,6 +39,71 @@ def validate_ohlcv_frame(df: pd.DataFrame, require_volume: bool = False) -> dict
             issues.append("duplicate_timestamps")
     if require_volume and "volume" not in df.columns:
         issues.append("missing_volume")
+
+    attrs = getattr(df, "attrs", {}) or {}
+    provenance = attrs.get("data_provenance") if isinstance(attrs.get("data_provenance"), dict) else {}
+    raw_timeframe = timeframe or attrs.get("timeframe") or provenance.get("timeframe")
+    raw_asset = str(asset or attrs.get("asset_class") or provenance.get("asset_class") or "").strip().lower()
+    expected_seconds = None
+    if raw_timeframe:
+        try:
+            parsed = float(pd.Timedelta(str(raw_timeframe)).total_seconds())
+            if math.isfinite(parsed) and parsed > 0:
+                expected_seconds = parsed
+        except (TypeError, ValueError, OverflowError):
+            expected_seconds = None
+
+    gap_report = {
+        "interval_count": max(0, len(df.index) - 1),
+        "expected_timeframe": str(raw_timeframe) if raw_timeframe else None,
+        "expected_interval_seconds": expected_seconds,
+        "intervals_above_1_5x_expected": None,
+        "intervals_above_1_5x_median": 0,
+        "unexpected_gap_intervals": None,
+        "estimated_missing_bars": None,
+        "market_closure_suspected_intervals": 0,
+        "max_interval_multiple": None,
+        "covered_interval_ratio": None,
+        "method": "expected-timeframe gap estimate; >36-hour non-crypto closures are reported separately and are not rejected",
+    }
+    if isinstance(df.index, pd.DatetimeIndex) and len(df.index) >= 2:
+        intervals = df.index.to_series().diff().dt.total_seconds().to_numpy(dtype=float)[1:]
+        intervals = intervals[np.isfinite(intervals) & (intervals > 0)]
+        if len(intervals):
+            median_seconds = float(np.median(intervals))
+            cadence = expected_seconds if expected_seconds is not None else median_seconds
+            if cadence > 0:
+                multiples_expected = intervals / cadence
+                multiples_median = intervals / median_seconds if median_seconds > 0 else np.ones(len(intervals))
+                above_expected = multiples_expected > 1.5
+                above_median = multiples_median > 1.5
+                # Weekend/long market closures are a separate diagnostic for FX and
+                # commodity data: a large calendar interval must not be mistaken for
+                # a missing run of tradable bars without calendar evidence.
+                closure_suspected = (
+                    (intervals >= 36 * 3600)
+                    if raw_asset in {"forex", "fx", "commodity", "commodities"}
+                    else np.zeros(len(intervals), dtype=bool)
+                )
+                unexpected = above_expected & ~closure_suspected
+                estimated_missing = int(np.sum(
+                    np.maximum(0, np.floor(multiples_expected[unexpected]).astype(int) - 1)
+                ))
+                expected_gaps = int(np.count_nonzero(above_expected))
+                unexpected_count = int(np.count_nonzero(unexpected))
+                gap_report.update({
+                    "intervals_above_1_5x_expected": expected_gaps,
+                    "intervals_above_1_5x_median": int(np.count_nonzero(above_median)),
+                    "unexpected_gap_intervals": unexpected_count,
+                    "estimated_missing_bars": estimated_missing,
+                    "market_closure_suspected_intervals": int(np.count_nonzero(closure_suspected & above_expected)),
+                    "max_interval_multiple": float(np.max(multiples_expected)),
+                    "covered_interval_ratio": float(
+                        len(intervals) / (len(intervals) + estimated_missing)
+                    ) if len(intervals) + estimated_missing else 1.0,
+                    "median_observed_interval_seconds": median_seconds,
+                    "cadence_source": "declared_timeframe" if expected_seconds is not None else "observed_median_fallback",
+                })
     if not missing:
         numeric = df[list(required)].apply(pd.to_numeric, errors="coerce")
         if numeric.isna().any().any():
@@ -45,7 +116,7 @@ def validate_ohlcv_frame(df: pd.DataFrame, require_volume: bool = False) -> dict
             issues.append("invalid_ohlc_range")
         if bool((numeric <= 0).any().any()):
             issues.append("non_positive_ohlc")
-    return {"valid": not issues, "issues": issues, "rows": int(len(df))}
+    return {"valid": not issues, "issues": issues, "rows": int(len(df)), "gap_report": gap_report}
 
 
 def purged_walk_forward_splits(n: int, folds: int = 5, min_train: int = 800,
@@ -95,20 +166,156 @@ def bootstrap_mean_ci(returns: Iterable[float], samples: int = 2000,
     return {"status": "OK", "n": int(len(x)), "mean": float(x.mean()), "ci_low": float(lo), "ci_high": float(hi), "alpha": alpha}
 
 
+def newey_west_mean_inference(returns: Iterable[float], *, max_lags: int | None = None) -> dict:
+    """HAC inference for the mean net per-period return, with effective-sample diagnostics.
+
+    This is a one-sided test of positive mean return. The annualized Sharpe is not
+    treated as a significance test. The effective sample is an autocorrelation-aware
+    diagnostic, not a count of independent observations proven by the data.
+    """
+    x = np.asarray(list(returns), dtype=float)
+    x = x[np.isfinite(x)]
+    n = int(len(x))
+    if n < 30:
+        return {"status": "INSUFFICIENT_DATA", "observations": n}
+    mean = float(np.mean(x))
+    centred = x - mean
+    variance = float(np.dot(centred, centred) / n)
+    if not math.isfinite(variance) or variance <= 0:
+        return {"status": "ZERO_OR_INVALID_VARIANCE", "observations": n, "mean_return_per_period": mean}
+    if max_lags is None:
+        max_lags = int(math.floor(4.0 * (n / 100.0) ** (2.0 / 9.0)))
+    lags = max(0, min(int(max_lags), n - 1))
+    long_run_variance = variance
+    for lag in range(1, lags + 1):
+        gamma = float(np.dot(centred[lag:], centred[:-lag]) / n)
+        weight = 1.0 - lag / (lags + 1.0)
+        long_run_variance += 2.0 * weight * gamma
+    if not math.isfinite(long_run_variance) or long_run_variance <= 0:
+        return {"status": "INVALID_LONG_RUN_VARIANCE", "observations": n, "max_lags": lags}
+    se = math.sqrt(long_run_variance / n)
+    t_stat = mean / se if se > 0 else None
+    effective_n = int(max(1, min(n, round(n * variance / long_run_variance))))
+    p_one_sided = 0.5 * math.erfc(float(t_stat) / math.sqrt(2.0)) if t_stat is not None else None
+    std = float(np.std(x, ddof=1))
+    return {
+        "status": "OK",
+        "observations": n,
+        "effective_observations": effective_n,
+        "mean_return_per_period": mean,
+        "per_period_sharpe": float(mean / std) if std > 0 else None,
+        "newey_west_standard_error": se,
+        "newey_west_t_statistic": float(t_stat) if t_stat is not None else None,
+        "one_sided_normal_p_value": float(p_one_sided) if p_one_sided is not None else None,
+        "max_lags": lags,
+        "inference": "Newey-West HAC mean-return test; normal-tail approximation; use as a gate only alongside trial deflation and minimum effective sample",
+    }
+
+
+def oos_benchmark_comparison(
+    market_return_blocks: list[Iterable[float]],
+    position_blocks: list[Iterable[float]],
+    candidate_net_blocks: list[Iterable[float]],
+    *,
+    transaction_cost_bps: float,
+    carry_bps_per_bar: float | None,
+    random_trials: int = 100,
+    seed: int = 20261026,
+) -> dict:
+    """Compare a single-symbol strategy to same-window buy-and-hold and shifted-entry controls.
+
+    The random-entry control circularly shifts each fold's realized exposure path,
+    preserving its per-fold exposure values and transition pattern while breaking
+    the original alignment between entries and returns. A true equal-weight multi-asset
+    basket cannot be created from a single-symbol frame and is reported unavailable.
+    """
+    if not (len(market_return_blocks) == len(position_blocks) == len(candidate_net_blocks)) or not market_return_blocks:
+        return {"status": "INSUFFICIENT_DATA", "reason": "fold_block_mismatch"}
+    cost_rate = float(transaction_cost_bps) / 10000.0
+    carry_rate = None if carry_bps_per_bar is None else float(carry_bps_per_bar) / 10000.0
+    market_blocks = [np.asarray(list(v), dtype=float) for v in market_return_blocks]
+    positions = [np.asarray(list(v), dtype=float) for v in position_blocks]
+    candidate_blocks = [np.asarray(list(v), dtype=float) for v in candidate_net_blocks]
+    if any(len(r) == 0 for r in market_blocks) or any(len(p) != len(r) for p, r in zip(positions, market_blocks)) or any(len(c) != len(r) for c, r in zip(candidate_blocks, market_blocks)):
+        return {"status": "INSUFFICIENT_DATA", "reason": "empty_or_misaligned_fold"}
+    if any(not np.isfinite(v).all() for group in (market_blocks, positions, candidate_blocks) for v in group):
+        return {"status": "INVALID_DATA", "reason": "nonfinite_benchmark_inputs"}
+
+    candidate_return = float(np.prod(np.concatenate([1.0 + np.clip(v, -1.0, None) for v in candidate_blocks])) - 1.0)
+    buy_hold_values = []
+    for returns in market_blocks:
+        turnover = np.zeros(len(returns), dtype=float)
+        turnover[0] = 1.0
+        turnover[-1] += 1.0
+        net = returns - turnover * cost_rate
+        if carry_rate is not None:
+            net = net - carry_rate
+        buy_hold_values.extend(np.clip(net, -1.0, None).tolist())
+    buy_hold_return = float(np.prod(1.0 + np.asarray(buy_hold_values, dtype=float)) - 1.0)
+
+    rng = np.random.default_rng(seed)
+    random_returns = []
+    random_trade_counts = []
+    for _ in range(max(1, int(random_trials))):
+        trial_blocks = []
+        trade_count = 0
+        for returns, original_positions in zip(market_blocks, positions):
+            if len(returns) > 1:
+                shift = int(rng.integers(1, len(returns)))
+                p = np.roll(original_positions, shift)
+            else:
+                p = original_positions.copy()
+            # Circular turnover counts the wrap transition, preserving the exposure
+            # path's transition pattern and approximate trade/holding-period profile.
+            prev = np.roll(p, 1)
+            turnover = np.abs(p - prev)
+            net = p * returns - turnover * cost_rate
+            if carry_rate is not None:
+                net = net - np.abs(p) * carry_rate
+            trial_blocks.extend(np.clip(net, -1.0, None).tolist())
+            trade_count += int(np.count_nonzero((p != 0.0) & ((prev == 0.0) | (np.sign(p) != np.sign(prev)))))
+        random_returns.append(float(np.prod(1.0 + np.asarray(trial_blocks, dtype=float)) - 1.0))
+        random_trade_counts.append(trade_count)
+    random_median = float(np.median(random_returns))
+    random_p95 = float(np.quantile(random_returns, 0.95))
+    return {
+        "status": "OK",
+        "candidate_net_return": candidate_return,
+        "buy_and_hold_net_return": buy_hold_return,
+        "excess_return_vs_buy_and_hold": candidate_return - buy_hold_return,
+        "matched_random_entry_median_net_return": random_median,
+        "matched_random_entry_p95_net_return": random_p95,
+        "excess_return_vs_random_p95": candidate_return - random_p95,
+        "random_trials": len(random_returns),
+        "random_control_trade_count_median": float(np.median(random_trade_counts)),
+        "equal_weight_basket": {"status": "UNAVAILABLE_SINGLE_SYMBOL_INPUT"},
+        "gate_passed": candidate_return > buy_hold_return and candidate_return > random_p95,
+        "cost_assumptions": {"transaction_cost_bps_per_turnover": float(transaction_cost_bps), "carry_bps_per_bar": carry_bps_per_bar},
+        "note": "Comparisons use the same ordered OOS fold return blocks; random control circularly shifts exposure timing within each fold.",
+    }
+
+
 def multiple_testing_sharpe_adjustment(sharpes: Iterable[float], trials: int) -> dict:
     s = np.asarray([x for x in sharpes if np.isfinite(x)], dtype=float)
-    if len(s) == 0:
-        return {"status": "INSUFFICIENT_DATA"}
-    # Conservative benchmark: expected maximum of trials of N(0,1), scaled to the
-    # observed Sharpe dispersion. This is a screening proxy, not a formal DSR.
+    if len(s) < 2:
+        return {"status": "INSUFFICIENT_TRIAL_DISPERSION",
+                "observed_trials": int(len(s)), "requested_trials": int(trials)}
+    # Use the expected-maximum helper with the observed trial variance. Inputs and
+    # output remain in the same Sharpe units. This remains a screening diagnostic,
+    # not the promotion-grade Deflated Sharpe Ratio.
+    from .research_stats import expected_max_sharpe
     m = max(1, int(trials))
-    expected_max = math.sqrt(2.0 * math.log(m)) if m > 1 else 0.0
+    dispersion_variance = float(np.var(s, ddof=1))
+    if not math.isfinite(dispersion_variance) or dispersion_variance <= 0:
+        return {"status": "INSUFFICIENT_TRIAL_DISPERSION",
+                "observed_trials": int(len(s)), "requested_trials": m}
+    expected_max = float(expected_max_sharpe(m, dispersion_variance))
     best = float(np.max(s))
-    dispersion = float(np.std(s)) if len(s) > 1 else 1.0
-    adjusted = best - expected_max * dispersion
+    adjusted = best - expected_max
     return {"status": "OK", "best_sharpe": best, "trials": m,
+            "observed_trial_variance": dispersion_variance,
             "expected_null_max_proxy": expected_max, "adjusted_sharpe_proxy": float(adjusted),
-            "note": "Screening proxy only; not a formal Deflated Sharpe Ratio."}
+            "note": "Dispersion-scaled screening proxy only; not a formal Deflated Sharpe Ratio."}
 
 
 def cost_sensitivity(returns_gross: Iterable[float], turnover: Iterable[float],
@@ -167,6 +374,8 @@ def fixed_signal_walk_forward_oos(
     carry_bps_per_bar: float | None = None,
     carry_evidence_source: str | None = None,
     carry_evidence_id: str | None = None,
+    max_hold_bars: int | None = None,
+    embargo_bars: int | None = None,
 ) -> dict:
     """Evaluate held-out returns with the same executable position/stop/carry stream.
 
@@ -175,7 +384,11 @@ def fixed_signal_walk_forward_oos(
     legacy next-open diagnostic and reports intrabar parity as incomplete. Missing carry
     is reported as incomplete evidence rather than silently certified as zero financing.
     """
-    splits = purged_walk_forward_splits(len(df), folds=folds, min_train=min_train, purge=1, embargo=1)
+    purge_bars = max(1, int(max_hold_bars)) if max_hold_bars is not None else 1
+    effective_embargo = max(purge_bars, int(embargo_bars)) if embargo_bars is not None else purge_bars
+    splits = purged_walk_forward_splits(
+        len(df), folds=folds, min_train=min_train, purge=purge_bars, embargo=effective_embargo
+    )
     if not splits:
         return {"status": "INSUFFICIENT_DATA", "folds": []}
     try:
@@ -239,6 +452,9 @@ def fixed_signal_walk_forward_oos(
     oos_gross_returns = []
     oos_turnover = []
     oos_fixed_costs = []
+    oos_market_return_blocks = []
+    oos_position_blocks = []
+    oos_candidate_net_blocks = []
     trades = 0
     for fold in splits:
         start, end = fold.test_start, fold.test_end
@@ -247,6 +463,9 @@ def fixed_signal_walk_forward_oos(
         oos_returns.append(x)
         oos_gross_returns.append(gross.iloc[start:end])
         oos_turnover.append(turnover.iloc[start:end])
+        oos_market_return_blocks.append(ret.iloc[start:end].to_numpy(dtype=float))
+        oos_position_blocks.append(p.to_numpy(dtype=float))
+        oos_candidate_net_blocks.append(x.to_numpy(dtype=float))
         if fixed_cost is not None:
             oos_fixed_costs.append(fixed_cost.iloc[start:end])
         prior_p = p.shift(1).fillna(0.0)
@@ -309,10 +528,20 @@ def fixed_signal_walk_forward_oos(
             "a traceable RESEARCH_CARRY_EVIDENCE_SOURCE and RESEARCH_CARRY_EVIDENCE_ID."
         )
 
+    inference = newey_west_mean_inference(values)
+    benchmark_comparison = oos_benchmark_comparison(
+        oos_market_return_blocks, oos_position_blocks, oos_candidate_net_blocks,
+        transaction_cost_bps=total_cost_bps,
+        carry_bps_per_bar=carry,
+    )
     return {
         "status": "OK",
         "folds": fold_rows,
         "oos_bars": int(len(values)),
+        "inference": inference,
+        "benchmark_comparison": benchmark_comparison,
+        "purge_bars": purge_bars,
+        "embargo_bars": effective_embargo,
         "oos_total_return": float(np.prod(1.0 + values) - 1.0),
         "oos_mean_return": mean_return,
         "oos_return_sample": values[-5000:].tolist(),
@@ -368,9 +597,12 @@ def oos_promotion_gate(
     min_positive_fold_ratio: float = 0.5,
     max_negative_fold_return: float = -0.20,
     require_last_fold_positive: bool = True,
-    min_sharpe: float | None = 0.5,
+    min_sharpe: float | None = None,
     max_drawdown: float | None = -0.20,
     min_trades: int | None = 100,
+    min_mean_t_statistic: float | None = None,
+    min_effective_observations: int | None = None,
+    require_benchmark_excess_return: bool = False,
 ) -> dict:
     """Fail-closed OOS promotion gate with explicit rejection reasons."""
     def finite_number(value):
@@ -411,7 +643,7 @@ def oos_promotion_gate(
         else None
     )
 
-    sharpe_ok = True if min_sharpe is None else (sharpe is not None and sharpe >= float(min_sharpe))
+    sharpe_ok = sharpe is not None and (min_sharpe is None or sharpe >= float(min_sharpe))
     dd_ok = True if max_drawdown is None else (max_dd is not None and max_dd >= float(max_drawdown))
     trades_ok = True if min_trades is None else (trades is not None and trades >= int(min_trades))
     dsr_value = finite_number(oos.get("deflated_sharpe"))
@@ -436,6 +668,21 @@ def oos_promotion_gate(
     )
     trial_registry_complete = oos.get("trial_registry_complete") is True
     status_ok = str(oos.get("status", "OK")) == "OK"
+    inference = oos.get("inference") if isinstance(oos.get("inference"), dict) else {}
+    mean_t_stat = finite_number(inference.get("newey_west_t_statistic"))
+    effective_observations = finite_number(inference.get("effective_observations"))
+    inference_ok = (
+        True if min_mean_t_statistic is None and min_effective_observations is None
+        else inference.get("status") == "OK"
+        and mean_t_stat is not None
+        and effective_observations is not None
+        and (min_mean_t_statistic is None or mean_t_stat >= float(min_mean_t_statistic))
+        and (min_effective_observations is None or effective_observations >= int(min_effective_observations))
+    )
+    benchmark = oos.get("benchmark_comparison") if isinstance(oos.get("benchmark_comparison"), dict) else {}
+    benchmark_ok = True if not require_benchmark_excess_return else (
+        benchmark.get("status") == "OK" and benchmark.get("gate_passed") is True
+    )
     enough_folds = len(returns) >= int(min_folds)
     total_return_ok = oos_total_return is not None and oos_total_return >= float(min_total_return)
     positive_ratio_ok = positive_ratio >= float(min_positive_fold_ratio)
@@ -459,6 +706,10 @@ def oos_promotion_gate(
         rejection_reasons.append("last_oos_fold_not_positive")
     if not sharpe_ok:
         rejection_reasons.append("missing_or_below_minimum_oos_sharpe")
+    if not inference_ok:
+        rejection_reasons.append("missing_or_insignificant_newey_west_mean_return")
+    if not benchmark_ok:
+        rejection_reasons.append("benchmark_excess_return_not_positive")
     if not dd_ok:
         rejection_reasons.append("missing_or_excessive_oos_drawdown")
     if not trades_ok:
@@ -508,7 +759,12 @@ def oos_promotion_gate(
             "max_drawdown": max_drawdown,
             "min_trades": min_trades,
             "trial_registry_complete_required": True,
+            "min_mean_t_statistic": min_mean_t_statistic,
+            "min_effective_observations": min_effective_observations,
+            "require_benchmark_excess_return": require_benchmark_excess_return,
         },
+        "inference": inference,
+        "benchmark_comparison": benchmark or None,
         "deflated_sharpe": dsr_value,
         "min_dsr": min_dsr,
         "dsr_ok": dsr_ok,
@@ -673,3 +929,4 @@ def edge_decay_check(realized_returns, *, expected_mean: float, min_obs: int = 6
     status = "HALT_NEW_ENTRIES" if z <= -abs(z_halt) else ("WARN" if z <= -abs(z_warn) else "OK")
     return {"status": status, "z": float(z), "realized_mean": float(x.mean()), "expected_mean": float(expected_mean),
             "observations": int(len(x)), "standard_error": float(se)}
+

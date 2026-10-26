@@ -60,7 +60,7 @@ def _strategy_returns(df: pd.DataFrame, cfg: StrategyConfig, strategy: str,
     return pos * ret - turnover * float(costs_bps) / 10000.0
 
 
-def _metrics(x: pd.Series) -> dict:
+def _metrics(x: pd.Series, *, asset: str = "crypto") -> dict:
     x = pd.Series(x).replace([np.inf, -np.inf], np.nan).dropna()
     if x.empty:
         return {"bars": 0, "trades": 0, "total_return": 0.0, "sharpe": 0.0,
@@ -69,12 +69,14 @@ def _metrics(x: pd.Series) -> dict:
     peak = eq.cummax()
     dd = eq / peak - 1.0
     std = float(x.std())
-    sharpe = float(x.mean() / std * math.sqrt(max(len(x), 1))) if std > 0 else 0.0
+    annualization_factor = _annualization_factor(x.index, asset=asset)
+    sharpe = float(x.mean() / std * math.sqrt(annualization_factor)) if std > 0 else 0.0
     return {
         "bars": int(len(x)),
         "trades": int(np.count_nonzero(np.diff(np.r_[0.0, np.sign(x.to_numpy())]))),
         "total_return": float(eq.iloc[-1] - 1.0),
         "sharpe": sharpe,
+        "annualization_factor": annualization_factor,
         "max_drawdown": float(dd.min()),
         "mean_return": float(x.mean()),
     }
@@ -99,7 +101,7 @@ def regime_conditioned_strategy_performance(df: pd.DataFrame, cfg: StrategyConfi
         for regime in sorted(set(regimes.dropna().astype(str))):
             mask = regimes == regime
             x = returns.loc[mask]
-            m = _metrics(x)
+            m = _metrics(x, asset=asset)
             p = positions.loc[mask]
             m["trades"] = int(np.count_nonzero(np.diff(np.r_[0.0, p.to_numpy()])))
             result[strategy][regime] = m
@@ -343,7 +345,7 @@ def router_walk_forward_backtest(df: pd.DataFrame, cfg: StrategyConfig | None = 
                      "bars": int(len(test)), "strategies_used": selected_series.value_counts().to_dict(),
                      "total_return": float((1.0 + net).prod() - 1.0)})
     joined = pd.concat(all_net) if all_net else pd.Series(dtype=float)
-    m = _metrics(joined)
+    m = _metrics(joined, asset=asset)
     m.update({"status": "OK", "folds": rows, "router": "REGIME_CONDITIONED_WALK_FORWARD"})
     return m
 
@@ -454,7 +456,7 @@ def policy_walk_forward_backtest(
 
         fold_net = pd.Series(net_rows, index=net_index)
         aggregate.extend(net_rows)
-        fm = _metrics(fold_net)
+        fm = _metrics(fold_net, asset=asset)
         fm.update({
             "test_start": df.index[test_start].isoformat(),
             "test_end": df.index[test_end - 1].isoformat(),
@@ -462,7 +464,7 @@ def policy_walk_forward_backtest(
         fold_rows.append(fm)
 
     joined = pd.Series(aggregate, dtype=float)
-    overall = _metrics(joined)
+    overall = _metrics(joined, asset=asset)
     positive_ratio = (sum(float(x.get("total_return", 0.0)) > 0 for x in fold_rows) / len(fold_rows)) if fold_rows else 0.0
     overall.update({
         "status": "OK" if fold_rows else "INSUFFICIENT_DATA",

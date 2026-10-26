@@ -319,22 +319,34 @@ def ensure_adaptive_model(
         min_dsr=max(float(policy.research_min_deflated_sharpe), 0.95),
         require_cost_stress=True,
         min_folds=5,
+        min_mean_t_statistic=1.645,
+        min_effective_observations=100,
+        require_benchmark_excess_return=True,
         min_total_return=policy.min_total_return,
-        min_positive_fold_ratio=0.50,
-        max_negative_fold_return=-0.20,
-        require_last_fold_positive=True,
-        min_sharpe=max(float(policy.min_sharpe), 0.5),
+        # Fold outcomes are regime diagnostics; HAC inference and DSR decide significance.
+        min_positive_fold_ratio=0.0,
+        max_negative_fold_return=-1.0,
+        require_last_fold_positive=False,
+        # Annualized Sharpe is reported but significance is decided by HAC + DSR.
+        min_sharpe=None,
         max_drawdown=max(float(policy.max_drawdown), -0.20),
         min_trades=max(int(policy.min_trades), 100),
     )
+    # This evaluator starts each fold from flat and liquidates inside the fold. Any
+    # alternate evaluator must provide this explicit invariant or promotion is blocked.
+    if wfo.get("trade_boundary_overlap_bars") != 0:
+        oos_gate["passed"] = False
+        reasons = list(oos_gate.get("rejection_reasons") or [])
+        if "oos_trade_crosses_fold_boundary" not in reasons:
+            reasons.append("oos_trade_crosses_fold_boundary")
+        oos_gate["rejection_reasons"] = reasons
     execution_evidence_required = str(settings.environment).lower() in {"staging", "production"}
     execution_evidence_complete = (
         wfo.get("financing_cost_model_complete") is True
         and wfo.get("intrabar_stop_target_model_complete") is True
     )
     absolute_pass = (
-        wfo.get("sharpe", 0.0) >= policy.min_sharpe
-        and wfo.get("max_drawdown", -1.0) >= policy.max_drawdown
+        wfo.get("max_drawdown", -1.0) >= policy.max_drawdown
         and wfo.get("trades", 0) >= policy.min_trades
         and wfo.get("total_return", -1.0) > policy.min_total_return
         and oos_gate.get("passed", False)
