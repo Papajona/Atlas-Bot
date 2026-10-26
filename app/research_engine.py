@@ -832,6 +832,8 @@ def paper_candidates(
 
     In-sample metrics alone are never sufficient. The OOS gate is intentionally
     simple and transparent; it is not a guarantee of future performance.
+    ``min_oos_positive_fold_ratio`` is retained for API compatibility and recorded
+    as a diagnostic only; it is not an enforced promotion requirement.
     """
     min_sharpe = settings.adaptive_min_sharpe if min_sharpe is None else float(min_sharpe)
     max_drawdown = settings.adaptive_max_drawdown if max_drawdown is None else float(max_drawdown)
@@ -855,10 +857,24 @@ def paper_candidates(
     # Promotion requires the complete signed archive bound to this exact OOS sample,
     # including every current candidate and all previously recorded trial labels.
     archive = validation.get("comparable_trial_archive") if isinstance(validation.get("comparable_trial_archive"), dict) else {}
+    evidence_id = archive.get("evidence_id")
+    evidence_digest = archive.get("evidence_sha256")
+    evidence_digest_valid = (
+        isinstance(evidence_digest, str)
+        and len(evidence_digest) == 64
+        and all(character in "0123456789abcdefABCDEF" for character in evidence_digest)
+    )
     archive_verified = (
-        archive.get("trial_archive_verified") is True
-        and bool(str(archive.get("evidence_id") or "").strip())
-        and bool(str(archive.get("evidence_sha256") or "").strip())
+        archive.get("verified") is True
+        and archive.get("trial_archive_verified") is True
+        and isinstance(evidence_id, str) and bool(evidence_id.strip())
+        and evidence_digest_valid
+    )
+    archive_trial_count = dsr.get("trial_count_archive")
+    archive_trial_count_valid = (
+        isinstance(archive_trial_count, int)
+        and not isinstance(archive_trial_count, bool)
+        and archive_trial_count >= 2
     )
     if (
         validation.get("walk_forward_purge_complete") is not True
@@ -866,7 +882,7 @@ def paper_candidates(
         or not archive_verified
         or dsr.get("status") != "OK"
         or dsr.get("trial_scope") != "VERIFIED_ARCHIVE_SAME_OOS_SAMPLE"
-        or int(dsr.get("trial_count_archive", 0)) < 2
+        or not archive_trial_count_valid
     ):
         return []
     candidates = []
@@ -923,6 +939,12 @@ def paper_candidates(
             "in_sample_diagnostics": row,
             "oos": oos,
             "oos_positive_fold_ratio": gate.get("positive_fold_ratio", 0.0),
+            "positive_fold_ratio_diagnostic": {
+                "configured_threshold": min_oos_positive_fold_ratio,
+                "observed_ratio": gate.get("positive_fold_ratio", 0.0),
+                "enforced": False,
+                "deprecation_note": "This threshold is diagnostic-only and does not affect candidate eligibility.",
+            },
             "promotion_gate": gate,
         })
     return candidates
