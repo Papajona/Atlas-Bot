@@ -37,7 +37,8 @@ def test_rbac_inactive_assignment_blocks_allowlist_fallback():
 
 def test_oos_gate_missing_required_metrics_fails_closed():
     source = _source("app/research_validation.py")
-    assert 'sharpe is not None and sharpe >= float(min_sharpe)' in source
+    # A Sharpe value must be present even when callers do not configure a floor.
+    assert 'sharpe_ok = sharpe is not None and (min_sharpe is None or sharpe >= float(min_sharpe))' in source
     assert 'max_dd is not None and max_dd >= float(max_drawdown)' in source
     assert 'trades is not None and trades >= int(min_trades)' in source
     assert 'raw_oos_return = oos.get("oos_total_return") if "oos_total_return" in oos else oos.get("total_return")' in source
