@@ -14,6 +14,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+RESEARCH_PROTOCOL_VERSION = "atlas-purged-walk-forward-v2"
 _UNIVERSE_SOURCES = {"listing_history", "delisting_history", "failed_assets"}
 _COST_SOURCES = {"observed_fills", "order_book", "fee_schedule"}
 _TRIAL_FIELDS = {"trial_label", "config_sha256", "code_sha256", "dataset_sha256",
