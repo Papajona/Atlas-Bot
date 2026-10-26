@@ -413,7 +413,12 @@ def fixed_signal_walk_forward_oos(
         oos_returns.append(x)
         oos_gross_returns.append(gross.iloc[start:end])
         oos_turnover.append(turnover.iloc[start:end])
-        oos_market_return_blocks.append(ret.iloc[start:end].to_numpy(dtype=float))
+        # Benchmark controls must use an unconditional bar return series.  The
+        # execution stream can substitute stop/target/gap-fill returns, so it is
+        # not a market return when the candidate is flat or exits intrabar.
+        market_ret = (df["close"].iloc[start:end].astype(float) /
+                      df["open"].iloc[start:end].astype(float) - 1.0)
+        oos_market_return_blocks.append(market_ret.to_numpy(dtype=float))
         oos_position_blocks.append(p.to_numpy(dtype=float))
         oos_candidate_net_blocks.append(x.to_numpy(dtype=float))
         if fixed_cost is not None:

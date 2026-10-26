@@ -458,7 +458,11 @@ def ai_walk_forward_backtest(
         oos_turnover_blocks.append(np.asarray(fold_turnover, dtype=float))
         oos_position_blocks.append(np.asarray(fold_position, dtype=float))
         oos_carry_blocks.append(np.asarray(fold_carry, dtype=float))
-        oos_market_return_blocks.append(execution["market_returns"].to_numpy(dtype=float))
+        # Keep benchmark returns independent of the candidate's execution path;
+        # execution["market_returns"] contains stop/target/gap-conditioned fills.
+        fold_market = (fold_frame["close"].astype(float) /
+                       fold_frame["open"].astype(float) - 1.0)
+        oos_market_return_blocks.append(fold_market.to_numpy(dtype=float))
         fold_equity = np.cumprod(1.0 + fold_net) if len(fold_net) else np.array([1.0])
         fold_peak = np.maximum.accumulate(fold_equity)
         fold_dd = fold_equity / fold_peak - 1.0
