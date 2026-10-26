@@ -656,8 +656,7 @@ def paper_candidates(
     # that corroborating archive was verified, and candidate selection remains blocked
     # when any current-run candidate lacks a comparable OOS Sharpe.
     if (
-        not walk_forward_purge_complete
-        or validation.get("walk_forward_purge_complete") is not True
+        validation.get("walk_forward_purge_complete") is not True
         or validation.get("trial_registry_complete") is not True
         or dsr.get("status") != "OK"
         or dsr.get("trial_scope") != "CURRENT_RUN_SAME_OOS_SAMPLE"
