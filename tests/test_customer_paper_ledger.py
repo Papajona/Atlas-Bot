@@ -1095,6 +1095,12 @@ def test_customer_paper_policy_validator_accepts_exact_statement_constant_subque
     )
     assert _tenant_policy_expression_is_exact(deparsed_cast) is True
 
+    deparsed_quoted_alias = (
+        "(customer_id = ( SELECT (NULLIF(current_setting('app.customer_id'::text, true), "
+        "''::text))::bigint AS \"nullif\" ))"
+    )
+    assert _tenant_policy_expression_is_exact(deparsed_quoted_alias) is True
+
     widened = (
         "(customer_id = (SELECT NULLIF(current_setting('app.customer_id'::text, true), "
         "''::text)::bigint) OR true)"
