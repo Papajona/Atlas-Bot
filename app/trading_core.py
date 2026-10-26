@@ -10,7 +10,10 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import balanced_accuracy_score, f1_score, log_loss
 from lightgbm import LGBMClassifier
 from .config import settings
-from .research_validation import deflated_sharpe_report, cost_breakeven_report, purged_walk_forward_splits
+from .research_validation import (
+    deflated_sharpe_report, cost_breakeven_report, purged_walk_forward_splits,
+    newey_west_mean_inference, oos_benchmark_comparison,
+)
 from .model_registry import sha256_file, artifact_signature, verify_artifact_signature
 from .execution_aware_research import simulate_execution_aware_strategy
 
@@ -396,6 +399,7 @@ def ai_walk_forward_backtest(
     oos_turnover_blocks: list[np.ndarray] = []
     oos_position_blocks: list[np.ndarray] = []
     oos_carry_blocks: list[np.ndarray] = []
+    oos_market_return_blocks: list[np.ndarray] = []
     total_stop_exits = total_target_exits = total_gap_exits = total_ambiguous_bars = 0
     pred_signal = pd.Series(np.nan, index=X.index)
     for fold in split_specs:
@@ -454,6 +458,7 @@ def ai_walk_forward_backtest(
         oos_turnover_blocks.append(np.asarray(fold_turnover, dtype=float))
         oos_position_blocks.append(np.asarray(fold_position, dtype=float))
         oos_carry_blocks.append(np.asarray(fold_carry, dtype=float))
+        oos_market_return_blocks.append(execution["market_returns"].to_numpy(dtype=float))
         fold_equity = np.cumprod(1.0 + fold_net) if len(fold_net) else np.array([1.0])
         fold_peak = np.maximum.accumulate(fold_equity)
         fold_dd = fold_equity / fold_peak - 1.0
@@ -499,6 +504,15 @@ def ai_walk_forward_backtest(
     wins = net[position != 0][net[position != 0] > 0].sum()
     losses = -net[position != 0][net[position != 0] < 0].sum()
     profit_factor = float(wins / losses) if losses > 0 else (float("inf") if wins > 0 else 0.0)
+    inference_report = newey_west_mean_inference(net.to_numpy(dtype=float))
+    benchmark_report = oos_benchmark_comparison(
+        oos_market_return_blocks,
+        oos_position_blocks,
+        oos_net_blocks,
+        transaction_cost_bps=taker_cost_bps + slippage_cost_bps,
+        carry_bps_per_bar=carry_cost_bps,
+        seed=20261026,
+    )
     return {
         "bars": int(len(df)), "oos_bars": int(len(net)), "features": int(X.shape[1]), "validated_bars": int(pred_signal.notna().sum()),
         "total_return": float(equity.iloc[-1] - 1),
@@ -512,6 +526,8 @@ def ai_walk_forward_backtest(
         "average_active_bar_return": float(net[position != 0].mean()) if bool((position != 0).any()) else 0.0,
         "validation_signal_count": len(scores),
         "prediction_gap_policy": "NO_FORWARD_FILL_ACROSS_NON_TEST_WINDOWS",
+        "inference": inference_report,
+        "benchmark_comparison": benchmark_report,
         "folds": fold_metrics,
         "cost_stress_ok": bool(cost_report.get("stress_ok")) and carry_evidence_complete if cost_report.get("status") == "OK" else False,
         "cost_stress_multiplier": float(stress_multiplier),
