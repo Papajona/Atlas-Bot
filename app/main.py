@@ -990,14 +990,17 @@ async def _adaptive_bot_controller_loop():
                 bots = (await db.execute(select(AdaptiveTradingBot).where(AdaptiveTradingBot.status == "RUNNING", or_(AdaptiveTradingBot.next_run_at.is_(None), AdaptiveTradingBot.next_run_at <= now)).order_by(AdaptiveTradingBot.id).limit(25))).scalars().all()
                 work = [(b.id, b.customer_id, b.trading_account_id, b.asset, b.symbol, b.exchange, b.timeframe, b.days, b.risk_fraction, b.interval_seconds, b.mode) for b in bots]
             _mark_worker_loop_success("adaptive-controller")
-            for bot_id, customer_id, account_id, asset, symbol, exchange, timeframe, days, risk_fraction, interval_seconds, mode in work:
+            for bot_id, customer_id, account_id, asset, symbol, exchange, timeframe, days, _risk_fraction, interval_seconds, mode in work:
                 lock_key = f"adaptive-bot:{bot_id}"
                 if not await acquire_lock(lock_key, ttl_seconds=max(120, int(interval_seconds) + 120)):
                     continue
                 decision_id = None
                 cycle_started_at = datetime.now(timezone.utc)
                 try:
-                    req = CustomerBotStartRequest(asset=asset, symbol=symbol, exchange=exchange, timeframe=timeframe, days=days, risk_fraction=risk_fraction, autonomous=False, interval_seconds=interval_seconds)
+                    # The persisted risk fraction is deliberately not passed through the constrained
+                    # request model: the cycle loads and fail-closed validates it so invalid stored
+                    # values yield risk_fraction_invalid/NO_TRADE rather than a controller ERROR.
+                    req = CustomerBotStartRequest(asset=asset, symbol=symbol, exchange=exchange, timeframe=timeframe, days=days, autonomous=False, interval_seconds=interval_seconds)
                     # The Redis scheduler lease can expire while a slow market/model cycle runs.
                     # Refreshing immediately before the execution path prevents an expired worker
                     # from submitting a trade after another worker acquired the bot lock.
