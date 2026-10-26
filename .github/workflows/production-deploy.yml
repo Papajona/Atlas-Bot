@@ -69,7 +69,7 @@ jobs:
 
           require_success "ci.yml" "Atlas CI"
           require_success "ledger-concurrency-check.yml" "PostgreSQL ledger concurrency"
-          require_success "production-verification.yml" "Production Verification Gate"
+          require_manual_provider_verification
           require_staging_identity_success() {
             local run_id run_status run_conclusion job_conclusion
 
