@@ -25,6 +25,7 @@ from app.customer_paper_ledger import (
     CustomerPaperIdempotencyConflict,
     CustomerPaperLedgerBlocked,
     _tenant_policy_expression_is_exact,
+    _single_line_policy_diagnostic,
     _tenant_policy_validation_error,
     _validated_paper_journal,
     _configured_database_role,
@@ -1074,3 +1075,77 @@ def test_customer_paper_entry_discipline_and_position_ownership_are_enforced(mon
         assert protection["status"] == "APPENDED"
 
     asyncio.run(run())
+
+def test_customer_paper_policy_diagnostic_collapses_multiline_expression_to_one_line():
+    expression = (
+        "customer_id =\n"
+        "    (SELECT NULLIF(current_setting('app.customer_id ', true),\n"
+        "    '')::bigint)"
+    )
+    diagnostic = _single_line_policy_diagnostic(expression)
+    assert diagnostic == (
+        "customer_id = (SELECT NULLIF(current_setting('app.customer_id ', true), '')::bigint)"
+    )
+    assert "\n" not in diagnostic
+    assert "\r" not in diagnostic
+
+
+def test_customer_paper_policy_validator_accepts_exact_statement_constant_subquery_only():
+    scalar = (
+        "(customer_id = (SELECT NULLIF(current_setting('app.customer_id'::text, true), "
+        "''::text)::bigint))"
+    )
+    assert _tenant_policy_expression_is_exact(scalar) is True
+
+    # pg_policies may render a scalar subquery's target-list output with an alias.
+    deparsed_scalar = (
+        "(customer_id = ( SELECT NULLIF(current_setting('app.customer_id'::text, true), "
+        "''::text) AS nullif ))"
+    )
+    assert _tenant_policy_expression_is_exact(deparsed_scalar) is True
+
+    deparsed_cast = (
+        "(customer_id = ( SELECT NULLIF(current_setting('app.customer_id'::text, true), "
+        "''::text)::bigint AS nullif ))"
+    )
+    assert _tenant_policy_expression_is_exact(deparsed_cast) is True
+
+    deparsed_quoted_alias = (
+        "(customer_id = ( SELECT (NULLIF(current_setting('app.customer_id'::text, true), "
+        "''::text))::bigint AS \"nullif\" ))"
+    )
+    assert _tenant_policy_expression_is_exact(deparsed_quoted_alias) is True
+
+    deparsed_parenthesized_setting = (
+        "(customer_id = ( SELECT (NULLIF((current_setting('app.customer_id'::text, true)), "
+        "''::text))::bigint AS \"nullif\" ))"
+    )
+    assert _tenant_policy_expression_is_exact(deparsed_parenthesized_setting) is True
+
+    widened = (
+        "(customer_id = (SELECT NULLIF(current_setting('app.customer_id'::text, true), "
+        "''::text)::bigint) OR true)"
+    )
+    assert _tenant_policy_expression_is_exact(widened) is False
+
+    wrong_guc = (
+        "(customer_id = (SELECT NULLIF(current_setting('app.other_id'::text, true), "
+        "''::text)::bigint))"
+    )
+    assert _tenant_policy_expression_is_exact(wrong_guc) is False
+
+    # Whitespace and case inside SQL string literals are significant. They must not
+    # be normalized into the expected tenant GUC, or preflight could accept a policy
+    # that reads a different setting from the one paper transactions actually set.
+    wrong_guc_with_trailing_space = (
+        "(customer_id = (SELECT NULLIF(current_setting('app.customer_id '::text, true), "
+        "''::text)::bigint))"
+    )
+    assert _tenant_policy_expression_is_exact(wrong_guc_with_trailing_space) is False
+
+    wrong_guc_with_uppercase = (
+        "(customer_id = (SELECT NULLIF(current_setting('APP.customer_id'::text, true), "
+        "''::text)::bigint))"
+    )
+    assert _tenant_policy_expression_is_exact(wrong_guc_with_uppercase) is False
+

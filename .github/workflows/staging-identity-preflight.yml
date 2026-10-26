@@ -340,7 +340,18 @@ jobs:
           result = subprocess.run(["psql","-X","-A","-t","-v","ON_ERROR_STOP=1","-c",query],
                                   capture_output=True,text=True,check=False,env=env)
           if result.returncode:
-              print("BLOCKED: read-only primary identity query failed; DB output withheld")
+              diagnostic = (result.stderr or result.stdout or "").lower()
+              if "password authentication failed" in diagnostic or "authentication failed for user" in diagnostic:
+                  reason = "database authentication failed; verify the configured primary database target, that atlas_paper_reader exists on it, and that Secret Manager contains its established password; do not reset the database role"
+              elif "could not translate host name" in diagnostic or "connection timed out" in diagnostic or "could not connect to server" in diagnostic:
+                  reason = "the configured primary database endpoint could not be reached; check the existing session-pooler endpoint and network path"
+              elif "permission denied" in diagnostic or "insufficient privilege" in diagnostic:
+                  reason = "the authenticated primary role lacks required read-only identity-query privileges; inspect the existing role grants without broadening them"
+              elif "timeout expired" in diagnostic or "statement timeout" in diagnostic or "canceling statement" in diagnostic:
+                  reason = "the read-only identity query timed out; inspect database availability before retrying"
+              else:
+                  reason = "the read-only primary identity query failed for an unclassified database reason"
+              print(f"BLOCKED: {reason}; psql exit code {result.returncode}; raw DB output and credentials withheld")
               sys.exit(1)
           fields = result.stdout.strip().split("|")
           if len(fields) != 22:
