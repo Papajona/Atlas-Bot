@@ -130,8 +130,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || secrets.GEMINI }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY || secrets.GROQ }}
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
-          GEMINI_MODEL: gemini-3.5-flash
-          GEMINI_STRATEGY_MODEL: gemini-3.5-flash
+          GEMINI_MODEL: gemini-3.8-flash
         run: |
           set +e
           python -m scripts.check_ai_models 2>&1 | tee ai-provider-verification.log

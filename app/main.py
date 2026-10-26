@@ -990,14 +990,16 @@ async def _adaptive_bot_controller_loop():
                 bots = (await db.execute(select(AdaptiveTradingBot).where(AdaptiveTradingBot.status == "RUNNING", or_(AdaptiveTradingBot.next_run_at.is_(None), AdaptiveTradingBot.next_run_at <= now)).order_by(AdaptiveTradingBot.id).limit(25))).scalars().all()
                 work = [(b.id, b.customer_id, b.trading_account_id, b.asset, b.symbol, b.exchange, b.timeframe, b.days, b.risk_fraction, b.interval_seconds, b.mode) for b in bots]
             _mark_worker_loop_success("adaptive-controller")
-            for bot_id, customer_id, account_id, asset, symbol, exchange, timeframe, days, risk_fraction, interval_seconds, mode in work:
+            for bot_id, customer_id, account_id, asset, symbol, exchange, timeframe, days, _risk_fraction, interval_seconds, mode in work:
                 lock_key = f"adaptive-bot:{bot_id}"
                 if not await acquire_lock(lock_key, ttl_seconds=max(120, int(interval_seconds) + 120)):
                     continue
                 decision_id = None
                 cycle_started_at = datetime.now(timezone.utc)
                 try:
-                    req = CustomerBotStartRequest(asset=asset, symbol=symbol, exchange=exchange, timeframe=timeframe, days=days, risk_fraction=risk_fraction, autonomous=False, interval_seconds=interval_seconds)
+                    # The persisted risk fraction must be validated by the cycle, not by this constrained request.
+                    # This ensures corrupt stored values become risk_fraction_invalid/NO_TRADE, not controller ERROR.
+                    req = CustomerBotStartRequest(asset=asset, symbol=symbol, exchange=exchange, timeframe=timeframe, days=days, autonomous=False, interval_seconds=interval_seconds)
                     # The Redis scheduler lease can expire while a slow market/model cycle runs.
                     # Refreshing immediately before the execution path prevents an expired worker
                     # from submitting a trade after another worker acquired the bot lock.
@@ -1022,12 +1024,17 @@ async def _adaptive_bot_controller_loop():
                         row = await db.get(AdaptiveTradingBot, bot_id)
                         if row:
                             row.last_run_at = now
-                            row.next_run_at = now + __import__("datetime").timedelta(seconds=max(60, interval_seconds))
                             row.last_decision = str(result.get("decision", "ERROR"))
                             row.last_stage = str(result.get("stage", "execution"))
                             row.last_model_version = str((result.get("ml_signal") or {}).get("model_version", ""))
-                            row.last_error = ""
-                            row.consecutive_errors = 0
+                            if row.status == "STOPPED":
+                                # Validation has intentionally stopped this bot and committed its reason.
+                                # Do not re-schedule it or erase that reason after the cycle returns.
+                                row.next_run_at = None
+                            else:
+                                row.next_run_at = now + __import__("datetime").timedelta(seconds=max(60, interval_seconds))
+                                row.last_error = ""
+                                row.consecutive_errors = 0
                             await db.commit()
                 except asyncio.CancelledError:
                     raise
@@ -1109,10 +1116,49 @@ async def _run_persisted_adaptive_bot_cycle(
         state = await db.get(AppState, 1)
         if not profile or not account or account.status != "ACTIVE" or not state or state.kill_switch:
             return {"decision": "NO_TRADE", "stage": "risk_state"}
-        equity = max(0.0, float(account.equity))
-        risk_fraction = float(bot.risk_fraction or settings.risk_per_trade)
+        # Do not mask malformed or non-finite equity by clamping it to zero.
+        # Customer-paper cycles replace this value with their isolated paper cash below.
+        try:
+            equity = float(account.equity)
+        except (TypeError, ValueError, OverflowError):
+            equity = float("nan")
+
+        # None means use the configured default. Other falsy/corrupt persisted values
+        # must not silently fall back to a larger risk budget.
+        configured_risk_fraction = (
+            settings.risk_per_trade if bot.risk_fraction is None else bot.risk_fraction
+        )
+        try:
+            risk_fraction = float(configured_risk_fraction)
+        except (TypeError, ValueError, OverflowError):
+            risk_fraction = float("nan")
+        if not math.isfinite(risk_fraction) or not 0.0 < risk_fraction <= 0.02:
+            bot.status = "STOPPED"
+            bot.next_run_at = None
+            bot.last_error = "Persisted risk fraction is invalid; expected a finite value in (0, 0.02]"
+            bot.last_decision = "NO_TRADE"
+            bot.last_stage = "risk_fraction_invalid"
+            await db.commit()
+            return {
+                "decision": "NO_TRADE",
+                "stage": "risk_fraction_invalid",
+                "reason": "Persisted risk fraction must be finite and in (0, 0.02]",
+            }
+
         paper_mode = bool(settings.paper_trading or not settings.live_trading_enabled or not state.live_enabled or bot.mode != "LIVE")
         needs_customer_paper = bool(paper_mode and profile.id is not None)
+        if not needs_customer_paper and (not math.isfinite(equity) or equity <= 0.0):
+            bot.status = "STOPPED"
+            bot.next_run_at = None
+            bot.last_error = "Account equity is invalid; live risk sizing requires finite positive account equity"
+            bot.last_decision = "NO_TRADE"
+            bot.last_stage = "risk_equity_invalid"
+            await db.commit()
+            return {
+                "decision": "NO_TRADE",
+                "stage": "risk_equity_invalid",
+                "reason": "Live risk sizing requires finite positive account equity",
+            }
         if needs_customer_paper and not _customer_paper_configuration_ready():
             bot.status = "STOPPED"
             bot.next_run_at = None
@@ -1278,7 +1324,7 @@ async def _run_persisted_adaptive_bot_cycle(
     distance = abs(float(plan["entry_price"]) - float(plan["stop_loss_price"]))
     if distance <= 0:
         return {"decision": "NO_TRADE", "stage": "risk_distance"}
-    risk_cash = equity * float(risk_fraction or settings.risk_per_trade)
+    risk_cash = equity * risk_fraction
     quantity = min(risk_cash / distance, settings.max_notional_usd / max(float(plan["entry_price"]), 1e-12))
     if derivatives_context.get("state") == "ELEVATED":
         quantity *= max(0.0, min(1.0, settings.derivatives_elevated_size_multiplier))

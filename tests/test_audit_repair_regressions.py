@@ -102,20 +102,22 @@ def test_ai_provider_checker_retries_transient_503(monkeypatch):
     assert len(calls) == 2
 
 
-def test_settings_reject_unapproved_gemini_model_ids():
+def test_settings_allow_only_single_gemini_3_8_flash_model():
     from pydantic import ValidationError
     from app.config import Settings
 
-    for field in ("gemini_model", "gemini_strategy_model"):
-        for unapproved in ("gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.5-flash-lite"):
-            values = {
-                "environment": "test",
-                "gemini_model": "gemini-3.5-flash",
-                "gemini_strategy_model": "gemini-3.5-flash",
-            }
-            values[field] = unapproved
-            with pytest.raises(ValidationError, match="Gemini model must be exactly gemini-3.5-flash"):
-                Settings(**values)
+    valid = Settings(environment="test", gemini_model="gemini-3.8-flash")
+    assert valid.gemini_model == "gemini-3.8-flash"
+
+    for unapproved in (
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.6-flash",
+        "gemini-3.7-flash",
+        "gemini-flash-latest",
+    ):
+        with pytest.raises(ValidationError, match="Gemini model must be exactly gemini-3.8-flash"):
+            Settings(environment="test", gemini_model=unapproved)
 
 
 def test_gemini_failure_does_not_probe_alternative_models(monkeypatch):
@@ -124,8 +126,7 @@ def test_gemini_failure_does_not_probe_alternative_models(monkeypatch):
 
     monkeypatch.setattr(settings, "gemini_api_key", "configured")
     monkeypatch.setattr(settings, "groq_api_key", "configured")
-    monkeypatch.setattr(settings, "gemini_model", "gemini-3.5-flash")
-    monkeypatch.setattr(settings, "gemini_strategy_model", "gemini-3.5-flash")
+    monkeypatch.setattr(settings, "gemini_model", "gemini-3.8-flash")
     monkeypatch.setattr(settings, "groq_model", "openai/gpt-oss-20b")
     monkeypatch.setattr(settings, "groq_strategy_model", "openai/gpt-oss-20b")
     monkeypatch.setattr(settings, "cerebras_api_key", "")
@@ -139,7 +140,7 @@ def test_gemini_failure_does_not_probe_alternative_models(monkeypatch):
     )
 
     assert checker.main() == 1
-    assert gemini_calls == ["gemini-3.5-flash"]
+    assert gemini_calls == ["gemini-3.8-flash"]
 
 
 
@@ -150,21 +151,18 @@ def test_production_gate_has_no_provider_quota_waiver_and_uses_verified_model():
     verify = (root / ".github" / "workflows" / "production-verification.yml").read_text()
     deploy = (root / ".github" / "workflows" / "production-deploy.yml").read_text()
     assert "temporarily waived" not in verify
-    assert "GEMINI_MODEL: gemini-3.5-flash" in verify
-    assert "GEMINI_STRATEGY_MODEL: gemini-3.5-flash" in verify
-    assert "GEMINI_MODEL: gemini-3.5-flash" in deploy
-    assert "GEMINI_STRATEGY_MODEL: gemini-3.5-flash" in deploy
+    assert "GEMINI_MODEL: gemini-3.8-flash" in verify
+    assert "GEMINI_MODEL: gemini-3.8-flash" in deploy
+    assert "GEMINI_STRATEGY_MODEL" not in verify + deploy
     assert "vars.GEMINI_MODEL" not in verify + deploy
-    assert "vars.GEMINI_STRATEGY_MODEL" not in verify + deploy
     api_deploy = (root / "deploy" / "cloud-run-deploy.sh").read_text()
     worker_deploy = (root / "deploy" / "cloud-run-worker-deploy.sh").read_text()
     for deployment in (api_deploy, worker_deploy):
-        assert "GEMINI_MODEL=gemini-3.5-flash" in deployment
-        assert "GEMINI_STRATEGY_MODEL=gemini-3.5-flash" in deployment
+        assert "GEMINI_MODEL=gemini-3.8-flash" in deployment
+        assert "GEMINI_STRATEGY_MODEL" not in deployment
         assert "${GEMINI_MODEL:-" not in deployment
-        assert "${GEMINI_STRATEGY_MODEL:-" not in deployment
     env_example = (root / "deploy" / "cloud-run.env.example").read_text()
     runbook = (root / "deploy" / "DEPLOY_WORKFLOW.md").read_text()
-    assert "GEMINI_MODEL=gemini-3.5-flash" in env_example
-    assert "GEMINI_STRATEGY_MODEL=gemini-3.5-flash" in env_example
-    assert "| `GEMINI_MODEL`, `GEMINI_STRATEGY_MODEL` | `gemini-3.5-flash` |" in runbook
+    assert "GEMINI_MODEL=gemini-3.8-flash" in env_example
+    assert "GEMINI_STRATEGY_MODEL" not in env_example
+    assert "| `GEMINI_MODEL` | `gemini-3.8-flash` |" in runbook
