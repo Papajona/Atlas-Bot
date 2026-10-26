@@ -269,9 +269,8 @@ class Settings(BaseSettings):
     ai_gateway_base_url: str = ""
     ai_gateway_model: str = ""
     gemini_api_key: str = ""
-    # gemini-2.5-* is scheduled to shut down in Oct 2026 (Google lists 16 and 20 Oct in different places); verify IDs with scripts/check_ai_models.py.
-    gemini_model: str = "gemini-3.5-flash"
-    gemini_strategy_model: str = "gemini-3.5-flash"
+    # Single approved Gemini model for research/strategy; production inference must pass the live provider gate.
+    gemini_model: str = "gemini-3.8-flash"
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-20b"
     groq_strategy_model: str = "openai/gpt-oss-20b"
@@ -563,13 +562,13 @@ class Settings(BaseSettings):
             )
         return normalized
 
-    @field_validator("gemini_model", "gemini_strategy_model")
+    @field_validator("gemini_model")
     @classmethod
     def _validate_gemini_model(cls, value: str) -> str:
         normalized = str(value or "").strip().removeprefix("models/")
-        if normalized != "gemini-3.5-flash":
+        if normalized != "gemini-3.8-flash":
             raise ValueError(
-                "Gemini model must be exactly gemini-3.5-flash; alternative Gemini IDs are not permitted."
+                "Gemini model must be exactly gemini-3.8-flash; alternative Gemini IDs are not permitted."
             )
         return normalized
 
