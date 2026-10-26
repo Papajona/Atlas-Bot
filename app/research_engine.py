@@ -329,7 +329,15 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     carry_evidence_source = str(settings.research_carry_evidence_source or "").strip()
     carry_evidence_id = str(settings.research_carry_evidence_id or "").strip()
     carry_evidence_complete = carry is not None and bool(carry_evidence_source) and bool(carry_evidence_id)
-    data_quality = validate_ohlcv_frame(df)
+    data_quality = validate_ohlcv_frame(
+        df,
+        timeframe=str(
+            df.attrs.get("timeframe")
+            or (df.attrs.get("data_provenance") or {}).get("timeframe")
+            or ""
+        ) or None,
+        asset=str(asset).strip().lower(),
+    )
     # The current established-coin allowlist is a live liquidity control, not a
     # historical point-in-time universe. Carry this limitation into every research result.
     universe_bias = (
