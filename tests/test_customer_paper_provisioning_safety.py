@@ -376,3 +376,31 @@ def test_file_backed_bootstrap_accepts_distinct_passwords_without_disclosing_the
     assert "distinct credential" not in result.stdout + result.stderr
     assert paper_password not in result.stdout + result.stderr
     assert primary_password not in result.stdout + result.stderr
+
+def test_customer_paper_trigger_functions_pin_search_path_and_account_key_is_not_duplicated():
+    sql = Path("scripts/customer_paper_ledger_schema.sql").read_text(encoding="utf-8")
+
+    function_end_markers = {
+        "reject_mutation": "$paper_immutable$;",
+        "assert_market_bar_capacity": "$paper_bar_capacity$;",
+        "assert_balanced_journal": "$paper_balance$;",
+        "assert_order_event_state": "$paper_event_state$;",
+    }
+    for function_name, end_marker in function_end_markers.items():
+        start = sql.index(f"CREATE OR REPLACE FUNCTION customer_paper.{function_name}()")
+        end = sql.index(end_marker, start) + len(end_marker)
+        definition = sql[start:end]
+        assert "SET search_path = pg_catalog, customer_paper" in definition, function_name
+
+    # The named unique index is the canonical uniqueness mechanism. Drop the
+    # equivalent table-declared unique constraint before creating/retaining it.
+    constraint_drop = (
+        "ALTER TABLE customer_paper.accounts "
+        "DROP CONSTRAINT IF EXISTS accounts_customer_id_currency_account_code_key;"
+    )
+    index_create = (
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_customer_paper_account_code"
+    )
+    assert constraint_drop in sql
+    assert sql.index(constraint_drop) < sql.index(index_create)
+
