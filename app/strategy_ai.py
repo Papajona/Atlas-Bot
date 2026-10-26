@@ -114,7 +114,7 @@ async def _generate_with_provider(provider: str, prompt: str) -> dict[str, Any]:
         return await _gemini_json(
             prompt,
             system_instruction=SYSTEM_PROMPT,
-            model=settings.gemini_strategy_model or settings.gemini_model,
+            model=settings.gemini_model,
         )
     if provider == "cerebras":
         return await _cerebras_json(
@@ -195,7 +195,7 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
         "ai": {
             "provider": provider_used,
             "model": (
-                settings.gemini_strategy_model if provider_used == "gemini"
+                settings.gemini_model if provider_used == "gemini"
                 else settings.groq_strategy_model if provider_used == "groq"
                 else settings.cerebras_model
             ),
