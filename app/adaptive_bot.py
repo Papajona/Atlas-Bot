@@ -330,6 +330,14 @@ def ensure_adaptive_model(
         max_drawdown=max(float(policy.max_drawdown), -0.20),
         min_trades=max(int(policy.min_trades), 100),
     )
+    # This evaluator starts each fold from flat and liquidates inside the fold. Any
+    # alternate evaluator must provide this explicit invariant or promotion is blocked.
+    if wfo.get("trade_boundary_overlap_bars") != 0:
+        oos_gate["passed"] = False
+        reasons = list(oos_gate.get("rejection_reasons") or [])
+        if "oos_trade_crosses_fold_boundary" not in reasons:
+            reasons.append("oos_trade_crosses_fold_boundary")
+        oos_gate["rejection_reasons"] = reasons
     execution_evidence_required = str(settings.environment).lower() in {"staging", "production"}
     execution_evidence_complete = (
         wfo.get("financing_cost_model_complete") is True
