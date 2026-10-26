@@ -166,7 +166,7 @@ jobs:
           SERVICE_URL="$(gcloud run services describe "$STAGING_SERVICE" --project="$GCP_PROJECT_ID" --region="$GCP_REGION" --format='value(status.url)')"
           [[ "$SERVICE_URL" == https://* ]] || { echo "BLOCKED: deployed Cloud Run service did not return an HTTPS URL"; exit 1; }
           BODY="$RUNNER_TEMP/atlas-paper-staging-health.json"
-          HTTP_CODE="$(curl --silent --show-error --output "$BODY" --write-out '%{http_code}' --max-time 30 "$SERVICE_URL/healthz" || true)"
+          HTTP_CODE="$(curl --silent --show-error --output "$BODY" --write-out '%{http_code}' --max-time 30 "$SERVICE_URL/livez" || true)"
           if [[ "$HTTP_CODE" != "200" ]]; then
             echo "BLOCKED: paper-only staging liveness check failed (HTTP $HTTP_CODE)"
             exit 1
