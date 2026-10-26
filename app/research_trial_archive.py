@@ -113,8 +113,13 @@ def _row_payload(report: Mapping[str, Any], context: Mapping[str, str],
     # merely a git commit label. GITHUB_SHA is a commit identifier, not this hash.
     code_sha = str(os.getenv("ATLAS_CODE_SHA256") or report.get("code_sha256") or "").strip().lower()
     dataset_sha = context["dataset_sha256"]
-    sample_sha = str(validation.get("oos_sample_sha256") or "").strip().lower()
-    protocol_version = str(context.get("protocol_version") or validation.get("protocol_version") or report.get("protocol_version") or "").strip()
+    if str(category).strip().lower() == "ai":
+        sample_sha = str(metrics.get("oos_sample_sha256") or "").strip().lower()
+    else:
+        sample_sha = str(validation.get("oos_sample_sha256") or "").strip().lower()
+    protocol_version = str(
+        metrics.get("protocol_version") if str(category).strip().lower() == "ai" else ""
+    ).strip() or str(context.get("protocol_version") or validation.get("protocol_version") or report.get("protocol_version") or "").strip()
     universe = validation.get("crypto_universe_validation")
     universe = universe if isinstance(universe, Mapping) else {}
     cost = validation.get("execution_cost_calibration")
