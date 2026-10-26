@@ -67,17 +67,24 @@ def _tenant_policy_expression_is_exact(expression: Any) -> bool:
     normalized = _strip_balanced_outer_parentheses(
         re.sub(r"\s+", "", str(expression or "")).casefold()
     )
-    # PostgreSQL's pg_policies deparser may parenthesize NULLIF(...) before its
-    # bigint cast. The statement-constant scalar subquery used by the schema may
-    # also be shown as SELECT NULLIF(...). Accept only these two exact predicates;
-    # extra clauses, operators, columns, GUC names or casts still fail closed.
     nullif_expression = (
         r"nullif\(current_setting\('app\.customer_id'(?:::text)?,true\),''(?:::text)?\)"
     )
     cast_expression = rf"(?:{nullif_expression}|\({nullif_expression}\))::bigint"
     direct = rf"customer_id={cast_expression}"
-    scalar_subquery = rf"customer_id=\(select{cast_expression}\)"
-    return re.fullmatch(rf"(?:{direct}|{scalar_subquery})", normalized) is not None
+    # PostgreSQL pg_policies deparsing of an uncorrelated scalar SELECT can include
+    # a target-list alias (AS nullif) and redundant parentheses around the SELECT
+    # result. Permit only those syntactic renderings of the same exact expression;
+    # arbitrary aliases, casts, predicates, operators, or GUC names remain rejected.
+    select_item = rf"(?:{nullif_expression}|\({nullif_expression}\))(?:::bigint)?(?:asnullif)?"
+    scalar_subquery = rf"customer_id=\((?:select)?{select_item}\)::bigint?"
+    scalar_subquery_alias = rf"customer_id=\(select{cast_expression}(?:asnullif)?\)"
+    scalar_subquery_inner_cast = rf"customer_id=\(select{select_item}\)"
+    scalar_subquery_outer_cast = rf"customer_id=\(\(select{select_item}\)::bigint\)"
+    return re.fullmatch(
+        rf"(?:{direct}|{scalar_subquery_alias}|{scalar_subquery_inner_cast}|{scalar_subquery_outer_cast})",
+        normalized,
+    ) is not None
 
 
 def _tenant_policy_roles_are_exact(value: Any, expected_role: str) -> bool:
