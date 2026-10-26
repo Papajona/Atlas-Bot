@@ -80,9 +80,9 @@ def validate_ohlcv_frame(
                 multiples_median = intervals / median_seconds if median_seconds > 0 else np.ones(len(intervals))
                 above_expected = multiples_expected > 1.5
                 above_median = multiples_median > 1.5
-                # Weekend/long market closures are a separate diagnostic for FX and
-                # commodity data: a large calendar interval must not be mistaken for
-                # a missing run of tradable bars without calendar evidence.
+                # Long FX/commodity intervals are only a closure suspicion. Without
+                # affirmative calendar/session evidence, do not subtract them from the
+                # unexpected-gap or missing-bar estimate.
                 closure_suspected = (
                     (intervals >= 36 * 3600)
                     if raw_asset in {"forex", "fx", "commodity", "commodities"}
@@ -370,7 +370,11 @@ def oos_benchmark_comparison(
                 turnover = simulated["turnover"].to_numpy(dtype=float)
                 exits = simulated["intrabar_exit"].to_numpy(dtype=bool)
                 executed = simulated["positions"].to_numpy(dtype=float)
-                trade_count += int(np.count_nonzero((executed != 0.0) & (np.r_[0.0, executed[:-1]] == 0.0)))
+                previous_executed = np.r_[0.0, executed[:-1]]
+                trade_count += int(np.count_nonzero(
+                    (executed != 0.0)
+                    & ((previous_executed == 0.0) | (np.sign(executed) != np.sign(previous_executed)))
+                ))
                 turnover_total += float(turnover.sum())
                 exit_count += int(np.count_nonzero(exits))
             else:
