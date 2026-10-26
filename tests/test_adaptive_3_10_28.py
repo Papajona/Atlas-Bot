@@ -81,6 +81,8 @@ def test_controller_runs_real_cycle_and_preserves_invalid_risk_stop(monkeypatch)
             return FakeQueryResult()
 
         async def get(self, model, ident):
+            if model.__name__ == "AdaptiveTradingBot":
+                return bot if ident == bot.id else None
             return {
                 "CustomerProfile": profile,
                 "TradingAccount": account,
@@ -129,7 +131,9 @@ def test_controller_runs_real_cycle_and_preserves_invalid_risk_stop(monkeypatch)
     # The scheduler builds a valid request without forwarding the corrupt stored zero;
     # the real cycle reloads risk_fraction=0.0 from persistence and fails closed.
     assert len(seen_requests) == 1
-    assert 0.0 < float(seen_requests[0].risk_fraction) <= 0.02
+    # None is deliberate: the scheduler must not forward the corrupt stored zero.
+    # The real cycle reloads that persisted zero by bot_id and stops the bot.
+    assert seen_requests[0].risk_fraction is None
     assert bot.status == "STOPPED"
     assert bot.next_run_at is None
     assert bot.last_error == "Persisted risk fraction is invalid; expected a finite value in (0, 0.02]"
