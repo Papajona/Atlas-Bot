@@ -576,6 +576,24 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     sample_sha256 = oos_sample_fingerprint(
         str(provenance.get("sha256") or ""), oos_windows, protocol_version
     )
+    if isinstance(ai_result, dict):
+        ai_windows = []
+        for fold_row in ai_result.get("folds", []):
+            if not isinstance(fold_row, dict) or not fold_row.get("test_start") or not fold_row.get("test_end"):
+                continue
+            ai_windows.append({
+                "test_start": str(fold_row["test_start"]),
+                "test_end_inclusive": str(fold_row["test_end"]),
+                "purge": int(fold_row.get("purge_bars", purge_bars)),
+                "embargo": int(fold_row.get("embargo_bars", purge_bars)),
+            })
+        # AI has its own feature-warmup/label-horizon OOS windows. Fingerprint those
+        # windows separately so its prospective record can never masquerade as a
+        # fixed-signal, same-sample trial in the comparable DSR archive.
+        ai_result["oos_sample_sha256"] = oos_sample_fingerprint(
+            str(provenance.get("sha256") or ""), ai_windows, protocol_version
+        )
+        ai_result["protocol_version"] = protocol_version
     research_context = {
         "asset_class": str(asset).strip().lower(), "venue": research_venue.lower(),
         "market_type": research_market_type.lower(), "symbol": research_symbol,
