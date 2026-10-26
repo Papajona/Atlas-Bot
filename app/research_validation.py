@@ -145,7 +145,7 @@ def purged_walk_forward_splits(n: int, folds: int = 5, min_train: int = 800,
 
 def bootstrap_mean_ci(returns: Iterable[float], samples: int = 2000,
                       seed: int = 17, alpha: float = 0.05,
-                      block_size: int = 24) -> dict:
+                      block_size: int = 1) -> dict:
     x = np.asarray(list(returns), dtype=float)
     x = x[np.isfinite(x)]
     if len(x) < 20:
