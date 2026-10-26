@@ -1074,3 +1074,23 @@ def test_customer_paper_entry_discipline_and_position_ownership_are_enforced(mon
         assert protection["status"] == "APPENDED"
 
     asyncio.run(run())
+
+def test_customer_paper_policy_validator_accepts_exact_statement_constant_subquery_only():
+    scalar = (
+        "(customer_id = (SELECT NULLIF(current_setting('app.customer_id'::text, true), "
+        "''::text)::bigint))"
+    )
+    assert _tenant_policy_expression_is_exact(scalar) is True
+
+    widened = (
+        "(customer_id = (SELECT NULLIF(current_setting('app.customer_id'::text, true), "
+        "''::text)::bigint) OR true)"
+    )
+    assert _tenant_policy_expression_is_exact(widened) is False
+
+    wrong_guc = (
+        "(customer_id = (SELECT NULLIF(current_setting('app.other_id'::text, true), "
+        "''::text)::bigint))"
+    )
+    assert _tenant_policy_expression_is_exact(wrong_guc) is False
+
