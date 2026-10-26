@@ -67,8 +67,15 @@ def _tenant_policy_expression_is_exact(expression: Any) -> bool:
     normalized = _strip_balanced_outer_parentheses(
         re.sub(r"\s+", "", str(expression or "")).casefold()
     )
+    # PostgreSQL's pg_policies deparser quotes the generated target-list alias and
+    # may add redundant parentheses around current_setting/NULLIF expressions.
+    # Normalize only that known alias spelling; the predicate grammar below remains
+    # exact and does not accept extra predicates or a different GUC.
+    normalized = normalized.replace('as"nullif"', "asnullif")
+    setting_call = r"current_setting\('app\.customer_id'(?:::text)?,true\)"
+    setting_expression = rf"(?:{setting_call}|\({setting_call}\))"
     nullif_expression = (
-        r"nullif\(current_setting\('app\.customer_id'(?:::text)?,true\),''(?:::text)?\)"
+        rf"nullif\({setting_expression},''(?:::text)?\)"
     )
     cast_expression = rf"(?:{nullif_expression}|\({nullif_expression}\))::bigint"
     direct = rf"customer_id={cast_expression}"
