@@ -125,7 +125,6 @@ jobs:
       - name: AI model/provider verification when credentials are supplied
         if: github.event_name == 'workflow_dispatch'
         id: ai_provider_verification
-        continue-on-error: true
         env:
           PYTHONPATH: .
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || secrets.GEMINI }}
