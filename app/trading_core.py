@@ -399,7 +399,9 @@ def ai_walk_forward_backtest(
     oos_turnover_blocks: list[np.ndarray] = []
     oos_position_blocks: list[np.ndarray] = []
     oos_carry_blocks: list[np.ndarray] = []
-    oos_market_return_blocks: list[np.ndarray] = []
+    oos_ohlc_blocks: list[pd.DataFrame] = []
+    oos_entry_signal_blocks: list[np.ndarray] = []
+    oos_entry_atr_blocks: list[np.ndarray] = []
     total_stop_exits = total_target_exits = total_gap_exits = total_ambiguous_bars = 0
     pred_signal = pd.Series(np.nan, index=X.index)
     for fold in split_specs:
@@ -458,7 +460,11 @@ def ai_walk_forward_backtest(
         oos_turnover_blocks.append(np.asarray(fold_turnover, dtype=float))
         oos_position_blocks.append(np.asarray(fold_position, dtype=float))
         oos_carry_blocks.append(np.asarray(fold_carry, dtype=float))
-        oos_market_return_blocks.append(execution["market_returns"].to_numpy(dtype=float))
+        # Preserve raw OHLC and the requested entry stream before stops or risk halts
+        # condition realized positions and returns. Benchmark controls resimulate both.
+        oos_ohlc_blocks.append(fold_frame.copy())
+        oos_entry_signal_blocks.append(fold_targets.to_numpy(dtype=float))
+        oos_entry_atr_blocks.append(entry_atr.iloc[te].to_numpy(dtype=float))
         fold_equity = np.cumprod(1.0 + fold_net) if len(fold_net) else np.array([1.0])
         fold_peak = np.maximum.accumulate(fold_equity)
         fold_dd = fold_equity / fold_peak - 1.0
@@ -506,11 +512,18 @@ def ai_walk_forward_backtest(
     profit_factor = float(wins / losses) if losses > 0 else (float("inf") if wins > 0 else 0.0)
     inference_report = newey_west_mean_inference(net.to_numpy(dtype=float))
     benchmark_report = oos_benchmark_comparison(
-        oos_market_return_blocks,
-        oos_position_blocks,
+        oos_ohlc_blocks,
+        oos_entry_signal_blocks,
         oos_net_blocks,
+        oos_entry_atr_blocks,
         transaction_cost_bps=taker_cost_bps + slippage_cost_bps,
         carry_bps_per_bar=carry_cost_bps,
+        stop_atr=float(settings.strategy_stop_atr),
+        take_profit_atr=float(settings.strategy_take_profit_atr),
+        drawdown_limit=settings.strategy_drawdown_halt,
+        daily_loss_limit=settings.strategy_daily_loss_halt,
+        loss_event_threshold=settings.strategy_stoploss_guard_trades,
+        cooldown_bars=settings.strategy_stoploss_guard_bars,
         seed=20261026,
     )
     return {
