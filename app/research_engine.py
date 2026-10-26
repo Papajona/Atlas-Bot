@@ -283,6 +283,40 @@ def _rank_by_oos(rows: list[dict], oos_by_strategy: dict[str, dict]) -> list[dic
     return sorted(rows, key=key, reverse=True)
 
 
+def _fold_trade_boundary_overlap(position, exit_mask, folds: list) -> dict:
+    """Count active trade bars inherited across OOS fold edges, not just split gaps."""
+    p = np.asarray(position, dtype=float)
+    exits = np.zeros(len(p), dtype=bool) if exit_mask is None else np.asarray(exit_mask, dtype=bool)
+    if len(exits) != len(p):
+        return {"status": "INVALID_DATA", "total_bars": None, "by_fold": []}
+    by_fold = []
+    for fold in folds:
+        start, end = int(fold.test_start), int(fold.test_end)
+        overlap = set()
+        if start > 0 and start < len(p):
+            prior, current = p[start - 1], p[start]
+            continues = prior != 0.0 and current != 0.0 and np.sign(prior) == np.sign(current) and not exits[start - 1]
+            if continues:
+                j, side = start, np.sign(current)
+                while j < min(end, len(p)) and p[j] != 0.0 and np.sign(p[j]) == side:
+                    overlap.add(j)
+                    if exits[j]:
+                        break
+                    j += 1
+        if start < end and end < len(p):
+            prior, following = p[end - 1], p[end]
+            continues = prior != 0.0 and following != 0.0 and np.sign(prior) == np.sign(following) and not exits[end - 1]
+            if continues:
+                j, side = end - 1, np.sign(prior)
+                while j >= start and p[j] != 0.0 and np.sign(p[j]) == side:
+                    overlap.add(j)
+                    if exits[j]:
+                        break
+                    j -= 1
+        by_fold.append(int(len(overlap)))
+    return {"status": "OK", "total_bars": int(sum(by_fold)), "by_fold": by_fold}
+
+
 def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                             taker_bps: float = 5.5, slippage_bps: float = 2.0,
                             include_ai: bool = True, asset: str = "crypto",
@@ -362,6 +396,11 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         carry_evidence_source=carry_evidence_source, carry_evidence_id=carry_evidence_id,
         max_hold_bars=research_hold_horizon, embargo_bars=research_hold_horizon,
     )
+    ensemble_overlap = _fold_trade_boundary_overlap(ensemble_pos, ensemble_exits, validation_splits)
+    oos["trade_boundary_overlap_bars"] = ensemble_overlap["total_bars"]
+    oos["trade_boundary_overlap_by_fold"] = ensemble_overlap["by_fold"]
+    for fold_row, overlap_bars in zip(oos.get("folds", []), ensemble_overlap["by_fold"]):
+        fold_row["boundary_overlap_bars"] = overlap_bars
     regime_performance = regime_conditioned_performance(df, ensemble_net, asset=asset)
     per_strategy_oos = {}
     for component in components:
@@ -379,6 +418,11 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             carry_evidence_source=carry_evidence_source, carry_evidence_id=carry_evidence_id,
             max_hold_bars=research_hold_horizon, embargo_bars=research_hold_horizon,
         )
+        component_overlap = _fold_trade_boundary_overlap(component_position, component_exits, validation_splits)
+        per_strategy_oos[component]["trade_boundary_overlap_bars"] = component_overlap["total_bars"]
+        per_strategy_oos[component]["trade_boundary_overlap_by_fold"] = component_overlap["by_fold"]
+        for fold_row, overlap_bars in zip(per_strategy_oos[component].get("folds", []), component_overlap["by_fold"]):
+            fold_row["boundary_overlap_bars"] = overlap_bars
     # Parameter-plateau check: small changes to the signal threshold should not destroy
     # the measured edge. A narrow single-point optimum is treated as fragile research.
     import hashlib
@@ -398,11 +442,17 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             carry_evidence_source=carry_evidence_source, carry_evidence_id=carry_evidence_id,
             max_hold_bars=research_hold_horizon, embargo_bars=research_hold_horizon,
         )
+        variant_overlap = _fold_trade_boundary_overlap(variant_position, variant_exits, validation_splits)
+        variant_oos["trade_boundary_overlap_bars"] = variant_overlap["total_bars"]
+        variant_oos["trade_boundary_overlap_by_fold"] = variant_overlap["by_fold"]
+        for fold_row, overlap_bars in zip(variant_oos.get("folds", []), variant_overlap["by_fold"]):
+            fold_row["boundary_overlap_bars"] = overlap_bars
         variant_config_sha = hashlib.sha256(
             json.dumps(asdict(vcfg), default=str, sort_keys=True).encode()
         ).hexdigest()
         variants.append({
             "multiplier":mult, "sharpe":vr.get("sharpe",0.0),
+            "trade_boundary_overlap_bars": variant_oos.get("trade_boundary_overlap_bars"),
             "total_return":vr.get("total_return",0.0), "max_drawdown":vr.get("max_drawdown",0.0),
             "config_sha256":variant_config_sha, "oos_status":variant_oos.get("status"),
             "oos_sharpe":variant_oos.get("sharpe"), "oos_total_return":variant_oos.get("oos_total_return"),
@@ -525,7 +575,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "walk_forward_purge_bars": purge_bars,
                         "walk_forward_embargo_bars": purge_bars,
                         "walk_forward_horizon_note": (
-                            "purge/embargo match the configured AI label hold horizon"
+                            "purge/embargo match the configured AI label hold horizon; per-candidate live-trade boundary overlaps are separately measured and must be zero"
                             if walk_forward_purge_complete
                             else "no validated asset hold horizon; candidates are blocked from promotion"
                         ),
@@ -624,6 +674,10 @@ def paper_candidates(
             continue
         oos = oos_all.get(name, {})
         if not isinstance(oos, dict):
+            continue
+        # A nonzero overlap means at least one held trade crosses an OOS boundary.
+        # Keep such results visible for diagnostics, but never promote them.
+        if oos.get("trade_boundary_overlap_bars") != 0:
             continue
         gate = oos_promotion_gate(
             oos,
