@@ -327,7 +327,8 @@ def ensure_adaptive_model(
         min_positive_fold_ratio=0.0,
         max_negative_fold_return=-1.0,
         require_last_fold_positive=False,
-        min_sharpe=max(float(policy.min_sharpe), 0.5),
+        # Annualized Sharpe is reported but significance is decided by HAC + DSR.
+        min_sharpe=None,
         max_drawdown=max(float(policy.max_drawdown), -0.20),
         min_trades=max(int(policy.min_trades), 100),
     )
@@ -345,8 +346,7 @@ def ensure_adaptive_model(
         and wfo.get("intrabar_stop_target_model_complete") is True
     )
     absolute_pass = (
-        wfo.get("sharpe", 0.0) >= policy.min_sharpe
-        and wfo.get("max_drawdown", -1.0) >= policy.max_drawdown
+        wfo.get("max_drawdown", -1.0) >= policy.max_drawdown
         and wfo.get("trades", 0) >= policy.min_trades
         and wfo.get("total_return", -1.0) > policy.min_total_return
         and oos_gate.get("passed", False)
