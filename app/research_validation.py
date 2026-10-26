@@ -18,7 +18,13 @@ class WalkForwardFold:
     embargo: int
 
 
-def validate_ohlcv_frame(df: pd.DataFrame, require_volume: bool = False) -> dict:
+def validate_ohlcv_frame(
+    df: pd.DataFrame,
+    require_volume: bool = False,
+    *,
+    timeframe: str | None = None,
+    asset: str | None = None,
+) -> dict:
     required = {"open", "high", "low", "close"}
     missing = sorted(required - set(df.columns))
     issues: list[str] = []
@@ -33,26 +39,70 @@ def validate_ohlcv_frame(df: pd.DataFrame, require_volume: bool = False) -> dict
             issues.append("duplicate_timestamps")
     if require_volume and "volume" not in df.columns:
         issues.append("missing_volume")
+
+    attrs = getattr(df, "attrs", {}) or {}
+    provenance = attrs.get("data_provenance") if isinstance(attrs.get("data_provenance"), dict) else {}
+    raw_timeframe = timeframe or attrs.get("timeframe") or provenance.get("timeframe")
+    raw_asset = str(asset or attrs.get("asset_class") or provenance.get("asset_class") or "").strip().lower()
+    expected_seconds = None
+    if raw_timeframe:
+        try:
+            parsed = float(pd.Timedelta(str(raw_timeframe)).total_seconds())
+            if math.isfinite(parsed) and parsed > 0:
+                expected_seconds = parsed
+        except (TypeError, ValueError, OverflowError):
+            expected_seconds = None
+
     gap_report = {
         "interval_count": max(0, len(df.index) - 1),
+        "expected_timeframe": str(raw_timeframe) if raw_timeframe else None,
+        "expected_interval_seconds": expected_seconds,
+        "intervals_above_1_5x_expected": None,
         "intervals_above_1_5x_median": 0,
-        "max_interval_multiple": 1.0,
-        "covered_interval_ratio": 1.0,
-        "method": "observed_median_timestamp_spacing; market-calendar closures are reported, not rejected",
+        "unexpected_gap_intervals": None,
+        "estimated_missing_bars": None,
+        "market_closure_suspected_intervals": 0,
+        "max_interval_multiple": None,
+        "covered_interval_ratio": None,
+        "method": "expected-timeframe gap estimate; >36-hour non-crypto closures are reported separately and are not rejected",
     }
-    if isinstance(df.index, pd.DatetimeIndex) and len(df.index) >= 3:
+    if isinstance(df.index, pd.DatetimeIndex) and len(df.index) >= 2:
         intervals = df.index.to_series().diff().dt.total_seconds().to_numpy(dtype=float)[1:]
         intervals = intervals[np.isfinite(intervals) & (intervals > 0)]
         if len(intervals):
-            cadence = float(np.median(intervals))
+            median_seconds = float(np.median(intervals))
+            cadence = expected_seconds if expected_seconds is not None else median_seconds
             if cadence > 0:
-                multiples = intervals / cadence
-                large = int(np.count_nonzero(multiples > 1.5))
+                multiples_expected = intervals / cadence
+                multiples_median = intervals / median_seconds if median_seconds > 0 else np.ones(len(intervals))
+                above_expected = multiples_expected > 1.5
+                above_median = multiples_median > 1.5
+                # Weekend/long market closures are a separate diagnostic for FX and
+                # commodity data: a large calendar interval must not be mistaken for
+                # a missing run of tradable bars without calendar evidence.
+                closure_suspected = (
+                    (intervals >= 36 * 3600)
+                    if raw_asset in {"forex", "fx", "commodity", "commodities"}
+                    else np.zeros(len(intervals), dtype=bool)
+                )
+                unexpected = above_expected & ~closure_suspected
+                estimated_missing = int(np.sum(
+                    np.maximum(0, np.floor(multiples_expected[unexpected]).astype(int) - 1)
+                ))
+                expected_gaps = int(np.count_nonzero(above_expected))
+                unexpected_count = int(np.count_nonzero(unexpected))
                 gap_report.update({
-                    "intervals_above_1_5x_median": large,
-                    "max_interval_multiple": float(np.max(multiples)),
-                    "covered_interval_ratio": float(1.0 - large / len(multiples)),
-                    "median_interval_seconds": cadence,
+                    "intervals_above_1_5x_expected": expected_gaps,
+                    "intervals_above_1_5x_median": int(np.count_nonzero(above_median)),
+                    "unexpected_gap_intervals": unexpected_count,
+                    "estimated_missing_bars": estimated_missing,
+                    "market_closure_suspected_intervals": int(np.count_nonzero(closure_suspected & above_expected)),
+                    "max_interval_multiple": float(np.max(multiples_expected)),
+                    "covered_interval_ratio": float(
+                        len(intervals) / (len(intervals) + estimated_missing)
+                    ) if len(intervals) + estimated_missing else 1.0,
+                    "median_observed_interval_seconds": median_seconds,
+                    "cadence_source": "declared_timeframe" if expected_seconds is not None else "observed_median_fallback",
                 })
     if not missing:
         numeric = df[list(required)].apply(pd.to_numeric, errors="coerce")
