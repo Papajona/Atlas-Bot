@@ -52,13 +52,14 @@ def test_paper_staging_asgi_exposes_only_health_and_paper_routes():
     routes = _concrete_dispatch_routes(paper_staging.app)
     assert len(routes) >= 3
     allowed = lambda path: (
-        path in {"/healthz", "/readyz"}
+        path in {"/healthz", "/livez", "/readyz"}
         or path.startswith("/api/customer/paper/")
     )
     assert all(allowed(route.path) for route in routes)
     assert all(route.path != "/openapi.json" for route in routes)
     assert all(getattr(route, "methods", None) for route in routes), "non-HTTP or mounted route escaped enumeration"
     assert next(r for r in routes if r.path == "/healthz").methods == {"GET"}
+    assert next(r for r in routes if r.path == "/livez").methods == {"GET"}
     assert next(r for r in routes if r.path == "/readyz").methods == {"GET"}
     schema = paper_staging.app.openapi()["paths"]
     schema_pairs = {(path, method.upper()) for path, methods in schema.items() for method in methods}
@@ -69,6 +70,11 @@ def test_paper_staging_asgi_exposes_only_health_and_paper_routes():
     assert paper_staging.app.openapi_url is None
 
 
+
+def test_paper_staging_liveness_endpoint_returns_paper_only_status():
+    response = TestClient(paper_staging.app).get("/livez")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "mode": "paper-only"}
 
 
 @pytest.mark.postgres
