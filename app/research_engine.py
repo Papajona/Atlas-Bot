@@ -419,6 +419,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     regime_performance = regime_conditioned_performance(df, ensemble_net, asset=asset)
     per_strategy_oos = {}
     for component in components:
+        if component == "ensemble":
+            per_strategy_oos[component] = oos
+            continue
         component_signals, _, component_requested, component_returns, component_position, _, _, component_exits = _protected_component_position(
             df, component, cfg, taker_bps, slippage_bps, asset, carry
         )
@@ -439,6 +442,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             benchmark_daily_loss_limit=settings.strategy_daily_loss_halt,
             benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
             benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
+            benchmark_random_trials=25,
         )
         component_overlap = _fold_trade_boundary_overlap(component_position, component_exits, validation_splits)
         per_strategy_oos[component]["trade_boundary_overlap_bars"] = component_overlap["total_bars"]
@@ -455,22 +459,26 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         variant_signals, _, variant_requested, variant_returns, variant_position, _, _, variant_exits = _protected_component_position(
             df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry
         )
-        variant_oos = fixed_signal_walk_forward_oos(
-            df, variant_position, costs_bps=taker_bps + slippage_bps,
-            folds=folds, min_train=min_train, annualization_factor=annualization_factor,
-            taker_bps=taker_bps, slippage_bps=slippage_bps,
-            cost_stress_multiplier=cost_mult, positions_are_final=True,
-            bar_returns=variant_returns, intrabar_exit=variant_exits, carry_bps_per_bar=carry,
-            carry_evidence_source=carry_evidence_source, carry_evidence_id=carry_evidence_id,
-            max_hold_bars=research_hold_horizon, embargo_bars=research_hold_horizon,
-            benchmark_entry_signal=variant_requested,
-            benchmark_atr_for_entry=variant_signals["atr"].shift(1),
-            benchmark_stop_atr=vcfg.stop_atr, benchmark_take_profit_atr=vcfg.take_profit_atr,
-            benchmark_drawdown_limit=settings.strategy_drawdown_halt,
-            benchmark_daily_loss_limit=settings.strategy_daily_loss_halt,
-            benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
-            benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
-        )
+        if math.isclose(float(mult), 1.00, rel_tol=0.0, abs_tol=1e-12):
+            variant_oos = oos
+        else:
+            variant_oos = fixed_signal_walk_forward_oos(
+                df, variant_position, costs_bps=taker_bps + slippage_bps,
+                folds=folds, min_train=min_train, annualization_factor=annualization_factor,
+                taker_bps=taker_bps, slippage_bps=slippage_bps,
+                cost_stress_multiplier=cost_mult, positions_are_final=True,
+                bar_returns=variant_returns, intrabar_exit=variant_exits, carry_bps_per_bar=carry,
+                carry_evidence_source=carry_evidence_source, carry_evidence_id=carry_evidence_id,
+                max_hold_bars=research_hold_horizon, embargo_bars=research_hold_horizon,
+                benchmark_entry_signal=variant_requested,
+                benchmark_atr_for_entry=variant_signals["atr"].shift(1),
+                benchmark_stop_atr=vcfg.stop_atr, benchmark_take_profit_atr=vcfg.take_profit_atr,
+                benchmark_drawdown_limit=settings.strategy_drawdown_halt,
+                benchmark_daily_loss_limit=settings.strategy_daily_loss_halt,
+                benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
+                benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
+                benchmark_random_trials=25,
+            )
         variant_overlap = _fold_trade_boundary_overlap(variant_position, variant_exits, validation_splits)
         variant_oos["trade_boundary_overlap_bars"] = variant_overlap["total_bars"]
         variant_oos["trade_boundary_overlap_by_fold"] = variant_overlap["by_fold"]
@@ -504,6 +512,56 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     import hashlib
     # Use a full SHA-256 fingerprint so config variants cannot silently collide
     # because a short fingerprint was truncated to only 32 bits.
+    ai_profile = AI_PROFILES.get(str(asset).strip().lower())
+    configured_ai_carry = settings.research_carry_bps_per_bar
+    ai_carry_bps = float(
+        ai_profile.carry_bps_per_bar
+        if configured_ai_carry is None
+        else configured_ai_carry
+    )
+    ai_trial_config = {
+        "strategy_config": asdict(cfg),
+        "evaluation": {
+            "asset": str(asset).strip().lower(),
+            "folds": int(folds),
+            "min_train": int(min_train),
+            "threshold": float(ai_threshold),
+            "bars_per_year": int(getattr(ai_profile, "bars_per_year", annualization_factor) or annualization_factor),
+            "max_hold_bars": int(getattr(ai_profile, "max_hold", research_hold_horizon) or research_hold_horizon or 1),
+            "taker_bps": float(getattr(ai_profile, "taker_bps", 0.0)),
+            "slippage_bps": float(getattr(ai_profile, "slippage_bps", 0.0)),
+            "carry_bps_per_bar": ai_carry_bps,
+            "cost_stress_multiplier": 2.0,
+        },
+        "execution": {
+            "stop_atr": float(settings.strategy_stop_atr),
+            "take_profit_atr": float(settings.strategy_take_profit_atr),
+            "drawdown_halt": settings.strategy_drawdown_halt,
+            "daily_loss_halt": settings.strategy_daily_loss_halt,
+            "loss_event_threshold": int(settings.strategy_stoploss_guard_trades),
+            "cooldown_bars": int(settings.strategy_stoploss_guard_bars),
+            "loss_lookback_bars": 24,
+        },
+        "model": {
+            "implementation": "lightgbm.LGBMClassifier",
+            "objective": "multiclass",
+            "class_weight": "balanced",
+            "n_estimators": 300,
+            "max_depth": 3,
+            "learning_rate": 0.05,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "min_child_samples": 50,
+            "reg_lambda": 1.0,
+            "random_state": 7,
+            "verbosity": -1,
+            "bagging_freq": 1,
+            "n_jobs": int(settings.ml_threads),
+        },
+    }
+    ai_fp = hashlib.sha256(
+        json.dumps(ai_trial_config, default=str, sort_keys=True).encode("utf-8")
+    ).hexdigest()
     fp = hashlib.sha256(json.dumps(asdict(cfg), default=str, sort_keys=True).encode()).hexdigest()
     this_labels = {f"{r.get('strategy')}@{fp}" for r in results} | {
         f"variant:{v['multiplier']}@{fp}" for v in variants
@@ -518,7 +576,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # AI evaluation is an experiment and belongs in persistent accounting, but its
     # different warm-up/label sample must never enter this fixed-signal DSR set.
     known_prior_fixed_signal_labels = {label for label in known_prior_labels if not label.startswith("ai@")}
-    ai_trial_labels = {f"ai@{fp}"} if include_ai else set()
+    ai_trial_labels = {f"ai@{ai_fp}"} if include_ai else set()
     persistent_trial_labels = this_labels | ai_trial_labels
     n_trials = len(known_prior_labels | persistent_trial_labels)
     # Candidate statistics and signed evidence use an explicit protocol version.
@@ -577,6 +635,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         str(provenance.get("sha256") or ""), oos_windows, protocol_version
     )
     if isinstance(ai_result, dict):
+        ai_result["trial_config"] = ai_trial_config
+        ai_result["trial_config_sha256"] = ai_fp
         ai_windows = []
         for fold_row in ai_result.get("folds", []):
             if not isinstance(fold_row, dict) or not fold_row.get("test_start") or not fold_row.get("test_end"):

@@ -301,8 +301,6 @@ def oos_benchmark_comparison(
             or (closes < lows).any() or (closes > highs).any()
         ):
             return {"status": "INVALID_DATA", "reason": "nonfinite_or_misaligned_benchmark_inputs"}
-        if bracket_configured and (not np.isfinite(atr).all() or (atr <= 0.0).any()):
-            return {"status": "INVALID_DATA", "reason": "invalid_market_atr_for_shifted_control"}
         # Each row earns open[i] -> open[i+1]. The terminal row uses its observed
         # close; never infer market movement from the candidate's stop/exit stream.
         market = np.empty(len(frame), dtype=float)
@@ -315,9 +313,93 @@ def oos_benchmark_comparison(
         atr_blocks.append(atr)
         frame_blocks.append(frame)
 
-    candidate_return = float(
-        np.prod(np.concatenate([1.0 + np.clip(values, -1.0, None) for values in candidate_blocks])) - 1.0
-    )
+    def _shift_signal(original_signal: np.ndarray, shift: int) -> np.ndarray:
+        shifted = np.zeros_like(original_signal)
+        if shift < len(shifted):
+            shifted[shift:] = original_signal[:len(shifted) - shift]
+        return shifted
+
+    def _entry_atr_is_usable(signal: np.ndarray, atr: np.ndarray, frame: pd.DataFrame) -> bool:
+        if not bracket_configured:
+            return True
+        previous = np.r_[0.0, signal[:-1]]
+        opens_entry = (signal != 0.0) & (
+            (previous == 0.0) | (np.sign(signal) != np.sign(previous))
+        )
+        if not opens_entry.any():
+            return True
+        entry_atr = atr[opens_entry]
+        if not np.isfinite(entry_atr).all() or (entry_atr <= 0.0).any():
+            return False
+        entry_open = frame["open"].to_numpy(dtype=float)[opens_entry]
+        entry_signal = signal[opens_entry]
+        if np.any((entry_signal > 0.0) & (entry_open - float(stop_atr) * entry_atr <= 0.0)):
+            return False
+        return True
+
+    def _simulate_signal(frame: pd.DataFrame, market: np.ndarray,
+                         signal: np.ndarray, atr: np.ndarray):
+        if bracket_configured:
+            simulated = simulate_execution_aware_strategy(
+                frame, signal, atr,
+                stop_atr=float(stop_atr),
+                take_profit_atr=float(take_profit_atr),
+                transaction_cost_bps=float(transaction_cost_bps),
+                carry_bps_per_bar=carry_bps_per_bar,
+                drawdown_limit=drawdown_limit,
+                daily_loss_limit=daily_loss_limit,
+                loss_event_threshold=loss_event_threshold,
+                cooldown_bars=cooldown_bars,
+                loss_lookback_bars=loss_lookback_bars,
+            )
+            return (
+                simulated["net_returns"].to_numpy(dtype=float),
+                simulated["turnover"].to_numpy(dtype=float),
+                simulated["positions"].to_numpy(dtype=float),
+                simulated["intrabar_exit"].to_numpy(dtype=bool),
+            )
+        previous = np.r_[0.0, signal[:-1]]
+        turnover = np.abs(signal - previous)
+        if len(turnover):
+            turnover[-1] += abs(float(signal[-1]))
+        net = signal * market - turnover * cost_rate
+        if carry_rate is not None:
+            net = net - np.abs(signal) * carry_rate
+        net = np.clip(net, -1.0, None)
+        following = np.r_[signal[1:], 0.0]
+        exits = (signal != 0.0) & (
+            (following == 0.0) | (np.sign(following) != np.sign(signal))
+        )
+        return net, turnover, signal, exits
+
+    candidate_stream_values = np.concatenate([
+        1.0 + np.clip(values, -1.0, None) for values in candidate_blocks
+    ])
+    candidate_stream_return = float(np.prod(candidate_stream_values) - 1.0)
+    candidate_fold_values: list[float] = []
+    candidate_turnover_total = 0.0
+    candidate_exit_count = 0
+    for frame, market, signal, atr in zip(frame_blocks, market_blocks, signals, atr_blocks):
+        try:
+            net, turnover, executed, exits = _simulate_signal(frame, market, signal, atr)
+        except (TypeError, ValueError, OverflowError, FloatingPointError):
+            return {"status": "INVALID_DATA", "reason": "candidate_fold_execution_invalid"}
+        candidate_fold_values.extend(np.asarray(net, dtype=float).tolist())
+        candidate_turnover_total += float(np.sum(turnover))
+        candidate_exit_count += int(np.count_nonzero(exits))
+    candidate_return = float(np.prod(1.0 + np.asarray(candidate_fold_values, dtype=float)) - 1.0)
+
+    valid_shift_offsets: list[list[int]] = []
+    for frame, original_signal, atr in zip(frame_blocks, signals, atr_blocks):
+        possible_shifts = range(1, len(original_signal)) if len(original_signal) > 1 else (0,)
+        valid_shifts = []
+        for shift in possible_shifts:
+            shifted = _shift_signal(original_signal, int(shift))
+            if _entry_atr_is_usable(shifted, atr, frame):
+                valid_shifts.append(int(shift))
+        if not valid_shifts:
+            return {"status": "INSUFFICIENT_DATA", "reason": "no_valid_shifted_entry_atr_control"}
+
     buy_hold_values = []
     buy_hold_turnover = 0.0
     for market in market_blocks:
@@ -341,50 +423,23 @@ def oos_benchmark_comparison(
         trade_count = 0
         turnover_total = 0.0
         exit_count = 0
-        for frame, market, original_signal, atr in zip(frame_blocks, market_blocks, signals, atr_blocks):
-            # Non-circular shift: the discarded prefix remains flat, no positions
-            # wrap from the end of a fold into its beginning.
-            shift = int(rng.integers(1, len(original_signal))) if len(original_signal) > 1 else 0
-            shifted = np.zeros_like(original_signal)
-            if shift < len(shifted):
-                shifted[shift:] = original_signal[:len(shifted) - shift]
-            if bracket_configured:
-                simulated = simulate_execution_aware_strategy(
-                    frame,
-                    pd.Series(shifted, index=frame.index, dtype=float),
-                    pd.Series(atr, index=frame.index, dtype=float),
-                    stop_atr=float(stop_atr),
-                    take_profit_atr=float(take_profit_atr),
-                    transaction_cost_bps=float(transaction_cost_bps),
-                    carry_bps_per_bar=carry_bps_per_bar,
-                    drawdown_limit=drawdown_limit,
-                    daily_loss_limit=daily_loss_limit,
-                    loss_event_threshold=loss_event_threshold,
-                    cooldown_bars=cooldown_bars,
-                    loss_lookback_bars=loss_lookback_bars,
-                )
-                net = simulated["net_returns"].to_numpy(dtype=float)
-                turnover = simulated["turnover"].to_numpy(dtype=float)
-                exits = simulated["intrabar_exit"].to_numpy(dtype=bool)
-                executed = simulated["positions"].to_numpy(dtype=float)
-                previous_executed = np.r_[0.0, executed[:-1]]
-                trade_count += int(np.count_nonzero(
-                    (executed != 0.0)
-                    & ((previous_executed == 0.0) | (np.sign(executed) != np.sign(previous_executed)))
-                ))
-                turnover_total += float(turnover.sum())
-                exit_count += int(np.count_nonzero(exits))
-            else:
-                previous = np.r_[0.0, shifted[:-1]]
-                turnover = np.abs(shifted - previous)
-                turnover[-1] += abs(float(shifted[-1]))  # terminal liquidation
-                net = shifted * market - turnover * cost_rate
-                if carry_rate is not None:
-                    net = net - np.abs(shifted) * carry_rate
-                net = np.clip(net, -1.0, None)
-                trade_count += int(np.count_nonzero((shifted != 0.0) & ((previous == 0.0) | (np.sign(shifted) != np.sign(previous)))))
-                turnover_total += float(turnover.sum())
-                exit_count += int(np.count_nonzero((shifted != 0.0) & (np.r_[shifted[1:], 0.0] == 0.0)))
+        for frame, market, original_signal, atr, valid_shifts in zip(
+            frame_blocks, market_blocks, signals, atr_blocks, valid_shift_offsets
+        ):
+            # Prefix remains flat; ATR is validated only where a shifted control enters.
+            shift = int(rng.choice(valid_shifts))
+            shifted = _shift_signal(original_signal, shift)
+            try:
+                net, turnover, executed, exits = _simulate_signal(frame, market, shifted, atr)
+            except (TypeError, ValueError, OverflowError, FloatingPointError):
+                return {"status": "INVALID_DATA", "reason": "random_control_fold_execution_invalid"}
+            previous_executed = np.r_[0.0, executed[:-1]]
+            trade_count += int(np.count_nonzero(
+                (executed != 0.0)
+                & ((previous_executed == 0.0) | (np.sign(executed) != np.sign(previous_executed)))
+            ))
+            turnover_total += float(np.sum(turnover))
+            exit_count += int(np.count_nonzero(exits))
             trial_values.extend(np.asarray(net, dtype=float).tolist())
         random_returns.append(float(np.prod(1.0 + np.asarray(trial_values, dtype=float)) - 1.0))
         random_trade_counts.append(trade_count)
@@ -396,6 +451,10 @@ def oos_benchmark_comparison(
     return {
         "status": "OK",
         "candidate_net_return": candidate_return,
+        "candidate_stream_net_return": candidate_stream_return,
+        "candidate_turnover": candidate_turnover_total,
+        "candidate_exit_count": candidate_exit_count,
+        "candidate_execution_model": "INDEPENDENT_FOLD_SIMULATION_FROM_REQUESTED_ENTRIES_WITH_TERMINAL_LIQUIDATION",
         "buy_and_hold_net_return": buy_hold_return,
         "excess_return_vs_buy_and_hold": candidate_return - buy_hold_return,
         "matched_random_entry_median_net_return": random_median,
@@ -411,7 +470,7 @@ def oos_benchmark_comparison(
         "equal_weight_basket": {"status": "UNAVAILABLE_SINGLE_SYMBOL_INPUT"},
         "gate_passed": candidate_return > buy_hold_return and candidate_return > random_p95,
         "cost_assumptions": {"transaction_cost_bps_per_turnover": float(transaction_cost_bps), "carry_bps_per_bar": carry_bps_per_bar},
-        "note": "Market returns come from raw fold OHLC. Each shifted entry control starts flat and charges its own turnover, exits, carry, risk halts and terminal liquidation.",
+        "note": "Candidate and random controls are independently re-simulated from requested positions inside each fold. Every fold starts flat and liquidates at its observed terminal close; market returns come from raw OHLC.",
     }
 
 
@@ -504,6 +563,7 @@ def fixed_signal_walk_forward_oos(
     benchmark_daily_loss_limit: float | None = None,
     benchmark_loss_event_threshold: int = 0,
     benchmark_cooldown_bars: int = 0,
+    benchmark_random_trials: int = 100,
 ) -> dict:
     """Evaluate held-out returns with the same executable position/stop/carry stream.
 
@@ -695,6 +755,7 @@ def fixed_signal_walk_forward_oos(
             daily_loss_limit=benchmark_daily_loss_limit,
             loss_event_threshold=benchmark_loss_event_threshold,
             cooldown_bars=benchmark_cooldown_bars,
+            random_trials=benchmark_random_trials,
         )
     return {
         "status": "OK",

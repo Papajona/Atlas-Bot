@@ -104,8 +104,13 @@ def _row_payload(report: Mapping[str, Any], context: Mapping[str, str],
                   evaluation_id: str) -> dict[str, Any]:
     validation = report.get("validation")
     validation = validation if isinstance(validation, Mapping) else {}
-    config = report.get("config")
-    config = config if isinstance(config, Mapping) else {}
+    is_ai_trial = str(category).strip().lower() == "ai"
+    if is_ai_trial:
+        config = metrics.get("trial_config")
+        config = config if isinstance(config, Mapping) else {}
+    else:
+        config = report.get("config")
+        config = config if isinstance(config, Mapping) else {}
     config_sha = hashlib.sha256(
         json.dumps(config, default=str, sort_keys=True).encode("utf-8")
     ).hexdigest() if config else ""

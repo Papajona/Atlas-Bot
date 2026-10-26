@@ -218,3 +218,57 @@ def test_promotion_gate_requires_inference_and_benchmarks_when_configured():
         min_effective_observations=100, require_benchmark_excess_return=True,
     )
     assert passed["passed"] is True
+
+
+
+def test_benchmark_candidate_is_resimulated_and_liquidated_at_each_fold_end():
+    n = 12
+    first = _ohlcv_from_returns(
+        np.r_[np.full(n - 1, 0.001), 0.02], "2026-01-01T00:00:00Z"
+    )
+    second = _ohlcv_from_returns(
+        np.r_[np.full(n - 1, -0.001), -0.03], "2026-02-01T00:00:00Z"
+    )
+    signals = [np.ones(n, dtype=float), np.ones(n, dtype=float)]
+    atrs = [np.ones(n, dtype=float), np.ones(n, dtype=float)]
+    supplied_streams = [np.full(n, 0.01), np.full(n, 0.01)]
+    expected_blocks = [
+        simulate_execution_aware_strategy(
+            frame, pd.Series(signal, index=frame.index), pd.Series(atr, index=frame.index),
+            stop_atr=10.0, take_profit_atr=10.0, transaction_cost_bps=10.0,
+            carry_bps_per_bar=0.0,
+        )["net_returns"].to_numpy(dtype=float)
+        for frame, signal, atr in zip([first, second], signals, atrs)
+    ]
+    expected_return = float(np.prod(1.0 + np.concatenate(expected_blocks)) - 1.0)
+    report = oos_benchmark_comparison(
+        [first, second], signals, supplied_streams, atrs,
+        transaction_cost_bps=10.0, carry_bps_per_bar=0.0,
+        stop_atr=10.0, take_profit_atr=10.0, random_trials=10, seed=91,
+    )
+    assert report["status"] == "OK"
+    assert np.isclose(report["candidate_net_return"], expected_return)
+    assert not np.isclose(report["candidate_net_return"], report["candidate_stream_net_return"])
+    assert report["candidate_execution_model"].startswith("INDEPENDENT_FOLD_SIMULATION")
+    assert report["candidate_exit_count"] >= 2
+
+
+def test_flat_bars_with_missing_atr_do_not_invalidate_benchmark_controls():
+    frame = _ohlcv(24)
+    requested = np.ones(len(frame), dtype=float)
+    requested[0] = 0.0
+    atr = np.ones(len(frame), dtype=float)
+    atr[0] = np.nan
+    candidate = simulate_execution_aware_strategy(
+        frame, pd.Series(requested, index=frame.index), pd.Series(atr, index=frame.index),
+        stop_atr=1.0, take_profit_atr=5.0, transaction_cost_bps=5.0,
+        carry_bps_per_bar=0.0,
+    )["net_returns"].to_numpy(dtype=float)
+    report = oos_benchmark_comparison(
+        [frame], [requested], [candidate], [atr],
+        transaction_cost_bps=5.0, carry_bps_per_bar=0.0,
+        stop_atr=1.0, take_profit_atr=5.0, random_trials=20, seed=13,
+    )
+    assert report["status"] == "OK"
+    assert report["candidate_exit_count"] > 0
+    assert report["random_trials"] == 20
