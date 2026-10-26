@@ -478,7 +478,6 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         "parameter_variants": variants,
     }
     # Formal DSR. Count every variant evaluated on this data: components + parameter variants (+ AI when included).
-    net_ensemble = ensemble_net.to_numpy()
     # Persistent trial accounting: count DISTINCT configurations ever evaluated (label = strategy/variant + config fingerprint), not runs.
     # Re-running the same configs on one more day of data is not a new trial; changing any parameter or adding a strategy is.
     import hashlib
