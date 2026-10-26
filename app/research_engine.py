@@ -369,7 +369,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     )
     signal_frame = strategy_signals(df, cfg, asset=asset)
     annualization_factor = float(signal_frame.attrs.get("annualization_factor", 252.0))
-    _, _, _, bar_returns, ensemble_pos, ensemble_net, ensemble_audit, ensemble_exits = _protected_component_position(
+    ensemble_signals, _, ensemble_requested, bar_returns, ensemble_pos, ensemble_net, ensemble_audit, ensemble_exits = _protected_component_position(
         df, "ensemble", cfg, taker_bps, slippage_bps, asset, carry
     )
     gross = ensemble_pos * bar_returns
@@ -412,7 +412,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     regime_performance = regime_conditioned_performance(df, ensemble_net, asset=asset)
     per_strategy_oos = {}
     for component in components:
-        _, _, _, component_returns, component_position, _, _, component_exits = _protected_component_position(
+        component_signals, _, component_requested, component_returns, component_position, _, _, component_exits = _protected_component_position(
             df, component, cfg, taker_bps, slippage_bps, asset, carry
         )
         per_strategy_oos[component] = fixed_signal_walk_forward_oos(
@@ -438,7 +438,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     for mult in (0.80,0.90,1.00,1.10,1.20):
         vcfg=StrategyConfig(**{**asdict(cfg), "signal_threshold": float(cfg.signal_threshold*mult)})
         vr=_component_backtest(df,"ensemble",vcfg,taker_bps,slippage_bps,asset,carry)
-        _, _, _, variant_returns, variant_position, _, _, variant_exits = _protected_component_position(
+        variant_signals, _, variant_requested, variant_returns, variant_position, _, _, variant_exits = _protected_component_position(
             df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry
         )
         variant_oos = fixed_signal_walk_forward_oos(
