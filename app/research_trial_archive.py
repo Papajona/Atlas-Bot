@@ -16,7 +16,7 @@ from typing import Any, Mapping
 from sqlalchemy.exc import IntegrityError
 
 from .db import ResearchTrialArchive, SessionLocal
-from .research_evidence import RESEARCH_PROTOCOL_VERSION, canonical_sha256
+from .research_evidence import canonical_sha256
 
 
 def _sha(value: Any) -> bool:
