@@ -373,6 +373,7 @@ async def _paper_customer_api_rate_limit(request: Request, call_next):
 
 
 @app.get("/healthz")
+@app.get("/livez")
 async def healthz():
     # Liveness only: don't make the container restart merely because provisioning is pending.
     return {"status": "ok", "mode": "paper-only"}
