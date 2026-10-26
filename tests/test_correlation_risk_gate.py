@@ -299,7 +299,8 @@ def test_customer_paper_exposure_rejects_timestamp_stale_mark_even_if_reported_a
 
     assert result["ok"] is False
     assert result["stage"] == "paper_exposure_mark_unavailable"
-    assert "stale" in result["reason"]
+    # The public result intentionally reports the exception class, not quote data.
+    assert "(ValueError)" in result["reason"]
 
 
 def test_customer_paper_buy_uses_effective_price_and_atomic_fill_cap():
