@@ -997,7 +997,10 @@ async def _adaptive_bot_controller_loop():
                 decision_id = None
                 cycle_started_at = datetime.now(timezone.utc)
                 try:
-                    req = CustomerBotStartRequest(asset=asset, symbol=symbol, exchange=exchange, timeframe=timeframe, days=days, risk_fraction=risk_fraction, autonomous=False, interval_seconds=interval_seconds)
+                    # Do not pass the persisted risk fraction through the request schema: invalid rows
+                    # must reach the cycle, which validates the authoritative bot row and stops the bot
+                    # with the risk-specific stage.
+                    req = CustomerBotStartRequest(asset=asset, symbol=symbol, exchange=exchange, timeframe=timeframe, days=days, autonomous=False, interval_seconds=interval_seconds)
                     # The Redis scheduler lease can expire while a slow market/model cycle runs.
                     # Refreshing immediately before the execution path prevents an expired worker
                     # from submitting a trade after another worker acquired the bot lock.

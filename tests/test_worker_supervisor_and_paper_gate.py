@@ -258,3 +258,87 @@ def test_persisted_live_bot_invalid_equity_stops_before_market_data_or_ai(monkey
     assert "finite positive account equity" in bot.last_error
     assert calls == {"market_data": 0, "ai": 0}
 
+
+@pytest.mark.parametrize("risk_fraction", [float("nan"), 0.0, 0.020001])
+def test_supervisor_invalid_persisted_risk_stops_bot_on_first_cycle(monkeypatch, risk_fraction):
+    import app.main as main
+
+    bot = SimpleNamespace(
+        id=90, customer_id=15, trading_account_id=34, asset="forex",
+        symbol="EUR_USD", exchange="oanda", timeframe="1h", days=365,
+        risk_fraction=risk_fraction, interval_seconds=900, mode="PAPER",
+        status="RUNNING", next_run_at=None, last_error="",
+        last_decision="", last_stage="", consecutive_errors=0, last_run_at=None,
+    )
+    profile = SimpleNamespace(id=15, status="ACTIVE")
+    account = SimpleNamespace(id=34, status="ACTIVE", equity=10000.0)
+    state = SimpleNamespace(kill_switch=False, live_enabled=False)
+
+    class Result:
+        def scalar_one_or_none(self):
+            return bot
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [bot]
+
+    class FakeDB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def execute(self, _query):
+            return Result()
+
+        async def get(self, model, _ident):
+            return {
+                "CustomerProfile": profile,
+                "TradingAccount": account,
+                "AppState": state,
+                "AdaptiveTradingBot": bot,
+            }.get(model.__name__)
+
+        async def commit(self):
+            return None
+
+    async def fake_acquire(*args, **kwargs):
+        return True
+
+    async def fake_refresh(*args, **kwargs):
+        return True
+
+    async def fake_release(*args, **kwargs):
+        return None
+
+    async def noop_memory(*args, **kwargs):
+        return None
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("market data / AI must not be reached for invalid persisted risk")
+
+    async def stop_after_one_cycle(_seconds):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: FakeDB())
+    monkeypatch.setattr(main, "acquire_lock", fake_acquire)
+    monkeypatch.setattr(main, "refresh_lock", fake_refresh)
+    monkeypatch.setattr(main, "release_lock", fake_release)
+    monkeypatch.setattr(main, "_record_adaptive_decision_memory", noop_memory)
+    monkeypatch.setattr(main, "_fetch_customer_oanda_data", forbidden)
+    monkeypatch.setattr(main, "_ensure_adaptive_model_locked", forbidden)
+    monkeypatch.setattr(main.settings, "paper_trading", True)
+    monkeypatch.setattr(main.settings, "live_trading_enabled", False)
+    monkeypatch.setattr(main.asyncio, "sleep", stop_after_one_cycle)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(main._adaptive_bot_controller_loop())
+
+    assert bot.status == "STOPPED"
+    assert bot.last_stage == "risk_fraction_invalid"
+    assert bot.last_decision == "NO_TRADE"
+    assert bot.consecutive_errors == 0
+
