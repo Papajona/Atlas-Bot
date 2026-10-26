@@ -377,7 +377,7 @@ def test_production_verification_blocks_missing_provider_credentials():
 
 def test_production_verification_passes_provider_secrets_to_checker():
     workflow = (ROOT / ".github" / "workflows" / "production-verification.yml").read_text(encoding="utf-8")
-    block_start = workflow.index("AI model/provider verification when credentials are supplied")
+    block_start = workflow.index("AI model/provider verification (manual dispatch only")
     block_end = workflow.index("Production-oriented static and security gates", block_start)
     block = workflow[block_start:block_end]
     assert 'GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || secrets.GEMINI }}' in block
