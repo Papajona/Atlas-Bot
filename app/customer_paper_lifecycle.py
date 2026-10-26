@@ -903,24 +903,38 @@ async def record_customer_paper_fill(
                         current_symbol.strip().upper(),
                     )
                     raw_mark = (group_mark_prices or {}).get(mark_key)
-                    if raw_mark is None and (
-                        mark_key[0] == venue.strip().lower()
-                        and mark_key[1] == market_type.strip().lower()
-                        and mark_key[2] == symbol.strip().upper()
-                    ):
-                        # The order's actual fill price is a validated current price for
-                        # the same market and is conservative relative to the BUY fill.
-                        raw_mark = fill_price
                     if raw_mark is None:
                         raise CustomerPaperLedgerBlocked(
                             "current mark is missing for an open correlation-group position; refusing to add exposure"
                         )
+                    if not isinstance(raw_mark, Mapping):
+                        raise CustomerPaperLedgerBlocked(
+                            "current correlation-group position mark must include a price and quote timestamp"
+                        )
                     try:
-                        mark_price = Decimal(str(raw_mark))
+                        mark_price = Decimal(str(raw_mark.get("price")))
+                        raw_quote_timestamp = str(
+                            raw_mark.get("quote_timestamp_utc") or ""
+                        ).strip()
+                        mark_timestamp = datetime.fromisoformat(
+                            raw_quote_timestamp.replace("Z", "+00:00")
+                        )
                     except (InvalidOperation, TypeError, ValueError) as exc:
                         raise CustomerPaperLedgerBlocked(
-                            "current correlation-group position mark is invalid"
+                            "current correlation-group position mark or quote timestamp is invalid"
                         ) from exc
+                    if mark_timestamp.tzinfo is None or mark_timestamp.utcoffset() is None:
+                        raise CustomerPaperLedgerBlocked(
+                            "current correlation-group position mark timestamp must be timezone-aware"
+                        )
+                    mark_age_seconds = (
+                        datetime.now(timezone.utc)
+                        - mark_timestamp.astimezone(timezone.utc)
+                    ).total_seconds()
+                    if mark_age_seconds < -1.0 or mark_age_seconds > 5.0:
+                        raise CustomerPaperLedgerBlocked(
+                            "current correlation-group position mark is stale or from the future"
+                        )
                     if not mark_price.is_finite() or mark_price <= 0:
                         raise CustomerPaperLedgerBlocked(
                             "current correlation-group position mark is not finite and positive"
