@@ -87,9 +87,13 @@ def test_strategy_deployment_wires_real_ai_secrets():
     assert "SECRET_CEREBRAS_API_KEY_VERSION" in deploy
     assert "CEREBRAS_API_KEY=atlas-cerebras-api-key" in deploy
     assert "CEREBRAS_MODEL=${CEREBRAS_MODEL:-" in deploy
-    assert "SECRET_CEREBRAS_REF" in (ROOT / "deploy" / "cloud-run-worker-deploy.sh").read_text()
-    assert "GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}" in deploy
-    assert "GEMINI_STRATEGY_MODEL=${GEMINI_STRATEGY_MODEL:-gemini-3.5-flash}" in deploy
+    worker_deploy = (ROOT / "deploy" / "cloud-run-worker-deploy.sh").read_text()
+    assert "SECRET_CEREBRAS_REF" in worker_deploy
+    for deployment in (deploy, worker_deploy):
+        assert "GEMINI_MODEL=gemini-3.5-flash" in deployment
+        assert "GEMINI_STRATEGY_MODEL=gemini-3.5-flash" in deployment
+        assert "${GEMINI_MODEL:-" not in deployment
+        assert "${GEMINI_STRATEGY_MODEL:-" not in deployment
     assert "gemini-2.5" not in deploy
 
 
