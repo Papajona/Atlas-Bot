@@ -767,7 +767,11 @@ def test_autonomous_paper_order_attempts_fill_at_ttl_boundary_then_expires_remai
     async def record_fill(**kwargs):
         events.append("fill")
         fill_calls.append(kwargs)
-        return {"status": "FILLED", "fill_id": "ttl-boundary-fill"}
+        # The ledger reports the open remainder after a partial fill; TTL then
+        # expires only that remainder, never the already-recorded fill.
+        state["status"] = "PARTIALLY_FILLED"
+        state["remaining_quantity"] = "1"
+        return {"status": "PARTIALLY_FILLED", "fill_id": "ttl-boundary-fill"}
 
     monkeypatch.setattr(flow, "get_customer_paper_order", read_order)
     monkeypatch.setattr(flow, "expire_customer_paper_order", expire)
@@ -787,7 +791,7 @@ def test_autonomous_paper_order_attempts_fill_at_ttl_boundary_then_expires_remai
         group_mark_prices={},
     ))
 
-    assert result["status"] == "FILLED"
+    assert result["status"] == "PARTIALLY_FILLED"
     assert result["order_status_after_ttl"] == "EXPIRED"
     assert len(fill_calls) == 1
     assert len(expiry_calls) == 1
