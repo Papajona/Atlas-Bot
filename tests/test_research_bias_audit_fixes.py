@@ -35,11 +35,30 @@ def test_gap_report_exposes_irregular_timestamp_coverage():
     idx = frame.index.to_series()
     idx.iloc[15:] = idx.iloc[15:] + pd.Timedelta(hours=4)
     frame.index = pd.DatetimeIndex(idx)
-    report = validate_ohlcv_frame(frame)
-    assert report["gap_report"]["intervals_above_1_5x_median"] >= 1
+    report = validate_ohlcv_frame(frame, timeframe="1h", asset="crypto")
+    assert report["gap_report"]["intervals_above_1_5x_expected"] >= 1
+    assert report["gap_report"]["unexpected_gap_intervals"] >= 1
+    assert report["gap_report"]["estimated_missing_bars"] >= 1
     assert report["gap_report"]["covered_interval_ratio"] < 1.0
-    assert "market-calendar closures are reported" in report["gap_report"]["method"]
 
+
+
+def test_fx_weekend_like_closure_is_reported_separately_from_missing_bars():
+    index = pd.to_datetime([
+        "2025-01-03T16:00:00Z",
+        "2025-01-03T17:00:00Z",
+        "2025-01-05T22:00:00Z",
+        "2025-01-05T23:00:00Z",
+    ])
+    close = np.array([100.0, 100.1, 100.2, 100.3])
+    frame = pd.DataFrame({
+        "open": close, "high": close + 0.2, "low": close - 0.2,
+        "close": close, "volume": np.full(4, 100.0),
+    }, index=index)
+    report = validate_ohlcv_frame(frame, timeframe="1h", asset="forex")
+    assert report["gap_report"]["market_closure_suspected_intervals"] == 1
+    assert report["gap_report"]["unexpected_gap_intervals"] == 0
+    assert report["gap_report"]["estimated_missing_bars"] == 0
 
 def test_newey_west_report_separates_period_statistic_from_annualized_sharpe():
     rng = np.random.default_rng(55)
