@@ -122,7 +122,8 @@ jobs:
           python -m alembic heads
       - name: Repository secret scan
         run: python scripts/check_no_secrets.py
-      - name: AI model/provider verification when credentials are supplied
+      - name: AI model/provider verification (manual dispatch only; uses provider quota)
+        if: github.event_name == 'workflow_dispatch'
         id: ai_provider_verification
         continue-on-error: true
         env:
@@ -218,7 +219,13 @@ jobs:
         if: always()
         env:
           PROVIDER_VERIFICATION_OUTCOME: ${{ steps.ai_provider_verification.outcome }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
+          if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "BLOCKED: live provider inference is intentionally disabled for automatic CI events to avoid repeated API quota use."
+            echo "Run this workflow manually on the exact commit when provider quota is available. Production provider verification remains unverified until that live check passes."
+            exit 1
+          fi
           if [ "$PROVIDER_VERIFICATION_OUTCOME" != "success" ]; then
             echo "BLOCKED: production gate requires successful live inference for every configured AI provider."
             exit 1
