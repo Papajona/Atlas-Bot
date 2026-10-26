@@ -649,61 +649,107 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         and len(current_trial_sharpes) >= 2
         and all(math.isfinite(x) for x in current_trial_sharpes)
     )
-    dsr = deflated_sharpe_report(
-        oos.get("oos_return_sample") or [],
-        current_trial_sharpes,
-        len(current_trial_sharpes),
-        max(1, int(round(annualization_factor))),
-    ) if current_trials_complete else {
-        "status": "INCOMPLETE_CURRENT_RUN_TRIAL_SET",
-        "observations": int(np.isfinite(np.asarray(oos.get("oos_return_sample") or [], dtype=float)).sum()),
-    }
-    dsr["trial_scope"] = "CURRENT_RUN_SAME_OOS_SAMPLE"
-    dsr["trial_count_current_run"] = len(current_trial_sharpes)
-    dsr["trial_labels_current_run"] = current_trial_labels
-    dsr["historical_archive_is_supplemental"] = True
+    # A signed archive must cover the complete current run and all known prior trials
+    # on this exact OOS sample and protocol. Labels/counts alone do not correct the
+    # selection bias introduced by experiments run before this backtest.
     archive_document = df.attrs.get("trial_performance_archive")
     archive_validation = validate_comparable_trial_archive(
-        archive_document, evidence_keys, candidate_labels=set(this_labels), expected_context=research_context,
+        archive_document, evidence_keys,
+        candidate_labels=set(this_labels) | known_prior_labels,
+        expected_context=research_context,
     )
-    dsr["historical_archive_verified"] = archive_validation.get("trial_archive_verified") is True
-    if archive_validation.get("trial_archive_verified") is True:
+    archive_verified = archive_validation.get("trial_archive_verified") is True
+    archive_sharpes_raw = archive_validation.get("trial_sharpes_annual")
+    archive_sharpes = list(archive_sharpes_raw) if isinstance(archive_sharpes_raw, (list, tuple)) else []
+    archive_sharpes_valid = (
+        archive_verified
+        and len(archive_sharpes) >= 2
+        and all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in archive_sharpes)
+    )
+    if not archive_sharpes_valid:
+        dsr = {
+            "status": "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
+            "observations": int(np.isfinite(np.asarray(oos.get("oos_return_sample") or [], dtype=float)).sum()),
+            "trial_count_current_run": len(current_trial_sharpes),
+            "trial_count_archive": len(archive_sharpes),
+            "note": (
+                "Promotion-grade DSR requires a signed, complete archive containing every "
+                "known prior and current trial with Sharpes measured on this exact OOS sample "
+                "and split protocol."
+            ),
+        }
+    elif not current_trials_complete:
+        dsr = {
+            "status": "INCOMPLETE_CURRENT_RUN_TRIAL_SET",
+            "observations": int(np.isfinite(np.asarray(oos.get("oos_return_sample") or [], dtype=float)).sum()),
+            "trial_count_current_run": len(current_trial_sharpes),
+            "trial_count_archive": len(archive_sharpes),
+            "note": "Current-run candidate outputs are incomplete; promotion is blocked despite the archive.",
+        }
+    else:
+        dsr = deflated_sharpe_report(
+            oos.get("oos_return_sample") or [],
+            archive_sharpes,
+            len(archive_sharpes),
+            max(1, int(round(annualization_factor))),
+        )
+    dsr["trial_scope"] = "VERIFIED_ARCHIVE_SAME_OOS_SAMPLE" if archive_sharpes_valid else "UNVERIFIED"
+    dsr["trial_count_current_run"] = len(current_trial_sharpes)
+    dsr["trial_count_archive"] = len(archive_sharpes)
+    dsr["trial_labels_current_run"] = current_trial_labels
+    dsr["historical_archive_verified"] = archive_sharpes_valid
+    dsr["historical_archive_required_for_promotion"] = True
+    if archive_sharpes_valid:
         dsr["trial_archive_evidence_id"] = archive_validation.get("evidence_id")
         dsr["trial_archive_sha256"] = archive_validation.get("evidence_sha256")
-    trial_registry_complete = bool(current_trials_complete and dsr.get("status") == "OK")
+
+    trial_registry_complete = bool(
+        current_trials_complete
+        and archive_sharpes_valid
+        and dsr.get("status") == "OK"
+    )
     if trial_registry_complete:
         oos["deflated_sharpe"] = dsr["deflated_sharpe_ratio"]
+    else:
+        oos.pop("deflated_sharpe", None)
+    oos["trial_registry_complete"] = trial_registry_complete
+    oos["deflated_sharpe_detail"] = dsr
+
     for component in components:
         component_returns = per_strategy_oos[component].get("oos_return_sample") or []
-        component_dsr = deflated_sharpe_report(
-            component_returns,
-            current_trial_sharpes,
-            len(current_trial_sharpes),
-            max(1, int(round(annualization_factor))),
-        ) if current_trials_complete else {
-            "status": "INCOMPLETE_CURRENT_RUN_TRIAL_SET",
-            "observations": int(per_strategy_oos[component].get("oos_bars", 0)),
-        }
-        component_dsr["trial_scope"] = "CURRENT_RUN_SAME_OOS_SAMPLE"
+        if not archive_sharpes_valid:
+            component_dsr = {
+                "status": "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
+                "observations": int(per_strategy_oos[component].get("oos_bars", 0)),
+            }
+        elif not current_trials_complete:
+            component_dsr = {
+                "status": "INCOMPLETE_CURRENT_RUN_TRIAL_SET",
+                "observations": int(per_strategy_oos[component].get("oos_bars", 0)),
+            }
+        else:
+            component_dsr = deflated_sharpe_report(
+                component_returns,
+                archive_sharpes,
+                len(archive_sharpes),
+                max(1, int(round(annualization_factor))),
+            )
+        component_dsr["trial_scope"] = dsr["trial_scope"]
         component_dsr["trial_count_current_run"] = len(current_trial_sharpes)
-        component_dsr["historical_archive_is_supplemental"] = True
-        if archive_validation.get("trial_archive_verified") is True:
+        component_dsr["trial_count_archive"] = len(archive_sharpes)
+        component_dsr["historical_archive_required_for_promotion"] = True
+        if archive_sharpes_valid:
             component_dsr["trial_archive_evidence_id"] = archive_validation.get("evidence_id")
         per_strategy_oos[component]["deflated_sharpe_detail"] = component_dsr
         per_strategy_oos[component]["trial_registry_complete"] = bool(
             trial_registry_complete and component_dsr.get("status") == "OK"
         )
-        if component_dsr.get("status") == "OK":
+        if per_strategy_oos[component]["trial_registry_complete"]:
             per_strategy_oos[component]["deflated_sharpe"] = component_dsr["deflated_sharpe_ratio"]
-    oos["trial_registry_complete"] = trial_registry_complete
-    oos["deflated_sharpe_detail"] = dsr
-    for component in components:
-        per_strategy_oos[component]["trial_registry_complete"] = bool(
-            trial_registry_complete
-            and per_strategy_oos[component].get("deflated_sharpe_detail", {}).get("status") == "OK"
-        )
+        else:
+            per_strategy_oos[component].pop("deflated_sharpe", None)
 
-    in_sample_ranked = _rank_for_research(results.copy())
+        in_sample_ranked = _rank_for_research(results.copy())
     # Headline order is based on held-out metrics; invalid OOS results always rank last.
     oos_ranked = _rank_by_oos(results.copy(), per_strategy_oos)
     return {
@@ -727,14 +773,14 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         ),
                         "multiple_testing_sharpe_proxy": adjusted,
                         "deflated_sharpe": dsr,
-                        "trial_labels": sorted(this_labels),
+                        "trial_labels": sorted(known_prior_labels | this_labels),
                         "trial_registry_complete": trial_registry_complete,
                         "financing_cost_model_complete": carry_evidence_complete,
                         "carry_rate_configured": carry is not None,
                         "carry_evidence_source": carry_evidence_source or None,
                         "carry_evidence_id": carry_evidence_id or None,
                         "intrabar_stop_target_model_complete": False,
-                        "execution_cost_model_complete": calibration_ok,
+                        "execution_cost_model_complete": False,
                         "execution_cost_calibration_status": calibration_status,
                         "execution_cost_calibration_evidence_id": calibration_evidence_id,
                         "execution_cost_calibration": cost_validation,
@@ -743,7 +789,11 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "comparable_trial_archive": archive_validation,
                         "oos_sample_sha256": sample_sha256 or None,
                         "carry_bps_per_bar": carry,
-                        "trial_registry_status": "COMPLETE_CURRENT_RUN_SAME_OOS_SAMPLE" if trial_registry_complete else "INCOMPLETE_CURRENT_RUN_TRIAL_SET",
+                        "trial_registry_status": (
+                            "COMPLETE_VERIFIED_COMPARABLE_TRIAL_ARCHIVE" if trial_registry_complete
+                            else "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY" if not archive_sharpes_valid
+                            else "INCOMPLETE_CURRENT_RUN_TRIAL_SET"
+                        ),
                         "ai_trial_comparability_note": "AI fold windows use feature warm-up and label-horizon slicing; AI metrics are not mixed into the fixed-signal DSR unless the exact OOS sample is aligned.",
                         "cumulative_trials": n_trials,
                         "cost_analysis": ens_cost,
@@ -795,18 +845,21 @@ def paper_candidates(
     elif asset_class not in {"forex", "commodity"} or universe_bias != "NOT_APPLICABLE":
         return []
     dsr = validation.get("deflated_sharpe") if isinstance(validation.get("deflated_sharpe"), dict) else {}
-    # Promotion uses the DSR calculated from the complete current-run candidate
-    # set on this exact fixed-signal OOS sample. A signed historical archive remains
-    # supplemental evidence, not an impossible prerequisite for today's OOS sample.
-    # This does not mean historical trials are irrelevant: the report records whether
-    # that corroborating archive was verified, and candidate selection remains blocked
-    # when any current-run candidate lacks a comparable OOS Sharpe.
+    # Promotion requires the complete signed archive bound to this exact OOS sample,
+    # including every current candidate and all previously recorded trial labels.
+    archive = validation.get("comparable_trial_archive") if isinstance(validation.get("comparable_trial_archive"), dict) else {}
+    archive_verified = (
+        archive.get("trial_archive_verified") is True
+        and bool(str(archive.get("evidence_id") or "").strip())
+        and bool(str(archive.get("evidence_sha256") or "").strip())
+    )
     if (
         validation.get("walk_forward_purge_complete") is not True
         or validation.get("trial_registry_complete") is not True
+        or not archive_verified
         or dsr.get("status") != "OK"
-        or dsr.get("trial_scope") != "CURRENT_RUN_SAME_OOS_SAMPLE"
-        or int(dsr.get("trial_count_current_run", 0)) < 2
+        or dsr.get("trial_scope") != "VERIFIED_ARCHIVE_SAME_OOS_SAMPLE"
+        or int(dsr.get("trial_count_archive", 0)) < 2
     ):
         return []
     candidates = []

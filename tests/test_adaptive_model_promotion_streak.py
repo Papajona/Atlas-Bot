@@ -36,7 +36,7 @@ def _passing_wfo():
         "slippage_model_complete": True,
         "execution_cost_calibration_status": "VERIFIED",
         "execution_cost_calibration_evidence_id": "fixture:venue-cost-calibration", "status": "OK", "oos_total_return": 0.10,
-            "deflated_sharpe": 0.97, "trial_registry_complete": True}
+            "deflated_sharpe": 0.97, "trial_registry_complete": True,\n            "inference": {"status": "OK", "newey_west_t_statistic": 2.0, "effective_observations": 200},\n            "benchmark_comparison": {"status": "OK", "gate_passed": True},\n            "trade_boundary_overlap_bars": 0}
 
 
 def _failing_wfo():

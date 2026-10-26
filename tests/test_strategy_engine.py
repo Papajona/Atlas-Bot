@@ -267,6 +267,9 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
         "execution_cost_calibration_status": "VERIFIED",
         "execution_cost_calibration_evidence_id": "fixture:venue-cost-calibration", "status": "OK", "oos_total_return": 0.20, "deflated_sharpe": 0.97,
            "trial_registry_complete": True,
+           "inference": {"status": "OK", "newey_west_t_statistic": 2.0, "effective_observations": 200},
+           "benchmark_comparison": {"status": "OK", "gate_passed": True},
+           "trade_boundary_overlap_bars": 0,
            "financing_cost_model_complete": True, "intrabar_stop_target_model_complete": True}
 
     monkeypatch.setattr(adaptive_bot.settings, "research_carry_bps_per_bar", 0.1)
@@ -370,8 +373,13 @@ def test_paper_candidates_use_oos_metrics_after_signed_archive_verification(monk
             "trades": 0, "total_return": -9.0,
         }],
         "validation": {
+            "walk_forward_purge_complete": True,
             "trial_registry_complete": True,
-            "deflated_sharpe": {"status": "OK", "deflated_sharpe_ratio": 0.99},
+            "deflated_sharpe": {
+                "status": "OK", "deflated_sharpe_ratio": 0.99,
+                "trial_scope": "VERIFIED_ARCHIVE_SAME_OOS_SAMPLE",
+                "trial_count_current_run": 5, "trial_count_archive": 5,
+            },
             "comparable_trial_archive": {
                 "verified": True, "trial_archive_verified": True,
                 "evidence_id": "test-signed-archive",
@@ -387,6 +395,9 @@ def test_paper_candidates_use_oos_metrics_after_signed_archive_verification(monk
                 "execution_cost_calibration_status": "VERIFIED",
                 "execution_cost_calibration_evidence_id": "test-cost-evidence",
                 "trial_registry_complete": True,
+                "trade_boundary_overlap_bars": 0,
+                "inference": {"status": "OK", "newey_west_t_statistic": 2.0, "effective_observations": 150},
+                "benchmark_comparison": {"status": "OK", "gate_passed": True},
                 "folds": [
                     {"total_return": 0.05}, {"total_return": 0.04},
                     {"total_return": -0.01}, {"total_return": 0.03},

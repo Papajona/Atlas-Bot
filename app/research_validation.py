@@ -643,7 +643,7 @@ def oos_promotion_gate(
         else None
     )
 
-    sharpe_ok = True if min_sharpe is None else (sharpe is not None and sharpe >= float(min_sharpe))
+    sharpe_ok = sharpe is not None and (min_sharpe is None or sharpe >= float(min_sharpe))
     dd_ok = True if max_drawdown is None else (max_dd is not None and max_dd >= float(max_drawdown))
     trades_ok = True if min_trades is None else (trades is not None and trades >= int(min_trades))
     dsr_value = finite_number(oos.get("deflated_sharpe"))
