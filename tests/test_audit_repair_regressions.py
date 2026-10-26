@@ -154,11 +154,17 @@ def test_production_gate_has_no_provider_quota_waiver_and_uses_verified_model():
     assert "GEMINI_STRATEGY_MODEL: gemini-3.5-flash" in verify
     assert "GEMINI_MODEL: gemini-3.5-flash" in deploy
     assert "GEMINI_STRATEGY_MODEL: gemini-3.5-flash" in deploy
+    assert "vars.GEMINI_MODEL" not in verify + deploy
+    assert "vars.GEMINI_STRATEGY_MODEL" not in verify + deploy
+    api_deploy = (root / "deploy" / "cloud-run-deploy.sh").read_text()
     worker_deploy = (root / "deploy" / "cloud-run-worker-deploy.sh").read_text()
+    for deployment in (api_deploy, worker_deploy):
+        assert "GEMINI_MODEL=gemini-3.5-flash" in deployment
+        assert "GEMINI_STRATEGY_MODEL=gemini-3.5-flash" in deployment
+        assert "${GEMINI_MODEL:-" not in deployment
+        assert "${GEMINI_STRATEGY_MODEL:-" not in deployment
     env_example = (root / "deploy" / "cloud-run.env.example").read_text()
     runbook = (root / "deploy" / "DEPLOY_WORKFLOW.md").read_text()
-    assert "GEMINI_MODEL=gemini-3.5-flash" in worker_deploy
-    assert "GEMINI_STRATEGY_MODEL=gemini-3.5-flash" in worker_deploy
     assert "GEMINI_MODEL=gemini-3.5-flash" in env_example
     assert "GEMINI_STRATEGY_MODEL=gemini-3.5-flash" in env_example
     assert "| `GEMINI_MODEL`, `GEMINI_STRATEGY_MODEL` | `gemini-3.5-flash` |" in runbook
