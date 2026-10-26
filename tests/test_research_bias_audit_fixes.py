@@ -6,6 +6,7 @@ that a strategy has predictive skill or substitute for venue-calibration data.
 import numpy as np
 import pandas as pd
 
+from app.execution_aware_research import simulate_execution_aware_strategy
 from app.research_validation import (
     validate_ohlcv_frame,
     newey_west_mean_inference,
