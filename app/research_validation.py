@@ -352,11 +352,17 @@ def oos_benchmark_comparison(
                 cooldown_bars=cooldown_bars,
                 loss_lookback_bars=loss_lookback_bars,
             )
+            audit = simulated["audit"]
+            audited_exits = sum(
+                int(audit.get(key, 0) or 0)
+                for key in ("stop_loss_exits", "take_profit_exits", "terminal_close_exits")
+            )
             return (
                 simulated["net_returns"].to_numpy(dtype=float),
                 simulated["turnover"].to_numpy(dtype=float),
                 simulated["positions"].to_numpy(dtype=float),
                 simulated["intrabar_exit"].to_numpy(dtype=bool),
+                audited_exits,
             )
         previous = np.r_[0.0, signal[:-1]]
         turnover = np.abs(signal - previous)
@@ -370,7 +376,7 @@ def oos_benchmark_comparison(
         exits = (signal != 0.0) & (
             (following == 0.0) | (np.sign(following) != np.sign(signal))
         )
-        return net, turnover, signal, exits
+        return net, turnover, signal, exits, int(np.count_nonzero(exits))
 
     candidate_stream_values = np.concatenate([
         1.0 + np.clip(values, -1.0, None) for values in candidate_blocks
@@ -381,12 +387,12 @@ def oos_benchmark_comparison(
     candidate_exit_count = 0
     for frame, market, signal, atr in zip(frame_blocks, market_blocks, signals, atr_blocks):
         try:
-            net, turnover, executed, exits = _simulate_signal(frame, market, signal, atr)
+            net, turnover, executed, exits, audited_exits = _simulate_signal(frame, market, signal, atr)
         except (TypeError, ValueError, OverflowError, FloatingPointError):
             return {"status": "INVALID_DATA", "reason": "candidate_fold_execution_invalid"}
         candidate_fold_values.extend(np.asarray(net, dtype=float).tolist())
         candidate_turnover_total += float(np.sum(turnover))
-        candidate_exit_count += int(np.count_nonzero(exits))
+        candidate_exit_count += audited_exits
     candidate_return = float(np.prod(1.0 + np.asarray(candidate_fold_values, dtype=float)) - 1.0)
 
     valid_shift_offsets: list[list[int]] = []
@@ -418,11 +424,13 @@ def oos_benchmark_comparison(
     random_trade_counts: list[int] = []
     random_turnover_totals: list[float] = []
     random_exit_counts: list[int] = []
+    random_exit_bar_counts: list[int] = []
     for _ in range(max(1, int(random_trials))):
         trial_values: list[float] = []
         trade_count = 0
         turnover_total = 0.0
         exit_count = 0
+        exit_bar_count = 0
         for frame, market, original_signal, atr, valid_shifts in zip(
             frame_blocks, market_blocks, signals, atr_blocks, valid_shift_offsets
         ):
@@ -430,7 +438,7 @@ def oos_benchmark_comparison(
             shift = int(rng.choice(valid_shifts))
             shifted = _shift_signal(original_signal, shift)
             try:
-                net, turnover, executed, exits = _simulate_signal(frame, market, shifted, atr)
+                net, turnover, executed, exits, audited_exits = _simulate_signal(frame, market, shifted, atr)
             except (TypeError, ValueError, OverflowError, FloatingPointError):
                 return {"status": "INVALID_DATA", "reason": "random_control_fold_execution_invalid"}
             previous_executed = np.r_[0.0, executed[:-1]]
@@ -439,12 +447,14 @@ def oos_benchmark_comparison(
                 & ((previous_executed == 0.0) | (np.sign(executed) != np.sign(previous_executed)))
             ))
             turnover_total += float(np.sum(turnover))
-            exit_count += int(np.count_nonzero(exits))
+            exit_count += audited_exits
+            exit_bar_count += int(np.count_nonzero(exits))
             trial_values.extend(np.asarray(net, dtype=float).tolist())
         random_returns.append(float(np.prod(1.0 + np.asarray(trial_values, dtype=float)) - 1.0))
         random_trade_counts.append(trade_count)
         random_turnover_totals.append(turnover_total)
         random_exit_counts.append(exit_count)
+        random_exit_bar_counts.append(exit_bar_count)
 
     random_median = float(np.median(random_returns))
     random_p95 = float(np.quantile(random_returns, 0.95))
@@ -464,6 +474,7 @@ def oos_benchmark_comparison(
         "random_control_trade_count_median": float(np.median(random_trade_counts)),
         "random_control_turnover_median": float(np.median(random_turnover_totals)),
         "random_control_exit_count_median": float(np.median(random_exit_counts)),
+        "random_control_exit_bar_count_median": float(np.median(random_exit_bar_counts)),
         "buy_and_hold_turnover": buy_hold_turnover,
         "benchmark_market_return_source": "OHLC_OPEN_TO_OPEN_WITH_TERMINAL_CLOSE",
         "random_control_execution_model": "INDEPENDENT_NONCIRCULAR_ENTRY_SHIFT_WITH_FLAT_START_AND_TERMINAL_LIQUIDATION",
