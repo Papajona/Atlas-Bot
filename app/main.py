@@ -990,14 +990,16 @@ async def _adaptive_bot_controller_loop():
                 bots = (await db.execute(select(AdaptiveTradingBot).where(AdaptiveTradingBot.status == "RUNNING", or_(AdaptiveTradingBot.next_run_at.is_(None), AdaptiveTradingBot.next_run_at <= now)).order_by(AdaptiveTradingBot.id).limit(25))).scalars().all()
                 work = [(b.id, b.customer_id, b.trading_account_id, b.asset, b.symbol, b.exchange, b.timeframe, b.days, b.risk_fraction, b.interval_seconds, b.mode) for b in bots]
             _mark_worker_loop_success("adaptive-controller")
-            for bot_id, customer_id, account_id, asset, symbol, exchange, timeframe, days, risk_fraction, interval_seconds, mode in work:
+            for bot_id, customer_id, account_id, asset, symbol, exchange, timeframe, days, _risk_fraction, interval_seconds, mode in work:
                 lock_key = f"adaptive-bot:{bot_id}"
                 if not await acquire_lock(lock_key, ttl_seconds=max(120, int(interval_seconds) + 120)):
                     continue
                 decision_id = None
                 cycle_started_at = datetime.now(timezone.utc)
                 try:
-                    req = CustomerBotStartRequest(asset=asset, symbol=symbol, exchange=exchange, timeframe=timeframe, days=days, risk_fraction=risk_fraction, autonomous=False, interval_seconds=interval_seconds)
+                    # The persisted risk fraction must be validated by the cycle, not by this constrained request.
+                    # This ensures corrupt stored values become risk_fraction_invalid/NO_TRADE, not controller ERROR.
+                    req = CustomerBotStartRequest(asset=asset, symbol=symbol, exchange=exchange, timeframe=timeframe, days=days, autonomous=False, interval_seconds=interval_seconds)
                     # The Redis scheduler lease can expire while a slow market/model cycle runs.
                     # Refreshing immediately before the execution path prevents an expired worker
                     # from submitting a trade after another worker acquired the bot lock.
@@ -1022,12 +1024,17 @@ async def _adaptive_bot_controller_loop():
                         row = await db.get(AdaptiveTradingBot, bot_id)
                         if row:
                             row.last_run_at = now
-                            row.next_run_at = now + __import__("datetime").timedelta(seconds=max(60, interval_seconds))
                             row.last_decision = str(result.get("decision", "ERROR"))
                             row.last_stage = str(result.get("stage", "execution"))
                             row.last_model_version = str((result.get("ml_signal") or {}).get("model_version", ""))
-                            row.last_error = ""
-                            row.consecutive_errors = 0
+                            if row.status == "STOPPED":
+                                # Validation has intentionally stopped this bot and committed its reason.
+                                # Do not re-schedule it or erase that reason after the cycle returns.
+                                row.next_run_at = None
+                            else:
+                                row.next_run_at = now + __import__("datetime").timedelta(seconds=max(60, interval_seconds))
+                                row.last_error = ""
+                                row.consecutive_errors = 0
                             await db.commit()
                 except asyncio.CancelledError:
                     raise
