@@ -106,14 +106,17 @@ def test_adaptive_controller_preserves_stopped_validation_state(monkeypatch):
     async def no_op(*args, **kwargs):
         return None
 
+    async def return_true(*args, **kwargs):
+        return True
+
     async def stop_after_one_cycle(seconds):
         raise asyncio.CancelledError()
 
     monkeypatch.setattr(main_module, "SessionLocal", lambda: FakeSession())
     monkeypatch.setattr(main_module, "_run_persisted_adaptive_bot_cycle", fake_cycle)
     monkeypatch.setattr(main_module, "_record_adaptive_decision_memory", no_op)
-    monkeypatch.setattr(main_module, "acquire_lock", no_op)
-    monkeypatch.setattr(main_module, "refresh_lock", lambda *args, **kwargs: _async_true())
+    monkeypatch.setattr(main_module, "acquire_lock", return_true)
+    monkeypatch.setattr(main_module, "refresh_lock", return_true)
     monkeypatch.setattr(main_module, "release_lock", no_op)
     monkeypatch.setattr(main_module, "_mark_worker_loop_success", lambda *args: None)
     monkeypatch.setattr(main_module.asyncio, "sleep", stop_after_one_cycle)
@@ -121,9 +124,6 @@ def test_adaptive_controller_preserves_stopped_validation_state(monkeypatch):
     async def run_controller():
         with pytest.raises(asyncio.CancelledError):
             await main_module._adaptive_bot_controller_loop()
-
-    async def _async_true():
-        return True
 
     import anyio
     anyio.run(run_controller)
