@@ -66,7 +66,8 @@ def validate_ohlcv_frame(
         "market_closure_suspected_intervals": 0,
         "max_interval_multiple": None,
         "covered_interval_ratio": None,
-        "method": "expected-timeframe gap estimate; >36-hour non-crypto closures are reported separately and are not rejected",
+        "market_closure_verified_intervals": 0,
+        "method": "expected-timeframe gap estimate; long FX/commodity intervals are suspected closures but remain missing-bar estimates unless market-calendar evidence verifies a closure",
     }
     if isinstance(df.index, pd.DatetimeIndex) and len(df.index) >= 2:
         intervals = df.index.to_series().diff().dt.total_seconds().to_numpy(dtype=float)[1:]
@@ -87,7 +88,10 @@ def validate_ohlcv_frame(
                     if raw_asset in {"forex", "fx", "commodity", "commodities"}
                     else np.zeros(len(intervals), dtype=bool)
                 )
-                unexpected = above_expected & ~closure_suspected
+                # Duration alone cannot prove a market was closed. Without a
+                # timestamp-aware session/calendar source, retain suspected closures
+                # in missing-bar estimates instead of silently excluding long outages.
+                unexpected = above_expected.copy()
                 estimated_missing = int(np.sum(
                     np.maximum(0, np.floor(multiples_expected[unexpected]).astype(int) - 1)
                 ))
