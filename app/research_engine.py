@@ -494,7 +494,12 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # from labels/counts alone; the trusted research archive and its comparable trial
     # outcomes must be restored and verified first.
     known_prior_labels = set(prior_trial_labels or ())
-    n_trials = len(known_prior_labels | this_labels)
+    # AI evaluation is an experiment and belongs in persistent accounting, but its
+    # different warm-up/label sample must never enter this fixed-signal DSR set.
+    known_prior_fixed_signal_labels = {label for label in known_prior_labels if not label.startswith("ai@")}
+    ai_trial_labels = {f"ai@{fp}"} if include_ai else set()
+    persistent_trial_labels = this_labels | ai_trial_labels
+    n_trials = len(known_prior_labels | persistent_trial_labels)
     # Candidate statistics and signed evidence use an explicit protocol version.
     # Bump it when split geometry changes so old attestations cannot be silently reused.
     ens_cost = cost_breakeven_report(
@@ -527,15 +532,16 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
 
     # External evidence is verified and bound to this exact dataset and split protocol.
     from .research_evidence import (
-        canonical_sha256, oos_sample_fingerprint, validate_comparable_trial_archive,
-        validate_crypto_universe_manifest, validate_execution_cost_calibration,
+        RESEARCH_PROTOCOL_VERSION, canonical_sha256, oos_sample_fingerprint,
+        validate_comparable_trial_archive, validate_crypto_universe_manifest,
+        validate_execution_cost_calibration,
     )
     evidence_keys = getattr(settings, "research_evidence_public_keys_json", "")
     research_symbol = str(provenance.get("symbol") or df.attrs.get("symbol") or "").strip()
     research_venue = str(provenance.get("exchange") or df.attrs.get("exchange") or "").strip()
     research_market_type = str(provenance.get("market_type") or df.attrs.get("market_type") or "").strip()
     research_timeframe = str(provenance.get("timeframe") or df.attrs.get("timeframe") or "").strip()
-    protocol_version = "atlas-purged-walk-forward-v2"
+    protocol_version = RESEARCH_PROTOCOL_VERSION
     oos_windows = []
     for split in validation_splits:
         if (0 <= int(split.test_start) < len(df)
@@ -655,7 +661,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     archive_document = df.attrs.get("trial_performance_archive")
     archive_validation = validate_comparable_trial_archive(
         archive_document, evidence_keys,
-        candidate_labels=set(this_labels) | known_prior_labels,
+        candidate_labels=set(this_labels) | known_prior_fixed_signal_labels,
         expected_context=research_context,
     )
     archive_verified = archive_validation.get("trial_archive_verified") is True
@@ -773,7 +779,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         ),
                         "multiple_testing_sharpe_proxy": adjusted,
                         "deflated_sharpe": dsr,
-                        "trial_labels": sorted(known_prior_labels | this_labels),
+                        "protocol_version": protocol_version,
+                        "trial_labels": sorted(known_prior_labels | persistent_trial_labels),
                         "trial_registry_complete": trial_registry_complete,
                         "financing_cost_model_complete": carry_evidence_complete,
                         "carry_rate_configured": carry is not None,
