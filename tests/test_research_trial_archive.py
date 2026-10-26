@@ -63,7 +63,7 @@ def test_ai_trial_config_changes_archive_digest_and_idempotency_key():
             "ai_threshold": 0.10,
         },
     }
-    first = _row_payload(report, context, "ai@threshold-005", base_metrics, "ai", "evaluation-a")
-    second = _row_payload(report, context, "ai@threshold-010", changed_metrics, "ai", "evaluation-b")
+    first = _row_payload(report, context, "ai@config", base_metrics, "ai", "evaluation-a")
+    second = _row_payload(report, context, "ai@config", changed_metrics, "ai", "evaluation-b")
     assert first["config_sha256"] != second["config_sha256"]
     assert first["trial_key"] != second["trial_key"]

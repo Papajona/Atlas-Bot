@@ -515,7 +515,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     ai_profile = AI_PROFILES.get(str(asset).strip().lower())
     configured_ai_carry = settings.research_carry_bps_per_bar
     ai_carry_bps = float(
-        ai_profile.carry_bps_per_bar
+        getattr(ai_profile, "carry_bps_per_bar", 0.0)
         if configured_ai_carry is None
         else configured_ai_carry
     )
