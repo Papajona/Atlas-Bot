@@ -301,9 +301,8 @@ def oos_benchmark_comparison(
             or (closes < lows).any() or (closes > highs).any()
         ):
             return {"status": "INVALID_DATA", "reason": "nonfinite_or_misaligned_benchmark_inputs"}
-        active_entries = entry != 0.0
-        if bracket_configured and bool((active_entries & (~np.isfinite(atr) | (atr <= 0.0))).any()):
-            return {"status": "INVALID_DATA", "reason": "invalid_entry_atr_for_shifted_control"}
+        if bracket_configured and (not np.isfinite(atr).all() or (atr <= 0.0).any()):
+            return {"status": "INVALID_DATA", "reason": "invalid_market_atr_for_shifted_control"}
         # Each row earns open[i] -> open[i+1]. The terminal row uses its observed
         # close; never infer market movement from the candidate's stop/exit stream.
         market = np.empty(len(frame), dtype=float)
@@ -347,15 +346,13 @@ def oos_benchmark_comparison(
             # wrap from the end of a fold into its beginning.
             shift = int(rng.integers(1, len(original_signal))) if len(original_signal) > 1 else 0
             shifted = np.zeros_like(original_signal)
-            shifted_atr = np.full_like(atr, np.nan, dtype=float)
             if shift < len(shifted):
                 shifted[shift:] = original_signal[:len(shifted) - shift]
-                shifted_atr[shift:] = atr[:len(shifted_atr) - shift]
             if bracket_configured:
                 simulated = simulate_execution_aware_strategy(
                     frame,
                     pd.Series(shifted, index=frame.index, dtype=float),
-                    pd.Series(shifted_atr, index=frame.index, dtype=float),
+                    pd.Series(atr, index=frame.index, dtype=float),
                     stop_atr=float(stop_atr),
                     take_profit_atr=float(take_profit_atr),
                     transaction_cost_bps=float(transaction_cost_bps),
