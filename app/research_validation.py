@@ -879,3 +879,4 @@ def edge_decay_check(realized_returns, *, expected_mean: float, min_obs: int = 6
     status = "HALT_NEW_ENTRIES" if z <= -abs(z_halt) else ("WARN" if z <= -abs(z_warn) else "OK")
     return {"status": status, "z": float(z), "realized_mean": float(x.mean()), "expected_mean": float(expected_mean),
             "observations": int(len(x)), "standard_error": float(se)}
+
