@@ -1064,12 +1064,20 @@ def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monke
                 },
             }
 
-        sol_after_rise = await recover_customer_paper_spot_flow(
+        # Exercise the signal-executor entry point while the SOL BUY is already
+        # pending. This must preserve the loader through internal pending-order
+        # recovery so the atomic writer receives ETH's fresh $200 mark.
+        sol_after_rise = await execute_customer_paper_spot_signal(
             customer_id=rising_customer_id, req=rise_sol_req_3,
             df=rise_sol_frame_3, market_context=rise_sol_context_3,
+            side="BUY", quantity="0.2", stop_loss_price="95",
+            take_profit_price="110",
+            strategy="rising-market-group-cap-regression",
             group_mark_price_loader=rising_group_marks,
         )
         assert sol_after_rise is not None
+        assert sol_after_rise["status"] == "RECOVERY_PROCESSED"
+        assert sol_after_rise["decision"] == "TRADE"
         rise_fill = sol_after_rise["execution"]["fill"]
         assert rise_fill["status"] == "APPENDED"
         rise_quantity = Decimal(rise_fill["filled_quantity"])
