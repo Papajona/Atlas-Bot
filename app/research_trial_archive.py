@@ -16,9 +16,7 @@ from typing import Any, Mapping
 from sqlalchemy.exc import IntegrityError
 
 from .db import ResearchTrialArchive, SessionLocal
-from .research_evidence import canonical_sha256
-
-_PROTOCOL_VERSION = "atlas-purged-walk-forward-v1"
+from .research_evidence import RESEARCH_PROTOCOL_VERSION, canonical_sha256
 
 
 def _sha(value: Any) -> bool:
@@ -50,6 +48,8 @@ def _int_metric(value: Any) -> int | None:
 def _report_context(report: Mapping[str, Any], request: Any) -> dict[str, str]:
     provenance = report.get("data_provenance")
     provenance = provenance if isinstance(provenance, Mapping) else {}
+    validation = report.get("validation")
+    validation = validation if isinstance(validation, Mapping) else {}
     return {
         "asset_class": str(report.get("asset_class") or getattr(request, "asset", "") or "").strip().lower(),
         "venue": str(getattr(request, "exchange", "") or provenance.get("exchange") or report.get("exchange") or "").strip().lower(),
@@ -57,6 +57,7 @@ def _report_context(report: Mapping[str, Any], request: Any) -> dict[str, str]:
         "symbol": str(getattr(request, "symbol", "") or provenance.get("symbol") or report.get("symbol") or "").strip(),
         "timeframe": str(getattr(request, "timeframe", "") or provenance.get("timeframe") or report.get("timeframe") or "").strip(),
         "dataset_sha256": str(provenance.get("sha256") or "").strip().lower(),
+        "protocol_version": str(validation.get("protocol_version") or report.get("protocol_version") or "").strip(),
     }
 
 
@@ -113,6 +114,7 @@ def _row_payload(report: Mapping[str, Any], context: Mapping[str, str],
     code_sha = str(os.getenv("ATLAS_CODE_SHA256") or report.get("code_sha256") or "").strip().lower()
     dataset_sha = context["dataset_sha256"]
     sample_sha = str(validation.get("oos_sample_sha256") or "").strip().lower()
+    protocol_version = str(context.get("protocol_version") or validation.get("protocol_version") or report.get("protocol_version") or "").strip()
     universe = validation.get("crypto_universe_validation")
     universe = universe if isinstance(universe, Mapping) else {}
     cost = validation.get("execution_cost_calibration")
@@ -131,6 +133,7 @@ def _row_payload(report: Mapping[str, Any], context: Mapping[str, str],
         bool(context["asset_class"]) and bool(context["venue"]) and bool(context["market_type"])
         and bool(context["symbol"]) and bool(context["timeframe"]) and _sha(config_sha)
         and _sha(code_sha) and _sha(dataset_sha) and _sha(sample_sha)
+        and bool(protocol_version)
     )
     required_metrics = sharpe is not None and total_return is not None and drawdown is not None and trades is not None
     status = "RECORDED_UNVERIFIED"
@@ -145,6 +148,7 @@ def _row_payload(report: Mapping[str, Any], context: Mapping[str, str],
     trial_identity = {
         "label": label, "config_sha256": config_sha, "code_sha256": code_sha,
         "dataset_sha256": dataset_sha, "oos_sample_sha256": sample_sha,
+        "protocol_version": protocol_version,
     }
     # A missing provenance fingerprint cannot identify an immutable experiment.
     # Retain every incomplete attempt under its own evaluation ID rather than
@@ -158,7 +162,7 @@ def _row_payload(report: Mapping[str, Any], context: Mapping[str, str],
         "market_type": context["market_type"], "symbol": context["symbol"],
         "timeframe": context["timeframe"], "config_sha256": config_sha,
         "code_sha256": code_sha, "dataset_sha256": dataset_sha,
-        "oos_sample_sha256": sample_sha, "protocol_version": _PROTOCOL_VERSION,
+        "oos_sample_sha256": sample_sha, "protocol_version": protocol_version,
         "universe_evidence_sha256": str(universe.get("evidence_sha256") or ""),
         "cost_evidence_id": str(cost.get("evidence_id") or ""),
         "annualized_sharpe": sharpe, "oos_total_return": total_return,
