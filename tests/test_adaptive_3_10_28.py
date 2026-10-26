@@ -7,8 +7,10 @@ def test_autonomous_cycle_uses_persisted_risk_fraction():
     start = src.index('async def _run_persisted_adaptive_bot_cycle')
     end = src.index('async def _daily_research_loop')
     chunk = src[start:end]
-    assert 'risk_fraction = float(bot.risk_fraction or settings.risk_per_trade)' in chunk
-    assert 'risk_cash = equity * float(risk_fraction or settings.risk_per_trade)' in chunk
+    assert 'settings.risk_per_trade if bot.risk_fraction is None else bot.risk_fraction' in chunk
+    assert 'not math.isfinite(risk_fraction) or not 0.0 < risk_fraction <= 0.02' in chunk
+    assert 'risk_cash = equity * risk_fraction' in chunk
+    assert 'risk_fraction_invalid' in chunk
 
 def test_start_path_schedules_next_cycle_after_initial_run():
     src = (ROOT / 'app' / 'main.py').read_text()
