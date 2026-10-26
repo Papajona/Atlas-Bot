@@ -603,18 +603,30 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # warm-up/label windows and is deliberately not mixed into this different sample.
     current_trial_sharpes = []
     current_trial_labels = []
+    def _sample_annualized_sharpe(sample):
+        values = np.asarray(sample, dtype=float)
+        values = values[np.isfinite(values)]
+        if len(values) < 2:
+            return None
+        sd = float(np.std(values, ddof=1))
+        if not math.isfinite(sd) or sd <= 0:
+            return None
+        return float(np.mean(values) / sd * math.sqrt(max(1, int(round(annualization_factor)))))
+
     for component in components:
         row = per_strategy_oos.get(component, {})
-        value = row.get("sharpe")
-        if row.get("status") == "OK" and value is not None and math.isfinite(float(value)):
-            current_trial_sharpes.append(float(value))
+        # Match the exact serialized sample passed into DSR (the latest <=5,000
+        # ordered OOS observations), not the full-series Sharpe if it uses more bars.
+        value = _sample_annualized_sharpe(row.get("oos_return_sample") or [])
+        if row.get("status") == "OK" and value is not None and math.isfinite(value):
+            current_trial_sharpes.append(value)
             current_trial_labels.append(f"component:{component}")
     for variant in variants:
         if math.isclose(float(variant.get("multiplier", 1.0)), 1.0, rel_tol=0.0, abs_tol=1e-12):
             continue
-        value = variant.get("oos_sharpe")
-        if variant.get("oos_status") == "OK" and value is not None and math.isfinite(float(value)):
-            current_trial_sharpes.append(float(value))
+        value = _sample_annualized_sharpe(variant.get("oos_return_sample") or [])
+        if variant.get("oos_status") == "OK" and value is not None and math.isfinite(value):
+            current_trial_sharpes.append(value)
             current_trial_labels.append(f"variant:{variant['multiplier']}")
     current_trials_complete = (
         len(current_trial_sharpes) == len(this_labels)
