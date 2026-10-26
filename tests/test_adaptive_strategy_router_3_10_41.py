@@ -111,9 +111,9 @@ def test_policy_walk_forward_includes_online_feedback_and_switch_controls():
     if result["status"] == "OK":
         assert result["router"] == "FULL_ADAPTIVE_POLICY_WALK_FORWARD"
         assert set(result["includes"]) >= {"regime", "online_outcome_feedback", "switch_hysteresis", "blending", "abstention"}
-        # Overall timestamps must survive concatenation so hourly data is not
-        # silently annualized with the 252-period fallback.
-        assert result["annualization_factor"] > 8000
+        # The policy produces one return per eight-hour decision stride here.
+        # Its timestamps should imply ~1,096 periods/year, not the 252 fallback.
+        assert 900 < result["annualization_factor"] < 1300
 
 def test_full_policy_walk_forward_executes_after_signal_bar(monkeypatch):
     # Close moves down while executable opens rise. The old close[i] -> close[next_i]
