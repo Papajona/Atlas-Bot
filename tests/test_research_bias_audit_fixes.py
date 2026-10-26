@@ -122,7 +122,7 @@ def test_benchmark_comparison_uses_independent_ohlc_and_reports_single_symbol_li
         _ohlcv_from_returns(market[0], "2025-01-01T00:00:00Z"),
         _ohlcv_from_returns(market[1], "2025-02-01T00:00:00Z"),
     ]
-    entry_signals = [np.ones(100), np.ones(100)]
+    entry_signals = [np.zeros(100), np.zeros(100)]
     candidate = [np.zeros(100), np.zeros(100)]  # Candidate is flat: market benchmark must still move.
     report = oos_benchmark_comparison(
         frames, entry_signals, candidate,
@@ -149,7 +149,12 @@ def test_benchmark_shifted_entries_replay_stop_exits_and_costs_independently():
     }, index=index)
     requested_entries = np.ones(n, dtype=float)
     atr = np.ones(n, dtype=float)
-    candidate_net = np.zeros(n, dtype=float)  # Flat candidate: control still must take its own stops.
+    candidate_execution = simulate_execution_aware_strategy(
+        frame, pd.Series(requested_entries, index=index), pd.Series(atr, index=index),
+        stop_atr=1.0, take_profit_atr=4.0, transaction_cost_bps=10.0,
+        carry_bps_per_bar=0.0,
+    )
+    candidate_net = candidate_execution["net_returns"].to_numpy(dtype=float)
 
     report = oos_benchmark_comparison(
         [frame], [requested_entries], [candidate_net], [atr],
@@ -157,7 +162,7 @@ def test_benchmark_shifted_entries_replay_stop_exits_and_costs_independently():
         stop_atr=1.0, take_profit_atr=4.0, random_trials=100, seed=29,
     )
     assert report["status"] == "OK"
-    assert report["candidate_net_return"] == 0.0
+    assert report["candidate_net_return"] < 0.0
     assert report["random_control_exit_count_median"] > 0
     assert report["random_control_turnover_median"] >= report["random_control_exit_count_median"]
     assert report["random_control_execution_model"].endswith("TERMINAL_LIQUIDATION")
