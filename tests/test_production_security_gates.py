@@ -377,9 +377,14 @@ def test_production_verification_blocks_missing_provider_credentials():
 
 def test_production_verification_passes_provider_secrets_to_checker():
     workflow = (ROOT / ".github" / "workflows" / "production-verification.yml").read_text(encoding="utf-8")
-    block_start = workflow.index("AI model/provider verification when credentials are supplied")
-    block_end = workflow.index("Production-oriented static and security gates", block_start)
+    provider_step_id = "        id: ai_provider_verification"
+    id_position = workflow.index(provider_step_id)
+    block_start = workflow.rfind("      - name:", 0, id_position)
+    assert block_start >= 0, "provider verification step must have a named workflow step"
+    block_end = workflow.index("      - name: Production-oriented static and security gates", id_position)
     block = workflow[block_start:block_end]
+    assert provider_step_id in block
+    assert "if: github.event_name == 'workflow_dispatch'" in block
     assert 'GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || secrets.GEMINI }}' in block
     assert 'GROQ_API_KEY: ${{ secrets.GROQ_API_KEY || secrets.GROQ }}' in block
     assert 'CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}' in block
