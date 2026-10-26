@@ -28,17 +28,7 @@ def test_challenger_cannot_materially_degrade_incumbent():
     assert 'WORSE_THAN_CHAMPION' in src
 
 
-def test_adaptive_controller_defers_persisted_risk_validation_to_cycle():
-    src = (ROOT / "app" / "main.py").read_text()
-    start = src.index("async def _adaptive_bot_controller_loop")
-    end = src.index("async def _fetch_customer_oanda_data", start)
-    chunk = src[start:end]
-    assert "days, _risk_fraction, interval_seconds, mode in work" in chunk
-    assert "risk_fraction=risk_fraction" not in chunk
-    assert "risk_fraction_invalid/NO_TRADE" in chunk
-
-
-def test_adaptive_controller_preserves_stopped_validation_state(monkeypatch):
+def test_controller_does_not_reschedule_cycle_stopped_bot(monkeypatch):
     import asyncio
     from types import SimpleNamespace
 
@@ -90,8 +80,13 @@ def test_adaptive_controller_preserves_stopped_validation_state(monkeypatch):
         async def commit(self):
             return None
 
+    cycle_requests = []
+
     async def fake_cycle(bot_id, req, *, decision_id=None):
-        # Simulate the cycle's fail-closed persisted-risk validation result.
+        # This unit test isolates the controller's post-cycle persistence behavior.
+        # The real cycle's invalid-risk behavior is covered in
+        # test_worker_supervisor_and_paper_gate.py.
+        cycle_requests.append(req)
         bot.status = "STOPPED"
         bot.next_run_at = None
         bot.last_error = "Persisted risk fraction is invalid; expected a finite value in (0, 0.02]"
@@ -133,3 +128,7 @@ def test_adaptive_controller_preserves_stopped_validation_state(monkeypatch):
     assert bot.last_error == "Persisted risk fraction is invalid; expected a finite value in (0, 0.02]"
     assert bot.last_decision == "NO_TRADE"
     assert bot.last_stage == "risk_fraction_invalid"
+    # A corrupt persisted zero must not be passed into the constrained request model.
+    # The cycle will validate the value reloaded from storage, not this request default.
+    assert len(cycle_requests) == 1
+    assert 0.0 < float(cycle_requests[0].risk_fraction) <= 0.02
