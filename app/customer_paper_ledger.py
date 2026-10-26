@@ -77,7 +77,6 @@ def _tenant_policy_expression_is_exact(expression: Any) -> bool:
     # result. Permit only those syntactic renderings of the same exact expression;
     # arbitrary aliases, casts, predicates, operators, or GUC names remain rejected.
     select_item = rf"(?:{nullif_expression}|\({nullif_expression}\))(?:::bigint)?(?:asnullif)?"
-    scalar_subquery = rf"customer_id=\((?:select)?{select_item}\)::bigint?"
     scalar_subquery_alias = rf"customer_id=\(select{cast_expression}(?:asnullif)?\)"
     scalar_subquery_inner_cast = rf"customer_id=\(select{select_item}\)"
     scalar_subquery_outer_cast = rf"customer_id=\(\(select{select_item}\)::bigint\)"
