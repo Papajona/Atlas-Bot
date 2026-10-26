@@ -219,12 +219,29 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
         return None
 
     monkeypatch.setattr(paper_api, "SessionLocal", lambda: DummySession())
+
+    async def fresh_group_marks(customer_id, request, _market_context):
+        # This API integration test uses deterministic fixture candles and a fresh
+        # UTC quote mark for the existing position; production wires the real server
+        # market-context loader from app.main.
+        return {
+            (
+                str(request.exchange).strip().lower(),
+                "spot",
+                str(request.symbol).strip().upper(),
+            ): {
+                "price": "100",
+                "quote_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            }
+        }
+
     api_app = FastAPI()
     api_app.include_router(paper_api.build_customer_paper_router(
         get_customer=fake_get_customer,
         market_data=fake_market_data,
         market_request_type=PaperMarketRequest,
         state_guard=state_guard,
+        group_mark_price_loader=fresh_group_marks,
     ))
     client = TestClient(api_app)
 

@@ -296,6 +296,36 @@ def test_deletion_of_already_absent_remote_ref_is_a_successful_noop(monkeypatch)
 
 
 
+def test_deletion_lease_rejection_preserves_remote_branch_that_advanced(monkeypatch):
+    def fake_run(args, *, check=True):
+        if args[:2] == ["git", "push"]:
+            assert args[2] == "origin"
+            assert args[3] == (
+                "--force-with-lease=refs/heads/feature/advancing:proven-sha"
+            )
+            assert args[4] == ":refs/heads/feature/advancing"
+            return subprocess.CompletedProcess(
+                args, 1, "", "! [rejected] feature/advancing (stale info)"
+            )
+        if args[:3] == ["git", "ls-remote", "--heads"]:
+            return subprocess.CompletedProcess(
+                args, 0,
+                "advanced-sha\trefs/heads/feature/advancing\n",
+                "",
+            )
+        raise AssertionError(f"unexpected command: {args}")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+
+    status, reason = pruning._delete_remote_ref_with_lease(
+        "feature/advancing", "proven-sha"
+    )
+
+    assert status == "PRESERVE"
+    assert "lease was rejected" in reason
+    assert "branch preserved" in reason
+
+
 def test_unknown_protection_branch_is_removed_only_when_remote_absence_is_verified(monkeypatch):
     def fake_run(args, *, check=True):
         assert args == ["git", "ls-remote", "--heads", "origin", "refs/heads/stale/branch"]
@@ -452,6 +482,41 @@ def test_android_gate_supersession_preserves_branch_if_main_workflow_is_not_safe
         " || (github.event_name == 'push' && github.ref == 'refs/heads/main') || "
         "(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v'))",
     )
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: False)
+    monkeypatch.setattr(
+        pruning,
+        "_branch_delta_mismatched_paths",
+        lambda *_args: ["tests/test_android_production_backend_wiring.py"],
+    )
+    monkeypatch.setattr(
+        pruning,
+        "_git_file_text_at_commit",
+        lambda _commit, path: (
+            unsafe_workflow
+            if path == ".github/workflows/android-release.yml"
+            else _safe_android_release_test_source()
+        ),
+    )
+
+    safe, reason, mismatches = pruning._resolve_branch_integration(
+        branch_name, branch_sha, "main-sha", set(), []
+    )
+
+    assert safe is False
+    assert reason == "no exact integration proof; preserve branch"
+    assert mismatches == ["tests/test_android_production_backend_wiring.py"]
+
+
+def test_android_gate_supersession_rejects_extra_release_job_alternative(monkeypatch):
+    branch_name = "fix/android-release-trigger-gating-followup-20261023"
+    branch_sha = "6b9feef6b55be4ef06eef630d4b558e0ffad35b7"
+    safe_workflow = _safe_android_release_workflow()
+    unsafe_workflow = safe_workflow.replace(
+        "startsWith(github.ref, 'refs/tags/android-v'))",
+        "startsWith(github.ref, 'refs/tags/android-v')) || "
+        "(github.event_name == 'pull_request')",
+    )
+    assert unsafe_workflow != safe_workflow
     monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: False)
     monkeypatch.setattr(
         pruning,

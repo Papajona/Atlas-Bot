@@ -739,7 +739,7 @@ def test_autonomous_paper_order_waits_for_configured_fill_latency(monkeypatch):
     assert result["elapsed_bars"] == 1
 
 
-def test_autonomous_paper_order_expires_at_ttl_boundary(monkeypatch):
+def test_autonomous_paper_order_attempts_fill_at_ttl_boundary_then_expires_remainder(monkeypatch):
     import app.customer_paper_flow as flow
 
     _, state, order, market = _paper_fill_test_context()
@@ -749,28 +749,55 @@ def test_autonomous_paper_order_expires_at_ttl_boundary(monkeypatch):
     market["quote_timestamp"] = (
         pd.Timestamp(market["bar_timestamp"]) + pd.Timedelta(seconds=2)
     ).isoformat()
-    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
     monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
     monkeypatch.setattr(settings, "paper_order_ttl_bars", 3)
-    expired = {}
+    events = []
+    fill_calls = []
+    expiry_calls = []
+
+    async def read_order(**_kwargs):
+        return dict(state)
 
     async def expire(**kwargs):
-        expired.update(kwargs)
+        events.append("expire")
+        expiry_calls.append(kwargs)
+        state["status"] = "EXPIRED"
         return {"status": "EXPIRED"}
 
+    async def record_fill(**kwargs):
+        events.append("fill")
+        fill_calls.append(kwargs)
+        # The ledger reports the open remainder after a partial fill; TTL then
+        # expires only that remainder, never the already-recorded fill.
+        state["status"] = "PARTIALLY_FILLED"
+        state["remaining_quantity"] = "1"
+        return {"status": "PARTIALLY_FILLED", "fill_id": "ttl-boundary-fill"}
+
+    monkeypatch.setattr(flow, "get_customer_paper_order", read_order)
     monkeypatch.setattr(flow, "expire_customer_paper_order", expire)
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([]))
+    monkeypatch.setattr(flow, "register_customer_paper_market_bar", _async_value({
+        "bar_key": "ttl-boundary-bar", "bar_at": market["bar_timestamp"],
+        "capacity": "10", "available": "10",
+    }))
+    monkeypatch.setattr(flow, "get_customer_paper_fill_for_bar", _async_value(None))
+    monkeypatch.setattr(flow, "get_customer_paper_balances", _async_value([{
+        "account_code": "PAPER_CASH", "currency": "USDT", "balance": "100000",
+    }]))
+    monkeypatch.setattr(flow, "record_customer_paper_fill", record_fill)
 
-    async def must_not_fetch_group_marks(*_args, **_kwargs):
-        raise AssertionError("TTL expiry must not fetch current group marks")
-
-    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
     result = asyncio.run(flow._fill_open_order(
         customer_id=12002, order=order, market=market, df=pd.DataFrame(),
-        group_mark_price_loader=must_not_fetch_group_marks, request=req,
+        group_mark_prices={},
     ))
-    assert result["status"] == "EXPIRED_TTL"
-    assert result["elapsed_bars"] == 3
-    assert expired["client_order_id"] == order["client_order_id"]
+
+    assert result["status"] == "PARTIALLY_FILLED"
+    assert result["order_status_after_ttl"] == "EXPIRED"
+    assert len(fill_calls) == 1
+    assert len(expiry_calls) == 1
+    assert events == ["fill", "expire"]
+    assert fill_calls[0]["bar_key"] == "ttl-boundary-bar"
+    assert expiry_calls[0]["client_order_id"] == order["client_order_id"]
 
 
 def test_pending_paper_buy_waits_for_latency_without_fetching_group_marks(monkeypatch):
@@ -934,9 +961,14 @@ def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monke
         async def same_group_current_marks(_customer_id, _req, _context):
             # Both symbols have fresh, independently verified quotes in this controlled
             # integration fixture. The production provider fetches one quote per holding.
+            timestamp = datetime.now(timezone.utc).isoformat()
             return {
-                ("binance", "spot", "ETH/USDT"): "100",
-                ("binance", "spot", "SOL/USDT"): "100",
+                ("binance", "spot", "ETH/USDT"): {
+                    "price": "100", "quote_timestamp_utc": timestamp,
+                },
+                ("binance", "spot", "SOL/USDT"): {
+                    "price": "100", "quote_timestamp_utc": timestamp,
+                },
             }
 
         eth_result, sol_result = await asyncio.gather(
@@ -1022,9 +1054,14 @@ def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monke
         )
 
         async def rising_group_marks(_customer_id, _req, _context):
+            timestamp = datetime.now(timezone.utc).isoformat()
             return {
-                ("binance", "spot", "ETH/USDT"): "200",
-                ("binance", "spot", "SOL/USDT"): "100",
+                ("binance", "spot", "ETH/USDT"): {
+                    "price": "200", "quote_timestamp_utc": timestamp,
+                },
+                ("binance", "spot", "SOL/USDT"): {
+                    "price": "100", "quote_timestamp_utc": timestamp,
+                },
             }
 
         sol_after_rise = await recover_customer_paper_spot_flow(

@@ -81,6 +81,36 @@ from .audit_chain import append_audit
 from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current, assert_database_role_compatible_with_rls_lockdown
 
 
+def _validated_customer_paper_mark(context: dict | None) -> tuple[float, str]:
+    """Return a positive bid and timestamp only when the quote is demonstrably current."""
+    if not isinstance(context, dict):
+        raise ValueError("current mark context is unavailable")
+    try:
+        mark = float(context.get("bid", 0))
+        reported_age = float(context.get("quote_age_seconds"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("current mark price or quote age is invalid") from exc
+    if (
+        not math.isfinite(mark) or mark <= 0
+        or not math.isfinite(reported_age)
+        or reported_age < -1.0 or reported_age > 5.0
+    ):
+        raise ValueError("current mark price or quote age is outside the accepted range")
+
+    raw_timestamp = str(context.get("quote_timestamp_utc") or "").strip()
+    try:
+        quote_dt = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("current mark quote timestamp is invalid") from exc
+    if quote_dt.tzinfo is None or quote_dt.utcoffset() is None:
+        raise ValueError("current mark quote timestamp must be timezone-aware")
+    quote_dt = quote_dt.astimezone(timezone.utc)
+    age_seconds = (datetime.now(timezone.utc) - quote_dt).total_seconds()
+    if not math.isfinite(age_seconds) or age_seconds < -1.0 or age_seconds > 5.0:
+        raise ValueError("current mark quote timestamp is stale or in the future")
+    return mark, quote_dt.isoformat()
+
+
 async def _customer_paper_positions_for_exposure(
     *, customer_id: int, req, market_context: dict | None
 ) -> dict[str, Any]:
@@ -137,22 +167,16 @@ async def _customer_paper_positions_for_exposure(
                 and symbol.upper() == str(req.symbol).upper()
                 and market_context is not None
             ):
-                mark = float(market_context.get("bid", 0))
-                if not math.isfinite(mark) or mark <= 0:
-                    raise ValueError("no fresh validated bid for the proposed market")
+                mark, mark_timestamp = _validated_customer_paper_mark(market_context)
             else:
                 mark_req = req.model_copy(update={"symbol": symbol, "exchange": venue})
                 mark_df = await asyncio.to_thread(market_data, mark_req)
                 mark_context = await asyncio.to_thread(
                     _server_paper_market_context, mark_req, mark_df
                 )
-                if (
-                    mark_context is None
-                    or not math.isfinite(float(mark_context.get("bid", 0)))
-                    or float(mark_context.get("bid", 0)) <= 0
-                ):
+                if mark_context is None:
                     raise ValueError("no fresh validated bid")
-                mark = float(mark_context["bid"])
+                mark, mark_timestamp = _validated_customer_paper_mark(mark_context)
         except Exception as exc:
             return {
                 "ok": False,
@@ -167,13 +191,14 @@ async def _customer_paper_positions_for_exposure(
             quantity=quantity,
             average_entry_price=average,
             mark_price=mark,
+            mark_quote_timestamp_utc=mark_timestamp,
         ))
     return {"ok": True, "positions": open_positions}
 
 
 async def _customer_paper_group_mark_prices(
     customer_id: int, req, market_context: dict | None
-) -> dict[tuple[str, str, str], str]:
+) -> dict[tuple[str, str, str], dict[str, str]]:
     """Return fresh marks for each nonzero holding in the candidate's correlation group."""
     context = market_context
     try:
@@ -198,7 +223,17 @@ async def _customer_paper_group_mark_prices(
         price = float(getattr(position, "mark_price", 0) or 0)
         if not venue or not symbol or not math.isfinite(price) or price <= 0:
             raise CustomerPaperFlowBlocked("current correlation-group position mark is invalid")
-        marks[(venue, "spot", symbol)] = format(price, ".18f")
+        quote_timestamp = str(
+            getattr(position, "mark_quote_timestamp_utc", "") or ""
+        ).strip()
+        if not quote_timestamp:
+            raise CustomerPaperFlowBlocked(
+                "current correlation-group position mark timestamp is missing"
+            )
+        marks[(venue, "spot", symbol)] = {
+            "price": format(price, ".18f"),
+            "quote_timestamp_utc": quote_timestamp,
+        }
     return marks
 
 
