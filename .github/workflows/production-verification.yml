@@ -122,7 +122,7 @@ jobs:
           python -m alembic heads
       - name: Repository secret scan
         run: python scripts/check_no_secrets.py
-      - name: AI model/provider verification (manual dispatch only; uses provider quota)
+      - name: AI model/provider verification when credentials are supplied
         if: github.event_name == 'workflow_dispatch'
         id: ai_provider_verification
         continue-on-error: true
