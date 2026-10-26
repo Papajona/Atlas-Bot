@@ -961,9 +961,14 @@ def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monke
         async def same_group_current_marks(_customer_id, _req, _context):
             # Both symbols have fresh, independently verified quotes in this controlled
             # integration fixture. The production provider fetches one quote per holding.
+            timestamp = datetime.now(timezone.utc).isoformat()
             return {
-                ("binance", "spot", "ETH/USDT"): "100",
-                ("binance", "spot", "SOL/USDT"): "100",
+                ("binance", "spot", "ETH/USDT"): {
+                    "price": "100", "quote_timestamp_utc": timestamp,
+                },
+                ("binance", "spot", "SOL/USDT"): {
+                    "price": "100", "quote_timestamp_utc": timestamp,
+                },
             }
 
         eth_result, sol_result = await asyncio.gather(
@@ -1049,9 +1054,14 @@ def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monke
         )
 
         async def rising_group_marks(_customer_id, _req, _context):
+            timestamp = datetime.now(timezone.utc).isoformat()
             return {
-                ("binance", "spot", "ETH/USDT"): "200",
-                ("binance", "spot", "SOL/USDT"): "100",
+                ("binance", "spot", "ETH/USDT"): {
+                    "price": "200", "quote_timestamp_utc": timestamp,
+                },
+                ("binance", "spot", "SOL/USDT"): {
+                    "price": "100", "quote_timestamp_utc": timestamp,
+                },
             }
 
         sol_after_rise = await recover_customer_paper_spot_flow(
