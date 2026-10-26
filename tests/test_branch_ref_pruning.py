@@ -296,6 +296,36 @@ def test_deletion_of_already_absent_remote_ref_is_a_successful_noop(monkeypatch)
 
 
 
+def test_deletion_lease_rejection_preserves_remote_branch_that_advanced(monkeypatch):
+    def fake_run(args, *, check=True):
+        if args[:2] == ["git", "push"]:
+            assert args[2] == "origin"
+            assert args[3] == (
+                "--force-with-lease=refs/heads/feature/advancing:proven-sha"
+            )
+            assert args[4] == ":refs/heads/feature/advancing"
+            return subprocess.CompletedProcess(
+                args, 1, "", "! [rejected] feature/advancing (stale info)"
+            )
+        if args[:3] == ["git", "ls-remote", "--heads"]:
+            return subprocess.CompletedProcess(
+                args, 0,
+                "advanced-sha\trefs/heads/feature/advancing\n",
+                "",
+            )
+        raise AssertionError(f"unexpected command: {args}")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+
+    status, reason = pruning._delete_remote_ref_with_lease(
+        "feature/advancing", "proven-sha"
+    )
+
+    assert status == "PRESERVE"
+    assert "lease was rejected" in reason
+    assert "branch preserved" in reason
+
+
 def test_unknown_protection_branch_is_removed_only_when_remote_absence_is_verified(monkeypatch):
     def fake_run(args, *, check=True):
         assert args == ["git", "ls-remote", "--heads", "origin", "refs/heads/stale/branch"]
