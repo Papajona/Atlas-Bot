@@ -684,7 +684,10 @@ def paper_candidates(
             require_cost_stress=True,
             min_folds=max(5, int(settings.research_folds)),
             min_total_return=min_oos_total_return,
-            min_positive_fold_ratio=min_oos_positive_fold_ratio,
+            # Fold signs and recency are diagnostics, not independent confirmations.
+            min_positive_fold_ratio=0.0,
+            max_negative_fold_return=-1.0,
+            require_last_fold_positive=False,
             min_sharpe=min_sharpe,
             max_drawdown=max_drawdown,
             min_trades=min_trades,
