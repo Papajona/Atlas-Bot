@@ -301,6 +301,7 @@ def validate_comparable_trial_archive(document, trusted_public_keys, *, candidat
         if not label or label in labels:
             return {"verified": False, "trial_archive_verified": False, "reason": "TRIAL_ARCHIVE_DUPLICATE_LABEL"}
         labels.add(label)
+        is_ai_trial = label.startswith("ai@")
         if not all(_sha(row.get(k)) for k in ("config_sha256", "code_sha256", "dataset_sha256",
                                                "oos_sample_sha256", "results_sha256")):
             return {"verified": False, "trial_archive_verified": False, "reason": "TRIAL_ARCHIVE_HASH_INVALID"}
@@ -310,21 +311,28 @@ def validate_comparable_trial_archive(document, trusted_public_keys, *, candidat
             return {"verified": False, "trial_archive_verified": False, "reason": "TRIAL_ARCHIVE_SHARPE_INVALID"}
         if not math.isfinite(sharpe):
             return {"verified": False, "trial_archive_verified": False, "reason": "TRIAL_ARCHIVE_SHARPE_INVALID"}
-        samples.add(str(row["oos_sample_sha256"]))
-        protocols.add(str(row["protocol_version"] or "").strip())
+        # AI walk-forward uses separate feature-warmup and label-horizon windows.
+        # Validate its own sample digest, but do not mix its sample or Sharpe into the
+        # fixed-signal archive distribution used for same-sample DSR promotion.
+        if not is_ai_trial:
+            samples.add(str(row["oos_sample_sha256"]))
+            protocols.add(str(row["protocol_version"] or "").strip())
+            sharpes.append(sharpe)
         for field, expected in expected_context.items():
+            if is_ai_trial and field == "oos_sample_sha256":
+                continue
             if str(row.get(field) or "").casefold() != str(expected or "").casefold():
                 return {"verified": False, "trial_archive_verified": False,
                         "reason": "TRIAL_ARCHIVE_CONTEXT_MISMATCH", "mismatched_field": field}
-        sharpes.append(sharpe)
-    if len(samples) != 1 or "" in protocols or len(protocols) != 1:
+    if len(samples) != 1 or "" in protocols or len(protocols) != 1 or len(sharpes) < 2:
         return {"verified": False, "trial_archive_verified": False, "reason": "TRIAL_ARCHIVE_NOT_COMPARABLE"}
     if not candidate_labels.issubset(labels):
         return {"verified": False, "trial_archive_verified": False,
                 "reason": "TRIAL_ARCHIVE_MISSING_CURRENT_TRIALS",
                 "missing_trial_labels": sorted(candidate_labels - labels)}
     return {**signed, "trial_archive_verified": True, "reason": "COMPARABLE_TRIAL_ARCHIVE_VERIFIED",
-            "trial_count": len(rows), "trial_sharpes_annual": sharpes,
+            "trial_count": len(sharpes), "trial_count_total": len(rows),
+            "trial_sharpes_annual": sharpes,
             "oos_sample_sha256": next(iter(samples)), "protocol_version": next(iter(protocols))}
 
 
