@@ -111,6 +111,9 @@ def test_policy_walk_forward_includes_online_feedback_and_switch_controls():
     if result["status"] == "OK":
         assert result["router"] == "FULL_ADAPTIVE_POLICY_WALK_FORWARD"
         assert set(result["includes"]) >= {"regime", "online_outcome_feedback", "switch_hysteresis", "blending", "abstention"}
+        # The policy produces one return per eight-hour decision stride here.
+        # Its timestamps should imply ~1,096 periods/year, not the 252 fallback.
+        assert 900 < result["annualization_factor"] < 1300
 
 def test_full_policy_walk_forward_executes_after_signal_bar(monkeypatch):
     # Close moves down while executable opens rise. The old close[i] -> close[next_i]
@@ -222,3 +225,21 @@ def test_regime_classifier_annualization_tracks_hourly_and_daily_cadence():
     daily = classify_regime(daily_df, asset="crypto")
     assert hourly.attrs["annualization_factor"] > 8000
     assert 300 <= daily.attrs["annualization_factor"] <= 400
+
+
+
+def test_regime_filter_keeps_annualization_from_full_source_cadence(monkeypatch):
+    from app import strategy_router as router
+
+    frame = _df(700)
+    alternating = pd.Series(
+        np.where(np.arange(len(frame)) % 2 == 0, "RANGE", "TREND_UP"),
+        index=frame.index,
+    )
+    monkeypatch.setattr(router, "classify_regime", lambda df, asset="crypto": alternating)
+
+    result = router.regime_conditioned_strategy_performance(frame, StrategyConfig(), asset="crypto")
+    expected = router._annualization_factor(frame.index, asset="crypto")
+    assert expected > 8000
+    assert result["ensemble"]["RANGE"]["annualization_factor"] == expected
+    assert result["ensemble"]["TREND_UP"]["annualization_factor"] == expected

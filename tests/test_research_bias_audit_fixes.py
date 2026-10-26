@@ -6,6 +6,7 @@ that a strategy has predictive skill or substitute for venue-calibration data.
 import numpy as np
 import pandas as pd
 
+from app.execution_aware_research import simulate_execution_aware_strategy
 from app.research_validation import (
     validate_ohlcv_frame,
     newey_west_mean_inference,
@@ -28,6 +29,20 @@ def _ohlcv(n=1200, freq="h"):
          "volume": np.full(n, 1000.0)},
         index=index,
     )
+
+
+def _ohlcv_from_returns(returns, start="2025-01-01T00:00:00Z"):
+    returns = np.asarray(returns, dtype=float)
+    index = pd.date_range(start, periods=len(returns), freq="h", tz="UTC")
+    opens = 100.0 * np.cumprod(np.r_[1.0, 1.0 + returns[:-1]])
+    closes = opens * (1.0 + returns)
+    return pd.DataFrame({
+        "open": opens,
+        "high": np.maximum(opens, closes) * 1.001,
+        "low": np.minimum(opens, closes) * 0.999,
+        "close": closes,
+        "volume": np.full(len(returns), 1000.0),
+    }, index=index)
 
 
 def test_gap_report_exposes_irregular_timestamp_coverage():
@@ -57,8 +72,27 @@ def test_fx_weekend_like_closure_is_reported_separately_from_missing_bars():
     }, index=index)
     report = validate_ohlcv_frame(frame, timeframe="1h", asset="forex")
     assert report["gap_report"]["market_closure_suspected_intervals"] == 1
-    assert report["gap_report"]["unexpected_gap_intervals"] == 0
-    assert report["gap_report"]["estimated_missing_bars"] == 0
+    # A possible weekend closure is not evidence of a verified closure. Until a
+    # calendar is consulted, the gap remains visible in missing-bar estimates.
+    assert report["gap_report"]["market_closure_verified_intervals"] == 0
+    assert report["gap_report"]["unexpected_gap_intervals"] >= 1
+    assert report["gap_report"]["estimated_missing_bars"] > 0
+
+
+def test_midweek_fx_outage_is_not_exempted_by_duration_alone():
+    index = pd.to_datetime([
+        "2025-01-07T10:00:00Z", "2025-01-07T11:00:00Z",
+        "2025-01-09T10:00:00Z", "2025-01-09T11:00:00Z",
+    ])
+    close = np.array([100.0, 100.1, 100.2, 100.3])
+    frame = pd.DataFrame({
+        "open": close, "high": close + 0.2, "low": close - 0.2,
+        "close": close, "volume": np.full(4, 100.0),
+    }, index=index)
+    report = validate_ohlcv_frame(frame, timeframe="1h", asset="forex")
+    assert report["gap_report"]["market_closure_suspected_intervals"] == 1
+    assert report["gap_report"]["unexpected_gap_intervals"] == 1
+    assert report["gap_report"]["estimated_missing_bars"] >= 40
 
 def test_newey_west_report_separates_period_statistic_from_annualized_sharpe():
     rng = np.random.default_rng(55)
@@ -83,20 +117,56 @@ def test_multiple_testing_proxy_scales_with_observed_trial_dispersion():
     assert high["expected_null_max_proxy"] > low["expected_null_max_proxy"]
 
 
-def test_benchmark_comparison_uses_same_fold_blocks_and_reports_single_symbol_limit():
+def test_benchmark_comparison_uses_independent_ohlc_and_reports_single_symbol_limit():
     market = [np.full(100, 0.001), np.full(100, -0.0002)]
-    positions = [np.ones(100), np.ones(100)]
-    candidate = [np.zeros(100), np.zeros(100)]
+    frames = [
+        _ohlcv_from_returns(market[0], "2025-01-01T00:00:00Z"),
+        _ohlcv_from_returns(market[1], "2025-02-01T00:00:00Z"),
+    ]
+    entry_signals = [np.zeros(100), np.zeros(100)]
+    candidate = [np.zeros(100), np.zeros(100)]  # Candidate is flat: market benchmark must still move.
     report = oos_benchmark_comparison(
-        market, positions, candidate,
+        frames, entry_signals, candidate,
         transaction_cost_bps=2.0, carry_bps_per_bar=0.0, random_trials=25, seed=8,
     )
     assert report["status"] == "OK"
     assert report["candidate_net_return"] == 0.0
     assert report["buy_and_hold_net_return"] > report["candidate_net_return"]
+    assert report["benchmark_market_return_source"] == "OHLC_OPEN_TO_OPEN_WITH_TERMINAL_CLOSE"
+    assert report["random_control_execution_model"].startswith("INDEPENDENT_NONCIRCULAR")
     assert report["gate_passed"] is False
     assert report["equal_weight_basket"]["status"] == "UNAVAILABLE_SINGLE_SYMBOL_INPUT"
     assert report["random_trials"] == 25
+
+
+def test_benchmark_shifted_entries_replay_stop_exits_and_costs_independently():
+    n = 16
+    index = pd.date_range("2026-01-01T00:00:00Z", periods=n, freq="h")
+    opens = np.full(n, 100.0)
+    closes = opens.copy()
+    frame = pd.DataFrame({
+        "open": opens, "high": np.full(n, 101.0), "low": np.full(n, 98.0),
+        "close": closes, "volume": np.full(n, 1000.0),
+    }, index=index)
+    requested_entries = np.ones(n, dtype=float)
+    atr = np.ones(n, dtype=float)
+    candidate_execution = simulate_execution_aware_strategy(
+        frame, pd.Series(requested_entries, index=index), pd.Series(atr, index=index),
+        stop_atr=1.0, take_profit_atr=4.0, transaction_cost_bps=10.0,
+        carry_bps_per_bar=0.0,
+    )
+    candidate_net = candidate_execution["net_returns"].to_numpy(dtype=float)
+
+    report = oos_benchmark_comparison(
+        [frame], [requested_entries], [candidate_net], [atr],
+        transaction_cost_bps=10.0, carry_bps_per_bar=0.0,
+        stop_atr=1.0, take_profit_atr=4.0, random_trials=100, seed=29,
+    )
+    assert report["status"] == "OK"
+    assert report["candidate_net_return"] < 0.0
+    assert report["random_control_exit_count_median"] > 0
+    assert report["random_control_turnover_median"] >= report["random_control_exit_count_median"]
+    assert report["random_control_execution_model"].endswith("TERMINAL_LIQUIDATION")
 
 
 def test_fixed_signal_oos_reports_inference_benchmark_and_hold_horizon():
@@ -148,3 +218,57 @@ def test_promotion_gate_requires_inference_and_benchmarks_when_configured():
         min_effective_observations=100, require_benchmark_excess_return=True,
     )
     assert passed["passed"] is True
+
+
+
+def test_benchmark_candidate_is_resimulated_and_liquidated_at_each_fold_end():
+    n = 12
+    first = _ohlcv_from_returns(
+        np.r_[np.full(n - 1, 0.001), 0.02], "2026-01-01T00:00:00Z"
+    )
+    second = _ohlcv_from_returns(
+        np.r_[np.full(n - 1, -0.001), -0.03], "2026-02-01T00:00:00Z"
+    )
+    signals = [np.ones(n, dtype=float), np.ones(n, dtype=float)]
+    atrs = [np.ones(n, dtype=float), np.ones(n, dtype=float)]
+    supplied_streams = [np.full(n, 0.01), np.full(n, 0.01)]
+    expected_blocks = [
+        simulate_execution_aware_strategy(
+            frame, pd.Series(signal, index=frame.index), pd.Series(atr, index=frame.index),
+            stop_atr=10.0, take_profit_atr=10.0, transaction_cost_bps=10.0,
+            carry_bps_per_bar=0.0,
+        )["net_returns"].to_numpy(dtype=float)
+        for frame, signal, atr in zip([first, second], signals, atrs)
+    ]
+    expected_return = float(np.prod(1.0 + np.concatenate(expected_blocks)) - 1.0)
+    report = oos_benchmark_comparison(
+        [first, second], signals, supplied_streams, atrs,
+        transaction_cost_bps=10.0, carry_bps_per_bar=0.0,
+        stop_atr=10.0, take_profit_atr=10.0, random_trials=10, seed=91,
+    )
+    assert report["status"] == "OK"
+    assert np.isclose(report["candidate_net_return"], expected_return)
+    assert not np.isclose(report["candidate_net_return"], report["candidate_stream_net_return"])
+    assert report["candidate_execution_model"].startswith("INDEPENDENT_FOLD_SIMULATION")
+    assert report["candidate_exit_count"] >= 2
+
+
+def test_flat_bars_with_missing_atr_do_not_invalidate_benchmark_controls():
+    frame = _ohlcv(24)
+    requested = np.ones(len(frame), dtype=float)
+    requested[0] = 0.0
+    atr = np.ones(len(frame), dtype=float)
+    atr[0] = np.nan
+    candidate = simulate_execution_aware_strategy(
+        frame, pd.Series(requested, index=frame.index), pd.Series(atr, index=frame.index),
+        stop_atr=1.0, take_profit_atr=5.0, transaction_cost_bps=5.0,
+        carry_bps_per_bar=0.0,
+    )["net_returns"].to_numpy(dtype=float)
+    report = oos_benchmark_comparison(
+        [frame], [requested], [candidate], [atr],
+        transaction_cost_bps=5.0, carry_bps_per_bar=0.0,
+        stop_atr=1.0, take_profit_atr=5.0, random_trials=20, seed=13,
+    )
+    assert report["status"] == "OK"
+    assert report["candidate_exit_count"] > 0
+    assert report["random_trials"] == 20

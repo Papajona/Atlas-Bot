@@ -268,3 +268,53 @@ def test_signed_universe_requires_per_instrument_failure_timeline():
     result = validate_crypto_universe_manifest(signed_invalid, keys, **args)
     assert result["universe_verified"] is False
     assert result["reason"] == "UNIVERSE_INSTRUMENT_TIMELINE_INVALID"
+
+
+def test_ai_archive_rows_are_counted_but_excluded_from_fixed_sample_dsr():
+    dataset = hashlib.sha256(b"dataset-ai-mix").hexdigest()
+    fixed_sample = hashlib.sha256(b"fixed-sample").hexdigest()
+    ai_sample = hashlib.sha256(b"ai-feature-warmup-sample").hexdigest()
+    protocol = "atlas-purged-walk-forward-v2"
+    rows = []
+    for idx in range(2):
+        rows.append({
+            "trial_label": f"trial-{idx}",
+            "config_sha256": hashlib.sha256(f"cfg-ai-mix-{idx}".encode()).hexdigest(),
+            "code_sha256": hashlib.sha256(f"code-ai-mix-{idx}".encode()).hexdigest(),
+            "dataset_sha256": dataset, "oos_sample_sha256": fixed_sample,
+            "protocol_version": protocol, "annualized_sharpe": 0.3 + idx / 10,
+            "results_sha256": hashlib.sha256(f"result-ai-mix-{idx}".encode()).hexdigest(),
+            "asset_class": "forex", "venue": "oanda", "market_type": "practice",
+            "symbol": "EUR_USD", "timeframe": "1h",
+        })
+    rows.append({
+        "trial_label": "ai@config",
+        "config_sha256": hashlib.sha256(b"ai-cfg").hexdigest(),
+        "code_sha256": hashlib.sha256(b"ai-code").hexdigest(),
+        "dataset_sha256": dataset, "oos_sample_sha256": ai_sample,
+        "protocol_version": protocol, "annualized_sharpe": 9.5,
+        "results_sha256": hashlib.sha256(b"ai-result").hexdigest(),
+        "asset_class": "forex", "venue": "oanda", "market_type": "practice",
+        "symbol": "EUR_USD", "timeframe": "1h",
+    })
+    document = {
+        "evidence_type": "comparable_trial_performance_archive",
+        "evidence_id": "trial-archive-ai-mixed",
+        "archive_complete": True, "includes_all_trials": True,
+        "trial_count": len(rows), "trials": rows,
+    }
+    signed, keys = _sign(document)
+    context = {
+        "asset_class": "forex", "venue": "oanda", "market_type": "practice",
+        "symbol": "EUR_USD", "timeframe": "1h", "dataset_sha256": dataset,
+        "oos_sample_sha256": fixed_sample, "protocol_version": protocol,
+    }
+
+    result = validate_comparable_trial_archive(
+        signed, keys, candidate_labels={"trial-0", "trial-1"}, expected_context=context,
+    )
+    assert result["trial_archive_verified"] is True
+    assert result["trial_count_total"] == 3
+    assert result["trial_count"] == 2
+    assert result["trial_sharpes_annual"] == [0.3, 0.4]
+    assert 9.5 not in result["trial_sharpes_annual"]

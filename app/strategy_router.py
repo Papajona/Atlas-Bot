@@ -60,7 +60,9 @@ def _strategy_returns(df: pd.DataFrame, cfg: StrategyConfig, strategy: str,
     return pos * ret - turnover * float(costs_bps) / 10000.0
 
 
-def _metrics(x: pd.Series, *, asset: str = "crypto") -> dict:
+def _metrics(
+    x: pd.Series, *, asset: str = "crypto", annualization_factor: float | None = None
+) -> dict:
     x = pd.Series(x).replace([np.inf, -np.inf], np.nan).dropna()
     if x.empty:
         return {"bars": 0, "trades": 0, "total_return": 0.0, "sharpe": 0.0,
@@ -69,7 +71,12 @@ def _metrics(x: pd.Series, *, asset: str = "crypto") -> dict:
     peak = eq.cummax()
     dd = eq / peak - 1.0
     std = float(x.std())
-    annualization_factor = _annualization_factor(x.index, asset=asset)
+    if annualization_factor is None:
+        annualization_factor = _annualization_factor(x.index, asset=asset)
+    else:
+        annualization_factor = float(annualization_factor)
+        if not math.isfinite(annualization_factor) or annualization_factor <= 0:
+            raise ValueError("annualization_factor must be finite and positive")
     sharpe = float(x.mean() / std * math.sqrt(annualization_factor)) if std > 0 else 0.0
     return {
         "bars": int(len(x)),
@@ -87,6 +94,9 @@ def regime_conditioned_strategy_performance(df: pd.DataFrame, cfg: StrategyConfi
                                              asset: str = "crypto") -> dict:
     """Compute per-strategy performance separately inside each market regime."""
     cfg = cfg or StrategyConfig()
+    # Compute cadence from the complete source series once; filtering to a regime
+    # changes timestamp spacing and would distort annualized metrics.
+    annualization_factor = _annualization_factor(df.index, asset=asset)
     regimes = classify_regime(df, asset=asset)
     result: dict[str, dict] = {}
     for strategy in STRATEGIES:
@@ -101,7 +111,7 @@ def regime_conditioned_strategy_performance(df: pd.DataFrame, cfg: StrategyConfi
         for regime in sorted(set(regimes.dropna().astype(str))):
             mask = regimes == regime
             x = returns.loc[mask]
-            m = _metrics(x, asset=asset)
+            m = _metrics(x, asset=asset, annualization_factor=annualization_factor)
             p = positions.loc[mask]
             m["trades"] = int(np.count_nonzero(np.diff(np.r_[0.0, p.to_numpy()])))
             result[strategy][regime] = m
@@ -371,7 +381,7 @@ def policy_walk_forward_backtest(
     signals = strategy_signals(df, cfg, asset=asset)
     regimes = classify_regime(df, asset=asset)
     fold_rows = []
-    aggregate: list[float] = []
+    fold_series: list[pd.Series] = []
 
     for fold in splits:
         current_strategy = None
@@ -454,8 +464,8 @@ def policy_walk_forward_backtest(
                 }))
             prev_pos = target_pos
 
-        fold_net = pd.Series(net_rows, index=net_index)
-        aggregate.extend(net_rows)
+        fold_net = pd.Series(net_rows, index=pd.DatetimeIndex(net_index))
+        fold_series.append(fold_net)
         fm = _metrics(fold_net, asset=asset)
         fm.update({
             "test_start": df.index[test_start].isoformat(),
@@ -463,7 +473,7 @@ def policy_walk_forward_backtest(
         })
         fold_rows.append(fm)
 
-    joined = pd.Series(aggregate, dtype=float)
+    joined = pd.concat(fold_series).sort_index() if fold_series else pd.Series(dtype=float)
     overall = _metrics(joined, asset=asset)
     positive_ratio = (sum(float(x.get("total_return", 0.0)) > 0 for x in fold_rows) / len(fold_rows)) if fold_rows else 0.0
     overall.update({

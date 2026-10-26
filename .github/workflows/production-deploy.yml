@@ -68,8 +68,51 @@ jobs:
           }
 
           require_success "ci.yml" "Atlas CI"
+          require_manual_provider_verification() {
+            local run_ids run_id run_json run_event run_sha run_branch run_status run_conclusion provider_conclusion
+
+            # Automatic push, pull-request, and scheduled checks skip live provider inference.
+            # Only successful manual verification on this exact main commit may attest providers.
+            run_ids="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "production-verification.yml" \
+              --commit "$GITHUB_SHA" \
+              --event workflow_dispatch \
+              --limit 100 \
+              --json databaseId,event,headSha,headBranch,status,conclusion \
+              --jq '[.[] | select(.event == "workflow_dispatch" and .headSha == "'"$GITHUB_SHA"'" and .headBranch == "main" and .status == "completed" and .conclusion == "success")] | sort_by(.databaseId) | reverse | .[].databaseId')"
+
+            if [ -z "$run_ids" ]; then
+              echo "BLOCKED: no successful manual Production Core Verification run exists for exact main commit $GITHUB_SHA"
+              exit 1
+            fi
+
+            for run_id in $run_ids; do
+              run_json="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json event,headSha,headBranch,status,conclusion,jobs)"
+              run_event="$(jq -r '.event // ""' <<< "$run_json")"
+              run_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
+              run_branch="$(jq -r '.headBranch // ""' <<< "$run_json")"
+              run_status="$(jq -r '.status // ""' <<< "$run_json")"
+              run_conclusion="$(jq -r '.conclusion // ""' <<< "$run_json")"
+              provider_conclusion="$(jq -r '[.jobs[].steps[] | select(.name == "AI model/provider verification when credentials are supplied") | .conclusion][0] // ""' <<< "$run_json")"
+
+              if [ "$run_event" = "workflow_dispatch" ] \
+                && [ "$run_sha" = "$GITHUB_SHA" ] \
+                && [ "$run_branch" = "main" ] \
+                && [ "$run_status" = "completed" ] \
+                && [ "$run_conclusion" = "success" ] \
+                && [ "$provider_conclusion" = "success" ]; then
+                echo "PASS: manual provider verification succeeded for exact main commit $GITHUB_SHA (run $run_id)"
+                return 0
+              fi
+              echo "Ignoring verification run $run_id: event=$run_event sha=$run_sha branch=$run_branch status=$run_status conclusion=$run_conclusion provider_step=$provider_conclusion"
+            done
+
+            echo "BLOCKED: no successful manual provider-check step attests exact main commit $GITHUB_SHA"
+            exit 1
+          }
           require_success "ledger-concurrency-check.yml" "PostgreSQL ledger concurrency"
-          require_success "production-verification.yml" "Production Verification Gate"
+          require_manual_provider_verification
           require_staging_identity_success() {
             local run_id run_status run_conclusion job_conclusion
 

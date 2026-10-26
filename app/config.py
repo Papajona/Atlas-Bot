@@ -227,6 +227,7 @@ class Settings(BaseSettings):
     # Promotion requires a positive net edge even when ALL costs are multiplied by this factor (live costs usually exceed backtest assumptions).
     research_require_cost_stress: bool = True
     research_cost_stress_multiplier: float = 2.0
+    # Deprecated diagnostic only; this ratio is not an enforced promotion gate.
     research_min_oos_positive_fold_ratio: float = 0.50
     adaptive_min_quote_volume_24h_usd: float = 5_000_000.0
     adaptive_require_established_crypto: bool = True

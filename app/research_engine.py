@@ -369,7 +369,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     )
     signal_frame = strategy_signals(df, cfg, asset=asset)
     annualization_factor = float(signal_frame.attrs.get("annualization_factor", 252.0))
-    _, _, _, bar_returns, ensemble_pos, ensemble_net, ensemble_audit, ensemble_exits = _protected_component_position(
+    ensemble_signals, _, ensemble_requested, bar_returns, ensemble_pos, ensemble_net, ensemble_audit, ensemble_exits = _protected_component_position(
         df, "ensemble", cfg, taker_bps, slippage_bps, asset, carry
     )
     gross = ensemble_pos * bar_returns
@@ -403,6 +403,13 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         bar_returns=bar_returns, intrabar_exit=ensemble_exits, carry_bps_per_bar=carry,
         carry_evidence_source=carry_evidence_source, carry_evidence_id=carry_evidence_id,
         max_hold_bars=research_hold_horizon, embargo_bars=research_hold_horizon,
+        benchmark_entry_signal=ensemble_requested,
+        benchmark_atr_for_entry=ensemble_signals["atr"].shift(1),
+        benchmark_stop_atr=cfg.stop_atr, benchmark_take_profit_atr=cfg.take_profit_atr,
+        benchmark_drawdown_limit=settings.strategy_drawdown_halt,
+        benchmark_daily_loss_limit=settings.strategy_daily_loss_halt,
+        benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
+        benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
     )
     ensemble_overlap = _fold_trade_boundary_overlap(ensemble_pos, ensemble_exits, validation_splits)
     oos["trade_boundary_overlap_bars"] = ensemble_overlap["total_bars"]
@@ -412,7 +419,10 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     regime_performance = regime_conditioned_performance(df, ensemble_net, asset=asset)
     per_strategy_oos = {}
     for component in components:
-        _, _, _, component_returns, component_position, _, _, component_exits = _protected_component_position(
+        if component == "ensemble":
+            per_strategy_oos[component] = oos
+            continue
+        component_signals, _, component_requested, component_returns, component_position, _, _, component_exits = _protected_component_position(
             df, component, cfg, taker_bps, slippage_bps, asset, carry
         )
         per_strategy_oos[component] = fixed_signal_walk_forward_oos(
@@ -425,6 +435,14 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             carry_bps_per_bar=carry,
             carry_evidence_source=carry_evidence_source, carry_evidence_id=carry_evidence_id,
             max_hold_bars=research_hold_horizon, embargo_bars=research_hold_horizon,
+            benchmark_entry_signal=component_requested,
+            benchmark_atr_for_entry=component_signals["atr"].shift(1),
+            benchmark_stop_atr=cfg.stop_atr, benchmark_take_profit_atr=cfg.take_profit_atr,
+            benchmark_drawdown_limit=settings.strategy_drawdown_halt,
+            benchmark_daily_loss_limit=settings.strategy_daily_loss_halt,
+            benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
+            benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
+            benchmark_random_trials=25,
         )
         component_overlap = _fold_trade_boundary_overlap(component_position, component_exits, validation_splits)
         per_strategy_oos[component]["trade_boundary_overlap_bars"] = component_overlap["total_bars"]
@@ -438,18 +456,29 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     for mult in (0.80,0.90,1.00,1.10,1.20):
         vcfg=StrategyConfig(**{**asdict(cfg), "signal_threshold": float(cfg.signal_threshold*mult)})
         vr=_component_backtest(df,"ensemble",vcfg,taker_bps,slippage_bps,asset,carry)
-        _, _, _, variant_returns, variant_position, _, _, variant_exits = _protected_component_position(
+        variant_signals, _, variant_requested, variant_returns, variant_position, _, _, variant_exits = _protected_component_position(
             df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry
         )
-        variant_oos = fixed_signal_walk_forward_oos(
-            df, variant_position, costs_bps=taker_bps + slippage_bps,
-            folds=folds, min_train=min_train, annualization_factor=annualization_factor,
-            taker_bps=taker_bps, slippage_bps=slippage_bps,
-            cost_stress_multiplier=cost_mult, positions_are_final=True,
-            bar_returns=variant_returns, intrabar_exit=variant_exits, carry_bps_per_bar=carry,
-            carry_evidence_source=carry_evidence_source, carry_evidence_id=carry_evidence_id,
-            max_hold_bars=research_hold_horizon, embargo_bars=research_hold_horizon,
-        )
+        if math.isclose(float(mult), 1.00, rel_tol=0.0, abs_tol=1e-12):
+            variant_oos = oos
+        else:
+            variant_oos = fixed_signal_walk_forward_oos(
+                df, variant_position, costs_bps=taker_bps + slippage_bps,
+                folds=folds, min_train=min_train, annualization_factor=annualization_factor,
+                taker_bps=taker_bps, slippage_bps=slippage_bps,
+                cost_stress_multiplier=cost_mult, positions_are_final=True,
+                bar_returns=variant_returns, intrabar_exit=variant_exits, carry_bps_per_bar=carry,
+                carry_evidence_source=carry_evidence_source, carry_evidence_id=carry_evidence_id,
+                max_hold_bars=research_hold_horizon, embargo_bars=research_hold_horizon,
+                benchmark_entry_signal=variant_requested,
+                benchmark_atr_for_entry=variant_signals["atr"].shift(1),
+                benchmark_stop_atr=vcfg.stop_atr, benchmark_take_profit_atr=vcfg.take_profit_atr,
+                benchmark_drawdown_limit=settings.strategy_drawdown_halt,
+                benchmark_daily_loss_limit=settings.strategy_daily_loss_halt,
+                benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
+                benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
+                benchmark_random_trials=25,
+            )
         variant_overlap = _fold_trade_boundary_overlap(variant_position, variant_exits, validation_splits)
         variant_oos["trade_boundary_overlap_bars"] = variant_overlap["total_bars"]
         variant_oos["trade_boundary_overlap_by_fold"] = variant_overlap["by_fold"]
@@ -483,6 +512,56 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     import hashlib
     # Use a full SHA-256 fingerprint so config variants cannot silently collide
     # because a short fingerprint was truncated to only 32 bits.
+    ai_profile = AI_PROFILES.get(str(asset).strip().lower())
+    configured_ai_carry = settings.research_carry_bps_per_bar
+    ai_carry_bps = float(
+        getattr(ai_profile, "carry_bps_per_bar", 0.0)
+        if configured_ai_carry is None
+        else configured_ai_carry
+    )
+    ai_trial_config = {
+        "strategy_config": asdict(cfg),
+        "evaluation": {
+            "asset": str(asset).strip().lower(),
+            "folds": int(folds),
+            "min_train": int(min_train),
+            "threshold": float(ai_threshold),
+            "bars_per_year": int(getattr(ai_profile, "bars_per_year", annualization_factor) or annualization_factor),
+            "max_hold_bars": int(getattr(ai_profile, "max_hold", research_hold_horizon) or research_hold_horizon or 1),
+            "taker_bps": float(getattr(ai_profile, "taker_bps", 0.0)),
+            "slippage_bps": float(getattr(ai_profile, "slippage_bps", 0.0)),
+            "carry_bps_per_bar": ai_carry_bps,
+            "cost_stress_multiplier": 2.0,
+        },
+        "execution": {
+            "stop_atr": float(settings.strategy_stop_atr),
+            "take_profit_atr": float(settings.strategy_take_profit_atr),
+            "drawdown_halt": settings.strategy_drawdown_halt,
+            "daily_loss_halt": settings.strategy_daily_loss_halt,
+            "loss_event_threshold": int(settings.strategy_stoploss_guard_trades),
+            "cooldown_bars": int(settings.strategy_stoploss_guard_bars),
+            "loss_lookback_bars": 24,
+        },
+        "model": {
+            "implementation": "lightgbm.LGBMClassifier",
+            "objective": "multiclass",
+            "class_weight": "balanced",
+            "n_estimators": 300,
+            "max_depth": 3,
+            "learning_rate": 0.05,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "min_child_samples": 50,
+            "reg_lambda": 1.0,
+            "random_state": 7,
+            "verbosity": -1,
+            "bagging_freq": 1,
+            "n_jobs": int(settings.ml_threads),
+        },
+    }
+    ai_fp = hashlib.sha256(
+        json.dumps(ai_trial_config, default=str, sort_keys=True).encode("utf-8")
+    ).hexdigest()
     fp = hashlib.sha256(json.dumps(asdict(cfg), default=str, sort_keys=True).encode()).hexdigest()
     this_labels = {f"{r.get('strategy')}@{fp}" for r in results} | {
         f"variant:{v['multiplier']}@{fp}" for v in variants
@@ -494,7 +573,12 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # from labels/counts alone; the trusted research archive and its comparable trial
     # outcomes must be restored and verified first.
     known_prior_labels = set(prior_trial_labels or ())
-    n_trials = len(known_prior_labels | this_labels)
+    # AI evaluation is an experiment and belongs in persistent accounting, but its
+    # different warm-up/label sample must never enter this fixed-signal DSR set.
+    known_prior_fixed_signal_labels = {label for label in known_prior_labels if not label.startswith("ai@")}
+    ai_trial_labels = {f"ai@{ai_fp}"} if include_ai else set()
+    persistent_trial_labels = this_labels | ai_trial_labels
+    n_trials = len(known_prior_labels | persistent_trial_labels)
     # Candidate statistics and signed evidence use an explicit protocol version.
     # Bump it when split geometry changes so old attestations cannot be silently reused.
     ens_cost = cost_breakeven_report(
@@ -527,15 +611,16 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
 
     # External evidence is verified and bound to this exact dataset and split protocol.
     from .research_evidence import (
-        canonical_sha256, oos_sample_fingerprint, validate_comparable_trial_archive,
-        validate_crypto_universe_manifest, validate_execution_cost_calibration,
+        RESEARCH_PROTOCOL_VERSION, canonical_sha256, oos_sample_fingerprint,
+        validate_comparable_trial_archive, validate_crypto_universe_manifest,
+        validate_execution_cost_calibration,
     )
     evidence_keys = getattr(settings, "research_evidence_public_keys_json", "")
     research_symbol = str(provenance.get("symbol") or df.attrs.get("symbol") or "").strip()
     research_venue = str(provenance.get("exchange") or df.attrs.get("exchange") or "").strip()
     research_market_type = str(provenance.get("market_type") or df.attrs.get("market_type") or "").strip()
     research_timeframe = str(provenance.get("timeframe") or df.attrs.get("timeframe") or "").strip()
-    protocol_version = "atlas-purged-walk-forward-v2"
+    protocol_version = RESEARCH_PROTOCOL_VERSION
     oos_windows = []
     for split in validation_splits:
         if (0 <= int(split.test_start) < len(df)
@@ -549,6 +634,26 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     sample_sha256 = oos_sample_fingerprint(
         str(provenance.get("sha256") or ""), oos_windows, protocol_version
     )
+    if isinstance(ai_result, dict):
+        ai_result["trial_config"] = ai_trial_config
+        ai_result["trial_config_sha256"] = ai_fp
+        ai_windows = []
+        for fold_row in ai_result.get("folds", []):
+            if not isinstance(fold_row, dict) or not fold_row.get("test_start") or not fold_row.get("test_end"):
+                continue
+            ai_windows.append({
+                "test_start": str(fold_row["test_start"]),
+                "test_end_inclusive": str(fold_row["test_end"]),
+                "purge": int(fold_row.get("purge_bars", purge_bars)),
+                "embargo": int(fold_row.get("embargo_bars", purge_bars)),
+            })
+        # AI has its own feature-warmup/label-horizon OOS windows. Fingerprint those
+        # windows separately so its prospective record can never masquerade as a
+        # fixed-signal, same-sample trial in the comparable DSR archive.
+        ai_result["oos_sample_sha256"] = oos_sample_fingerprint(
+            str(provenance.get("sha256") or ""), ai_windows, protocol_version
+        )
+        ai_result["protocol_version"] = protocol_version
     research_context = {
         "asset_class": str(asset).strip().lower(), "venue": research_venue.lower(),
         "market_type": research_market_type.lower(), "symbol": research_symbol,
@@ -655,7 +760,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     archive_document = df.attrs.get("trial_performance_archive")
     archive_validation = validate_comparable_trial_archive(
         archive_document, evidence_keys,
-        candidate_labels=set(this_labels) | known_prior_labels,
+        candidate_labels=set(this_labels) | known_prior_fixed_signal_labels,
         expected_context=research_context,
     )
     archive_verified = archive_validation.get("trial_archive_verified") is True
@@ -773,7 +878,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         ),
                         "multiple_testing_sharpe_proxy": adjusted,
                         "deflated_sharpe": dsr,
-                        "trial_labels": sorted(known_prior_labels | this_labels),
+                        "protocol_version": protocol_version,
+                        "trial_labels": sorted(known_prior_labels | persistent_trial_labels),
                         "trial_registry_complete": trial_registry_complete,
                         "financing_cost_model_complete": carry_evidence_complete,
                         "carry_rate_configured": carry is not None,
@@ -825,6 +931,8 @@ def paper_candidates(
 
     In-sample metrics alone are never sufficient. The OOS gate is intentionally
     simple and transparent; it is not a guarantee of future performance.
+    ``min_oos_positive_fold_ratio`` is retained for API compatibility and recorded
+    as a diagnostic only; it is not an enforced promotion requirement.
     """
     min_sharpe = settings.adaptive_min_sharpe if min_sharpe is None else float(min_sharpe)
     max_drawdown = settings.adaptive_max_drawdown if max_drawdown is None else float(max_drawdown)
@@ -848,10 +956,24 @@ def paper_candidates(
     # Promotion requires the complete signed archive bound to this exact OOS sample,
     # including every current candidate and all previously recorded trial labels.
     archive = validation.get("comparable_trial_archive") if isinstance(validation.get("comparable_trial_archive"), dict) else {}
+    evidence_id = archive.get("evidence_id")
+    evidence_digest = archive.get("evidence_sha256")
+    evidence_digest_valid = (
+        isinstance(evidence_digest, str)
+        and len(evidence_digest) == 64
+        and all(character in "0123456789abcdefABCDEF" for character in evidence_digest)
+    )
     archive_verified = (
-        archive.get("trial_archive_verified") is True
-        and bool(str(archive.get("evidence_id") or "").strip())
-        and bool(str(archive.get("evidence_sha256") or "").strip())
+        archive.get("verified") is True
+        and archive.get("trial_archive_verified") is True
+        and isinstance(evidence_id, str) and bool(evidence_id.strip())
+        and evidence_digest_valid
+    )
+    archive_trial_count = dsr.get("trial_count_archive")
+    archive_trial_count_valid = (
+        isinstance(archive_trial_count, int)
+        and not isinstance(archive_trial_count, bool)
+        and archive_trial_count >= 2
     )
     if (
         validation.get("walk_forward_purge_complete") is not True
@@ -859,7 +981,7 @@ def paper_candidates(
         or not archive_verified
         or dsr.get("status") != "OK"
         or dsr.get("trial_scope") != "VERIFIED_ARCHIVE_SAME_OOS_SAMPLE"
-        or int(dsr.get("trial_count_archive", 0)) < 2
+        or not archive_trial_count_valid
     ):
         return []
     candidates = []
@@ -916,6 +1038,12 @@ def paper_candidates(
             "in_sample_diagnostics": row,
             "oos": oos,
             "oos_positive_fold_ratio": gate.get("positive_fold_ratio", 0.0),
+            "positive_fold_ratio_diagnostic": {
+                "configured_threshold": min_oos_positive_fold_ratio,
+                "observed_ratio": gate.get("positive_fold_ratio", 0.0),
+                "enforced": False,
+                "deprecation_note": "This threshold is diagnostic-only and does not affect candidate eligibility.",
+            },
             "promotion_gate": gate,
         })
     return candidates

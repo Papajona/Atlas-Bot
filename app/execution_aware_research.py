@@ -31,19 +31,20 @@ def execution_turnover(position: pd.Series, exit_mask: pd.Series | None = None) 
         if exit_mask is None
         else pd.Series(exit_mask, index=positions.index).fillna(False).astype(bool)
     )
-    out = np.zeros(len(positions), dtype=float)
+    position_values = positions.to_numpy(dtype=float)
+    exit_values = exits.to_numpy(dtype=bool)
+    out = np.zeros(len(position_values), dtype=float)
     previous = 0.0
-    for i, current in enumerate(positions.to_numpy(dtype=float)):
+    for i, current in enumerate(position_values):
         if not math.isfinite(float(current)):
             raise ValueError("position stream contains a non-finite value")
         out[i] = abs(float(current) - previous)
-        if bool(exits.iloc[i]) and current != 0.0:
+        if exit_values[i] and current != 0.0:
             out[i] += abs(float(current))
             previous = 0.0
         else:
             previous = float(current)
     return pd.Series(out, index=positions.index, dtype=float)
-
 
 def costed_execution_returns(
     position: pd.Series,
@@ -139,12 +140,27 @@ def simulate_execution_aware_strategy(
         if isinstance(value, bool) or int(value) != value or int(value) < minimum:
             raise ValueError(f"{name} must be an integer of at least {minimum}")
 
-    positions = pd.Series(target_position, index=df.index).astype(float)
-    atr = pd.Series(atr_for_entry, index=df.index).astype(float)
-    if not np.isfinite(positions.to_numpy()).all():
-        raise ValueError("target position contains a non-finite value")
-
+    if isinstance(target_position, pd.Series):
+        positions = (
+            target_position.to_numpy(dtype=float, copy=False)
+            if target_position.index.equals(df.index)
+            else target_position.reindex(df.index).to_numpy(dtype=float)
+        )
+    else:
+        positions = np.asarray(target_position, dtype=float)
+    if isinstance(atr_for_entry, pd.Series):
+        atr = (
+            atr_for_entry.to_numpy(dtype=float, copy=False)
+            if atr_for_entry.index.equals(df.index)
+            else atr_for_entry.reindex(df.index).to_numpy(dtype=float)
+        )
+    else:
+        atr = np.asarray(atr_for_entry, dtype=float)
     n = len(df)
+    if positions.shape != (n,) or atr.shape != (n,):
+        raise ValueError("target position and entry ATR must align with the OHLC rows")
+    if not np.isfinite(positions).all():
+        raise ValueError("target position contains a non-finite value")
     actual_positions = np.zeros(n, dtype=float)
     market_returns = np.zeros(n, dtype=float)
     exit_mask = np.zeros(n, dtype=bool)
@@ -168,10 +184,14 @@ def simulate_execution_aware_strategy(
     halt_reason: str | None = None
     halt_triggered_at: int | None = None
     cooldown_triggers = 0
+    if isinstance(df.index, pd.DatetimeIndex):
+        utc_days = df.index.tz_convert("UTC").date if df.index.tz is not None else df.index.date
+    else:
+        utc_days = np.asarray([timestamp.date() for timestamp in df.index], dtype=object)
 
     for i in range(n):
         timestamp = df.index[i]
-        day = timestamp.tz_convert("UTC").date() if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None else timestamp.date()
+        day = utc_days[i]
         day_changed = day != current_day
         if day_changed:
             current_day = day
@@ -183,7 +203,7 @@ def simulate_execution_aware_strategy(
         forced_flat = force_flat_next
         force_flat_next = False
         is_halted = forced_flat or hard_halt or daily_halt or i <= cooldown_until
-        requested = 0.0 if is_halted else float(positions.iloc[i])
+        requested = 0.0 if is_halted else float(positions[i])
         sign = 1 if requested > 0 else -1 if requested < 0 else 0
         if is_halted:
             halted_bars += 1
@@ -200,7 +220,7 @@ def simulate_execution_aware_strategy(
                 requested = 0.0
                 sign = 0
             else:
-                entry_atr = float(atr.iloc[i]) if pd.notna(atr.iloc[i]) else float("nan")
+                entry_atr = float(atr[i]) if np.isfinite(atr[i]) else float("nan")
                 if not math.isfinite(entry_atr) or entry_atr <= 0:
                     raise ValueError(f"non-zero position at {timestamp} has no finite entry ATR")
                 active_sign = sign
@@ -215,7 +235,7 @@ def simulate_execution_aware_strategy(
                 requested = 0.0
                 sign = 0
             else:
-                entry_atr = float(atr.iloc[i]) if pd.notna(atr.iloc[i]) else float("nan")
+                entry_atr = float(atr[i]) if np.isfinite(atr[i]) else float("nan")
                 if not math.isfinite(entry_atr) or entry_atr <= 0:
                     raise ValueError(f"non-zero position at {timestamp} has no finite entry ATR")
                 active_sign = sign
