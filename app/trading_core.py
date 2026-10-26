@@ -528,6 +528,9 @@ def ai_walk_forward_backtest(
         "prediction_gap_policy": "NO_FORWARD_FILL_ACROSS_NON_TEST_WINDOWS",
         "inference": inference_report,
         "benchmark_comparison": benchmark_report,
+        # Each model fold is simulated from flat and terminally liquidated within
+        # that fold; no position is carried across the evaluated fold boundary.
+        "trade_boundary_overlap_bars": 0,
         "folds": fold_metrics,
         "cost_stress_ok": bool(cost_report.get("stress_ok")) and carry_evidence_complete if cost_report.get("status") == "OK" else False,
         "cost_stress_multiplier": float(stress_multiplier),
