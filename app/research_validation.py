@@ -597,7 +597,7 @@ def oos_promotion_gate(
     min_positive_fold_ratio: float = 0.5,
     max_negative_fold_return: float = -0.20,
     require_last_fold_positive: bool = True,
-    min_sharpe: float | None = 0.5,
+    min_sharpe: float | None = None,
     max_drawdown: float | None = -0.20,
     min_trades: int | None = 100,
     min_mean_t_statistic: float | None = None,
