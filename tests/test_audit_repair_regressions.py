@@ -161,6 +161,6 @@ def test_production_gate_has_no_provider_quota_waiver_and_uses_verified_model():
         assert "${GEMINI_MODEL:-" not in deployment
     env_example = (root / "deploy" / "cloud-run.env.example").read_text()
     runbook = (root / "deploy" / "DEPLOY_WORKFLOW.md").read_text()
-    assert "GEMINI_MODEL=gemini-3.5-flash" in env_example
-    assert "GEMINI_STRATEGY_MODEL=gemini-3.5-flash" in env_example
-    assert "| `GEMINI_MODEL`, `GEMINI_STRATEGY_MODEL` | `gemini-3.5-flash` |" in runbook
+    assert "GEMINI_MODEL=gemini-3.8-flash" in env_example
+    assert "GEMINI_STRATEGY_MODEL" not in env_example
+    assert "| `GEMINI_MODEL` | `gemini-3.8-flash` |" in runbook
