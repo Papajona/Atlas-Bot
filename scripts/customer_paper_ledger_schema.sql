@@ -230,6 +230,22 @@ CREATE TABLE IF NOT EXISTS customer_paper.position_events (
     UNIQUE (customer_id, reversal_of_fill_id)
 );
 
+-- Index the child-side columns of composite foreign keys. PostgreSQL does not
+-- create these automatically, and these access paths support order/journal/fill
+-- lookups and referenced-row maintenance without changing ledger semantics.
+CREATE INDEX IF NOT EXISTS ix_customer_paper_fills_order_customer
+    ON customer_paper.fills (order_id, customer_id);
+CREATE INDEX IF NOT EXISTS ix_customer_paper_journal_lines_account_customer_currency
+    ON customer_paper.journal_lines (account_id, customer_id, currency);
+CREATE INDEX IF NOT EXISTS ix_customer_paper_journal_lines_journal_customer
+    ON customer_paper.journal_lines (journal_id, customer_id);
+CREATE INDEX IF NOT EXISTS ix_customer_paper_order_events_order_customer
+    ON customer_paper.order_events (order_id, customer_id);
+CREATE INDEX IF NOT EXISTS ix_customer_paper_position_events_fill_customer
+    ON customer_paper.position_events (fill_id, customer_id);
+CREATE INDEX IF NOT EXISTS ix_customer_paper_position_events_reversal_fill_customer
+    ON customer_paper.position_events (reversal_of_fill_id, customer_id);
+
 CREATE OR REPLACE FUNCTION customer_paper.reject_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -510,7 +526,7 @@ BEGIN
         EXECUTE format('GRANT SELECT, INSERT ON customer_paper.%I TO %I', policy_table, role_name);
         EXECUTE format('DROP POLICY IF EXISTS customer_paper_tenant ON customer_paper.%I', policy_table);
         EXECUTE format(
-            'CREATE POLICY customer_paper_tenant ON customer_paper.%I FOR ALL TO %I USING (customer_id = NULLIF(current_setting(''app.customer_id'', true), '''')::bigint) WITH CHECK (customer_id = NULLIF(current_setting(''app.customer_id'', true), '''')::bigint)',
+            'CREATE POLICY customer_paper_tenant ON customer_paper.%I FOR ALL TO %I USING (customer_id = (SELECT NULLIF(current_setting(''app.customer_id'', true), '''')::bigint)) WITH CHECK (customer_id = (SELECT NULLIF(current_setting(''app.customer_id'', true), '''')::bigint))',
             policy_table, role_name
         );
     END LOOP;
