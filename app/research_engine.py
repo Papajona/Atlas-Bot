@@ -467,7 +467,16 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             "oos_max_drawdown":variant_oos.get("max_drawdown"), "oos_trades":variant_oos.get("trades"),
             "oos_return_sample":variant_oos.get("oos_return_sample", []),
         })
-    robustness={"monte_carlo":monte_carlo_bootstrap(ensemble_net.to_numpy(),trials=500),"parameter_plateau":parameter_plateau_score({"variants":variants},metric="sharpe",tolerance=0.20),"parameter_variants":variants}
+    robustness={
+        "monte_carlo": monte_carlo_bootstrap(
+            ensemble_net.to_numpy(), trials=500, block_size=bootstrap_block_size
+        ),
+        "monte_carlo_block_size": bootstrap_block_size,
+        "parameter_plateau": parameter_plateau_score(
+            {"variants": variants}, metric="sharpe", tolerance=0.20
+        ),
+        "parameter_variants": variants,
+    }
     # Formal DSR. Count every variant evaluated on this data: components + parameter variants (+ AI when included).
     net_ensemble = ensemble_net.to_numpy()
     # Persistent trial accounting: count DISTINCT configurations ever evaluated (label = strategy/variant + config fingerprint), not runs.
