@@ -403,6 +403,13 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         bar_returns=bar_returns, intrabar_exit=ensemble_exits, carry_bps_per_bar=carry,
         carry_evidence_source=carry_evidence_source, carry_evidence_id=carry_evidence_id,
         max_hold_bars=research_hold_horizon, embargo_bars=research_hold_horizon,
+        benchmark_entry_signal=ensemble_requested,
+        benchmark_atr_for_entry=ensemble_signals["atr"].shift(1),
+        benchmark_stop_atr=cfg.stop_atr, benchmark_take_profit_atr=cfg.take_profit_atr,
+        benchmark_drawdown_limit=settings.strategy_drawdown_halt,
+        benchmark_daily_loss_limit=settings.strategy_daily_loss_halt,
+        benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
+        benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
     )
     ensemble_overlap = _fold_trade_boundary_overlap(ensemble_pos, ensemble_exits, validation_splits)
     oos["trade_boundary_overlap_bars"] = ensemble_overlap["total_bars"]
@@ -425,6 +432,13 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             carry_bps_per_bar=carry,
             carry_evidence_source=carry_evidence_source, carry_evidence_id=carry_evidence_id,
             max_hold_bars=research_hold_horizon, embargo_bars=research_hold_horizon,
+            benchmark_entry_signal=component_requested,
+            benchmark_atr_for_entry=component_signals["atr"].shift(1),
+            benchmark_stop_atr=cfg.stop_atr, benchmark_take_profit_atr=cfg.take_profit_atr,
+            benchmark_drawdown_limit=settings.strategy_drawdown_halt,
+            benchmark_daily_loss_limit=settings.strategy_daily_loss_halt,
+            benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
+            benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
         )
         component_overlap = _fold_trade_boundary_overlap(component_position, component_exits, validation_splits)
         per_strategy_oos[component]["trade_boundary_overlap_bars"] = component_overlap["total_bars"]
@@ -449,6 +463,13 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             bar_returns=variant_returns, intrabar_exit=variant_exits, carry_bps_per_bar=carry,
             carry_evidence_source=carry_evidence_source, carry_evidence_id=carry_evidence_id,
             max_hold_bars=research_hold_horizon, embargo_bars=research_hold_horizon,
+            benchmark_entry_signal=variant_requested,
+            benchmark_atr_for_entry=variant_signals["atr"].shift(1),
+            benchmark_stop_atr=vcfg.stop_atr, benchmark_take_profit_atr=vcfg.take_profit_atr,
+            benchmark_drawdown_limit=settings.strategy_drawdown_halt,
+            benchmark_daily_loss_limit=settings.strategy_daily_loss_halt,
+            benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
+            benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
         )
         variant_overlap = _fold_trade_boundary_overlap(variant_position, variant_exits, validation_splits)
         variant_oos["trade_boundary_overlap_bars"] = variant_overlap["total_bars"]
