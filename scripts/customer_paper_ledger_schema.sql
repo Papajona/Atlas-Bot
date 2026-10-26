@@ -73,6 +73,10 @@ CREATE TABLE IF NOT EXISTS customer_paper.accounts (
 ALTER TABLE customer_paper.accounts
     ADD COLUMN IF NOT EXISTS account_code varchar(40) NOT NULL DEFAULT 'PAPER_CASH';
 ALTER TABLE customer_paper.accounts DROP CONSTRAINT IF EXISTS accounts_customer_id_currency_key;
+-- The table declaration creates this equivalent unique constraint on fresh installs.
+-- Keep the explicitly named unique index as the single enforcement structure on both
+-- fresh and previously provisioned databases; the account identity FKs use a different key.
+ALTER TABLE customer_paper.accounts DROP CONSTRAINT IF EXISTS accounts_customer_id_currency_account_code_key;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_customer_paper_account_code
     ON customer_paper.accounts (customer_id, currency, account_code);
 DO $paper_account_code_check$
@@ -227,7 +231,10 @@ CREATE TABLE IF NOT EXISTS customer_paper.position_events (
 );
 
 CREATE OR REPLACE FUNCTION customer_paper.reject_mutation()
-RETURNS trigger LANGUAGE plpgsql AS $paper_immutable$
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, customer_paper
+AS $paper_immutable$
 BEGIN
     RAISE EXCEPTION 'customer paper ledger rows are append-only; post a compensating journal instead'
         USING ERRCODE = '55000';
@@ -259,7 +266,10 @@ CREATE TABLE IF NOT EXISTS customer_paper.market_bar_allocations (
 );
 
 CREATE OR REPLACE FUNCTION customer_paper.assert_market_bar_capacity()
-RETURNS trigger LANGUAGE plpgsql AS $paper_bar_capacity$
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, customer_paper
+AS $paper_bar_capacity$
 DECLARE
     maximum_capacity numeric(38,18);
     already_allocated numeric(38,18);
@@ -315,7 +325,10 @@ $paper_bar_guard_check$;
 REVOKE ALL ON FUNCTION customer_paper.verify_market_bar_capacity_guards() FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION customer_paper.assert_balanced_journal()
-RETURNS trigger LANGUAGE plpgsql AS $paper_balance$
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, customer_paper
+AS $paper_balance$
 DECLARE
     target_id uuid;
     event_name text;
@@ -361,7 +374,10 @@ END
 $paper_balance$;
 
 CREATE OR REPLACE FUNCTION customer_paper.assert_order_event_state()
-RETURNS trigger LANGUAGE plpgsql AS $paper_event_state$
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, customer_paper
+AS $paper_event_state$
 DECLARE
     previous_event text;
     previous_filled numeric(38,18);
