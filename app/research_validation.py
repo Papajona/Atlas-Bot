@@ -342,14 +342,15 @@ def oos_benchmark_comparison(
             # wrap from the end of a fold into its beginning.
             shift = int(rng.integers(1, len(original_signal))) if len(original_signal) > 1 else 0
             shifted = np.zeros_like(original_signal)
+            shifted_atr = np.full_like(atr, np.nan, dtype=float)
             if shift < len(shifted):
                 shifted[shift:] = original_signal[:len(shifted) - shift]
+                shifted_atr[shift:] = atr[:len(shifted_atr) - shift]
             if bracket_configured:
-                from .execution_aware_research import simulate_execution_aware_strategy
                 simulated = simulate_execution_aware_strategy(
                     frame,
                     pd.Series(shifted, index=frame.index, dtype=float),
-                    pd.Series(atr, index=frame.index, dtype=float),
+                    pd.Series(shifted_atr, index=frame.index, dtype=float),
                     stop_atr=float(stop_atr),
                     take_profit_atr=float(take_profit_atr),
                     transaction_cost_bps=float(transaction_cost_bps),
