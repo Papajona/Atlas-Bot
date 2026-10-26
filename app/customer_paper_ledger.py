@@ -391,9 +391,19 @@ async def preflight_isolated_customer_paper_ledger(
                 if len(candidates) != 1:
                     policy_error = "MISSING" if not candidates else "MULTIPLE"
                 if policy_error:
-                    insecure_paper.append(
-                        f"customer_paper.{table}:TENANT_POLICY_INVALID_{policy_error}"
-                    )
+                    finding = f"customer_paper.{table}:TENANT_POLICY_INVALID_{policy_error}"
+                    # This is a schema-policy expression, not row data or a credential.
+                    # Include it only on a blocked preflight so deparser incompatibilities
+                    # can be diagnosed without printing database stdout/stderr.
+                    if row is not None and "USING_EXPRESSION" in policy_error:
+                        finding += ":qual=" + re.sub(
+                            r"\\s+", " ", str(row.get("qual") or "")
+                        )[:400]
+                    if row is not None and "WITH_CHECK_EXPRESSION" in policy_error:
+                        finding += ":with_check=" + re.sub(
+                            r"\\s+", " ", str(row.get("with_check") or "")
+                        )[:400]
+                    insecure_paper.append(finding)
             # These global tables contain only public bar metadata and aggregate fill capacity,
             # never customer IDs, positions, balances or journals. Their single policy is global
             # only for the dedicated backend role; RLS remains forced and direct API roles receive
