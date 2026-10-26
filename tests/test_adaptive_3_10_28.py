@@ -28,7 +28,7 @@ def test_challenger_cannot_materially_degrade_incumbent():
     assert 'WORSE_THAN_CHAMPION' in src
 
 
-def test_controller_does_not_reschedule_cycle_stopped_bot(monkeypatch):
+def test_controller_runs_real_cycle_and_preserves_invalid_risk_stop(monkeypatch):
     import asyncio
     from types import SimpleNamespace
 
@@ -39,9 +39,9 @@ def test_controller_does_not_reschedule_cycle_stopped_bot(monkeypatch):
         id=91,
         customer_id=7,
         trading_account_id=11,
-        asset="crypto",
-        symbol="BTC/USDT",
-        exchange="binance",
+        asset="forex",
+        symbol="EUR_USD",
+        exchange="oanda",
         timeframe="1h",
         days=30,
         risk_fraction=0.0,
@@ -56,6 +56,9 @@ def test_controller_does_not_reschedule_cycle_stopped_bot(monkeypatch):
         last_error="",
         consecutive_errors=0,
     )
+    profile = SimpleNamespace(id=7, status="ACTIVE")
+    account = SimpleNamespace(id=11, status="ACTIVE", equity=10000.0)
+    state = SimpleNamespace(kill_switch=False, live_enabled=False)
 
     class FakeQueryResult:
         def scalars(self):
@@ -63,6 +66,9 @@ def test_controller_does_not_reschedule_cycle_stopped_bot(monkeypatch):
 
         def all(self):
             return [bot]
+
+        def scalar_one_or_none(self):
+            return bot
 
     class FakeSession:
         async def __aenter__(self):
@@ -74,47 +80,44 @@ def test_controller_does_not_reschedule_cycle_stopped_bot(monkeypatch):
         async def execute(self, query):
             return FakeQueryResult()
 
-        async def get(self, model, bot_id):
-            return bot if bot_id == bot.id else None
+        async def get(self, model, ident):
+            return {
+                "CustomerProfile": profile,
+                "TradingAccount": account,
+                "AppState": state,
+            }.get(model.__name__)
 
         async def commit(self):
             return None
 
-    cycle_requests = []
+    seen_requests = []
 
-    async def fake_cycle(bot_id, req, *, decision_id=None):
-        # This unit test isolates the controller's post-cycle persistence behavior.
-        # The real cycle's invalid-risk behavior is covered in
-        # test_worker_supervisor_and_paper_gate.py.
-        cycle_requests.append(req)
-        bot.status = "STOPPED"
-        bot.next_run_at = None
-        bot.last_error = "Persisted risk fraction is invalid; expected a finite value in (0, 0.02]"
-        bot.last_decision = "NO_TRADE"
-        bot.last_stage = "risk_fraction_invalid"
-        return {
-            "decision": "NO_TRADE",
-            "stage": "risk_fraction_invalid",
-            "reason": "Persisted risk fraction must be finite and in (0, 0.02]",
-        }
+    async def capture_decision_memory(**kwargs):
+        seen_requests.append(kwargs["req"])
+
+    async def return_true(*args, **kwargs):
+        return True
 
     async def no_op(*args, **kwargs):
         return None
 
-    async def return_true(*args, **kwargs):
-        return True
+    async def forbidden_external_work(*args, **kwargs):
+        raise AssertionError("invalid persisted risk must stop before external/data work")
 
     async def stop_after_one_cycle(seconds):
         raise asyncio.CancelledError()
 
     monkeypatch.setattr(main_module, "SessionLocal", lambda: FakeSession())
-    monkeypatch.setattr(main_module, "_run_persisted_adaptive_bot_cycle", fake_cycle)
-    monkeypatch.setattr(main_module, "_record_adaptive_decision_memory", no_op)
+    monkeypatch.setattr(main_module, "_record_adaptive_decision_memory", capture_decision_memory)
     monkeypatch.setattr(main_module, "acquire_lock", return_true)
     monkeypatch.setattr(main_module, "refresh_lock", return_true)
     monkeypatch.setattr(main_module, "release_lock", no_op)
     monkeypatch.setattr(main_module, "_mark_worker_loop_success", lambda *args: None)
     monkeypatch.setattr(main_module.asyncio, "sleep", stop_after_one_cycle)
+    monkeypatch.setattr(main_module, "_fetch_customer_oanda_data", forbidden_external_work)
+    monkeypatch.setattr(main_module, "_ensure_adaptive_model_locked", forbidden_external_work)
+    monkeypatch.setattr(main_module.settings, "paper_trading", True)
+    monkeypatch.setattr(main_module.settings, "live_trading_enabled", False)
 
     async def run_controller():
         with pytest.raises(asyncio.CancelledError):
@@ -123,12 +126,12 @@ def test_controller_does_not_reschedule_cycle_stopped_bot(monkeypatch):
     import anyio
     anyio.run(run_controller)
 
+    # The scheduler builds a valid request without forwarding the corrupt stored zero;
+    # the real cycle reloads risk_fraction=0.0 from persistence and fails closed.
+    assert len(seen_requests) == 1
+    assert 0.0 < float(seen_requests[0].risk_fraction) <= 0.02
     assert bot.status == "STOPPED"
     assert bot.next_run_at is None
     assert bot.last_error == "Persisted risk fraction is invalid; expected a finite value in (0, 0.02]"
     assert bot.last_decision == "NO_TRADE"
     assert bot.last_stage == "risk_fraction_invalid"
-    # A corrupt persisted zero must not be passed into the constrained request model.
-    # The cycle will validate the value reloaded from storage, not this request default.
-    assert len(cycle_requests) == 1
-    assert 0.0 < float(cycle_requests[0].risk_fraction) <= 0.02
