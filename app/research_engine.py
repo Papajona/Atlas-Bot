@@ -10,6 +10,10 @@ from .execution_aware_research import execution_turnover, simulate_execution_awa
 from .trading_core import ai_walk_forward_backtest
 from .strategy_evidence import evidence_for
 from .research_validation import monte_carlo_bootstrap, parameter_plateau_score, cost_breakeven_report
+from .research_evidence import (
+    canonical_sha256, oos_sample_fingerprint, validate_comparable_trial_archive,
+    validate_crypto_universe_manifest, validate_execution_cost_calibration,
+)
 from .config import settings
 
 # Fail-closed release gate: no trusted signed comparable-trial archive verifier is
@@ -401,6 +405,71 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     oos["trade_boundary_overlap_by_fold"] = ensemble_overlap["by_fold"]
     for fold_row, overlap_bars in zip(oos.get("folds", []), ensemble_overlap["by_fold"]):
         fold_row["boundary_overlap_bars"] = overlap_bars
+    # Validate signed evidence against this exact dataset and evaluation context.
+    evidence_keys = settings.research_evidence_public_keys_json
+    sample_windows = [
+        {"test_start": row.get("test_start"), "test_end": row.get("test_end"),
+         "bars": row.get("bars")} for row in oos.get("folds", [])
+    ]
+    sample_sha256 = oos_sample_fingerprint(provenance.get("sha256", ""), sample_windows)
+    research_context = {
+        "dataset_sha256": provenance.get("sha256", ""),
+        "oos_sample_sha256": sample_sha256,
+        "protocol_version": "atlas-purged-walk-forward-v1",
+    }
+    universe_validation = {"verified": False, "universe_verified": False,
+                           "reason": "NOT_APPLICABLE"}
+    if str(asset).lower() == "crypto":
+        universe_document = df.attrs.get("point_in_time_universe_manifest")
+        index_start = df.index[0].isoformat() if len(df.index) else ""
+        index_end = df.index[-1].isoformat() if len(df.index) else ""
+        universe_validation = validate_crypto_universe_manifest(
+            universe_document, evidence_keys,
+            venue=str(provenance.get("venue") or provenance.get("exchange") or ""),
+            market_type=str(provenance.get("market_type") or provenance.get("type") or "spot"),
+            coverage_start=index_start, coverage_end=index_end,
+            symbol=provenance.get("symbol"),
+        )
+        if universe_validation.get("universe_verified") is True:
+            universe_bias = "POINT_IN_TIME_VERIFIED"
+            data_quality["universe_bias"] = universe_bias
+    else:
+        universe_bias = "NOT_APPLICABLE"
+        data_quality["universe_bias"] = universe_bias
+
+    model_fingerprint = canonical_sha256({
+        "taker_bps": float(taker_bps), "slippage_bps": float(slippage_bps),
+        "carry_bps_per_bar": carry, "cost_stress_multiplier": cost_mult,
+    })
+    cost_document = df.attrs.get("execution_cost_calibration_evidence")
+    cost_validation = validate_execution_cost_calibration(
+        cost_document, evidence_keys,
+        venue=str(provenance.get("venue") or provenance.get("exchange") or ""),
+        market_type=str(provenance.get("market_type") or provenance.get("type") or "spot"),
+        symbol=str(provenance.get("symbol") or ""),
+        model_fingerprint=model_fingerprint,
+        max_spread_error_bps=settings.research_cost_max_spread_mae_bps,
+        max_slippage_error_bps=settings.research_cost_max_slippage_mae_bps,
+    )
+    calibration_ok = cost_validation.get("calibration_verified") is True
+    calibration_status = "VERIFIED" if calibration_ok else str(cost_validation.get("reason") or "MISSING")
+    calibration_evidence_id = cost_validation.get("evidence_id") if calibration_ok else None
+    ens_cost = dict(oos.get("cost_analysis") or {})
+    ens_cost.update({"execution_cost_model_complete": calibration_ok,
+                     "execution_cost_calibration_status": calibration_status,
+                     "execution_cost_calibration_evidence_id": calibration_evidence_id})
+
+    ai_result = None
+    if include_ai and walk_forward_purge_complete:
+        ai_result = ai_walk_forward_backtest(
+            df, asset=str(asset).lower(), folds=folds, min_train=min_train,
+            threshold=ai_threshold, cost_stress_multiplier=cost_mult,
+            research_trial_sharpes=[r.get("sharpe", 0.0) for r in results],
+            bars_per_year=max(1, int(round(annualization_factor))),
+            taker_bps=taker_bps, slippage_bps=slippage_bps,
+            carry_bps_per_bar=carry, max_hold_bars=research_hold_horizon,
+            research_trial_evidence_verified=bool(universe_validation.get("universe_verified") and calibration_ok),
+        )
     regime_performance = regime_conditioned_performance(df, ensemble_net, asset=asset)
     per_strategy_oos = {}
     for component in components:
@@ -459,6 +528,23 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             "oos_max_drawdown":variant_oos.get("max_drawdown"), "oos_trades":variant_oos.get("trades"),
             "oos_return_sample":variant_oos.get("oos_return_sample", []),
         })
+    # Propagate the same verified venue calibration to every OOS result used by
+    # the promotion gates; an ensemble-only report is not sufficient evidence.
+    oos["execution_cost_model_complete"] = calibration_ok
+    oos["execution_cost_calibration_status"] = calibration_status
+    oos["execution_cost_calibration_evidence_id"] = calibration_evidence_id
+    oos.setdefault("cost_analysis", {}).update(ens_cost)
+    for component in components:
+        row = per_strategy_oos.get(component)
+        if isinstance(row, dict):
+            row["execution_cost_model_complete"] = calibration_ok
+            row["execution_cost_calibration_status"] = calibration_status
+            row["execution_cost_calibration_evidence_id"] = calibration_evidence_id
+            row.setdefault("cost_analysis", {}).update(ens_cost)
+    for variant in variants:
+        variant["execution_cost_model_complete"] = calibration_ok
+        variant["execution_cost_calibration_status"] = calibration_status
+        variant["execution_cost_calibration_evidence_id"] = calibration_evidence_id
     robustness={"monte_carlo":monte_carlo_bootstrap(ensemble_net.to_numpy(),trials=500),"parameter_plateau":parameter_plateau_score({"variants":variants},metric="sharpe",tolerance=0.20),"parameter_variants":variants}
     # Formal DSR. Count every variant evaluated on this data: components + parameter variants (+ AI when included).
     net_ensemble = ensemble_net.to_numpy()
@@ -479,124 +565,6 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # outcomes must be restored and verified first.
     known_prior_labels = set(prior_trial_labels or ())
     n_trials = len(known_prior_labels | this_labels)
-    # Candidate statistics and signed evidence use an explicit protocol version.
-    # Bump it when split geometry changes so old attestations cannot be silently reused.
-    ens_cost = cost_breakeven_report(
-        gross.to_numpy(), turnover.to_numpy(),
-        taker_bps=taker_bps, slippage_bps=slippage_bps,
-        bars_per_year=max(1, int(round(annualization_factor))),
-        stress_multiplier=cost_mult,
-        fixed_cost_drag=None if carry is None else (ensemble_pos.abs() * (float(carry) / 10000.0)).to_numpy(),
-    )
-    ens_cost["carry_rate_configured"] = carry is not None
-    ens_cost["carry_evidence_source_present"] = bool(carry_evidence_source)
-    ens_cost["carry_evidence_id_present"] = bool(carry_evidence_id)
-    ens_cost["financing_cost_model_complete"] = carry_evidence_complete
-    ens_cost["intrabar_stop_target_model_complete"] = False
-    ens_cost["execution_cost_model_complete"] = False
-    ens_cost["execution_cost_calibration_status"] = "MISSING_VENUE_CALIBRATION_EVIDENCE"
-    ens_cost["execution_cost_calibration_evidence_id"] = None
-    if not carry_evidence_complete:
-        ens_cost["note"] = (
-            str(ens_cost.get("note") or "")
-            + " Financing promotion evidence requires a configured carry rate and traceable carry source/evidence ID."
-        ).strip()
-
-    ai_result = None
-    if include_ai:
-        try:
-            ai_result = ai_walk_forward_backtest(df, asset, folds, min_train, ai_threshold)
-        except Exception as exc:
-            ai_result = {"strategy": "ai_walk_forward", "status": "INSUFFICIENT_DATA", "error": str(exc)}
-
-    # External evidence is verified and bound to this exact dataset and split protocol.
-    from .research_evidence import (
-        canonical_sha256, oos_sample_fingerprint, validate_comparable_trial_archive,
-        validate_crypto_universe_manifest, validate_execution_cost_calibration,
-    )
-    evidence_keys = getattr(settings, "research_evidence_public_keys_json", "")
-    research_symbol = str(provenance.get("symbol") or df.attrs.get("symbol") or "").strip()
-    research_venue = str(provenance.get("exchange") or df.attrs.get("exchange") or "").strip()
-    research_market_type = str(provenance.get("market_type") or df.attrs.get("market_type") or "").strip()
-    research_timeframe = str(provenance.get("timeframe") or df.attrs.get("timeframe") or "").strip()
-    protocol_version = "atlas-purged-walk-forward-v2"
-    oos_windows = []
-    for split in validation_splits:
-        if (0 <= int(split.test_start) < len(df)
-                and 0 < int(split.test_end) <= len(df)
-                and int(split.test_end) > int(split.test_start)):
-            oos_windows.append({
-                "test_start": df.index[int(split.test_start)].isoformat(),
-                "test_end_inclusive": df.index[int(split.test_end) - 1].isoformat(),
-                "purge": int(split.purge), "embargo": int(split.embargo),
-            })
-    sample_sha256 = oos_sample_fingerprint(
-        str(provenance.get("sha256") or ""), oos_windows, protocol_version
-    )
-    research_context = {
-        "asset_class": str(asset).strip().lower(), "venue": research_venue.lower(),
-        "market_type": research_market_type.lower(), "symbol": research_symbol,
-        "timeframe": research_timeframe, "dataset_sha256": str(provenance.get("sha256") or ""),
-        "oos_sample_sha256": sample_sha256, "protocol_version": protocol_version,
-    }
-    universe_document = df.attrs.get("point_in_time_universe_manifest")
-    if str(asset).lower() == "crypto":
-        if research_venue and research_market_type and len(df.index):
-            universe_validation = validate_crypto_universe_manifest(
-                universe_document, evidence_keys, venue=research_venue, market_type=research_market_type,
-                coverage_start=df.index[0].isoformat(), coverage_end=df.index[-1].isoformat(),
-                symbol=research_symbol or None,
-            )
-        else:
-            universe_validation = {
-                "verified": False, "universe_verified": False,
-                "reason": "UNIVERSE_MARKET_PROVENANCE_MISSING",
-            }
-        universe_bias = (
-            "POINT_IN_TIME_VERIFIED"
-            if universe_validation.get("universe_verified") is True
-            else "CURRENT_SURVIVORS_ONLY_NO_POINT_IN_TIME_HISTORY"
-        )
-    else:
-        universe_validation = {
-            "verified": True, "universe_verified": True,
-            "reason": "NOT_APPLICABLE_TO_NON_CRYPTO_ASSET",
-        }
-        universe_bias = "NOT_APPLICABLE"
-    data_quality["universe_bias"] = universe_bias
-
-    model_fingerprint = canonical_sha256({
-        "model": "atlas-research-cost-v1",
-        "taker_bps": float(taker_bps),
-        "slippage_bps": float(slippage_bps),
-        "cost_stress_multiplier": float(cost_mult),
-    })
-    cost_document = df.attrs.get("execution_cost_calibration_evidence")
-    if research_venue and research_market_type and research_symbol:
-        cost_validation = validate_execution_cost_calibration(
-            cost_document, evidence_keys, venue=research_venue, market_type=research_market_type,
-            symbol=research_symbol, model_fingerprint=model_fingerprint,
-            max_spread_error_bps=settings.research_cost_max_spread_mae_bps,
-            max_slippage_error_bps=settings.research_cost_max_slippage_mae_bps,
-        )
-    else:
-        cost_validation = {
-            "verified": False, "calibration_verified": False,
-            "reason": "COST_CALIBRATION_MARKET_PROVENANCE_MISSING",
-        }
-    calibration_ok = cost_validation.get("calibration_verified") is True
-    calibration_status = "VERIFIED" if calibration_ok else "MISSING_VENUE_CALIBRATION_EVIDENCE"
-    calibration_evidence_id = cost_validation.get("evidence_id") if calibration_ok else None
-    # Calibration evidence alone does not mean the fixed-bps research executor
-    # applied the calibrated model. Keep execution_cost_model_complete false until
-    # the calibrated estimator is wired into the actual research return stream.
-    for cost_target in [ens_cost, oos, *per_strategy_oos.values()]:
-        cost_target["execution_cost_calibration_status"] = calibration_status
-        cost_target["execution_cost_calibration_evidence_id"] = calibration_evidence_id
-        cost_target["execution_cost_model_complete"] = False
-        cost_target["slippage_model_complete"] = False
-        cost_target["slippage_model_status"] = "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED"
-
     trial_registry_complete = False
     # DSR is calculated from every distinct candidate evaluated on the identical
     # fixed-signal OOS fold set in this run. The AI evaluator uses its own feature
