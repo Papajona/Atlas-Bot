@@ -297,7 +297,8 @@ def oos_benchmark_comparison(
             or (closes < lows).any() or (closes > highs).any()
         ):
             return {"status": "INVALID_DATA", "reason": "nonfinite_or_misaligned_benchmark_inputs"}
-        if bracket_configured and (not np.isfinite(atr).all() or (atr[entry != 0.0] <= 0).any()):
+        active_entries = entry != 0.0
+        if bracket_configured and bool((active_entries & (~np.isfinite(atr) | (atr <= 0.0))).any()):
             return {"status": "INVALID_DATA", "reason": "invalid_entry_atr_for_shifted_control"}
         # Each row earns open[i] -> open[i+1]. The terminal row uses its observed
         # close; never infer market movement from the candidate's stop/exit stream.
