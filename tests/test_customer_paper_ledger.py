@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 from decimal import Decimal
 from pathlib import Path
@@ -40,6 +40,11 @@ def _seed_lines(amount: str = "100"):
         {"account_code": "PAPER_CASH", "signed_amount": amount},
         {"account_code": "PAPER_EQUITY", "signed_amount": str(-Decimal(amount))},
     ]
+
+
+def _fresh_group_mark(price: str, *, at: datetime | None = None) -> dict[str, str]:
+    timestamp = at or datetime.now(timezone.utc)
+    return {"price": price, "quote_timestamp_utc": timestamp.isoformat()}
 
 
 def test_public_customer_paper_journal_writer_only_accepts_positive_seed():
@@ -551,7 +556,7 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
             quantity="1",
             price="100",
             fee_amount="1",
-            group_mark_prices={("binance", "spot", "BTC/USDT"): "100"},
+            group_mark_prices={("binance", "spot", "BTC/USDT"): _fresh_group_mark("100")},
         )
         assert second["order_status"] == "FILLED"
         final_order = await get_customer_paper_order(
@@ -616,7 +621,7 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
         sol_fill = await record_customer_paper_fill(
             customer_id=customer_id, client_order_id="risk-sol-entry-92001",
             idempotency_key="risk-sol-fill-92001", bar_key="risk-sol-bar-92001",
-            quantity="1", price="100", group_mark_prices={("binance", "spot", "ETH/USDT"): "200"},
+            quantity="1", price="100", group_mark_prices={("binance", "spot", "ETH/USDT"): _fresh_group_mark("200")},
         )
         assert sol_fill["status"] == "APPENDED"
         assert sol_fill["filled_quantity"] == "0.500000000000000000"
@@ -633,7 +638,37 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
             await record_customer_paper_fill(
                 customer_id=customer_id, client_order_id="risk-bnb-entry-92001",
                 idempotency_key="risk-bnb-fill-92001", bar_key="risk-bnb-bar-92001",
-                quantity="1", price="100", group_mark_prices={("binance", "spot", "ETH/USDT"): "200"},
+                quantity="1", price="100", group_mark_prices={("binance", "spot", "ETH/USDT"): _fresh_group_mark("200")},
+            )
+
+        # An otherwise complete mark map must still be rejected when one quote is stale.
+        stale_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+        with pytest.raises(CustomerPaperLedgerBlocked, match="mark is stale or from the future"):
+            await record_customer_paper_fill(
+                customer_id=customer_id, client_order_id="risk-bnb-entry-92001",
+                idempotency_key="risk-bnb-fill-stale-92001", bar_key="risk-bnb-bar-stale-92001",
+                quantity="1", price="100",
+                group_mark_prices={
+                    ("binance", "spot", "ETH/USDT"): _fresh_group_mark("200", at=stale_at),
+                    ("binance", "spot", "SOL/USDT"): _fresh_group_mark("100"),
+                },
+            )
+
+        # The same-symbol historical fill price is not a substitute for a fresh
+        # independently timestamped quote when an existing position already exists.
+        monkeypatch.setattr(settings, "correlation_group_cap_usd", 1000.0)
+        await submit_customer_paper_order(
+            customer_id=customer_id, client_order_id="lifecycle-btc-repeat-entry-92001",
+            venue="binance", market_type="spot", symbol="BTC/USDT", side="BUY",
+            quantity="1", currency="USDT", order_type="LIMIT", limit_price="100",
+        )
+        with pytest.raises(CustomerPaperLedgerBlocked, match="current mark is missing for an open correlation-group position"):
+            await record_customer_paper_fill(
+                customer_id=customer_id,
+                client_order_id="lifecycle-btc-repeat-entry-92001",
+                idempotency_key="lifecycle-btc-repeat-fill-92001",
+                bar_key="btc-repeat-bar-92001",
+                quantity="1", price="100",
             )
 
         # Queries are tenant-filtered; a different customer cannot inspect this order.
