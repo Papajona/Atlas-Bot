@@ -80,89 +80,6 @@ def _request_json(url: str, headers: dict[str, str], payload: dict | None = None
     return 0, {}
 
 
-def _select_gemini_flash_alternatives(models: list[dict], configured_model: str) -> list[str]:
-    """Select at most four currently listed stable Flash model IDs for failure diagnostics."""
-    import re
-
-    candidates: list[tuple[int, int, int, str]] = []
-    configured = configured_model.removeprefix("models/")
-    for item in models:
-        if not isinstance(item, dict):
-            continue
-        name = item.get("name")
-        methods = item.get("supportedGenerationMethods")
-        if not isinstance(name, str) or not isinstance(methods, list) or "generateContent" not in methods:
-            continue
-        model_id = name.removeprefix("models/")
-        if model_id == configured or "preview" in model_id.lower():
-            continue
-        match = re.fullmatch(r"gemini-(\d+)\.(\d+)-flash(-lite)?", model_id)
-        if not match:
-            continue
-        major, minor = int(match.group(1)), int(match.group(2))
-        # Prefer the non-lite model at the same version, then newer versions.
-        candidates.append((major, minor, 0 if match.group(3) else 1, model_id))
-    candidates.sort(reverse=True)
-    return [item[3] for item in candidates[:4]]
-
-
-def _diagnose_gemini_flash_alternatives(configured_model: str) -> None:
-    """After a configured model fails, probe up to four catalogue-listed stable Flash alternatives.
-
-    This diagnostic never converts a failed configured-model check into success. It only
-    reports a candidate that actually generated text with the configured API credential.
-    """
-    status, body = _request_json(
-        "https://generativelanguage.googleapis.com/v1beta/models",
-        {"x-goog-api-key": settings.gemini_api_key, "Accept": "application/json"},
-    )
-    listed = body.get("models")
-    if status != 200 or not isinstance(listed, list):
-        print(f"[DIAGNOSTIC] Gemini model catalogue unavailable (HTTP {status or 'network/error'}); no alternative inferred.")
-        return
-    alternatives = _select_gemini_flash_alternatives(listed, configured_model)
-    if not alternatives:
-        print("[DIAGNOSTIC] Gemini catalogue returned no stable alternative Flash IDs; no alternative inferred.")
-        return
-    for alternative in alternatives:
-        encoded_model = urllib.parse.quote(alternative, safe="-_.")
-        alt_status, alt_body = _request_json(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{encoded_model}:generateContent",
-            {"Content-Type": "application/json", "x-goog-api-key": settings.gemini_api_key},
-            {
-                "contents": [{"parts": [{"text": "Reply with OK."}]}],
-                "generationConfig": {"maxOutputTokens": 1024, "temperature": 0},
-            },
-        )
-        candidates = alt_body.get("candidates")
-        text = ""
-        if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
-            content = candidates[0].get("content")
-            parts = content.get("parts") if isinstance(content, dict) else []
-            if isinstance(parts, list):
-                text = "".join(
-                    part.get("text", "") for part in parts
-                    if isinstance(part, dict) and isinstance(part.get("text", ""), str)
-                )
-        if alt_status == 200 and text.strip():
-            detail = "inference succeeded; configure and rerun the gate before release."
-        else:
-            detail = f"generation failed (HTTP {alt_status or 'network/error'})"
-            error = alt_body.get("error")
-            if isinstance(error, dict) and isinstance(error.get("message"), str):
-                detail += "; provider_error=" + error["message"][:180]
-            prompt_feedback = alt_body.get("promptFeedback")
-            if isinstance(prompt_feedback, dict) and prompt_feedback.get("blockReason"):
-                detail += "; prompt_block_reason=" + str(prompt_feedback["blockReason"])[:80]
-            if alt_status == 200:
-                detail += "; candidates=" + str(len(candidates) if isinstance(candidates, list) else 0)
-                if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
-                    finish = candidates[0].get("finishReason")
-                    if finish:
-                        detail += "; finish_reason=" + str(finish)[:80]
-        print(f"[DIAGNOSTIC {'PASS' if alt_status == 200 and text.strip() else 'FAIL'}] Gemini alternative {alternative}: {detail}")
-
-
 def _check_gemini(model: str) -> bool:
     encoded_model = urllib.parse.quote(model, safe="-_.")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{encoded_model}:generateContent"
@@ -361,8 +278,7 @@ def main() -> int:
         for model in provider_models:
             checked += 1
             model_ok = checker(model)
-            if not model_ok and provider == "Gemini":
-                _diagnose_gemini_flash_alternatives(model)
+            # Never probe fallback Gemini IDs: this gate verifies only the approved model.
             failures += not model_ok
     if not checked:
         print("AI provider verification: NOT VERIFIED (no model checks were configured).")
