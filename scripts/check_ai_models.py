@@ -264,7 +264,7 @@ def main() -> int:
         return 2
 
     models = [
-        ("Gemini", sorted({settings.gemini_model, settings.gemini_strategy_model} - {""}), _check_gemini),
+        ("Gemini", [settings.gemini_model], _check_gemini),
         ("Groq", sorted({settings.groq_model, settings.groq_strategy_model} - {""}), _check_groq),
     ]
     if settings.cerebras_api_key:
