@@ -1109,10 +1109,49 @@ async def _run_persisted_adaptive_bot_cycle(
         state = await db.get(AppState, 1)
         if not profile or not account or account.status != "ACTIVE" or not state or state.kill_switch:
             return {"decision": "NO_TRADE", "stage": "risk_state"}
-        equity = max(0.0, float(account.equity))
-        risk_fraction = float(bot.risk_fraction or settings.risk_per_trade)
+        # Do not mask malformed or non-finite equity by clamping it to zero.
+        # Customer-paper cycles replace this value with their isolated paper cash below.
+        try:
+            equity = float(account.equity)
+        except (TypeError, ValueError, OverflowError):
+            equity = float("nan")
+
+        # None means use the configured default. Other falsy/corrupt persisted values
+        # must not silently fall back to a larger risk budget.
+        configured_risk_fraction = (
+            settings.risk_per_trade if bot.risk_fraction is None else bot.risk_fraction
+        )
+        try:
+            risk_fraction = float(configured_risk_fraction)
+        except (TypeError, ValueError, OverflowError):
+            risk_fraction = float("nan")
+        if not math.isfinite(risk_fraction) or not 0.0 < risk_fraction <= 0.02:
+            bot.status = "STOPPED"
+            bot.next_run_at = None
+            bot.last_error = "Persisted risk fraction is invalid; expected a finite value in (0, 0.02]"
+            bot.last_decision = "NO_TRADE"
+            bot.last_stage = "risk_fraction_invalid"
+            await db.commit()
+            return {
+                "decision": "NO_TRADE",
+                "stage": "risk_fraction_invalid",
+                "reason": "Persisted risk fraction must be finite and in (0, 0.02]",
+            }
+
         paper_mode = bool(settings.paper_trading or not settings.live_trading_enabled or not state.live_enabled or bot.mode != "LIVE")
         needs_customer_paper = bool(paper_mode and profile.id is not None)
+        if not needs_customer_paper and (not math.isfinite(equity) or equity <= 0.0):
+            bot.status = "STOPPED"
+            bot.next_run_at = None
+            bot.last_error = "Account equity is invalid; live risk sizing requires finite positive account equity"
+            bot.last_decision = "NO_TRADE"
+            bot.last_stage = "risk_equity_invalid"
+            await db.commit()
+            return {
+                "decision": "NO_TRADE",
+                "stage": "risk_equity_invalid",
+                "reason": "Live risk sizing requires finite positive account equity",
+            }
         if needs_customer_paper and not _customer_paper_configuration_ready():
             bot.status = "STOPPED"
             bot.next_run_at = None
@@ -1278,7 +1317,7 @@ async def _run_persisted_adaptive_bot_cycle(
     distance = abs(float(plan["entry_price"]) - float(plan["stop_loss_price"]))
     if distance <= 0:
         return {"decision": "NO_TRADE", "stage": "risk_distance"}
-    risk_cash = equity * float(risk_fraction or settings.risk_per_trade)
+    risk_cash = equity * risk_fraction
     quantity = min(risk_cash / distance, settings.max_notional_usd / max(float(plan["entry_price"]), 1e-12))
     if derivatives_context.get("state") == "ELEVATED":
         quantity *= max(0.0, min(1.0, settings.derivatives_elevated_size_multiplier))
