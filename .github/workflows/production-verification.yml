@@ -1,4 +1,4 @@
-name: Production Verification Gate
+name: Production Core Verification (live AI provider check manual)
 on:
   workflow_dispatch:
   pull_request:
@@ -215,19 +215,29 @@ jobs:
         run: |
           python -m pytest -m postgres -q -rs --junitxml=postgres-marked.xml
           python scripts/assert_no_skips.py postgres-marked.xml
-      - name: Enforce provider verification result
+      - name: Report live provider verification result
         if: always()
         env:
           PROVIDER_VERIFICATION_OUTCOME: ${{ steps.ai_provider_verification.outcome }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
           if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
-            echo "BLOCKED: live provider inference is intentionally disabled for automatic CI events to avoid repeated API quota use."
-            echo "Run this workflow manually on the exact commit when provider quota is available. Production provider verification remains unverified until that live check passes."
-            exit 1
+            echo "::notice title=Live provider verification deferred::Automatic CI did not call live AI providers; provider readiness remains unverified."
+            {
+              echo "## Live AI provider verification: NOT RUN"
+              echo "Automatic CI intentionally avoids live AI inference to conserve provider quota."
+              echo "Core tests, database checks, and security checks may pass, but this run is **not** a production release attestation."
+              echo "For an explicit provider attestation, manually run this workflow against the exact candidate commit when provider quota is available."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
           if [ "$PROVIDER_VERIFICATION_OUTCOME" != "success" ]; then
-            echo "BLOCKED: production gate requires successful live inference for every configured AI provider."
+            echo "## Live AI provider verification: FAILED" >> "$GITHUB_STEP_SUMMARY"
+            echo "BLOCKED: production provider verification requires successful live inference for every configured AI provider."
             exit 1
           fi
+          {
+            echo "## Live AI provider verification: PASSED"
+            echo "Live inference succeeded for every configured provider in this manual run."
+          } >> "$GITHUB_STEP_SUMMARY"
           echo "Live AI provider verification passed for every configured model."
