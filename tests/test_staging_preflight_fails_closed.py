@@ -70,10 +70,4 @@ def test_staging_preflight_classifies_authentication_failure_without_exposing_da
     assert "print(result.stdout" not in workflow
 
 
-def test_staging_preflight_collapses_policy_diagnostic_whitespace_correctly():
-    ledger = (ROOT / "app" / "customer_paper_ledger.py").read_text(encoding="utf-8")
-    assert r're.sub(r"\\s+", " ", str(row.get("qual") or ""))' not in ledger
-    assert r're.sub(r"\\s+", " ", str(row.get("with_check") or ""))' not in ledger
-    assert r're.sub(r"\s+", " ", str(row.get("qual") or ""))' in ledger
-    assert r're.sub(r"\s+", " ", str(row.get("with_check") or ""))' in ledger
 

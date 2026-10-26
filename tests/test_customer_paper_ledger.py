@@ -25,6 +25,7 @@ from app.customer_paper_ledger import (
     CustomerPaperIdempotencyConflict,
     CustomerPaperLedgerBlocked,
     _tenant_policy_expression_is_exact,
+    _single_line_policy_diagnostic,
     _tenant_policy_validation_error,
     _validated_paper_journal,
     _configured_database_role,
@@ -1074,6 +1075,20 @@ def test_customer_paper_entry_discipline_and_position_ownership_are_enforced(mon
         assert protection["status"] == "APPENDED"
 
     asyncio.run(run())
+
+def test_customer_paper_policy_diagnostic_collapses_multiline_expression_to_one_line():
+    expression = (
+        "customer_id =\n"
+        "    (SELECT NULLIF(current_setting('app.customer_id ', true),\n"
+        "    '')::bigint)"
+    )
+    diagnostic = _single_line_policy_diagnostic(expression)
+    assert diagnostic == (
+        "customer_id = (SELECT NULLIF(current_setting('app.customer_id ', true), '')::bigint)"
+    )
+    assert "\n" not in diagnostic
+    assert "\r" not in diagnostic
+
 
 def test_customer_paper_policy_validator_accepts_exact_statement_constant_subquery_only():
     scalar = (
