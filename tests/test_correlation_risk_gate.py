@@ -229,6 +229,79 @@ def test_customer_paper_buy_still_fails_closed_on_unpriced_same_group_position(m
 
 
 
+def test_customer_paper_group_marks_carry_fresh_quote_timestamps(monkeypatch):
+    import asyncio
+    from datetime import datetime, timezone
+    from app import main
+    import app.customer_paper_lifecycle as lifecycle
+
+    async def positions(**_kwargs):
+        return [{
+            "symbol": "ETH/USDT",
+            "venue": "binance",
+            "quantity": "1",
+            "average_entry_price": "100",
+        }]
+
+    class Request:
+        symbol = "ETH/USDT"
+        exchange = "binance"
+
+    monkeypatch.setattr(lifecycle, "get_customer_paper_positions", positions)
+    timestamp = datetime.now(timezone.utc).isoformat()
+    marks = asyncio.run(main._customer_paper_group_mark_prices(
+        customer_id=773,
+        req=Request(),
+        market_context={
+            "bid": 2000,
+            "quote_age_seconds": 0.0,
+            "quote_timestamp_utc": timestamp,
+        },
+    ))
+
+    mark = marks[("binance", "spot", "ETH/USDT")]
+    assert mark["price"] == "2000.000000000000000000"
+    assert mark["quote_timestamp_utc"] == timestamp
+
+
+def test_customer_paper_exposure_rejects_timestamp_stale_mark_even_if_reported_age_is_fresh(monkeypatch):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from app import main
+    import app.customer_paper_lifecycle as lifecycle
+
+    async def positions(**_kwargs):
+        return [{
+            "symbol": "ETH/USDT",
+            "venue": "binance",
+            "quantity": "1",
+            "average_entry_price": "100",
+        }]
+
+    class Request:
+        symbol = "ETH/USDT"
+        exchange = "binance"
+
+    monkeypatch.setattr(lifecycle, "get_customer_paper_positions", positions)
+    stale_timestamp = (
+        datetime.now(timezone.utc) - timedelta(seconds=15)
+    ).isoformat()
+    result = asyncio.run(main._customer_paper_positions_for_exposure(
+        customer_id=774,
+        req=Request(),
+        market_context={
+            "bid": 2000,
+            # Deliberately contradict the timestamp: the timestamp must still win.
+            "quote_age_seconds": 0.0,
+            "quote_timestamp_utc": stale_timestamp,
+        },
+    ))
+
+    assert result["ok"] is False
+    assert result["stage"] == "paper_exposure_mark_unavailable"
+    assert "stale" in result["reason"]
+
+
 def test_customer_paper_buy_uses_effective_price_and_atomic_fill_cap():
     from pathlib import Path
 
