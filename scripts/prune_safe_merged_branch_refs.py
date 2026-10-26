@@ -253,16 +253,23 @@ def _main_has_explicit_android_release_gate(main_sha: str) -> bool:
     release_job = workflow.split("  android-release:\n", 1)[1].split(
         "\n    runs-on:", 1
     )[0]
+    expected_release_condition = (
+        "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || "
+        "(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v'))"
+    )
+    release_conditions = [
+        " ".join(line.split("if:", 1)[1].split())
+        for line in release_job.splitlines()
+        if line.startswith("    if:")
+    ]
     return (
         'tags:\n      - "android-v*"' in push_trigger
         and "branches:" not in push_trigger
         and "paths:" not in push_trigger
-        and "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
-        in release_job
-        and "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v')"
-        in release_job
-        and "github.event_name == 'push' && github.ref == 'refs/heads/main'"
-        not in release_job
+        # Require the whole job condition, not merely the presence of two safe
+        # alternatives. Extra alternatives (for example pull_request) can bypass
+        # the release boundary even when the required substrings are present.
+        and release_conditions == [expected_release_condition]
         and "test_signed_release_is_only_triggered_by_an_explicit_release_tag_or_manual_main_dispatch"
         in test_source
     )
