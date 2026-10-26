@@ -329,7 +329,7 @@ def validate_comparable_trial_archive(document, trusted_public_keys, *, candidat
 
 
 def oos_sample_fingerprint(dataset_sha256: str, oos_windows: list[dict[str, Any]],
-                           protocol_version: str = "atlas-purged-walk-forward-v1") -> str:
+                           protocol_version: str = RESEARCH_PROTOCOL_VERSION) -> str:
     if not _sha(dataset_sha256) or not oos_windows:
         return ""
     return canonical_sha256({"dataset_sha256": dataset_sha256,
