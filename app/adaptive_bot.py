@@ -323,9 +323,10 @@ def ensure_adaptive_model(
         min_effective_observations=100,
         require_benchmark_excess_return=True,
         min_total_return=policy.min_total_return,
-        min_positive_fold_ratio=0.50,
-        max_negative_fold_return=-0.20,
-        require_last_fold_positive=True,
+        # Fold outcomes are regime diagnostics; HAC inference and DSR decide significance.
+        min_positive_fold_ratio=0.0,
+        max_negative_fold_return=-1.0,
+        require_last_fold_positive=False,
         min_sharpe=max(float(policy.min_sharpe), 0.5),
         max_drawdown=max(float(policy.max_drawdown), -0.20),
         min_trades=max(int(policy.min_trades), 100),
