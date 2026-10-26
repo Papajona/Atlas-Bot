@@ -835,7 +835,8 @@ def paper_candidates(
             min_positive_fold_ratio=0.0,
             max_negative_fold_return=-1.0,
             require_last_fold_positive=False,
-            min_sharpe=min_sharpe,
+            # Annualized Sharpe remains a display metric; HAC inference and DSR gate promotion.
+            min_sharpe=None,
             max_drawdown=max_drawdown,
             min_trades=min_trades,
             min_mean_t_statistic=1.645,
