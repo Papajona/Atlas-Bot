@@ -563,6 +563,16 @@ class Settings(BaseSettings):
             )
         return normalized
 
+    @field_validator("gemini_model", "gemini_strategy_model")
+    @classmethod
+    def _validate_gemini_model(cls, value: str) -> str:
+        normalized = str(value or "").strip().removeprefix("models/")
+        if normalized != "gemini-3.5-flash":
+            raise ValueError(
+                "Gemini model must be exactly gemini-3.5-flash; alternative Gemini IDs are not permitted."
+            )
+        return normalized
+
     @model_validator(mode="after")
     def _production_security_requirements(self):
         if self.live_enable_request_ttl_minutes < 1:
