@@ -49,12 +49,19 @@ jobs:
             [[ "$branch" == "main" ]] && continue
 
             start_sha="$(git rev-parse "$remote_ref")"
+            git checkout --detach "$start_sha" >/dev/null 2>&1
             if git merge-base --is-ancestor "$NATIVE_AI_COMMIT" "$start_sha"; then
-              skipped+=("$branch (already contains Native AI commit)")
+              if grep -RInE 'gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\\.googleapis\\.com|_gemini_json|settings\\.gemini_api_key|SECRET_GEMINI|GROQ_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|api\\.groq\\.com|api\\.cerebras\\.ai' \\
+                app scripts deploy .github/workflows \\
+                --exclude='propagate-native-ai-all-branches.yml' >"$RUNNER_TEMP/hosted-ai-scan.txt"; then
+                failed+=("$branch: already contains Native AI commit but hosted-AI wiring was reintroduced")
+                echo "::warning title=Native AI branch needs repair::$branch contains old or reintroduced hosted-AI wiring."
+                sed -n '1,30p' "$RUNNER_TEMP/hosted-ai-scan.txt"
+              else
+                skipped+=("$branch (Native AI commit present; active-code scan clean)")
+              fi
               continue
             fi
-
-            git checkout --detach "$start_sha" >/dev/null 2>&1
             if ! git cherry-pick -X theirs "$NATIVE_AI_COMMIT" >"$RUNNER_TEMP/cherry-pick.log" 2>&1; then
               if [[ -n "$(git rev-parse -q --verify CHERRY_PICK_HEAD 2>/dev/null || true)" ]] && git diff --cached --quiet; then
                 git cherry-pick --skip >/dev/null 2>&1 || true
