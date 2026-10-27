@@ -66,7 +66,7 @@ jobs:
 
           # Build a patch commit containing only the reviewed runtime/deployment paths.
           # This avoids cherry-picking the canonical commit's unrelated test rewrites
-          # and lets Git resolve only overlapping hunks in favor of the cleanup.
+          # and leaves overlapping hunks unresolved for explicit branch reconciliation.
           NATIVE_AI_PARENT="$(git rev-parse "$NATIVE_AI_COMMIT^")"
           git checkout --detach "$NATIVE_AI_PARENT" >/dev/null
           if ! git diff --binary "$NATIVE_AI_PARENT" "$NATIVE_AI_COMMIT" -- "${NATIVE_AI_PATHS[@]}" > "$RUNNER_TEMP/native-ai-runtime.patch"; then
@@ -341,11 +341,11 @@ jobs:
             if [[ -n "$before_refs" ]]; then
               echo "ACTIVE PROVIDER REFERENCES before propagation on $branch: $before_refs" >&2
             fi
-            if ! git cherry-pick -X theirs "$NATIVE_AI_RUNTIME_PATCH_COMMIT" >"$RUNNER_TEMP/cherry-pick.log" 2>&1; then
+            if ! git cherry-pick "$NATIVE_AI_RUNTIME_PATCH_COMMIT" >"$RUNNER_TEMP/cherry-pick.log" 2>&1; then
               echo "FAILED branch reconciliation: $branch could not apply the runtime-only Native AI cleanup patch; diagnostic follows." >&2
               cat "$RUNNER_TEMP/cherry-pick.log" >&2 || true
               git cherry-pick --abort >/dev/null 2>&1 || true
-              failed+=("$branch: runtime-only cleanup patch conflicts or cannot be applied; no target-ref update was attempted")
+              failed+=("$branch: runtime-only cleanup patch conflicts or cannot be applied safely; no target-ref update was attempted")
               continue
             fi
             after_refs="$(scan_active_provider_refs)" || { git cherry-pick --abort >/dev/null 2>&1 || true; failed+=("$branch: post-change provider scan errored; branch left unchanged"); continue; }
