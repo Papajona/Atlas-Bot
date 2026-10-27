@@ -799,7 +799,7 @@ def transform_ai_providers(commit: str) -> None:
             canonical_nodes_by_name.setdefault(defined_name, canonical_node)
     canonical_names = set(canonical_nodes_by_name)
     provider_adapter_names = {
-        "_gemini_json", "_groq_json", "_prompt",
+        "_gemini_json", "_groq_json", "_cerebras_json", "_openai_json", "_prompt",
         "dual_ai_research_review", "dual_ai_trade_safety_review",
     }
     extras: list[str] = []
@@ -1285,6 +1285,452 @@ def transform_ai_providers(commit: str) -> None:
     if PROVIDER_RE.search(result):
         raise MigrationError("app/ai_providers.py still contains hosted-provider wiring after facade migration")
     path.write_text(result, encoding="utf-8")
+
+
+
+def _is_safe_legacy_hosted_strategy_generator(node: ast.AST) -> bool:
+    """Recognize only the known legacy Gemini/Groq[/Cerebras] fallback wrapper.
+
+    The wrapper's schema validation and market-context call are deliberately checked
+    before replacing it with the canonical Native AI draft builder. Any extra business
+    logic, side-effecting expression, decorator, or output field fails closed.
+    """
+    if not isinstance(node, ast.AsyncFunctionDef) or node.decorator_list:
+        return False
+    if node.name != "generate_strategy_draft":
+        return False
+    args = node.args
+    if (args.posonlyargs or args.args or args.vararg or args.kwarg
+            or [a.arg for a in args.kwonlyargs] != ["prompt", "name", "asset", "symbol", "timeframe"]
+            or args.kw_defaults != [None, None, None]):
+        return False
+
+    def inert_annotation(value: ast.AST | None) -> bool:
+        if value is None or isinstance(value, (ast.Name, ast.Constant)):
+            return True
+        if isinstance(value, ast.Attribute):
+            return inert_annotation(value.value)
+        if isinstance(value, ast.Subscript):
+            return inert_annotation(value.value) and inert_annotation(value.slice)
+        if isinstance(value, (ast.Tuple, ast.List)):
+            return all(inert_annotation(item) for item in value.elts)
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
+            return inert_annotation(value.left) and inert_annotation(value.right)
+        return False
+
+    if any(not inert_annotation(a.annotation) for a in args.kwonlyargs):
+        return False
+    if not inert_annotation(node.returns):
+        return False
+
+    body = list(node.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]
+
+    def is_name(value: ast.AST | None, expected: str) -> bool:
+        return isinstance(value, ast.Name) and value.id == expected
+
+    def is_string(value: ast.AST | None, expected: str) -> bool:
+        return isinstance(value, ast.Constant) and value.value == expected
+
+    provider_keys = {
+        "gemini": "gemini_api_key",
+        "groq": "groq_api_key",
+        "cerebras": "cerebras_api_key",
+    }
+
+    def is_setting(value: ast.AST | None, field: str) -> bool:
+        return isinstance(value, ast.Attribute) and value.attr == field and is_name(value.value, "settings")
+
+    def settings_flag_names(value: ast.AST) -> list[str] | None:
+        if not isinstance(value, ast.BoolOp) or not isinstance(value.op, ast.And) or len(value.values) < 2:
+            return None
+        result: list[str] = []
+        for term in value.values:
+            if (not isinstance(term, ast.UnaryOp) or not isinstance(term.op, ast.Not)
+                    or not isinstance(term.operand, ast.Attribute) or not is_name(term.operand.value, "settings")):
+                return None
+            key = term.operand.attr
+            if key not in set(provider_keys.values()) or key in result:
+                return None
+            result.append(key)
+        return result
+
+    def is_provider_list(value: ast.AST, expected: list[str]) -> bool:
+        return isinstance(value, ast.List) and all(is_string(item, item.value) for item in value.elts if isinstance(item, ast.Constant)) and [
+            item.value if isinstance(item, ast.Constant) else None for item in value.elts
+        ] == expected
+
+    def is_provider_append(statement: ast.stmt, provider: str) -> bool:
+        if not isinstance(statement, ast.If) or statement.orelse or len(statement.body) != 1:
+            return False
+        if not is_setting(statement.test, provider_keys[provider]):
+            return False
+        expr = statement.body[0]
+        return (
+            isinstance(expr, ast.Expr) and isinstance(expr.value, ast.Call)
+            and isinstance(expr.value.func, ast.Attribute) and expr.value.func.attr == "append"
+            and is_name(expr.value.func.value, "provider_order")
+            and len(expr.value.args) == 1 and is_string(expr.value.args[0], provider)
+            and not expr.value.keywords
+        )
+
+    def is_ai_provider_error_raise(statement: ast.stmt, message: str | None = None) -> bool:
+        if not isinstance(statement, ast.Raise) or not isinstance(statement.exc, ast.Call):
+            return False
+        call = statement.exc
+        if not is_name(call.func, "AIProviderError") or len(call.args) != 1 or call.keywords:
+            return False
+        if message is not None:
+            return is_string(call.args[0], message) and statement.cause is None
+        # The only nonconstant error message permitted is the known provider-error
+        # aggregation: prefix + "; ".join(f"{k}: {v}" for k, v in provider_errors.items()).
+        allowed_names = {"provider_errors", "k", "v"}
+        for item in ast.walk(call.args[0]):
+            if isinstance(item, ast.Name) and item.id not in allowed_names:
+                return False
+            if isinstance(item, ast.Call):
+                if isinstance(item.func, ast.Attribute):
+                    if item.func.attr not in {"join", "items"}:
+                        return False
+                else:
+                    return False
+            if isinstance(item, ast.Attribute) and item.attr not in {"join", "items"}:
+                return False
+        return statement.cause is None
+
+    if len(body) not in {11, 13}:
+        return False
+    guard = body[0]
+    if not isinstance(guard, ast.If) or guard.orelse or len(guard.body) != 1:
+        return False
+    missing = settings_flag_names(guard.test)
+    if not missing or len(missing) not in {2, 3}:
+        return False
+    if set(missing) not in (
+        {"gemini_api_key", "groq_api_key"},
+        {"gemini_api_key", "groq_api_key", "cerebras_api_key"},
+    ):
+        return False
+    if not is_ai_provider_error_raise(guard.body[0], "No AI strategy provider is configured"):
+        return False
+
+    errors = body[1]
+    if not isinstance(errors, ast.AnnAssign) or not is_name(errors.target, "provider_errors"):
+        return False
+    if not isinstance(errors.value, ast.Dict) or errors.value.keys or errors.value.values:
+        return False
+    if not inert_annotation(errors.annotation):
+        return False
+
+    if len(body) == 11:
+        order = body[2]
+        if not isinstance(order, ast.Assign) or len(order.targets) != 1 or not is_name(order.targets[0], "provider_order"):
+            return False
+        order_value = order.value
+        if not (
+            isinstance(order_value, ast.IfExp)
+            and is_setting(order_value.test, "gemini_api_key")
+            and is_provider_list(order_value.body, ["gemini", "groq"])
+            and is_provider_list(order_value.orelse, ["groq"])
+        ):
+            return False
+        enabled_both = body[3]
+        if (not isinstance(enabled_both, ast.If) or enabled_both.orelse or len(enabled_both.body) != 1
+                or not isinstance(enabled_both.test, ast.BoolOp) or not isinstance(enabled_both.test.op, ast.And)
+                or len(enabled_both.test.values) != 2
+                or not is_setting(enabled_both.test.values[0], "gemini_api_key")
+                or not is_setting(enabled_both.test.values[1], "groq_api_key")):
+            return False
+        assign_order = enabled_both.body[0]
+        if (not isinstance(assign_order, ast.Assign) or len(assign_order.targets) != 1
+                or not is_name(assign_order.targets[0], "provider_order")
+                or not is_provider_list(assign_order.value, ["gemini", "groq"])):
+            return False
+        position = 4
+    else:
+        order = body[2]
+        if (not isinstance(order, ast.Assign) or len(order.targets) != 1
+                or not is_name(order.targets[0], "provider_order")
+                or not isinstance(order.value, ast.List) or order.value.elts):
+            return False
+        if not all(is_provider_append(body[i], provider) for i, provider in zip(
+            (3, 4, 5), ("gemini", "groq", "cerebras")
+        )):
+            return False
+        position = 6
+
+    raw = body[position]
+    if (not isinstance(raw, ast.AnnAssign) or not is_name(raw.target, "raw")
+            or not is_string(raw.value, None) and not (isinstance(raw.value, ast.Constant) and raw.value.value is None)
+            or not inert_annotation(raw.annotation)):
+        return False
+    provider_used = body[position + 1]
+    if (not isinstance(provider_used, ast.Assign) or len(provider_used.targets) != 1
+            or not is_name(provider_used.targets[0], "provider_used") or not is_string(provider_used.value, "")):
+        return False
+
+    loop = body[position + 2]
+    if (not isinstance(loop, ast.For) or not is_name(loop.target, "provider")
+            or not is_name(loop.iter, "provider_order") or loop.orelse or len(loop.body) != 1
+            or not isinstance(loop.body[0], ast.Try)):
+        return False
+    loop_try = loop.body[0]
+    if loop_try.orelse or loop_try.finalbody or len(loop_try.body) != 3 or len(loop_try.handlers) != 1:
+        return False
+    parse_assign, provider_assign, break_stmt = loop_try.body
+    if (not isinstance(parse_assign, ast.Assign) or len(parse_assign.targets) != 1
+            or not is_name(parse_assign.targets[0], "raw") or not isinstance(parse_assign.value, ast.Await)
+            or not isinstance(parse_assign.value.value, ast.Call)
+            or not is_name(parse_assign.value.value.func, "_generate_with_provider")
+            or len(parse_assign.value.value.args) != 2
+            or not is_name(parse_assign.value.value.args[0], "provider")
+            or parse_assign.value.value.keywords):
+        return False
+    prompt_call = parse_assign.value.value.args[1]
+    if (not isinstance(prompt_call, ast.Call) or not is_name(prompt_call.func, "_strategy_prompt")
+            or len(prompt_call.args) != 2 or not is_name(prompt_call.args[0], "prompt")
+            or not is_name(prompt_call.args[1], "name") or prompt_call.keywords):
+        return False
+    if (not isinstance(provider_assign, ast.Assign) or len(provider_assign.targets) != 1
+            or not is_name(provider_assign.targets[0], "provider_used") or not is_name(provider_assign.value, "provider")
+            or not isinstance(break_stmt, ast.Break)):
+        return False
+    handler = loop_try.handlers[0]
+    if (not is_name(handler.type, "Exception") or handler.name != "exc" or len(handler.body) != 1
+            or not isinstance(handler.body[0], ast.Assign)):
+        return False
+    handler_assign = handler.body[0]
+    if (len(handler_assign.targets) != 1 or not isinstance(handler_assign.targets[0], ast.Subscript)
+            or not is_name(handler_assign.targets[0].value, "provider_errors")
+            or not is_name(handler_assign.targets[0].slice, "provider")
+            or not isinstance(handler_assign.value, ast.Call) or not is_name(handler_assign.value.func, "str")
+            or len(handler_assign.value.args) != 1 or not is_name(handler_assign.value.args[0], "exc")
+            or handler_assign.value.keywords):
+        return False
+
+    empty_raw = body[position + 3]
+    if (not isinstance(empty_raw, ast.If) or empty_raw.orelse or len(empty_raw.body) != 1
+            or not isinstance(empty_raw.test, ast.Compare) or not is_name(empty_raw.test.left, "raw")
+            or len(empty_raw.test.ops) != 1 or not isinstance(empty_raw.test.ops[0], ast.Is)
+            or len(empty_raw.test.comparators) != 1 or not isinstance(empty_raw.test.comparators[0], ast.Constant)
+            or empty_raw.test.comparators[0].value is not None
+            or not is_ai_provider_error_raise(empty_raw.body[0])):
+        return False
+
+    validation = body[position + 4]
+    if (not isinstance(validation, ast.Try) or validation.orelse or validation.finalbody
+            or len(validation.body) != 2 or len(validation.handlers) != 1):
+        return False
+    model_check, context_check = validation.body
+    if (not isinstance(model_check, ast.Assign) or len(model_check.targets) != 1
+            or not is_name(model_check.targets[0], "spec") or not isinstance(model_check.value, ast.Call)
+            or not isinstance(model_check.value.func, ast.Attribute) or model_check.value.func.attr != "model_validate"
+            or not is_name(model_check.value.func.value, "AIStrategySpec")
+            or len(model_check.value.args) != 1 or not is_name(model_check.value.args[0], "raw")
+            or model_check.value.keywords):
+        return False
+    if (not isinstance(context_check, ast.Assign) or len(context_check.targets) != 1
+            or not is_name(context_check.targets[0], "spec") or not isinstance(context_check.value, ast.Call)
+            or not is_name(context_check.value.func, "_apply_market_context")
+            or len(context_check.value.args) != 1 or not is_name(context_check.value.args[0], "spec")
+            or {keyword.arg for keyword in context_check.value.keywords} != {"asset", "symbol", "timeframe"}
+            or any(not is_name(next(k.value for k in context_check.value.keywords if k.arg == key), key)
+                   for key in ("asset", "symbol", "timeframe"))):
+        return False
+    validation_handler = validation.handlers[0]
+    if (not is_name(validation_handler.type, "Exception") or validation_handler.name != "exc"
+            or len(validation_handler.body) != 1 or not isinstance(validation_handler.body[0], ast.Raise)):
+        return False
+    raise_stmt = validation_handler.body[0]
+    if (not isinstance(raise_stmt.exc, ast.Call) or not is_name(raise_stmt.exc.func, "AIProviderError")
+            or len(raise_stmt.exc.args) != 1 or not isinstance(raise_stmt.exc.args[0], ast.JoinedStr)
+            or not is_name(raise_stmt.cause, "exc")):
+        return False
+    if any(isinstance(item, ast.Call) and not (
+        (isinstance(item.func, ast.Name) and item.func.id == "AIProviderError")
+        or (isinstance(item.func, ast.Attribute) and item.func.attr == "items")
+    ) for item in ast.walk(raise_stmt.exc.args[0])):
+        return False
+
+    family = body[position + 5]
+    if (not isinstance(family, ast.Assign) or len(family.targets) != 1
+            or not is_name(family.targets[0], "family_key") or not isinstance(family.value, ast.Subscript)
+            or not isinstance(family.value.value, ast.Dict) or not is_name(family.value.slice, "spec")):
+        return False
+    family_subscript = family.value
+    if not (isinstance(family_subscript.slice, ast.Attribute) and family_subscript.slice.attr == "strategy_family"
+            and is_name(family_subscript.slice.value, "spec")):
+        return False
+    expected_families = {
+        "TREND": "trend", "MOMENTUM": "momentum", "BREAKOUT": "breakout",
+        "MEAN_REVERSION": "mean_reversion", "ENSEMBLE": "ensemble",
+    }
+    actual_families = {
+        key.value: value.value for key, value in zip(family_subscript.value.keys, family_subscript.value.values)
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        and isinstance(value, ast.Constant) and isinstance(value.value, str)
+    }
+    if actual_families != expected_families or len(family_subscript.value.keys) != len(expected_families):
+        return False
+
+    result = body[position + 6]
+    if not isinstance(result, ast.Return) or not isinstance(result.value, ast.Dict):
+        return False
+    outer = {
+        key.value: value for key, value in zip(result.value.keys, result.value.values)
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    if set(outer) != {"strategy", "evidence", "ai"} or len(result.value.keys) != 3:
+        return False
+    if not (isinstance(outer["strategy"], ast.Call) and isinstance(outer["strategy"].func, ast.Attribute)
+            and outer["strategy"].func.attr == "model_dump" and is_name(outer["strategy"].func.value, "spec")
+            and not outer["strategy"].args and not outer["strategy"].keywords):
+        return False
+    evidence = outer["evidence"]
+    if (not isinstance(evidence, ast.Call) or not is_name(evidence.func, "evidence_for")
+            or len(evidence.args) != 1 or not is_name(evidence.args[0], "family_key") or evidence.keywords):
+        return False
+    ai = outer["ai"]
+    if not isinstance(ai, ast.Dict):
+        return False
+    ai_values = {
+        key.value: value for key, value in zip(ai.keys, ai.values)
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    expected_keys = {"provider", "model", "fallback_used", "provider_errors", "execution_authority",
+                     "requires_backtest", "requires_walk_forward"}
+    if set(ai_values) != expected_keys or len(ai.keys) != len(expected_keys):
+        return False
+    if not is_name(ai_values["provider"], "provider_used") or not is_name(ai_values["provider_errors"], "provider_errors"):
+        return False
+    fallback = ai_values["fallback_used"]
+    if (not isinstance(fallback, ast.Compare) or not is_name(fallback.left, "provider_used")
+            or len(fallback.ops) != 1 or not isinstance(fallback.ops[0], ast.NotEq)
+            or len(fallback.comparators) != 1 or not is_string(fallback.comparators[0], "gemini")):
+        return False
+    if not (isinstance(ai_values["execution_authority"], ast.Constant) and ai_values["execution_authority"].value is False):
+        return False
+    if not (isinstance(ai_values["requires_backtest"], ast.Constant) and ai_values["requires_backtest"].value is True):
+        return False
+    if not (isinstance(ai_values["requires_walk_forward"], ast.Constant) and ai_values["requires_walk_forward"].value is True):
+        return False
+
+    allowed_model_names = {
+        "provider_used", "settings", "gemini_strategy_model", "groq_strategy_model",
+        "cerebras_model", "gemini_model", "groq_model",
+    }
+    for item in ast.walk(ai_values["model"]):
+        if isinstance(item, ast.Name) and item.id not in allowed_model_names:
+            return False
+        if isinstance(item, ast.Attribute) and (
+            not is_name(item.value, "settings") or item.attr not in {
+                "gemini_strategy_model", "groq_strategy_model", "cerebras_model", "gemini_model", "groq_model"
+            }
+        ):
+            return False
+        if isinstance(item, ast.Call):
+            return False
+    return True
+
+
+def _is_safe_legacy_provider_dispatcher(node: ast.AST) -> bool:
+    """Recognize the known legacy adapter router without permitting extra behavior."""
+    if not isinstance(node, ast.AsyncFunctionDef) or node.name != "_generate_with_provider" or node.decorator_list:
+        return False
+    args = node.args
+    if (args.posonlyargs or [a.arg for a in args.args] != ["provider", "prompt"]
+            or args.vararg or args.kwarg or args.kwonlyargs or args.defaults):
+        return False
+
+    def is_name(value: ast.AST | None, expected: str) -> bool:
+        return isinstance(value, ast.Name) and value.id == expected
+
+    def is_setting(value: ast.AST | None, allowed: set[str]) -> bool:
+        return (isinstance(value, ast.Attribute) and is_name(value.value, "settings")
+                and value.attr in allowed)
+
+    def is_model_expr(value: ast.AST) -> bool:
+        if is_setting(value, {"gemini_strategy_model", "groq_strategy_model", "cerebras_model", "gemini_model", "groq_model"}):
+            return True
+        return (isinstance(value, ast.BoolOp) and isinstance(value.op, ast.Or) and len(value.values) == 2
+                and all(is_setting(term, {"gemini_strategy_model", "groq_strategy_model", "gemini_model", "groq_model"})
+                        for term in value.values))
+
+    def safe_adapter_call(value: ast.AST, provider: str) -> bool:
+        adapter = {"gemini": "_gemini_json", "groq": "_groq_json", "cerebras": "_cerebras_json"}[provider]
+        return (
+            isinstance(value, ast.Await) and isinstance(value.value, ast.Call)
+            and is_name(value.value.func, adapter)
+            and len(value.value.args) == 1 and is_name(value.value.args[0], "prompt")
+            and {keyword.arg for keyword in value.value.keywords} == {"system_instruction", "model"}
+            and all(
+                (keyword.arg == "system_instruction" and is_name(keyword.value, "SYSTEM_PROMPT"))
+                or (keyword.arg == "model" and is_model_expr(keyword.value))
+                for keyword in value.value.keywords
+            )
+        )
+
+    body = list(node.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]
+    if len(body) == 1 and isinstance(body[0], ast.Return):
+        value = body[0].value
+        if (isinstance(value, ast.Await) and isinstance(value.value, ast.Call)
+                and isinstance(value.value.func, ast.Name)
+                and value.value.func.id in {"_gemini_json", "_groq_json", "_cerebras_json"}
+                and len(value.value.args) == 1 and is_name(value.value.args[0], "prompt")
+                and not value.value.keywords):
+            return True
+
+    if len(body) not in {2, 3}:
+        return False
+    branches: list[tuple[str, ast.If]] = []
+    for statement in body[:-1]:
+        if (not isinstance(statement, ast.If) or statement.orelse or len(statement.body) != 1
+                or not isinstance(statement.test, ast.Compare) or not is_name(statement.test.left, "provider")
+                or len(statement.test.ops) != 1 or not isinstance(statement.test.ops[0], ast.Eq)
+                or len(statement.test.comparators) != 1 or not isinstance(statement.test.comparators[0], ast.Constant)
+                or not isinstance(statement.test.comparators[0].value, str)
+                or statement.test.comparators[0].value not in {"gemini", "groq"}):
+            return False
+        provider = statement.test.comparators[0].value
+        if any(provider == previous for previous, _ in branches):
+            return False
+        if (not isinstance(statement.body[0], ast.Return)
+                or not safe_adapter_call(statement.body[0].value, provider)):
+            return False
+        branches.append((provider, statement))
+
+    last_return = body[-1]
+    if not isinstance(last_return, ast.Return) or not isinstance(last_return.value, ast.Await):
+        return False
+    last_call = last_return.value.value
+    if not isinstance(last_call, ast.Call):
+        return False
+    if len(body) == 2:
+        return (
+            branches[0][0] == "gemini"
+            and is_name(last_call.func, "_groq_json")
+            and len(last_call.args) == 1 and is_name(last_call.args[0], "prompt")
+            and {k.arg for k in last_call.keywords} == {"system_instruction", "model"}
+            and all(
+                (k.arg == "system_instruction" and is_name(k.value, "SYSTEM_PROMPT"))
+                or (k.arg == "model" and is_model_expr(k.value))
+                for k in last_call.keywords
+            )
+        )
+    return (
+        [name for name, _ in branches] == ["gemini", "groq"]
+        and is_name(last_call.func, "_cerebras_json")
+        and len(last_call.args) == 1 and is_name(last_call.args[0], "prompt")
+        and {k.arg for k in last_call.keywords} == {"system_instruction", "model"}
+        and all(
+            (k.arg == "system_instruction" and is_name(k.value, "SYSTEM_PROMPT"))
+            or (k.arg == "model" and is_model_expr(k.value))
+            for k in last_call.keywords
+        )
+    )
 
 
 def transform_strategy_ai(commit: str) -> None:
