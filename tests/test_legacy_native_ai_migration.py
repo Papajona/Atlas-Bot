@@ -269,7 +269,7 @@ def retained_helper():
                 "canonical_text",
                 return_value="from .native_ai import AIProviderError\n",
             ):
-                with self.assertRaisesRegex(migration.MigrationError, "builds __all__ dynamically"):
+                with self.assertRaisesRegex(migration.MigrationError, "dynamic exports or mutates __all__"):
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
