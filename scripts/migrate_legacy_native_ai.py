@@ -299,32 +299,35 @@ def transform_ai_providers(commit: str) -> None:
             # Only replace the exact empty compatibility stub when RuntimeError still
             # resolves to Python's built-in exception class. A module-level binding can
             # make this a custom branch exception whose behavior must be preserved.
-            runtime_error_shadowed = any(
-                "RuntimeError" in _defined_names(candidate)
-                for candidate in old_tree.body
-            ) or any(
-                (
-                    isinstance(candidate, ast.Name)
-                    and candidate.id == "RuntimeError"
-                    and isinstance(candidate.ctx, (ast.Store, ast.Del))
-                )
-                or (
-                    isinstance(candidate, ast.alias)
-                    and (
-                        candidate.asname == "RuntimeError"
-                        or (candidate.name == "RuntimeError" and candidate.asname is None)
+            runtime_error_shadowed = False
+            for candidate in old_tree.body:
+                if candidate is node:
+                    break
+                if "RuntimeError" in _defined_names(candidate):
+                    runtime_error_shadowed = True
+                    break
+                # Bindings inside module-level control flow are not reported by
+                # _defined_names(control_flow_node), but can still change the
+                # name resolved by the class base below.
+                if isinstance(candidate, (ast.If, ast.For, ast.AsyncFor, ast.While,
+                                          ast.With, ast.AsyncWith, ast.Try, ast.Match)) and any(
+                    ("RuntimeError" in _defined_names(nested))
+                    or (
+                        isinstance(nested, ast.Name)
+                        and nested.id == "RuntimeError"
+                        and isinstance(nested.ctx, (ast.Store, ast.Del))
                     )
-                )
-                or (
-                    isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-                    and candidate.name == "RuntimeError"
-                )
-                or (
-                    isinstance(candidate, ast.Global)
-                    and "RuntimeError" in candidate.names
-                )
-                for candidate in ast.walk(old_tree)
-            )
+                    or (
+                        isinstance(nested, ast.alias)
+                        and (
+                            nested.asname == "RuntimeError"
+                            or (nested.name == "RuntimeError" and nested.asname is None)
+                        )
+                    )
+                    for nested in ast.walk(candidate)
+                ):
+                    runtime_error_shadowed = True
+                    break
             if runtime_error_shadowed:
                 raise MigrationError(
                     "legacy AIProviderError base RuntimeError is imported or rebound in this facade; refusing to replace a possibly custom exception"
