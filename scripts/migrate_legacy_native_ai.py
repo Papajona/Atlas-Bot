@@ -919,7 +919,7 @@ def _class_contract_info(
         if _is_pydantic_base(base, source_path, module_tree):
             is_model = True
             continue
-        resolved = _resolve_base_class(source_path, module_tree, base, seen)
+        resolved = _resolve_base_class(source_path, module_tree, base, set())
         if resolved is None:
             continue
         parent_path, parent_tree, parent_class = resolved
