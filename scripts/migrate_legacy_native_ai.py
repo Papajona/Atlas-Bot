@@ -371,14 +371,21 @@ def transform_daily_research() -> None:
         test_segment = ast.get_source_segment(source, node.test) or ""
         if not re.search(r"(?i)(?:gemini_api_key|groq_api_key|cerebras_api_key|ai_gateway_)", test_segment):
             continue
+        def is_simple_statement(statement: ast.AST) -> bool:
+            if not isinstance(statement, (ast.Assign, ast.AnnAssign, ast.Expr, ast.Return)):
+                return False
+            compound = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.With,
+                        ast.AsyncWith, ast.Match, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            return not any(isinstance(part, compound) for part in ast.walk(statement) if part is not statement)
+
         body_is_provider_only = bool(node.body) and all(
-            contains_provider_call(statement) or PROVIDER_RE.search(ast.get_source_segment(source, statement) or "")
+            is_simple_statement(statement) and contains_provider_call(statement)
             for statement in node.body
         )
         else_is_provider_fallback = all(
-            contains_provider_call(statement)
-            or "NOT_CONFIGURED" in (ast.get_source_segment(source, statement) or "")
-            or PROVIDER_RE.search(ast.get_source_segment(source, statement) or "")
+            (is_simple_statement(statement) and contains_provider_call(statement))
+            or (is_simple_statement(statement) and isinstance(statement, (ast.Assign, ast.AnnAssign))
+                and "NOT_CONFIGURED" in (ast.get_source_segment(source, statement) or ""))
             for statement in node.orelse
         )
         if not body_is_provider_only or not else_is_provider_fallback:
@@ -647,7 +654,7 @@ def scrub_ancillary_text(path: str, text: str) -> str:
             if isinstance(value, list):
                 return [scrub(item, key_context) for item in value]
             if isinstance(value, str) and PROVIDER_RE.search(value):
-                if "model" in key_context.lower():
+                if re.fullmatch(r"(?i)(?:[a-z0-9]+_)*model(?:_(?:id|name|version))?", key_context):
                     return "atlas-native-strategy-v1"
                 cleaned = SECRET_VERSION_RE.sub("", value)
                 cleaned = KEY_ASSIGNMENT_RE.sub("", cleaned)
