@@ -88,7 +88,7 @@ jobs:
 
           scan_active_provider_refs() {
             local rc=0
-            git grep -IlEi 'gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' || rc=$?
+            git grep -IlEi 'gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' || rc=$?
             if (( rc == 1 )); then return 0; fi
             if (( rc != 0 )); then return "$rc"; fi
           }
@@ -292,25 +292,30 @@ jobs:
           # and provider-bearing deployment entries; the helper refuses unknown layouts.
           if ! python "$RUNNER_TEMP/migrate_legacy_native_ai.py" --canonical-commit "$NATIVE_AI_COMMIT" --extra-base-commit "$NATIVE_AI_EXTRA_BASE_COMMIT" --extra-commit "$NATIVE_AI_EXTRA_COMMIT"; then
             git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true
             failed+=("$branch: semantic Native AI migration refused or failed; branch left unchanged")
             continue
           fi
 
-          after_refs="$(scan_active_provider_refs)" || { git reset --hard "$start_sha" >/dev/null 2>&1 || true; failed+=("$branch: post-migration provider scan errored; branch left unchanged"); continue; }
+          after_refs="$(scan_active_provider_refs)" || { git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true; failed+=("$branch: post-migration provider scan errored; branch left unchanged"); continue; }
           if [[ -n "$after_refs" ]]; then
             echo "ACTIVE PROVIDER REFERENCES REMAIN after semantic migration on $branch:" >&2
-            git grep -nIEi 'gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' >&2 || true
+            git grep -nIEi 'gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' >&2 || true
             git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true
             failed+=("$branch: provider references remain after semantic migration; branch left unchanged")
             continue
           fi
           if ! verify_native_ai_impl; then
             git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true
             failed+=("$branch: Native AI implementation/import verification failed; branch left unchanged")
             continue
           fi
           if ! git diff --check; then
             git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true
             failed+=("$branch: whitespace validation failed; branch left unchanged")
             continue
           fi
@@ -327,6 +332,7 @@ jobs:
           else
             update_status=$?
             git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true
             if [[ "$update_status" -eq 2 ]]; then
               failure_reason="remote branch state unresolved after update attempt; intended commit was not confirmed and remote state may have changed"
             else
