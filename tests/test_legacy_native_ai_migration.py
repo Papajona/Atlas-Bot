@@ -107,7 +107,7 @@ def retained_helper():
             with patch.object(migration, "ROOT", root), patch.object(
                 migration,
                 "canonical_text",
-                return_value="from .native_ai import AIProviderError, NativeAIError\\n",
+                return_value="from .native_ai import AIProviderError, NativeAIError\n",
             ):
                 with self.assertRaisesRegex(migration.MigrationError, "canonical name .* differently"):
                     migration.transform_ai_providers("canonical-commit")
@@ -130,7 +130,7 @@ def retained_helper():
             with patch.object(migration, "ROOT", root), patch.object(
                 migration,
                 "canonical_text",
-                return_value="from .native_ai import AIProviderError\\n",
+                return_value="from .native_ai import AIProviderError\n",
             ):
                 migration.transform_ai_providers("canonical-commit")
             result = target.read_text(encoding="utf-8")
@@ -156,7 +156,7 @@ custom = json = object()
             with patch.object(migration, "ROOT", root), patch.object(
                 migration,
                 "canonical_text",
-                return_value="import json\\nfrom .native_ai import AIProviderError\\n",
+                return_value="import json\nfrom .native_ai import AIProviderError\n",
             ):
                 with self.assertRaisesRegex(migration.MigrationError, "canonical name"):
                     migration.transform_ai_providers("canonical-commit")
