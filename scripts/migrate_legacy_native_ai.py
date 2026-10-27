@@ -207,6 +207,8 @@ def transform_config() -> None:
 def _defined_names(node: ast.AST) -> set[str]:
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         return {node.name}
+    if isinstance(node, ast.Expr) and isinstance(node.value, ast.NamedExpr):
+        return _assigned_names(node.value.target)
     if isinstance(node, ast.Assign):
         return {name for target in node.targets for name in _assigned_names(target)}
     if isinstance(node, ast.AnnAssign):
@@ -294,7 +296,17 @@ def transform_ai_providers(commit: str) -> None:
         start_line = min([node.lineno, *[decorator.lineno for decorator in getattr(node, "decorator_list", [])]])
         segment = "".join(source_lines[start_line - 1:node.end_lineno]).rstrip("\n")
         if name == "AIProviderError" and _is_legacy_ai_provider_error_stub(node):
-            # This exact empty legacy subclass is safe to replace with the canonical alias.
+            # Only replace the exact empty compatibility stub when RuntimeError still
+            # resolves to Python's built-in exception class. A module-level binding can
+            # make this a custom branch exception whose behavior must be preserved.
+            runtime_error_shadowed = any(
+                "RuntimeError" in _defined_names(candidate)
+                for candidate in old_tree.body
+            )
+            if runtime_error_shadowed:
+                raise MigrationError(
+                    "legacy AIProviderError base RuntimeError is imported or rebound in this facade; refusing to replace a possibly custom exception"
+                )
             continue
         defined_names = _defined_names(node)
         collisions = defined_names & canonical_names
@@ -472,11 +484,17 @@ def transform_ai_providers(commit: str) -> None:
                         dynamic_all = True
                 elif isinstance(nested, ast.NamedExpr):
                     if directly_assigns_all(nested.target):
-                        # Recognize a direct literal walrus export declaration such as
-                        # (__all__ := ["helper"]); duplicate or non-literal declarations
-                        # remain rejected below.
-                        if not has_direct_all_assignment:
+                        # Only a module-level expression (__all__ := [...]) is an
+                        # export declaration. Function-local/nested walruses have a
+                        # different scope, so reject rather than misinfer exports.
+                        if (
+                            isinstance(module_node, ast.Expr)
+                            and module_node.value is nested
+                            and not has_direct_all_assignment
+                        ):
                             all_values.append(nested.value)
+                        else:
+                            dynamic_all = True
                     elif mutates_all_target(nested.target):
                         dynamic_all = True
 
@@ -603,6 +621,17 @@ def transform_ai_providers(commit: str) -> None:
             if names & star_exports and definition_line < star_line:
                 raise MigrationError(
                     "retained definition precedes a later star import with overlapping exports; "
+                    "refusing to change helper bindings"
+                )
+
+    # Preserved explicit imports are emitted before retained local definitions. If a
+    # later import originally replaced a local name, this output order would reverse
+    # which binding a retained helper sees; refuse that migration.
+    for bindings, import_line in zip(preserved_import_bindings, preserved_import_lines):
+        for names, definition_line in zip(extra_defined_names, extra_definition_lines):
+            if bindings & names and definition_line < import_line:
+                raise MigrationError(
+                    "retained explicit import follows a local definition with an overlapping name; "
                     "refusing to change helper bindings"
                 )
 
