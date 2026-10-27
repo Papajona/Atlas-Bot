@@ -113,7 +113,7 @@ def _name(node: ast.AST) -> str | None:
     return None
 
 
-def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str) -> bool:
+def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str, legacy_tree: ast.Module) -> bool:
     """Recognize only pure legacy JSON helper variants replaced by canonical implementations.
 
     The recognized functions may differ in annotations and error messages, but must retain
@@ -136,6 +136,28 @@ def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str) -
     positional_names = [arg.arg for arg in args.args]
     if name == "_extract_json":
         if positional_names != ["text"] or args.defaults:
+            return False
+        # The helper's json global must be the standard-library module. In particular,
+        # do not drop "import orjson as json" and silently change parser behavior.
+        json_import_count = 0
+        for module_statement in legacy_tree.body:
+            if isinstance(module_statement, ast.Import):
+                for alias in module_statement.names:
+                    bound = alias.asname or alias.name.split(".", 1)[0]
+                    if bound == "json":
+                        if alias.name != "json" or alias.asname is not None:
+                            return False
+                        json_import_count += 1
+            elif isinstance(module_statement, ast.ImportFrom):
+                if any((alias.asname or alias.name) == "json" for alias in module_statement.names):
+                    return False
+            if isinstance(module_statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and module_statement.name == "json":
+                return False
+        if json_import_count != 1 or any(
+            isinstance(item, ast.Name) and item.id == "json"
+            and isinstance(item.ctx, (ast.Store, ast.Del))
+            for item in ast.walk(legacy_tree)
+        ):
             return False
         local_names = {"text", "raw", "value", "exc"}
         assigned_names = {"raw", "value"}
@@ -187,6 +209,32 @@ def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str) -
             and value.slice.step is None
         )
 
+    def safe_condition(condition: ast.AST) -> bool:
+        if isinstance(condition, ast.UnaryOp) and isinstance(condition.op, ast.Not):
+            return safe_condition(condition.operand)
+        if isinstance(condition, ast.BoolOp) and isinstance(condition.op, (ast.And, ast.Or)):
+            return all(safe_condition(value) for value in condition.values)
+        if isinstance(condition, ast.Call) and isinstance(condition.func, ast.Name) and condition.func.id == "isinstance":
+            if len(condition.args) != 2 or condition.keywords:
+                return False
+            if not all(isinstance(arg, ast.Name) for arg in condition.args):
+                return False
+            left, right = condition.args[0].id, condition.args[1].id
+            allowed = {("text", "str"), ("value", "dict")} if name == "_extract_json" else {("body", "dict")}
+            return (left, right) in allowed
+        if isinstance(condition, ast.Call) and isinstance(condition.func, ast.Attribute):
+            func = condition.func
+            if name == "_extract_json" and func.attr == "strip":
+                return safe_string_receiver(func.value) and not condition.args and not condition.keywords
+            if name == "_extract_json" and func.attr == "startswith":
+                return (
+                    isinstance(func.value, ast.Name) and func.value.id in {"raw", "text"}
+                    and len(condition.args) == 1 and not condition.keywords
+                    and isinstance(condition.args[0], ast.Constant)
+                    and condition.args[0].value in {"json", "\\x60\\x60\\x60"}
+                )
+        return False
+
     body_nodes = [item for statement in node.body for item in ast.walk(statement)]
     if any(
         isinstance(item, (ast.Global, ast.Nonlocal, ast.Await, ast.Yield, ast.YieldFrom,
@@ -212,6 +260,33 @@ def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str) -
             # statements can have effects even when they do not contain a Call node.
             if not (isinstance(item.value, ast.Constant) and isinstance(item.value.value, str)):
                 return False
+        if isinstance(item, ast.If) and not safe_condition(item.test):
+            return False
+        if isinstance(item, ast.Try):
+            if item.orelse or item.finalbody or not item.handlers:
+                return False
+            for handler in item.handlers:
+                if handler.type is None or len(handler.body) != 1 or not isinstance(handler.body[0], ast.Raise):
+                    return False
+                raised = handler.body[0]
+                if (
+                    not isinstance(raised.exc, ast.Call)
+                    or not isinstance(raised.exc.func, ast.Name)
+                    or raised.exc.func.id != "AIProviderError"
+                ):
+                    return False
+                names = {
+                    child.id if isinstance(child, ast.Name) else child.attr
+                    for child in ast.walk(handler.type)
+                    if isinstance(child, (ast.Name, ast.Attribute))
+                }
+                allowed_exceptions = (
+                    {"JSONDecodeError", "TypeError", "ValueError", "UnicodeDecodeError"}
+                    if name == "_extract_json"
+                    else {"ValueError", "UnicodeDecodeError", "TypeError", "AttributeError"}
+                )
+                if not names or not names.issubset(allowed_exceptions):
+                    return False
         if isinstance(item, ast.Assign):
             if (
                 len(item.targets) != 1
@@ -219,6 +294,51 @@ def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str) -
                 or item.targets[0].id not in assigned_names
             ):
                 return False
+            target_name = item.targets[0].id
+            if target_name == "raw":
+                value = item.value
+                safe_raw = (
+                    isinstance(value, ast.Name) and value.id == "text"
+                ) or (
+                    isinstance(value, ast.BoolOp) and isinstance(value.op, ast.Or)
+                    and len(value.values) == 2
+                    and isinstance(value.values[0], ast.Name) and value.values[0].id == "text"
+                    and isinstance(value.values[1], ast.Constant) and value.values[1].value == ""
+                ) or (
+                    isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                    and value.func.attr == "strip" and safe_string_receiver(value.func.value)
+                    and not value.keywords and not value.args
+                ) or (
+                    isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                    and value.func.attr == "strip" and isinstance(value.func.value, ast.Name)
+                    and value.func.value.id == "raw" and len(value.args) == 1
+                    and isinstance(value.args[0], ast.Constant) and value.args[0].value == "\\x60"
+                    and not value.keywords
+                ) or (
+                    isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                    and value.func.attr == "lstrip" and isinstance(value.func.value, ast.Subscript)
+                    and safe_string_receiver(value.func.value) and not value.args and not value.keywords
+                )
+                if not safe_raw:
+                    return False
+            elif target_name == "value":
+                value = item.value
+                if not (
+                    isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                    and value.func.attr == "loads" and isinstance(value.func.value, ast.Name)
+                    and value.func.value.id == "json" and len(value.args) == 1
+                    and isinstance(value.args[0], ast.Name) and value.args[0].id in {"raw", "text"}
+                    and not value.keywords
+                ):
+                    return False
+            elif target_name == "body":
+                value = item.value
+                if not (
+                    isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                    and value.func.attr == "json" and isinstance(value.func.value, ast.Name)
+                    and value.func.value.id == "response" and not value.args and not value.keywords
+                ):
+                    return False
         elif isinstance(item, ast.AnnAssign):
             if not isinstance(item.target, ast.Name) or item.target.id not in assigned_names:
                 return False
@@ -272,10 +392,34 @@ def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str) -
             continue
         if (
             name == "_extract_json"
-            and func.attr in {"strip", "startswith", "lstrip"}
+            and func.attr == "strip"
             and safe_string_receiver(func.value)
             and not call.keywords
-            and all(isinstance(argument, ast.Constant) and isinstance(argument.value, str) for argument in call.args)
+            and (
+                not call.args
+                or (
+                    isinstance(func.value, ast.Name) and func.value.id == "raw"
+                    and len(call.args) == 1
+                    and isinstance(call.args[0], ast.Constant) and call.args[0].value == "\\x60"
+                )
+            )
+        ):
+            continue
+        if (
+            name == "_extract_json"
+            and func.attr == "startswith"
+            and isinstance(func.value, ast.Name) and func.value.id in {"raw", "text"}
+            and len(call.args) == 1 and not call.keywords
+            and isinstance(call.args[0], ast.Constant)
+            and call.args[0].value in {"json", "\\x60\\x60\\x60"}
+        ):
+            continue
+        if (
+            name == "_extract_json"
+            and func.attr == "lstrip"
+            and isinstance(func.value, ast.Subscript)
+            and safe_string_receiver(func.value)
+            and not call.args and not call.keywords
         ):
             continue
         return False
@@ -586,7 +730,7 @@ def transform_ai_providers(commit: str) -> None:
             # Accept only tightly whitelisted legacy parser bodies; do not generalize this
             # exception to arbitrary same-named branch functions.
             if len(collisions) == 1 and next(iter(collisions)) == name and _safe_canonical_json_helper(
-                node, name or "", segment
+                node, name or "", segment, old_tree
             ):
                 continue
             collision = sorted(
