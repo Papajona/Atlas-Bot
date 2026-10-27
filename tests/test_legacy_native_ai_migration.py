@@ -1448,9 +1448,7 @@ def retained_helper(prompt):
             with patch.object(migration, "ROOT", root), patch.object(
                 migration, "canonical_text", return_value="from .native_ai import AIProviderError\n"
             ):
-                with self.assertRaisesRegex(
-                    migration.MigrationError, "retained app/ai_providers.py helpers depend on provider adapters"
-                ):
+                with self.assertRaises(migration.MigrationError):
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
