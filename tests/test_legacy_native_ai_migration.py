@@ -42,11 +42,82 @@ class LegacyNativeAIMigrationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with patch.object(migration, "ROOT", root):
-                with self.assertRaisesRegex(migration.MigrationError, "sharing a line with another statement"):
+                with self.assertRaisesRegex(migration.MigrationError, "physical line with a non-provider statement"):
                     migration.transform_config()
             result = config.read_text(encoding="utf-8")
             self.assertIn("withdrawals_enabled", result)
             self.assertIn("gemini_api_key", result)
+
+    def test_config_refuses_provider_assignment_outside_settings_class(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            source = (
+                "class Settings:\n"
+                "    withdrawals_enabled: bool = True\n"
+                "def initialize_provider():\n"
+                "    gemini_api_key = open_database_and_register_default()\n"
+            )
+            config.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "outside the Settings class"):
+                    migration.transform_config()
+            self.assertEqual(config.read_text(encoding="utf-8"), source)
+
+    def test_config_refuses_provider_field_sharing_line_with_setup_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            source = (
+                "class Settings:\n"
+                "    gemini_api_key: str = None; record_config_load()\n"
+            )
+            config.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "physical line with a non-provider statement"):
+                    migration.transform_config()
+            self.assertEqual(config.read_text(encoding="utf-8"), source)
+
+    def test_daily_research_refuses_to_replace_early_return(self):
+        legacy = (
+            "from .ai_providers import dual_ai_research_review\n"
+            "async def run_daily_research():\n"
+            "    if settings.gemini_api_key:\n"
+            "        return await dual_ai_research_review(research, intelligence)\n"
+            "    return {'status': 'NOT_CONFIGURED'}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "daily_research.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "contains unrelated or unknown logic"):
+                    migration.transform_daily_research()
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_daily_research_refuses_unrelated_not_configured_fallback_data(self):
+        legacy = (
+            "from .ai_providers import dual_ai_research_review\n"
+            "async def run_daily_research():\n"
+            "    review = {}\n"
+            "    if settings.gemini_api_key:\n"
+            "        review['external_ai'] = await dual_ai_research_review(research, intelligence)\n"
+            "    else:\n"
+            "        review['external_ai'] = {'status': 'NOT_CONFIGURED'}\n"
+            "        review['audit_status'] = {'status': 'NOT_CONFIGURED'}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "daily_research.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "contains unrelated or unknown logic"):
+                    migration.transform_daily_research()
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
     def test_config_removes_provider_fields_but_preserves_unrelated_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
