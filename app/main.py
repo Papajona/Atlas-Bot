@@ -5593,6 +5593,22 @@ async def create_strategy_candidate(req: StrategyLabRequest, authorization: str 
         db.add(row); await db.commit(); await db.refresh(row)
         return {"id":row.id,"status":row.status,"spec":spec,"next":"RUN_BACKTEST"}
 
+def _candidate_backtest_config(spec: dict[str, Any]) -> StrategyConfig:
+    """Build the backtest config from the candidate's actual supported stop/target parameters."""
+    if not isinstance(spec, dict):
+        raise ValueError("Strategy candidate specification must be an object")
+    try:
+        stop_atr = float(spec["stop_loss_atr"])
+        target_rr = float(spec["take_profit_rr"])
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Candidate stop-loss ATR and take-profit reward/risk are required for validation") from exc
+    if not math.isfinite(stop_atr) or not 0.1 <= stop_atr <= 10.0:
+        raise ValueError("Candidate stop-loss ATR must be finite and within [0.1, 10]")
+    if not math.isfinite(target_rr) or not 0.1 <= target_rr <= 10.0:
+        raise ValueError("Candidate take-profit reward/risk must be finite and within [0.1, 10]")
+    return StrategyConfig(stop_atr=stop_atr, take_profit_atr=stop_atr * target_rr)
+
+
 @app.post("/api/customer/strategy-lab/candidates/{candidate_id}/validate")
 async def validate_strategy_candidate(candidate_id:int, authorization:str|None=Header(default=None)):
     async with SessionLocal() as db:
@@ -5602,14 +5618,15 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
         req=CustomerBotStartRequest(asset=row.asset,symbol=row.symbol,exchange=row.exchange,timeframe=row.timeframe,days=365,autonomous=False)
     try:
         df=await _fetch_customer_oanda_data(profile.id,req) if row.asset in {"forex","commodity"} else await asyncio.to_thread(market_data,req)
-        result=await asyncio.to_thread(backtest_all_strategies,df,StrategyConfig(),5.5,2.0,True,row.asset,5,800,settings.research_ai_threshold)
-        rows=result.get("strategies",[])
         spec=json.loads(row.spec_json or "{}")
+        candidate_config=_candidate_backtest_config(spec)
+        result=await asyncio.to_thread(backtest_all_strategies,df,candidate_config,5.5,2.0,True,row.asset,5,800,settings.research_ai_threshold)
+        rows=result.get("strategies",[])
         family_map={"TREND":"trend","MOMENTUM":"momentum","BREAKOUT":"breakout","MEAN_REVERSION":"mean_reversion","ENSEMBLE":"ensemble"}
         family=str(spec.get("strategy_family") or "ENSEMBLE").upper()
         selected_name=family_map.get(family,"ensemble")
         selected=next((x for x in rows if x.get("strategy")==selected_name),None) or {}
-        gate={"strategy_family":family,"validated_component":selected_name,"evidence_level":(selected.get("evidence") or {}).get("evidence_level"),"sharpe":float(selected.get("sharpe",0)),"max_drawdown":float(selected.get("max_drawdown",-1)),"trades":int(selected.get("trades",0)),"total_return":float(selected.get("total_return",0))}
+        gate={"strategy_family":family,"validated_component":selected_name,"validated_stop_loss_atr":candidate_config.stop_atr,"validated_take_profit_atr":candidate_config.take_profit_atr,"validated_take_profit_rr":candidate_config.take_profit_atr/candidate_config.stop_atr,"evidence_level":(selected.get("evidence") or {}).get("evidence_level"),"sharpe":float(selected.get("sharpe",0)),"max_drawdown":float(selected.get("max_drawdown",-1)),"trades":int(selected.get("trades",0)),"total_return":float(selected.get("total_return",0))}
         oos=result.get("validation",{}).get("per_strategy_oos",{}).get(selected_name,{})
         folds=oos.get("folds",[]) or []
         positive_ratio=(sum(1 for f in folds if float(f.get("total_return",0))>0)/len(folds)) if folds else 0.0
