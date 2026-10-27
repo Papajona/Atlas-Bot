@@ -357,7 +357,7 @@ def transform_ai_providers(commit: str) -> None:
             if star_node.module:
                 module_base = module_base.joinpath(*star_node.module.split("."))
             candidates = (
-                [module_base.with_suffix(".py"), module_base / "__init__.py"]
+                [module_base / "__init__.py", module_base.with_suffix(".py")]
                 if star_node.module else [module_base / "__init__.py"]
             )
         else:
@@ -372,7 +372,7 @@ def transform_ai_providers(commit: str) -> None:
                 else:
                     module_base = ROOT.joinpath(*module_name.split(".")) if module_name else ROOT
                 candidates = (
-                    [module_base.with_suffix(".py"), module_base / "__init__.py"]
+                    [module_base / "__init__.py", module_base.with_suffix(".py")]
                     if module_name else []
                 )
         module_file = next((candidate for candidate in candidates if candidate.is_file()), None)
@@ -394,6 +394,7 @@ def transform_ai_providers(commit: str) -> None:
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in {"__getattr__", "__dir__"}
             for node in module_tree.body
         )
+
         def root_name(node: ast.AST) -> str | None:
             while isinstance(node, (ast.Attribute, ast.Subscript)):
                 node = node.value
@@ -405,17 +406,29 @@ def transform_ai_providers(commit: str) -> None:
         def mutates_all_target(target: ast.AST) -> bool:
             return root_name(target) == "__all__" and not directly_assigns_all(target)
 
+        # Top-level control-flow can bind names not represented by _defined_names
+        # (e.g. "for helper in values"). Do not infer star exports through such code.
+        unsafe_module_statements = (
+            ast.If, ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith,
+            ast.Try, ast.Match,
+        )
+        if any(isinstance(node, unsafe_module_statements) for node in module_tree.body):
+            dynamic_exports = True
+
         for module_node in module_tree.body:
             if isinstance(module_node, ast.ImportFrom) and any(alias.name == "*" for alias in module_node.names):
                 has_nested_star = True
 
+            has_direct_all_assignment = False
             if isinstance(module_node, ast.Assign):
-                if any(directly_assigns_all(target) for target in module_node.targets):
+                has_direct_all_assignment = any(directly_assigns_all(target) for target in module_node.targets)
+                if has_direct_all_assignment:
                     all_values.append(module_node.value)
                 if any(mutates_all_target(target) for target in module_node.targets):
                     dynamic_all = True
             elif isinstance(module_node, ast.AnnAssign):
-                if directly_assigns_all(module_node.target):
+                has_direct_all_assignment = directly_assigns_all(module_node.target)
+                if has_direct_all_assignment:
                     all_values.append(module_node.value)
                 elif mutates_all_target(module_node.target):
                     dynamic_all = True
@@ -426,22 +439,36 @@ def transform_ai_providers(commit: str) -> None:
             ):
                 dynamic_all = True
 
-            # Include indexed edits (e.g. __all__[0] = "json"), method calls
-            # (append/extend/insert/remove/clear), and nested mutations. If the
-            # export list is changed at runtime, static star-export inspection is unsafe.
             for nested in ast.walk(module_node):
-                if (
-                    isinstance(nested, ast.Call)
-                    and isinstance(nested.func, ast.Attribute)
-                    and root_name(nested.func.value) == "__all__"
-                ):
-                    dynamic_all = True
-                elif isinstance(nested, ast.NamedExpr) and mutates_all_target(nested.target):
-                    dynamic_all = True
+                if isinstance(nested, ast.Call):
+                    # Any globals() access can create or mutate module exports through
+                    # a computed name; fail closed even when the call is indirect,
+                    # such as globals()["__all__"].append(...).
+                    if isinstance(nested.func, ast.Name) and nested.func.id == "globals":
+                        dynamic_all = True
+                    elif (
+                        isinstance(nested.func, ast.Name)
+                        and nested.func.id in {"exec", "eval"}
+                    ):
+                        dynamic_exports = True
+                    elif (
+                        isinstance(nested.func, ast.Attribute)
+                        and root_name(nested.func.value) == "__all__"
+                    ):
+                        dynamic_all = True
+                elif isinstance(nested, ast.NamedExpr):
+                    if directly_assigns_all(nested.target):
+                        # Recognize a direct literal walrus export declaration such as
+                        # (__all__ := ["helper"]); duplicate or non-literal declarations
+                        # remain rejected below.
+                        if not has_direct_all_assignment:
+                            all_values.append(nested.value)
+                    elif mutates_all_target(nested.target):
+                        dynamic_all = True
 
         if dynamic_all or len(all_values) > 1:
             raise MigrationError(
-                f"star-import module {module_file} builds __all__ dynamically; refusing to guess its exports"
+                f"star-import module {module_file} has dynamic exports or mutates __all__; refusing to guess its exports"
             )
         explicit_all = bool(all_values)
         if explicit_all:
