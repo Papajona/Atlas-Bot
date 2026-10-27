@@ -466,7 +466,7 @@ def transform_ai_providers(commit: str) -> None:
                     elif mutates_all_target(nested.target):
                         dynamic_all = True
 
-        if dynamic_all or len(all_values) > 1:
+        if dynamic_all or dynamic_exports or has_nested_star or len(all_values) > 1:
             raise MigrationError(
                 f"star-import module {module_file} has dynamic exports or mutates __all__; refusing to guess its exports"
             )
