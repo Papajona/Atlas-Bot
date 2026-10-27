@@ -732,11 +732,42 @@ def transform_config() -> None:
 def _defined_names(node: ast.AST) -> set[str]:
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         return {node.name}
-    if isinstance(node, ast.Expr) and isinstance(node.value, ast.NamedExpr):
-        return _assigned_names(node.value.target)
     if isinstance(node, ast.Assign):
         return {name for target in node.targets for name in _assigned_names(target)}
     if isinstance(node, ast.AnnAssign):
+        return _assigned_names(node.target)
+    if isinstance(node, ast.Delete):
+        return {name for target in node.targets for name in _assigned_names(target)}
+    # Module-level control-flow targets also bind names and can shadow imports
+    # installed by the canonical facade. Fail closed on any such collision.
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        return _assigned_names(node.target)
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        return {
+            name
+            for item in node.items
+            if item.optional_vars is not None
+            for name in _assigned_names(item.optional_vars)
+        }
+    if isinstance(node, ast.AugAssign):
+        return _assigned_names(node.target)
+    if isinstance(node, ast.Expr):
+        # Assignment expressions in module-level expressions bind in module scope,
+        # but a walrus inside a lambda body binds only in that lambda's local scope.
+        names: set[str] = set()
+        pending = [node.value]
+        while pending:
+            part = pending.pop()
+            if isinstance(part, ast.Lambda):
+                # Lambda defaults execute in the enclosing scope; the body does not.
+                pending.extend(part.args.defaults)
+                pending.extend(value for value in part.args.kw_defaults if value is not None)
+                continue
+            if isinstance(part, ast.NamedExpr):
+                names.update(_assigned_names(part.target))
+            pending.extend(ast.iter_child_nodes(part))
+        return names
+    if isinstance(node, ast.NamedExpr):
         return _assigned_names(node.target)
     if isinstance(node, ast.Import):
         return {alias.asname or alias.name.split(".", 1)[0] for alias in node.names}
@@ -748,185 +779,11 @@ def _defined_names(node: ast.AST) -> set[str]:
 def _assigned_names(target: ast.AST) -> set[str]:
     if isinstance(target, ast.Name):
         return {target.id}
+    if isinstance(target, ast.Starred):
+        return _assigned_names(target.value)
     if isinstance(target, (ast.Tuple, ast.List)):
         return {name for item in target.elts for name in _assigned_names(item)}
     return set()
-
-
-
-
-def _module_path_for_import(source_path: Path, node: ast.ImportFrom, imported_name: str | None = None) -> Path | None:
-    """Resolve a Python source module inside the checked-out repo without importing it."""
-    if node.level:
-        base = source_path.parent
-        for _ in range(node.level - 1):
-            base = base.parent
-        parts = node.module.split(".") if node.module else ([imported_name] if imported_name else [])
-        base = base.joinpath(*parts)
-    else:
-        module_name = node.module or imported_name
-        if not module_name:
-            return None
-        base = ROOT.joinpath(*module_name.split("."))
-    candidates = (base / "__init__.py", base.with_suffix(".py"))
-    return next((candidate for candidate in candidates if candidate.is_file()), None)
-
-
-def _module_path_for_name(module_name: str) -> Path | None:
-    """Resolve a statically named project module, preferring package __init__.py."""
-    if not module_name or module_name.split(".", 1)[0] in {"pydantic", "pydantic_settings", "typing"}:
-        return None
-    base = ROOT.joinpath(*module_name.split("."))
-    candidates = (base / "__init__.py", base.with_suffix(".py"))
-    return next((candidate for candidate in candidates if candidate.is_file()), None)
-
-
-def _resolve_class_symbol(
-    source_path: Path,
-    module_tree: ast.Module,
-    symbol_name: str,
-    seen: set[tuple[str, str]] | None = None,
-) -> tuple[Path, ast.Module, ast.ClassDef] | None:
-    """Resolve a class defined locally or imported from a statically resolvable project module."""
-    seen = set() if seen is None else set(seen)
-    key = (str(source_path), symbol_name)
-    if key in seen:
-        return None
-    seen.add(key)
-    matches = [
-        node for node in module_tree.body
-        if isinstance(node, ast.ClassDef) and node.name == symbol_name
-    ]
-    if len(matches) == 1:
-        return source_path, module_tree, matches[0]
-    if matches:
-        return None
-    for import_node in module_tree.body:
-        if not isinstance(import_node, ast.ImportFrom):
-            continue
-        for alias in import_node.names:
-            if alias.name == "*" or (alias.asname or alias.name) != symbol_name:
-                continue
-            target_path = _module_path_for_import(source_path, import_node, alias.name)
-            if target_path is None:
-                continue
-            try:
-                target_tree = ast.parse(target_path.read_text(encoding="utf-8"), filename=str(target_path))
-            except (OSError, SyntaxError):
-                return None
-            return _resolve_class_symbol(target_path, target_tree, alias.name, seen)
-    return None
-
-
-def _dotted_ast_name(node: ast.AST) -> str | None:
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        prefix = _dotted_ast_name(node.value)
-        return f"{prefix}.{node.attr}" if prefix else None
-    return None
-
-
-def _resolve_base_class(
-    source_path: Path,
-    module_tree: ast.Module,
-    base: ast.AST,
-    seen: set[tuple[str, str]] | None = None,
-) -> tuple[Path, ast.Module, ast.ClassDef] | None:
-    if isinstance(base, ast.Name):
-        return _resolve_class_symbol(source_path, module_tree, base.id, seen)
-    if not isinstance(base, ast.Attribute):
-        return None
-    dotted = _dotted_ast_name(base.value)
-    if not dotted:
-        return None
-    module_name: str | None = None
-    for import_node in module_tree.body:
-        if isinstance(import_node, ast.Import):
-            for alias in import_node.names:
-                bound = alias.asname or alias.name.split(".", 1)[0]
-                if dotted == bound:
-                    module_name = alias.name
-                    break
-                if alias.asname and dotted == alias.asname:
-                    module_name = alias.name
-                    break
-        elif isinstance(import_node, ast.ImportFrom):
-            for alias in import_node.names:
-                if alias.name == "*" or (alias.asname or alias.name) != dotted:
-                    continue
-                target_path = _module_path_for_import(source_path, import_node, alias.name)
-                if target_path is not None:
-                    try:
-                        target_tree = ast.parse(target_path.read_text(encoding="utf-8"), filename=str(target_path))
-                    except (OSError, SyntaxError):
-                        return None
-                    return _resolve_class_symbol(target_path, target_tree, base.attr, seen)
-    if module_name:
-        target_path = _module_path_for_name(module_name)
-        if target_path is not None:
-            try:
-                target_tree = ast.parse(target_path.read_text(encoding="utf-8"), filename=str(target_path))
-            except (OSError, SyntaxError):
-                return None
-            return _resolve_class_symbol(target_path, target_tree, base.attr, seen)
-    return None
-
-
-def _is_pydantic_base(base: ast.AST, source_path: Path, module_tree: ast.Module) -> bool:
-    if isinstance(base, ast.Name):
-        for import_node in module_tree.body:
-            if not isinstance(import_node, ast.ImportFrom) or import_node.module not in {"pydantic", "pydantic.v1"}:
-                continue
-            for alias in import_node.names:
-                if alias.name == "BaseModel" and (alias.asname or alias.name) == base.id:
-                    return True
-    if isinstance(base, ast.Attribute) and base.attr == "BaseModel":
-        dotted = _dotted_ast_name(base.value)
-        if dotted:
-            for import_node in module_tree.body:
-                if not isinstance(import_node, ast.Import):
-                    continue
-                for alias in import_node.names:
-                    bound = alias.asname or alias.name.split(".", 1)[0]
-                    if bound == dotted and alias.name in {"pydantic", "pydantic.v1"}:
-                        return True
-    return False
-
-
-def _class_contract_info(
-    source_path: Path,
-    module_tree: ast.Module,
-    class_node: ast.ClassDef,
-    seen: set[tuple[str, str]] | None = None,
-) -> tuple[bool, set[str]]:
-    """Return whether a class is Pydantic-backed and its statically visible inherited fields."""
-    seen = set() if seen is None else set(seen)
-    key = (str(source_path), class_node.name)
-    if key in seen:
-        return False, set()
-    seen.add(key)
-    fields: set[str] = set()
-    for member in class_node.body:
-        if isinstance(member, ast.AnnAssign) and isinstance(member.target, ast.Name):
-            fields.add(member.target.id)
-        elif isinstance(member, ast.Assign):
-            fields.update(
-                target.id for target in member.targets if isinstance(target, ast.Name)
-            )
-    is_model = False
-    for base in class_node.bases:
-        if _is_pydantic_base(base, source_path, module_tree):
-            is_model = True
-            continue
-        resolved = _resolve_base_class(source_path, module_tree, base, set())
-        if resolved is None:
-            continue
-        parent_path, parent_tree, parent_class = resolved
-        parent_is_model, parent_fields = _class_contract_info(parent_path, parent_tree, parent_class, seen)
-        is_model = is_model or parent_is_model
-        fields.update(parent_fields)
-    return is_model, fields
 
 
 def _is_legacy_ai_provider_error_stub(node: ast.AST) -> bool:
