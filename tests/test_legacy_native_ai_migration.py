@@ -1432,16 +1432,28 @@ async def _gemini_json(prompt):
         legacy = (
             "from .config import settings\n"
             "from .ai_providers import AIProviderError, _gemini_json, _groq_json\n"
-            "from .strategy_evidence import evidence_for\n\n"
-            "class AIStrategySpec:\n"
-            "    pass\n\n"
+            "from .strategy_evidence import evidence_for\n"
+            "from pydantic import BaseModel, Field\n\n"
+            "class AIStrategySpec(BaseModel):\n"
+            "    strategy_family: str = 'TREND'\n"
+            "    validation_warnings: list[str] = Field(default_factory=list)\n"
+            "    asset: str = 'crypto'\n"
+            "    symbols: list[str] = Field(default_factory=list)\n"
+            "    timeframes: list[str] = Field(default_factory=list)\n\n"
             "SYSTEM_PROMPT = '''Gemini strategy prompt'''\n\n"
             "def _strategy_prompt(prompt, name):\n"
             "    return prompt\n\n"
             "async def _generate_with_provider(provider, prompt):\n"
             "    return await _gemini_json(prompt)\n\n"
-            "def _apply_market_context(spec, asset=None, symbol=None, timeframe=None):\n"
-            "    return spec\n\n"
+            "def _apply_market_context(spec, *, asset=None, symbol=None, timeframe=None):\n"
+            "    data = spec.model_dump()\n"
+            "    if asset is not None:\n"
+            "        data['asset'] = asset\n"
+            "    if symbol is not None:\n"
+            "        data['symbols'] = [symbol]\n"
+            "    if timeframe is not None:\n"
+            "        data['timeframes'] = [timeframe]\n"
+            "    return AIStrategySpec.model_validate(data)\n\n"
             "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
             "    return await _generate_with_provider('gemini', prompt)\n"
         )
@@ -1461,6 +1473,45 @@ async def _gemini_json(prompt):
             self.assertIn('provider": "atlas_native"', result)
             self.assertNotRegex(result, migration.PROVIDER_RE)
             self.assertNotIn("_generate_with_provider", result)
+
+            # Execute the migrated function, not just its syntax, against a tiny
+            # package that exercises the retained Pydantic schema/context contract.
+            import asyncio
+            import importlib
+            import sys
+
+            package = root / "fixture_app"
+            package.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "strategy_ai.py").write_text(result, encoding="utf-8")
+            (package / "native_ai.py").write_text(
+                "class NativeAIError(RuntimeError): pass\n"
+                "def compose_strategy_spec(*, prompt, name, asset=None, symbol=None, timeframe=None, max_risk_per_trade=0.01):\n"
+                "    return {'strategy_family':'TREND','validation_warnings':[],'asset':asset or 'crypto',"
+                "'symbols':[symbol] if symbol else ['EUR_USD'],'timeframes':[timeframe] if timeframe else ['1h']}\n",
+                encoding="utf-8",
+            )
+            (package / "config.py").write_text(
+                "class Settings: risk_per_trade = 0.01\nsettings = Settings()\n",
+                encoding="utf-8",
+            )
+            (package / "strategy_evidence.py").write_text(
+                "def evidence_for(family): return {'family': family}\n", encoding="utf-8"
+            )
+            sys.path.insert(0, str(root))
+            try:
+                module = importlib.import_module("fixture_app.strategy_ai")
+                outcome = asyncio.run(module.generate_strategy_draft(
+                    prompt="build a paper-only trend strategy", name="migration-test",
+                    asset="forex", symbol="EUR_USD", timeframe="1h",
+                ))
+                self.assertEqual(outcome["strategy"]["strategy_family"], "TREND")
+                self.assertEqual(outcome["ai"]["provider"], "atlas_native")
+                self.assertEqual(outcome["ai"]["network_calls"], 0)
+            finally:
+                sys.modules.pop("fixture_app.strategy_ai", None)
+                sys.modules.pop("fixture_app", None)
+                sys.path.remove(str(root))
 
     def test_strategy_migration_accepts_recognized_two_and_three_provider_flows(self):
         legacy_two = """from .config import settings
