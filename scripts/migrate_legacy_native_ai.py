@@ -790,6 +790,16 @@ def transform_ai_providers(commit: str) -> None:
                 for collision in collisions
             )
             if equivalent:
+                # AST equality does not capture module-level import bindings. Validate
+                # parser helpers before accepting syntactic equality so a branch alias
+                # such as "import orjson as json" cannot bypass the dependency guard.
+                if name in {"_extract_json", "_response_json_object"} and not _safe_canonical_json_helper(
+                    node, name, segment, old_tree
+                ):
+                    collision = sorted(collisions)[0]
+                    raise MigrationError(
+                        f"app/ai_providers.py has branch-specific definition {collision!r} that collides with a canonical name; refusing to discard or shadow it"
+                    )
                 continue
             # The canonical facade deliberately provides safer implementations of these
             # generic parsers (same callable contract, broader malformed-input handling).
