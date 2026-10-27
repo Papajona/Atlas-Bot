@@ -85,4 +85,4 @@ def test_migration_script_preserves_unrelated_branch_logic_and_fails_closed() ->
     assert "refusing lossy rewrite" in helper
     assert "provider references remain in:" in helper
     assert '_git("add", "-A")' in helper
-    assert "git diff --cached --check" in helper
+    assert '_git("diff", "--cached", "--check")' in helper
