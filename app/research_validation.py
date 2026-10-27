@@ -314,9 +314,18 @@ def oos_benchmark_comparison(
         frame_blocks.append(frame)
 
     def _shift_signal(original_signal: np.ndarray, shift: int) -> np.ndarray:
+        """Shift without wraparound; signed offsets move the full path earlier or later."""
         shifted = np.zeros_like(original_signal)
-        if shift < len(shifted):
-            shifted[shift:] = original_signal[:len(shifted) - shift]
+        size = len(original_signal)
+        if shift == 0:
+            return original_signal.copy()
+        if shift > 0:
+            if shift < size:
+                shifted[shift:] = original_signal[:size - shift]
+        else:
+            advance = -shift
+            if advance < size:
+                shifted[:size - advance] = original_signal[advance:]
         return shifted
 
     def _entry_atr_is_usable(signal: np.ndarray, atr: np.ndarray, frame: pd.DataFrame) -> bool:
@@ -397,14 +406,30 @@ def oos_benchmark_comparison(
 
     valid_shift_offsets: list[list[int]] = []
     for frame, original_signal, atr in zip(frame_blocks, signals, atr_blocks):
-        possible_shifts = range(1, len(original_signal)) if len(original_signal) > 1 else (0,)
+        requested_exposure_bars = int(np.count_nonzero(original_signal))
+        if requested_exposure_bars == 0:
+            # A flat candidate has no timing opportunities to randomize; keep its
+            # benchmark control flat rather than manufacturing exposure.
+            valid_shift_offsets.append([0])
+            continue
+
         valid_shifts = []
-        for shift in possible_shifts:
+        # Both early and late non-wrapping shifts are allowed, but a control must
+        # retain every requested non-flat bar. This prevents fold-edge truncation
+        # from making random controls artificially under-exposed.
+        for shift in range(-(len(original_signal) - 1), len(original_signal)):
+            if shift == 0:
+                continue
             shifted = _shift_signal(original_signal, int(shift))
+            if int(np.count_nonzero(shifted)) != requested_exposure_bars:
+                continue
             if _entry_atr_is_usable(shifted, atr, frame):
                 valid_shifts.append(int(shift))
-        if not valid_shifts:
-            return {"status": "INSUFFICIENT_DATA", "reason": "no_valid_shifted_entry_atr_control"}
+        if len(valid_shifts) < 2:
+            return {
+                "status": "INSUFFICIENT_DATA",
+                "reason": "no_exposure_preserving_randomized_entry_control",
+            }
         valid_shift_offsets.append(valid_shifts)
 
     if len(valid_shift_offsets) != len(frame_blocks):
@@ -423,24 +448,41 @@ def oos_benchmark_comparison(
         buy_hold_values.extend(np.clip(net, -1.0, None).tolist())
     buy_hold_return = float(np.prod(1.0 + np.asarray(buy_hold_values, dtype=float)) - 1.0)
 
+    candidate_requested_exposure_bars = int(sum(np.count_nonzero(signal) for signal in signals))
+    candidate_requested_entry_count = 0
+    for signal in signals:
+        previous = np.r_[0.0, signal[:-1]]
+        candidate_requested_entry_count += int(np.count_nonzero(
+            (signal != 0.0) & ((previous == 0.0) | (np.sign(signal) != np.sign(previous)))
+        ))
+
     rng = np.random.default_rng(seed)
     random_returns: list[float] = []
     random_trade_counts: list[int] = []
     random_turnover_totals: list[float] = []
     random_exit_counts: list[int] = []
     random_exit_bar_counts: list[int] = []
+    random_requested_exposure_bars: list[int] = []
+    random_requested_entry_counts: list[int] = []
     for _ in range(max(1, int(random_trials))):
         trial_values: list[float] = []
         trade_count = 0
         turnover_total = 0.0
         exit_count = 0
         exit_bar_count = 0
+        requested_exposure_bars = 0
+        requested_entry_count = 0
         for frame, market, original_signal, atr, valid_shifts in zip(
             frame_blocks, market_blocks, signals, atr_blocks, valid_shift_offsets
         ):
-            # Prefix remains flat; ATR is validated only where a shifted control enters.
             shift = int(rng.choice(valid_shifts))
             shifted = _shift_signal(original_signal, shift)
+            requested_exposure_bars += int(np.count_nonzero(shifted))
+            previous_requested = np.r_[0.0, shifted[:-1]]
+            requested_entry_count += int(np.count_nonzero(
+                (shifted != 0.0)
+                & ((previous_requested == 0.0) | (np.sign(shifted) != np.sign(previous_requested)))
+            ))
             try:
                 net, turnover, executed, exits, audited_exits = _simulate_signal(frame, market, shifted, atr)
             except (TypeError, ValueError, OverflowError, FloatingPointError):
@@ -459,7 +501,12 @@ def oos_benchmark_comparison(
         random_turnover_totals.append(turnover_total)
         random_exit_counts.append(exit_count)
         random_exit_bar_counts.append(exit_bar_count)
+        random_requested_exposure_bars.append(requested_exposure_bars)
+        random_requested_entry_counts.append(requested_entry_count)
 
+    valid_nonzero_shifts = [
+        shift for offsets in valid_shift_offsets for shift in offsets if shift != 0
+    ]
     random_median = float(np.median(random_returns))
     random_p95 = float(np.quantile(random_returns, 0.95))
     return {
@@ -479,6 +526,13 @@ def oos_benchmark_comparison(
         "random_control_turnover_median": float(np.median(random_turnover_totals)),
         "random_control_exit_count_median": float(np.median(random_exit_counts)),
         "random_control_exit_bar_count_median": float(np.median(random_exit_bar_counts)),
+        "candidate_requested_exposure_bars": candidate_requested_exposure_bars,
+        "random_control_requested_exposure_bars_median": float(np.median(random_requested_exposure_bars)),
+        "candidate_requested_entry_count": candidate_requested_entry_count,
+        "random_control_requested_entry_count_median": float(np.median(random_requested_entry_counts)),
+        "random_control_shift_min": min(valid_nonzero_shifts) if valid_nonzero_shifts else None,
+        "random_control_shift_max": max(valid_nonzero_shifts) if valid_nonzero_shifts else None,
+        "random_control_exposure_matching": "EXACT_REQUESTED_EXPOSURE_BARS_AND_ENTRY_COUNT",
         "buy_and_hold_turnover": buy_hold_turnover,
         "benchmark_market_return_source": "OHLC_OPEN_TO_OPEN_WITH_TERMINAL_CLOSE",
         "random_control_execution_model": "INDEPENDENT_NONCIRCULAR_ENTRY_SHIFT_WITH_FLAT_START_AND_TERMINAL_LIQUIDATION",
