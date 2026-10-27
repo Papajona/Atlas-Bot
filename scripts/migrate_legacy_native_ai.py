@@ -346,11 +346,39 @@ def transform_strategy_ai(commit: str) -> None:
             "generate_strategy_draft contains branch-specific behavior beyond the recognized provider trampoline; refusing to overwrite it"
         )
 
+    legacy_provider = next(
+        (node for node in old_tree.body
+         if isinstance(node, ast.AsyncFunctionDef) and node.name == "_generate_with_provider"),
+        None,
+    )
+    if legacy_provider is None or legacy_provider.decorator_list:
+        raise MigrationError(
+            "strategy module lacks an undecorated provider-only _generate_with_provider helper; refusing to drop unknown behavior"
+        )
+    provider_body = legacy_provider.body
+    provider_delegations = {"_gemini_json", "_groq_json", "_cerebras_json", "_openai_json"}
+    direct_provider_trampoline = (
+        len(provider_body) == 1
+        and isinstance(provider_body[0], ast.Return)
+        and isinstance(provider_body[0].value, ast.Await)
+        and isinstance(provider_body[0].value.value, ast.Call)
+        and (
+            (isinstance(provider_body[0].value.value.func, ast.Name)
+             and provider_body[0].value.value.func.id in provider_delegations)
+            or (isinstance(provider_body[0].value.value.func, ast.Attribute)
+                and provider_body[0].value.value.func.attr in provider_delegations)
+        )
+    )
+    if not direct_provider_trampoline:
+        raise MigrationError(
+            "_generate_with_provider contains additional or unknown behavior; refusing to discard its body"
+        )
     canonical_generate = next(
         (node for node in new_tree.body
          if isinstance(node, ast.AsyncFunctionDef) and node.name == "generate_strategy_draft"),
         None,
     )
+
     if canonical_generate is None:
         raise MigrationError("canonical strategy module lacks generate_strategy_draft")
     canonical_lines = canonical.splitlines(keepends=True)
