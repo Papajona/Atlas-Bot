@@ -2254,7 +2254,8 @@ def transform_strategy_ai(commit: str) -> None:
             "strategy schema/context helpers do not satisfy the canonical Native AI draft contract; refusing to replace the hosted generator"
         )
 
-    edits: list[tuple[int, int, str]] =     found_generate = False
+    edits: list[tuple[int, int, str]] = []
+    found_generate = False
     replacement_import_inserted = False
     for node in old_tree.body:
         name = _name(node)
