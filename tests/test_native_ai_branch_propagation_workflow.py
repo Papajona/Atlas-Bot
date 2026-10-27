@@ -56,7 +56,7 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert '"ENTRY_EXIT_3_9_0.md"' in runtime_path_list
     assert '"app/src/main/java/com/atlas/trading/network/ReleaseAdvisorClient.kt"' in runtime_path_list
     assert '"app/src/main/java/com/atlas/trading/ui/ReleaseAdvisorScreen.kt"' in runtime_path_list
-    assert "git grep -IlEi" in workflow
+    assert "git grep -IlEi" not in workflow
     assert "git grep -nIEi" in workflow
     assert "AI_GATEWAY_API_KEY" in workflow
     assert "SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+" in workflow
