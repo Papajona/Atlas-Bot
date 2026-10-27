@@ -46,7 +46,7 @@ def test_inconclusive_mutation_never_claims_the_remote_branch_was_unchanged() ->
     assert "existing-ref update rejected; branch left unchanged" not in workflow
 
 
-def test_legacy_branches_receive_runtime_only_patch_with_hunk_conflicts_favoring_cleanup() -> None:
+def test_legacy_branches_receive_runtime_only_patch_without_overwriting_conflicts() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     paths_start = workflow.index("NATIVE_AI_PATHS=(")
     paths_end = workflow.index(")", paths_start)
@@ -57,7 +57,9 @@ def test_legacy_branches_receive_runtime_only_patch_with_hunk_conflicts_favoring
         'git diff --binary "$NATIVE_AI_PARENT" "$NATIVE_AI_COMMIT" -- "${NATIVE_AI_PATHS[@]}"'
         in workflow
     )
-    assert 'git cherry-pick -X theirs "$NATIVE_AI_RUNTIME_PATCH_COMMIT"' in workflow
+    assert 'git cherry-pick "$NATIVE_AI_RUNTIME_PATCH_COMMIT"' in workflow
+    assert 'git cherry-pick -X theirs "$NATIVE_AI_RUNTIME_PATCH_COMMIT"' not in workflow
+    assert "runtime-only cleanup patch conflicts or cannot be applied safely" in workflow
     assert 'git cherry-pick "$NATIVE_AI_COMMIT"' not in workflow
     assert "verify_native_ai_impl" in workflow
     assert "provider references remain" in workflow
