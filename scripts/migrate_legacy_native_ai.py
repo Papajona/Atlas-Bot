@@ -2010,17 +2010,16 @@ def _is_safe_legacy_cerebras_adapter(node: ast.AST) -> bool:
     if not isinstance(extract_assign, ast.Assign) or len(extract_assign.targets) != 1 or not is_name(extract_assign.targets[0], "text"):
         return False
     content = extract_assign.value
-    for key in ("content", "message", "choices"):
-        if not isinstance(content, ast.Subscript):
-            return False
-        slice_node = content.slice
-        if not is_string(slice_node, key):
-            return False
-        content = content.value
-    if not (
-        isinstance(content, ast.Subscript) and isinstance(content.slice, ast.Constant)
-        and content.slice.value == 0 and is_name(content.value, "body")
-    ):
+    if not isinstance(content, ast.Subscript) or not is_string(content.slice, "content"):
+        return False
+    content = content.value
+    if not isinstance(content, ast.Subscript) or not is_string(content.slice, "message"):
+        return False
+    content = content.value
+    if not isinstance(content, ast.Subscript) or not isinstance(content.slice, ast.Constant) or content.slice.value != 0:
+        return False
+    content = content.value
+    if not isinstance(content, ast.Subscript) or not is_string(content.slice, "choices") or not is_name(content.value, "body"):
         return False
     handler = extract_try.handlers[0]
     if not (
@@ -2038,6 +2037,65 @@ def _is_safe_legacy_cerebras_adapter(node: ast.AST) -> bool:
         and is_name(result_return.value.func, "_extract_json")
         and len(result_return.value.args) == 1 and is_name(result_return.value.args[0], "text")
         and not result_return.value.keywords
+    )
+
+
+
+def _is_compatible_strategy_schema_and_context(tree: ast.Module) -> bool:
+    """Ensure the retained schema/helper return the Pydantic object the new generator expects."""
+    imported_base_model = any(
+        isinstance(node, ast.ImportFrom) and node.module == "pydantic" and node.level == 0
+        and any(alias.name == "BaseModel" and alias.asname is None for alias in node.names)
+        for node in tree.body
+    )
+    classes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"]
+    if not imported_base_model or len(classes) != 1:
+        return False
+    schema = classes[0]
+    if schema.decorator_list or not any(isinstance(base, ast.Name) and base.id == "BaseModel" for base in schema.bases):
+        return False
+    fields = {
+        node.target.id for node in schema.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+    }
+    required_fields = {"strategy_family", "validation_warnings", "asset", "symbols", "timeframes"}
+    if not required_fields.issubset(fields):
+        return False
+    if any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in {"model_validate", "model_dump"}
+        for node in schema.body
+    ):
+        return False
+
+    contexts = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+    ]
+    if len(contexts) != 1:
+        return False
+    context = contexts[0]
+    args = context.args
+    if (
+        context.decorator_list or args.posonlyargs or [arg.arg for arg in args.args] != ["spec"]
+        or args.vararg or args.kwarg or [arg.arg for arg in args.kwonlyargs] != ["asset", "symbol", "timeframe"]
+        or args.defaults or len(args.kw_defaults) != 3
+        or any(not isinstance(value, ast.Constant) or value.value is not None for value in args.kw_defaults)
+        or not context.body or not isinstance(context.body[-1], ast.Return)
+    ):
+        return False
+    result = context.body[-1].value
+    if (
+        not isinstance(result, ast.Call) or not isinstance(result.func, ast.Attribute)
+        or not isinstance(result.func.value, ast.Name) or result.func.value.id != "AIStrategySpec"
+        or result.func.attr != "model_validate" or len(result.args) != 1
+        or not isinstance(result.args[0], ast.Name) or result.args[0].id != "data" or result.keywords
+    ):
+        return False
+    return any(
+        isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute)
+        and isinstance(item.func.value, ast.Name) and item.func.value.id == "spec"
+        and item.func.attr == "model_dump" and not item.args and not item.keywords
+        for item in ast.walk(context)
     )
 
 
