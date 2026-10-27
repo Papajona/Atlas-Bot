@@ -104,13 +104,39 @@ def test_release_diagnostics_redacts_quoted_json_secret_values_before_returning_
     import json
     from app.main import _redact_release_diagnostic_text, _release_diagnostic_report
 
-    supplied = '{"password": "dont expose this secret", "Authorization": "Bearer bearer-secret-value", "message": "Could not resolve com.example:bad:1"}'
+    supplied = r'''{"password": "prefix \\" escaped quoted value secret-leak-after-escaped-quote", "Authorization": "Bearer bearer-secret-value", "message": "Could not resolve com.example:bad:1"}'''
     redacted = _redact_release_diagnostic_text(supplied)
     report = json.loads(_release_diagnostic_report(redacted, ""))
 
-    assert "dont expose this secret" not in redacted
+    assert "secret-leak-after-escaped-quote" not in redacted
     assert "bearer-secret-value" not in redacted
-    assert "dont expose this secret" not in json.dumps(report)
+    assert "secret-leak-after-escaped-quote" not in json.dumps(report)
     assert "bearer-secret-value" not in json.dumps(report)
     assert "[REDACTED]" in redacted
     assert "Could not resolve" in json.dumps(report)
+
+
+
+def test_android_resource_linking_header_is_classified_without_compiler_advice():
+    import json
+    from app.main import _release_diagnostic_report
+
+    report = json.loads(_release_diagnostic_report("Android resource linking failed", ""))
+
+    assert "Android resource-linking failure" in report["likely_blockers"]
+    assert "Kotlin or Java compilation failure" not in report["likely_blockers"]
+
+
+def test_android_resource_not_found_line_is_classified_as_resource_failure():
+    import json
+    from app.main import _release_diagnostic_report
+
+    report = json.loads(
+        _release_diagnostic_report(
+            "Android resource linking failed\nerror: resource drawable/missing_icon not found",
+            "",
+        )
+    )
+
+    assert "Android resource-linking failure" in report["likely_blockers"]
+    assert "Kotlin or Java compilation failure" not in report["likely_blockers"]
