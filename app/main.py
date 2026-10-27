@@ -1027,14 +1027,16 @@ async def _adaptive_bot_controller_loop():
                             row.last_decision = str(result.get("decision", "ERROR"))
                             row.last_stage = str(result.get("stage", "execution"))
                             row.last_model_version = str((result.get("ml_signal") or {}).get("model_version", ""))
-                            if row.status == "STOPPED":
-                                # Validation has intentionally stopped this bot and committed its reason.
-                                # Do not re-schedule it or erase that reason after the cycle returns.
-                                row.next_run_at = None
-                            else:
+                            if row.status == "RUNNING":
                                 row.next_run_at = now + __import__("datetime").timedelta(seconds=max(60, interval_seconds))
                                 row.last_error = ""
                                 row.consecutive_errors = 0
+                            elif row.status == "STOPPED":
+                                # A stop is committed by the cycle itself. Preserve its diagnostic
+                                # error and never re-schedule it after the supervisor resumes.
+                                row.next_run_at = None
+                            # For any other status, preserve its schedule/error rather than
+                            # treating a non-running bot as eligible for another cycle.
                             await db.commit()
                 except asyncio.CancelledError:
                     raise
