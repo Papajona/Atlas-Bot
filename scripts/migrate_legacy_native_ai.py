@@ -129,6 +129,29 @@ def _safe_canonical_json_helper(
     if args.posonlyargs or args.kwonlyargs or args.vararg or args.kwarg or args.kw_defaults:
         return False
 
+    # Annotations execute at function definition unless postponed. Allow only inert,
+    # well-known type names and simple generic subscriptions; reject calls/attribute
+    # lookups and other expressions whose side effects would disappear on replacement.
+    safe_annotation_names = {"str", "dict", "Any", "int", "float", "bool", "list", "tuple"}
+
+    def safe_annotation(annotation: ast.AST | None) -> bool:
+        if annotation is None:
+            return True
+        if isinstance(annotation, ast.Name):
+            return annotation.id in safe_annotation_names
+        if isinstance(annotation, ast.Constant):
+            return annotation.value is None or isinstance(annotation.value, str)
+        if isinstance(annotation, ast.Subscript):
+            return safe_annotation(annotation.value) and safe_annotation(annotation.slice)
+        if isinstance(annotation, (ast.Tuple, ast.List)):
+            return all(safe_annotation(element) for element in annotation.elts)
+        return False
+
+    if any(not safe_annotation(argument.annotation) for argument in args.args):
+        return False
+    if not safe_annotation(node.returns):
+        return False
+
     if name == "_extract_json":
         if [arg.arg for arg in args.args] != ["text"] or args.defaults:
             return False
