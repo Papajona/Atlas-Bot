@@ -114,12 +114,12 @@ def _name(node: ast.AST) -> str | None:
 
 
 def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str) -> bool:
-    """Recognize only side-effect-free legacy JSON parser helpers replaced canonically.
+    """Recognize only pure legacy JSON helper variants replaced by canonical implementations.
 
-    These two helpers have stable callable contracts across old branches. Their legacy
-    implementations may differ in annotations/error wording, but only parse JSON / inspect
-    a response body. Provider adapters, arbitrary helpers, and calls with external side
-    effects are deliberately not eligible for this compatibility replacement.
+    The recognized functions may differ in annotations and error messages, but must retain
+    a one-argument JSON parser or a two-argument response-body parser contract. Mutable
+    object writes, extra parameters, unexpected return values, property-chain calls, and
+    unapproved calls are not eligible for canonical replacement.
     """
     if (
         name not in {"_extract_json", "_response_json_object"}
@@ -129,18 +129,122 @@ def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str) -
     ):
         return False
 
-    def root_name(value: ast.AST) -> str | None:
-        while isinstance(value, (ast.Attribute, ast.Subscript)):
-            value = value.value
-        return value.id if isinstance(value, ast.Name) else None
+    args = node.args
+    if args.posonlyargs or args.kwonlyargs or args.vararg or args.kwarg or args.kw_defaults:
+        return False
 
-    calls = [item for item in ast.walk(node) if isinstance(item, ast.Call)]
-    saw_contract_call = False
+    positional_names = [arg.arg for arg in args.args]
+    if name == "_extract_json":
+        if positional_names != ["text"] or args.defaults:
+            return False
+        local_names = {"text", "raw", "value", "exc"}
+        assigned_names = {"raw", "value"}
+        return_name = "value"
+        allowed_globals = {
+            "json", "AIProviderError", "isinstance", "str", "dict", "Any",
+            "JSONDecodeError", "TypeError", "ValueError", "UnicodeDecodeError",
+        }
+    else:
+        if positional_names != ["response", "provider"]:
+            return False
+        if len(args.defaults) not in {0, 1}:
+            return False
+        if args.defaults and not (
+            isinstance(args.defaults[0], ast.Constant) and isinstance(args.defaults[0].value, str)
+        ):
+            return False
+        local_names = {"response", "provider", "body", "exc"}
+        assigned_names = {"body"}
+        return_name = "body"
+        allowed_globals = {
+            "AIProviderError", "isinstance", "dict", "Any", "ValueError",
+            "UnicodeDecodeError", "TypeError", "AttributeError",
+        }
+
+    def safe_string_receiver(value: ast.AST) -> bool:
+        if isinstance(value, ast.Name) and value.id in {"text", "raw"}:
+            return True
+        # Permit exactly (text or ""), not arbitrary Boolean expressions/property chains.
+        if (
+            isinstance(value, ast.BoolOp)
+            and isinstance(value.op, ast.Or)
+            and len(value.values) == 2
+            and isinstance(value.values[0], ast.Name)
+            and value.values[0].id == "text"
+            and isinstance(value.values[1], ast.Constant)
+            and value.values[1].value == ""
+        ):
+            return True
+        # A legacy fenced-JSON parser may use raw[4:].lstrip() after a literal "json" prefix.
+        return (
+            isinstance(value, ast.Subscript)
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "raw"
+            and isinstance(value.slice, ast.Slice)
+            and isinstance(value.slice.lower, ast.Constant)
+            and value.slice.lower.value == 4
+            and value.slice.upper is None
+            and value.slice.step is None
+        )
+
+    body_nodes = [item for statement in node.body for item in ast.walk(statement)]
+    if any(
+        isinstance(item, (ast.Global, ast.Nonlocal, ast.Await, ast.Yield, ast.YieldFrom,
+                          ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp))
+        for item in body_nodes
+    ):
+        return False
+    if any(
+        isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and item is not node
+        for item in body_nodes
+    ):
+        return False
+
+    allowed_statement_types = (
+        ast.Assign, ast.AnnAssign, ast.If, ast.Try, ast.Return, ast.Raise, ast.Pass, ast.Expr,
+    )
+    for item in body_nodes:
+        if isinstance(item, ast.stmt) and not isinstance(item, allowed_statement_types):
+            return False
+        if isinstance(item, ast.Expr):
+            # Only an optional docstring expression is permitted; executable expression
+            # statements can have effects even when they do not contain a Call node.
+            if not (isinstance(item.value, ast.Constant) and isinstance(item.value.value, str)):
+                return False
+        if isinstance(item, ast.Assign):
+            if (
+                len(item.targets) != 1
+                or not isinstance(item.targets[0], ast.Name)
+                or item.targets[0].id not in assigned_names
+            ):
+                return False
+        elif isinstance(item, ast.AnnAssign):
+            if not isinstance(item.target, ast.Name) or item.target.id not in assigned_names:
+                return False
+        elif isinstance(item, (ast.AugAssign, ast.Delete, ast.NamedExpr)):
+            return False
+        elif isinstance(item, ast.Return):
+            if not isinstance(item.value, ast.Name) or item.value.id != return_name:
+                return False
+
+    if not node.body or not isinstance(node.body[-1], ast.Return):
+        return False
+    if not isinstance(node.body[-1].value, ast.Name) or node.body[-1].value.id != return_name:
+        return False
+
+    calls = [item for item in body_nodes if isinstance(item, ast.Call)]
+    saw_contract_error = False
+    saw_parser_call = False
     for call in calls:
         func = call.func
-        if isinstance(func, ast.Name) and func.id in {"AIProviderError", "isinstance"}:
-            saw_contract_call = saw_contract_call or func.id == "AIProviderError"
-            continue
+        if isinstance(func, ast.Name):
+            if func.id == "AIProviderError":
+                saw_contract_error = True
+                continue
+            if func.id == "isinstance":
+                continue
+            return False
         if not isinstance(func, ast.Attribute):
             return False
 
@@ -149,29 +253,79 @@ def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str) -
             and func.attr == "loads"
             and isinstance(func.value, ast.Name)
             and func.value.id == "json"
+            and len(call.args) == 1
+            and not call.keywords
         ):
-            saw_contract_call = True
+            saw_parser_call = True
+            if not isinstance(call.args[0], ast.Name) or call.args[0].id not in {"raw", "text"}:
+                return False
             continue
         if (
             name == "_response_json_object"
             and func.attr == "json"
             and isinstance(func.value, ast.Name)
             and func.value.id == "response"
+            and not call.args
+            and not call.keywords
         ):
-            saw_contract_call = True
+            saw_parser_call = True
             continue
         if (
             name == "_extract_json"
             and func.attr in {"strip", "startswith", "lstrip"}
-            and root_name(func.value) in {"text", "raw"}
+            and safe_string_receiver(func.value)
+            and not call.keywords
+            and all(isinstance(argument, ast.Constant) and isinstance(argument.value, str) for argument in call.args)
         ):
             continue
         return False
 
-    if any(isinstance(item, (ast.Global, ast.Nonlocal, ast.Await, ast.Yield, ast.YieldFrom))
-           for item in ast.walk(node)):
-        return False
-    return saw_contract_call
+    # Reject property access outside the exact parser/string operations above.
+    for item in body_nodes:
+        if isinstance(item, ast.Attribute):
+            if (
+                name == "_extract_json"
+                and item.attr == "loads"
+                and isinstance(item.value, ast.Name)
+                and item.value.id == "json"
+            ):
+                continue
+            if (
+                name == "_extract_json"
+                and item.attr == "JSONDecodeError"
+                and isinstance(item.value, ast.Name)
+                and item.value.id == "json"
+            ):
+                continue
+            if (
+                name == "_response_json_object"
+                and item.attr == "json"
+                and isinstance(item.value, ast.Name)
+                and item.value.id == "response"
+            ):
+                continue
+            if (
+                name == "_extract_json"
+                and item.attr in {"strip", "startswith", "lstrip"}
+                and safe_string_receiver(item.value)
+            ):
+                continue
+            return False
+        if isinstance(item, ast.Subscript):
+            if not safe_string_receiver(item):
+                return False
+
+    # Unknown global reads are not compatible with an unattended canonical replacement.
+    for item in body_nodes:
+        if (
+            isinstance(item, ast.Name)
+            and isinstance(item.ctx, ast.Load)
+            and item.id not in local_names
+            and item.id not in allowed_globals
+        ):
+            return False
+
+    return saw_parser_call and saw_contract_error
 
 
 def _apply_line_edits(source: str, edits: list[tuple[int, int, str]]) -> str:
