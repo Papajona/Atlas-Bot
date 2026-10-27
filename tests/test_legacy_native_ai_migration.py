@@ -914,8 +914,8 @@ def _extract_json(text):
                 target = root / "app" / "ai_providers.py"
                 target.parent.mkdir()
                 legacy = (
-                    "import json\\n\\n"
-                    "class AIProviderError(RuntimeError):\\n    pass\\n\\n"
+                    "import json\n\n"
+                    "class AIProviderError(RuntimeError):\n    pass\n\n"
                     + helper
                 )
                 target.write_text(legacy, encoding="utf-8")
