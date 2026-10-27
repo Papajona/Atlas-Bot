@@ -30,7 +30,7 @@ class StrategyCondition(BaseModel):
 
 
 class AIStrategySpec(BaseModel):
-    """LLM output contract. It describes a strategy but has no execution authority."""
+    """Native AI output contract. It describes a strategy but grants no execution authority."""
 
     model_config = ConfigDict(extra="forbid")
     version: Literal["atlas-strategy-v1"] = "atlas-strategy-v1"
