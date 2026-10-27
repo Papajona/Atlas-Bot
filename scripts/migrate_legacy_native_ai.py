@@ -297,12 +297,23 @@ def transform_ai_providers(commit: str) -> None:
             # The Native AI facade exports AIProviderError as a compatibility alias
             # for NativeAIError; this exact empty legacy subclass is safe to replace.
             continue
-        if name and name in canonical_names:
-            canonical_node = canonical_nodes_by_name[name]
-            if ast.dump(node, include_attributes=False) == ast.dump(canonical_node, include_attributes=False):
+        defined_names = _defined_names(node)
+        collisions = defined_names & canonical_names
+        if collisions:
+            equivalent = all(
+                ast.dump(node, include_attributes=False)
+                == ast.dump(canonical_nodes_by_name[collision], include_attributes=False)
+                for collision in collisions
+            )
+            if equivalent:
                 continue
+            collision = sorted(
+                name for name in collisions
+                if ast.dump(node, include_attributes=False)
+                != ast.dump(canonical_nodes_by_name[name], include_attributes=False)
+            )[0]
             raise MigrationError(
-                f"app/ai_providers.py has branch-specific definition {name!r} that collides with a canonical name; refusing to discard or shadow it"
+                f"app/ai_providers.py has branch-specific definition {collision!r} that collides with a canonical name; refusing to discard or shadow it"
             )
         if PROVIDER_RE.search(segment):
             raise MigrationError(
@@ -310,25 +321,77 @@ def transform_ai_providers(commit: str) -> None:
             )
         extras.append(segment.rstrip())
 
-    # Preserve only imports that retained branch helpers actually use and that the
-    # canonical facade does not already provide. Never carry hosted-provider imports
-    # solely because removed adapters previously needed them.
+    # Preserve dependencies for retained branch helpers without silently changing
+    # their import bindings. A retained import that collides with a canonical name
+    # must be the exact same import binding; otherwise refuse the migration.
     used_names: set[str] = set()
     for segment in extras:
         tree = ast.parse(segment)
         used_names.update(node.id for node in ast.walk(tree) if isinstance(node, ast.Name))
+
+    def import_bindings(tree: ast.Module) -> dict[str, set[tuple[str, int, str, str, str]]]:
+        bindings: dict[str, set[tuple[str, int, str, str, str]]] = {}
+        for import_node in tree.body:
+            if not isinstance(import_node, (ast.Import, ast.ImportFrom)):
+                continue
+            for alias in import_node.names:
+                if alias.name == "*":
+                    continue
+                if isinstance(import_node, ast.Import):
+                    bound = alias.asname or alias.name.split(".", 1)[0]
+                    signature = ("import", 0, "", alias.name, bound)
+                else:
+                    bound = alias.asname or alias.name
+                    signature = ("from", import_node.level, import_node.module or "", alias.name, bound)
+                bindings.setdefault(bound, set()).add(signature)
+        return bindings
+
+    canonical_imports = import_bindings(canonical_tree)
     preserved_imports: list[str] = []
+    pre_canonical_imports: list[str] = []
     for node in import_nodes:
         if isinstance(node, ast.ImportFrom) and node.module == "__future__":
             continue
+
+        # Star imports are not statically enumerable. Preserve a non-provider star
+        # import before the canonical facade so that canonical globals take priority,
+        # while retained branch helpers can still resolve their extra dependencies.
+        if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
+            if extras:
+                source_module = "." * node.level + (node.module or "")
+                if PROVIDER_RE.search(source_module):
+                    raise MigrationError(
+                        f"app/ai_providers.py has a provider-bearing star import used alongside retained helpers; refusing to drop or preserve it: {source_module}"
+                    )
+                pre_canonical_imports.append(ast.unparse(node))
+            continue
+
         aliases = []
         for alias in node.names:
             bound = alias.asname or (
                 alias.name.split(".", 1)[0] if isinstance(node, ast.Import) else alias.name
             )
-            if bound not in used_names or bound in canonical_names or PROVIDER_RE.search(alias.name):
+            if bound not in used_names:
                 continue
+            source_module = alias.name if isinstance(node, ast.Import) else (node.module or "")
+            if PROVIDER_RE.search(alias.name) or PROVIDER_RE.search(source_module):
+                raise MigrationError(
+                    f"app/ai_providers.py retained helper depends on a provider-bearing import {alias.name!r}; refusing to leave it unresolved"
+                )
+            if bound in canonical_names:
+                signature = (
+                    ("import", 0, "", alias.name, bound)
+                    if isinstance(node, ast.Import)
+                    else ("from", node.level, node.module or "", alias.name, bound)
+                )
+                if signature in canonical_imports.get(bound, set()):
+                    # This import has exactly the same binding as the canonical one.
+                    continue
+                raise MigrationError(
+                    f"app/ai_providers.py retained helper import {alias.name!r} binds canonical name {bound!r} differently; refusing to change helper semantics"
+                )
             aliases.append(alias)
+
         if not aliases:
             continue
         if isinstance(node, ast.Import):
@@ -338,7 +401,10 @@ def transform_ai_providers(commit: str) -> None:
                 module=node.module, names=aliases, level=node.level
             )))
 
-    pieces = [canonical.rstrip()]
+    pieces = []
+    if pre_canonical_imports:
+        pieces.extend(sorted(set(pre_canonical_imports)))
+    pieces.append(canonical.rstrip())
     if preserved_imports:
         pieces.append("\n".join(sorted(set(preserved_imports))))
     if extras:
