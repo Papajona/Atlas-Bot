@@ -42,14 +42,15 @@ def _classify_asset(text: str, requested: str | None) -> str:
 
 def _classify_family(text: str) -> str:
     value = text.lower()
+    # Explicit multi-strategy intent takes precedence over component keywords.
+    if any(x in value for x in ("ensemble", "combine strategies", "multiple strategies", "combine momentum and trend")):
+        return "ENSEMBLE"
     if any(x in value for x in ("mean reversion", "mean-reversion", "revert to mean", "range-bound", "oversold", "overbought")):
         return "MEAN_REVERSION"
     if any(x in value for x in ("breakout", "break out", "prior high", "range high", "range low")):
         return "BREAKOUT"
-    if any(x in value for x in ("momentum", "rate of change", "roc", "acceleration")):
+    if any(x in value for x in ("momentum", "rate of change", "acceleration")) or re.search(r"\\broc\\b", value):
         return "MOMENTUM"
-    if any(x in value for x in ("ensemble", "combine strategies", "multiple strategies")):
-        return "ENSEMBLE"
     return "TREND"
 
 
@@ -81,6 +82,44 @@ def _template_rules(family: str) -> tuple[list[dict[str, str]], list[dict[str, s
     return entries, [{"type": f"{family}_EXIT", "rule": exits[family]}]
 
 
+def _condition_timeframe(prompt: str, condition_type: str, default_timeframe: str) -> str:
+    """Bind supported rules to the nearest explicitly requested timeframe when clear."""
+    prompt_lower = prompt.lower()
+    timeframe_matches = list(re.finditer(
+        r"(?<![a-z0-9])(5m|15m|30m|1h|4h|1d)(?![a-z0-9])", prompt_lower
+    ))
+    if len(timeframe_matches) < 2:
+        return default_timeframe
+    keywords = {
+        "RANGE_BREAKOUT": ("breakout", "break out", "prior high", "range high", "range low"),
+        "BREAKOUT_QUALITY": ("confirmation", "confirm", "quality"),
+        "TREND_CONFIRMATION": ("trend", "fast", "slow", "confirmation", "confirm"),
+        "MOMENTUM_CONFIRMATION": ("momentum", "confirmation", "confirm"),
+        "VOLATILITY_FILTER": ("volatility", "spread", "data quality"),
+        "EXTREME_DEVIATION": ("mean", "deviation", "vwap", "reversal"),
+        "RANGE_REGIME": ("regime", "range", "trend"),
+        "SIGNAL_CONSENSUS": ("consensus", "ensemble", "components", "strategies"),
+        "SIGNAL_QUALITY": ("quality", "coverage", "spread"),
+        "BREAKOUT_EXIT": ("breakout", "exit", "range"),
+    }.get(condition_type, ())
+    keyword_spans = []
+    for keyword in keywords:
+        for match in re.finditer(re.escape(keyword), prompt_lower):
+            keyword_spans.append((match.start(), match.end()))
+    if not keyword_spans:
+        return default_timeframe
+    ranked = []
+    for timeframe_match in timeframe_matches:
+        distance = min(
+            max(0, max(start - timeframe_match.end(), timeframe_match.start() - end))
+            for start, end in keyword_spans
+        )
+        ranked.append((distance, timeframe_match.group(1)))
+    distance, selected = min(ranked, key=lambda item: item[0])
+    # Do not bind a rule to a distant timeframe mention without local textual evidence.
+    return selected if distance <= 48 else default_timeframe
+
+
 def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
                           symbol: str | None = None, timeframe: str | None = None,
                           max_risk_per_trade: float = 0.005) -> dict[str, Any]:
@@ -93,27 +132,39 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
     if symbol and symbol.strip():
         selected_symbol = symbol.strip()[:80]
     else:
-        upper = text.upper().replace(" ", "")
+        upper = text.upper()
         match = next(((pattern, label) for pattern, label in (
-            (r"EUR(?:[/_-]?USD)", "EUR_USD"), (r"GBP(?:[/_-]?USD)", "GBP_USD"),
-            (r"XAU(?:[/_-]?USD)|GOLD", "XAU_USD"), (r"BTC(?:[/_-]?USDT|[/_-]?USD)?", "BTC/USDT"),
-            (r"ETH(?:[/_-]?USDT|[/_-]?USD)?", "ETH/USDT"), (r"WTI|CRUDEOIL", "WTI"),
+            (r"\\bEUR\\s*[/_-]?\\s*USD\\b", "EUR_USD"),
+            (r"\\bGBP\\s*[/_-]?\\s*USD\\b", "GBP_USD"),
+            (r"\\bXAU(?:\\s*[/_-]?\\s*USD)?\\b|\\bGOLD\\b", "XAU_USD"),
+            (r"\\bBTC(?:\\s*[/_-]?\\s*USDT?)?\\b", "BTC/USDT"),
+            (r"\\bETH(?:\\s*[/_-]?\\s*USDT?)?\\b", "ETH/USDT"),
+            (r"\\bWTI\\b|\\bCRUDE\\s*OIL\\b", "WTI"),
         ) if re.search(pattern, upper)), None)
         selected_symbol = match[1] if match else {"crypto": "BTC/USDT", "forex": "EUR_USD", "commodity": "XAU_USD"}[asset_kind]
-    tf = timeframe if timeframe in _ALLOWED_TIMEFRAMES else None
-    if tf is None:
-        match = re.search(r"(?<![a-z0-9])(5m|15m|30m|1h|4h|1d)(?![a-z0-9])", text.lower())
-        tf = match.group(1) if match else "1h"
+    requested_timeframes = list(dict.fromkeys(
+        match.group(1) for match in re.finditer(
+            r"(?<![a-z0-9])(5m|15m|30m|1h|4h|1d)(?![a-z0-9])", text.lower()
+        )
+    ))
+    tf = timeframe if timeframe in _ALLOWED_TIMEFRAMES else (requested_timeframes[0] if requested_timeframes else "1h")
+    if tf not in requested_timeframes:
+        requested_timeframes.append(tf)
     family = _classify_family(text)
     lower = text.lower()
-    direction = "BOTH" if any(x in lower for x in ("both directions", "long and short", "long/short", "both sides")) else (
-        "SHORT" if any(x in lower for x in ("short only", "sell only", "bearish only", "downtrend only")) else "LONG")
+    asks_both = any(x in lower for x in ("both directions", "long and short", "long/short", "both sides"))
+    asks_short = bool(re.search(r"\\b(short|sell|bearish|downtrend)\\b", lower))
+    asks_long = bool(re.search(r"\\b(long|buy|bullish|uptrend)\\b", lower))
+    direction = "BOTH" if asks_both or (asks_short and asks_long) else ("SHORT" if asks_short else "LONG")
+    direction_ambiguous = not (asks_both or asks_short or asks_long)
     cap = _number(max_risk_per_trade)
     cap = min(cap if cap is not None and cap > 0 else 0.005, 0.05)
     risk = min(cap, 0.005)
     warnings = [
         "Generated locally by Atlas Native AI from supported templates; not a general-purpose language-model response.",
         "This draft is not backtest evidence; cost-aware out-of-sample and walk-forward validation remain mandatory before paper promotion."]
+    if direction_ambiguous:
+        warnings.append("No trading direction was explicit in the prompt; LONG is only a draft default and must be confirmed before use.")
     risk_match = re.search(r"\brisk(?:\s+per\s+trade)?\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)\s*(%|percent|bps|bp)?", lower)
     if risk_match:
         amount = float(risk_match.group(1))
@@ -128,13 +179,15 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
     rr_match = re.search(r"(?:take.?profit|reward.?risk|risk.?reward|target)\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)\s*r\b", lower)
     target_rr = min(10.0, max(0.1, float(rr_match.group(1)))) if rr_match else 2.0
     entries, exits = _template_rules(family)
+    entry_conditions = [dict(x, timeframe=_condition_timeframe(text, x["type"], tf)) for x in entries]
+    exit_conditions = [dict(x, timeframe=_condition_timeframe(text, x["type"], tf)) for x in exits]
     sessions = [n for n, term in (("ASIA", "asia"), ("LONDON", "london"), ("NEW_YORK", "new york"), ("SYDNEY", "sydney")) if term in lower]
     return {
         "version": "atlas-strategy-v1", "title": title,
         "summary": f"{family.replace('_', ' ').title()} template for {selected_symbol} on {tf}; empirically validate all parameters.",
-        "asset": asset_kind, "symbols": [selected_symbol], "timeframes": [tf], "direction": direction,
-        "strategy_family": family, "entry_conditions": [dict(x, timeframe=tf) for x in entries],
-        "exit_conditions": [dict(x, timeframe=tf) for x in exits], "risk_per_trade": risk,
+        "asset": asset_kind, "symbols": [selected_symbol], "timeframes": requested_timeframes, "direction": direction,
+        "strategy_family": family, "entry_conditions": entry_conditions,
+        "exit_conditions": exit_conditions, "risk_per_trade": risk,
         "stop_loss_atr": stop_atr, "take_profit_rr": target_rr, "sessions": sessions,
         "assumptions": ["Use completed candles only.", "Use verified market data and realistic costs.", "Platform risk controls override this draft."],
         "validation_warnings": warnings, "requires_backtest": True, "requires_walk_forward": True,
@@ -214,24 +267,33 @@ def evaluate_native_trade_packet(packet: dict[str, Any]) -> dict[str, Any]:
     ml = packet.get("ml_signal")
     if not isinstance(ml, dict): ml = {}; reasons.append("ml_signal_missing")
     signal = _number(ml.get("signal"))
-    if signal is None or signal == 0: reasons.append("ml_signal_is_not_directional")
+    adaptive_disabled = (
+        isinstance(adaptive, dict)
+        and str(adaptive.get("status") or "").upper() == "DISABLED"
+        and isinstance(ml, dict)
+        and str(ml.get("status") or "").upper() == "DISABLED"
+        and ml.get("signal") is None
+    )
+    data_quality_flags = ["ADAPTIVE_AI_DISABLED"] if adaptive_disabled else []
+    if not adaptive_disabled and (signal is None or signal == 0):
+        reasons.append("ml_signal_is_not_directional")
     side = str(plan.get("side") or "").strip().lower()
     entry, stop, target = (_number(plan.get(key)) for key in ("entry_price", "stop_loss_price", "take_profit_price"))
     if side not in {"buy", "sell"}: reasons.append("invalid_trade_side")
     if any(x is None or x <= 0 for x in (entry, stop, target)): reasons.append("invalid_protective_price")
     elif side == "buy":
         if not stop < entry < target: reasons.append("long_stop_entry_target_order_invalid")
-        if signal is not None and signal <= 0: reasons.append("ml_signal_direction_mismatch")
+        if not adaptive_disabled and signal is not None and signal <= 0: reasons.append("ml_signal_direction_mismatch")
     elif side == "sell":
         if not target < entry < stop: reasons.append("short_target_entry_stop_order_invalid")
-        if signal is not None and signal >= 0: reasons.append("ml_signal_direction_mismatch")
+        if not adaptive_disabled and signal is not None and signal >= 0: reasons.append("ml_signal_direction_mismatch")
     if entry is not None and stop is not None and target is not None and abs(entry - stop) > 0:
         if abs(target - entry) / abs(entry - stop) < 1.5: reasons.append("reward_risk_below_native_minimum")
     else: reasons.append("risk_distance_invalid")
     if reasons:
-        return {"safe": False, "confidence": 0.0, "reasons": sorted(set(reasons)), "data_quality_flags": [],
+        return {"safe": False, "confidence": 0.0, "reasons": sorted(set(reasons)), "data_quality_flags": data_quality_flags,
                 "engine": "atlas-native-safety-v1", "execution_authority": False}
-    return {"safe": True, "confidence": 1.0, "reasons": ["all_native_safety_checks_passed"], "data_quality_flags": [],
+    return {"safe": True, "confidence": 1.0, "reasons": ["all_native_safety_checks_passed"], "data_quality_flags": data_quality_flags,
             "engine": "atlas-native-safety-v1", "execution_authority": False}
 
 
