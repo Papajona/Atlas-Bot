@@ -2249,9 +2249,12 @@ def transform_strategy_ai(commit: str) -> None:
             + ", ".join(unsafe_imports)
             + "; only imports whose original symbol matches NativeAIError or compose_strategy_spec can be remapped"
         )
+    if not _is_compatible_strategy_schema_and_context(old_tree):
+        raise MigrationError(
+            "strategy schema/context helpers do not satisfy the canonical Native AI draft contract; refusing to replace the hosted generator"
+        )
 
-    edits: list[tuple[int, int, str]] = []
-    found_generate = False
+    edits: list[tuple[int, int, str]] =     found_generate = False
     replacement_import_inserted = False
     for node in old_tree.body:
         name = _name(node)
