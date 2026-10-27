@@ -278,6 +278,8 @@ def transform_ai_providers(commit: str) -> None:
         "dual_ai_research_review", "dual_ai_trade_safety_review",
     }
     extras: list[str] = []
+    extra_defined_names: list[set[str]] = []
+    extra_definition_lines: list[int] = []
     import_nodes: list[ast.AST] = []
     source_lines = source.splitlines(keepends=True)
     for node in old_tree.body:
@@ -317,6 +319,8 @@ def transform_ai_providers(commit: str) -> None:
                 f"app/ai_providers.py contains an unrecognized provider-bearing helper {name or type(node).__name__}; refusing to overwrite it"
             )
         extras.append(segment.rstrip())
+        extra_defined_names.append(defined_names)
+        extra_definition_lines.append(node.lineno)
 
     used_names: set[str] = set()
     for segment in extras:
@@ -440,6 +444,16 @@ def transform_ai_providers(commit: str) -> None:
                 dynamic_all = True
 
             for nested in ast.walk(module_node):
+                # Reading __all__ can leak its mutable list through an alias
+                # (e.g. names = __all__; names.append(...)). Reject that escape
+                # rather than guessing the final export set.
+                if (
+                    isinstance(nested, ast.Name)
+                    and nested.id == "__all__"
+                    and isinstance(nested.ctx, ast.Load)
+                ):
+                    dynamic_all = True
+
                 if isinstance(nested, ast.Call):
                     # Any globals() access can create or mutate module exports through
                     # a computed name; fail closed even when the call is indirect,
@@ -582,8 +596,16 @@ def transform_ai_providers(commit: str) -> None:
         preserved_import_lines.append(node.lineno)
 
     # The output format preserves star imports before the canonical body and explicit
-    # imports after it. Refuse a migration if moving them would reverse an overlapping
-    # binding that originally came from a later star import.
+    # imports after it. Refuse migrations whenever moving a star import before a retained
+    # local definition would reverse which binding wins in the original module.
+    for names, definition_line in zip(extra_defined_names, extra_definition_lines):
+        for star_exports, star_line in zip(retained_star_exports, retained_star_lines):
+            if names & star_exports and definition_line < star_line:
+                raise MigrationError(
+                    "retained definition precedes a later star import with overlapping exports; "
+                    "refusing to change helper bindings"
+                )
+
     for bindings, explicit_line in zip(preserved_import_bindings, preserved_import_lines):
         for star_exports, star_line in zip(retained_star_exports, retained_star_lines):
             if bindings & star_exports and explicit_line < star_line:
