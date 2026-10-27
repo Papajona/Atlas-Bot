@@ -157,6 +157,25 @@ def _safe_canonical_json_helper(
             return False
         return_name = "value"
         json_import_count = 0
+
+        def module_scope_walk(statements: list[ast.stmt]):
+            """Walk module-executed statements without entering nested lexical scopes."""
+            pending = list(reversed(statements))
+            while pending:
+                current = pending.pop()
+                yield current
+                if isinstance(
+                    current,
+                    (
+                        ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
+                        ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp,
+                    ),
+                ):
+                    continue
+                pending.extend(reversed(list(ast.iter_child_nodes(current))))
+
+        # Require at least one unconditional standard-library import. Repeating
+        # that import is harmless and should not prevent migration.
         for statement in legacy_tree.body:
             if isinstance(statement, ast.Import):
                 for alias in statement.names:
@@ -165,20 +184,25 @@ def _safe_canonical_json_helper(
                         if alias.name != "json" or alias.asname is not None:
                             return False
                         json_import_count += 1
-            elif isinstance(statement, ast.ImportFrom):
-                if any((alias.asname or alias.name) == "json" for alias in statement.names):
+        # Refuse bindings that execute in module scope, including bindings under
+        # module-level control flow, but ignore locals inside unrelated functions
+        # and classes: those cannot replace the parser's module-level json binding.
+        for nested in module_scope_walk(legacy_tree.body):
+            if isinstance(nested, ast.Import):
+                for alias in nested.names:
+                    bound = alias.asname or alias.name.split(".", 1)[0]
+                    if bound == "json" and (alias.name != "json" or alias.asname is not None):
+                        return False
+            elif isinstance(nested, ast.ImportFrom):
+                if any((alias.asname or alias.name) == "json" for alias in nested.names):
                     return False
-        for nested in ast.walk(legacy_tree):
-            if isinstance(nested, ast.alias) and (
-                (nested.asname == "json" and nested.name != "json")
-                or (nested.name == "json" and nested.asname is not None)
-            ):
-                return False
             if isinstance(nested, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and nested.name == "json":
                 return False
             if isinstance(nested, ast.Name) and nested.id == "json" and isinstance(nested.ctx, (ast.Store, ast.Del)):
                 return False
-        if json_import_count != 1:
+            if isinstance(nested, ast.ExceptHandler) and nested.name == "json":
+                return False
+        if json_import_count < 1:
             return False
         allowed_exceptions = {
             "json.JSONDecodeError", "TypeError", "ValueError", "UnicodeDecodeError",
