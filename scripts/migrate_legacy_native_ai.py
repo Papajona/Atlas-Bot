@@ -169,7 +169,7 @@ def transform_config() -> None:
                 "app/config.py has a mixed provider/unrelated assignment; refusing to remove unrelated settings"
             )
         provider_nodes.append(node)
-        removable_lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1)
+        removable_lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
 
     statement_types = (
         ast.Assign, ast.AnnAssign, ast.Expr, ast.Import, ast.ImportFrom,
