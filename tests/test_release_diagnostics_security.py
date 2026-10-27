@@ -104,7 +104,7 @@ def test_release_diagnostics_redacts_quoted_json_secret_values_before_returning_
     import json
     from app.main import _redact_release_diagnostic_text, _release_diagnostic_report
 
-    supplied = r'''{"password": "prefix \\" escaped quoted value secret-leak-after-escaped-quote", "Authorization": "Bearer bearer-secret-value", "message": "Could not resolve com.example:bad:1"}'''
+    supplied = r'''{"password": "prefix \" escaped quoted value secret-leak-after-escaped-quote", "Authorization": "Bearer bearer-secret-value", "message": "Could not resolve com.example:bad:1"}'''
     redacted = _redact_release_diagnostic_text(supplied)
     report = json.loads(_release_diagnostic_report(redacted, ""))
 
