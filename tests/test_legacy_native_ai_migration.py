@@ -1733,7 +1733,7 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
                 target.parent.mkdir()
                 target.write_text(source, encoding="utf-8")
                 with patch.object(migration, "ROOT", root), patch.object(
-                    migration, "canonical_text", return_value="from .native_ai import AIProviderError\\n"
+                    migration, "canonical_text", return_value="from .native_ai import AIProviderError\n"
                 ):
                     if should_refuse:
                         with self.assertRaisesRegex(migration.MigrationError, "unrecognized provider-bearing helper _cerebras_json"):
