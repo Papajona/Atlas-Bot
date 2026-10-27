@@ -158,19 +158,65 @@ def _safe_canonical_json_helper(
         return_name = "value"
         json_import_count = 0
 
+        def has_json_named_expression(nodes: list[ast.AST]) -> bool:
+            """Detect walrus assignments that leak into the enclosing module scope."""
+            pending = list(nodes)
+            while pending:
+                current = pending.pop()
+                if (
+                    isinstance(current, ast.NamedExpr)
+                    and isinstance(current.target, ast.Name)
+                    and current.target.id == "json"
+                ):
+                    return True
+                if isinstance(current, ast.Lambda):
+                    # Lambda bodies are deferred, but their default expressions execute now.
+                    pending.extend(current.args.defaults)
+                    pending.extend(default for default in current.args.kw_defaults if default is not None)
+                    continue
+                if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue
+                pending.extend(ast.iter_child_nodes(current))
+            return False
+
+        def class_body_writes_global_json(node: ast.ClassDef) -> bool:
+            """Detect class-body writes explicitly redirected to the module binding."""
+            pending = list(reversed(node.body))
+            declares_global = False
+            writes_global = False
+            while pending:
+                current = pending.pop()
+                if isinstance(current, ast.Global) and "json" in current.names:
+                    declares_global = True
+                if (
+                    isinstance(current, ast.Name)
+                    and current.id == "json"
+                    and isinstance(current.ctx, (ast.Store, ast.Del))
+                ):
+                    writes_global = True
+                if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                    continue
+                if isinstance(current, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                    if has_json_named_expression([current]):
+                        return True
+                    continue
+                pending.extend(reversed(list(ast.iter_child_nodes(current))))
+            return declares_global and writes_global
+
         def module_scope_walk(statements: list[ast.stmt]):
             """Walk module-executed statements without entering nested lexical scopes."""
             pending = list(reversed(statements))
             while pending:
                 current = pending.pop()
                 yield current
-                if isinstance(
-                    current,
-                    (
-                        ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
-                        ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp,
-                    ),
-                ):
+                if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue
+                if isinstance(current, ast.Lambda):
+                    # Lambda bodies are deferred, but defaults execute in module scope.
+                    pending.extend(reversed(current.args.defaults))
+                    pending.extend(reversed([default for default in current.args.kw_defaults if default is not None]))
+                    continue
+                if isinstance(current, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
                     continue
                 pending.extend(reversed(list(ast.iter_child_nodes(current))))
 
@@ -185,8 +231,8 @@ def _safe_canonical_json_helper(
                             return False
                         json_import_count += 1
         # Refuse bindings that execute in module scope, including bindings under
-        # module-level control flow, but ignore locals inside unrelated functions
-        # and classes: those cannot replace the parser's module-level json binding.
+        # control flow, class bodies that write through global, and walrus assignments
+        # that escape comprehensions. Ignore ordinary function/class locals.
         for nested in module_scope_walk(legacy_tree.body):
             if isinstance(nested, ast.Import):
                 for alias in nested.names:
@@ -196,12 +242,40 @@ def _safe_canonical_json_helper(
             elif isinstance(nested, ast.ImportFrom):
                 if any((alias.asname or alias.name) == "json" for alias in nested.names):
                     return False
-            if isinstance(nested, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and nested.name == "json":
+            if isinstance(nested, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if nested.name == "json":
+                    return False
+                if isinstance(nested, ast.ClassDef):
+                    if class_body_writes_global_json(nested):
+                        return False
+                    executed_expressions = [
+                        *nested.decorator_list, *nested.bases,
+                        *(keyword.value for keyword in nested.keywords),
+                    ]
+                else:
+                    executed_expressions = [
+                        *nested.decorator_list, *nested.args.defaults,
+                        *(default for default in nested.args.kw_defaults if default is not None),
+                        *(argument.annotation for argument in [*nested.args.posonlyargs, *nested.args.args, *nested.args.kwonlyargs] if argument.annotation is not None),
+                        *([nested.args.vararg.annotation] if nested.args.vararg and nested.args.vararg.annotation is not None else []),
+                        *([nested.args.kwarg.annotation] if nested.args.kwarg and nested.args.kwarg.annotation is not None else []),
+                        *([nested.returns] if nested.returns is not None else []),
+                    ]
+                if has_json_named_expression(executed_expressions):
+                    return False
+            if isinstance(nested, ast.Lambda) and has_json_named_expression(
+                [*nested.args.defaults, *(default for default in nested.args.kw_defaults if default is not None)]
+            ):
                 return False
+            if isinstance(nested, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                if has_json_named_expression([nested]):
+                    return False
             if isinstance(nested, ast.Name) and nested.id == "json" and isinstance(nested.ctx, (ast.Store, ast.Del)):
                 return False
             if isinstance(nested, ast.ExceptHandler) and nested.name == "json":
                 return False
+        if json_import_count < 1:
+            return False
         if json_import_count < 1:
             return False
         allowed_exceptions = {
