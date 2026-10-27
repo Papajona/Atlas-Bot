@@ -194,42 +194,56 @@ jobs:
               current_sha="$(jq -r '.data.repository.ref.target.oid // empty' <<<"$ref_payload")"
               if [[ -z "$repository_id" || "$current_sha" != "$expected_sha" ]]; then
                 echo "Ref refs/heads/$branch changed or disappeared before atomic update; refusing to overwrite it." >&2
-              elif update_payload="$(gh api graphql \
-                  -f query='mutation($repoId: ID!, $name: String!, $before: GitObjectID!, $after: GitObjectID!) { updateRefs(input: {repositoryId: $repoId, refUpdates: [{name: $name, beforeOid: $before, afterOid: $after, force: false}], clientMutationId: "atlas-native-ai-propagation"}) { clientMutationId } }' \
-                  -F repoId="$repository_id" \
-                  -F name="refs/heads/$branch" \
-                  -F before="$expected_sha" \
-                  -F after="$new_sha")"; then
-                updated_sha="$(jq -r '.data.updateRefs.clientMutationId // empty' <<<"$update_payload")"
-                if [[ "$(jq -r '((.errors // []) | length) == 0' <<<"$update_payload")" == "true" && "$updated_sha" == "atlas-native-ai-propagation" ]]; then
-                  # clientMutationId confirms the supported payload shape; independently
-                  # read back the branch tip to prove the requested commit was applied.
-                  if updated_ref_payload="$(gh api graphql \
-                      -f query='query($owner: String!, $name: String!, $qualifiedName: String!) { repository(owner: $owner, name: $name) { ref(qualifiedName: $qualifiedName) { target { oid } } } }' \
-                      -F owner="$GITHUB_REPOSITORY_OWNER" \
-                      -F name="${GITHUB_REPOSITORY#*/}" \
-                      -F qualifiedName="refs/heads/$branch")"; then
-                    read_back_sha="$(jq -r '.data.repository.ref.target.oid // empty' <<<"$updated_ref_payload")"
-                    if [[ "$(jq -r '((.errors // []) | length) == 0' <<<"$updated_ref_payload")" == "true" && "$read_back_sha" == "$new_sha" ]]; then
-                      update_rc=0
-                    else
-                      echo "Atomic update response returned, but read-back did not confirm expected SHA for refs/heads/$branch." >&2
-                      echo "$updated_ref_payload" >&2
-                    fi
+                echo "Observed target SHA: ${current_sha:-unavailable}; expected starting SHA: $expected_sha" >&2
+              else
+                # Once updateRefs has been sent, a lost response or failed read-back
+                # cannot prove that the remote mutation did not apply. Read the ref
+                # after every mutation attempt and classify the observed final state.
+                update_rc=2
+                if update_payload="$(gh api graphql \
+                    -f query='mutation($repoId: ID!, $name: String!, $before: GitObjectID!, $after: GitObjectID!) { updateRefs(input: {repositoryId: $repoId, refUpdates: [{name: $name, beforeOid: $before, afterOid: $after, force: false}], clientMutationId: "atlas-native-ai-propagation"}) { clientMutationId } }' \
+                    -F repoId="$repository_id" \
+                    -F name="refs/heads/$branch" \
+                    -F before="$expected_sha" \
+                    -F after="$new_sha")"; then
+                  updated_sha="$(jq -r '.data.updateRefs.clientMutationId // empty' <<<"$update_payload")"
+                  if [[ "$(jq -r '((.errors // []) | length) == 0' <<<"$update_payload")" == "true" && "$updated_sha" == "atlas-native-ai-propagation" ]]; then
+                    echo "UpdateRefs acknowledged for refs/heads/$branch; checking the actual branch tip." >&2
                   else
-                    echo "Atomic update response returned, but could not read back refs/heads/$branch." >&2
+                    echo "UpdateRefs response was not conclusive for refs/heads/$branch; checking the actual branch tip before classifying the result." >&2
+                    echo "$update_payload" >&2
+                  fi
+                else
+                  echo "UpdateRefs request returned no verifiable response for refs/heads/$branch; the mutation outcome may be ambiguous. Checking the actual branch tip." >&2
+                  echo "${update_payload:-No GraphQL response was captured.}" >&2
+                fi
+
+                if updated_ref_payload="$(gh api graphql \
+                    -f query='query($owner: String!, $name: String!, $qualifiedName: String!) { repository(owner: $owner, name: $name) { ref(qualifiedName: $qualifiedName) { target { oid } } } }' \
+                    -F owner="$GITHUB_REPOSITORY_OWNER" \
+                    -F name="${GITHUB_REPOSITORY#*/}" \
+                    -F qualifiedName="refs/heads/$branch")"; then
+                  read_back_sha="$(jq -r '.data.repository.ref.target.oid // empty' <<<"$updated_ref_payload")"
+                  if [[ "$(jq -r '((.errors // []) | length) == 0' <<<"$updated_ref_payload")" == "true" && "$read_back_sha" == "$new_sha" ]]; then
+                    update_rc=0
+                    echo "Confirmed refs/heads/$branch now points to $new_sha." >&2
+                  elif [[ "$(jq -r '((.errors // []) | length) == 0' <<<"$updated_ref_payload")" == "true" && "$read_back_sha" == "$expected_sha" ]]; then
+                    update_rc=1
+                    echo "Final read-back shows refs/heads/$branch still at its starting SHA; requested update was not confirmed." >&2
+                  else
+                    update_rc=2
+                    echo "REMOTE STATE UNRESOLVED for refs/heads/$branch: read-back did not match either expected SHA." >&2
+                    echo "Expected old SHA: $expected_sha; intended new SHA: $new_sha; observed SHA: ${read_back_sha:-unavailable}" >&2
                     echo "$updated_ref_payload" >&2
                   fi
                 else
-                  echo "Atomic update did not confirm the supported UpdateRefsPayload for refs/heads/$branch; treating update as unresolved." >&2
-                  echo "$update_payload" >&2
+                  update_rc=2
+                  echo "REMOTE STATE UNRESOLVED for refs/heads/$branch: mutation was attempted but read-back failed." >&2
+                  echo "$updated_ref_payload" >&2
                 fi
-              else
-                echo "Atomic update rejected for refs/heads/$branch; target branch left unchanged." >&2
-                echo "$update_payload" >&2
               fi
             else
-              echo "Unable to read current ref state for $branch; target branch left unchanged." >&2
+              echo "Unable to read current ref state for $branch before mutation; no updateRefs mutation was sent." >&2
               echo "$ref_payload" >&2
             fi
             # Cleanup is independent of target-ref success. A cleanup failure is a
@@ -286,15 +300,24 @@ jobs:
               if update_existing_branch_ref "$branch" "$start_sha" "$new_sha"; then
                 updated+=("$branch ($start_sha -> $new_sha)")
               else
+                update_status=$?
                 git reset --hard "$start_sha" >/dev/null 2>&1 || true
-                failed+=("$branch: existing-ref update rejected; branch left unchanged, with no force-push or branch recreation")
+                if [[ "$update_status" -eq 2 ]]; then
+                  failure_reason="remote branch state unresolved after update attempt; intended commit was not confirmed and remote state may have changed"
+                else
+                  failure_reason="requested update was not confirmed; workflow did not verify the intended commit on the remote"
+                fi
+                failed+=("$branch: $failure_reason")
+                echo "FAILED branch reconciliation: $branch: $failure_reason" >&2
               fi
               continue
             fi
 
             if ! git cherry-pick "$NATIVE_AI_COMMIT" >"$RUNNER_TEMP/cherry-pick.log" 2>&1; then
+              echo "FAILED branch reconciliation: $branch could not cherry-pick canonical Native AI commit; diagnostic follows." >&2
+              cat "$RUNNER_TEMP/cherry-pick.log" >&2 || true
               git cherry-pick --abort >/dev/null 2>&1 || true
-              failed+=("$branch: canonical commit conflicts or cannot be cherry-picked; branch left unchanged")
+              failed+=("$branch: canonical commit conflicts or cannot be cherry-picked; no target-ref update was attempted")
               continue
             fi
             after_refs="$(scan_active_provider_refs)" || { git cherry-pick --abort >/dev/null 2>&1 || true; failed+=("$branch: post-change provider scan errored; branch left unchanged"); continue; }
@@ -312,7 +335,15 @@ jobs:
             if update_existing_branch_ref "$branch" "$start_sha" "$new_sha"; then
               updated+=("$branch ($start_sha -> $new_sha)")
             else
-              failed+=("$branch: existing-ref update rejected; branch left unchanged, with no force-push or branch recreation")
+              update_status=$?
+              git reset --hard "$start_sha" >/dev/null 2>&1 || true
+              if [[ "$update_status" -eq 2 ]]; then
+                failure_reason="remote branch state unresolved after update attempt; intended commit was not confirmed and remote state may have changed"
+              else
+                failure_reason="requested update was not confirmed; workflow did not verify the intended commit on the remote"
+              fi
+              failed+=("$branch: $failure_reason")
+              echo "FAILED branch reconciliation: $branch: $failure_reason" >&2
             fi
           done < <(git for-each-ref --format='%(refname)' refs/remotes/origin/ | grep -v '^refs/remotes/origin/HEAD$' | sort)
 
@@ -329,8 +360,12 @@ jobs:
             echo "- Unresolved branches: ${#failed[@]}"
             printf '  - %s\n' "${failed[@]:-none}"
           } >> "$GITHUB_STEP_SUMMARY"
+          # Mirror unresolved branches into normal job logs as well as the step summary.
+          for failure in "${failed[@]}"; do
+            echo "UNRESOLVED BRANCH: $failure" >&2
+          done
           if (( ${#failed[@]} > 0 )); then
-            echo "::error title=Repository-wide Native AI cleanup incomplete::Some branches need manual reconciliation; see workflow summary."
+            echo "::error title=Repository-wide Native AI cleanup incomplete::${#failed[@]} branch(es) need reconciliation; see UNRESOLVED BRANCH log lines and step summary."
             exit 1
           fi
           echo "PASS: all enumerated branches were updated or passed explicit implementation and provider checks."
