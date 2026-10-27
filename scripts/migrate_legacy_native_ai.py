@@ -1546,13 +1546,20 @@ def _is_safe_legacy_hosted_strategy_generator(node: ast.AST) -> bool:
         return False
     raise_stmt = validation_handler.body[0]
     if (not isinstance(raise_stmt.exc, ast.Call) or not is_name(raise_stmt.exc.func, "AIProviderError")
-            or len(raise_stmt.exc.args) != 1 or not isinstance(raise_stmt.exc.args[0], ast.JoinedStr)
+            or len(raise_stmt.exc.args) != 1 or raise_stmt.exc.keywords
             or not is_name(raise_stmt.cause, "exc")):
         return False
-    if any(isinstance(item, ast.Call) and not (
-        (isinstance(item.func, ast.Name) and item.func.id == "AIProviderError")
-        or (isinstance(item.func, ast.Attribute) and item.func.attr == "items")
-    ) for item in ast.walk(raise_stmt.exc.args[0])):
+    validation_message = raise_stmt.exc.args[0]
+    if not (
+        isinstance(validation_message, ast.JoinedStr)
+        and len(validation_message.values) == 2
+        and isinstance(validation_message.values[0], ast.Constant)
+        and validation_message.values[0].value == "AI strategy failed schema validation: "
+        and isinstance(validation_message.values[1], ast.FormattedValue)
+        and is_name(validation_message.values[1].value, "exc")
+        and validation_message.values[1].conversion == -1
+        and validation_message.values[1].format_spec is None
+    ):
         return False
 
     family = body[position + 5]
@@ -1618,21 +1625,38 @@ def _is_safe_legacy_hosted_strategy_generator(node: ast.AST) -> bool:
     if not (isinstance(ai_values["requires_walk_forward"], ast.Constant) and ai_values["requires_walk_forward"].value is True):
         return False
 
-    allowed_model_names = {
-        "provider_used", "settings", "gemini_strategy_model", "groq_strategy_model",
-        "cerebras_model", "gemini_model", "groq_model",
-    }
-    for item in ast.walk(ai_values["model"]):
-        if isinstance(item, ast.Name) and item.id not in allowed_model_names:
+    def is_model_setting(value: ast.AST, provider: str) -> bool:
+        fields = {
+            "gemini": {"gemini_strategy_model", "gemini_model"},
+            "groq": {"groq_strategy_model", "groq_model"},
+            "cerebras": {"cerebras_model"},
+        }[provider]
+        return isinstance(value, ast.Attribute) and is_name(value.value, "settings") and value.attr in fields
+
+    def is_provider_test(value: ast.AST, provider: str) -> bool:
+        return (
+            isinstance(value, ast.Compare) and is_name(value.left, "provider_used")
+            and len(value.ops) == 1 and isinstance(value.ops[0], ast.Eq)
+            and len(value.comparators) == 1 and is_string(value.comparators[0], provider)
+        )
+
+    def is_audited_model_expression(value: ast.AST) -> bool:
+        if len(missing) == 2:
+            return (
+                isinstance(value, ast.IfExp) and is_provider_test(value.test, "gemini")
+                and is_model_setting(value.body, "gemini") and is_model_setting(value.orelse, "groq")
+            )
+        if not isinstance(value, ast.IfExp) or not is_provider_test(value.test, "gemini"):
             return False
-        if isinstance(item, ast.Attribute) and (
-            not is_name(item.value, "settings") or item.attr not in {
-                "gemini_strategy_model", "groq_strategy_model", "cerebras_model", "gemini_model", "groq_model"
-            }
-        ):
-            return False
-        if isinstance(item, ast.Call):
-            return False
+        fallback = value.orelse
+        return (
+            is_model_setting(value.body, "gemini")
+            and isinstance(fallback, ast.IfExp) and is_provider_test(fallback.test, "groq")
+            and is_model_setting(fallback.body, "groq") and is_model_setting(fallback.orelse, "cerebras")
+        )
+
+    if not is_audited_model_expression(ai_values["model"]):
+        return False
     return True
 
 
