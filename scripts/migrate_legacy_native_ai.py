@@ -1715,14 +1715,11 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST) -> bool:
     body = list(node.body)
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
         body = body[1:]
-    if len(body) == 1 and isinstance(body[0], ast.Return):
-        value = body[0].value
-        if (isinstance(value, ast.Await) and isinstance(value.value, ast.Call)
-                and isinstance(value.value.func, ast.Name)
-                and value.value.func.id in {"_gemini_json", "_groq_json", "_cerebras_json"}
-                and len(value.value.args) == 1 and is_name(value.value.args[0], "prompt")
-                and not value.value.keywords):
-            return True
+    # A one-provider direct adapter is handled separately by transform_strategy_ai,
+    # where it can be matched to the generator's literal provider argument. It must
+    # not satisfy the dispatcher check for a multi-provider fallback loop.
+    if len(body) == 1:
+        return False
 
     if len(body) not in {2, 3}:
         return False
@@ -2186,11 +2183,27 @@ def transform_strategy_ai(commit: str) -> None:
     if direct_provider_trampoline:
         provider_call = provider_body[0].value.value
         direct_provider_trampoline = (
-            len(provider_call.args) == 1
+            isinstance(provider_call.func, ast.Name)
+            and len(provider_call.args) == 1
             and isinstance(provider_call.args[0], ast.Name)
             and provider_call.args[0].id == "prompt"
             and not provider_call.keywords
         )
+        if safe_legacy_flow:
+            # A multi-provider fallback loop requires a dispatcher that actually
+            # routes each provider name to its matching adapter.
+            direct_provider_trampoline = False
+        elif safe_trampoline and direct_provider_trampoline:
+            adapter_by_provider = {
+                "gemini": "_gemini_json",
+                "groq": "_groq_json",
+                "cerebras": "_cerebras_json",
+                "openai": "_openai_json",
+            }
+            direct_provider_trampoline = (
+                adapter_by_provider.get(generator_call.args[0].value)
+                == provider_call.func.id
+            )
     safe_provider_dispatcher = _is_safe_legacy_provider_dispatcher(legacy_provider)
     if not direct_provider_trampoline and not safe_provider_dispatcher:
         raise MigrationError(
