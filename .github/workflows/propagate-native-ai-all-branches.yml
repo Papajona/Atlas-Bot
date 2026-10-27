@@ -169,6 +169,10 @@ jobs:
           # transitive exports, including missing native_trade_safety_review.
           native = importlib.import_module("app.native_ai")
           facade = importlib.import_module("app.ai_providers")
+          if getattr(facade, "AIProviderError", None) is not getattr(native, "NativeAIError", None):
+              raise SystemExit(
+                  "app.ai_providers.AIProviderError must be the exact app.native_ai.NativeAIError alias"
+              )
           for name in ("NativeAIError", "compose_strategy_spec", "native_research_review"):
               if not hasattr(native, name):
                   raise SystemExit(f"app.native_ai is missing required symbol: {name}")

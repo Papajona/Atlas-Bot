@@ -77,6 +77,7 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
 def test_provider_scan_excludes_static_markers_in_legacy_branch_pruning_workflow() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     assert "':!.github/workflows/prune-contained-branches-once.yml'" in workflow
+    assert 'if getattr(facade, "AIProviderError", None) is not getattr(native, "NativeAIError", None):' in workflow
 
 
 def test_migration_script_preserves_unrelated_branch_logic_and_fails_closed() -> None:

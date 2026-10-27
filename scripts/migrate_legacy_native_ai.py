@@ -211,6 +211,8 @@ def _defined_names(node: ast.AST) -> set[str]:
         return {name for target in node.targets for name in _assigned_names(target)}
     if isinstance(node, ast.AnnAssign):
         return _assigned_names(node.target)
+    if isinstance(node, ast.Delete):
+        return {name for target in node.targets for name in _assigned_names(target)}
     if isinstance(node, ast.Import):
         return {alias.asname or alias.name.split(".", 1)[0] for alias in node.names}
     if isinstance(node, ast.ImportFrom):
@@ -226,6 +228,19 @@ def _assigned_names(target: ast.AST) -> set[str]:
     return set()
 
 
+
+
+
+
+def _import_binding_signature(
+    node: ast.Import | ast.ImportFrom, alias: ast.alias
+) -> tuple[str, str | None, int, str, str]:
+    """Capture the imported object and the exact module-level name it binds."""
+    if isinstance(node, ast.Import):
+        bound_name = alias.asname or alias.name.split(".", 1)[0]
+        return ("import", None, 0, alias.name, bound_name)
+    bound_name = alias.asname or alias.name
+    return ("from", node.module, node.level, alias.name, bound_name)
 
 
 def _is_legacy_ai_provider_error_stub(node: ast.AST) -> bool:
@@ -275,6 +290,13 @@ def transform_ai_providers(commit: str) -> None:
         for defined_name in _defined_names(canonical_node):
             canonical_nodes_by_name.setdefault(defined_name, canonical_node)
     canonical_names = set(canonical_nodes_by_name)
+    canonical_import_bindings: dict[str, set[tuple[str, str | None, int, str, str]]] = {}
+    for canonical_node in canonical_tree.body:
+        if not isinstance(canonical_node, (ast.Import, ast.ImportFrom)):
+            continue
+        for alias in canonical_node.names:
+            signature = _import_binding_signature(canonical_node, alias)
+            canonical_import_bindings.setdefault(signature[-1], set()).add(signature)
     provider_adapter_names = {
         "_gemini_json", "_groq_json", "_prompt",
         "dual_ai_research_review", "dual_ai_trade_safety_review",
@@ -297,12 +319,17 @@ def transform_ai_providers(commit: str) -> None:
             # The Native AI facade exports AIProviderError as a compatibility alias
             # for NativeAIError; this exact empty legacy subclass is safe to replace.
             continue
-        if name and name in canonical_names:
-            canonical_node = canonical_nodes_by_name[name]
-            if ast.dump(node, include_attributes=False) == ast.dump(canonical_node, include_attributes=False):
-                continue
+        defined_names = _defined_names(node)
+        colliding_names = defined_names & canonical_names
+        if colliding_names:
+            if len(colliding_names) == 1:
+                canonical_node = canonical_nodes_by_name[next(iter(colliding_names))]
+                if ast.dump(node, include_attributes=False) == ast.dump(canonical_node, include_attributes=False):
+                    continue
             raise MigrationError(
-                f"app/ai_providers.py has branch-specific definition {name!r} that collides with a canonical name; refusing to discard or shadow it"
+                "app/ai_providers.py has branch-specific definition "
+                + ", ".join(sorted(colliding_names))
+                + " that collides with a canonical name; refusing to discard or shadow it"
             )
         if PROVIDER_RE.search(segment):
             raise MigrationError(
@@ -317,17 +344,36 @@ def transform_ai_providers(commit: str) -> None:
     for segment in extras:
         tree = ast.parse(segment)
         used_names.update(node.id for node in ast.walk(tree) if isinstance(node, ast.Name))
+    if extras and any(
+        isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names)
+        for node in import_nodes
+    ):
+        raise MigrationError(
+            "app/ai_providers.py has a wildcard import alongside retained helpers; refusing to guess imported helper dependencies"
+        )
+
     preserved_imports: list[str] = []
     for node in import_nodes:
         if isinstance(node, ast.ImportFrom) and node.module == "__future__":
             continue
         aliases = []
         for alias in node.names:
-            bound = alias.asname or (
-                alias.name.split(".", 1)[0] if isinstance(node, ast.Import) else alias.name
-            )
-            if bound not in used_names or bound in canonical_names or PROVIDER_RE.search(alias.name):
+            if alias.name == "*":
                 continue
+            signature = _import_binding_signature(node, alias)
+            bound = signature[-1]
+            if bound not in used_names:
+                continue
+            if bound in canonical_names:
+                if signature not in canonical_import_bindings.get(bound, set()):
+                    raise MigrationError(
+                        f"app/ai_providers.py import {alias.name!r} bound as {bound!r} collides with a canonical import binding; refusing to change retained helper semantics"
+                    )
+                continue
+            if PROVIDER_RE.search(alias.name):
+                raise MigrationError(
+                    f"retained helper depends on removed provider import {alias.name!r}; refusing to discard its dependency"
+                )
             aliases.append(alias)
         if not aliases:
             continue

@@ -47,7 +47,7 @@ def retained_helper():
             target.parent.mkdir()
             target.write_text(legacy, encoding="utf-8")
             with patch.object(migration, "ROOT", root), patch.object(
-                migration, "canonical_text", return_value="from .native_ai import AIProviderError\n\n"
+                migration, "canonical_text", return_value="import json\nfrom .native_ai import AIProviderError, NativeAIError\n\n"
             ):
                 migration.transform_ai_providers("canonical-commit")
             result = target.read_text(encoding="utf-8")
@@ -76,7 +76,7 @@ def retained_helper():
             target.parent.mkdir()
             target.write_text(legacy, encoding="utf-8")
             with patch.object(migration, "ROOT", root), patch.object(
-                migration, "canonical_text", return_value="from .native_ai import AIProviderError\n\n"
+                migration, "canonical_text", return_value="import json\nfrom .native_ai import AIProviderError, NativeAIError\n\n"
             ):
                 migration.transform_ai_providers("canonical-commit")
             result = target.read_text(encoding="utf-8")
@@ -101,7 +101,77 @@ async def _gemini_json(prompt):
             target.parent.mkdir()
             target.write_text(legacy, encoding="utf-8")
             with patch.object(migration, "ROOT", root), patch.object(
-                migration, "canonical_text", return_value="from .native_ai import AIProviderError\n\n"
+                migration, "canonical_text", return_value="import json\nfrom .native_ai import AIProviderError, NativeAIError\n\n"
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "collides with a canonical name"):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
+    def test_ai_provider_error_import_from_different_module_fails_closed(self):
+        legacy = """from .legacy_errors import NativeAIError
+
+class AIProviderError(RuntimeError):
+    pass
+
+async def _gemini_json(prompt):
+    return {"prompt": prompt}
+
+def retained_helper():
+    raise NativeAIError("branch-specific error")
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value="import json\nfrom .native_ai import AIProviderError, NativeAIError\n\n"
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "canonical import binding"):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_ai_provider_migration_refuses_star_import_with_retained_helper(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+async def _gemini_json(prompt):
+    return {"prompt": prompt}
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value="import json\nfrom .native_ai import AIProviderError, NativeAIError\n\n"
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "wildcard import alongside retained helpers"):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_ai_provider_migration_rejects_chained_assignment_to_canonical_import(self):
+        legacy = """class AIProviderError(RuntimeError):
+    pass
+
+async def _gemini_json(prompt):
+    return {"prompt": prompt}
+
+custom = json = object()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value="import json\nfrom .native_ai import AIProviderError, NativeAIError\n\n"
             ):
                 with self.assertRaisesRegex(migration.MigrationError, "collides with a canonical name"):
                     migration.transform_ai_providers("canonical-commit")
