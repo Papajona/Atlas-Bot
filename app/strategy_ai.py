@@ -91,11 +91,29 @@ def _apply_market_context(spec: AIStrategySpec, *, asset: str | None = None, sym
         data["symbols"] = [symbol]
     elif symbol:
         data["symbols"] = [symbol]
-    if timeframe and (not spec.timeframes or timeframe not in spec.timeframes):
-        warnings.append(f"AI timeframe overridden to the selected market timeframe: {timeframe}.")
+    if timeframe:
+        condition_timeframes = [
+            str(condition.get("timeframe") or "")
+            for key in ("entry_conditions", "exit_conditions")
+            for condition in data.get(key, [])
+        ]
+        requested_different_timeframes = (
+            any(value != timeframe for value in spec.timeframes)
+            or any(value and value != timeframe for value in condition_timeframes)
+        )
+        if requested_different_timeframes:
+            warnings.append(
+                f"Selected market timeframe {timeframe} overrides the draft's multi-timeframe setup; "
+                "all conditions were constrained to this timeframe so validation uses a consistent dataset."
+            )
+        elif not spec.timeframes or timeframe not in spec.timeframes:
+            warnings.append(f"AI timeframe overridden to the selected market timeframe: {timeframe}.")
         data["timeframes"] = [timeframe]
-    elif timeframe:
-        data["timeframes"] = [timeframe]
+        for key in ("entry_conditions", "exit_conditions"):
+            data[key] = [
+                {**condition, "timeframe": timeframe}
+                for condition in data.get(key, [])
+            ]
     data["validation_warnings"] = warnings[:12]
     return AIStrategySpec.model_validate(data)
 
