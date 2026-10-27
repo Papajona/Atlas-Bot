@@ -324,13 +324,26 @@ def transform_strategy_ai(commit: str) -> None:
     old_tree = ast.parse(source, filename=str(path))
     new_tree = ast.parse(canonical, filename="canonical app/strategy_ai.py")
 
-    legacy_generate = next(
-        (node for node in old_tree.body
-         if isinstance(node, ast.AsyncFunctionDef) and node.name == "generate_strategy_draft"),
-        None,
+    removed_names = {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider", "generate_strategy_draft"}
+    definitions_by_name = {
+        name: [node for node in old_tree.body if _name(node) == name]
+        for name in removed_names
+    }
+    duplicate_definitions = sorted(
+        name for name, nodes in definitions_by_name.items() if len(nodes) > 1
     )
-    if legacy_generate is None:
-        raise MigrationError("strategy module has no async generate_strategy_draft function")
+    if duplicate_definitions:
+        raise MigrationError(
+            "strategy module has multiple top-level definitions for removed names: "
+            + ", ".join(duplicate_definitions)
+        )
+
+    generator_definitions = definitions_by_name["generate_strategy_draft"]
+    if len(generator_definitions) != 1 or not isinstance(generator_definitions[0], ast.AsyncFunctionDef):
+        raise MigrationError(
+            "strategy module must have exactly one top-level async generate_strategy_draft definition"
+        )
+    legacy_generate = generator_definitions[0]
     body = legacy_generate.body
     safe_trampoline = (
         not legacy_generate.decorator_list
@@ -346,14 +359,15 @@ def transform_strategy_ai(commit: str) -> None:
             "generate_strategy_draft contains branch-specific behavior beyond the recognized provider trampoline; refusing to overwrite it"
         )
 
-    legacy_provider = next(
-        (node for node in old_tree.body
-         if isinstance(node, ast.AsyncFunctionDef) and node.name == "_generate_with_provider"),
-        None,
-    )
-    if legacy_provider is None or legacy_provider.decorator_list:
+    provider_definitions = definitions_by_name["_generate_with_provider"]
+    if len(provider_definitions) != 1 or not isinstance(provider_definitions[0], ast.AsyncFunctionDef):
         raise MigrationError(
-            "strategy module lacks an undecorated provider-only _generate_with_provider helper; refusing to drop unknown behavior"
+            "strategy module must have exactly one top-level async _generate_with_provider helper; refusing to drop unknown behavior"
+        )
+    legacy_provider = provider_definitions[0]
+    if legacy_provider.decorator_list:
+        raise MigrationError(
+            "strategy module has a decorated _generate_with_provider helper; refusing to drop unknown behavior"
         )
     provider_body = legacy_provider.body
     provider_delegations = {"_gemini_json", "_groq_json", "_cerebras_json", "_openai_json"}
@@ -384,10 +398,9 @@ def transform_strategy_ai(commit: str) -> None:
     canonical_lines = canonical.splitlines(keepends=True)
     new_function = "".join(canonical_lines[canonical_generate.lineno - 1:canonical_generate.end_lineno])
 
-    removed_names = {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider", "generate_strategy_draft"}
     ai_provider_imports: list[ast.ImportFrom] = []
     retained_nodes: list[ast.AST] = []
-    import_aliases: set[str] = set()
+    imported_symbols_by_bound_name: dict[str, set[str]] = {}
     for node in old_tree.body:
         if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "ai_providers":
             ai_provider_imports.append(node)
@@ -396,7 +409,8 @@ def transform_strategy_ai(commit: str) -> None:
                     raise MigrationError(
                         "strategy module uses a wildcard .ai_providers import; refusing to guess retained helper dependencies"
                     )
-                import_aliases.add(alias.asname or alias.name)
+                bound_name = alias.asname or alias.name
+                imported_symbols_by_bound_name.setdefault(bound_name, set()).add(alias.name)
             continue
         name = _name(node)
         if name in removed_names:
@@ -412,14 +426,19 @@ def transform_strategy_ai(commit: str) -> None:
         for part in ast.walk(node)
         if isinstance(part, ast.Name)
     }
-    used_removed_imports = import_aliases & retained_name_uses
-    remappable_names = {"NativeAIError", "compose_strategy_spec"}
-    unsafe_imports = sorted(used_removed_imports - remappable_names)
+    used_removed_imports = set(imported_symbols_by_bound_name) & retained_name_uses
+    native_symbols = {"NativeAIError", "compose_strategy_spec"}
+    unsafe_imports: list[str] = []
+    for bound_name in sorted(used_removed_imports):
+        original_names = imported_symbols_by_bound_name[bound_name]
+        if bound_name not in native_symbols or original_names != {bound_name}:
+            original_text = ", ".join(sorted(original_names))
+            unsafe_imports.append(f"{original_text} bound as {bound_name}")
     if unsafe_imports:
         raise MigrationError(
-            "retained strategy helper depends on removed .ai_providers import(s) "
+            "retained strategy helper depends on non-native or aliased .ai_providers import(s) "
             + ", ".join(unsafe_imports)
-            + "; refusing to drop those dependencies"
+            + "; only imports whose original symbol matches NativeAIError or compose_strategy_spec can be remapped"
         )
 
     edits: list[tuple[int, int, str]] = []

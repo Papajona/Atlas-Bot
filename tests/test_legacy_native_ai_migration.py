@@ -233,6 +233,61 @@ class LegacyNativeAIMigrationTests(unittest.TestCase):
                     migration.transform_strategy_ai("fake-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_strategy_migration_refuses_duplicate_generator_definitions(self):
+        legacy = (
+            "from .ai_providers import _gemini_json\n"
+            "async def _generate_with_provider(provider, prompt):\n"
+            "    return await _gemini_json(prompt)\n\n"
+            "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+            "    return await _generate_with_provider('gemini', prompt)\n\n"
+            "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+            "    if not prompt.strip():\n"
+            "        raise ValueError('prompt is required')\n"
+            "    return await _generate_with_provider('gemini', prompt)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "multiple top-level definitions"):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_strategy_migration_refuses_aliases_that_masquerade_as_native_imports(self):
+        cases = (
+            ("custom_helper", "compose_strategy_spec"),
+            ("custom_exception", "NativeAIError"),
+        )
+        for original_symbol, native_binding in cases:
+            with self.subTest(original_symbol=original_symbol, native_binding=native_binding):
+                legacy = "".join([
+                    "from .ai_providers import _gemini_json, " + original_symbol + " as " + native_binding + "\n",
+                    "SYSTEM_PROMPT = 'Gemini prompt'\n",
+                    "async def _generate_with_provider(provider, prompt):\n",
+                    "    return await _gemini_json(prompt)\n\n",
+                    "def retained_helper():\n",
+                    "    return " + native_binding + "()\n\n",
+                    "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n",
+                    "    return await _generate_with_provider('gemini', prompt)\n",
+                ])
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    target = root / "app" / "strategy_ai.py"
+                    target.parent.mkdir()
+                    target.write_text(legacy, encoding="utf-8")
+                    with patch.object(migration, "ROOT", root), patch.object(
+                        migration, "canonical_text", return_value=CANONICAL_STRATEGY
+                    ):
+                        with self.assertRaisesRegex(
+                            migration.MigrationError, "only imports whose original symbol matches"
+                        ):
+                            migration.transform_strategy_ai("fake-commit")
+                    self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_strategy_migration_refuses_to_drop_import_used_by_retained_helper(self):
         legacy = (
             "from .ai_providers import AIProviderError, _gemini_json, _groq_json, custom_helper\n"
