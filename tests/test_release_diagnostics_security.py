@@ -71,3 +71,44 @@ def test_local_release_rules_flag_gradle_dependency_failures_without_network_cal
     assert report["analysis_mode"] == "deterministic_local_rules"
     assert "Gradle dependency failure" in report["likely_blockers"]
     assert "Could not resolve com.example:missing-library:1.2.3" in report["findings"][0]["evidence"][0]
+
+
+def test_local_release_rules_ignore_valid_signing_and_google_services_configuration():
+    import json
+    from app.main import _release_diagnostic_report
+
+    report = json.loads(
+        _release_diagnostic_report(
+            "",
+            'android { signingConfig = signingConfigs.getByName("release") }\\n'
+            'google-services.json is included in the app project',
+        )
+    )
+
+    assert report["likely_blockers"] == ["No known failure signature matched the supplied text"]
+
+
+def test_release_diagnostics_evidence_keeps_failure_marker_beyond_prefix_limit():
+    import json
+    from app.main import _release_diagnostic_report
+
+    line = ("Gradle task output prefix " * 15) + "Could not resolve com.example:missing-library:1.2.3" + (" tail" * 20)
+    report = json.loads(_release_diagnostic_report(line, ""))
+
+    evidence = report["findings"][0]["evidence"][0]
+    assert "Could not resolve com.example:missing-library:1.2.3" in evidence
+    assert len(evidence) <= 242
+
+
+def test_release_diagnostics_redacts_quoted_json_secret_values_before_returning_evidence():
+    import json
+    from app.main import _redact_release_diagnostic_text, _release_diagnostic_report
+
+    supplied = '{"password": "dont expose this secret", "message": "Could not resolve com.example:bad:1"}'
+    redacted = _redact_release_diagnostic_text(supplied)
+    report = json.loads(_release_diagnostic_report(redacted, ""))
+
+    assert "dont expose this secret" not in redacted
+    assert "dont expose this secret" not in json.dumps(report)
+    assert "[REDACTED]" in redacted
+    assert "Could not resolve" in json.dumps(report)
