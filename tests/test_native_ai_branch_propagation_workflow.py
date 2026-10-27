@@ -68,6 +68,13 @@ def test_legacy_branches_receive_runtime_only_patch_without_overwriting_conflict
     assert 'git checkout "$start_sha" -- "$path"' in workflow
     assert 'git cherry-pick' not in workflow
     assert "apply_native_ai_cleanup_paths" in workflow
+    assert 'if [[ "$path" == "$conflict_path" ]]' in workflow
+    assert 'git rm -f --cached --ignore-unmatch -q -- "$path"' in workflow
+    assert 'git commit -m "Apply reviewed Native AI cleanup"' in workflow
+    assert '[[ "$new_sha" == "$start_sha" ]]' in workflow
+    assert 'git reset --hard "$start_sha" >/dev/null 2>&1\n            git checkout --detach "$start_sha"' in workflow
+    assert 'NATIVE_AI_EXTRA_COMMIT="d847ff8cd8340ccbb3de2a5a0457b607be6a86ad"' in workflow
+    assert "git log -S 'def _release_diagnostic_report'" not in workflow
     assert "git grep -IlEi" in workflow
     assert "git grep -nIEi" in workflow
     assert "verify_native_ai_impl" in workflow
