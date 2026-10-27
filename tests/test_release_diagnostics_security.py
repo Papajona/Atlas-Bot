@@ -18,6 +18,24 @@ def test_release_diagnostics_redacts_bearer_and_named_secrets():
     assert "ordinary gradle task failed" in redacted
 
 
+def test_release_diagnostics_redacts_quoted_bearer_and_preserves_http_status():
+    import json
+    from app.main import _redact_release_diagnostic_text, _release_diagnostic_report
+
+    source = (
+        'Authorization: Bearer "s3cr3tABC"; HTTP 401 Could not GET https://repo.example/artifact\n'
+        "Authorization: HTTP 401 Could not GET https://repo.example/artifact"
+    )
+    redacted = _redact_release_diagnostic_text(source)
+    report = json.loads(_release_diagnostic_report(redacted, ""))
+
+    assert "s3cr3tABC" not in redacted
+    assert "s3cr3tABC" not in json.dumps(report)
+    assert "HTTP 401" in redacted
+    assert "HTTP 401" in json.dumps(report)
+    assert "Repository access or network failure" in report["likely_blockers"]
+
+
 def test_release_diagnostics_redacts_private_key_material():
     from app.main import _redact_release_diagnostic_text
 
