@@ -168,16 +168,33 @@ jobs:
           }
           update_existing_branch_ref() {
             local branch="$1" expected_sha="$2" new_sha="$3"
-            local remote_sha
+            local remote_sha branch_hash temp_ref update_rc
             remote_sha="$(git ls-remote --heads origin "refs/heads/$branch" | awk 'NR == 1 {print $1}')"
             if [[ "$remote_sha" != "$expected_sha" ]]; then
               echo "Ref refs/heads/$branch changed or disappeared after enumeration; refusing to update it." >&2
               return 1
             fi
-            # PATCH updates an existing ref only (unlike git push, it cannot recreate
-            # a deleted branch); force=false rejects non-fast-forward updates.
-            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" \
-              -f "sha=$new_sha" -F force=false >/dev/null
+            # Upload the new commit to a temporary ref first. The API then updates
+            # the existing target ref only; a deleted branch cannot be recreated.
+            # force=false rejects a non-fast-forward update, and the temp ref is removed.
+            branch_hash="$(printf '%s' "$branch" | sha256sum | cut -c1-12)"
+            temp_ref="atlas-native-ai-propagation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${branch_hash}"
+            if ! git push origin "HEAD:refs/heads/$temp_ref" >/dev/null; then
+              echo "Could not upload temporary commit ref for $branch; target branch left unchanged." >&2
+              return 1
+            fi
+            if gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" \
+                -f "sha=$new_sha" -F force=false >/dev/null; then
+              update_rc=0
+            else
+              update_rc=$?
+              echo "Existing-ref update rejected for $branch; target left unchanged." >&2
+            fi
+            if ! git push origin --delete "$temp_ref" >/dev/null; then
+              echo "WARNING: temporary ref refs/heads/$temp_ref could not be deleted." >&2
+              if (( update_rc == 0 )); then update_rc=1; fi
+            fi
+            return "$update_rc"
           }
 
           declare -a updated=() skipped=() failed=()
