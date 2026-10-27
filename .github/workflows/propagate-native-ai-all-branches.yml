@@ -179,6 +179,10 @@ jobs:
           ):
               if not hasattr(facade, name):
                   raise SystemExit(f"app.ai_providers is missing required symbol: {name}")
+          if facade.AIProviderError is not native.NativeAIError:
+              raise SystemExit(
+                  "app.ai_providers.AIProviderError must be the app.native_ai.NativeAIError compatibility alias"
+              )
 
           print("PASS: Native AI imports and compatibility exports resolve.")
           PY
