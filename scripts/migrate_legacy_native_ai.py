@@ -1636,6 +1636,74 @@ def _is_safe_legacy_hosted_strategy_generator(node: ast.AST) -> bool:
     return True
 
 
+def _has_safe_retained_strategy_contract(tree: ast.Module) -> bool:
+    """Check that retained schema/context helpers satisfy the native generator API.
+
+    The legacy wrapper is replaced wholesale, so these siblings are only safe to
+    retain when the canonical generator can still use them as typed specs.  AST
+    validation is intentionally conservative: a context helper must return a
+    model-validated ``AIStrategySpec`` rather than an arbitrary mapping.
+    """
+    schema_nodes = [
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"
+    ]
+    context_nodes = [
+        node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_apply_market_context"
+    ]
+    if len(schema_nodes) != 1 or len(context_nodes) != 1:
+        return False
+
+    schema = schema_nodes[0]
+    has_strategy_family = any(
+        isinstance(statement, (ast.AnnAssign, ast.Assign))
+        and any(
+            isinstance(target, ast.Name) and target.id == "strategy_family"
+            for target in (
+                [statement.target] if isinstance(statement, ast.AnnAssign)
+                else statement.targets
+            )
+        )
+        for statement in schema.body
+    )
+    inherits_base_model = any(
+        isinstance(base, ast.Name) and base.id == "BaseModel"
+        for base in schema.bases
+    )
+    has_model_validate = inherits_base_model or any(
+        isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and statement.name == "model_validate"
+        for statement in schema.body
+    )
+    has_model_dump = any(
+        isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and statement.name == "model_dump"
+        for statement in schema.body
+    ) or any(
+        isinstance(base, ast.Name) and base.id == "BaseModel"
+        for base in schema.bases
+    )
+    if not has_strategy_family or not has_model_validate or not has_model_dump:
+        return False
+
+    context = context_nodes[0]
+    if context.decorator_list or len(context.args.args) < 1:
+        return False
+    if context.args.args[0].arg != "spec":
+        return False
+    returns = [statement.value for statement in ast.walk(context) if isinstance(statement, ast.Return)]
+    return bool(returns) and all(
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr == "model_validate"
+        and isinstance(value.func.value, ast.Name)
+        and value.func.value.id == "AIStrategySpec"
+        for value in returns
+    )
+
+
 def _is_safe_legacy_provider_dispatcher(node: ast.AST) -> bool:
     """Recognize the known legacy adapter router without permitting extra behavior."""
     if not isinstance(node, ast.AsyncFunctionDef) or node.name != "_generate_with_provider" or node.decorator_list:
@@ -1780,6 +1848,11 @@ def transform_strategy_ai(commit: str) -> None:
     if not safe_trampoline and not safe_legacy_flow:
         raise MigrationError(
             "generate_strategy_draft contains unrecognized branch-specific behavior; refusing to overwrite it"
+        )
+    if (safe_trampoline or safe_legacy_flow) and not _has_safe_retained_strategy_contract(old_tree):
+        raise MigrationError(
+            "retained AIStrategySpec and _apply_market_context helpers do not satisfy "
+            "the canonical generator contract; refusing to overwrite them"
         )
     if safe_trampoline:
         generator_call = body[0].value.value

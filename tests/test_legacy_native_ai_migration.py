@@ -1426,14 +1426,19 @@ async def _gemini_json(prompt):
             "from .ai_providers import AIProviderError, _gemini_json, _groq_json\n"
             "from .strategy_evidence import evidence_for\n\n"
             "class AIStrategySpec:\n"
-            "    pass\n\n"
+            "    strategy_family = 'TREND'\n"
+            "    @classmethod\n"
+            "    def model_validate(cls, value):\n"
+            "        return value\n"
+            "    def model_dump(self):\n"
+            "        return self.__dict__\n\n"
             "SYSTEM_PROMPT = '''Gemini strategy prompt'''\n\n"
             "def _strategy_prompt(prompt, name):\n"
             "    return prompt\n\n"
             "async def _generate_with_provider(provider, prompt):\n"
             "    return await _gemini_json(prompt)\n\n"
             "def _apply_market_context(spec, asset=None, symbol=None, timeframe=None):\n"
-            "    return spec\n\n"
+            "    return AIStrategySpec.model_validate(spec)\n\n"
             "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
             "    return await _generate_with_provider('gemini', prompt)\n"
         )
@@ -1565,13 +1570,9 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
                 with patch.object(migration, "ROOT", root), patch.object(
                     migration, "canonical_text", return_value=CANONICAL_STRATEGY
                 ):
-                    migration.transform_strategy_ai("fake-commit")
-                result = target.read_text(encoding="utf-8")
-                ast.parse(result, filename="app/strategy_ai.py")
-                self.assertIn("compose_strategy_spec", result)
-                self.assertIn("def _apply_market_context", result)
-                self.assertNotIn("_generate_with_provider", result)
-                self.assertNotRegex(result, migration.PROVIDER_RE)
+                    with self.assertRaisesRegex(migration.MigrationError, "retained AIStrategySpec"):
+                        migration.transform_strategy_ai("fake-commit")
+                self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
     def test_ai_providers_known_cerebras_adapter_is_removed_with_legacy_provider_routes(self):
         legacy = """import httpx
