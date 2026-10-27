@@ -122,12 +122,52 @@ def transform_config() -> None:
     path = ROOT / "app/config.py"
     if not path.is_file():
         raise MigrationError("app/config.py is absent")
-    result = "".join(line for line in path.read_text(encoding="utf-8").splitlines(keepends=True)
-                     if not PROVIDER_FIELD_RE.search(line))
-    if PROVIDER_RE.search(result):
-        raise MigrationError("app/config.py still contains hosted-provider configuration")
-    path.write_text(result, encoding="utf-8")
+    source = path.read_text(encoding="utf-8")
+    try:
+        tree = ast.parse(source, filename=str(path))
+    except SyntaxError as exc:
+        raise MigrationError(f"app/config.py cannot be parsed before provider cleanup: {exc}") from exc
 
+    edits: list[tuple[int, int, str]] = []
+    assignment_types = (ast.Assign, ast.AnnAssign)
+    statements = list(ast.walk(tree))
+    for node in statements:
+        if not isinstance(node, assignment_types):
+            continue
+        if isinstance(node, ast.Assign):
+            names = {name for target in node.targets for name in _assigned_names(target)}
+        else:
+            names = _assigned_names(node.target)
+        provider_names = {name for name in names if PROVIDER_FIELD_RE.search(name)}
+        if not provider_names:
+            continue
+        if provider_names != names:
+            raise MigrationError(
+                "app/config.py has a combined provider/non-provider assignment; refusing to remove unrelated settings"
+            )
+        same_line_statements = [
+            other for other in statements
+            if other is not node
+            and isinstance(other, (ast.Assign, ast.AnnAssign, ast.Expr, ast.Import, ast.ImportFrom))
+            and getattr(other, "lineno", None) == node.lineno
+        ]
+        if same_line_statements:
+            raise MigrationError(
+                "app/config.py has a provider field sharing a line with another statement; refusing lossy cleanup"
+            )
+        edits.append((node.lineno, node.end_lineno or node.lineno, ""))
+
+    result = _apply_line_edits(source, edits)
+    result = "".join(
+        line for line in result.splitlines(keepends=True)
+        if not (line.lstrip().startswith("#") and PROVIDER_RE.search(line))
+    )
+    if PROVIDER_RE.search(result):
+        raise MigrationError(
+            "app/config.py still contains provider text outside isolated provider fields; refusing lossy cleanup"
+        )
+    ast.parse(result, filename=str(path))
+    path.write_text(result, encoding="utf-8")
 
 
 def _defined_names(node: ast.AST) -> set[str]:
@@ -237,6 +277,29 @@ def transform_strategy_ai(commit: str) -> None:
         return
     canonical = canonical_text(commit, "app/strategy_ai.py")
     old_tree = ast.parse(source, filename=str(path))
+
+    legacy_generate = next(
+        (node for node in old_tree.body
+         if isinstance(node, ast.AsyncFunctionDef) and node.name == "generate_strategy_draft"),
+        None,
+    )
+    if legacy_generate is None:
+        raise MigrationError("strategy module has no async generate_strategy_draft function")
+    # This canonical replacement is safe only for the known provider-only trampoline.
+    # Do not erase validation, market-context handling, or branch-specific control flow.
+    body = legacy_generate.body
+    safe_trampoline = (
+        len(body) == 1
+        and isinstance(body[0], ast.Return)
+        and isinstance(body[0].value, ast.Await)
+        and isinstance(body[0].value.value, ast.Call)
+        and isinstance(body[0].value.value.func, ast.Name)
+        and body[0].value.value.func.id == "_generate_with_provider"
+    )
+    if not safe_trampoline:
+        raise MigrationError(
+            "generate_strategy_draft contains branch-specific behavior beyond the recognized provider trampoline; refusing to overwrite it"
+        )
     new_tree = ast.parse(canonical, filename="canonical app/strategy_ai.py")
     canonical_generate = next((n for n in new_tree.body
                                if isinstance(n, ast.AsyncFunctionDef) and n.name == "generate_strategy_draft"), None)
@@ -286,10 +349,12 @@ def transform_daily_research() -> None:
         if re.search(r"(?i)(?:gemini_api_key|groq_api_key|cerebras_api_key|ai_gateway_)", segment):
             first = lines[node.lineno - 1]
             indent = first[:len(first) - len(first.lstrip())]
-            edits.append((node.lineno, node.end_lineno,
-                          indent + "native_research_input = dict(research)\\n"
-                          + 'native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))\\n'
-                          + 'review["native_ai_review"] = native_research_review(native_research_input, intelligence)\\n'))
+            replacement = "\n".join((
+                indent + "native_research_input = dict(research)",
+                indent + 'native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))',
+                indent + 'review["native_ai_review"] = native_research_review(native_research_input, intelligence)',
+            )) + "\n"
+            edits.append((node.lineno, node.end_lineno, replacement))
             found_callsite = True
             break
     for index, line in enumerate(lines, start=1):
@@ -396,7 +461,26 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if skip_provider_block:
             if re.match(r"^\s*fi\b", line):
                 skip_provider_block = False
-            continue
+                continue
+            if (not stripped or stripped.startswith("#")
+                    or re.match(r"^(?:else|elif\b|then\b)", stripped, re.I)):
+                continue
+            provider_assignment = re.match(
+                r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_GROQ[A-Z0-9_]*|"
+                r"GEMINI_API_KEY|GROQ_API_KEY|GROQ_SECRET_ARG|AI_SECRET_ARGS|"
+                r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
+                line, re.I,
+            )
+            warning_only = (
+                re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
+                and PROVIDER_RE.search(stripped)
+                and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", stripped)
+            )
+            if provider_assignment or warning_only:
+                continue
+            raise MigrationError(
+                f"{path} has a mixed provider-conditioned shell block; refusing to discard unrelated statement: {stripped[:100]}"
+            )
 
         # Drop only a provider-specific if/else block, including its warning body.
         if (re.match(r"^\s*if\b", line) and variable_pattern.search(line)
@@ -455,11 +539,44 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         # Strip any remaining provider-only executable line. If a mixed executable line
         # still contains a provider token, refuse the branch rather than damage its command.
         if PROVIDER_RE.search(line):
+            if stripped.startswith("#"):
+                continue
+            warning_only = (
+                re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
+                and re.search(r"(?i)\b(?:gemini|groq|cerebras|ai.?gateway|openai)\b", stripped)
+                and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", stripped)
+            )
+            if warning_only:
+                continue
+            inline_if = re.match(r"^\s*if\b.*\bthen\b(.*);\s*fi\s*$", line, re.I)
+            if inline_if:
+                commands = [part.strip() for part in inline_if.group(1).split(";") if part.strip()]
+                safe_inline = all(
+                    re.match(
+                        r"^(?::|(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_GROQ[A-Z0-9_]*|"
+                        r"GEMINI_API_KEY|GROQ_API_KEY|GROQ_SECRET_ARG|AI_SECRET_ARGS|"
+                        r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=)",
+                        command, re.I,
+                    )
+                    or (
+                        re.match(r"^(?:echo|printf)\b", command, re.I)
+                        and re.search(r"(?i)\b(?:gemini|groq|cerebras|ai.?gateway|openai)\b", command)
+                        and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", command)
+                    )
+                    for command in commands
+                )
+                if safe_inline:
+                    continue
+                raise MigrationError(
+                    f"{path} has a mixed inline provider conditional; refusing to discard unrelated commands"
+                )
             if re.search(r"(?i)\b(?:gcloud|docker|curl|python|bash|run:|ENV_VARS=|--set-env-vars|--set-secrets)\b", line):
                 raise MigrationError(
                     f"{path} retains provider wiring in a mixed shell command; refusing to rewrite it"
                 )
-            continue
+            raise MigrationError(
+                f"{path} retains provider text in a non-provider shell statement; refusing lossy deletion"
+            )
         if line.strip():
             output.append(line)
         elif original.strip():
