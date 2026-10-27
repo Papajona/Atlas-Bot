@@ -401,10 +401,32 @@ def transform_ai_providers(commit: str) -> None:
                 module=node.module, names=aliases, level=node.level
             )))
 
+    # Keep the module docstring and future imports at the top of the generated
+    # module. Retained star imports still need to precede ordinary canonical
+    # bindings so that helpers can resolve their branch-specific dependencies.
+    canonical_lines = canonical.splitlines(keepends=True)
+    canonical_prefix_end = 0
+    for index, node in enumerate(canonical_tree.body):
+        is_docstring = (
+            index == 0
+            and isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        )
+        is_future_import = isinstance(node, ast.ImportFrom) and node.module == "__future__"
+        if not (is_docstring or is_future_import):
+            break
+        canonical_prefix_end = node.end_lineno
+    canonical_prefix = "".join(canonical_lines[:canonical_prefix_end]).rstrip()
+    canonical_body = "".join(canonical_lines[canonical_prefix_end:]).rstrip()
+
     pieces = []
+    if canonical_prefix:
+        pieces.append(canonical_prefix)
     if pre_canonical_imports:
         pieces.extend(sorted(set(pre_canonical_imports)))
-    pieces.append(canonical.rstrip())
+    if canonical_body:
+        pieces.append(canonical_body)
     if preserved_imports:
         pieces.append("\n".join(sorted(set(preserved_imports))))
     if extras:

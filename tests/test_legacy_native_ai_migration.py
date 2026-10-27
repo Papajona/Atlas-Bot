@@ -127,17 +127,23 @@ def retained_helper():
             target = root / "app" / "ai_providers.py"
             target.parent.mkdir()
             target.write_text(legacy, encoding="utf-8")
+            canonical = (Path(__file__).resolve().parents[1] / "app" / "ai_providers.py").read_text(
+                encoding="utf-8"
+            )
             with patch.object(migration, "ROOT", root), patch.object(
-                migration,
-                "canonical_text",
-                return_value="from .native_ai import AIProviderError\\n",
+                migration, "canonical_text", return_value=canonical
             ):
                 migration.transform_ai_providers("canonical-commit")
             result = target.read_text(encoding="utf-8")
+            ast.parse(result)
             self.assertIn("from .branch_helpers import *", result)
             self.assertLess(
                 result.index("from .branch_helpers import *"),
                 result.index("from .native_ai import AIProviderError"),
+            )
+            self.assertLess(
+                result.index("from __future__ import annotations"),
+                result.index("from .branch_helpers import *"),
             )
             self.assertIn("return branch_helper()", result)
             self.assertNotRegex(result, migration.PROVIDER_RE)
