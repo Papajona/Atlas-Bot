@@ -299,32 +299,23 @@ def transform_ai_providers(commit: str) -> None:
             # Only replace the exact empty compatibility stub when RuntimeError still
             # resolves to Python's built-in exception class. A module-level binding can
             # make this a custom branch exception whose behavior must be preserved.
-            runtime_error_shadowed = any(
-                "RuntimeError" in _defined_names(candidate)
-                for candidate in old_tree.body
-            ) or any(
-                (
-                    isinstance(candidate, ast.Name)
-                    and candidate.id == "RuntimeError"
-                    and isinstance(candidate.ctx, (ast.Store, ast.Del))
-                )
-                or (
-                    isinstance(candidate, ast.alias)
-                    and (
-                        candidate.asname == "RuntimeError"
-                        or (candidate.name == "RuntimeError" and candidate.asname is None)
-                    )
-                )
-                or (
-                    isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-                    and candidate.name == "RuntimeError"
-                )
-                or (
-                    isinstance(candidate, ast.Global)
-                    and "RuntimeError" in candidate.names
-                )
-                for candidate in ast.walk(old_tree)
-            )
+            runtime_error_shadowed = False
+            for candidate in old_tree.body:
+                if candidate is node:
+                    break
+                if "RuntimeError" in _defined_names(candidate):
+                    runtime_error_shadowed = True
+                    break
+                # Bindings inside module-level control flow are not reported by
+                # _defined_names(control_flow_node), but can still change the
+                # name resolved by the class base below.
+                if isinstance(candidate, (ast.If, ast.For, ast.AsyncFor, ast.While,
+                                          ast.With, ast.AsyncWith, ast.Try, ast.Match)) and any(
+                    "RuntimeError" in _defined_names(nested)
+                    for nested in ast.walk(candidate)
+                ):
+                    runtime_error_shadowed = True
+                    break
             if runtime_error_shadowed:
                 raise MigrationError(
                     "legacy AIProviderError base RuntimeError is imported or rebound in this facade; refusing to replace a possibly custom exception"
@@ -460,18 +451,13 @@ def transform_ai_providers(commit: str) -> None:
             has_direct_all_assignment = False
             if isinstance(module_node, ast.Assign):
                 has_direct_all_assignment = any(directly_assigns_all(target) for target in module_node.targets)
-                targets_bind_all = any("__all__" in _assigned_names(target) for target in module_node.targets)
                 if has_direct_all_assignment:
                     all_values.append(module_node.value)
-                    # Chained assignment (aliases = __all__ = [...]) leaks the same
-                    # mutable export list through another binding; reject it rather
-                    # than assume the alias will remain unchanged.
-                    if len(module_node.targets) != 1:
+                    # A chained assignment aliases the mutable export list. The
+                    # alias may be mutated later, so its final contents cannot be
+                    # inferred from the literal assigned to __all__.
+                    if any(not directly_assigns_all(target) for target in module_node.targets):
                         dynamic_all = True
-                elif targets_bind_all:
-                    # Destructuring/attribute targets that include __all__ are not a
-                    # simple literal export declaration we can safely reason about.
-                    dynamic_all = True
                 if any(mutates_all_target(target) for target in module_node.targets):
                     dynamic_all = True
             elif isinstance(module_node, ast.AnnAssign):
