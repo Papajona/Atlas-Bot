@@ -1774,38 +1774,45 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST) -> bool:
 
 
 
-def _is_compatible_strategy_schema_and_context(tree: ast.Module) -> bool:
-    """Ensure retained strategy helpers accept the native composer's complete schema."""
-    imported_base_model = any(
-        isinstance(node, ast.ImportFrom) and node.module == "pydantic" and node.level == 0
-        and any(alias.name == "BaseModel" and alias.asname is None for alias in node.names)
-        for node in tree.body
-    )
-    classes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"]
-    if not imported_base_model or len(classes) != 1:
+def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree: ast.Module) -> bool:
+    """Require a retained schema that exactly accepts the canonical composer contract."""
+    canonical_schemas = [
+        node for node in canonical_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"
+    ]
+    schemas = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"]
+    if len(canonical_schemas) != 1 or len(schemas) != 1:
         return False
-    schema = classes[0]
-    if schema.decorator_list or not any(isinstance(base, ast.Name) and base.id == "BaseModel" for base in schema.bases):
+    canonical_schema, schema = canonical_schemas[0], schemas[0]
+    if schema.decorator_list or any(ast.dump(a, include_attributes=False) != ast.dump(b, include_attributes=False)
+                                    for a, b in zip(schema.bases, canonical_schema.bases)) or len(schema.bases) != len(canonical_schema.bases):
         return False
 
-    native_composer_fields = {
-        "version", "title", "summary", "asset", "symbols", "timeframes", "direction",
-        "strategy_family", "entry_conditions", "exit_conditions", "risk_per_trade",
-        "stop_loss_atr", "take_profit_rr", "sessions", "assumptions", "validation_warnings",
-        "requires_backtest", "requires_walk_forward", "execution_mode", "implementation_status",
-    }
-    field_nodes = {
-        statement.target.id: statement
-        for statement in schema.body
-        if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name)
-    }
-    if not native_composer_fields.issubset(field_nodes):
+    def body_without_docstring(node: ast.ClassDef) -> list[ast.stmt]:
+        body = list(node.body)
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+            body = body[1:]
+        return body
+
+    canonical_body = body_without_docstring(canonical_schema)
+    schema_body = body_without_docstring(schema)
+    def field_map(body: list[ast.stmt]) -> dict[str, ast.AnnAssign]:
+        return {
+            statement.target.id: statement
+            for statement in body
+            if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name)
+        }
+
+    canonical_fields = field_map(canonical_body)
+    fields = field_map(schema_body)
+    if len(canonical_fields) == 0 or not set(canonical_fields).issubset(fields):
         return False
-    if any(
-        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in {"model_validate", "model_dump"}
-        for node in schema.body
-    ):
-        return False
+    # The field annotations/defaults/Field constraints of every canonical output field
+    # must match exactly, so tighter hosted-only constraints cannot make native drafts
+    # fail validation. Additional required fields are forbidden below.
+    for name, canonical_field in canonical_fields.items():
+        if ast.dump(fields[name], include_attributes=False) != ast.dump(canonical_field, include_attributes=False):
+            return False
 
     def field_is_required(statement: ast.AnnAssign) -> bool:
         default = statement.value
@@ -1820,22 +1827,59 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module) -> bool:
                 return isinstance(value, ast.Constant) and value.value is Ellipsis
             if default.args:
                 return isinstance(default.args[0], ast.Constant) and default.args[0].value is Ellipsis
-            # Field constraints without a default still make the Pydantic field required.
             return True
         return False
 
-    # The native composer has no branch-specific fields. Any additional required
-    # Pydantic field would make every canonical draft fail validation; optional extras
-    # are retained and can still take their declared defaults.
-    for name, statement in field_nodes.items():
-        if name not in native_composer_fields and field_is_required(statement):
+    for name, statement in fields.items():
+        if name not in canonical_fields and field_is_required(statement):
             return False
+
+    def method_map(body: list[ast.stmt]) -> dict[str, ast.AST]:
+        return {
+            statement.name: statement
+            for statement in body
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+
+    canonical_methods = method_map(canonical_body)
+    methods = method_map(schema_body)
+    if set(methods) != set(canonical_methods):
+        return False
+    if any(
+        ast.dump(methods[name], include_attributes=False)
+        != ast.dump(canonical_methods[name], include_attributes=False)
+        for name in canonical_methods
+    ):
+        return False
+
+    def model_config_node(body: list[ast.stmt]) -> ast.stmt | None:
+        matches = [
+            statement for statement in body
+            if isinstance(statement, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "model_config" for target in statement.targets)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    canonical_config = model_config_node(canonical_body)
+    config = model_config_node(schema_body)
+    if canonical_config is None or config is None or ast.dump(config, include_attributes=False) != ast.dump(canonical_config, include_attributes=False):
+        return False
+
+    # Fail closed on unrecognized class-body behavior; docstrings, field assignments,
+    # model_config, and validator methods are the only accepted class-body forms.
+    allowed_ids = {id(node) for node in fields.values()} | {id(node) for node in methods.values()} | {id(config)}
+    if any(id(statement) not in allowed_ids for statement in schema_body):
+        return False
 
     contexts = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
     ]
-    if len(contexts) != 1:
+    canonical_contexts = [
+        node for node in canonical_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+    ]
+    if len(contexts) != 1 or len(canonical_contexts) != 1:
         return False
     context = contexts[0]
     args = context.args
@@ -2330,7 +2374,7 @@ def transform_strategy_ai(commit: str) -> None:
             + ", ".join(unsafe_imports)
             + "; only imports whose original symbol matches NativeAIError or compose_strategy_spec can be remapped"
         )
-    if not _is_compatible_strategy_schema_and_context(old_tree):
+    if not _is_compatible_strategy_schema_and_context(old_tree, new_tree):
         raise MigrationError(
             "strategy schema/context helpers do not satisfy the canonical Native AI draft contract; refusing to replace the hosted generator"
         )
