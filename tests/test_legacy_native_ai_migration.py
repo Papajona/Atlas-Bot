@@ -51,6 +51,21 @@ class LegacyNativeAIMigrationTests(unittest.TestCase):
             self.assertIn("withdrawals_enabled", result)
             self.assertNotRegex(result, migration.PROVIDER_RE)
 
+    def test_config_refuses_a_provider_field_sharing_a_line_with_an_unrelated_setting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            mixed = (
+                "class Settings:\n"
+                "    database_url: str = 'sqlite:///data.db'; gemini_api_key: str = ''\n"
+            )
+            config.write_text(mixed, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "sharing a line"):
+                    migration.transform_config()
+            self.assertEqual(config.read_text(encoding="utf-8"), mixed)
+
     def test_strategy_rewrites_provider_generator_and_preserves_schema_context(self):
         legacy = (
             "from .config import settings\n"
@@ -85,6 +100,28 @@ class LegacyNativeAIMigrationTests(unittest.TestCase):
             self.assertNotRegex(result, migration.PROVIDER_RE)
             self.assertNotIn("_generate_with_provider", result)
 
+    def test_strategy_migration_refuses_to_discard_generator_validation(self):
+        legacy = (
+            "from .ai_providers import _gemini_json, _groq_json\n"
+            "async def _generate_with_provider(provider, prompt):\n"
+            "    return await _gemini_json(prompt)\n\n"
+            "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+            "    if not prompt.strip():\n"
+            "        raise ValueError('prompt is required')\n"
+            "    return await _generate_with_provider('gemini', prompt)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "branch-specific behavior"):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_daily_research_replaces_only_provider_conditional(self):
         legacy = (
             "from .ai_providers import dual_ai_research_review\n"
@@ -109,6 +146,13 @@ class LegacyNativeAIMigrationTests(unittest.TestCase):
             self.assertIn("review['run_drift']", result)
             self.assertIn('native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))', result)
             self.assertIn("native_research_review(native_research_input, intelligence)", result)
+            self.assertIn(
+                '\n    native_research_input = dict(research)\n'
+                '    native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))\n'
+                '    review["native_ai_review"] = native_research_review(native_research_input, intelligence)\n',
+                result,
+            )
+            ast.parse(result, filename="app/daily_research.py")
             self.assertNotRegex(result, migration.PROVIDER_RE)
 
     def test_scrub_workflow_removes_only_provider_entries(self):
@@ -172,6 +216,16 @@ for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key; do echo 
         self.assertIn("DATABASE_SECRET_REF", cleaned)
         self.assertNotRegex(cleaned, migration.PROVIDER_RE)
 
+
+    def test_shell_scrub_refuses_provider_block_containing_unrelated_deployment_command(self):
+        source = (
+            'if [[ -n "$SECRET_GROQ_API_KEY_VERSION" ]]; then\n'
+            '  echo "WARNING: Groq key configured"\n'
+            '  gcloud run deploy atlas --project "$GCP_PROJECT_ID"\n'
+            'fi\n'
+        )
+        with self.assertRaisesRegex(migration.MigrationError, "mixed provider-conditioned shell block"):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
 
     def test_release_diagnostics_replaces_only_hosted_route_and_preserves_neighbor_routes(self):
         legacy = """# Authorized release diagnostics. The gateway key is read only from server configuration.
