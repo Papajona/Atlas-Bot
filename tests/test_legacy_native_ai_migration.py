@@ -1398,6 +1398,169 @@ async def _gemini_json(prompt):
                     migration.transform_config()
             self.assertEqual(config.read_text(encoding="utf-8"), mixed)
 
+    def test_ai_provider_cerebras_adapter_is_removed_when_only_used_by_removed_provider_router(self):
+        legacy = """import httpx
+from .config import settings
+
+class AIProviderError(RuntimeError):
+    pass
+
+async def _cerebras_json(prompt):
+    return await httpx.post("https://api.cerebras.ai/v1/chat/completions", json={"prompt": prompt})
+
+async def _generate_with_provider(provider, prompt):
+    return await _cerebras_json(prompt)
+
+def retained_helper():
+    return {"audit": "preserved"}
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value="from .native_ai import AIProviderError\n"
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+        ast.parse(result, filename="app/ai_providers.py")
+        self.assertNotIn("def _cerebras_json", result)
+        self.assertNotIn("api.cerebras.ai", result)
+        self.assertIn("def retained_helper", result)
+        self.assertIn('return {"audit": "preserved"}', result)
+        self.assertNotRegex(result, migration.PROVIDER_RE)
+
+    def test_ai_provider_cerebras_adapter_is_not_removed_when_retained_helper_uses_it(self):
+        legacy = """import httpx
+
+class AIProviderError(RuntimeError):
+    pass
+
+async def _cerebras_json(prompt):
+    return await httpx.post("https://api.cerebras.ai/v1/chat/completions", json={"prompt": prompt})
+
+def retained_helper(prompt):
+    return _cerebras_json(prompt)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value="from .native_ai import AIProviderError\n"
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "retained app/ai_providers.py helpers depend on provider adapters"
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_strategy_migrates_audited_multi_provider_fallback_to_native_composition(self):
+        legacy = """from .config import settings
+from .ai_providers import AIProviderError, _gemini_json, _groq_json, _cerebras_json
+from .strategy_evidence import evidence_for
+
+class AIStrategySpec:
+    @classmethod
+    def model_validate(cls, value):
+        return value
+
+def _strategy_prompt(prompt, name):
+    return prompt
+
+SYSTEM_PROMPT = "Gemini strategy prompt"
+
+async def _generate_with_provider(provider, prompt):
+    if provider == "gemini":
+        return await _gemini_json(
+            prompt, system_instruction=SYSTEM_PROMPT,
+            model=settings.gemini_strategy_model or settings.gemini_model,
+        )
+    if provider == "cerebras":
+        return await _cerebras_json(
+            prompt, system_instruction=SYSTEM_PROMPT, model=settings.cerebras_model
+        )
+    return await _groq_json(
+        prompt, system_instruction=SYSTEM_PROMPT,
+        model=settings.groq_strategy_model or settings.groq_model,
+    )
+
+def _apply_market_context(spec, *, asset=None, symbol=None, timeframe=None):
+    return spec
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    \"\"\"Generate a provider-backed strategy with schema validation and audit metadata.\"\"\"
+    if not settings.gemini_api_key and not settings.groq_api_key and not settings.cerebras_api_key:
+        raise AIProviderError("No AI strategy provider is configured")
+
+    provider_errors: dict[str, str] = {}
+    provider_order = []
+    if settings.gemini_api_key:
+        provider_order.append("gemini")
+    if settings.groq_api_key:
+        provider_order.append("groq")
+    if settings.cerebras_api_key:
+        provider_order.append("cerebras")
+
+    raw: dict[str, Any] | None = None
+    provider_used = ""
+    for provider in provider_order:
+        try:
+            raw = await _generate_with_provider(provider, _strategy_prompt(prompt, name))
+            provider_used = provider
+            break
+        except Exception as exc:
+            provider_errors[provider] = str(exc)
+
+    if raw is None:
+        raise AIProviderError("All configured AI strategy providers failed: " + "; ".join(
+            f"{k}: {v}" for k, v in provider_errors.items()
+        ))
+
+    try:
+        spec = AIStrategySpec.model_validate(raw)
+        spec = _apply_market_context(spec, asset=asset, symbol=symbol, timeframe=timeframe)
+    except Exception as exc:
+        raise AIProviderError(f"AI strategy failed schema validation: {exc}") from exc
+
+    family_key = {"TREND":"trend", "MOMENTUM":"momentum", "BREAKOUT":"breakout",
+                  "MEAN_REVERSION":"mean_reversion", "ENSEMBLE":"ensemble"}[spec.strategy_family]
+    return {
+        "strategy": spec.model_dump(),
+        "evidence": evidence_for(family_key),
+        "ai": {
+            "provider": provider_used,
+            "model": settings.gemini_model if provider_used == "gemini" else settings.groq_strategy_model,
+            "fallback_used": provider_used != "gemini",
+            "provider_errors": provider_errors,
+            "execution_authority": False,
+            "requires_backtest": True,
+            "requires_walk_forward": True,
+        },
+    }
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                migration.transform_strategy_ai("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+        ast.parse(result, filename="app/strategy_ai.py")
+        self.assertIn("class AIStrategySpec", result)
+        self.assertIn("def _apply_market_context", result)
+        self.assertIn("compose_strategy_spec", result)
+        self.assertIn('provider": "atlas_native"', result)
+        self.assertIn('"network_calls": 0', result)
+        self.assertNotIn("_generate_with_provider", result)
+        self.assertNotIn("provider_order", result)
+        self.assertNotRegex(result, migration.PROVIDER_RE)
+
     def test_strategy_migration_refuses_to_drop_provider_helper_behavior(self):
         legacy = (
             "from .ai_providers import _gemini_json\n"
