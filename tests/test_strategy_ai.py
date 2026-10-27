@@ -83,6 +83,18 @@ def test_native_strategy_parser_recognizes_ensemble_and_short_intent():
     )
     assert short["direction"] == "SHORT"
 
+    long_crossover = compose_strategy_spec(
+        prompt="Buy when the short EMA crosses above the long EMA; sell when RSI > 70",
+        name="Long-only moving-average crossover",
+    )
+    assert long_crossover["direction"] == "LONG"
+
+    explicit_sell = compose_strategy_spec(
+        prompt="Sell EUR/USD on the 1h timeframe",
+        name="Short EUR/USD",
+    )
+    assert explicit_sell["direction"] == "SHORT"
+
     ambiguous = compose_strategy_spec(prompt="BTC strategy on 1h", name="Unspecified direction")
     assert any("direction was explicit" in item.lower() for item in ambiguous["validation_warnings"])
 
@@ -103,3 +115,26 @@ def test_strategy_candidate_backtest_uses_the_requested_stop_and_target_paramete
         _candidate_backtest_config({"stop_loss_atr": float("nan"), "take_profit_rr": 3.0})
     with pytest.raises(ValueError):
         _candidate_backtest_config({"stop_loss_atr": 1.0})
+
+def test_selected_market_timeframe_constrains_multitimeframe_strategy_conditions():
+    from app.strategy_ai import generate_strategy_draft
+
+    result = asyncio.run(generate_strategy_draft(
+        prompt="15m breakout with 1h confirmation for BTC",
+        name="Selected-timeframe breakout",
+        asset="crypto",
+        symbol="BTC/USDT",
+        timeframe="1h",
+    ))
+    spec = result["strategy"]
+    assert spec["timeframes"] == ["1h"]
+    assert all(
+        condition["timeframe"] == "1h"
+        for key in ("entry_conditions", "exit_conditions")
+        for condition in spec[key]
+    )
+    assert any(
+        "overrides the draft's multi-timeframe setup" in warning
+        for warning in spec["validation_warnings"]
+    )
+
