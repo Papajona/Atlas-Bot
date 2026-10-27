@@ -1676,12 +1676,22 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST) -> bool:
         return (isinstance(value, ast.Attribute) and is_name(value.value, "settings")
                 and value.attr in allowed)
 
-    def is_model_expr(value: ast.AST) -> bool:
-        if is_setting(value, {"gemini_strategy_model", "groq_strategy_model", "cerebras_model", "gemini_model", "groq_model"}):
+    def is_model_expr(value: ast.AST, provider: str) -> bool:
+        fields = {
+            "gemini": {"gemini_strategy_model", "gemini_model"},
+            "groq": {"groq_strategy_model", "groq_model"},
+            "cerebras": {"cerebras_model"},
+        }[provider]
+
+        def is_provider_setting(term: ast.AST) -> bool:
+            return is_setting(term, fields)
+
+        if is_provider_setting(value):
             return True
-        return (isinstance(value, ast.BoolOp) and isinstance(value.op, ast.Or) and len(value.values) == 2
-                and all(is_setting(term, {"gemini_strategy_model", "groq_strategy_model", "gemini_model", "groq_model"})
-                        for term in value.values))
+        return (
+            isinstance(value, ast.BoolOp) and isinstance(value.op, ast.Or) and len(value.values) == 2
+            and all(is_provider_setting(term) for term in value.values)
+        )
 
     def safe_adapter_call(value: ast.AST, provider: str) -> bool:
         adapter = {"gemini": "_gemini_json", "groq": "_groq_json", "cerebras": "_cerebras_json"}[provider]
@@ -1689,10 +1699,11 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST) -> bool:
             isinstance(value, ast.Await) and isinstance(value.value, ast.Call)
             and is_name(value.value.func, adapter)
             and len(value.value.args) == 1 and is_name(value.value.args[0], "prompt")
+            and len(value.value.keywords) == 2
             and {keyword.arg for keyword in value.value.keywords} == {"system_instruction", "model"}
             and all(
                 (keyword.arg == "system_instruction" and is_name(keyword.value, "SYSTEM_PROMPT"))
-                or (keyword.arg == "model" and is_model_expr(keyword.value))
+                or (keyword.arg == "model" and is_model_expr(keyword.value, provider))
                 for keyword in value.value.keywords
             )
         )
@@ -1739,10 +1750,11 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST) -> bool:
             branches[0][0] == "gemini"
             and is_name(last_call.func, "_groq_json")
             and len(last_call.args) == 1 and is_name(last_call.args[0], "prompt")
+            and len(last_call.keywords) == 2
             and {k.arg for k in last_call.keywords} == {"system_instruction", "model"}
             and all(
                 (k.arg == "system_instruction" and is_name(k.value, "SYSTEM_PROMPT"))
-                or (k.arg == "model" and is_model_expr(k.value))
+                or (k.arg == "model" and is_model_expr(k.value, "groq"))
                 for k in last_call.keywords
             )
         )
@@ -1750,10 +1762,11 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST) -> bool:
         [name for name, _ in branches] == ["gemini", "groq"]
         and is_name(last_call.func, "_cerebras_json")
         and len(last_call.args) == 1 and is_name(last_call.args[0], "prompt")
+        and len(last_call.keywords) == 2
         and {k.arg for k in last_call.keywords} == {"system_instruction", "model"}
         and all(
             (k.arg == "system_instruction" and is_name(k.value, "SYSTEM_PROMPT"))
-            or (k.arg == "model" and is_model_expr(k.value))
+            or (k.arg == "model" and is_model_expr(k.value, "cerebras"))
             for k in last_call.keywords
         )
     )
