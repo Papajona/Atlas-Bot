@@ -13,7 +13,9 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path.cwd()
-DEFAULT_COMMIT = "f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
+DEFAULT_CLEANUP_COMMIT = "f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
+# Reviewed source for canonical Native AI behavior, distinct from the cleanup patch base.
+DEFAULT_CANONICAL_COMMIT = "f8bb968198ec909e66cc04b888716f87ded6c0fa"
 DEFAULT_EXTRA_BASE_COMMIT = "0d38f95079833804713fcba080caee38a6ddfb4c"
 PROVIDER_RE = re.compile(
     r"(?i)(?:gemini|groq|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
@@ -889,23 +891,24 @@ def apply_ancillary_patch(commit: str, path: str, extra_base: str, extra_commit:
             target.write_text(cleaned, encoding="utf-8")
 
 
-def migrate(commit: str, extra_base: str, extra_commit: str) -> None:
-    # Replace network adapters but preserve non-provider branch-specific helpers.
-    transform_ai_providers(commit)
-    write_text("scripts/check_ai_models.py", canonical_text(commit, "scripts/check_ai_models.py"))
+def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:
+    # Canonical Native AI source and the original provider-removal patch baseline are
+    # independent pins: changing one must not widen the other per-path diff.
+    transform_ai_providers(canonical_commit)
+    write_text("scripts/check_ai_models.py", canonical_text(canonical_commit, "scripts/check_ai_models.py"))
     for path in ("app/native_ai.py", "scripts/check_native_ai.py"):
         target = ROOT / path
         if not target.exists():
-            write_text(path, canonical_text(commit, path))
+            write_text(path, canonical_text(canonical_commit, path))
         elif PROVIDER_RE.search(target.read_text(encoding="utf-8")):
             raise MigrationError(f"{path} has a divergent provider-bearing implementation; refusing overwrite")
 
     transform_config()
-    transform_strategy_ai(commit)
+    transform_strategy_ai(canonical_commit)
     transform_daily_research()
     transform_release_diagnostics(extra_commit)
     for path in ANCILLARY_PATHS:
-        apply_ancillary_patch(commit, path, extra_base, extra_commit)
+        apply_ancillary_patch(cleanup_commit, path, extra_base, extra_commit)
 
     remaining = []
     for path in NATIVE_PATHS:
@@ -934,14 +937,17 @@ def migrate(commit: str, extra_base: str, extra_commit: str) -> None:
 def main() -> int:
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--canonical-commit", default=DEFAULT_COMMIT)
+    parser.add_argument("--canonical-commit", default=DEFAULT_CANONICAL_COMMIT)
+    parser.add_argument("--cleanup-commit", default=DEFAULT_CLEANUP_COMMIT)
     parser.add_argument("--extra-base-commit", default=DEFAULT_EXTRA_BASE_COMMIT)
     parser.add_argument("--extra-commit", required=True)
     args = parser.parse_args()
     try:
+        _git("cat-file", "-e", f"{args.canonical_commit}^{{commit}}")
+        _git("cat-file", "-e", f"{args.cleanup_commit}^{{commit}}")
         _git("cat-file", "-e", f"{args.extra_base_commit}^{{commit}}")
         _git("cat-file", "-e", f"{args.extra_commit}^{{commit}}")
-        migrate(args.canonical_commit, args.extra_base_commit, args.extra_commit)
+        migrate(args.canonical_commit, args.cleanup_commit, args.extra_base_commit, args.extra_commit)
     except (MigrationError, OSError, SyntaxError, json.JSONDecodeError) as exc:
         print(f"SAFE MIGRATION REFUSED: {exc}")
         return 1
