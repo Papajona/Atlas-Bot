@@ -211,6 +211,29 @@ class LegacyNativeAIMigrationTests(unittest.TestCase):
                     migration.transform_strategy_ai("fake-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_strategy_migration_refuses_to_drop_import_used_by_retained_helper(self):
+        legacy = (
+            "from .ai_providers import AIProviderError, _gemini_json, _groq_json, custom_helper\n"
+            "SYSTEM_PROMPT = 'Gemini prompt'\n"
+            "async def _generate_with_provider(provider, prompt):\n"
+            "    return await _gemini_json(prompt)\n\n"
+            "def record_metrics():\n"
+            "    return custom_helper()\n\n"
+            "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+            "    return await _generate_with_provider('gemini', prompt)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "retained strategy helper depends on removed"):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_daily_research_replaces_only_provider_conditional(self):
         legacy = (
             "from .ai_providers import dual_ai_research_review\n"
