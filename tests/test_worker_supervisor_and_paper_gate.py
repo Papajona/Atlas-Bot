@@ -338,3 +338,85 @@ def test_supervisor_invalid_persisted_risk_stops_bot_on_first_cycle(monkeypatch,
     assert bot.last_decision == "NO_TRADE"
     assert "Persisted risk fraction is invalid" in bot.last_error
     assert bot.consecutive_errors == 0
+
+
+def test_supervisor_preserves_risk_stop_when_decision_recording_raises(monkeypatch):
+    import app.main as main
+
+    bot = SimpleNamespace(
+        id=91, customer_id=15, trading_account_id=34, asset="forex",
+        symbol="EUR_USD", exchange="oanda", timeframe="1h", days=365,
+        risk_fraction=float("nan"), interval_seconds=900, mode="PAPER",
+        status="RUNNING", next_run_at=None, last_error="", last_decision="",
+        last_stage="", consecutive_errors=0, last_run_at=None,
+    )
+    profile = SimpleNamespace(id=15, status="ACTIVE")
+    account = SimpleNamespace(id=34, status="ACTIVE", equity=10000.0)
+    state = SimpleNamespace(kill_switch=False, live_enabled=False)
+
+    class Result:
+        def scalar_one_or_none(self):
+            return bot
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [bot]
+
+    class FakeDB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def execute(self, _query):
+            return Result()
+
+        async def get(self, model, _ident):
+            return {
+                "CustomerProfile": profile,
+                "TradingAccount": account,
+                "AppState": state,
+                "AdaptiveTradingBot": bot,
+            }.get(model.__name__)
+
+        async def commit(self):
+            return None
+
+    calls = {"record": 0}
+
+    async def fake_record(**_kwargs):
+        calls["record"] += 1
+        if calls["record"] == 1:
+            raise RuntimeError("decision record failed after risk stop")
+
+    async def fake_lock(*_args, **_kwargs):
+        return True
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    async def stop_after_one_cycle(_seconds):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: FakeDB())
+    monkeypatch.setattr(main, "_record_adaptive_decision_memory", fake_record)
+    monkeypatch.setattr(main, "acquire_lock", fake_lock)
+    monkeypatch.setattr(main, "refresh_lock", fake_lock)
+    monkeypatch.setattr(main, "release_lock", noop)
+    monkeypatch.setattr(main.settings, "paper_trading", True)
+    monkeypatch.setattr(main.settings, "live_trading_enabled", False)
+    monkeypatch.setattr(main.asyncio, "sleep", stop_after_one_cycle)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(main._adaptive_bot_controller_loop())
+
+    assert calls["record"] == 2
+    assert bot.status == "STOPPED"
+    assert bot.next_run_at is None
+    assert bot.last_decision == "NO_TRADE"
+    assert bot.last_stage == "risk_fraction_invalid"
+    assert "Persisted risk fraction is invalid" in bot.last_error
+    assert bot.consecutive_errors == 0
