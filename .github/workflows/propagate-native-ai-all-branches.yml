@@ -34,13 +34,24 @@ jobs:
         run: |
           set -euo pipefail
           NATIVE_AI_BASE_COMMIT="f9c1730c423ff40522366aab5a1bcc960ff1d5ac"
-          NATIVE_AI_COMMIT="$GITHUB_SHA"
+          NATIVE_AI_INITIAL_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
+          NATIVE_AI_EXTRA_BASE_COMMIT="0d38f95079833804713fcba080caee38a6ddfb4c"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          git cat-file -e "$NATIVE_AI_BASE_COMMIT^{commit}"
-          git cat-file -e "$NATIVE_AI_COMMIT^{commit}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin "+refs/heads/*:refs/remotes/origin/*" --prune
+          # Pin the additional cleanup to the commit that introduced the local release
+          # analyzer, not to whatever unrelated source changes may later reach main.
+          NATIVE_AI_EXTRA_COMMIT="$(git log -S 'def _release_diagnostic_report' --format=%H "$GITHUB_SHA" -- app/main.py | head -n 1)"
+          NATIVE_AI_COMMIT="$NATIVE_AI_EXTRA_COMMIT"
+          if [[ -z "$NATIVE_AI_EXTRA_COMMIT" ]]; then
+            echo "Could not locate the reviewed local release-diagnostics cleanup commit." >&2
+            exit 1
+          fi
+          git cat-file -e "$NATIVE_AI_BASE_COMMIT^{commit}"
+          git cat-file -e "$NATIVE_AI_INITIAL_COMMIT^{commit}"
+          git cat-file -e "$NATIVE_AI_EXTRA_BASE_COMMIT^{commit}"
+          git cat-file -e "$NATIVE_AI_EXTRA_COMMIT^{commit}"
 
           # Only propagate the reviewed runtime/deployment cleanup. Legacy test files
           # often diverged or were deleted independently; carrying their whole changes
@@ -55,6 +66,8 @@ jobs:
             "app/daily_research.py"
             "app/main.py"
             "app/native_ai.py"
+            "app/src/main/java/com/atlas/trading/network/ReleaseAdvisorClient.kt"
+            "app/src/main/java/com/atlas/trading/ui/ReleaseAdvisorScreen.kt"
             "app/strategy_ai.py"
             "app/templates/customer.html"
             "deploy/DEPLOY_WORKFLOW.md"
@@ -167,23 +180,30 @@ jobs:
           apply_native_ai_cleanup_paths() {
             local start_sha="$1" path
             patch_conflicts=()
-            for path in "${NATIVE_AI_PATHS[@]}"; do
-              if ! git diff --binary "$NATIVE_AI_BASE_COMMIT" "$NATIVE_AI_COMMIT" -- "$path" > "$RUNNER_TEMP/native-ai-path.patch"; then
-                echo "Could not prepare cleanup patch for $path." >&2
-                return 1
-              fi
-              [[ -s "$RUNNER_TEMP/native-ai-path.patch" ]] || continue
-              if git apply --3way --index "$RUNNER_TEMP/native-ai-path.patch" > "$RUNNER_TEMP/native-ai-path-apply.log" 2>&1; then
-                continue
-              fi
-              echo "CONFLICT: preserving branch-specific content in $path on current branch $branch; diagnostic follows." >&2
-              cat "$RUNNER_TEMP/native-ai-path-apply.log" >&2 || true
-              if ! git reset "$start_sha" -- "$path" >/dev/null 2>&1 || ! git checkout "$start_sha" -- "$path" >/dev/null 2>&1; then
-                echo "Could not restore conflicting path $path to its exact starting revision $start_sha." >&2
-                git reset --hard "$start_sha" >/dev/null 2>&1 || true
-                return 1
-              fi
-              patch_conflicts+=("$path")
+            local revision_index base_commit tip_commit
+            local -a patch_bases=("$NATIVE_AI_BASE_COMMIT" "$NATIVE_AI_EXTRA_BASE_COMMIT")
+            local -a patch_tips=("$NATIVE_AI_INITIAL_COMMIT" "$NATIVE_AI_EXTRA_COMMIT")
+            for revision_index in "${!patch_bases[@]}"; do
+              base_commit="${patch_bases[$revision_index]}"
+              tip_commit="${patch_tips[$revision_index]}"
+              for path in "${NATIVE_AI_PATHS[@]}"; do
+                if ! git diff --binary "$base_commit" "$tip_commit" -- "$path" > "$RUNNER_TEMP/native-ai-path.patch"; then
+                  echo "Could not prepare cleanup patch for $path between $base_commit and $tip_commit." >&2
+                  return 1
+                fi
+                [[ -s "$RUNNER_TEMP/native-ai-path.patch" ]] || continue
+                if git apply --3way --index "$RUNNER_TEMP/native-ai-path.patch" > "$RUNNER_TEMP/native-ai-path-apply.log" 2>&1; then
+                  continue
+                fi
+                echo "CONFLICT: preserving branch-specific content in $path on current branch $branch; patch range $base_commit..$tip_commit; diagnostic follows." >&2
+                cat "$RUNNER_TEMP/native-ai-path-apply.log" >&2 || true
+                if ! git reset "$start_sha" -- "$path" >/dev/null 2>&1 || ! git checkout "$start_sha" -- "$path" >/dev/null 2>&1; then
+                  echo "Could not restore conflicting path $path to its exact starting revision $start_sha." >&2
+                  git reset --hard "$start_sha" >/dev/null 2>&1 || true
+                  return 1
+                fi
+                patch_conflicts+=("$path")
+              done
             done
             if (( ${#patch_conflicts[@]} > 0 )); then
               echo "Non-conflicting cleanup paths were applied; overlapping paths were preserved unchanged: ${patch_conflicts[*]}" >&2
