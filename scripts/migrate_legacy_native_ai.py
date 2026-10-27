@@ -595,6 +595,17 @@ def transform_ai_providers(commit: str) -> None:
         })
         preserved_import_lines.append(node.lineno)
 
+    # Explicit imports are emitted before retained local definitions. Refuse migrations
+    # whenever a later retained import originally overwrote a retained definition, since
+    # moving that import would make the local definition win instead.
+    for bindings, explicit_line in zip(preserved_import_bindings, preserved_import_lines):
+        for names, definition_line in zip(extra_defined_names, extra_definition_lines):
+            if bindings & names and definition_line < explicit_line:
+                raise MigrationError(
+                    "retained explicit import follows an overlapping definition; "
+                    "refusing to change helper bindings"
+                )
+
     # The output format preserves star imports before the canonical body and explicit
     # imports after it. Refuse migrations whenever moving a star import before a retained
     # local definition would reverse which binding wins in the original module.
