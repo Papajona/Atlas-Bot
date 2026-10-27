@@ -42,11 +42,20 @@ jobs:
           git fetch origin "+refs/heads/*:refs/remotes/origin/*" --prune
           # Pin the additional cleanup to the commit that introduced the local release
           # analyzer, not to whatever unrelated source changes may later reach main.
-          NATIVE_AI_EXTRA_COMMIT="d847ff8cd8340ccbb3de2a5a0457b607be6a86ad"
+          NATIVE_AI_EXTRA_COMMIT="$(git log --first-parent --format=%H --fixed-strings --grep='Remove remaining hosted AI release diagnostics and harden propagation' "$GITHUB_SHA" | head -n 1)"
           NATIVE_AI_COMMIT="$NATIVE_AI_EXTRA_COMMIT"
           git cat-file -e "$NATIVE_AI_INITIAL_BASE_COMMIT^{commit}"
           git cat-file -e "$NATIVE_AI_INITIAL_COMMIT^{commit}"
           git cat-file -e "$NATIVE_AI_EXTRA_BASE_COMMIT^{commit}"
+          if [[ -z "$NATIVE_AI_EXTRA_COMMIT" ]]; then
+            echo "Could not locate the reviewed local release-diagnostics cleanup merge commit." >&2
+            exit 1
+          fi
+          extra_parent="$(git rev-parse "$NATIVE_AI_EXTRA_COMMIT^")"
+          if [[ "$extra_parent" != "$NATIVE_AI_EXTRA_BASE_COMMIT" ]]; then
+            echo "Refusing to propagate an unexpected cleanup range: expected parent $NATIVE_AI_EXTRA_BASE_COMMIT, found $extra_parent." >&2
+            exit 1
+          fi
           git cat-file -e "$NATIVE_AI_EXTRA_COMMIT^{commit}"
 
           # Only propagate the reviewed runtime/deployment cleanup. Legacy test files
@@ -211,7 +220,7 @@ jobs:
                   # A branch that never had (or already deleted) this path must remain
                   # without it; restore the starting tree rather than treating absence as
                   # a fatal checkout failure.
-                  git rm --cached --ignore-unmatch -q -- "$path" >/dev/null 2>&1 || true
+                  git rm -f --cached --ignore-unmatch -q -- "$path" >/dev/null 2>&1 || true
                   rm -f -- "$path"
                 fi
                 patch_conflicts+=("$path")
