@@ -422,7 +422,7 @@ def _safe_canonical_json_helper(
         {"response", "provider", "body", "exc", "AIProviderError", "isinstance",
          "dict", "ValueError", "UnicodeDecodeError", "TypeError", "AttributeError"}
     )
-    for item in ast.walk(node):
+    for item in (child for statement in node.body for child in ast.walk(statement)):
         if isinstance(item, ast.Call):
             if isinstance(item.func, ast.Name) and item.func.id in allowed_call_names:
                 continue
