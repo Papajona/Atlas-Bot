@@ -97,7 +97,7 @@ jobs:
             start_sha="$(git rev-parse "$remote_ref")"
             git checkout --detach "$start_sha" >/dev/null 2>&1
 
-            before_refs="$(scan_active_provider_refs)"
+            before_refs="$(scan_active_provider_refs || true)"
             already_has_commit=false
             if git merge-base --is-ancestor "$NATIVE_AI_COMMIT" "$start_sha"; then
               already_has_commit=true
@@ -145,7 +145,7 @@ jobs:
               fi
             fi
 
-            after_refs="$(scan_active_provider_refs)"
+            after_refs="$(scan_active_provider_refs || true)"
             if [[ -n "$after_refs" ]]; then
               unsafe_refs=false
               while IFS= read -r f; do
@@ -164,7 +164,7 @@ jobs:
                 git checkout "$NATIVE_AI_COMMIT" -- "$f"
                 git add -- "$f"
               done <<< "$after_refs"
-              after_refs="$(scan_active_provider_refs)"
+              after_refs="$(scan_active_provider_refs || true)"
               if [[ -n "$after_refs" ]]; then
                 failed+=("$branch: hosted AI reference remains after scoped repair")
                 continue
