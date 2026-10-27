@@ -1287,6 +1287,315 @@ def transform_ai_providers(commit: str) -> None:
     path.write_text(result, encoding="utf-8")
 
 
+def _strategy_provider_route_return(statement: ast.stmt) -> bool:
+    """Accept only a direct provider-adapter call with inert arguments."""
+    if not (
+        isinstance(statement, ast.Return)
+        and isinstance(statement.value, ast.Await)
+        and isinstance(statement.value.value, ast.Call)
+    ):
+        return False
+    call = statement.value.value
+    if not isinstance(call.func, ast.Name) or len(call.args) != 1 or not (
+        isinstance(call.args[0], ast.Name) and call.args[0].id == "prompt"
+    ):
+        return False
+    provider_by_adapter = {
+        "_gemini_json": "gemini",
+        "_groq_json": "groq",
+        "_cerebras_json": "cerebras",
+        "_openai_json": "openai",
+    }
+    provider = provider_by_adapter.get(call.func.id)
+    if provider is None:
+        return False
+    allowed_model_fields = {
+        "gemini": {"gemini_model", "gemini_strategy_model"},
+        "groq": {"groq_model", "groq_strategy_model"},
+        "cerebras": {"cerebras_model"},
+        "openai": {"openai_model", "openai_strategy_model"},
+    }[provider]
+
+    def safe_model_expression(value: ast.AST) -> bool:
+        if (
+            isinstance(value, ast.Attribute)
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "settings"
+        ):
+            return value.attr in allowed_model_fields
+        if isinstance(value, ast.BoolOp) and isinstance(value.op, ast.Or):
+            return len(value.values) == 2 and all(safe_model_expression(item) for item in value.values)
+        return False
+
+    seen_keywords: set[str] = set()
+    for keyword in call.keywords:
+        if keyword.arg in seen_keywords:
+            return False
+        seen_keywords.add(keyword.arg or "")
+        if keyword.arg == "system_instruction":
+            if not (isinstance(keyword.value, ast.Name) and keyword.value.id == "SYSTEM_PROMPT"):
+                return False
+        elif keyword.arg == "model":
+            if not safe_model_expression(keyword.value):
+                return False
+        else:
+            return False
+    return seen_keywords.issubset({"system_instruction", "model"})
+
+
+def _strategy_provider_router(statements: list[ast.stmt]) -> bool:
+    """Recognize only provider-name dispatch that returns a known adapter result."""
+    if not statements:
+        return False
+    first, *remaining = statements
+    if isinstance(first, ast.Return):
+        return not remaining and _strategy_provider_route_return(first)
+    if not isinstance(first, ast.If) or first.orelse:
+        return False
+    test = first.test
+    if not (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Eq)
+        and isinstance(test.left, ast.Name)
+        and test.left.id == "provider"
+        and len(test.comparators) == 1
+        and isinstance(test.comparators[0], ast.Constant)
+        and test.comparators[0].value in {"gemini", "groq", "cerebras", "openai"}
+    ):
+        return False
+    if len(first.body) != 1 or not _strategy_provider_route_return(first.body[0]):
+        return False
+    adapter = first.body[0].value.value.func.id
+    expected = {
+        "gemini": "_gemini_json",
+        "groq": "_groq_json",
+        "cerebras": "_cerebras_json",
+        "openai": "_openai_json",
+    }[test.comparators[0].value]
+    return adapter == expected and _strategy_provider_router(remaining)
+
+
+def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
+    """Verify a complete provider orchestration contract before replacing it with Native AI.
+
+    The known legacy variants do provider selection/fallback, validate the returned
+    StrategySpec, apply market context, attach evidence, and return an auditable
+    non-execution result. Only this exact family is replaced; unknown calls, extra
+    validation paths, and arbitrary side effects continue to fail closed.
+    """
+    args = node.args
+    if (
+        node.decorator_list
+        or args.posonlyargs
+        or args.args
+        or args.vararg
+        or args.kwarg
+        or [item.arg for item in args.kwonlyargs] != ["prompt", "name", "asset", "symbol", "timeframe"]
+        or len(args.kw_defaults) != 5
+        or args.kw_defaults[0] is not None
+        or args.kw_defaults[1] is not None
+        or any(not isinstance(item, ast.Constant) or item.value is not None for item in args.kw_defaults[2:])
+    ):
+        return False
+
+    body = list(node.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]
+    if not body or not isinstance(body[-1], ast.Return) or not isinstance(body[-1].value, ast.Dict):
+        return False
+
+    top_return = body[-1].value
+    if not all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in top_return.keys):
+        return False
+    if {key.value for key in top_return.keys} != {"strategy", "evidence", "ai"}:
+        return False
+    result_values = {
+        key.value: value for key, value in zip(top_return.keys, top_return.values, strict=True)
+    }
+    strategy_value = result_values["strategy"]
+    evidence_value = result_values["evidence"]
+    ai_value = result_values["ai"]
+    if not (
+        isinstance(strategy_value, ast.Call)
+        and isinstance(strategy_value.func, ast.Attribute)
+        and strategy_value.func.attr == "model_dump"
+        and isinstance(strategy_value.func.value, ast.Name)
+        and strategy_value.func.value.id == "spec"
+        and isinstance(evidence_value, ast.Call)
+        and isinstance(evidence_value.func, ast.Name)
+        and evidence_value.func.id == "evidence_for"
+        and len(evidence_value.args) == 1
+        and isinstance(evidence_value.args[0], ast.Name)
+        and evidence_value.args[0].id == "family_key"
+        and isinstance(ai_value, ast.Dict)
+    ):
+        return False
+    if not all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in ai_value.keys):
+        return False
+    ai_keys = {key.value for key in ai_value.keys}
+    required_ai_keys = {"provider", "model", "execution_authority", "requires_backtest", "requires_walk_forward"}
+    allowed_ai_keys = required_ai_keys | {"fallback_used", "provider_errors", "network_calls"}
+    if not required_ai_keys.issubset(ai_keys) or not ai_keys.issubset(allowed_ai_keys):
+        return False
+
+    allowed_tests = {
+        "not settings.gemini_api_key and not settings.groq_api_key",
+        "not settings.gemini_api_key and not settings.groq_api_key and not settings.cerebras_api_key",
+        "settings.gemini_api_key and settings.groq_api_key",
+        "settings.gemini_api_key",
+        "settings.groq_api_key",
+        "settings.cerebras_api_key",
+        "raw is None",
+    }
+    calls: list[ast.Call] = []
+    for part in ast.walk(ast.Module(body=body, type_ignores=[])):
+        if isinstance(part, ast.If) and ast.unparse(part.test) not in allowed_tests:
+            return False
+        if isinstance(part, ast.For):
+            if not (
+                isinstance(part.target, ast.Name)
+                and part.target.id == "provider"
+                and isinstance(part.iter, ast.Name)
+                and part.iter.id == "provider_order"
+                and len(part.body) == 1
+                and isinstance(part.body[0], ast.Try)
+            ):
+                return False
+        if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            # The generator itself must not create helper scopes whose behavior is lost.
+            if part is not node:
+                return False
+        if isinstance(part, ast.Call):
+            calls.append(part)
+            if isinstance(part.func, ast.Name):
+                if part.func.id not in {
+                    "_generate_with_provider", "_strategy_prompt", "AIProviderError",
+                    "str", "evidence_for", "_apply_market_context",
+                }:
+                    return False
+            elif isinstance(part.func, ast.Attribute):
+                allowed_attrs = {
+                    "append", "items", "model_validate", "model_dump",
+                }
+                if part.func.attr not in allowed_attrs:
+                    return False
+                if part.func.attr == "append" and not (
+                    isinstance(part.func.value, ast.Name) and part.func.value.id == "provider_order"
+                ):
+                    return False
+                if part.func.attr == "items" and not (
+                    isinstance(part.func.value, ast.Name) and part.func.value.id == "provider_errors"
+                ):
+                    return False
+                if part.func.attr == "model_validate" and not (
+                    isinstance(part.func.value, ast.Name) and part.func.value.id == "AIStrategySpec"
+                ):
+                    return False
+                if part.func.attr == "model_dump" and not (
+                    isinstance(part.func.value, ast.Name) and part.func.value.id == "spec"
+                ):
+                    return False
+            else:
+                return False
+
+    if not any(
+        isinstance(call.func, ast.Name) and call.func.id == "_strategy_prompt"
+        and [ast.dump(arg, include_attributes=False) for arg in call.args]
+            == [ast.dump(ast.Name(id="prompt", ctx=ast.Load()), include_attributes=False),
+                ast.dump(ast.Name(id="name", ctx=ast.Load()), include_attributes=False)]
+        and not call.keywords
+        for call in calls
+    ):
+        return False
+    if not any(
+        isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "AIStrategySpec"
+        and call.func.attr == "model_validate"
+        and len(call.args) == 1
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "raw"
+        and not call.keywords
+        for call in calls
+    ):
+        return False
+    if not any(
+        isinstance(call.func, ast.Name) and call.func.id == "_apply_market_context"
+        and len(call.args) == 1 and isinstance(call.args[0], ast.Name) and call.args[0].id == "spec"
+        and not call.keywords or
+        isinstance(call.func, ast.Name) and call.func.id == "_apply_market_context"
+        and len(call.args) == 1 and isinstance(call.args[0], ast.Name) and call.args[0].id == "spec"
+        and {keyword.arg for keyword in call.keywords}.issubset({"asset", "symbol", "timeframe"})
+        for call in calls
+    ):
+        return False
+    if not any(
+        isinstance(call.func, ast.Name) and call.func.id == "_generate_with_provider"
+        and len(call.args) == 2
+        and isinstance(call.args[0], ast.Name) and call.args[0].id == "provider"
+        and isinstance(call.args[1], ast.Call)
+        and isinstance(call.args[1].func, ast.Name) and call.args[1].func.id == "_strategy_prompt"
+        and not call.keywords
+        for call in calls
+    ):
+        return False
+
+    allowed_targets = {"provider_errors", "provider_order", "raw", "provider_used", "spec", "family_key"}
+    raises = []
+    try_count = 0
+    provider_loop_count = 0
+    for part in ast.walk(ast.Module(body=body, type_ignores=[])):
+        if isinstance(part, ast.For):
+            provider_loop_count += 1
+        if isinstance(part, ast.Try):
+            try_count += 1
+        if isinstance(part, (ast.Assign, ast.AnnAssign)):
+            targets = part.targets if isinstance(part, ast.Assign) else [part.target]
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id in allowed_targets:
+                    continue
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "provider_errors"
+                    and isinstance(target.slice, ast.Name)
+                    and target.slice.id == "provider"
+                ):
+                    continue
+                return False
+        if isinstance(part, ast.Raise):
+            if not (
+                isinstance(part.exc, ast.Call)
+                and isinstance(part.exc.func, ast.Name)
+                and part.exc.func.id == "AIProviderError"
+                and part.exc.args
+                and len(part.exc.args) == 1
+                and not part.exc.keywords
+                and (part.cause is None or (isinstance(part.cause, ast.Name) and part.cause.id == "exc"))
+            ):
+                return False
+            message = part.exc.args[0]
+            if isinstance(message, ast.Constant) and message.value == "No AI strategy provider is configured":
+                raises.append("no-provider")
+            elif isinstance(message, ast.Constant) and isinstance(message.value, str) and message.value.startswith("All configured AI strategy providers failed:"):
+                raises.append("provider-failures")
+            elif isinstance(message, ast.JoinedStr) and any(
+                isinstance(value, ast.Constant) and isinstance(value.value, str)
+                and value.value.startswith("AI strategy failed schema validation:")
+                for value in message.values
+            ):
+                raises.append("validation-failure")
+            else:
+                return False
+    return (
+        provider_loop_count == 1
+        and try_count == 2
+        and set(raises) == {"no-provider", "provider-failures", "validation-failure"}
+        and sum(isinstance(call.func, ast.Name) and call.func.id == "_generate_with_provider" for call in calls) == 1
+    )
+
+
 def transform_strategy_ai(commit: str) -> None:
     path = ROOT / "app/strategy_ai.py"
     if not path.is_file():
@@ -1328,21 +1637,22 @@ def transform_strategy_ai(commit: str) -> None:
         and isinstance(body[0].value.value.func, ast.Name)
         and body[0].value.value.func.id == "_generate_with_provider"
     )
-    if not safe_trampoline:
+    if safe_trampoline:
+        generator_call = body[0].value.value
+        if (
+            len(generator_call.args) != 2
+            or not isinstance(generator_call.args[0], ast.Constant)
+            or generator_call.args[0].value not in {"gemini", "groq", "cerebras", "openai"}
+            or not isinstance(generator_call.args[1], ast.Name)
+            or generator_call.args[1].id != "prompt"
+            or generator_call.keywords
+        ):
+            raise MigrationError(
+                "generate_strategy_draft trampoline arguments may contain branch-specific input handling; refusing to discard it"
+            )
+    elif not _recognized_native_strategy_generator(legacy_generate):
         raise MigrationError(
-            "generate_strategy_draft contains branch-specific behavior beyond the recognized provider trampoline; refusing to overwrite it"
-        )
-    generator_call = body[0].value.value
-    if (
-        len(generator_call.args) != 2
-        or not isinstance(generator_call.args[0], ast.Constant)
-        or generator_call.args[0].value not in {"gemini", "groq", "cerebras", "openai"}
-        or not isinstance(generator_call.args[1], ast.Name)
-        or generator_call.args[1].id != "prompt"
-        or generator_call.keywords
-    ):
-        raise MigrationError(
-            "generate_strategy_draft trampoline arguments may contain branch-specific input handling; refusing to discard it"
+            "generate_strategy_draft contains branch-specific behavior beyond the recognized provider orchestration contract; refusing to overwrite it"
         )
 
     provider_definitions = definitions_by_name["_generate_with_provider"]
@@ -1356,27 +1666,12 @@ def transform_strategy_ai(commit: str) -> None:
             "strategy module has a decorated _generate_with_provider helper; refusing to drop unknown behavior"
         )
     provider_body = legacy_provider.body
-    provider_delegations = {"_gemini_json", "_groq_json", "_cerebras_json", "_openai_json"}
     direct_provider_trampoline = (
         len(provider_body) == 1
-        and isinstance(provider_body[0], ast.Return)
-        and isinstance(provider_body[0].value, ast.Await)
-        and isinstance(provider_body[0].value.value, ast.Call)
-        and (
-            (isinstance(provider_body[0].value.value.func, ast.Name)
-             and provider_body[0].value.value.func.id in provider_delegations)
-            or (isinstance(provider_body[0].value.value.func, ast.Attribute)
-                and provider_body[0].value.value.func.attr in provider_delegations)
-        )
+        and _strategy_provider_route_return(provider_body[0])
     )
-    if direct_provider_trampoline:
-        provider_call = provider_body[0].value.value
-        direct_provider_trampoline = (
-            len(provider_call.args) == 1
-            and isinstance(provider_call.args[0], ast.Name)
-            and provider_call.args[0].id == "prompt"
-            and not provider_call.keywords
-        )
+    if not direct_provider_trampoline:
+        direct_provider_trampoline = _strategy_provider_router(provider_body)
     if not direct_provider_trampoline:
         raise MigrationError(
             "_generate_with_provider contains additional or unknown behavior or side-effecting arguments; refusing to discard its body"
