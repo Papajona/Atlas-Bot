@@ -246,7 +246,7 @@ def _safe_canonical_json_helper(
                 return "raise"
             expected_value = "value" if name == "_extract_json" else "body"
             if is_isinstance_call(operand, expected_value, "dict"):
-                return "raise"
+                return "object-guard"
             if name == "_extract_json" and is_strip_call(operand, "text"):
                 return "raise"
         if name == "_extract_json" and is_safe_empty_text_condition(condition):
@@ -374,6 +374,7 @@ def _safe_canonical_json_helper(
 
     saw_parse = False
     saw_error = False
+    saw_object_guard = False
     for statement in body:
         if isinstance(statement, ast.Assign):
             if name == "_extract_json" and len(statement.targets) == 1 and is_name(statement.targets[0], "raw"):
@@ -397,10 +398,12 @@ def _safe_canonical_json_helper(
                 # The JSON-prefix cleanup is allowed only as the nested second statement
                 # inside the recognized fenced-JSON branch.
                 return False
-            elif condition_kind == "raise":
+            elif condition_kind in {"raise", "object-guard"}:
                 if statement.orelse or len(statement.body) != 1 or not is_error_raise(statement.body[0]):
                     return False
                 saw_error = True
+                if condition_kind == "object-guard":
+                    saw_object_guard = True
             else:
                 return False
         elif isinstance(statement, ast.Return):
@@ -412,6 +415,13 @@ def _safe_canonical_json_helper(
     # Every nested expression must belong to the whitelisted statement forms. This also
     # prevents hidden calls, mutable writes, alternate return paths and custom parser checks.
     allowed_call_names = {"AIProviderError", "isinstance"}
+    allowed_load_names = (
+        {"text", "raw", "value", "exc", "json", "AIProviderError", "isinstance",
+         "str", "dict", "TypeError", "ValueError", "UnicodeDecodeError"}
+        if name == "_extract_json" else
+        {"response", "provider", "body", "exc", "AIProviderError", "isinstance",
+         "dict", "ValueError", "UnicodeDecodeError", "TypeError", "AttributeError"}
+    )
     for item in ast.walk(node):
         if isinstance(item, ast.Call):
             if isinstance(item.func, ast.Name) and item.func.id in allowed_call_names:
@@ -430,11 +440,37 @@ def _safe_canonical_json_helper(
             return False
         if isinstance(item, ast.Name) and item.id == "json" and isinstance(item.ctx, (ast.Store, ast.Del)):
             return False
+        if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Load) and item.id not in allowed_load_names:
+            return False
+        if isinstance(item, ast.Attribute):
+            if name == "_extract_json" and is_name(item.value, "json") and item.attr in {"loads", "JSONDecodeError"}:
+                continue
+            if name == "_response_json_object" and is_name(item.value, "response") and item.attr == "json":
+                continue
+            if name == "_extract_json" and item.attr in {"strip", "startswith", "lstrip"}:
+                receiver = item.value
+                if is_name(receiver, "text") or is_name(receiver, "raw"):
+                    continue
+                if (
+                    isinstance(receiver, ast.BoolOp) and isinstance(receiver.op, ast.Or)
+                    and len(receiver.values) == 2 and is_name(receiver.values[0], "text")
+                    and is_string(receiver.values[1], "")
+                ):
+                    continue
+                if (
+                    isinstance(receiver, ast.Subscript) and is_name(receiver.value, "raw")
+                    and isinstance(receiver.slice, ast.Slice)
+                    and isinstance(receiver.slice.lower, ast.Constant)
+                    and receiver.slice.lower.value == 4 and receiver.slice.upper is None
+                    and receiver.slice.step is None
+                ):
+                    continue
+            return False
         if isinstance(item, (ast.Global, ast.Nonlocal, ast.Await, ast.Yield, ast.YieldFrom,
                              ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             return False
 
-    return saw_parse and saw_error
+    return saw_parse and saw_error and saw_object_guard
 
 
 def _apply_line_edits(source: str, edits: list[tuple[int, int, str]]) -> str:
