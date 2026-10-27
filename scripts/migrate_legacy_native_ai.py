@@ -309,23 +309,46 @@ def transform_ai_providers(commit: str) -> None:
                 # Bindings inside module-level control flow are not reported by
                 # _defined_names(control_flow_node), but can still change the
                 # name resolved by the class base below.
-                if isinstance(candidate, (ast.If, ast.For, ast.AsyncFor, ast.While,
-                                          ast.With, ast.AsyncWith, ast.Try, ast.Match)) and any(
-                    ("RuntimeError" in _defined_names(nested))
-                    or (
-                        isinstance(nested, ast.Name)
-                        and nested.id == "RuntimeError"
-                        and isinstance(nested.ctx, (ast.Store, ast.Del))
-                    )
-                    or (
-                        isinstance(nested, ast.alias)
-                        and (
+                def module_flow_can_bind_runtime_error(scope: ast.AST) -> bool:
+                    pending = [scope]
+                    while pending:
+                        nested = pending.pop()
+                        if "RuntimeError" in _defined_names(nested):
+                            return True
+                        if (
+                            isinstance(nested, ast.Name)
+                            and nested.id == "RuntimeError"
+                            and isinstance(nested.ctx, (ast.Store, ast.Del))
+                        ):
+                            return True
+                        if isinstance(nested, ast.alias) and (
                             nested.asname == "RuntimeError"
                             or (nested.name == "RuntimeError" and nested.asname is None)
-                        )
-                    )
-                    for nested in ast.walk(candidate)
-                ):
+                        ):
+                            return True
+                        if isinstance(nested, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                            # Local function/lambda assignments do not bind the module name.
+                            # A global declaration is a potentially relevant escape, so fail closed.
+                            if any(
+                                isinstance(item, ast.Global) and "RuntimeError" in item.names
+                                for item in ast.walk(nested)
+                            ):
+                                return True
+                            continue
+                        if isinstance(nested, ast.ClassDef):
+                            # Class-local assignments do not rebind module RuntimeError,
+                            # except for an explicit global declaration in the class body.
+                            if any(
+                                isinstance(item, ast.Global) and "RuntimeError" in item.names
+                                for item in ast.walk(nested)
+                            ):
+                                return True
+                            continue
+                        pending.extend(ast.iter_child_nodes(nested))
+                    return False
+
+                if isinstance(candidate, (ast.If, ast.For, ast.AsyncFor, ast.While,
+                                          ast.With, ast.AsyncWith, ast.Try, ast.Match)) and module_flow_can_bind_runtime_error(candidate):
                     runtime_error_shadowed = True
                     break
             if runtime_error_shadowed:
@@ -470,7 +493,18 @@ def transform_ai_providers(commit: str) -> None:
                     # mutable export list through another binding; reject it rather
                     # than assume the alias will remain unchanged.
                     if len(module_node.targets) != 1:
-                        dynamic_all = True
+                        # A chained alias is safe only when the shared object is a
+                        # literal immutable tuple of strings. Lists/other expressions
+                        # may be mutated through the extra alias after assignment.
+                        immutable_tuple = (
+                            isinstance(module_node.value, ast.Tuple)
+                            and all(
+                                isinstance(item, ast.Constant) and isinstance(item.value, str)
+                                for item in module_node.value.elts
+                            )
+                        )
+                        if not immutable_tuple:
+                            dynamic_all = True
                 elif targets_bind_all:
                     # Destructuring/attribute targets that include __all__ are not a
                     # simple literal export declaration we can safely reason about.
