@@ -29,6 +29,8 @@ jobs:
 
       - name: Safely propagate reviewed Native AI changes
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           NATIVE_AI_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
@@ -164,6 +166,20 @@ jobs:
           print("PASS: Native AI imports and compatibility exports resolve.")
           PY
           }
+          update_existing_branch_ref() {
+            local branch="$1" expected_sha="$2" new_sha="$3"
+            local remote_sha
+            remote_sha="$(git ls-remote --heads origin "refs/heads/$branch" | awk 'NR == 1 {print $1}')"
+            if [[ "$remote_sha" != "$expected_sha" ]]; then
+              echo "Ref refs/heads/$branch changed or disappeared after enumeration; refusing to update it." >&2
+              return 1
+            fi
+            # PATCH updates an existing ref only (unlike git push, it cannot recreate
+            # a deleted branch); force=false rejects non-fast-forward updates.
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" \
+              -f "sha=$new_sha" -F force=false >/dev/null
+          }
+
           declare -a updated=() skipped=() failed=()
           while IFS= read -r remote_ref; do
             [[ -n "$remote_ref" ]] || continue
@@ -206,11 +222,11 @@ jobs:
               fi
               git commit -m "Remove reintroduced hosted AI wiring" >/dev/null
               new_sha="$(git rev-parse HEAD)"
-              if git push origin "HEAD:refs/heads/$branch"; then
+              if update_existing_branch_ref "$branch" "$start_sha" "$new_sha"; then
                 updated+=("$branch ($start_sha -> $new_sha)")
               else
                 git reset --hard "$start_sha" >/dev/null 2>&1 || true
-                failed+=("$branch: normal fast-forward push rejected; branch left unchanged")
+                failed+=("$branch: existing-ref update rejected; branch left unchanged, with no force-push or branch recreation")
               fi
               continue
             fi
@@ -232,10 +248,10 @@ jobs:
               continue
             fi
             new_sha="$(git rev-parse HEAD)"
-            if git push origin "HEAD:refs/heads/$branch"; then
+            if update_existing_branch_ref "$branch" "$start_sha" "$new_sha"; then
               updated+=("$branch ($start_sha -> $new_sha)")
             else
-              failed+=("$branch: push rejected or branch ref changed/deleted; no retry or branch recreation attempted")
+              failed+=("$branch: existing-ref update rejected; branch left unchanged, with no force-push or branch recreation")
             fi
           done < <(git for-each-ref --format='%(refname)' refs/remotes/origin/ | grep -v '^refs/remotes/origin/HEAD$' | sort)
 
