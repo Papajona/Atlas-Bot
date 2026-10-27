@@ -113,6 +113,67 @@ def _name(node: ast.AST) -> str | None:
     return None
 
 
+def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str) -> bool:
+    """Recognize only side-effect-free legacy JSON parser helpers replaced canonically.
+
+    These two helpers have stable callable contracts across old branches. Their legacy
+    implementations may differ in annotations/error wording, but only parse JSON / inspect
+    a response body. Provider adapters, arbitrary helpers, and calls with external side
+    effects are deliberately not eligible for this compatibility replacement.
+    """
+    if (
+        name not in {"_extract_json", "_response_json_object"}
+        or not isinstance(node, ast.FunctionDef)
+        or node.decorator_list
+        or PROVIDER_RE.search(source_segment)
+    ):
+        return False
+
+    def root_name(value: ast.AST) -> str | None:
+        while isinstance(value, (ast.Attribute, ast.Subscript)):
+            value = value.value
+        return value.id if isinstance(value, ast.Name) else None
+
+    calls = [item for item in ast.walk(node) if isinstance(item, ast.Call)]
+    saw_contract_call = False
+    for call in calls:
+        func = call.func
+        if isinstance(func, ast.Name) and func.id in {"AIProviderError", "isinstance"}:
+            saw_contract_call = saw_contract_call or func.id == "AIProviderError"
+            continue
+        if not isinstance(func, ast.Attribute):
+            return False
+
+        if (
+            name == "_extract_json"
+            and func.attr == "loads"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "json"
+        ):
+            saw_contract_call = True
+            continue
+        if (
+            name == "_response_json_object"
+            and func.attr == "json"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "response"
+        ):
+            saw_contract_call = True
+            continue
+        if (
+            name == "_extract_json"
+            and func.attr in {"strip", "startswith", "lstrip"}
+            and root_name(func.value) in {"text", "raw"}
+        ):
+            continue
+        return False
+
+    if any(isinstance(item, (ast.Global, ast.Nonlocal, ast.Await, ast.Yield, ast.YieldFrom))
+           for item in ast.walk(node)):
+        return False
+    return saw_contract_call
+
+
 def _apply_line_edits(source: str, edits: list[tuple[int, int, str]]) -> str:
     lines = source.splitlines(keepends=True)
     for first, last, replacement in sorted(edits, key=lambda item: item[0], reverse=True):
@@ -365,6 +426,14 @@ def transform_ai_providers(commit: str) -> None:
                 for collision in collisions
             )
             if equivalent:
+                continue
+            # The canonical facade deliberately provides safer implementations of these
+            # generic parsers (same callable contract, broader malformed-input handling).
+            # Accept only tightly whitelisted legacy parser bodies; do not generalize this
+            # exception to arbitrary same-named branch functions.
+            if len(collisions) == 1 and next(iter(collisions)) == name and _safe_canonical_json_helper(
+                node, name or "", segment
+            ):
                 continue
             collision = sorted(
                 name for name in collisions
