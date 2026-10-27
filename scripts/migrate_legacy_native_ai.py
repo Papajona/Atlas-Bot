@@ -732,11 +732,42 @@ def transform_config() -> None:
 def _defined_names(node: ast.AST) -> set[str]:
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         return {node.name}
-    if isinstance(node, ast.Expr) and isinstance(node.value, ast.NamedExpr):
-        return _assigned_names(node.value.target)
     if isinstance(node, ast.Assign):
         return {name for target in node.targets for name in _assigned_names(target)}
     if isinstance(node, ast.AnnAssign):
+        return _assigned_names(node.target)
+    if isinstance(node, ast.Delete):
+        return {name for target in node.targets for name in _assigned_names(target)}
+    # Module-level control-flow targets also bind names and can shadow imports
+    # installed by the canonical facade. Fail closed on any such collision.
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        return _assigned_names(node.target)
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        return {
+            name
+            for item in node.items
+            if item.optional_vars is not None
+            for name in _assigned_names(item.optional_vars)
+        }
+    if isinstance(node, ast.AugAssign):
+        return _assigned_names(node.target)
+    if isinstance(node, ast.Expr):
+        # Assignment expressions in module-level expressions bind in module scope,
+        # but a walrus inside a lambda body binds only in that lambda's local scope.
+        names: set[str] = set()
+        pending = [node.value]
+        while pending:
+            part = pending.pop()
+            if isinstance(part, ast.Lambda):
+                # Lambda defaults execute in the enclosing scope; the body does not.
+                pending.extend(part.args.defaults)
+                pending.extend(value for value in part.args.kw_defaults if value is not None)
+                continue
+            if isinstance(part, ast.NamedExpr):
+                names.update(_assigned_names(part.target))
+            pending.extend(ast.iter_child_nodes(part))
+        return names
+    if isinstance(node, ast.NamedExpr):
         return _assigned_names(node.target)
     if isinstance(node, ast.Import):
         return {alias.asname or alias.name.split(".", 1)[0] for alias in node.names}
@@ -748,11 +779,11 @@ def _defined_names(node: ast.AST) -> set[str]:
 def _assigned_names(target: ast.AST) -> set[str]:
     if isinstance(target, ast.Name):
         return {target.id}
+    if isinstance(target, ast.Starred):
+        return _assigned_names(target.value)
     if isinstance(target, (ast.Tuple, ast.List)):
         return {name for item in target.elts for name in _assigned_names(item)}
     return set()
-
-
 
 
 def _module_path_for_import(source_path: Path, node: ast.ImportFrom, imported_name: str | None = None) -> Path | None:
@@ -1288,6 +1319,18 @@ def transform_ai_providers(commit: str) -> None:
             raise MigrationError(
                 f"star-import module {module_file} has dynamic exports or mutates __all__; refusing to guess its exports"
             )
+        # Track live module bindings in source order. A del removes a prior definition
+        # for star-export purposes while remaining visible to facade collision checks.
+        last_definitions: dict[str, ast.AST] = {}
+        for module_node in module_tree.body:
+            if isinstance(module_node, ast.Delete):
+                for target in module_node.targets:
+                    for deleted_name in _assigned_names(target):
+                        last_definitions.pop(deleted_name, None)
+                continue
+            for defined_name in _defined_names(module_node):
+                last_definitions[defined_name] = module_node
+
         explicit_all = bool(all_values)
         if explicit_all:
             value = all_values[0]
@@ -1311,17 +1354,16 @@ def transform_ai_providers(commit: str) -> None:
                 raise MigrationError(
                     f"star-import module {module_file} uses exec; refusing to guess its exports"
                 )
-            exports = {
-                name
-                for module_node in module_tree.body
-                for name in _defined_names(module_node)
-                if not name.startswith("_")
-            }
+            exports = {name for name in last_definitions if not name.startswith("_")}
 
-        last_definitions: dict[str, ast.AST] = {}
-        for module_node in module_tree.body:
-            for defined_name in _defined_names(module_node):
-                last_definitions[defined_name] = module_node
+        if explicit_all:
+            missing_exports = sorted(set(exports) - set(last_definitions))
+            if missing_exports:
+                raise MigrationError(
+                    f"star-import module {module_file} explicitly exports names that are not live: "
+                    + ", ".join(missing_exports)
+                )
+
         bindings: dict[str, tuple[str, int, str, str, str] | None] = {}
         for exported_name in exports:
             definition = last_definitions.get(exported_name)
