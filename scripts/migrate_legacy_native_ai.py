@@ -360,6 +360,18 @@ def transform_strategy_ai(commit: str) -> None:
         raise MigrationError(
             "generate_strategy_draft contains branch-specific behavior beyond the recognized provider trampoline; refusing to overwrite it"
         )
+    generator_call = body[0].value.value
+    if (
+        len(generator_call.args) != 2
+        or not isinstance(generator_call.args[0], ast.Constant)
+        or generator_call.args[0].value not in {"gemini", "groq", "cerebras", "openai"}
+        or not isinstance(generator_call.args[1], ast.Name)
+        or generator_call.args[1].id != "prompt"
+        or generator_call.keywords
+    ):
+        raise MigrationError(
+            "generate_strategy_draft trampoline arguments may contain branch-specific input handling; refusing to discard it"
+        )
 
     provider_definitions = definitions_by_name["_generate_with_provider"]
     if len(provider_definitions) != 1 or not isinstance(provider_definitions[0], ast.AsyncFunctionDef):
@@ -385,9 +397,17 @@ def transform_strategy_ai(commit: str) -> None:
                 and provider_body[0].value.value.func.attr in provider_delegations)
         )
     )
+    if direct_provider_trampoline:
+        provider_call = provider_body[0].value.value
+        direct_provider_trampoline = (
+            len(provider_call.args) == 1
+            and isinstance(provider_call.args[0], ast.Name)
+            and provider_call.args[0].id == "prompt"
+            and not provider_call.keywords
+        )
     if not direct_provider_trampoline:
         raise MigrationError(
-            "_generate_with_provider contains additional or unknown behavior; refusing to discard its body"
+            "_generate_with_provider contains additional or unknown behavior or side-effecting arguments; refusing to discard its body"
         )
     canonical_generate = next(
         (node for node in new_tree.body
@@ -501,6 +521,10 @@ def transform_daily_research() -> None:
         test_segment = ast.get_source_segment(source, node.test) or ""
         if not re.search(r"(?i)(?:gemini_api_key|groq_api_key|cerebras_api_key|ai_gateway_)", test_segment):
             continue
+        if any(isinstance(part, ast.Call) for part in ast.walk(node.test)):
+            raise MigrationError(
+                "daily-research provider condition includes a call expression; refusing to discard condition side effects"
+            )
         def is_review_result_target(target: ast.AST) -> bool:
             if not isinstance(target, ast.Subscript) or not isinstance(target.value, ast.Name):
                 return False
