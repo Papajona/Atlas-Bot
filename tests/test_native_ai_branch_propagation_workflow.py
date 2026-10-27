@@ -56,8 +56,8 @@ def test_legacy_branches_receive_runtime_only_patch_without_overwriting_conflict
     assert "tests/" not in runtime_path_list
     assert '"app/main.py"' in runtime_path_list
     assert '"ENTRY_EXIT_3_9_0.md"' in runtime_path_list
-    assert 'NATIVE_AI_BASE_COMMIT="f9c1730c423ff40522366aab5a1bcc960ff1d5ac"' in workflow
-    assert 'NATIVE_AI_INITIAL_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"' in workflow
+    assert 'NATIVE_AI_INITIAL_BASE_COMMIT="95a59e5ad1a9cd67dd5be31280c21d1b402a5b3e"' in workflow
+    assert 'NATIVE_AI_INITIAL_COMMIT="47048b917d799de847571755970fb1eca7915ae8"' in workflow
     assert 'NATIVE_AI_EXTRA_BASE_COMMIT="0d38f95079833804713fcba080caee38a6ddfb4c"' in workflow
     assert 'NATIVE_AI_COMMIT="$NATIVE_AI_EXTRA_COMMIT"' in workflow
     assert "git log -S 'def _release_diagnostic_report'" in workflow
