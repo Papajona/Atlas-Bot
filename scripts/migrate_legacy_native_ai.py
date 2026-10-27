@@ -113,6 +113,529 @@ def _name(node: ast.AST) -> str | None:
     return None
 
 
+def _safe_canonical_json_helper(
+    node: ast.AST, name: str, source_segment: str, legacy_tree: ast.Module
+) -> bool:
+    """Whitelist the known pure legacy JSON helper shapes; reject semantic variants."""
+    if (
+        name not in {"_extract_json", "_response_json_object"}
+        or not isinstance(node, ast.FunctionDef)
+        or node.decorator_list
+        or PROVIDER_RE.search(source_segment)
+    ):
+        return False
+
+    args = node.args
+    if args.posonlyargs or args.kwonlyargs or args.vararg or args.kwarg or args.kw_defaults:
+        return False
+
+    # Annotations execute at function definition unless postponed. Allow only inert,
+    # well-known type names and simple generic subscriptions; reject calls/attribute
+    # lookups and other expressions whose side effects would disappear on replacement.
+    safe_annotation_names = {"str", "dict", "Any", "int", "float", "bool", "list", "tuple"}
+
+    def safe_annotation(annotation: ast.AST | None) -> bool:
+        if annotation is None:
+            return True
+        if isinstance(annotation, ast.Name):
+            return annotation.id in safe_annotation_names
+        if isinstance(annotation, ast.Constant):
+            return annotation.value is None or isinstance(annotation.value, str)
+        if isinstance(annotation, ast.Subscript):
+            return safe_annotation(annotation.value) and safe_annotation(annotation.slice)
+        if isinstance(annotation, (ast.Tuple, ast.List)):
+            return all(safe_annotation(element) for element in annotation.elts)
+        return False
+
+    if any(not safe_annotation(argument.annotation) for argument in args.args):
+        return False
+    if not safe_annotation(node.returns):
+        return False
+
+    if name == "_extract_json":
+        if [arg.arg for arg in args.args] != ["text"] or args.defaults:
+            return False
+        return_name = "value"
+        json_import_count = 0
+
+        def has_json_named_expression(nodes: list[ast.AST]) -> bool:
+            """Detect walrus assignments that leak into the enclosing module scope."""
+            pending = list(nodes)
+            while pending:
+                current = pending.pop()
+                if (
+                    isinstance(current, ast.NamedExpr)
+                    and isinstance(current.target, ast.Name)
+                    and current.target.id == "json"
+                ):
+                    return True
+                if isinstance(current, ast.Lambda):
+                    # Lambda bodies are deferred, but their default expressions execute now.
+                    pending.extend(current.args.defaults)
+                    pending.extend(default for default in current.args.kw_defaults if default is not None)
+                    continue
+                if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue
+                pending.extend(ast.iter_child_nodes(current))
+            return False
+
+        def class_body_writes_global_json(node: ast.ClassDef) -> bool:
+            """Detect class-body writes explicitly redirected to the module binding."""
+            pending = list(reversed(node.body))
+            declares_global = False
+            writes_global = False
+            while pending:
+                current = pending.pop()
+                if isinstance(current, ast.Global) and "json" in current.names:
+                    declares_global = True
+                if (
+                    isinstance(current, ast.Name)
+                    and current.id == "json"
+                    and isinstance(current.ctx, (ast.Store, ast.Del))
+                ):
+                    writes_global = True
+                if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                    continue
+                if isinstance(current, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                    if has_json_named_expression([current]):
+                        return True
+                    continue
+                pending.extend(reversed(list(ast.iter_child_nodes(current))))
+            return declares_global and writes_global
+
+        def module_scope_walk(statements: list[ast.stmt]):
+            """Walk module-executed statements without entering nested lexical scopes."""
+            pending = list(reversed(statements))
+            while pending:
+                current = pending.pop()
+                yield current
+                if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue
+                if isinstance(current, ast.Lambda):
+                    # Lambda bodies are deferred, but defaults execute in module scope.
+                    pending.extend(reversed(current.args.defaults))
+                    pending.extend(reversed([default for default in current.args.kw_defaults if default is not None]))
+                    continue
+                if isinstance(current, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                    continue
+                pending.extend(reversed(list(ast.iter_child_nodes(current))))
+
+        # Require at least one unconditional standard-library import. Repeating
+        # that import is harmless and should not prevent migration.
+        for statement in legacy_tree.body:
+            if isinstance(statement, ast.Import):
+                for alias in statement.names:
+                    bound = alias.asname or alias.name.split(".", 1)[0]
+                    if bound == "json":
+                        if alias.name != "json" or alias.asname is not None:
+                            return False
+                        json_import_count += 1
+        # Refuse bindings that execute in module scope, including bindings under
+        # control flow, class bodies that write through global, and walrus assignments
+        # that escape comprehensions. Ignore ordinary function/class locals.
+        for nested in module_scope_walk(legacy_tree.body):
+            if isinstance(nested, ast.Import):
+                for alias in nested.names:
+                    bound = alias.asname or alias.name.split(".", 1)[0]
+                    if bound == "json" and (alias.name != "json" or alias.asname is not None):
+                        return False
+            elif isinstance(nested, ast.ImportFrom):
+                if any((alias.asname or alias.name) == "json" for alias in nested.names):
+                    return False
+            if isinstance(nested, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if nested.name == "json":
+                    return False
+                if isinstance(nested, ast.ClassDef):
+                    if class_body_writes_global_json(nested):
+                        return False
+                    executed_expressions = [
+                        *nested.decorator_list, *nested.bases,
+                        *(keyword.value for keyword in nested.keywords),
+                    ]
+                else:
+                    executed_expressions = [
+                        *nested.decorator_list, *nested.args.defaults,
+                        *(default for default in nested.args.kw_defaults if default is not None),
+                        *(argument.annotation for argument in [*nested.args.posonlyargs, *nested.args.args, *nested.args.kwonlyargs] if argument.annotation is not None),
+                        *([nested.args.vararg.annotation] if nested.args.vararg and nested.args.vararg.annotation is not None else []),
+                        *([nested.args.kwarg.annotation] if nested.args.kwarg and nested.args.kwarg.annotation is not None else []),
+                        *([nested.returns] if nested.returns is not None else []),
+                    ]
+                if has_json_named_expression(executed_expressions):
+                    return False
+            if isinstance(nested, ast.Lambda) and has_json_named_expression(
+                [*nested.args.defaults, *(default for default in nested.args.kw_defaults if default is not None)]
+            ):
+                return False
+            if isinstance(nested, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                if has_json_named_expression([nested]):
+                    return False
+            if isinstance(nested, ast.Name) and nested.id == "json" and isinstance(nested.ctx, (ast.Store, ast.Del)):
+                return False
+            if isinstance(nested, ast.ExceptHandler) and nested.name == "json":
+                return False
+        if json_import_count < 1:
+            return False
+        if json_import_count < 1:
+            return False
+        allowed_exceptions = {
+            "json.JSONDecodeError", "TypeError", "ValueError", "UnicodeDecodeError",
+        }
+    else:
+        if [arg.arg for arg in args.args] != ["response", "provider"]:
+            return False
+        if len(args.defaults) not in {0, 1}:
+            return False
+        if args.defaults and not (
+            isinstance(args.defaults[0], ast.Constant) and isinstance(args.defaults[0].value, str)
+        ):
+            return False
+        return_name = "body"
+        allowed_exceptions = {"ValueError", "UnicodeDecodeError", "TypeError", "AttributeError"}
+
+    def is_name(value: ast.AST, expected: str) -> bool:
+        return isinstance(value, ast.Name) and value.id == expected
+
+    def is_string(value: ast.AST, expected: str) -> bool:
+        return isinstance(value, ast.Constant) and value.value == expected
+
+    def is_error_raise(statement: ast.stmt) -> bool:
+        if not isinstance(statement, ast.Raise) or not isinstance(statement.exc, ast.Call):
+            return False
+        call = statement.exc
+        if not is_name(call.func, "AIProviderError") or not call.args or call.keywords:
+            return False
+        for argument in call.args:
+            for part in ast.walk(argument):
+                if isinstance(part, (ast.Call, ast.Attribute, ast.Subscript, ast.NamedExpr, ast.Lambda)):
+                    return False
+                if isinstance(part, ast.FormattedValue) and not (
+                    isinstance(part.value, ast.Name) and part.format_spec is None
+                ):
+                    return False
+                if not isinstance(part, (ast.Constant, ast.JoinedStr, ast.Name, ast.BinOp, ast.FormattedValue)):
+                    if isinstance(part, ast.expr):
+                        return False
+        return True
+
+    def is_isinstance_call(value: ast.AST, left: str, right: str) -> bool:
+        return (
+            isinstance(value, ast.Call)
+            and is_name(value.func, "isinstance")
+            and len(value.args) == 2
+            and is_name(value.args[0], left)
+            and is_name(value.args[1], right)
+            and not value.keywords
+        )
+
+    def is_strip_call(value: ast.AST, receiver: str | None = None) -> bool:
+        if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Attribute) or value.func.attr != "strip" or value.keywords:
+            return False
+        if receiver is not None and not is_name(value.func.value, receiver):
+            return False
+        if is_name(value.func.value, "text") or is_name(value.func.value, "raw"):
+            return not value.args
+        if (
+            isinstance(value.func.value, ast.BoolOp) and isinstance(value.func.value.op, ast.Or)
+            and len(value.func.value.values) == 2
+            and is_name(value.func.value.values[0], "text")
+            and is_string(value.func.value.values[1], "")
+        ):
+            return not value.args
+        if (
+            is_name(value.func.value, "raw")
+            and len(value.args) == 1
+            and is_string(value.args[0], "\x60")
+        ):
+            return True
+        return False
+
+    def is_safe_empty_text_condition(condition: ast.AST) -> bool:
+        if isinstance(condition, ast.UnaryOp) and isinstance(condition.op, ast.Not):
+            return is_strip_call(condition.operand, "text")
+        if isinstance(condition, ast.BoolOp) and isinstance(condition.op, ast.Or) and len(condition.values) == 2:
+            first, second = condition.values
+            return (
+                isinstance(first, ast.UnaryOp) and isinstance(first.op, ast.Not)
+                and is_isinstance_call(first.operand, "text", "str")
+                and isinstance(second, ast.UnaryOp) and isinstance(second.op, ast.Not)
+                and is_safe_empty_text_condition(second)
+            )
+        return False
+
+    def is_safe_condition(condition: ast.AST) -> str | None:
+        # Only canonical rejection checks are eligible. Inverted or additional conditions
+        # can change which valid JSON values callers accept, so reject them.
+        if isinstance(condition, ast.UnaryOp) and isinstance(condition.op, ast.Not):
+            operand = condition.operand
+            if name == "_extract_json" and is_isinstance_call(operand, "text", "str"):
+                return "raise"
+            expected_value = "value" if name == "_extract_json" else "body"
+            if is_isinstance_call(operand, expected_value, "dict"):
+                return "object-guard"
+            if name == "_extract_json" and is_strip_call(operand, "text"):
+                return "raise"
+        if name == "_extract_json" and is_safe_empty_text_condition(condition):
+            return "raise"
+        if (
+            name == "_extract_json"
+            and isinstance(condition, ast.Call)
+            and isinstance(condition.func, ast.Attribute)
+            and condition.func.attr == "startswith"
+            and is_name(condition.func.value, "raw")
+            and len(condition.args) == 1
+            and not condition.keywords
+        ):
+            if is_string(condition.args[0], "\x60\x60\x60"):
+                return "fence"
+            if is_string(condition.args[0], "json"):
+                return "json-prefix"
+        return None
+
+    def safe_raw_assignment(value: ast.AST) -> bool:
+        if is_name(value, "text"):
+            return True
+        if (
+            isinstance(value, ast.BoolOp) and isinstance(value.op, ast.Or) and len(value.values) == 2
+            and is_name(value.values[0], "text") and is_string(value.values[1], "")
+        ):
+            return True
+        if is_strip_call(value):
+            return True
+        if (
+            isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "strip" and is_name(value.func.value, "raw")
+            and len(value.args) == 1 and is_string(value.args[0], "\x60") and not value.keywords
+        ):
+            return True
+        if (
+            isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "lstrip" and isinstance(value.func.value, ast.Subscript)
+            and is_name(value.func.value.value, "raw")
+            and isinstance(value.func.value.slice, ast.Slice)
+            and is_string(value.func.value.slice.lower, "") is False
+            and isinstance(value.func.value.slice.lower, ast.Constant)
+            and value.func.value.slice.lower.value == 4
+            and value.func.value.slice.upper is None and value.func.value.slice.step is None
+            and not value.args and not value.keywords
+        ):
+            return True
+        return False
+
+    def safe_parser_assignment(statement: ast.Assign) -> bool:
+        if len(statement.targets) != 1 or not isinstance(statement.targets[0], ast.Name):
+            return False
+        target = statement.targets[0].id
+        value = statement.value
+        if name == "_extract_json" and target == "value":
+            return (
+                isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                and value.func.attr == "loads" and is_name(value.func.value, "json")
+                and len(value.args) == 1 and isinstance(value.args[0], ast.Name)
+                and value.args[0].id in {"raw", "text"} and not value.keywords
+            )
+        if name == "_response_json_object" and target == "body":
+            return (
+                isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                and value.func.attr == "json" and is_name(value.func.value, "response")
+                and not value.args and not value.keywords
+            )
+        return False
+
+    def safe_try(statement: ast.Try) -> bool:
+        if statement.orelse or statement.finalbody or len(statement.body) != 1 or not isinstance(statement.body[0], ast.Assign):
+            return False
+        if not safe_parser_assignment(statement.body[0]) or not statement.handlers:
+            return False
+        for handler in statement.handlers:
+            if handler.type is None or len(handler.body) != 1 or not is_error_raise(handler.body[0]):
+                return False
+            exception_nodes = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+            exception_names = {ast.unparse(item) for item in exception_nodes}
+            if not exception_names or not exception_names.issubset(allowed_exceptions):
+                return False
+        return True
+
+    def safe_fence_if(statement: ast.If) -> bool:
+        if statement.orelse or not statement.body or len(statement.body) > 2:
+            return False
+        first = statement.body[0]
+        if not isinstance(first, ast.Assign) or len(first.targets) != 1 or not is_name(first.targets[0], "raw"):
+            return False
+        first_value = first.value
+        if not (
+            isinstance(first_value, ast.Call) and isinstance(first_value.func, ast.Attribute)
+            and first_value.func.attr == "strip" and is_name(first_value.func.value, "raw")
+            and len(first_value.args) == 1 and is_string(first_value.args[0], "\x60")
+            and not first_value.keywords
+        ):
+            return False
+        if len(statement.body) == 1:
+            return True
+        second = statement.body[1]
+        if not isinstance(second, ast.If) or is_safe_condition(second.test) != "json-prefix" or second.orelse:
+            return False
+        if len(second.body) != 1 or not isinstance(second.body[0], ast.Assign):
+            return False
+        assigned = second.body[0]
+        if len(assigned.targets) != 1 or not is_name(assigned.targets[0], "raw"):
+            return False
+        expression = assigned.value
+        return (
+            isinstance(expression, ast.Call) and isinstance(expression.func, ast.Attribute)
+            and expression.func.attr == "lstrip" and isinstance(expression.func.value, ast.Subscript)
+            and is_name(expression.func.value.value, "raw")
+            and isinstance(expression.func.value.slice, ast.Slice)
+            and isinstance(expression.func.value.slice.lower, ast.Constant)
+            and expression.func.value.slice.lower.value == 4
+            and expression.func.value.slice.upper is None and expression.func.value.slice.step is None
+            and not expression.args and not expression.keywords
+        )
+
+    body = list(node.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]
+    if not body or not isinstance(body[-1], ast.Return) or not is_name(body[-1].value, return_name):
+        return False
+
+    saw_parse = False
+    saw_error = False
+    saw_object_guard = False
+    for statement in body:
+        if isinstance(statement, ast.Assign):
+            if name == "_extract_json" and len(statement.targets) == 1 and is_name(statement.targets[0], "raw"):
+                if not safe_raw_assignment(statement.value):
+                    return False
+            elif safe_parser_assignment(statement):
+                saw_parse = True
+            else:
+                return False
+        elif isinstance(statement, ast.Try):
+            if not safe_try(statement):
+                return False
+            saw_parse = True
+            saw_error = True
+        elif isinstance(statement, ast.If):
+            condition_kind = is_safe_condition(statement.test)
+            if condition_kind == "fence":
+                if name != "_extract_json" or not safe_fence_if(statement):
+                    return False
+            elif condition_kind == "json-prefix":
+                # The JSON-prefix cleanup is allowed only as the nested second statement
+                # inside the recognized fenced-JSON branch.
+                return False
+            elif condition_kind in {"raise", "object-guard"}:
+                if statement.orelse or len(statement.body) != 1 or not is_error_raise(statement.body[0]):
+                    return False
+                saw_error = True
+                if condition_kind == "object-guard":
+                    saw_object_guard = True
+            else:
+                return False
+        elif isinstance(statement, ast.Return):
+            if not is_name(statement.value, return_name):
+                return False
+        else:
+            return False
+
+    # Every nested expression must belong to the whitelisted statement forms. This also
+    # prevents hidden calls, mutable writes, alternate return paths and custom parser checks.
+    allowed_call_names = {"AIProviderError", "isinstance"}
+    allowed_load_names = (
+        {"text", "raw", "value", "exc", "json", "AIProviderError", "isinstance",
+         "str", "dict", "TypeError", "ValueError", "UnicodeDecodeError"}
+        if name == "_extract_json" else
+        {"response", "provider", "body", "exc", "AIProviderError", "isinstance",
+         "dict", "ValueError", "UnicodeDecodeError", "TypeError", "AttributeError"}
+    )
+    for item in (child for statement in node.body for child in ast.walk(statement)):
+        if isinstance(item, ast.Call):
+            if isinstance(item.func, ast.Name) and item.func.id in allowed_call_names:
+                continue
+            if not isinstance(item.func, ast.Attribute):
+                return False
+            if name == "_extract_json":
+                if item.func.attr == "loads" and is_name(item.func.value, "json"):
+                    if (
+                        len(item.args) == 1 and isinstance(item.args[0], ast.Name)
+                        and item.args[0].id in {"raw", "text"} and not item.keywords
+                    ):
+                        continue
+                    return False
+                if item.func.attr == "strip":
+                    if not item.keywords and (
+                        not item.args
+                        or (
+                            is_name(item.func.value, "raw") and len(item.args) == 1
+                            and is_string(item.args[0], "\x60")
+                        )
+                    ) and (
+                        is_name(item.func.value, "text") or is_name(item.func.value, "raw")
+                        or (
+                            isinstance(item.func.value, ast.BoolOp) and isinstance(item.func.value.op, ast.Or)
+                            and len(item.func.value.values) == 2
+                            and is_name(item.func.value.values[0], "text")
+                            and is_string(item.func.value.values[1], "")
+                        )
+                    ):
+                        continue
+                if item.func.attr == "startswith":
+                    if (
+                        is_name(item.func.value, "raw") and len(item.args) == 1
+                        and is_string(item.args[0], "\x60\x60\x60") or
+                        is_name(item.func.value, "raw") and len(item.args) == 1
+                        and is_string(item.args[0], "json")
+                    ) and not item.keywords:
+                        continue
+                if item.func.attr == "lstrip":
+                    receiver=item.func.value
+                    if (
+                        isinstance(receiver, ast.Subscript) and is_name(receiver.value, "raw")
+                        and isinstance(receiver.slice, ast.Slice)
+                        and isinstance(receiver.slice.lower, ast.Constant) and receiver.slice.lower.value == 4
+                        and receiver.slice.upper is None and receiver.slice.step is None
+                        and not item.args and not item.keywords
+                    ):
+                        continue
+            elif item.func.attr == "json" and is_name(item.func.value, "response"):
+                if not item.args and not item.keywords:
+                    continue
+            return False
+        if isinstance(item, ast.Name) and item.id == "json" and isinstance(item.ctx, (ast.Store, ast.Del)):
+            return False
+        if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Load) and item.id not in allowed_load_names:
+            return False
+        if isinstance(item, ast.Attribute):
+            if name == "_extract_json" and is_name(item.value, "json") and item.attr in {"loads", "JSONDecodeError"}:
+                continue
+            if name == "_response_json_object" and is_name(item.value, "response") and item.attr == "json":
+                continue
+            if name == "_extract_json" and item.attr in {"strip", "startswith", "lstrip"}:
+                receiver = item.value
+                if is_name(receiver, "text") or is_name(receiver, "raw"):
+                    continue
+                if (
+                    isinstance(receiver, ast.BoolOp) and isinstance(receiver.op, ast.Or)
+                    and len(receiver.values) == 2 and is_name(receiver.values[0], "text")
+                    and is_string(receiver.values[1], "")
+                ):
+                    continue
+                if (
+                    isinstance(receiver, ast.Subscript) and is_name(receiver.value, "raw")
+                    and isinstance(receiver.slice, ast.Slice)
+                    and isinstance(receiver.slice.lower, ast.Constant)
+                    and receiver.slice.lower.value == 4 and receiver.slice.upper is None
+                    and receiver.slice.step is None
+                ):
+                    continue
+            return False
+        if isinstance(item, (ast.Global, ast.Nonlocal, ast.Await, ast.Yield, ast.YieldFrom,
+                             ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            return False
+
+    return saw_parse and saw_error and saw_object_guard
+
+
 def _apply_line_edits(source: str, edits: list[tuple[int, int, str]]) -> str:
     lines = source.splitlines(keepends=True)
     for first, last, replacement in sorted(edits, key=lambda item: item[0], reverse=True):
@@ -365,6 +888,24 @@ def transform_ai_providers(commit: str) -> None:
                 for collision in collisions
             )
             if equivalent:
+                # AST equality does not capture module-level import bindings. Validate
+                # parser helpers before accepting syntactic equality so a branch alias
+                # such as "import orjson as json" cannot bypass the dependency guard.
+                if name in {"_extract_json", "_response_json_object"} and not _safe_canonical_json_helper(
+                    node, name, segment, old_tree
+                ):
+                    collision = sorted(collisions)[0]
+                    raise MigrationError(
+                        f"app/ai_providers.py has branch-specific definition {collision!r} that collides with a canonical name; refusing to discard or shadow it"
+                    )
+                continue
+            # The canonical facade deliberately provides safer implementations of these
+            # generic parsers (same callable contract, broader malformed-input handling).
+            # Accept only tightly whitelisted legacy parser bodies; do not generalize this
+            # exception to arbitrary same-named branch functions.
+            if len(collisions) == 1 and next(iter(collisions)) == name and _safe_canonical_json_helper(
+                node, name or "", segment, old_tree
+            ):
                 continue
             collision = sorted(
                 name for name in collisions
