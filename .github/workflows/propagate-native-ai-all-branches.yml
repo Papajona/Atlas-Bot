@@ -35,7 +35,7 @@ jobs:
           set -euo pipefail
           NATIVE_AI_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
           NATIVE_AI_EXTRA_BASE_COMMIT="0d38f95079833804713fcba080caee38a6ddfb4c"
-          NATIVE_AI_EXTRA_COMMIT="$(git log --first-parent --format=%H --fixed-strings --grep='Remove remaining hosted AI release diagnostics and harden propagation' "$GITHUB_SHA" | head -n 1)"
+          NATIVE_AI_EXTRA_COMMIT="2317ccc4c3293e8bbd7043970876eceb509d2d1d"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git cat-file -e "$NATIVE_AI_COMMIT^{commit}"
           git cat-file -e "$NATIVE_AI_EXTRA_BASE_COMMIT^{commit}"
