@@ -53,19 +53,25 @@ def test_legacy_branches_receive_runtime_only_patch_without_overwriting_conflict
     runtime_path_list = workflow[paths_start:paths_end]
 
     assert "tests/" not in runtime_path_list
+    assert '"app/main.py"' in runtime_path_list
+    assert '"ENTRY_EXIT_3_9_0.md"' in runtime_path_list
+    assert 'NATIVE_AI_BASE_COMMIT="f9c1730c423ff40522366aab5a1bcc960ff1d5ac"' in workflow
+    assert 'NATIVE_AI_COMMIT="$GITHUB_SHA"' in workflow
     assert (
-        'git diff --binary "$NATIVE_AI_PARENT" "$NATIVE_AI_COMMIT" -- "${NATIVE_AI_PATHS[@]}"'
+        'git diff --binary "$NATIVE_AI_BASE_COMMIT" "$NATIVE_AI_COMMIT" -- "$path"'
         in workflow
     )
-    assert 'git cherry-pick "$NATIVE_AI_RUNTIME_PATCH_COMMIT"' in workflow
-    assert 'git cherry-pick -X theirs "$NATIVE_AI_RUNTIME_PATCH_COMMIT"' not in workflow
-    assert "runtime-only cleanup patch conflicts or cannot be applied safely" in workflow
-    assert 'git cherry-pick "$NATIVE_AI_COMMIT"' not in workflow
+    assert 'git apply --3way --index "$RUNNER_TEMP/native-ai-path.patch"' in workflow
+    assert 'git checkout "$start_sha" -- "$path"' in workflow
+    assert 'git cherry-pick' not in workflow
+    assert "apply_native_ai_cleanup_paths" in workflow
     assert "verify_native_ai_impl" in workflow
     assert "provider references remain" in workflow
     assert 'if [[ -z "$before_refs" ]] && verify_native_ai_impl; then' in workflow
     assert "ACTIVE PROVIDER REFERENCES before propagation" in workflow
-    assert "ACTIVE PROVIDER REFERENCES REMAIN after runtime-only patch" in workflow
+    assert "ACTIVE PROVIDER REFERENCES REMAIN after per-path cleanup" in workflow
     assert r"generativelanguage\.googleapis\.com" in workflow
     assert r"api\.groq\.com" in workflow
     assert r"api\.cerebras\.ai" in workflow
+    assert "AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL" in workflow
+    assert "CEREBRAS_API_KEY|CEREBRAS_MODEL" in workflow
