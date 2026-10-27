@@ -87,6 +87,81 @@ def retained_helper():
             self.assertNotRegex(result, migration.PROVIDER_RE)
 
 
+    def test_retained_import_that_changes_canonical_exception_binding_fails_closed(self):
+        legacy = """from .branch_errors import NativeAIError
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    try:
+        raise NativeAIError("failure")
+    except AIProviderError:
+        return "handled"
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration,
+                "canonical_text",
+                return_value="from .native_ai import AIProviderError, NativeAIError\\n",
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "collides with canonical name"):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_star_import_dependency_is_preserved_before_canonical_facade(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration,
+                "canonical_text",
+                return_value="from .native_ai import AIProviderError\\n",
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("from .branch_helpers import *", result)
+            self.assertLess(
+                result.index("from .branch_helpers import *"),
+                result.index("from .native_ai import AIProviderError"),
+            )
+            self.assertIn("return branch_helper()", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
+    def test_chained_assignment_cannot_overwrite_canonical_facade_name(self):
+        legacy = """class AIProviderError(RuntimeError):
+    pass
+
+custom = json = object()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration,
+                "canonical_text",
+                return_value="import json\\nfrom .native_ai import AIProviderError\\n",
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "canonical name"):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_ai_provider_error_collision_with_custom_behavior_fails_closed(self):
         legacy = """class AIProviderError(RuntimeError):
     def __init__(self, message):
