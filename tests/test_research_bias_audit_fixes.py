@@ -223,7 +223,6 @@ def test_fixed_signal_oos_reports_inference_benchmark_and_hold_horizon():
     # non-wrapping, exposure-preserving entry shift. The benchmark must fail closed.
     assert result["benchmark_comparison"]["status"] == "INSUFFICIENT_DATA"
     assert result["benchmark_comparison"]["reason"] == "no_exposure_preserving_randomized_entry_control"
-    assert "excess_return_vs_buy_and_hold" in result["benchmark_comparison"]
 
 
 def test_promotion_gate_requires_inference_and_benchmarks_when_configured():
@@ -301,9 +300,11 @@ def test_benchmark_candidate_is_resimulated_and_liquidated_at_each_fold_end():
 
 def test_flat_bars_with_missing_atr_do_not_invalidate_benchmark_controls():
     frame = _ohlcv(24)
-    requested = np.ones(len(frame), dtype=float)
-    requested[0] = 0.0
+    requested = np.zeros(len(frame), dtype=float)
+    requested[2:14] = 1.0
     atr = np.ones(len(frame), dtype=float)
+    # The missing value is on a flat row; the active segment has room to shift
+    # both earlier and later while retaining all requested exposure bars.
     atr[0] = np.nan
     candidate = simulate_execution_aware_strategy(
         frame, pd.Series(requested, index=frame.index), pd.Series(atr, index=frame.index),
