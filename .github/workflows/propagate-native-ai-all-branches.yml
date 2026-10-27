@@ -33,8 +33,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          NATIVE_AI_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
+          NATIVE_AI_BASE_COMMIT="f9c1730c423ff40522366aab5a1bcc960ff1d5ac"
+          NATIVE_AI_COMMIT="$GITHUB_SHA"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git cat-file -e "$NATIVE_AI_BASE_COMMIT^{commit}"
           git cat-file -e "$NATIVE_AI_COMMIT^{commit}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -45,11 +47,13 @@ jobs:
           # onto old branches adds conflicts without removing a live provider.
           NATIVE_AI_PATHS=(
             ".env.example"
+            "ENTRY_EXIT_3_9_0.md"
             ".github/workflows/production-deploy.yml"
             ".github/workflows/production-verification.yml"
             "app/ai_providers.py"
             "app/config.py"
             "app/daily_research.py"
+            "app/main.py"
             "app/native_ai.py"
             "app/strategy_ai.py"
             "app/templates/customer.html"
@@ -64,32 +68,9 @@ jobs:
             "scripts/verify_release.sh"
           )
 
-          # Build a patch commit containing only the reviewed runtime/deployment paths.
-          # This avoids cherry-picking the canonical commit's unrelated test rewrites
-          # and leaves overlapping hunks unresolved for explicit branch reconciliation.
-          NATIVE_AI_PARENT="$(git rev-parse "$NATIVE_AI_COMMIT^")"
-          git checkout --detach "$NATIVE_AI_PARENT" >/dev/null
-          if ! git diff --binary "$NATIVE_AI_PARENT" "$NATIVE_AI_COMMIT" -- "${NATIVE_AI_PATHS[@]}" > "$RUNNER_TEMP/native-ai-runtime.patch"; then
-            echo "Could not create the reviewed runtime-only Native AI patch." >&2
-            exit 1
-          fi
-          if [[ ! -s "$RUNNER_TEMP/native-ai-runtime.patch" ]]; then
-            echo "The reviewed runtime-only Native AI patch is empty." >&2
-            exit 1
-          fi
-          if ! git apply --index "$RUNNER_TEMP/native-ai-runtime.patch"; then
-            echo "Could not reconstruct the canonical runtime-only patch from its parent." >&2
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "Build reviewed Native AI runtime cleanup patch" >/dev/null
-          NATIVE_AI_RUNTIME_PATCH_COMMIT="$(git rev-parse HEAD)"
-          git checkout --detach "$GITHUB_SHA" >/dev/null
-          git cat-file -e "$NATIVE_AI_RUNTIME_PATCH_COMMIT^{commit}"
-
           scan_active_provider_refs() {
             local rc=0
-            git grep -IlE 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' || rc=$?
+            git grep -IlE 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|api\.groq\.com|api\.cerebras\.ai|api\.openai\.com|openai-compatible|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|CEREBRAS' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' || rc=$?
             if (( rc == 1 )); then return 0; fi
             if (( rc != 0 )); then return "$rc"; fi
           }
@@ -182,6 +163,34 @@ jobs:
           print("PASS: Native AI imports and compatibility exports resolve.")
           PY
           }
+          declare -a patch_conflicts=()
+          apply_native_ai_cleanup_paths() {
+            local start_sha="$1" path
+            patch_conflicts=()
+            for path in "${NATIVE_AI_PATHS[@]}"; do
+              if ! git diff --binary "$NATIVE_AI_BASE_COMMIT" "$NATIVE_AI_COMMIT" -- "$path" > "$RUNNER_TEMP/native-ai-path.patch"; then
+                echo "Could not prepare cleanup patch for $path." >&2
+                return 1
+              fi
+              [[ -s "$RUNNER_TEMP/native-ai-path.patch" ]] || continue
+              if git apply --3way --index "$RUNNER_TEMP/native-ai-path.patch" > "$RUNNER_TEMP/native-ai-path-apply.log" 2>&1; then
+                continue
+              fi
+              echo "CONFLICT: preserving branch-specific content in $path on current branch $branch; diagnostic follows." >&2
+              cat "$RUNNER_TEMP/native-ai-path-apply.log" >&2 || true
+              if ! git reset "$start_sha" -- "$path" >/dev/null 2>&1 || ! git checkout "$start_sha" -- "$path" >/dev/null 2>&1; then
+                echo "Could not restore conflicting path $path to its exact starting revision $start_sha." >&2
+                git reset --hard "$start_sha" >/dev/null 2>&1 || true
+                return 1
+              fi
+              patch_conflicts+=("$path")
+            done
+            if (( ${#patch_conflicts[@]} > 0 )); then
+              echo "Non-conflicting cleanup paths were applied; overlapping paths were preserved unchanged: ${patch_conflicts[*]}" >&2
+            fi
+            return 0
+          }
+
           declare -a cleanup_warnings=()
           update_existing_branch_ref() {
             local branch="$1" expected_sha="$2" new_sha="$3"
@@ -289,17 +298,17 @@ jobs:
                 fi
                 continue
               fi
-              # Reapply only the reviewed Native AI patch if a later commit reintroduced
-              # provider wiring; do not replace whole files or discard unrelated branch work.
-              if ! git diff "$NATIVE_AI_COMMIT^" "$NATIVE_AI_COMMIT" -- "${NATIVE_AI_PATHS[@]}" | git apply --3way --index -; then
+              # Apply changes per path. Conflicting paths remain exactly as the branch
+              # had them; later provider and import checks decide whether the whole candidate is safe.
+              if ! apply_native_ai_cleanup_paths "$start_sha"; then
                 git reset --hard "$start_sha" >/dev/null 2>&1 || true
-                failed+=("$branch: reintroduced provider wiring conflicts with branch changes; branch left unchanged")
+                failed+=("$branch: could not safely prepare cleanup paths; branch left unchanged")
                 continue
               fi
               after_refs="$(scan_active_provider_refs)" || { git reset --hard "$start_sha" >/dev/null 2>&1 || true; failed+=("$branch: provider scan errored; branch left unchanged"); continue; }
               if [[ -n "$after_refs" ]]; then
                 echo "ACTIVE PROVIDER REFERENCES REMAIN after targeted patch on $branch:" >&2
-                git grep -nIE 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' >&2 || true
+                git grep -nIE 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|api\.groq\.com|api\.cerebras\.ai|api\.openai\.com|openai-compatible|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|CEREBRAS' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' >&2 || true
                 git reset --hard "$start_sha" >/dev/null 2>&1 || true
                 failed+=("$branch: provider references remain after targeted Native AI patch; branch left unchanged")
                 continue
@@ -341,19 +350,20 @@ jobs:
             if [[ -n "$before_refs" ]]; then
               echo "ACTIVE PROVIDER REFERENCES before propagation on $branch: $before_refs" >&2
             fi
-            if ! git cherry-pick "$NATIVE_AI_RUNTIME_PATCH_COMMIT" >"$RUNNER_TEMP/cherry-pick.log" 2>&1; then
-              echo "FAILED branch reconciliation: $branch could not apply the runtime-only Native AI cleanup patch; diagnostic follows." >&2
-              cat "$RUNNER_TEMP/cherry-pick.log" >&2 || true
-              git cherry-pick --abort >/dev/null 2>&1 || true
-              failed+=("$branch: runtime-only cleanup patch conflicts or cannot be applied safely; no target-ref update was attempted")
+            # Apply each runtime path independently. An overlapping path is restored
+            # to the exact branch version; only a candidate that passes the full provider
+            # scan and Native AI compatibility checks can be published.
+            if ! apply_native_ai_cleanup_paths "$start_sha"; then
+              git reset --hard "$start_sha" >/dev/null 2>&1 || true
+              failed+=("$branch: could not safely prepare cleanup paths; branch left unchanged")
               continue
             fi
-            after_refs="$(scan_active_provider_refs)" || { git cherry-pick --abort >/dev/null 2>&1 || true; failed+=("$branch: post-change provider scan errored; branch left unchanged"); continue; }
+            after_refs="$(scan_active_provider_refs)" || { git reset --hard "$start_sha" >/dev/null 2>&1 || true; failed+=("$branch: post-change provider scan errored; branch left unchanged"); continue; }
             if [[ -n "$after_refs" ]]; then
-              echo "ACTIVE PROVIDER REFERENCES REMAIN after runtime-only patch on $branch:" >&2
-              git grep -nIE 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' >&2 || true
-              git cherry-pick --abort >/dev/null 2>&1 || true
-              failed+=("$branch: provider references remain after runtime-only cleanup patch; branch left unchanged")
+              echo "ACTIVE PROVIDER REFERENCES REMAIN after per-path cleanup on $branch:" >&2
+              git grep -nIE 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|api\.groq\.com|api\.cerebras\.ai|api\.openai\.com|openai-compatible|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|CEREBRAS' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' >&2 || true
+              git reset --hard "$start_sha" >/dev/null 2>&1 || true
+              failed+=("$branch: provider references remain after per-path cleanup; branch left unchanged")
               continue
             fi
             if ! verify_native_ai_impl; then
