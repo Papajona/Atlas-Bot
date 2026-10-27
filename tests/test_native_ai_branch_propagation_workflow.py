@@ -77,7 +77,7 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
 def test_migration_script_preserves_unrelated_branch_logic_and_fails_closed() -> None:
     helper = MIGRATION.read_text(encoding="utf-8")
     assert "transform_config()" in helper
-    assert "transform_strategy_ai(commit)" in helper
+    assert "transform_strategy_ai(canonical_commit)" in helper
     assert "transform_daily_research()" in helper
     assert "transform_release_diagnostics(extra_commit)" in helper
     assert "EXTRA_PATHS" in helper
