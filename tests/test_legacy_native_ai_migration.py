@@ -185,6 +185,94 @@ def retained_helper():
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_explicit_import_before_overlapping_star_import_fails_closed(self):
+        legacy = """from .explicit_helpers import helper
+from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            explicit_module = root / "app" / "explicit_helpers.py"
+            star_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            explicit_module.write_text("def helper():\n    return 'explicit'\n", encoding="utf-8")
+            star_module.write_text("def helper():\n    return 'star'\n", encoding="utf-8")
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration,
+                "canonical_text",
+                return_value="from .native_ai import AIProviderError\n",
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "overlapping exports"):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_absolute_app_star_import_is_resolved_under_app_package(self):
+        legacy = """from app.branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text("def branch_helper():\n    return True\n", encoding="utf-8")
+            target.write_text(legacy, encoding="utf-8")
+            canonical = '"""Canonical facade."""\nfrom __future__ import annotations\nfrom .native_ai import AIProviderError\n'
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("from app.branch_helpers import *", result)
+            self.assertIn("return branch_helper()", result)
+            self.assertLess(
+                result.index("from __future__ import annotations"),
+                result.index("from app.branch_helpers import *"),
+            )
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
+    def test_indexed_all_export_mutation_fails_closed(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                "__all__ = ['branch_helper']\n"
+                "__all__[0] = 'json'\n"
+                "def branch_helper():\n    return True\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration,
+                "canonical_text",
+                return_value="from .native_ai import AIProviderError\n",
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "builds __all__ dynamically"):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_chained_assignment_cannot_overwrite_canonical_facade_name(self):
         legacy = """class AIProviderError(RuntimeError):
     pass
