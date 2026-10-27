@@ -109,7 +109,7 @@ def retained_helper():
                 "canonical_text",
                 return_value="from .native_ai import AIProviderError, NativeAIError\\n",
             ):
-                with self.assertRaisesRegex(migration.MigrationError, "collides with canonical name"):
+                with self.assertRaisesRegex(migration.MigrationError, "canonical name .* differently"):
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
