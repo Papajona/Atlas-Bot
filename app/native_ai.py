@@ -49,7 +49,7 @@ def _classify_family(text: str) -> str:
         return "MEAN_REVERSION"
     if any(x in value for x in ("breakout", "break out", "prior high", "range high", "range low")):
         return "BREAKOUT"
-    if any(x in value for x in ("momentum", "rate of change", "acceleration")) or re.search(r"\\broc\\b", value):
+    if any(x in value for x in ("momentum", "rate of change", "acceleration")) or re.search(r"\broc\b", value):
         return "MOMENTUM"
     return "TREND"
 
@@ -134,12 +134,12 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
     else:
         upper = text.upper()
         match = next(((pattern, label) for pattern, label in (
-            (r"\\bEUR\\s*[/_-]?\\s*USD\\b", "EUR_USD"),
-            (r"\\bGBP\\s*[/_-]?\\s*USD\\b", "GBP_USD"),
-            (r"\\bXAU(?:\\s*[/_-]?\\s*USD)?\\b|\\bGOLD\\b", "XAU_USD"),
-            (r"\\bBTC(?:\\s*[/_-]?\\s*USDT?)?\\b", "BTC/USDT"),
-            (r"\\bETH(?:\\s*[/_-]?\\s*USDT?)?\\b", "ETH/USDT"),
-            (r"\\bWTI\\b|\\bCRUDE\\s*OIL\\b", "WTI"),
+            (r"\bEUR\s*[/_-]?\s*USD\b", "EUR_USD"),
+            (r"\bGBP\s*[/_-]?\s*USD\b", "GBP_USD"),
+            (r"\bXAU(?:\s*[/_-]?\s*USD)?\b|\bGOLD\b", "XAU_USD"),
+            (r"\bBTC(?:\s*[/_-]?\s*USDT?)?\b", "BTC/USDT"),
+            (r"\bETH(?:\s*[/_-]?\s*USDT?)?\b", "ETH/USDT"),
+            (r"\bWTI\b|\bCRUDE\s*OIL\b", "WTI"),
         ) if re.search(pattern, upper)), None)
         selected_symbol = match[1] if match else {"crypto": "BTC/USDT", "forex": "EUR_USD", "commodity": "XAU_USD"}[asset_kind]
     requested_timeframes = list(dict.fromkeys(
@@ -153,8 +153,8 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
     family = _classify_family(text)
     lower = text.lower()
     asks_both = any(x in lower for x in ("both directions", "long and short", "long/short", "both sides"))
-    asks_short = bool(re.search(r"\\b(short|sell|bearish|downtrend)\\b", lower))
-    asks_long = bool(re.search(r"\\b(long|buy|bullish|uptrend)\\b", lower))
+    asks_short = bool(re.search(r"\b(short|sell|bearish|downtrend)\b", lower))
+    asks_long = bool(re.search(r"\b(long|buy|bullish|uptrend)\b", lower))
     direction = "BOTH" if asks_both or (asks_short and asks_long) else ("SHORT" if asks_short else "LONG")
     direction_ambiguous = not (asks_both or asks_short or asks_long)
     cap = _number(max_risk_per_trade)
