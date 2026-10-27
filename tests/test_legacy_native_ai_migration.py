@@ -1435,11 +1435,26 @@ async def _gemini_json(prompt):
             "from .strategy_evidence import evidence_for\n"
             "from pydantic import BaseModel, Field\n\n"
             "class AIStrategySpec(BaseModel):\n"
-            "    strategy_family: str = 'TREND'\n"
-            "    validation_warnings: list[str] = Field(default_factory=list)\n"
+            "    version: str = 'atlas-strategy-v1'\n"
+            "    title: str = 'fixture'\n"
+            "    summary: str = 'fixture summary'\n"
             "    asset: str = 'crypto'\n"
             "    symbols: list[str] = Field(default_factory=list)\n"
-            "    timeframes: list[str] = Field(default_factory=list)\n\n"
+            "    timeframes: list[str] = Field(default_factory=list)\n"
+            "    direction: str = 'LONG'\n"
+            "    strategy_family: str = 'TREND'\n"
+            "    entry_conditions: list[dict] = Field(default_factory=list)\n"
+            "    exit_conditions: list[dict] = Field(default_factory=list)\n"
+            "    risk_per_trade: float = 0.005\n"
+            "    stop_loss_atr: float | None = None\n"
+            "    take_profit_rr: float | None = None\n"
+            "    sessions: list[str] = Field(default_factory=list)\n"
+            "    assumptions: list[str] = Field(default_factory=list)\n"
+            "    validation_warnings: list[str] = Field(default_factory=list)\n"
+            "    requires_backtest: bool = True\n"
+            "    requires_walk_forward: bool = True\n"
+            "    execution_mode: str = 'PAPER_SHADOW_ONLY'\n"
+            "    implementation_status: str = 'ATLAS_SUPPORTED_FAMILY'\n\n"
             "SYSTEM_PROMPT = '''Gemini strategy prompt'''\n\n"
             "def _strategy_prompt(prompt, name):\n"
             "    return prompt\n\n"
@@ -1521,11 +1536,26 @@ from .strategy_evidence import evidence_for
 from pydantic import BaseModel, Field
 
 class AIStrategySpec(BaseModel):
-    strategy_family: str = "TREND"
-    validation_warnings: list[str] = Field(default_factory=list)
+    version: str = "atlas-strategy-v1"
+    title: str = "fixture"
+    summary: str = "fixture summary"
     asset: str = "crypto"
     symbols: list[str] = Field(default_factory=list)
     timeframes: list[str] = Field(default_factory=list)
+    direction: str = "LONG"
+    strategy_family: str = "TREND"
+    entry_conditions: list[dict] = Field(default_factory=list)
+    exit_conditions: list[dict] = Field(default_factory=list)
+    risk_per_trade: float = 0.005
+    stop_loss_atr: float | None = None
+    take_profit_rr: float | None = None
+    sessions: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    validation_warnings: list[str] = Field(default_factory=list)
+    requires_backtest: bool = True
+    requires_walk_forward: bool = True
+    execution_mode: str = "PAPER_SHADOW_ONLY"
+    implementation_status: str = "ATLAS_SUPPORTED_FAMILY"
 
 SYSTEM_PROMPT = "Legacy strategy prompt"
 
@@ -1668,6 +1698,18 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
                 "return spec",
                 "strategy schema/context helpers do not satisfy",
             ),
+            (
+                "uninitialized context data",
+                "    data = spec.model_dump()\n",
+                "",
+                "strategy schema/context helpers do not satisfy",
+            ),
+            (
+                "extra required hosted schema field",
+                '    strategy_family: str = "TREND"\n',
+                '    strategy_family: str = "TREND"\n    compliance_tag: str\n',
+                "strategy schema/context helpers do not satisfy",
+            ),
         )
         for label, old, new, message in unsafe_cases:
             with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
@@ -1750,10 +1792,15 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
             '        record_provider_metrics()\n        body = _response_json_object(response, "Cerebras")',
         )
         custom_annotation = legacy.replace("prompt: str", "prompt: audit()")
+        custom_prompt = legacy.replace(
+            "You are Atlas Trading OS's research assistant. Analyze supplied research only.",
+            "You are a branch-specific assistant with extra strategy obligations.",
+        )
         for label, source, should_refuse in (
             ("audited", legacy, False),
             ("custom-side-effect", custom, True),
             ("side-effecting-annotation", custom_annotation, True),
+            ("custom-system-prompt", custom_prompt, True),
         ):
             with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
