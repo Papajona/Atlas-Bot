@@ -1,191 +1,63 @@
 import asyncio
 
 
-def test_dual_ai_returns_both_provider_outputs(monkeypatch):
-    import app.ai_providers as ap
-    monkeypatch.setattr(ap.settings, "cerebras_api_key", "")
-
-    async def fake_gemini(prompt):
-        return {
-            "provider": "gemini",
-            "regime_assessment": "range",
-            "key_observations": ["price history is available"],
-            "data_quality_flags": [],
-            "strategy_watchlist": [],
-            "confidence": 0.8,
-            "research_only_summary": "research only",
-        }
-
-    async def fake_groq(prompt):
-        return {
-            "provider": "groq",
-            "regime_assessment": "range",
-            "key_observations": ["price history is available"],
-            "data_quality_flags": [],
-            "strategy_watchlist": [],
-            "confidence": 0.7,
-            "research_only_summary": "research only",
-        }
-
-    monkeypatch.setattr(ap, "_gemini_json", fake_gemini)
-    monkeypatch.setattr(ap, "_groq_json", fake_groq)
-    out = asyncio.run(ap.dual_ai_research_review({"regime": {}}, {"news_summary": {}}))
-    assert out["mode"] == "MULTI_PROVIDER_AI_RESEARCH_REVIEW"
-    assert set(out["providers"]) == {"gemini", "groq"}
-    assert out["execution_authority"] is False
+def test_native_safety_review_fails_closed_for_incomplete_packet():
+    from app.ai_providers import dual_ai_trade_safety_review
+    result = asyncio.run(dual_ai_trade_safety_review({"symbol": "BTC/USDT"}))
+    assert result["safe"] is False
+    assert result["configured"] is True
+    assert result["mode"] == "ATLAS_NATIVE_AI_SAFETY_VETO"
+    assert result["execution_authority"] is False
+    assert result["providers"]["atlas_native"]["safe"] is False
 
 
-def test_dual_ai_degrades_per_provider(monkeypatch):
-    import app.ai_providers as ap
-
-    async def fake_gemini(prompt):
-        raise ap.AIProviderError("Gemini unavailable")
-
-    async def fake_groq(prompt):
-        return {
-            "provider": "groq",
-            "regime_assessment": "range",
-            "key_observations": [],
-            "data_quality_flags": [],
-            "strategy_watchlist": [],
-            "confidence": 0.7,
-            "research_only_summary": "research only",
-        }
-
-    monkeypatch.setattr(ap, "_gemini_json", fake_gemini)
-    monkeypatch.setattr(ap, "_groq_json", fake_groq)
-    monkeypatch.setattr(ap.settings, "cerebras_api_key", "")
-    out = asyncio.run(ap.dual_ai_research_review({}, {}))
-    assert "gemini" in out["errors"]
-    assert out["providers"]["groq"]["provider"] == "groq"
-    assert out["execution_authority"] is False
+def test_native_safety_review_accepts_only_complete_consistent_packet():
+    from app.native_ai import evaluate_native_trade_packet
+    packet = {
+        "symbol":"BTC/USDT", "asset":"crypto", "exchange":"paper", "timeframe":"1h",
+        "market_timestamp":"2026-10-27T00:00:00+00:00",
+        "trade_plan":{"side":"buy","entry_price":100.0,"stop_loss_price":95.0,"take_profit_price":110.0},
+        "deterministic_rules":{"entry":"confirmed"},
+        "price_context":{"latest_close":100.0,"bars":1000,"spread_bps":2.0},
+        "data_quality":{"safe":True,"reasons":[]},
+        "adaptive_model":{"status":"PROMOTED","model_version":"fixture"},
+        "ml_signal":{"signal":1.0},
+    }
+    result = evaluate_native_trade_packet(packet)
+    assert result["safe"] is True
+    assert result["execution_authority"] is False
 
 
-def test_dual_ai_rejects_incomplete_research_schema_per_provider(monkeypatch):
-    import app.ai_providers as ap
-
-    async def incomplete(prompt):
-        return {"provider": "gemini", "confidence": 0.9}
-
-    async def valid(prompt):
-        return {
-            "regime_assessment": "range",
-            "key_observations": ["one observation"],
-            "data_quality_flags": [],
-            "strategy_watchlist": [],
-            "confidence": 0.9,
-            "research_only_summary": "research only",
-        }
-
-    monkeypatch.setattr(ap, "_gemini_json", incomplete)
-    monkeypatch.setattr(ap, "_groq_json", valid)
-    monkeypatch.setattr(ap.settings, "cerebras_api_key", "")
-    out = asyncio.run(ap.dual_ai_research_review({}, {}))
-    assert "gemini" in out["errors"]
-    assert out["providers"]["groq"]["regime_assessment"] == "range"
-    assert out["execution_authority"] is False
+def test_native_safety_veto_blocks_bad_data_or_invalid_long_prices():
+    from app.native_ai import evaluate_native_trade_packet
+    packet = {
+        "symbol":"BTC/USDT","asset":"crypto","exchange":"paper","timeframe":"1h","market_timestamp":"now",
+        "trade_plan":{"side":"buy","entry_price":100,"stop_loss_price":105,"take_profit_price":110},
+        "deterministic_rules":{},"price_context":{"latest_close":100,"bars":1000,"spread_bps":2},
+        "data_quality":{"safe":False,"reasons":["stale"]},"adaptive_model":{"status":"PROMOTED"},
+        "ml_signal":{"signal":1},
+    }
+    result = evaluate_native_trade_packet(packet)
+    assert result["safe"] is False
+    assert "market_data_quality_not_safe" in result["reasons"]
+    assert "long_stop_entry_target_order_invalid" in result["reasons"]
 
 
-def test_config_exposes_configured_ai_provider_models():
-    from app.config import settings
-    assert settings.gemini_model
-    assert settings.groq_model
-    assert settings.cerebras_model
-    assert not hasattr(settings, "claude_api_key")
+def test_native_research_review_reports_gaps_and_does_not_authorize_actions():
+    from app.ai_providers import dual_ai_research_review
+    result = asyncio.run(dual_ai_research_review({}, {"failures":{"news":"unavailable"}}))
+    review = result["providers"]["atlas_native"]
+    assert result["mode"] == "ATLAS_NATIVE_RESEARCH_REVIEW"
+    assert result["network_calls"] == 0
+    assert result["execution_authority"] is False
+    assert review["execution_authority"] is False
+    assert "REGIME_NOT_AVAILABLE" in review["data_quality_flags"]
+    assert "TRIAL_REGISTRY_NOT_VERIFIED" in review["data_quality_flags"]
 
 
-def test_trade_safety_review_flags_unconfigured_distinctly_from_vetoed(monkeypatch):
-    # An unconfigured AI Brain (no provider keys set) must still fail closed (safe=False,
-    # no trades), but callers need to tell "nothing is configured" apart from "the AI
-    # reviewed a real signal and rejected it" so an empty deployment doesn't get
-    # misdiagnosed as a broken strategy.
-    import app.ai_providers as ap
-
-    async def fake_unconfigured(prompt):
-        raise ap.AIProviderError("not configured")
-
-    monkeypatch.setattr(ap, "_gemini_json", fake_unconfigured)
-    monkeypatch.setattr(ap, "_groq_json", fake_unconfigured)
-    monkeypatch.setattr(ap.settings, "gemini_api_key", "")
-    monkeypatch.setattr(ap.settings, "groq_api_key", "")
-    monkeypatch.setattr(ap.settings, "cerebras_api_key", "")
-    out = asyncio.run(ap.dual_ai_trade_safety_review({"symbol": "BTCUSDT"}))
-    assert out["safe"] is False
-    assert out["configured"] is False
-
-    async def fake_vetoed(prompt):
-        return {
-            "safe": False,
-            "confidence": 0.95,
-            "reasons": ["risk too high"],
-            "data_quality_flags": [],
-        }
-
-    monkeypatch.setattr(ap, "_gemini_json", fake_vetoed)
-    monkeypatch.setattr(ap, "_groq_json", fake_vetoed)
-    monkeypatch.setattr(ap.settings, "gemini_api_key", "configured-key")
-    monkeypatch.setattr(ap.settings, "groq_api_key", "configured-groq")
-    out2 = asyncio.run(ap.dual_ai_trade_safety_review({"symbol": "BTCUSDT"}))
-    assert out2["safe"] is False
-    assert out2["configured"] is True
-
-def test_cerebras_can_be_primary_when_gemini_is_not_configured(monkeypatch):
-    import app.ai_providers as ap
-
-    monkeypatch.setattr(ap.settings, "gemini_api_key", "")
-    monkeypatch.setattr(ap.settings, "groq_api_key", "configured-groq")
-    monkeypatch.setattr(ap.settings, "cerebras_api_key", "configured-cerebras")
-
-    async def safe_cerebras(prompt):
-        return {"safe": True, "confidence": 0.95, "reasons": ["plan consistent"], "data_quality_flags": [], "provider": "cerebras"}
-
-    async def safe_groq(prompt):
-        return {"safe": True, "confidence": 0.95, "reasons": ["plan consistent"], "data_quality_flags": [], "provider": "groq"}
-
-    async def unexpected_gemini(prompt):
-        raise AssertionError("Gemini must not be called when its key is absent")
-
-    monkeypatch.setattr(ap, "_gemini_json", unexpected_gemini)
-    monkeypatch.setattr(ap, "_cerebras_json", safe_cerebras)
-    monkeypatch.setattr(ap, "_groq_json", safe_groq)
-    out = asyncio.run(ap.dual_ai_trade_safety_review({"symbol": "BTCUSDT"}))
-    assert out["safe"] is True
-    assert out["configured"] is True
-    assert set(out["providers"]) == {"cerebras", "groq"}
-    assert out["fallbacks"] == {}
-    assert out["execution_authority"] is False
-
-
-def test_cerebras_can_substitute_for_exhausted_gemini_but_groq_remains_required(monkeypatch):
-    import app.ai_providers as ap
-
-    monkeypatch.setattr(ap.settings, "gemini_api_key", "configured-gemini")
-    monkeypatch.setattr(ap.settings, "groq_api_key", "configured-groq")
-    monkeypatch.setattr(ap.settings, "cerebras_api_key", "configured-cerebras")
-
-    async def fail_gemini(prompt):
-        raise ap.AIProviderError("Gemini quota exhausted")
-
-    async def safe_cerebras(prompt):
-        return {"safe": True, "confidence": 0.95, "reasons": ["plan consistent"], "data_quality_flags": [], "provider": "cerebras"}
-
-    async def safe_groq(prompt):
-        return {"safe": True, "confidence": 0.95, "reasons": ["plan consistent"], "data_quality_flags": [], "provider": "groq"}
-
-    monkeypatch.setattr(ap, "_gemini_json", fail_gemini)
-    monkeypatch.setattr(ap, "_cerebras_json", safe_cerebras)
-    monkeypatch.setattr(ap, "_groq_json", safe_groq)
-    out = asyncio.run(ap.dual_ai_trade_safety_review({"symbol": "BTCUSDT"}))
-    assert out["safe"] is True
-    assert set(out["providers"]) == {"cerebras", "groq"}
-    assert "gemini" not in out["providers"]
-    assert out["execution_authority"] is False
-    assert out["fallbacks"] == {"gemini": "cerebras"}
-
-    async def fail_groq(prompt):
-        raise ap.AIProviderError("Groq unavailable")
-
-    monkeypatch.setattr(ap, "_groq_json", fail_groq)
-    out2 = asyncio.run(ap.dual_ai_trade_safety_review({"symbol": "BTCUSDT"}))
-    assert out2["safe"] is False
-    assert out2["execution_authority"] is False
+def test_native_ai_self_check_is_offline():
+    from app.native_ai import native_ai_health_check
+    report = native_ai_health_check()
+    assert report["status"] == "PASS"
+    assert report["network_calls"] == 0
+    assert report["external_model_credentials_required"] is False
