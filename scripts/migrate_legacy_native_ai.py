@@ -371,21 +371,40 @@ def transform_daily_research() -> None:
         test_segment = ast.get_source_segment(source, node.test) or ""
         if not re.search(r"(?i)(?:gemini_api_key|groq_api_key|cerebras_api_key|ai_gateway_)", test_segment):
             continue
-        def is_simple_statement(statement: ast.AST) -> bool:
-            if not isinstance(statement, (ast.Assign, ast.AnnAssign, ast.Expr, ast.Return)):
+        def is_provider_expression(expression: ast.AST | None) -> bool:
+            if isinstance(expression, ast.Await):
+                expression = expression.value
+            if not isinstance(expression, ast.Call):
                 return False
-            compound = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.With,
-                        ast.AsyncWith, ast.Match, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-            return not any(isinstance(part, compound) for part in ast.walk(statement) if part is not statement)
+            return (
+                (isinstance(expression.func, ast.Name) and expression.func.id in provider_delegations)
+                or (isinstance(expression.func, ast.Attribute) and expression.func.attr in provider_delegations)
+            )
+
+        def is_provider_only_statement(statement: ast.AST) -> bool:
+            if isinstance(statement, ast.Assign):
+                return len(statement.targets) == 1 and is_provider_expression(statement.value)
+            if isinstance(statement, ast.AnnAssign):
+                return is_provider_expression(statement.value)
+            if isinstance(statement, ast.Expr):
+                return is_provider_expression(statement.value)
+            if isinstance(statement, ast.Return):
+                return is_provider_expression(statement.value)
+            return False
+
+        def is_not_configured_fallback(statement: ast.AST) -> bool:
+            if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                return False
+            value = statement.value
+            if value is None or any(isinstance(part, ast.Call) for part in ast.walk(value)):
+                return False
+            return "NOT_CONFIGURED" in (ast.get_source_segment(source, statement) or "")
 
         body_is_provider_only = bool(node.body) and all(
-            is_simple_statement(statement) and contains_provider_call(statement)
-            for statement in node.body
+            is_provider_only_statement(statement) for statement in node.body
         )
         else_is_provider_fallback = all(
-            (is_simple_statement(statement) and contains_provider_call(statement))
-            or (is_simple_statement(statement) and isinstance(statement, (ast.Assign, ast.AnnAssign))
-                and "NOT_CONFIGURED" in (ast.get_source_segment(source, statement) or ""))
+            is_provider_only_statement(statement) or is_not_configured_fallback(statement)
             for statement in node.orelse
         )
         if not body_is_provider_only or not else_is_provider_fallback:
