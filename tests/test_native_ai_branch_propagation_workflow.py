@@ -78,7 +78,7 @@ def test_provider_scan_filters_only_historical_pruning_proof_markers() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     assert "':!.github/workflows/prune-contained-branches-once.yml'" not in workflow
     assert "git grep -nIEi" in workflow
-    assert r"prune-contained-branches-once\\.yml:[0-9]+" in workflow
+    assert r"prune-contained-branches-once\.yml:[0-9]+" in workflow
     assert "grep -F .def _check_groq." in workflow
 
 
