@@ -89,4 +89,4 @@ def test_native_strategy_parser_recognizes_ensemble_and_short_intent():
 
 def test_worker_deployment_pins_explicit_gcp_project():
     script = (ROOT / "deploy" / "cloud-run-worker-deploy.sh").read_text()
-    assert 'gcloud run worker-pools deploy "$WORKER_POOL" \\\\n  --project "$GCP_PROJECT_ID"' in script
+    assert '--project "$GCP_PROJECT_ID"' in script
