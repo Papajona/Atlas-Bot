@@ -1556,7 +1556,7 @@ def _is_safe_legacy_hosted_strategy_generator(node: ast.AST) -> bool:
     family = body[position + 5]
     if (not isinstance(family, ast.Assign) or len(family.targets) != 1
             or not is_name(family.targets[0], "family_key") or not isinstance(family.value, ast.Subscript)
-            or not isinstance(family.value.value, ast.Dict) or not is_name(family.value.slice, "spec")):
+            or not isinstance(family.value.value, ast.Dict)):
         return False
     family_subscript = family.value
     if not (isinstance(family_subscript.slice, ast.Attribute) and family_subscript.slice.attr == "strategy_family"
@@ -1774,22 +1774,24 @@ def transform_strategy_ai(commit: str) -> None:
         and isinstance(body[0].value.value.func, ast.Name)
         and body[0].value.value.func.id == "_generate_with_provider"
     )
-    if not safe_trampoline:
+    safe_legacy_flow = _is_safe_legacy_hosted_strategy_generator(legacy_generate)
+    if not safe_trampoline and not safe_legacy_flow:
         raise MigrationError(
-            "generate_strategy_draft contains branch-specific behavior beyond the recognized provider trampoline; refusing to overwrite it"
+            "generate_strategy_draft contains unrecognized branch-specific behavior; refusing to overwrite it"
         )
-    generator_call = body[0].value.value
-    if (
-        len(generator_call.args) != 2
-        or not isinstance(generator_call.args[0], ast.Constant)
-        or generator_call.args[0].value not in {"gemini", "groq", "cerebras", "openai"}
-        or not isinstance(generator_call.args[1], ast.Name)
-        or generator_call.args[1].id != "prompt"
-        or generator_call.keywords
-    ):
-        raise MigrationError(
-            "generate_strategy_draft trampoline arguments may contain branch-specific input handling; refusing to discard it"
-        )
+    if safe_trampoline:
+        generator_call = body[0].value.value
+        if (
+            len(generator_call.args) != 2
+            or not isinstance(generator_call.args[0], ast.Constant)
+            or generator_call.args[0].value not in {"gemini", "groq", "cerebras", "openai"}
+            or not isinstance(generator_call.args[1], ast.Name)
+            or generator_call.args[1].id != "prompt"
+            or generator_call.keywords
+        ):
+            raise MigrationError(
+                "generate_strategy_draft trampoline arguments may contain branch-specific input handling; refusing to discard it"
+            )
 
     provider_definitions = definitions_by_name["_generate_with_provider"]
     if len(provider_definitions) != 1 or not isinstance(provider_definitions[0], ast.AsyncFunctionDef):
@@ -1823,7 +1825,8 @@ def transform_strategy_ai(commit: str) -> None:
             and provider_call.args[0].id == "prompt"
             and not provider_call.keywords
         )
-    if not direct_provider_trampoline:
+    safe_provider_dispatcher = _is_safe_legacy_provider_dispatcher(legacy_provider)
+    if not direct_provider_trampoline and not safe_provider_dispatcher:
         raise MigrationError(
             "_generate_with_provider contains additional or unknown behavior or side-effecting arguments; refusing to discard its body"
         )
