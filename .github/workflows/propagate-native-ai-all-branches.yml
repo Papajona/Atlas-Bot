@@ -195,13 +195,13 @@ jobs:
               if [[ -z "$repository_id" || "$current_sha" != "$expected_sha" ]]; then
                 echo "Ref refs/heads/$branch changed or disappeared before atomic update; refusing to overwrite it." >&2
               elif update_payload="$(gh api graphql \
-                  -f query='mutation($repoId: ID!, $refId: ID!, $before: GitObjectID!, $after: GitObjectID!) { updateRefs(input: {repositoryId: $repoId, refUpdates: [{refName: $refName, beforeOid: $before, afterOid: $after, force: false}]}) { refUpdates { ref { name target { oid } } } } }' \
+                  -f query='mutation($repoId: ID!, $name: String!, $before: GitObjectID!, $after: GitObjectID!) { updateRefs(input: {repositoryId: $repoId, refUpdates: [{name: $name, beforeOid: $before, afterOid: $after, force: false}], clientMutationId: "atlas-native-ai-propagation"}) { clientMutationId } }' \
                   -F repoId="$repository_id" \
-                  -F refName="refs/heads/$branch" \
+                  -F name="refs/heads/$branch" \
                   -F before="$expected_sha" \
                   -F after="$new_sha")"; then
-                updated_sha="$(jq -r '.data.updateRefs.refUpdates[0].ref.target.oid // empty' <<<"$update_payload")"
-                if [[ "$updated_sha" == "$new_sha" ]]; then
+                updated_sha="$(jq -r '.data.updateRefs.clientMutationId // empty' <<<"$update_payload")"
+                if [[ "$(jq -r '((.errors // []) | length) == 0' <<<"$update_payload")" == "true" && "$updated_sha" == "atlas-native-ai-propagation" ]]; then
                   update_rc=0
                 else
                   echo "Atomic update did not confirm new SHA for refs/heads/$branch; treating update as unresolved." >&2
