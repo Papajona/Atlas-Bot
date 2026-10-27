@@ -42,7 +42,8 @@ def test_inconclusive_mutation_never_claims_the_remote_branch_was_unchanged() ->
     assert "REMOTE STATE UNRESOLVED for refs/heads/$branch" in workflow
     assert "remote branch state unresolved after update attempt" in workflow
     assert 'echo "UNRESOLVED BRANCH: $failure" >&2' in workflow
-    assert 'cat "$RUNNER_TEMP/cherry-pick.log" >&2' in workflow
+    assert 'cat "$RUNNER_TEMP/native-ai-path-apply.log" >&2 || true' in workflow
+    assert "CONFLICT: preserving branch-specific content" in workflow
     assert "existing-ref update rejected; branch left unchanged" not in workflow
 
 
@@ -56,11 +57,13 @@ def test_legacy_branches_receive_runtime_only_patch_without_overwriting_conflict
     assert '"app/main.py"' in runtime_path_list
     assert '"ENTRY_EXIT_3_9_0.md"' in runtime_path_list
     assert 'NATIVE_AI_BASE_COMMIT="f9c1730c423ff40522366aab5a1bcc960ff1d5ac"' in workflow
-    assert 'NATIVE_AI_COMMIT="$GITHUB_SHA"' in workflow
-    assert (
-        'git diff --binary "$NATIVE_AI_BASE_COMMIT" "$NATIVE_AI_COMMIT" -- "$path"'
-        in workflow
-    )
+    assert 'NATIVE_AI_INITIAL_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"' in workflow
+    assert 'NATIVE_AI_EXTRA_BASE_COMMIT="0d38f95079833804713fcba080caee38a6ddfb4c"' in workflow
+    assert 'NATIVE_AI_COMMIT="$NATIVE_AI_EXTRA_COMMIT"' in workflow
+    assert "git log -S 'def _release_diagnostic_report'" in workflow
+    assert 'patch_bases=("$NATIVE_AI_BASE_COMMIT" "$NATIVE_AI_EXTRA_BASE_COMMIT")' in workflow
+    assert 'patch_tips=("$NATIVE_AI_INITIAL_COMMIT" "$NATIVE_AI_EXTRA_COMMIT")' in workflow
+    assert 'git diff --binary "$base_commit" "$tip_commit" -- "$path"' in workflow
     assert 'git apply --3way --index "$RUNNER_TEMP/native-ai-path.patch"' in workflow
     assert 'git checkout "$start_sha" -- "$path"' in workflow
     assert 'git cherry-pick' not in workflow
