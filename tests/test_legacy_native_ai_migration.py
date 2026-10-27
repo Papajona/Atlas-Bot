@@ -31,6 +31,53 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
 
 
 class LegacyNativeAIMigrationTests(unittest.TestCase):
+    def test_ai_provider_error_stub_is_replaced_by_native_compatibility_alias(self):
+        legacy = """class AIProviderError(RuntimeError):
+    pass
+
+async def _gemini_json(prompt):
+    return {"prompt": prompt}
+
+def retained_helper():
+    raise AIProviderError('invalid input')
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value="from .native_ai import AIProviderError\n\n"
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertNotIn("class AIProviderError", result)
+            self.assertIn("from .native_ai import AIProviderError", result)
+            self.assertIn("def retained_helper", result)
+            self.assertIn("raise AIProviderError('invalid input')", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
+    def test_ai_provider_error_collision_with_custom_behavior_fails_closed(self):
+        legacy = """class AIProviderError(RuntimeError):
+    def __init__(self, message):
+        self.message = message
+
+async def _gemini_json(prompt):
+    return {"prompt": prompt}
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value="from .native_ai import AIProviderError\n\n"
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "collides with a canonical name"):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
     def test_config_refuses_mixed_provider_and_unrelated_same_line_assignments(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

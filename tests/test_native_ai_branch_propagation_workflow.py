@@ -74,6 +74,11 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert r"api\.cerebras\.ai" in workflow
 
 
+def test_provider_scan_excludes_static_markers_in_legacy_branch_pruning_workflow() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "':!.github/workflows/prune-contained-branches-once.yml'" in workflow
+
+
 def test_migration_script_preserves_unrelated_branch_logic_and_fails_closed() -> None:
     helper = MIGRATION.read_text(encoding="utf-8")
     assert "transform_config()" in helper

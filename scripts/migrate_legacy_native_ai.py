@@ -226,6 +226,28 @@ def _assigned_names(target: ast.AST) -> set[str]:
     return set()
 
 
+
+
+def _is_legacy_ai_provider_error_stub(node: ast.AST) -> bool:
+    """Recognize only the empty legacy exception class replaced by Native AI's alias."""
+    if not isinstance(node, ast.ClassDef) or node.name != "AIProviderError":
+        return False
+    if node.decorator_list or node.keywords or len(node.bases) != 1:
+        return False
+    if not isinstance(node.bases[0], ast.Name) or node.bases[0].id != "RuntimeError":
+        return False
+    body = node.body
+    if len(body) == 1 and isinstance(body[0], ast.Pass):
+        return True
+    return (
+        len(body) == 2
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+        and isinstance(body[1], ast.Pass)
+    )
+
+
 def transform_ai_providers(commit: str) -> None:
     """Replace hosted adapters with the Native AI facade while retaining unrelated helpers/imports."""
     path = ROOT / "app/ai_providers.py"
@@ -262,6 +284,10 @@ def transform_ai_providers(commit: str) -> None:
             continue
         start_line = min([node.lineno, *[decorator.lineno for decorator in getattr(node, "decorator_list", [])]])
         segment = "".join(source_lines[start_line - 1:node.end_lineno]).rstrip("\n")
+        if name == "AIProviderError" and _is_legacy_ai_provider_error_stub(node):
+            # The Native AI facade exports AIProviderError as a compatibility alias
+            # for NativeAIError; this exact empty legacy subclass is safe to replace.
+            continue
         if name and name in canonical_names:
             canonical_node = canonical_nodes_by_name[name]
             if ast.dump(node, include_attributes=False) == ast.dump(canonical_node, include_attributes=False):
