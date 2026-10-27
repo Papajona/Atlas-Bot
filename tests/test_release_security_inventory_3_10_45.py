@@ -132,7 +132,6 @@ def test_bootstrap_uses_least_privilege_secret_sets():
     common = [
         "atlas-database-url", "atlas-secret-key", "atlas-app-encryption-key",
         "atlas-redis-url", "atlas-usdt-tron-account-xpub", "atlas-trongrid-api-key",
-        "atlas-gemini-api-key",
     ]
     loop_line = next(line for line in bootstrap.splitlines() if line.startswith("for secret in "))
     for name in common:

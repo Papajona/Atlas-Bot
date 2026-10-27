@@ -1,15 +1,8 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_ai_model_check_bootstraps_repository_root_before_app_import():
-    script = (ROOT / "scripts" / "check_ai_models.py").read_text(encoding="utf-8")
-    root_bootstrap = script.index("_REPOSITORY_ROOT = ")
-    app_import = script.index("from app.config import settings")
-    assert root_bootstrap < app_import
-    assert "Path(__file__).resolve().parents[1]" in script
-    assert "sys.path.insert(0, _REPOSITORY_ROOT)" in script or (
-        "sys.path.insert(0, str(_REPOSITORY_ROOT))" in script
-    )
+def test_native_ai_checker_bootstraps_repo_root_before_app_import():
+    text = (ROOT / "scripts" / "check_native_ai.py").read_text(encoding="utf-8")
+    assert text.index("_REPOSITORY_ROOT = ") < text.index("from app.native_ai import native_ai_health_check")

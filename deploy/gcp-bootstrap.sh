@@ -18,13 +18,10 @@ set -euo pipefail
 : "${FUNDING_WEBHOOK_SECRET:?Set FUNDING_WEBHOOK_SECRET}"
 : "${ADMIN_SUPABASE_USER_IDS:?Set ADMIN_SUPABASE_USER_IDS}"
 : "${BACKUP_RECOVERY_URL:?Set BACKUP_RECOVERY_URL}"
-: "${GEMINI_API_KEY:?Set GEMINI_API_KEY for Atlas Strategy Intelligence}"
 : "${FORWARDED_ALLOW_IPS:?Set FORWARDED_ALLOW_IPS to trusted proxy IP/CIDR; never *}"
 : "${MODEL_SIGNING_PUBLIC_KEY:?Set MODEL_SIGNING_PUBLIC_KEY to the Ed25519 public PEM}"
 : "${MODEL_SIGNING_PRIVATE_KEY:?Set MODEL_SIGNING_PRIVATE_KEY to the Ed25519 private PEM (worker only)}"
 MIGRATION_SERVICE_ACCOUNT="${MIGRATION_SERVICE_ACCOUNT:-atlas-migrator}"
-GROQ_API_KEY="${GROQ_API_KEY:-}"
-CEREBRAS_API_KEY="${CEREBRAS_API_KEY:-}"
 SECRET_KEY="${SECRET_KEY:-$(python -c 'import secrets; print(secrets.token_urlsafe(48))')}"
 
 PROJECT_NUMBER=$(gcloud projects describe "$GCP_PROJECT_ID" --format='value(projectNumber)')
@@ -89,13 +86,10 @@ create_secret atlas-model-signing-private-key "$MODEL_SIGNING_PRIVATE_KEY"
 create_secret atlas-trongrid-api-key "$TRONGRID_API_KEY"
 create_secret atlas-supabase-anon-key "$SUPABASE_ANON_KEY"
 create_secret atlas-funding-webhook-secret "$FUNDING_WEBHOOK_SECRET"
-create_secret atlas-gemini-api-key "$GEMINI_API_KEY"
-if [[ -n "$GROQ_API_KEY" ]]; then create_secret atlas-groq-api-key "$GROQ_API_KEY"; fi
-if [[ -n "$CEREBRAS_API_KEY" ]]; then create_secret atlas-cerebras-api-key "$CEREBRAS_API_KEY"; fi
 
 # Least-privilege split: both API and worker need runtime/database/market-data secrets,
 # but only the API needs Supabase and funding-webhook credentials.
-for secret in atlas-database-url atlas-secret-key atlas-app-encryption-key atlas-redis-url atlas-usdt-tron-account-xpub atlas-trongrid-api-key atlas-gemini-api-key; do
+for secret in atlas-database-url atlas-secret-key atlas-app-encryption-key atlas-redis-url atlas-usdt-tron-account-xpub atlas-trongrid-api-key; do
   grant_secret_access "$secret" "$SERVICE_ACCOUNT"
   grant_secret_access "$secret" "$WORKER_SERVICE_ACCOUNT"
 done
@@ -106,8 +100,6 @@ grant_secret_access atlas-funding-webhook-secret "$SERVICE_ACCOUNT"
 grant_secret_access atlas-model-signing-public-key "$SERVICE_ACCOUNT"
 grant_secret_access atlas-model-signing-public-key "$WORKER_SERVICE_ACCOUNT"
 grant_secret_access atlas-model-signing-private-key "$WORKER_SERVICE_ACCOUNT"
-if [[ -n "$GROQ_API_KEY" ]]; then grant_secret_access atlas-groq-api-key "$SERVICE_ACCOUNT"; grant_secret_access atlas-groq-api-key "$WORKER_SERVICE_ACCOUNT"; fi
-if [[ -n "$CEREBRAS_API_KEY" ]]; then grant_secret_access atlas-cerebras-api-key "$SERVICE_ACCOUNT"; grant_secret_access atlas-cerebras-api-key "$WORKER_SERVICE_ACCOUNT"; fi
 
 # Cloud Run service agent needs permission to use the service identity.
 gcloud iam service-accounts add-iam-policy-binding \

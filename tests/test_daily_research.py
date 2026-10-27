@@ -93,8 +93,6 @@ def test_daily_run_records_prospective_trial_archive(monkeypatch):
     monkeypatch.setattr(dr, "archive_research_trials", fake_archive)
     monkeypatch.setattr(dr, "_ai_research_brief", lambda *_: {"ai_brain_mode": "RESEARCH_ONLY"})
     monkeypatch.setattr(dr, "_persist_research_run", fake_persist)
-    monkeypatch.setattr(dr.settings, "gemini_api_key", "")
-    monkeypatch.setattr(dr.settings, "groq_api_key", "")
 
     out = asyncio.run(dr.run_daily_research())
     assert out["status"] == "COMPLETE"

@@ -20,4 +20,4 @@ if [[ "${DATABASE_URL}" == postgresql* ]]; then
 fi
 python -m bandit -r app -lll -f json -o bandit-report.json
 python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325 -f json -o pip-audit-report.json
-python scripts/check_ai_models.py || test $? -eq 2
+python -m scripts.check_native_ai
