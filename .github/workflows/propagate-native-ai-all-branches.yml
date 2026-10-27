@@ -71,9 +71,18 @@ jobs:
 
           scan_active_provider_refs() {
             local rc=0
-            git grep -IlE 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\\.googleapis\\.com|_gemini_json|settings\\.gemini_|settings\\.groq_api_key|settings\\.cerebras_api_key|settings\\.ai_gateway_|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\\.groq\\.com|api\\.cerebras\\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' || rc=$?
+            git grep -IlE 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' || rc=$?
             if (( rc == 1 )); then return 0; fi
             if (( rc != 0 )); then return "$rc"; fi
+          }
+
+          verify_native_ai_impl() {
+            test -f app/native_ai.py &&
+              grep -q '^class NativeAIError' app/native_ai.py &&
+              grep -q '^def compose_strategy_spec' app/native_ai.py &&
+              grep -q '^def native_research_review' app/native_ai.py &&
+              grep -q 'from \.native_ai import NativeAIError, compose_strategy_spec' app/strategy_ai.py &&
+              grep -q 'from \.native_ai import native_research_review' app/daily_research.py
           }
 
           declare -a updated=() skipped=() failed=()
@@ -87,7 +96,11 @@ jobs:
             before_refs="$(scan_active_provider_refs)" || { failed+=("$branch: provider scan errored; branch left unchanged"); continue; }
             if git merge-base --is-ancestor "$NATIVE_AI_COMMIT" "$start_sha"; then
               if [[ -z "$before_refs" ]]; then
-                skipped+=("$branch (active provider scan clean; branch-specific files preserved)")
+                if verify_native_ai_impl; then
+                  skipped+=("$branch (Native AI implementation verified; active provider scan clean)")
+                else
+                  failed+=("$branch: canonical commit is an ancestor but Native AI implementation is missing or reverted; branch left unchanged")
+                fi
                 continue
               fi
               # Reapply only the reviewed Native AI patch if a later commit reintroduced
@@ -101,6 +114,11 @@ jobs:
               if [[ -n "$after_refs" ]]; then
                 git reset --hard "$start_sha" >/dev/null 2>&1 || true
                 failed+=("$branch: provider references remain after targeted Native AI patch; branch left unchanged")
+                continue
+              fi
+              if ! verify_native_ai_impl; then
+                git reset --hard "$start_sha" >/dev/null 2>&1 || true
+                failed+=("$branch: Native AI implementation verification failed after targeted patch; branch left unchanged")
                 continue
               fi
               if [[ -z "$(git status --porcelain)" ]]; then
@@ -118,7 +136,7 @@ jobs:
               continue
             fi
 
-            if ! git cherry-pick -X theirs "$NATIVE_AI_COMMIT" >"$RUNNER_TEMP/cherry-pick.log" 2>&1; then
+            if ! git cherry-pick "$NATIVE_AI_COMMIT" >"$RUNNER_TEMP/cherry-pick.log" 2>&1; then
               git cherry-pick --abort >/dev/null 2>&1 || true
               failed+=("$branch: canonical commit conflicts or cannot be cherry-picked; branch left unchanged")
               continue
@@ -127,6 +145,11 @@ jobs:
             if [[ -n "$after_refs" ]]; then
               failed+=("$branch: provider references remain after cherry-pick; branch left unchanged")
               git cherry-pick --abort >/dev/null 2>&1 || true
+              continue
+            fi
+            if ! verify_native_ai_impl; then
+              failed+=("$branch: Native AI implementation verification failed after cherry-pick; branch left unchanged")
+              git reset --hard "$start_sha" >/dev/null 2>&1 || true
               continue
             fi
             new_sha="$(git rev-parse HEAD)"
