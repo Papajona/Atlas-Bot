@@ -83,7 +83,7 @@ jobs:
           scan_active_provider_refs() {
             grep -RIlE 'gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_api_key|SECRET_GEMINI|GROQ_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|api\.groq\.com|api\.cerebras\.ai' \
               app scripts deploy .github/workflows \
-              --exclude='propagate-native-ai-all-branches.yml' 2>/dev/null || true
+              --exclude='propagate-native-ai-all-branches.yml' 2>/dev/null
           }
 
           declare -a updated=()
@@ -109,7 +109,7 @@ jobs:
 
             if [[ "$already_has_commit" == false ]]; then
               if ! git cherry-pick "$NATIVE_AI_COMMIT" >"$RUNNER_TEMP/cherry-pick.log" 2>&1; then
-                if [[ -z "$(git rev-parse -q --verify CHERRY_PICK_HEAD 2>/dev/null || true)" ]]; then
+                if [[ -z "$(git rev-parse -q --verify CHERRY_PICK_HEAD 2>/dev/null)" ]]; then
                   failed+=("$branch: cherry-pick failed before conflict resolution")
                   git cherry-pick --abort >/dev/null 2>&1 || true
                   continue
@@ -130,14 +130,10 @@ jobs:
                 fi
                 while IFS= read -r f; do
                   [[ -n "$f" ]] || continue
-# Removed unsafe automatic conflict preference; conflicts require manual reconciliation.
-                  git add -- "$f"
-                done <<< "$conflict_files"
-                if ! GIT_EDITOR=true git cherry-pick --continue >/dev/null 2>&1; then
-                  git cherry-pick --abort >/dev/null 2>&1 || true
-                  failed+=("$branch: Native AI conflict resolution failed")
-                  continue
-                fi
+                git cherry-pick --abort >/dev/null 2>&1 || true
+                failed+=("$branch: Native AI patch conflicts; branch left unchanged for manual reconciliation")
+                continue
+              fi
               fi
             else
               # Reapply the Native AI patch if a later branch commit reintroduced hosted
