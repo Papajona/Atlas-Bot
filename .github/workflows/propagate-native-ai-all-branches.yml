@@ -299,7 +299,7 @@ jobs:
               after_refs="$(scan_active_provider_refs)" || { git reset --hard "$start_sha" >/dev/null 2>&1 || true; failed+=("$branch: provider scan errored; branch left unchanged"); continue; }
               if [[ -n "$after_refs" ]]; then
                 echo "ACTIVE PROVIDER REFERENCES REMAIN after targeted patch on $branch:" >&2
-                git grep -nIE 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\\.googleapis\\.com|_gemini_json|settings\\.gemini_|settings\\.groq_api_key|settings\\.cerebras_api_key|settings\\.ai_gateway_|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\\.groq\\.com|api\\.cerebras\\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' >&2 || true
+                git grep -nIE 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' >&2 || true
                 git reset --hard "$start_sha" >/dev/null 2>&1 || true
                 failed+=("$branch: provider references remain after targeted Native AI patch; branch left unchanged")
                 continue
@@ -351,7 +351,7 @@ jobs:
             after_refs="$(scan_active_provider_refs)" || { git cherry-pick --abort >/dev/null 2>&1 || true; failed+=("$branch: post-change provider scan errored; branch left unchanged"); continue; }
             if [[ -n "$after_refs" ]]; then
               echo "ACTIVE PROVIDER REFERENCES REMAIN after runtime-only patch on $branch:" >&2
-              git grep -nIE 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\\.googleapis\\.com|_gemini_json|settings\\.gemini_|settings\\.groq_api_key|settings\\.cerebras_api_key|settings\\.ai_gateway_|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\\.groq\\.com|api\\.cerebras\\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' >&2 || true
+              git grep -nIE 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' >&2 || true
               git cherry-pick --abort >/dev/null 2>&1 || true
               failed+=("$branch: provider references remain after runtime-only cleanup patch; branch left unchanged")
               continue
