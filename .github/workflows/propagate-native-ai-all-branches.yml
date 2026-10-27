@@ -166,33 +166,60 @@ jobs:
           print("PASS: Native AI imports and compatibility exports resolve.")
           PY
           }
+          declare -a cleanup_warnings=()
           update_existing_branch_ref() {
             local branch="$1" expected_sha="$2" new_sha="$3"
-            local remote_sha branch_hash temp_ref update_rc
+            local remote_sha branch_hash temp_ref update_rc ref_payload repository_id ref_id current_sha update_payload updated_sha
             remote_sha="$(git ls-remote --heads origin "refs/heads/$branch" | awk 'NR == 1 {print $1}')"
             if [[ "$remote_sha" != "$expected_sha" ]]; then
               echo "Ref refs/heads/$branch changed or disappeared after enumeration; refusing to update it." >&2
               return 1
             fi
-            # Upload the new commit to a temporary ref first. The API then updates
-            # the existing target ref only; a deleted branch cannot be recreated.
-            # force=false rejects a non-fast-forward update, and the temp ref is removed.
+            # Upload the candidate commit under a temporary ref. Update the target with
+            # GraphQL updateRefs and beforeOid=expected_sha: the expected-tip check and
+            # non-force fast-forward update are one atomic server-side operation.
             branch_hash="$(printf '%s' "$branch" | sha256sum | cut -c1-12)"
             temp_ref="atlas-native-ai-propagation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${branch_hash}"
             if ! git push origin "HEAD:refs/heads/$temp_ref" >/dev/null; then
-              echo "Could not upload temporary commit ref for $branch; target branch left unchanged." >&2
+              echo "Could not upload temporary commit ref for $branch; target branch unchanged." >&2
               return 1
             fi
-            if gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" \
-                -f "sha=$new_sha" -F force=false >/dev/null; then
-              update_rc=0
+            update_rc=1
+            if ref_payload="$(gh api graphql \
+                -f query='query($owner: String!, $name: String!, $qualifiedName: String!) { repository(owner: $owner, name: $name) { id ref(qualifiedName: $qualifiedName) { id target { oid } } } }' \
+                -F owner="$GITHUB_REPOSITORY_OWNER" \
+                -F name="${GITHUB_REPOSITORY#*/}" \
+                -F qualifiedName="refs/heads/$branch")"; then
+              repository_id="$(jq -r '.data.repository.id // empty' <<<"$ref_payload")"
+              ref_id="$(jq -r '.data.repository.ref.id // empty' <<<"$ref_payload")"
+              current_sha="$(jq -r '.data.repository.ref.target.oid // empty' <<<"$ref_payload")"
+              if [[ -z "$repository_id" || -z "$ref_id" || "$current_sha" != "$expected_sha" ]]; then
+                echo "Ref refs/heads/$branch changed or disappeared before atomic update; refusing to overwrite it." >&2
+              elif update_payload="$(gh api graphql \
+                  -f query='mutation($repoId: ID!, $refId: ID!, $before: GitObjectID!, $after: GitObjectID!) { updateRefs(input: {repositoryId: $repoId, refUpdates: [{refId: $refId, beforeOid: $before, afterOid: $after, force: false}]}) { ref { name target { oid } } } }' \
+                  -F repoId="$repository_id" \
+                  -F refId="$ref_id" \
+                  -F before="$expected_sha" \
+                  -F after="$new_sha")"; then
+                updated_sha="$(jq -r '.data.updateRefs.ref.target.oid // empty' <<<"$update_payload")"
+                if [[ "$updated_sha" == "$new_sha" ]]; then
+                  update_rc=0
+                else
+                  echo "Atomic update did not confirm new SHA for refs/heads/$branch; treating update as unresolved." >&2
+                fi
+              else
+                echo "Atomic update rejected for refs/heads/$branch; target branch left unchanged." >&2
+                echo "$update_payload" >&2
+              fi
             else
-              update_rc=$?
-              echo "Existing-ref update rejected for $branch; target left unchanged." >&2
+              echo "Unable to read current ref state for $branch; target branch left unchanged." >&2
+              echo "$ref_payload" >&2
             fi
+            # Cleanup is independent of target-ref success. A cleanup failure is a
+            # warning, not evidence that an already-updated target branch failed.
             if ! git push origin --delete "$temp_ref" >/dev/null; then
-              echo "WARNING: temporary ref refs/heads/$temp_ref could not be deleted." >&2
-              if (( update_rc == 0 )); then update_rc=1; fi
+              cleanup_warnings+=("$branch: temporary ref refs/heads/$temp_ref remains; target update exit code=$update_rc")
+              echo "::warning title=Temporary ref cleanup failed::refs/heads/$temp_ref could not be deleted; target update result remains exit code $update_rc."
             fi
             return "$update_rc"
           }
@@ -280,6 +307,8 @@ jobs:
             printf '  - %s\n' "${updated[@]:-none}"
             echo "- Branches skipped after implementation and provider checks: ${#skipped[@]}"
             printf '  - %s\n' "${skipped[@]:-none}"
+            echo "- Temporary-ref cleanup warnings: ${#cleanup_warnings[@]}"
+            printf '  - %s\n' "${cleanup_warnings[@]:-none}"
             echo "- Unresolved branches: ${#failed[@]}"
             printf '  - %s\n' "${failed[@]:-none}"
           } >> "$GITHUB_STEP_SUMMARY"
