@@ -79,6 +79,13 @@ def test_provider_scan_excludes_static_markers_in_legacy_branch_pruning_workflow
     assert "':!.github/workflows/prune-contained-branches-once.yml'" in workflow
 
 
+def test_provider_free_branch_skip_requires_native_error_alias_identity() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "facade.AIProviderError is not native.NativeAIError" in workflow
+    assert "AIProviderError must be the app.native_ai.NativeAIError compatibility alias" in workflow
+    assert 'if [[ -z "$before_refs" ]] && verify_native_ai_impl; then' in workflow
+
+
 def test_migration_script_preserves_unrelated_branch_logic_and_fails_closed() -> None:
     helper = MIGRATION.read_text(encoding="utf-8")
     assert "transform_config()" in helper
