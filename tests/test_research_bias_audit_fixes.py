@@ -140,7 +140,7 @@ def test_benchmark_comparison_uses_independent_ohlc_and_reports_single_symbol_li
 
 
 def test_benchmark_shifted_entries_replay_stop_exits_and_costs_independently():
-    n = 16
+    n = 32
     index = pd.date_range("2026-01-01T00:00:00Z", periods=n, freq="h")
     opens = np.full(n, 100.0)
     closes = opens.copy()
@@ -148,7 +148,11 @@ def test_benchmark_shifted_entries_replay_stop_exits_and_costs_independently():
         "open": opens, "high": np.full(n, 101.0), "low": np.full(n, 98.0),
         "close": closes, "volume": np.full(n, 1000.0),
     }, index=index)
-    requested_entries = np.ones(n, dtype=float)
+    # Two distinct opportunities, with room to move the complete path in either
+    # direction while preserving requested exposure and entry count.
+    requested_entries = np.zeros(n, dtype=float)
+    requested_entries[3:9] = 1.0
+    requested_entries[19:25] = 1.0
     atr = np.ones(n, dtype=float)
     candidate_execution = simulate_execution_aware_strategy(
         frame, pd.Series(requested_entries, index=index), pd.Series(atr, index=index),
@@ -167,6 +171,41 @@ def test_benchmark_shifted_entries_replay_stop_exits_and_costs_independently():
     assert report["random_control_exit_count_median"] > 0
     assert report["random_control_turnover_median"] >= report["random_control_exit_count_median"]
     assert report["random_control_execution_model"].endswith("TERMINAL_LIQUIDATION")
+    assert report["candidate_requested_exposure_bars"] == int(np.count_nonzero(requested_entries))
+    assert report["random_control_requested_exposure_bars_median"] == report["candidate_requested_exposure_bars"]
+    assert report["candidate_requested_entry_count"] == 2
+    assert report["random_control_requested_entry_count_median"] == 2.0
+    assert report["random_control_shift_min"] < 0
+    assert report["random_control_shift_max"] > 0
+    assert report["random_control_exposure_matching"] == "EXACT_REQUESTED_EXPOSURE_BARS_AND_ENTRY_COUNT"
+
+
+def test_sustained_signal_without_alternative_full_exposure_timing_fails_closed():
+    frame = _ohlcv(24)
+    requested = np.ones(len(frame), dtype=float)
+    report = oos_benchmark_comparison(
+        [frame], [requested], [np.zeros(len(frame))],
+        transaction_cost_bps=2.0, carry_bps_per_bar=0.0, random_trials=10,
+    )
+    assert report["status"] == "INSUFFICIENT_DATA"
+    assert report["reason"] == "no_exposure_preserving_randomized_entry_control"
+    assert "gate_passed" not in report
+
+
+def test_late_fold_signal_controls_move_earlier_without_losing_exposure():
+    frame = _ohlcv(24)
+    requested = np.zeros(len(frame), dtype=float)
+    requested[-5:-2] = 1.0
+    report = oos_benchmark_comparison(
+        [frame], [requested], [np.zeros(len(frame))],
+        transaction_cost_bps=2.0, carry_bps_per_bar=0.0, random_trials=20, seed=31,
+    )
+    assert report["status"] == "OK"
+    assert report["candidate_requested_exposure_bars"] == 3
+    assert report["random_control_requested_exposure_bars_median"] == 3.0
+    assert report["candidate_requested_entry_count"] == 1
+    assert report["random_control_requested_entry_count_median"] == 1.0
+    assert report["random_control_shift_min"] < 0
 
 
 def test_fixed_signal_oos_reports_inference_benchmark_and_hold_horizon():
