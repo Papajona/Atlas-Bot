@@ -34,7 +34,7 @@ jobs:
         run: |
           set -euo pipefail
           NATIVE_AI_INITIAL_BASE_COMMIT="95a59e5ad1a9cd67dd5be31280c21d1b402a5b3e"
-          NATIVE_AI_INITIAL_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
+          NATIVE_AI_INITIAL_COMMIT="47048b917d799de847571755970fb1eca7915ae8"
           NATIVE_AI_EXTRA_BASE_COMMIT="0d38f95079833804713fcba080caee38a6ddfb4c"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git config user.name "github-actions[bot]"
@@ -42,12 +42,8 @@ jobs:
           git fetch origin "+refs/heads/*:refs/remotes/origin/*" --prune
           # Pin the additional cleanup to the commit that introduced the local release
           # analyzer, not to whatever unrelated source changes may later reach main.
-          NATIVE_AI_EXTRA_COMMIT="$(git log -S 'def _release_diagnostic_report' --format=%H "$GITHUB_SHA" -- app/main.py | head -n 1)"
+          NATIVE_AI_EXTRA_COMMIT="d847ff8cd8340ccbb3de2a5a0457b607be6a86ad"
           NATIVE_AI_COMMIT="$NATIVE_AI_EXTRA_COMMIT"
-          if [[ -z "$NATIVE_AI_EXTRA_COMMIT" ]]; then
-            echo "Could not locate the reviewed local release-diagnostics cleanup commit." >&2
-            exit 1
-          fi
           git cat-file -e "$NATIVE_AI_INITIAL_BASE_COMMIT^{commit}"
           git cat-file -e "$NATIVE_AI_INITIAL_COMMIT^{commit}"
           git cat-file -e "$NATIVE_AI_EXTRA_BASE_COMMIT^{commit}"
@@ -178,15 +174,23 @@ jobs:
           }
           declare -a patch_conflicts=()
           apply_native_ai_cleanup_paths() {
-            local start_sha="$1" path
+            local start_sha="$1" path revision_index base_commit tip_commit conflict_path skip_path
             patch_conflicts=()
-            local revision_index base_commit tip_commit
             local -a patch_bases=("$NATIVE_AI_INITIAL_BASE_COMMIT" "$NATIVE_AI_EXTRA_BASE_COMMIT")
             local -a patch_tips=("$NATIVE_AI_INITIAL_COMMIT" "$NATIVE_AI_EXTRA_COMMIT")
             for revision_index in "${!patch_bases[@]}"; do
               base_commit="${patch_bases[$revision_index]}"
               tip_commit="${patch_tips[$revision_index]}"
               for path in "${NATIVE_AI_PATHS[@]}"; do
+                skip_path=false
+                for conflict_path in "${patch_conflicts[@]}"; do
+                  if [[ "$path" == "$conflict_path" ]]; then
+                    skip_path=true
+                    break
+                  fi
+                done
+                [[ "$skip_path" == true ]] && continue
+
                 if ! git diff --binary "$base_commit" "$tip_commit" -- "$path" > "$RUNNER_TEMP/native-ai-path.patch"; then
                   echo "Could not prepare cleanup patch for $path between $base_commit and $tip_commit." >&2
                   return 1
@@ -197,10 +201,18 @@ jobs:
                 fi
                 echo "CONFLICT: preserving branch-specific content in $path on current branch $branch; patch range $base_commit..$tip_commit; diagnostic follows." >&2
                 cat "$RUNNER_TEMP/native-ai-path-apply.log" >&2 || true
-                if ! git reset "$start_sha" -- "$path" >/dev/null 2>&1 || ! git checkout "$start_sha" -- "$path" >/dev/null 2>&1; then
-                  echo "Could not restore conflicting path $path to its exact starting revision $start_sha." >&2
-                  git reset --hard "$start_sha" >/dev/null 2>&1 || true
-                  return 1
+                if git cat-file -e "$start_sha:$path" 2>/dev/null; then
+                  if ! git reset "$start_sha" -- "$path" >/dev/null 2>&1 || ! git checkout "$start_sha" -- "$path" >/dev/null 2>&1; then
+                    echo "Could not restore conflicting path $path to its exact starting revision $start_sha." >&2
+                    git reset --hard "$start_sha" >/dev/null 2>&1 || true
+                    return 1
+                  fi
+                else
+                  # A branch that never had (or already deleted) this path must remain
+                  # without it; restore the starting tree rather than treating absence as
+                  # a fatal checkout failure.
+                  git rm --cached --ignore-unmatch -q -- "$path" >/dev/null 2>&1 || true
+                  rm -f -- "$path"
                 fi
                 patch_conflicts+=("$path")
               done
@@ -306,6 +318,8 @@ jobs:
             branch="${remote_ref#refs/remotes/origin/}"
             [[ "$branch" == "main" ]] && continue
             start_sha="$(git rev-parse "$remote_ref")"
+            # Each branch starts from a clean tree even if a previous iteration staged work.
+            git reset --hard "$start_sha" >/dev/null 2>&1
             git checkout --detach "$start_sha" >/dev/null 2>&1
 
             before_refs="$(scan_active_provider_refs)" || { failed+=("$branch: provider scan errored; branch left unchanged"); continue; }
@@ -387,11 +401,22 @@ jobs:
               continue
             fi
             if ! verify_native_ai_impl; then
-              failed+=("$branch: Native AI implementation verification failed after cherry-pick; branch left unchanged")
+              failed+=("$branch: Native AI implementation verification failed after per-path cleanup; branch left unchanged")
               git reset --hard "$start_sha" >/dev/null 2>&1 || true
               continue
             fi
+            if [[ -z "$(git status --porcelain)" ]]; then
+              skipped+=("$branch (no applicable cleanup changes; provider and implementation checks passed)")
+              continue
+            fi
+            git diff --cached --check
+            git commit -m "Apply reviewed Native AI cleanup" >/dev/null
             new_sha="$(git rev-parse HEAD)"
+            if [[ "$new_sha" == "$start_sha" ]]; then
+              git reset --hard "$start_sha" >/dev/null 2>&1 || true
+              failed+=("$branch: cleanup commit did not advance the branch tip; branch left unchanged")
+              continue
+            fi
             if update_existing_branch_ref "$branch" "$start_sha" "$new_sha"; then
               updated+=("$branch ($start_sha -> $new_sha)")
             else
