@@ -1496,14 +1496,16 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
                     and part.func.value.value == "; "
                     and len(part.args) == 1
                     and isinstance(part.args[0], ast.GeneratorExp)
-                    and isinstance(part.args[0].target, ast.Tuple)
-                    and len(part.args[0].target.elts) == 2
-                    and all(isinstance(item, ast.Name) for item in part.args[0].target.elts)
-                    and isinstance(part.args[0].iter, ast.Call)
-                    and isinstance(part.args[0].iter.func, ast.Attribute)
-                    and part.args[0].iter.func.attr == "items"
-                    and isinstance(part.args[0].iter.func.value, ast.Name)
-                    and part.args[0].iter.func.value.id == "provider_errors"
+                    and len(part.args[0].generators) == 1
+                    and isinstance(part.args[0].generators[0].target, ast.Tuple)
+                    and len(part.args[0].generators[0].target.elts) == 2
+                    and all(isinstance(item, ast.Name) for item in part.args[0].generators[0].target.elts)
+                    and isinstance(part.args[0].generators[0].iter, ast.Call)
+                    and isinstance(part.args[0].generators[0].iter.func, ast.Attribute)
+                    and part.args[0].generators[0].iter.func.attr == "items"
+                    and isinstance(part.args[0].generators[0].iter.func.value, ast.Name)
+                    and part.args[0].generators[0].iter.func.value.id == "provider_errors"
+                    and not part.args[0].generators[0].ifs
                     and isinstance(part.args[0].elt, ast.JoinedStr)
                     and not part.keywords
                 ):
