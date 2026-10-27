@@ -232,7 +232,7 @@ jobs:
                 # after every mutation attempt and classify the observed final state.
                 update_rc=2
                 if update_payload="$(gh api graphql \
-                    -f query='mutation($repoId: ID!, $name: String!, $before: GitObjectID!, $after: GitObjectID!) { updateRefs(input: {repositoryId: $repoId, refUpdates: [{name: $name, beforeOid: $before, afterOid: $after, force: false}], clientMutationId: "atlas-native-ai-propagation"}) { clientMutationId } }' \
+                    -f query='mutation($repoId: ID!, $name: GitRefname!, $before: GitObjectID!, $after: GitObjectID!) { updateRefs(input: {repositoryId: $repoId, refUpdates: [{name: $name, beforeOid: $before, afterOid: $after, force: false}], clientMutationId: "atlas-native-ai-propagation"}) { clientMutationId } }' \
                     -F repoId="$repository_id" \
                     -F name="refs/heads/$branch" \
                     -F before="$expected_sha" \
