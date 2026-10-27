@@ -140,3 +140,16 @@ def test_android_resource_not_found_line_is_classified_as_resource_failure():
 
     assert "Android resource-linking failure" in report["likely_blockers"]
     assert "Kotlin or Java compilation failure" not in report["likely_blockers"]
+
+def test_braced_unquoted_secret_is_fully_redacted_from_diagnostic_evidence():
+    import json
+    from app.main import _redact_release_diagnostic_text, _release_diagnostic_report
+
+    supplied = "Could not resolve artifact; password=SECRET}SUFFIX"
+    redacted = _redact_release_diagnostic_text(supplied)
+    report = json.loads(_release_diagnostic_report(redacted, ""))
+
+    assert "SECRET}SUFFIX" not in redacted
+    assert "SECRET}SUFFIX" not in json.dumps(report)
+    assert "[REDACTED]" in redacted
+    assert "Could not resolve" in json.dumps(report)
