@@ -61,3 +61,6 @@ def test_legacy_branches_receive_runtime_only_patch_with_hunk_conflicts_favoring
     assert 'git cherry-pick "$NATIVE_AI_COMMIT"' not in workflow
     assert "verify_native_ai_impl" in workflow
     assert "provider references remain" in workflow
+    assert 'if [[ -z "$before_refs" ]] && verify_native_ai_impl; then' in workflow
+    assert "ACTIVE PROVIDER REFERENCES before propagation" in workflow
+    assert "ACTIVE PROVIDER REFERENCES REMAIN after runtime-only patch" in workflow
