@@ -630,6 +630,60 @@ def retained_helper():
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_conditional_runtime_error_rebinding_prevents_stub_replacement(self):
+        legacy = """if use_custom_runtime:
+    RuntimeError = CustomRuntimeError
+
+class AIProviderError(RuntimeError):
+    pass
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text",
+                return_value="from .native_ai import AIProviderError\n",
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "RuntimeError is imported or rebound"
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_chained_all_assignment_alias_mutation_fails_closed(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                "aliases = __all__ = ['branch_helper']\n"
+                "aliases.append('NativeAIError')\n"
+                "class NativeAIError(RuntimeError):\n    pass\n"
+                "def branch_helper():\n    return True\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text",
+                return_value="from .native_ai import AIProviderError, NativeAIError\n",
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "dynamic exports or mutates __all__"
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_chained_assignment_cannot_overwrite_canonical_facade_name(self):
         legacy = """class AIProviderError(RuntimeError):
     pass
