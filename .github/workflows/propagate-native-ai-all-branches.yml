@@ -119,6 +119,7 @@ jobs:
                 git cherry-pick --abort >/dev/null 2>&1 || true
                 failed+=("$branch: Native AI patch conflicts; branch left unchanged for manual reconciliation")
                 continue
+              fi
             else
               # Reapply the Native AI patch if a later branch commit reintroduced hosted
               # provider wiring after the canonical Native AI commit.
