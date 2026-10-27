@@ -236,23 +236,23 @@ class LegacyNativeAIMigrationTests(unittest.TestCase):
     def test_strategy_migration_refuses_side_effecting_trampoline_arguments(self):
         cases = (
             (
-                "async def _generate_with_provider(provider, prompt):\\n"
-                "    return await _gemini_json(prompt)\\n\\n"
-                "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\\n"
-                "    return await _generate_with_provider('gemini', normalize_prompt(prompt))\\n",
+                "async def _generate_with_provider(provider, prompt):\n"
+                "    return await _gemini_json(prompt)\n\n"
+                "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+                "    return await _generate_with_provider('gemini', normalize_prompt(prompt))\n",
                 "trampoline arguments may contain branch-specific input handling",
             ),
             (
-                "async def _generate_with_provider(provider, prompt):\\n"
-                "    return await _gemini_json(normalize_prompt(prompt))\\n\\n"
-                "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\\n"
-                "    return await _generate_with_provider('gemini', prompt)\\n",
+                "async def _generate_with_provider(provider, prompt):\n"
+                "    return await _gemini_json(normalize_prompt(prompt))\n\n"
+                "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+                "    return await _generate_with_provider('gemini', prompt)\n",
                 "side-effecting arguments",
             ),
         )
         for definitions, message in cases:
             with self.subTest(message=message):
-                legacy = "from .ai_providers import _gemini_json\\n" + definitions
+                legacy = "from .ai_providers import _gemini_json\n" + definitions
                 with tempfile.TemporaryDirectory() as tmp:
                     root = Path(tmp)
                     target = root / "app" / "strategy_ai.py"
@@ -440,13 +440,13 @@ class LegacyNativeAIMigrationTests(unittest.TestCase):
 
     def test_daily_research_refuses_side_effecting_provider_condition(self):
         legacy = (
-            "from .ai_providers import dual_ai_research_review\\n"
-            "async def run_daily_research():\\n"
-            "    review = {}\\n"
-            "    if provider_enabled(settings.gemini_api_key):\\n"
-            "        review['external_ai'] = await dual_ai_research_review(research, intelligence)\\n"
-            "    else:\\n"
-            "        review['external_ai'] = {'status': 'NOT_CONFIGURED'}\\n"
+            "from .ai_providers import dual_ai_research_review\n"
+            "async def run_daily_research():\n"
+            "    review = {}\n"
+            "    if provider_enabled(settings.gemini_api_key):\n"
+            "        review['external_ai'] = await dual_ai_research_review(research, intelligence)\n"
+            "    else:\n"
+            "        review['external_ai'] = {'status': 'NOT_CONFIGURED'}\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
