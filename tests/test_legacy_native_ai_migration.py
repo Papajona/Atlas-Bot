@@ -31,6 +31,23 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
 
 
 class LegacyNativeAIMigrationTests(unittest.TestCase):
+    def test_config_refuses_mixed_provider_and_unrelated_same_line_assignments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(
+                "class Settings:\\n"
+                "    gemini_api_key: str = ''; withdrawals_enabled: bool = True\\n",
+                encoding="utf-8",
+            )
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "sharing a line with another statement"):
+                    migration.transform_config()
+            result = config.read_text(encoding="utf-8")
+            self.assertIn("withdrawals_enabled", result)
+            self.assertIn("gemini_api_key", result)
+
     def test_config_removes_provider_fields_but_preserves_unrelated_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
