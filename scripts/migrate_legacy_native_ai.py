@@ -274,7 +274,7 @@ def _safe_canonical_json_helper(
             and is_name(value.values[0], "text") and is_string(value.values[1], "")
         ):
             return True
-        if is_strip_call(value, "text") or is_strip_call(value, "raw"):
+        if is_strip_call(value):
             return True
         if (
             isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
@@ -325,7 +325,8 @@ def _safe_canonical_json_helper(
             if handler.type is None or len(handler.body) != 1 or not is_error_raise(handler.body[0]):
                 return False
             exception_nodes = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
-            if not {ast.unparse(item) for item in exception_nodes}.issubset(allowed_exceptions):
+            exception_names = {ast.unparse(item) for item in exception_nodes}
+            if not exception_names or not exception_names.issubset(allowed_exceptions):
                 return False
         return True
 
