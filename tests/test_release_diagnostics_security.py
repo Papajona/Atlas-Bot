@@ -104,11 +104,13 @@ def test_release_diagnostics_redacts_quoted_json_secret_values_before_returning_
     import json
     from app.main import _redact_release_diagnostic_text, _release_diagnostic_report
 
-    supplied = '{"password": "dont expose this secret", "message": "Could not resolve com.example:bad:1"}'
+    supplied = '{"password": "dont expose this secret", "Authorization": "Bearer bearer-secret-value", "message": "Could not resolve com.example:bad:1"}'
     redacted = _redact_release_diagnostic_text(supplied)
     report = json.loads(_release_diagnostic_report(redacted, ""))
 
     assert "dont expose this secret" not in redacted
+    assert "bearer-secret-value" not in redacted
     assert "dont expose this secret" not in json.dumps(report)
+    assert "bearer-secret-value" not in json.dumps(report)
     assert "[REDACTED]" in redacted
     assert "Could not resolve" in json.dumps(report)
