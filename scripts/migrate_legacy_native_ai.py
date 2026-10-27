@@ -205,13 +205,18 @@ def transform_ai_providers(commit: str) -> None:
     old_tree = ast.parse(source, filename=str(path))
     canonical = canonical_text(commit, "app/ai_providers.py")
     canonical_tree = ast.parse(canonical, filename="canonical app/ai_providers.py")
-    canonical_names = {name for node in canonical_tree.body for name in _defined_names(node)}
+    canonical_nodes_by_name: dict[str, ast.AST] = {}
+    for canonical_node in canonical_tree.body:
+        for defined_name in _defined_names(canonical_node):
+            canonical_nodes_by_name.setdefault(defined_name, canonical_node)
+    canonical_names = set(canonical_nodes_by_name)
     provider_adapter_names = {
         "_gemini_json", "_groq_json", "_prompt",
         "dual_ai_research_review", "dual_ai_trade_safety_review",
     }
     extras: list[str] = []
     import_nodes: list[ast.AST] = []
+    source_lines = source.splitlines(keepends=True)
     for node in old_tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             import_nodes.append(node)
@@ -219,9 +224,17 @@ def transform_ai_providers(commit: str) -> None:
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
             continue
         name = _name(node)
-        if name in provider_adapter_names or (name and name in canonical_names):
+        if name in provider_adapter_names:
             continue
-        segment = ast.get_source_segment(source, node) or ""
+        start_line = min([node.lineno, *[decorator.lineno for decorator in getattr(node, "decorator_list", [])]])
+        segment = "".join(source_lines[start_line - 1:node.end_lineno]).rstrip("\n")
+        if name and name in canonical_names:
+            canonical_node = canonical_nodes_by_name[name]
+            if ast.dump(node, include_attributes=False) == ast.dump(canonical_node, include_attributes=False):
+                continue
+            raise MigrationError(
+                f"app/ai_providers.py has branch-specific definition {name!r} that collides with a canonical name; refusing to discard or shadow it"
+            )
         if PROVIDER_RE.search(segment):
             raise MigrationError(
                 f"app/ai_providers.py contains an unrecognized provider-bearing helper {name or type(node).__name__}; refusing to overwrite it"
@@ -342,21 +355,46 @@ def transform_daily_research() -> None:
     lines = source.splitlines(keepends=True)
     edits: list[tuple[int, int, str]] = []
     found_callsite = False
+    provider_delegations = {"dual_ai_research_review", "_gemini_json", "_groq_json", "_cerebras_json"}
+
+    def contains_provider_call(statement: ast.AST) -> bool:
+        return any(
+            isinstance(part, ast.Call)
+            and ((isinstance(part.func, ast.Name) and part.func.id in provider_delegations)
+                 or (isinstance(part.func, ast.Attribute) and part.func.attr in provider_delegations))
+            for part in ast.walk(statement)
+        )
+
     for node in ast.walk(tree):
         if not isinstance(node, ast.If):
             continue
-        segment = ast.get_source_segment(source, node) or ""
-        if re.search(r"(?i)(?:gemini_api_key|groq_api_key|cerebras_api_key|ai_gateway_)", segment):
-            first = lines[node.lineno - 1]
-            indent = first[:len(first) - len(first.lstrip())]
-            replacement = "\n".join((
-                indent + "native_research_input = dict(research)",
-                indent + 'native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))',
-                indent + 'review["native_ai_review"] = native_research_review(native_research_input, intelligence)',
-            )) + "\n"
-            edits.append((node.lineno, node.end_lineno, replacement))
-            found_callsite = True
-            break
+        test_segment = ast.get_source_segment(source, node.test) or ""
+        if not re.search(r"(?i)(?:gemini_api_key|groq_api_key|cerebras_api_key|ai_gateway_)", test_segment):
+            continue
+        body_is_provider_only = bool(node.body) and all(
+            contains_provider_call(statement) or PROVIDER_RE.search(ast.get_source_segment(source, statement) or "")
+            for statement in node.body
+        )
+        else_is_provider_fallback = all(
+            contains_provider_call(statement)
+            or "NOT_CONFIGURED" in (ast.get_source_segment(source, statement) or "")
+            or PROVIDER_RE.search(ast.get_source_segment(source, statement) or "")
+            for statement in node.orelse
+        )
+        if not body_is_provider_only or not else_is_provider_fallback:
+            raise MigrationError(
+                "daily-research provider conditional contains unrelated or unknown logic; refusing to replace its whole block"
+            )
+        first = lines[node.lineno - 1]
+        indent = first[:len(first) - len(first.lstrip())]
+        replacement = "\n".join((
+            indent + "native_research_input = dict(research)",
+            indent + 'native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))',
+            indent + 'review["native_ai_review"] = native_research_review(native_research_input, intelligence)',
+        )) + "\n"
+        edits.append((node.lineno, node.end_lineno, replacement))
+        found_callsite = True
+        break
     for index, line in enumerate(lines, start=1):
         if re.search(r"^\s*from\s+\.ai_providers\s+import\s+dual_ai_research_review\b", line):
             edits.append((index, index, "from .native_ai import native_research_review\n"))
@@ -498,7 +536,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             line, re.I,
         ):
             continue
-        if re.search(r"(?i)\b(?:create_secret|grant_secret_access)\s+atlas-(?:gemini|groq|cerebras|ai-gateway)\b", line):
+        if re.search(r"(?i)\b(?:create_secret|grant_secret_access)\s+atlas-(?:gemini|groq|cerebras|ai-gateway|openai)\b", line):
             continue
         if stripped.startswith("#") and PROVIDER_RE.search(line):
             continue
@@ -507,7 +545,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if "ENV_VARS=" in line:
             line = re.sub(
                 r"@(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|GROQ_MODEL|GROQ_STRATEGY_MODEL|"
-                r"GROQ_MAX_COMPLETION_TOKENS|CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+)=[^@\"]*",
+                r"GROQ_MAX_COMPLETION_TOKENS|CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^@\"]*",
                 "",
                 line,
                 flags=re.I,
@@ -609,7 +647,13 @@ def scrub_ancillary_text(path: str, text: str) -> str:
             if isinstance(value, list):
                 return [scrub(item, key_context) for item in value]
             if isinstance(value, str) and PROVIDER_RE.search(value):
-                return "atlas-native-strategy-v1" if "model" in key_context.lower() else ""
+                if "model" in key_context.lower():
+                    return "atlas-native-strategy-v1"
+                cleaned = SECRET_VERSION_RE.sub("", value)
+                cleaned = KEY_ASSIGNMENT_RE.sub("", cleaned)
+                cleaned = HOST_RE.sub("", cleaned)
+                cleaned = MODEL_RE.sub("atlas-native-strategy-v1", cleaned)
+                return PROVIDER_RE.sub("legacy provider", cleaned)
             return value
 
         return json.dumps(scrub(data), indent=2, ensure_ascii=False) + "\n"
@@ -627,7 +671,7 @@ def scrub_ancillary_text(path: str, text: str) -> str:
         if PROVIDER_RE.search(candidate):
             if re.search(r"(?i)\b(?:gcloud|docker|curl|python|bash|run:)\b", candidate):
                 raise MigrationError(f"{path} has provider wiring inside an executable line; refusing automatic deletion")
-            continue
+            candidate = PROVIDER_RE.sub("legacy provider", candidate)
         if candidate.strip():
             kept.append(candidate)
     cleaned = "".join(_remove_empty_env(kept))
@@ -644,9 +688,14 @@ def _apply_path_patch(base_commit: str, tip_commit: str, path: str) -> bool:
         return True
     applied = _git("apply", "--3way", "--index", input_text=patch, check=False)
     if applied.returncode:
-        # The path is returned to the branch's exact starting content. Never choose
-        # either side of a conflicted hunk automatically.
-        _git("restore", "--source=HEAD", "--staged", "--worktree", "--", path, check=False)
+        # Restore the branch's exact starting content. A path absent at HEAD must be
+        # removed from both index and worktree; git restore cannot restore a nonexistent path.
+        restored = _git("restore", "--source=HEAD", "--staged", "--worktree", "--", path, check=False)
+        if _git("cat-file", "-e", f"HEAD:{path}", check=False).returncode != 0:
+            _git("rm", "-f", "--cached", "--ignore-unmatch", "--", path, check=False)
+            target = ROOT / path
+            if target.is_file() or target.is_symlink():
+                target.unlink()
         return False
     return True
 
