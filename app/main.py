@@ -7752,16 +7752,49 @@ async def research_fx_execution_route(req: dict[str, object], x_admin_token: str
 # Authorized release diagnostics. The gateway key is read only from server configuration.
 _RELEASE_SECRET_PATTERNS = [
     re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+"),
-    re.compile(r"(?i)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|private[_-]?key)\s*[:=]\s*)[^\s,;]+"),
-    re.compile(r"(?i)(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----)"),
+    re.compile(
+        r"""(?i)((?:"|')?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret(?:[_-]?key)?|private[_-]?key|token)(?:"|')?\s*[:=]\s*)(?:"([^"]*)"|'([^']*)'|([^\s,;}]+))"""
+    ),
+    re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----)"),
 ]
 
 
 def _redact_release_diagnostic_text(value: str) -> str:
     text_value = str(value or "")
-    for pattern in _RELEASE_SECRET_PATTERNS:
-        text_value = pattern.sub(r"\1[REDACTED]" if pattern.groups == 1 else r"\1[REDACTED]\2", text_value)
+    # Support JSON/YAML-style quoted keys and values as well as KEY=value text.
+    text_value = _RELEASE_SECRET_PATTERNS[0].sub(r"\1[REDACTED]", text_value)
+
+    def redact_named_secret(match: re.Match[str]) -> str:
+        prefix = match.group(1)
+        if match.group(2) is not None:
+            replacement_value = '"[REDACTED]"'
+        elif match.group(3) is not None:
+            replacement_value = "'[REDACTED]'"
+        else:
+            replacement_value = "[REDACTED]"
+        return prefix + replacement_value
+
+    text_value = _RELEASE_SECRET_PATTERNS[1].sub(redact_named_secret, text_value)
+    text_value = _RELEASE_SECRET_PATTERNS[2].sub(r"\1[REDACTED]\2", text_value)
     return text_value
+
+
+def _bounded_release_evidence(line: str, markers: tuple[str, ...], limit: int = 240) -> str:
+    """Keep a bounded excerpt around the failure marker so the evidence retains its cause."""
+    lowered_line = line.lower()
+    positions = [lowered_line.find(marker.lower()) for marker in markers]
+    positions = [position for position in positions if position >= 0]
+    if not positions:
+        return line.strip()[:limit]
+    marker_position = min(positions)
+    start = max(0, marker_position - limit // 3)
+    end = min(len(line), start + limit)
+    excerpt = line[start:end].strip()
+    if start > 0:
+        excerpt = "…" + excerpt
+    if end < len(line):
+        excerpt += "…"
+    return excerpt
 
 
 def _release_diagnostic_report(safe_logs: str, safe_config: str) -> str:
@@ -7781,12 +7814,12 @@ def _release_diagnostic_report(safe_logs: str, safe_config: str) -> str:
         ),
         (
             "Android manifest or SDK configuration failure",
-            ("manifest merger failed", "minsdkversion", "sdk location not found", "cmdline-tools", "build-tools", "namespace not specified", "google-services.json"),
+            ("manifest merger failed", "min sdk version is lower", "minsdkversion error", "sdk location not found", "cmdline-tools component is missing", "cmdline-tools not found", "failed to find build tools revision", "namespace not specified", "google-services.json is missing", "google-services.json was not found", "failed to process google-services.json", "no matching client found for package name"),
             "Verify the Android SDK installation, namespace, manifest declarations, and required non-secret build configuration.",
         ),
         (
             "Signing configuration failure",
-            ("keystore was tampered", "failed to read key", "signingconfig", "keystore file", "no key with alias", "validate signing"),
+            ("keystore was tampered", "failed to read key", "no key with alias", "validate signing", "keystore file does not exist", "keystore file not found", "failed to load keystore", "signing configuration is incomplete"),
             "Verify the expected keystore, alias, and protected signing configuration. Never expose keystore data or bypass the signed-release gate.",
         ),
         (
@@ -7805,7 +7838,7 @@ def _release_diagnostic_report(safe_logs: str, safe_config: str) -> str:
         if not any(marker in lowered for marker in markers):
             continue
         matched_lines = [
-            line.strip()[:240]
+            _bounded_release_evidence(line, markers)
             for line in combined.splitlines()
             if line.strip() and any(marker in line.lower() for marker in markers)
         ][:5]
