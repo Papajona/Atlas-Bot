@@ -1046,6 +1046,44 @@ def _extract_json(text):
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_side_effecting_parser_annotation_fails_closed(self):
+        legacy = """import json
+
+class AIProviderError(RuntimeError):
+    pass
+
+def audit():
+    return str
+
+def _extract_json(text: audit()):
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise AIProviderError("response object required")
+    return value
+"""
+        canonical = """import json
+from .native_ai import AIProviderError
+
+def _extract_json(text: str):
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise AIProviderError("response object required")
+    return value
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "branch-specific definition '_extract_json' that collides"
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_chained_assignment_cannot_overwrite_canonical_facade_name(self):
         legacy = """class AIProviderError(RuntimeError):
     pass
