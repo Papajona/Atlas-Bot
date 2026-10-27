@@ -7,6 +7,8 @@ whose unrelated hunks collide with each branch. It deliberately refuses uncertai
 from __future__ import annotations
 
 import ast
+import builtins
+import symtable
 import json
 import re
 import subprocess
@@ -1389,6 +1391,84 @@ def transform_strategy_ai(commit: str) -> None:
 
     if canonical_generate is None:
         raise MigrationError("canonical strategy module lacks generate_strategy_draft")
+    # Check retained schema/helper contracts before transplanting the canonical generator.
+    canonical_spec = next(
+        (node for node in new_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"),
+        None,
+    )
+    canonical_context = next(
+        (node for node in new_tree.body
+         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_apply_market_context"),
+        None,
+    )
+    if canonical_spec is not None:
+        legacy_spec = next(
+            (node for node in old_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"),
+            None,
+        )
+        if legacy_spec is None:
+            raise MigrationError("legacy strategy module lacks AIStrategySpec required by the canonical generator")
+        base_names = {
+            part.id if isinstance(part, ast.Name) else part.attr
+            for part in legacy_spec.bases
+            if isinstance(part, (ast.Name, ast.Attribute))
+        }
+        spec_fields = {
+            statement.target.id for statement in legacy_spec.body
+            if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name)
+        } | {
+            target.id for statement in legacy_spec.body if isinstance(statement, ast.Assign)
+            for target in statement.targets if isinstance(target, ast.Name)
+        }
+        required_spec_fields = {"asset", "symbols", "timeframes", "strategy_family", "validation_warnings"}
+        if "BaseModel" not in base_names or not required_spec_fields.issubset(spec_fields):
+            raise MigrationError(
+                "legacy AIStrategySpec does not satisfy the canonical generator contract "
+                "(BaseModel plus asset, symbols, timeframes, strategy_family, validation_warnings required)"
+            )
+
+        if canonical_context is not None:
+            legacy_context = next(
+                (node for node in old_tree.body
+                 if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"),
+                None,
+            )
+            if legacy_context is None:
+                raise MigrationError(
+                    "legacy strategy module lacks a synchronous _apply_market_context required by the canonical generator"
+                )
+            arguments = legacy_context.args
+            positional = [*arguments.posonlyargs, *arguments.args]
+            parameter_names = {arg.arg for arg in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)}
+            required_context_keywords = {"asset", "symbol", "timeframe"}
+            supports_keywords = arguments.kwarg is not None or required_context_keywords.issubset(parameter_names)
+            if not positional or positional[0].arg != "spec" or not supports_keywords:
+                raise MigrationError(
+                    "legacy _apply_market_context signature is incompatible with canonical keyword calls"
+                )
+
+        config_path = ROOT / "app/config.py"
+        if not config_path.is_file():
+            raise MigrationError("app/config.py is absent; cannot verify canonical strategy risk configuration")
+        config_tree = ast.parse(config_path.read_text(encoding="utf-8"), filename=str(config_path))
+        has_risk_setting = any(
+            isinstance(module_node, ast.ClassDef)
+            and any(
+                (
+                    isinstance(member, ast.AnnAssign)
+                    and isinstance(member.target, ast.Name)
+                    and member.target.id == "risk_per_trade"
+                ) or (
+                    isinstance(member, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "risk_per_trade" for target in member.targets)
+                )
+                for member in module_node.body
+            )
+            for module_node in config_tree.body
+        )
+        if not has_risk_setting:
+            raise MigrationError("legacy app settings do not define risk_per_trade required by canonical strategy generation")
+
     canonical_lines = canonical.splitlines(keepends=True)
     new_function = "".join(canonical_lines[canonical_generate.lineno - 1:canonical_generate.end_lineno])
 
@@ -1413,6 +1493,84 @@ def transform_strategy_ai(commit: str) -> None:
                 and isinstance(node.value.value, str)):
             continue
         retained_nodes.append(node)
+
+    # Prove the canonical generator's global loads resolve after the migration.
+    local_names = {canonical_generate.name}
+    local_names.update(arg.arg for arg in ast.walk(canonical_generate.args) if isinstance(arg, ast.arg))
+    for part in ast.walk(canonical_generate):
+        if isinstance(part, ast.Name) and isinstance(part.ctx, (ast.Store, ast.Del)):
+            local_names.add(part.id)
+        elif isinstance(part, ast.ExceptHandler) and part.name:
+            local_names.add(part.name)
+        elif isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and part is not canonical_generate:
+            local_names.add(part.name)
+    canonical_global_loads = {
+        part.id for part in ast.walk(canonical_generate)
+        if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Load)
+    } - local_names - set(dir(builtins))
+    available_names: set[str] = set()
+    for retained_node in retained_nodes:
+        if isinstance(retained_node, ast.AnnAssign) and retained_node.value is None:
+            continue
+        available_names.update(_defined_names(retained_node))
+    remappable_names = {"NativeAIError", "compose_strategy_spec"}
+    missing_dependencies = sorted(canonical_global_loads - available_names - remappable_names)
+    if missing_dependencies:
+        raise MigrationError(
+            "canonical strategy generator depends on missing module binding(s): "
+            + ", ".join(missing_dependencies)
+            + "; refusing to publish a broken strategy module"
+        )
+
+    # Scope-aware references distinguish a retained helper's parameter from a real
+    # reference to a removed module global.
+    retained_module = ast.Module(body=retained_nodes, type_ignores=[])
+    try:
+        retained_symbols = symtable.symtable(ast.unparse(retained_module), str(path), "exec")
+    except (SyntaxError, ValueError) as exc:
+        raise MigrationError("unable to resolve retained strategy helper scopes safely") from exc
+    removed_local_dependencies = {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider"}
+    retained_removed_global_uses: set[str] = set()
+
+    def collect_removed_global_references(table: symtable.SymbolTable) -> None:
+        for removed_name in removed_local_dependencies:
+            try:
+                symbol = table.lookup(removed_name)
+            except KeyError:
+                continue
+            if symbol.is_referenced() and symbol.is_global():
+                retained_removed_global_uses.add(removed_name)
+        for child in table.get_children():
+            collect_removed_global_references(child)
+
+    collect_removed_global_references(retained_symbols)
+    if retained_removed_global_uses:
+        raise MigrationError(
+            "retained strategy helper depends on removed local definition(s) "
+            + ", ".join(sorted(retained_removed_global_uses))
+            + "; refusing to remove prompt or provider behavior"
+        )
+
+    # __all__ is string-based, so Name-node dependency scans do not see removed exports.
+    for retained_node in retained_nodes:
+        targets = (
+            retained_node.targets if isinstance(retained_node, ast.Assign)
+            else [retained_node.target] if isinstance(retained_node, ast.AnnAssign)
+            else []
+        )
+        if not any(isinstance(target, ast.Name) and target.id == "__all__" for target in targets):
+            continue
+        try:
+            exports = ast.literal_eval(retained_node.value) if retained_node.value is not None else None
+        except (ValueError, TypeError):
+            exports = None
+        if not isinstance(exports, (list, tuple, set)) or not all(isinstance(export, str) for export in exports):
+            raise MigrationError("strategy module has dynamic __all__; refusing to remove names that may be exported")
+        lost_exports = sorted(removed_local_dependencies & set(exports))
+        if lost_exports:
+            raise MigrationError(
+                "strategy module __all__ exports definitions removed by migration: " + ", ".join(lost_exports)
+            )
 
     retained_name_uses = {
         part.id
@@ -1811,26 +1969,39 @@ def scrub_ancillary_text(path: str, text: str) -> str:
         def scrub(value, key_context=""):
             if isinstance(value, dict):
                 return {
-                    k: scrub(v, str(k))
-                    for k, v in value.items()
-                    if not PROVIDER_FIELD_RE.search(str(k))
+                    key: scrub(item, str(key))
+                    for key, item in value.items()
+                    if not PROVIDER_FIELD_RE.search(str(key))
                 }
             if isinstance(value, list):
                 return [scrub(item, key_context) for item in value]
             if isinstance(value, str) and PROVIDER_RE.search(value):
                 if re.fullmatch(r"(?i)(?:[a-z0-9]+_)*model(?:_(?:id|name|version))?", key_context):
                     return "atlas-native-strategy-v1"
+                # Remove actual credentials/endpoints, but preserve descriptive and audit
+                # values that merely mention a provider name.
                 cleaned = SECRET_VERSION_RE.sub("", value)
                 cleaned = KEY_ASSIGNMENT_RE.sub("", cleaned)
                 cleaned = HOST_RE.sub("", cleaned)
                 cleaned = MODEL_RE.sub("atlas-native-strategy-v1", cleaned)
-                return PROVIDER_RE.sub("legacy provider", cleaned)
+                return cleaned
             return value
 
-        return json.dumps(scrub(data), indent=2, ensure_ascii=False) + "\n"
+        scrubbed = scrub(data)
+        # Keep whitespace, key order, and formatting stable for a semantic no-op.
+        if scrubbed == data:
+            return text
+        encoded = json.dumps(scrubbed, indent=2, ensure_ascii=False) + "\n"
+        json.loads(encoded)
+        return encoded
 
     kept: list[str] = []
     for line in text.splitlines(keepends=True):
+        if path == ".env.example" and line.lstrip().startswith("#") and (
+            re.search(r"(?i)optional server-side.*(?:provider gateway|ai gateway|openai-compatible gateway)", line)
+            or re.search(r"(?i)keep the key in server Secret Manager", line)
+        ):
+            continue
         if not PROVIDER_RE.search(line):
             kept.append(line)
             continue
@@ -1848,8 +2019,6 @@ def scrub_ancillary_text(path: str, text: str) -> str:
     cleaned = "".join(_remove_empty_env(kept))
     if PROVIDER_RE.search(cleaned):
         raise MigrationError(f"{path} still contains provider references")
-    if path == "metadata.json":
-        json.loads(cleaned)
     return cleaned
 
 
