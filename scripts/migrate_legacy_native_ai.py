@@ -1302,7 +1302,9 @@ def _is_safe_legacy_hosted_strategy_generator(node: ast.AST) -> bool:
     args = node.args
     if (args.posonlyargs or args.args or args.vararg or args.kwarg
             or [a.arg for a in args.kwonlyargs] != ["prompt", "name", "asset", "symbol", "timeframe"]
-            or args.kw_defaults != [None, None, None]):
+            or len(args.kw_defaults) != 5
+            or args.kw_defaults[0] is not None or args.kw_defaults[1] is not None
+            or any(not isinstance(value, ast.Constant) or value.value is not None for value in args.kw_defaults[2:])):
         return False
 
     def inert_annotation(value: ast.AST | None) -> bool:
