@@ -33,9 +33,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          NATIVE_AI_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
+          NATIVE_AI_CLEANUP_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
+          NATIVE_AI_CANONICAL_COMMIT="f8bb968198ec909e66cc04b888716f87ded6c0fa"
+          NATIVE_AI_EXTRA_BASE_COMMIT="0d38f95079833804713fcba080caee38a6ddfb4c"
+          NATIVE_AI_EXTRA_COMMIT="2317ccc4c3293e8bbd7043970876eceb509d2d1d"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          git cat-file -e "$NATIVE_AI_COMMIT^{commit}"
+          git cat-file -e "$NATIVE_AI_CLEANUP_COMMIT^{commit}"
+          git cat-file -e "$NATIVE_AI_CANONICAL_COMMIT^{commit}"
+          git cat-file -e "$NATIVE_AI_EXTRA_BASE_COMMIT^{commit}"
+          if [[ -z "$NATIVE_AI_EXTRA_COMMIT" ]]; then
+            echo "Could not locate the reviewed release-diagnostics cleanup commit." >&2
+            exit 1
+          fi
+          git cat-file -e "$NATIVE_AI_EXTRA_COMMIT^{commit}"
+          extra_parent="$(git rev-parse "$NATIVE_AI_EXTRA_COMMIT^")"
+          if [[ "$extra_parent" != "$NATIVE_AI_EXTRA_BASE_COMMIT" ]]; then
+            echo "Refusing to propagate an unexpected cleanup range: expected parent $NATIVE_AI_EXTRA_BASE_COMMIT, found $extra_parent." >&2
+            exit 1
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin "+refs/heads/*:refs/remotes/origin/*" --prune
@@ -47,10 +62,14 @@ jobs:
             ".env.example"
             ".github/workflows/production-deploy.yml"
             ".github/workflows/production-verification.yml"
+            "ENTRY_EXIT_3_9_0.md"
             "app/ai_providers.py"
             "app/config.py"
             "app/daily_research.py"
+            "app/main.py"
             "app/native_ai.py"
+            "app/src/main/java/com/atlas/trading/network/ReleaseAdvisorClient.kt"
+            "app/src/main/java/com/atlas/trading/ui/ReleaseAdvisorScreen.kt"
             "app/strategy_ai.py"
             "app/templates/customer.html"
             "deploy/DEPLOY_WORKFLOW.md"
@@ -64,32 +83,14 @@ jobs:
             "scripts/verify_release.sh"
           )
 
-          # Build a patch commit containing only the reviewed runtime/deployment paths.
-          # This avoids cherry-picking the canonical commit's unrelated test rewrites
-          # and leaves overlapping hunks unresolved for explicit branch reconciliation.
-          NATIVE_AI_PARENT="$(git rev-parse "$NATIVE_AI_COMMIT^")"
-          git checkout --detach "$NATIVE_AI_PARENT" >/dev/null
-          if ! git diff --binary "$NATIVE_AI_PARENT" "$NATIVE_AI_COMMIT" -- "${NATIVE_AI_PATHS[@]}" > "$RUNNER_TEMP/native-ai-runtime.patch"; then
-            echo "Could not create the reviewed runtime-only Native AI patch." >&2
-            exit 1
-          fi
-          if [[ ! -s "$RUNNER_TEMP/native-ai-runtime.patch" ]]; then
-            echo "The reviewed runtime-only Native AI patch is empty." >&2
-            exit 1
-          fi
-          if ! git apply --index "$RUNNER_TEMP/native-ai-runtime.patch"; then
-            echo "Could not reconstruct the canonical runtime-only patch from its parent." >&2
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "Build reviewed Native AI runtime cleanup patch" >/dev/null
-          NATIVE_AI_RUNTIME_PATCH_COMMIT="$(git rev-parse HEAD)"
-          git checkout --detach "$GITHUB_SHA" >/dev/null
-          git cat-file -e "$NATIVE_AI_RUNTIME_PATCH_COMMIT^{commit}"
+          # Load the migration helper from the exact triggering commit. It rewrites only
+          # provider-bearing functions/settings and preserves unrelated branch logic.
+          git show "$GITHUB_SHA:scripts/migrate_legacy_native_ai.py" > "$RUNNER_TEMP/migrate_legacy_native_ai.py"
+          python -m py_compile "$RUNNER_TEMP/migrate_legacy_native_ai.py"
 
           scan_active_provider_refs() {
             local rc=0
-            git grep -IlE 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' || rc=$?
+            git grep -IlEi 'gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' || rc=$?
             if (( rc == 1 )); then return 0; fi
             if (( rc != 0 )); then return "$rc"; fi
           }
@@ -280,107 +281,75 @@ jobs:
             git checkout --detach "$start_sha" >/dev/null 2>&1
 
             before_refs="$(scan_active_provider_refs)" || { failed+=("$branch: provider scan errored; branch left unchanged"); continue; }
-            if git merge-base --is-ancestor "$NATIVE_AI_COMMIT" "$start_sha"; then
-              if [[ -z "$before_refs" ]]; then
-                if verify_native_ai_impl; then
-                  skipped+=("$branch (Native AI implementation verified; active provider scan clean)")
-                else
-                  failed+=("$branch: canonical commit is an ancestor but Native AI implementation is missing or reverted; branch left unchanged")
-                fi
-                continue
-              fi
-              # Reapply only the reviewed Native AI patch if a later commit reintroduced
-              # provider wiring; do not replace whole files or discard unrelated branch work.
-              if ! git diff "$NATIVE_AI_COMMIT^" "$NATIVE_AI_COMMIT" -- "${NATIVE_AI_PATHS[@]}" | git apply --3way --index -; then
-                git reset --hard "$start_sha" >/dev/null 2>&1 || true
-                failed+=("$branch: reintroduced provider wiring conflicts with branch changes; branch left unchanged")
-                continue
-              fi
-              after_refs="$(scan_active_provider_refs)" || { git reset --hard "$start_sha" >/dev/null 2>&1 || true; failed+=("$branch: provider scan errored; branch left unchanged"); continue; }
-              if [[ -n "$after_refs" ]]; then
-                echo "ACTIVE PROVIDER REFERENCES REMAIN after targeted patch on $branch:" >&2
-                git grep -nIE 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' >&2 || true
-                git reset --hard "$start_sha" >/dev/null 2>&1 || true
-                failed+=("$branch: provider references remain after targeted Native AI patch; branch left unchanged")
-                continue
-              fi
-              if ! verify_native_ai_impl; then
-                git reset --hard "$start_sha" >/dev/null 2>&1 || true
-                failed+=("$branch: Native AI implementation verification failed after targeted patch; branch left unchanged")
-                continue
-              fi
-              if [[ -z "$(git status --porcelain)" ]]; then
-                skipped+=("$branch (active code provider-free)")
-                continue
-              fi
-              git commit -m "Remove reintroduced hosted AI wiring" >/dev/null
-              new_sha="$(git rev-parse HEAD)"
-              if update_existing_branch_ref "$branch" "$start_sha" "$new_sha"; then
-                updated+=("$branch ($start_sha -> $new_sha)")
-              else
-                update_status=$?
-                git reset --hard "$start_sha" >/dev/null 2>&1 || true
-                if [[ "$update_status" -eq 2 ]]; then
-                  failure_reason="remote branch state unresolved after update attempt; intended commit was not confirmed and remote state may have changed"
-                else
-                  failure_reason="requested update was not confirmed; workflow did not verify the intended commit on the remote"
-                fi
-                failed+=("$branch: $failure_reason")
-                echo "FAILED branch reconciliation: $branch: $failure_reason" >&2
-              fi
-              continue
-            fi
+          if [[ -z "$before_refs" ]] && verify_native_ai_impl; then
+            skipped+=("$branch (Native AI implementation verified; active provider scan clean)")
+            continue
+          fi
+          if [[ -n "$before_refs" ]]; then
+            echo "ACTIVE PROVIDER REFERENCES before semantic migration on $branch:" >&2
+            printf '%s\n' "$before_refs" >&2
+          fi
 
-            # Old branches that are already provider-free need only pass the
-            # implementation check; avoid an empty/cherry-pick-no-op being reported as
-            # a failure just because the canonical commit is not in their ancestry.
-            if [[ -z "$before_refs" ]] && verify_native_ai_impl; then
-              skipped+=("$branch (Native AI implementation verified; active provider scan clean)")
-              continue
-            fi
-            if [[ -n "$before_refs" ]]; then
-              echo "ACTIVE PROVIDER REFERENCES before propagation on $branch: $before_refs" >&2
-            fi
-            if ! git cherry-pick "$NATIVE_AI_RUNTIME_PATCH_COMMIT" >"$RUNNER_TEMP/cherry-pick.log" 2>&1; then
-              echo "FAILED branch reconciliation: $branch could not apply the runtime-only Native AI cleanup patch; diagnostic follows." >&2
-              cat "$RUNNER_TEMP/cherry-pick.log" >&2 || true
-              git cherry-pick --abort >/dev/null 2>&1 || true
-              failed+=("$branch: runtime-only cleanup patch conflicts or cannot be applied safely; no target-ref update was attempted")
-              continue
-            fi
-            after_refs="$(scan_active_provider_refs)" || { git cherry-pick --abort >/dev/null 2>&1 || true; failed+=("$branch: post-change provider scan errored; branch left unchanged"); continue; }
-            if [[ -n "$after_refs" ]]; then
-              echo "ACTIVE PROVIDER REFERENCES REMAIN after runtime-only patch on $branch:" >&2
-              git grep -nIE 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' >&2 || true
-              git cherry-pick --abort >/dev/null 2>&1 || true
-              failed+=("$branch: provider references remain after runtime-only cleanup patch; branch left unchanged")
-              continue
-            fi
-            if ! verify_native_ai_impl; then
-              failed+=("$branch: Native AI implementation verification failed after cherry-pick; branch left unchanged")
-              git reset --hard "$start_sha" >/dev/null 2>&1 || true
-              continue
-            fi
-            new_sha="$(git rev-parse HEAD)"
-            if update_existing_branch_ref "$branch" "$start_sha" "$new_sha"; then
-              updated+=("$branch ($start_sha -> $new_sha)")
+          # Do not replay the broad canonical commit. Apply only the AI settings/callsites
+          # and provider-bearing deployment entries; the helper refuses unknown layouts.
+          if ! python "$RUNNER_TEMP/migrate_legacy_native_ai.py" --canonical-commit "$NATIVE_AI_CANONICAL_COMMIT" --cleanup-commit "$NATIVE_AI_CLEANUP_COMMIT" --extra-base-commit "$NATIVE_AI_EXTRA_BASE_COMMIT" --extra-commit "$NATIVE_AI_EXTRA_COMMIT"; then
+            git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true
+            failed+=("$branch: semantic Native AI migration refused or failed; branch left unchanged")
+            continue
+          fi
+
+          after_refs="$(scan_active_provider_refs)" || { git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true; failed+=("$branch: post-migration provider scan errored; branch left unchanged"); continue; }
+          if [[ -n "$after_refs" ]]; then
+            echo "ACTIVE PROVIDER REFERENCES REMAIN after semantic migration on $branch:" >&2
+            git grep -nIEi 'gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' >&2 || true
+            git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true
+            failed+=("$branch: provider references remain after semantic migration; branch left unchanged")
+            continue
+          fi
+          if ! verify_native_ai_impl; then
+            git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true
+            failed+=("$branch: Native AI implementation/import verification failed; branch left unchanged")
+            continue
+          fi
+          if ! git diff --check; then
+            git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true
+            failed+=("$branch: whitespace validation failed; branch left unchanged")
+            continue
+          fi
+          if [[ -z "$(git status --porcelain)" ]]; then
+            skipped+=("$branch (already provider-free after verification)")
+            continue
+          fi
+          git add -A
+          git diff --cached --check
+          git commit -m "Remove hosted AI wiring with targeted Native AI migration" >/dev/null
+          new_sha="$(git rev-parse HEAD)"
+          if update_existing_branch_ref "$branch" "$start_sha" "$new_sha"; then
+            updated+=("$branch ($start_sha -> $new_sha)")
+          else
+            update_status=$?
+            git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true
+            if [[ "$update_status" -eq 2 ]]; then
+              failure_reason="remote branch state unresolved after update attempt; intended commit was not confirmed and remote state may have changed"
             else
-              update_status=$?
-              git reset --hard "$start_sha" >/dev/null 2>&1 || true
-              if [[ "$update_status" -eq 2 ]]; then
-                failure_reason="remote branch state unresolved after update attempt; intended commit was not confirmed and remote state may have changed"
-              else
-                failure_reason="requested update was not confirmed; workflow did not verify the intended commit on the remote"
-              fi
-              failed+=("$branch: $failure_reason")
-              echo "FAILED branch reconciliation: $branch: $failure_reason" >&2
+              failure_reason="requested update was not confirmed; workflow did not verify the intended commit on the remote"
             fi
+            failed+=("$branch: $failure_reason")
+            echo "FAILED branch reconciliation: $branch: $failure_reason" >&2
+          fi
           done < <(git for-each-ref --format='%(refname)' refs/remotes/origin/ | grep -v '^refs/remotes/origin/HEAD$' | sort)
 
           {
             echo "## Atlas Native AI branch propagation"
             echo
-            echo "- Canonical Native AI commit: $NATIVE_AI_COMMIT"
+            echo "- Native AI cleanup commit: $NATIVE_AI_CLEANUP_COMMIT"
+            echo "- Canonical Native AI source commit: $NATIVE_AI_CANONICAL_COMMIT"
             echo "- Branches updated: ${#updated[@]}"
             printf '  - %s\n' "${updated[@]:-none}"
             echo "- Branches skipped after implementation and provider checks: ${#skipped[@]}"

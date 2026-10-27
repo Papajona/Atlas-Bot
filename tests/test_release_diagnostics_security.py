@@ -6,7 +6,7 @@ def test_release_diagnostics_redacts_bearer_and_named_secrets():
 
     source = (
         "Authorization: Bearer abc.def.ghi\n"
-        "AI_GATEWAY_API_KEY=supersecret123\n"
+        "SERVICE_API_KEY=supersecret123\n"
         "password: dont-log-me\n"
         "ordinary gradle task failed"
     )
@@ -16,6 +16,24 @@ def test_release_diagnostics_redacts_bearer_and_named_secrets():
     assert "dont-log-me" not in redacted
     assert "[REDACTED]" in redacted
     assert "ordinary gradle task failed" in redacted
+
+
+def test_release_diagnostics_redacts_quoted_bearer_and_preserves_http_status():
+    import json
+    from app.main import _redact_release_diagnostic_text, _release_diagnostic_report
+
+    source = (
+        'Authorization: Bearer "s3cr3tABC"; HTTP 401 Could not GET https://repo.example/artifact\n'
+        "Authorization: HTTP 401 Could not GET https://repo.example/artifact"
+    )
+    redacted = _redact_release_diagnostic_text(source)
+    report = json.loads(_release_diagnostic_report(redacted, ""))
+
+    assert "s3cr3tABC" not in redacted
+    assert "s3cr3tABC" not in json.dumps(report)
+    assert "HTTP 401" in redacted
+    assert "HTTP 401" in json.dumps(report)
+    assert "Repository access or network failure" in report["likely_blockers"]
 
 
 def test_release_diagnostics_redacts_private_key_material():
@@ -32,9 +50,169 @@ def test_release_diagnostics_redacts_private_key_material():
     assert "END PRIVATE KEY" in redacted
 
 
-def test_hosted_ai_gateway_configuration_is_removed():
+def test_external_release_analysis_configuration_and_calls_are_removed():
+    from pathlib import Path
     from app.config import settings
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "app" / "main.py").read_text(encoding="utf-8")
+    env_example = (root / ".env.example").read_text(encoding="utf-8")
+    route_start = source.index('@app.post("/api/admin/release-diagnostics")')
+    route_end = source.index("# Customer-authenticated spot paper orders", route_start)
+    route_source = source[route_start:route_end]
 
     assert not hasattr(settings, "ai_gateway_api_key")
     assert not hasattr(settings, "ai_gateway_base_url")
     assert not hasattr(settings, "ai_gateway_model")
+    assert "settings.ai_gateway_" not in source
+    assert "httpx.AsyncClient" not in route_source
+    assert "chat/completions" not in route_source
+    assert "deterministic_local_rules" in source
+    assert "AI_GATEWAY_API_KEY=" not in env_example
+    assert "AI_GATEWAY_BASE_URL=" not in env_example
+    assert "AI_GATEWAY_MODEL=" not in env_example
+    assert "CEREBRAS_API_KEY=" not in env_example
+    assert "CEREBRAS_MODEL=" not in env_example
+
+
+def test_local_release_rules_flag_gradle_dependency_failures_without_network_calls():
+    import json
+    from app.main import _release_diagnostic_report
+
+    report = json.loads(
+        _release_diagnostic_report(
+            "Could not resolve com.example:missing-library:1.2.3",
+            "android { compileSdk = 35 }",
+        )
+    )
+
+    assert report["analysis_mode"] == "deterministic_local_rules"
+    assert "Gradle dependency failure" in report["likely_blockers"]
+    assert "Could not resolve com.example:missing-library:1.2.3" in report["findings"][0]["evidence"][0]
+
+
+def test_local_release_rules_ignore_valid_signing_and_google_services_configuration():
+    import json
+    from app.main import _release_diagnostic_report
+
+    report = json.loads(
+        _release_diagnostic_report(
+            "",
+            'android { signingConfig = signingConfigs.getByName("release") }\\n'
+            'google-services.json is included in the app project',
+        )
+    )
+
+    assert report["likely_blockers"] == ["No known failure signature matched the supplied text"]
+
+
+def test_release_diagnostics_evidence_keeps_failure_marker_beyond_prefix_limit():
+    import json
+    from app.main import _release_diagnostic_report
+
+    line = ("Gradle task output prefix " * 15) + "Could not resolve com.example:missing-library:1.2.3" + (" tail" * 20)
+    report = json.loads(_release_diagnostic_report(line, ""))
+
+    evidence = report["findings"][0]["evidence"][0]
+    assert "Could not resolve com.example:missing-library:1.2.3" in evidence
+    assert len(evidence) <= 242
+
+
+def test_release_diagnostics_redacts_quoted_json_secret_values_before_returning_evidence():
+    import json
+    from app.main import _redact_release_diagnostic_text, _release_diagnostic_report
+
+    supplied = r'''{"password": "prefix \" escaped quoted value secret-leak-after-escaped-quote", "Authorization": "Bearer bearer-secret-value", "message": "Could not resolve com.example:bad:1"}'''
+    redacted = _redact_release_diagnostic_text(supplied)
+    report = json.loads(_release_diagnostic_report(redacted, ""))
+
+    assert "secret-leak-after-escaped-quote" not in redacted
+    assert "bearer-secret-value" not in redacted
+    assert "secret-leak-after-escaped-quote" not in json.dumps(report)
+    assert "bearer-secret-value" not in json.dumps(report)
+    assert "[REDACTED]" in redacted
+    assert "Could not resolve" in json.dumps(report)
+
+
+
+def test_android_resource_linking_header_is_classified_without_compiler_advice():
+    import json
+    from app.main import _release_diagnostic_report
+
+    report = json.loads(_release_diagnostic_report("Android resource linking failed", ""))
+
+    assert "Android resource-linking failure" in report["likely_blockers"]
+    assert "Kotlin or Java compilation failure" not in report["likely_blockers"]
+
+
+def test_android_resource_not_found_line_is_classified_as_resource_failure():
+    import json
+    from app.main import _release_diagnostic_report
+
+    report = json.loads(
+        _release_diagnostic_report(
+            "Android resource linking failed\nerror: resource drawable/missing_icon not found",
+            "",
+        )
+    )
+
+    assert "Android resource-linking failure" in report["likely_blockers"]
+    assert "Kotlin or Java compilation failure" not in report["likely_blockers"]
+
+def test_escaped_quotes_inside_quoted_secret_are_fully_redacted():
+    import json
+    from app.main import _redact_release_diagnostic_text, _release_diagnostic_report
+
+    supplied = r'Could not resolve dependency; password="PREFIX\"quoted-secret\"-SUFFIX"'
+    redacted = _redact_release_diagnostic_text(supplied)
+    report = json.loads(_release_diagnostic_report(redacted, ""))
+
+    for fragment in ("PREFIX", "quoted-secret", "SUFFIX"):
+        assert fragment not in redacted
+        assert fragment not in json.dumps(report)
+    assert "[REDACTED]" in redacted
+    assert "Could not resolve" in json.dumps(report)
+
+
+def test_braced_unquoted_secret_is_fully_redacted_from_diagnostic_evidence():
+    import json
+    from app.main import _redact_release_diagnostic_text, _release_diagnostic_report
+
+    supplied = "Could not resolve artifact; password=SECRET}SUFFIX"
+    redacted = _redact_release_diagnostic_text(supplied)
+    report = json.loads(_release_diagnostic_report(redacted, ""))
+
+    assert "SECRET}SUFFIX" not in redacted
+    assert "SECRET}SUFFIX" not in json.dumps(report)
+    assert "[REDACTED]" in redacted
+    assert "Could not resolve" in json.dumps(report)
+
+def test_release_diagnostics_redacts_basic_authorization_before_returning_evidence():
+    import json
+    from app.main import _redact_release_diagnostic_text, _release_diagnostic_report
+
+    supplied = "Authorization: Basic dXNlcjpwYXNz\nCould not resolve com.example:bad:1"
+    redacted = _redact_release_diagnostic_text(supplied)
+    report = json.loads(_release_diagnostic_report(redacted, ""))
+
+    assert "dXNlcjpwYXNz" not in redacted
+    assert "dXNlcjpwYXNz" not in json.dumps(report)
+    assert "[REDACTED]" in redacted
+    assert "Could not resolve" in json.dumps(report)
+
+def test_release_diagnostics_redacts_basic_authorization_without_losing_same_line_failure():
+    import json
+    from app.main import _redact_release_diagnostic_text, _release_diagnostic_report
+
+    supplied = "Authorization: Basic dXNlcjpwYXNz; HTTP 401 Could not GET https://repo.example/artifact"
+    redacted = _redact_release_diagnostic_text(supplied)
+    report = json.loads(_release_diagnostic_report(redacted, ""))
+
+    assert "dXNlcjpwYXNz" not in redacted
+    assert "dXNlcjpwYXNz" not in json.dumps(report)
+    assert "[REDACTED]" in redacted
+    assert "HTTP 401" in redacted
+    assert "HTTP 401" in json.dumps(report)
+    assert "Repository access or network failure" in report["likely_blockers"]
+
+

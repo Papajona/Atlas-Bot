@@ -61,3 +61,28 @@ def test_native_ai_self_check_is_offline():
     assert report["status"] == "PASS"
     assert report["network_calls"] == 0
     assert report["external_model_credentials_required"] is False
+
+
+
+def test_native_safety_allows_only_explicitly_disabled_adaptive_mode_with_other_gates_intact():
+    from app.native_ai import evaluate_native_trade_packet
+
+    packet = {
+        "symbol": "BTC/USDT", "asset": "crypto", "exchange": "paper", "timeframe": "1h",
+        "market_timestamp": "2026-10-27T00:00:00+00:00",
+        "trade_plan": {"side": "buy", "entry_price": 100.0, "stop_loss_price": 95.0, "take_profit_price": 110.0},
+        "deterministic_rules": {"entry": "confirmed"},
+        "price_context": {"latest_close": 100.0, "bars": 1000, "spread_bps": 2.0},
+        "data_quality": {"safe": True, "reasons": []},
+        "adaptive_model": {"status": "DISABLED"},
+        "ml_signal": {"status": "DISABLED"},
+    }
+    result = evaluate_native_trade_packet(packet)
+    assert result["safe"] is True
+    assert "ADAPTIVE_AI_DISABLED" in result["data_quality_flags"]
+    assert result["execution_authority"] is False
+
+    packet["ml_signal"] = {"status": "DISABLED", "signal": 0}
+    result = evaluate_native_trade_packet(packet)
+    assert result["safe"] is False
+    assert "ml_signal_is_not_directional" in result["reasons"]

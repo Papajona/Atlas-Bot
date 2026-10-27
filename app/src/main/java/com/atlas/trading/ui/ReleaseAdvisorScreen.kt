@@ -55,7 +55,7 @@ fun ReleaseAdvisorScreen(
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("Release advisor", fontSize = 23.sp, fontWeight = FontWeight.Bold, color = theme.textPrimary)
-                Text("AI-assisted analysis of Android build logs and configuration. Advice only; no release gate is changed.", color = theme.textMuted, fontSize = 12.sp)
+                Text("Deterministic local-rule analysis of Android build logs and configuration. No external AI service is called; advice only, and no release gate is changed.", color = theme.textMuted, fontSize = 12.sp)
             }
             TextButton(onClick = onBack) { Text("Back") }
         }

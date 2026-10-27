@@ -17,7 +17,7 @@ data class ReleaseAdvisorResult(
     val diagnostics: String
 )
 
-/** Calls the server-side release diagnostics endpoint. Gateway credentials never enter Android. */
+/** Calls the authenticated server-side deterministic release diagnostics endpoint. */
 class ReleaseAdvisorClient(
     private val baseUrl: String,
     private val http: OkHttpClient = OkHttpClient.Builder()
@@ -45,7 +45,7 @@ class ReleaseAdvisorClient(
                 if (!response.isSuccessful) {
                     val detail = json.optString("detail").takeIf { it.isNotBlank() }
                         ?: when (response.code) {
-                            402 -> "AI gateway has insufficient credits."
+                            402 -> "Release diagnostics are temporarily unavailable (HTTP 402)."
                             403 -> "Release advisor access is blocked for this account."
                             429 -> "Release advisor rate limit reached. Try again later."
                             else -> "Release advisor request failed (HTTP ${response.code})."
@@ -56,7 +56,7 @@ class ReleaseAdvisorClient(
                     runId = json.optString("run_id"),
                     status = json.optString("status"),
                     model = json.optString("model"),
-                    diagnostics = json.optString("diagnostics").ifBlank { "Provider returned no diagnostic text." }
+                    diagnostics = json.optString("diagnostics").ifBlank { "Server returned no diagnostic text." }
                 )
             }
         }

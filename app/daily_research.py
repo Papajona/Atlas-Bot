@@ -199,7 +199,7 @@ async def _persist_research_run(symbol: str, research: dict[str, Any], review: d
                 macro_risk_score=float((macro_regime.get("headline_risk") or {}).get("risk_score") or 0.0),
                 regime_drift_json=json.dumps(drift, default=str),
                 research_json=json.dumps(current, default=str),
-                review_json=json.dumps({k: review.get(k) for k in ("ai_brain_mode", "paper_candidates")}, default=str),
+                review_json=json.dumps({k: review.get(k) for k in ("ai_brain_mode", "paper_candidates", "native_ai_review")}, default=str),
             ))
             await db.commit()
         return drift
@@ -300,7 +300,11 @@ async def run_daily_research() -> dict[str, Any]:
                 # code/data/venue fingerprints exist; they cannot satisfy promotion.
                 research["prospective_trial_archive"] = trial_archive
                 review = _ai_research_brief(research, intelligence)
-                review["native_ai_review"] = native_research_review(research, intelligence)
+                # The candidate list is created by _ai_research_brief, not by the raw research object.
+                # Feed that computed list to the local review so eligible paper candidates are visible.
+                native_research_input = dict(research)
+                native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))
+                review["native_ai_review"] = native_research_review(native_research_input, intelligence)
                 review["run_drift"] = await _persist_research_run(symbol, research, review, intelligence.get("macro_regime"))
                 run_record = {
                     "symbol": symbol, "research": research, "review": review,
