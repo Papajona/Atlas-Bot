@@ -287,7 +287,9 @@ def transform_daily_research() -> None:
             first = lines[node.lineno - 1]
             indent = first[:len(first) - len(first.lstrip())]
             edits.append((node.lineno, node.end_lineno,
-                          indent + 'review["native_ai_review"] = native_research_review(research, intelligence)\n'))
+                          indent + "native_research_input = dict(research)\\n"
+                          + 'native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))\\n'
+                          + 'review["native_ai_review"] = native_research_review(native_research_input, intelligence)\\n'))
             found_callsite = True
             break
     for index, line in enumerate(lines, start=1):
