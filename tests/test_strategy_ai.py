@@ -90,3 +90,16 @@ def test_native_strategy_parser_recognizes_ensemble_and_short_intent():
 def test_worker_deployment_pins_explicit_gcp_project():
     script = (ROOT / "deploy" / "cloud-run-worker-deploy.sh").read_text()
     assert '--project "$GCP_PROJECT_ID"' in script
+
+
+def test_strategy_candidate_backtest_uses_the_requested_stop_and_target_parameters():
+    from app.main import _candidate_backtest_config
+
+    config = _candidate_backtest_config({"stop_loss_atr": 1.0, "take_profit_rr": 3.0})
+    assert config.stop_atr == 1.0
+    assert config.take_profit_atr == 3.0
+
+    with pytest.raises(ValueError):
+        _candidate_backtest_config({"stop_loss_atr": float("nan"), "take_profit_rr": 3.0})
+    with pytest.raises(ValueError):
+        _candidate_backtest_config({"stop_loss_atr": 1.0})
