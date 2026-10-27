@@ -71,7 +71,7 @@ jobs:
 
           scan_active_provider_refs() {
             local rc=0
-            git grep -IlE 'gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_api_key|SECRET_GEMINI|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' || rc=$?
+            git grep -IlEi 'gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_api_key|settings\.ai_gateway_[[:alnum:]_]*|SECRET_GEMINI|GROQ_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_[[:alnum:]_]*|GATEWAY_API_KEY|gateway.*credential|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' || rc=$?
             if (( rc == 1 )); then return 0; fi
             if (( rc != 0 )); then return "$rc"; fi
           }
