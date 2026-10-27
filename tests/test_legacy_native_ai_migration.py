@@ -1643,6 +1643,47 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
                 self.assertNotIn("_generate_with_provider", result)
                 self.assertNotRegex(result, migration.PROVIDER_RE)
 
+        unsafe_cases = (
+            (
+                "cross-provider model routing",
+                "model=settings.gemini_strategy_model or settings.gemini_model)",
+                "model=settings.groq_strategy_model or settings.groq_model)",
+                "_generate_with_provider contains additional or unknown behavior",
+            ),
+            (
+                "custom provider output",
+                '"model": settings.gemini_strategy_model if provider_used == "gemini" else settings.groq_strategy_model,',
+                '"model": settings,',
+                "generate_strategy_draft contains unrecognized branch-specific behavior",
+            ),
+            (
+                "custom validation reporting",
+                'f"AI strategy failed schema validation: {exc}"',
+                'f"AI strategy failed schema validation: {exc}; provider={provider_used}"',
+                "generate_strategy_draft contains unrecognized branch-specific behavior",
+            ),
+            (
+                "incompatible retained context helper",
+                "return AIStrategySpec.model_validate(data)",
+                "return spec",
+                "strategy schema/context helpers do not satisfy",
+            ),
+        )
+        for label, old, new, message in unsafe_cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                altered = legacy_two.replace(old, new, 1)
+                self.assertNotEqual(altered, legacy_two, f"fixture did not alter {label}")
+                root = Path(tmp)
+                target = root / "app" / "strategy_ai.py"
+                target.parent.mkdir()
+                target.write_text(altered, encoding="utf-8")
+                with patch.object(migration, "ROOT", root), patch.object(
+                    migration, "canonical_text", return_value=CANONICAL_STRATEGY
+                ):
+                    with self.assertRaisesRegex(migration.MigrationError, message):
+                        migration.transform_strategy_ai("fake-commit")
+                self.assertEqual(target.read_text(encoding="utf-8"), altered)
+
     def test_ai_providers_only_removes_audited_cerebras_adapter(self):
         legacy = """import httpx
 from .config import settings
@@ -1651,7 +1692,7 @@ class AIProviderError(RuntimeError):
     pass
 
 async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instruction: str | None = None, model: str | None = None) -> dict[str, Any]:
-    """Call Cerebras' OpenAI-compatible Chat Completions API; never grants execution authority."""
+    \"\"\"Call Cerebras' OpenAI-compatible Chat Completions API; never grants execution authority.\"\"\"
     if not settings.cerebras_api_key:
         raise AIProviderError("CEREBRAS_API_KEY is not configured")
     url = "https://api.cerebras.ai/v1/chat/completions"
