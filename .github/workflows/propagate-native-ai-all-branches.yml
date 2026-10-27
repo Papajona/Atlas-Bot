@@ -77,14 +77,93 @@ jobs:
           }
 
           verify_native_ai_impl() {
-            test -f app/native_ai.py &&
-              grep -q '^class NativeAIError' app/native_ai.py &&
-              grep -q '^def compose_strategy_spec' app/native_ai.py &&
-              grep -q '^def native_research_review' app/native_ai.py &&
-              grep -q 'from \.native_ai import NativeAIError, compose_strategy_spec' app/strategy_ai.py &&
-              grep -q 'from \.native_ai import native_research_review' app/daily_research.py
-          }
+            python - <<'PY'
+          import ast
+          import importlib
+          from pathlib import Path
 
+          app_dir = Path("app")
+          module_paths = {
+              "native_ai": app_dir / "native_ai.py",
+              "ai_providers": app_dir / "ai_providers.py",
+          }
+          trees = {}
+          for module_name, path in module_paths.items():
+              if not path.is_file():
+                  raise SystemExit(f"Missing required Native AI module: {path}")
+              trees[module_name] = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+          def assigned_names(target):
+              if isinstance(target, ast.Name):
+                  return {target.id}
+              if isinstance(target, (ast.Tuple, ast.List)):
+                  names = set()
+                  for item in target.elts:
+                      names.update(assigned_names(item))
+                  return names
+              return set()
+
+          def module_names(tree):
+              names = set()
+              for node in tree.body:
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                      names.add(node.name)
+                  elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                      for alias in node.names:
+                          if alias.name != "*":
+                              names.add(alias.asname or alias.name.rsplit(".", 1)[-1])
+                  elif isinstance(node, ast.Assign):
+                      for target in node.targets:
+                          names.update(assigned_names(target))
+                  elif isinstance(node, ast.AnnAssign):
+                      names.update(assigned_names(node.target))
+              return names
+
+          available = {name: module_names(tree) for name, tree in trees.items()}
+          problems = []
+          for path in sorted(app_dir.rglob("*.py")):
+              try:
+                  tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+              except (OSError, SyntaxError) as exc:
+                  problems.append(f"{path}: cannot parse Python module ({exc})")
+                  continue
+              for node in ast.walk(tree):
+                  if not isinstance(node, ast.ImportFrom):
+                      continue
+                  if node.level == 1 and node.module in available:
+                      target_module = node.module
+                  elif node.level == 0 and node.module in ("app.native_ai", "app.ai_providers"):
+                      target_module = node.module.rsplit(".", 1)[-1]
+                  else:
+                      continue
+                  for alias in node.names:
+                      if alias.name != "*" and alias.name not in available[target_module]:
+                          problems.append(
+                              f"{path}: imports missing symbol {alias.name} from {target_module}"
+                          )
+
+          if problems:
+              print("\n".join(problems))
+              raise SystemExit(1)
+
+          # Execute the compatibility facade import as well: this catches broken
+          # transitive exports, including missing native_trade_safety_review.
+          native = importlib.import_module("app.native_ai")
+          facade = importlib.import_module("app.ai_providers")
+          for name in ("NativeAIError", "compose_strategy_spec", "native_research_review"):
+              if not hasattr(native, name):
+                  raise SystemExit(f"app.native_ai is missing required symbol: {name}")
+          for name in (
+              "AIProviderError", "dual_ai_research_review", "dual_ai_trade_safety_review",
+              "evaluate_native_trade_packet", "native_ai_health_check", "native_research_review",
+              "native_trade_safety_review",
+          ):
+              if not hasattr(facade, name):
+                  raise SystemExit(f"app.ai_providers is missing required symbol: {name}")
+
+          print("PASS: Native AI imports and compatibility exports resolve.")
+          PY
+          }
           declare -a updated=() skipped=() failed=()
           while IFS= read -r remote_ref; do
             [[ -n "$remote_ref" ]] || continue
@@ -127,7 +206,7 @@ jobs:
               fi
               git commit -m "Remove reintroduced hosted AI wiring" >/dev/null
               new_sha="$(git rev-parse HEAD)"
-              if git push origin "HEAD:refs/heads/$branch"; then
+              if git push "--force-with-lease=refs/heads/$branch:$start_sha" origin "HEAD:refs/heads/$branch"; then
                 updated+=("$branch ($start_sha -> $new_sha)")
               else
                 git reset --hard "$start_sha" >/dev/null 2>&1 || true
@@ -153,7 +232,7 @@ jobs:
               continue
             fi
             new_sha="$(git rev-parse HEAD)"
-            if git push origin "HEAD:refs/heads/$branch"; then
+            if git push "--force-with-lease=refs/heads/$branch:$start_sha" origin "HEAD:refs/heads/$branch"; then
               updated+=("$branch ($start_sha -> $new_sha)")
             else
               failed+=("$branch: push rejected or branch ref changed/deleted; no retry or branch recreation attempted")
