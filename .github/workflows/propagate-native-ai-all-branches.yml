@@ -169,7 +169,7 @@ jobs:
           declare -a cleanup_warnings=()
           update_existing_branch_ref() {
             local branch="$1" expected_sha="$2" new_sha="$3"
-            local remote_sha branch_hash temp_ref update_rc ref_payload repository_id current_sha update_payload updated_sha
+            local remote_sha branch_hash temp_ref update_rc ref_payload repository_id current_sha update_payload updated_sha updated_ref_payload read_back_sha
             remote_sha="$(git ls-remote --heads origin "refs/heads/$branch" | awk 'NR == 1 {print $1}')"
             if [[ "$remote_sha" != "$expected_sha" ]]; then
               echo "Ref refs/heads/$branch changed or disappeared after enumeration; refusing to update it." >&2
@@ -202,9 +202,27 @@ jobs:
                   -F after="$new_sha")"; then
                 updated_sha="$(jq -r '.data.updateRefs.clientMutationId // empty' <<<"$update_payload")"
                 if [[ "$(jq -r '((.errors // []) | length) == 0' <<<"$update_payload")" == "true" && "$updated_sha" == "atlas-native-ai-propagation" ]]; then
-                  update_rc=0
+                  # clientMutationId confirms the supported payload shape; independently
+                  # read back the branch tip to prove the requested commit was applied.
+                  if updated_ref_payload="$(gh api graphql \
+                      -f query='query($owner: String!, $name: String!, $qualifiedName: String!) { repository(owner: $owner, name: $name) { ref(qualifiedName: $qualifiedName) { target { oid } } } }' \
+                      -F owner="$GITHUB_REPOSITORY_OWNER" \
+                      -F name="${GITHUB_REPOSITORY#*/}" \
+                      -F qualifiedName="refs/heads/$branch")"; then
+                    read_back_sha="$(jq -r '.data.repository.ref.target.oid // empty' <<<"$updated_ref_payload")"
+                    if [[ "$(jq -r '((.errors // []) | length) == 0' <<<"$updated_ref_payload")" == "true" && "$read_back_sha" == "$new_sha" ]]; then
+                      update_rc=0
+                    else
+                      echo "Atomic update response returned, but read-back did not confirm expected SHA for refs/heads/$branch." >&2
+                      echo "$updated_ref_payload" >&2
+                    fi
+                  else
+                    echo "Atomic update response returned, but could not read back refs/heads/$branch." >&2
+                    echo "$updated_ref_payload" >&2
+                  fi
                 else
-                  echo "Atomic update did not confirm new SHA for refs/heads/$branch; treating update as unresolved." >&2
+                  echo "Atomic update did not confirm the supported UpdateRefsPayload for refs/heads/$branch; treating update as unresolved." >&2
+                  echo "$update_payload" >&2
                 fi
               else
                 echo "Atomic update rejected for refs/heads/$branch; target branch left unchanged." >&2
