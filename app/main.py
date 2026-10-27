@@ -7770,7 +7770,7 @@ async def research_fx_execution_route(req: dict[str, object], x_admin_token: str
 _RELEASE_SECRET_PATTERNS = [
     re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+"),
     re.compile(
-        r"""(?i)((?:"|')?(?:authorization|api[_-]?key|anon[_-]?key|service[_-]?role[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret(?:[_-]?key)?|private[_-]?key|client[_-]?secret|signing[_-]?key|encryption[_-]?key|credential|token)(?:"|')?\s*[:=]\s*)(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s,;}]+))"""
+        r"""(?i)((?:"|')?(?:authorization|api[_-]?key|anon[_-]?key|service[_-]?role[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret(?:[_-]?key)?|private[_-]?key|client[_-]?secret|signing[_-]?key|encryption[_-]?key|credential|token)(?:"|')?\s*[:=]\s*)(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s,;]+))"""
     ),
     re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----)"),
 ]
