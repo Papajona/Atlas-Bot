@@ -1775,31 +1775,61 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST) -> bool:
 
 
 def _is_compatible_strategy_schema_and_context(tree: ast.Module) -> bool:
-    """Require a Pydantic strategy schema and object-returning market-context helper."""
-    base_model_imported = any(
-        isinstance(node, ast.ImportFrom) and node.module == "pydantic"
-        and node.level == 0
+    """Ensure retained strategy helpers accept the native composer's complete schema."""
+    imported_base_model = any(
+        isinstance(node, ast.ImportFrom) and node.module == "pydantic" and node.level == 0
         and any(alias.name == "BaseModel" and alias.asname is None for alias in node.names)
         for node in tree.body
     )
-    schemas = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"]
-    if not base_model_imported or len(schemas) != 1:
+    classes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"]
+    if not imported_base_model or len(classes) != 1:
         return False
-    schema = schemas[0]
+    schema = classes[0]
     if schema.decorator_list or not any(isinstance(base, ast.Name) and base.id == "BaseModel" for base in schema.bases):
         return False
-    field_names = {
-        node.target.id
-        for node in schema.body
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+
+    native_composer_fields = {
+        "version", "title", "summary", "asset", "symbols", "timeframes", "direction",
+        "strategy_family", "entry_conditions", "exit_conditions", "risk_per_trade",
+        "stop_loss_atr", "take_profit_rr", "sessions", "assumptions", "validation_warnings",
+        "requires_backtest", "requires_walk_forward", "execution_mode", "implementation_status",
     }
-    if not {"strategy_family", "validation_warnings", "asset", "symbols", "timeframes"}.issubset(field_names):
+    field_nodes = {
+        statement.target.id: statement
+        for statement in schema.body
+        if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name)
+    }
+    if not native_composer_fields.issubset(field_nodes):
         return False
     if any(
         isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in {"model_validate", "model_dump"}
         for node in schema.body
     ):
         return False
+
+    def field_is_required(statement: ast.AnnAssign) -> bool:
+        default = statement.value
+        if default is None:
+            return True
+        if isinstance(default, ast.Call) and isinstance(default.func, ast.Name) and default.func.id == "Field":
+            default_keywords = {keyword.arg: keyword.value for keyword in default.keywords}
+            if "default_factory" in default_keywords:
+                return False
+            if "default" in default_keywords:
+                value = default_keywords["default"]
+                return isinstance(value, ast.Constant) and value.value is Ellipsis
+            if default.args:
+                return isinstance(default.args[0], ast.Constant) and default.args[0].value is Ellipsis
+            # Field constraints without a default still make the Pydantic field required.
+            return True
+        return False
+
+    # The native composer has no branch-specific fields. Any additional required
+    # Pydantic field would make every canonical draft fail validation; optional extras
+    # are retained and can still take their declared defaults.
+    for name, statement in field_nodes.items():
+        if name not in native_composer_fields and field_is_required(statement):
+            return False
 
     contexts = [
         node for node in tree.body
@@ -1811,29 +1841,38 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module) -> bool:
     args = context.args
     if (
         context.decorator_list or args.posonlyargs or [arg.arg for arg in args.args] != ["spec"]
-        or args.vararg or args.kwarg
-        or [arg.arg for arg in args.kwonlyargs] != ["asset", "symbol", "timeframe"]
+        or args.vararg or args.kwarg or [arg.arg for arg in args.kwonlyargs] != ["asset", "symbol", "timeframe"]
         or args.defaults or len(args.kw_defaults) != 3
         or any(not isinstance(value, ast.Constant) or value.value is not None for value in args.kw_defaults)
         or not context.body or not isinstance(context.body[-1], ast.Return)
     ):
         return False
-    return_node = context.body[-1].value
-    if (
-        not isinstance(return_node, ast.Call) or not isinstance(return_node.func, ast.Attribute)
-        or not isinstance(return_node.func.value, ast.Name) or return_node.func.value.id != "AIStrategySpec"
-        or return_node.func.attr != "model_validate" or len(return_node.args) != 1
-        or not isinstance(return_node.args[0], ast.Name) or return_node.args[0].id != "data"
-        or return_node.keywords
-    ):
+
+    returns = [node for node in ast.walk(context) if isinstance(node, ast.Return)]
+    if len(returns) != 1 or returns[0] is not context.body[-1]:
         return False
-    has_model_dump = any(
-        isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute)
-        and isinstance(item.func.value, ast.Name) and item.func.value.id == "spec"
-        and item.func.attr == "model_dump" and not item.args and not item.keywords
-        for item in ast.walk(context)
+    assignments = [
+        statement for statement in context.body
+        if isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+        and statement.targets[0].id == "data"
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Attribute)
+        and isinstance(statement.value.func.value, ast.Name)
+        and statement.value.func.value.id == "spec"
+        and statement.value.func.attr == "model_dump"
+        and not statement.value.args and not statement.value.keywords
+    ]
+    if len(assignments) != 1 or assignments[0].lineno >= returns[0].lineno:
+        return False
+    result = returns[0].value
+    return (
+        isinstance(result, ast.Call) and isinstance(result.func, ast.Attribute)
+        and isinstance(result.func.value, ast.Name) and result.func.value.id == "AIStrategySpec"
+        and result.func.attr == "model_validate" and len(result.args) == 1
+        and isinstance(result.args[0], ast.Name) and result.args[0].id == "data" and not result.keywords
     )
-    return has_model_dump
 
 
 def _is_safe_legacy_cerebras_adapter(node: ast.AST) -> bool:
@@ -1954,7 +1993,11 @@ def _is_safe_legacy_cerebras_adapter(node: ast.AST) -> bool:
     if (
         not isinstance(system_content, ast.BoolOp) or not isinstance(system_content.op, ast.Or)
         or len(system_content.values) != 2 or not is_name(system_content.values[0], "system_instruction")
-        or not isinstance(system_content.values[1], ast.Constant) or not isinstance(system_content.values[1].value, str)
+        or not is_string(
+            system_content.values[1],
+            "You are Atlas Trading OS's research assistant. Analyze supplied research only. "
+            "Do not place trades, invent market data, or give guaranteed outcomes. Return JSON only.",
+        )
     ):
         return False
     if not is_name(user_message["content"], "prompt"):
