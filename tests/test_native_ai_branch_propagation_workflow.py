@@ -48,11 +48,9 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert "tests/" not in runtime_path_list
     assert 'git show "$GITHUB_SHA:scripts/migrate_legacy_native_ai.py"' in workflow
     assert 'python "$RUNNER_TEMP/migrate_legacy_native_ai.py" --canonical-commit "$NATIVE_AI_COMMIT" --extra-base-commit "$NATIVE_AI_EXTRA_BASE_COMMIT" --extra-commit "$NATIVE_AI_EXTRA_COMMIT"' in workflow
-    expected_pin = """NATIVE_AI_EXTRA_COMMIT="$(git log --first-parent --format=%H --fixed-strings --grep='Remove remaining hosted AI release diagnostics and harden propagation' "$GITHUB_SHA" | head -n 1)""" + '"'
-    assert expected_pin in workflow
+    assert 'NATIVE_AI_EXTRA_COMMIT="2317ccc4c3293e8bbd7043970876eceb509d2d1d"' in workflow
     assert 'extra_parent="$(git rev-parse "$NATIVE_AI_EXTRA_COMMIT^")"' in workflow
     assert 'if [[ "$extra_parent" != "$NATIVE_AI_EXTRA_BASE_COMMIT" ]]; then' in workflow
-    assert 'NATIVE_AI_EXTRA_COMMIT="$GITHUB_SHA"' not in workflow
     assert '"app/main.py"' in runtime_path_list
     assert '"ENTRY_EXIT_3_9_0.md"' in runtime_path_list
     assert '"app/src/main/java/com/atlas/trading/network/ReleaseAdvisorClient.kt"' in runtime_path_list
