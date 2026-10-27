@@ -8,7 +8,7 @@ When a customer clicks **Start Bot Analysis**:
 2. The deterministic strategy checks trend, momentum, ADX/RSI, and a prior-range breakout.
 3. Atlas calculates an exact entry, structural/ATR stop-loss, and R-multiple take-profit.
 4. The setup is rejected if the entry is not confirmed, risk is invalid, the reward/risk is below the configured minimum, data is unsafe, or the spread gate fails.
-5. Gemini and Groq independently review the supplied plan as a **safety veto only**. They cannot alter the prices, side, size, or authorize execution.
+5. Deterministic local consistency and risk checks independently review the supplied plan as a **safety veto only**. They cannot alter the prices, side, size, or authorize execution.
 6. If both AI reviews pass and all deterministic gates pass, Atlas sizes the position from account equity and configured risk-per-trade, then sends the plan to the existing execution/risk engine.
 7. Paper trading remains the default. Real-money execution requires the existing platform-wide live-trading controls.
 
