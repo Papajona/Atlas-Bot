@@ -328,21 +328,33 @@ def oos_benchmark_comparison(
                 shifted[:size - advance] = original_signal[advance:]
         return shifted
 
-    def _entry_atr_is_usable(signal: np.ndarray, atr: np.ndarray, frame: pd.DataFrame) -> bool:
-        if not bracket_configured:
-            return True
+    def _entry_indices(signal: np.ndarray) -> np.ndarray:
         previous = np.r_[0.0, signal[:-1]]
-        opens_entry = (signal != 0.0) & (
-            (previous == 0.0) | (np.sign(signal) != np.sign(previous))
+        return np.flatnonzero(
+            (signal != 0.0)
+            & ((previous == 0.0) | (np.sign(signal) != np.sign(previous)))
         )
-        if not opens_entry.any():
+
+    def _shifted_entries_have_usable_atr(
+        original_signal: np.ndarray,
+        shift: int,
+        atr: np.ndarray,
+        opens: np.ndarray,
+        entry_indices: np.ndarray,
+    ) -> bool:
+        """Validate only translated entry bars; do not scan/copy the full fold per offset."""
+        if not bracket_configured or not len(entry_indices):
             return True
-        entry_atr = atr[opens_entry]
+        translated = entry_indices + int(shift)
+        entry_atr = atr[translated]
         if not np.isfinite(entry_atr).all() or (entry_atr <= 0.0).any():
             return False
-        entry_open = frame["open"].to_numpy(dtype=float)[opens_entry]
-        entry_signal = signal[opens_entry]
-        if np.any((entry_signal > 0.0) & (entry_open - float(stop_atr) * entry_atr <= 0.0)):
+        entry_signal = original_signal[entry_indices]
+        entry_open = opens[translated]
+        if np.any(
+            (entry_signal > 0.0)
+            & (entry_open - float(stop_atr) * entry_atr <= 0.0)
+        ):
             return False
         return True
 
@@ -420,13 +432,16 @@ def oos_benchmark_comparison(
         active_indices = np.flatnonzero(original_signal)
         min_shift = -int(active_indices[0])
         max_shift = len(original_signal) - 1 - int(active_indices[-1])
+        entry_indices = _entry_indices(original_signal)
+        fold_opens = frame["open"].to_numpy(dtype=float)
         for shift in range(min_shift, max_shift + 1):
             if shift == 0:
                 continue
-            shifted = _shift_signal(original_signal, int(shift))
-            if int(np.count_nonzero(shifted)) != requested_exposure_bars:
-                continue
-            if _entry_atr_is_usable(shifted, atr, frame):
+            # The first/last-active bounds prove no requested non-flat bar is
+            # truncated. Translate only entry indices for ATR/stop-price checks.
+            if _shifted_entries_have_usable_atr(
+                original_signal, int(shift), atr, fold_opens, entry_indices
+            ):
                 valid_shifts.append(int(shift))
         if len(valid_shifts) < 2:
             return {
