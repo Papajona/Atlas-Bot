@@ -7770,7 +7770,7 @@ async def research_fx_execution_route(req: dict[str, object], x_admin_token: str
 _RELEASE_SECRET_PATTERNS = [
     re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+"),
     re.compile(
-        r"""(?i)((?:"|')?(?:authorization|api[_-]?key|anon[_-]?key|service[_-]?role[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret(?:[_-]?key)?|private[_-]?key|client[_-]?secret|signing[_-]?key|encryption[_-]?key|credential|token)(?:"|')?\s*[:=]\s*)(?:"([^"]*)"|'([^']*)'|([^\s,;}]+))"""
+        r"""(?i)((?:"|')?(?:authorization|api[_-]?key|anon[_-]?key|service[_-]?role[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret(?:[_-]?key)?|private[_-]?key|client[_-]?secret|signing[_-]?key|encryption[_-]?key|credential|token)(?:"|')?\s*[:=]\s*)(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s,;}]+))"""
     ),
     re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----)"),
 ]
@@ -7826,8 +7826,13 @@ def _release_diagnostic_report(safe_logs: str, safe_config: str) -> str:
         ),
         (
             "Kotlin or Java compilation failure",
-            ("unresolved reference", "compilation error", "compilation failed", "error: ", "cannot find symbol", "type mismatch", "incompatible types"),
+            ("unresolved reference", "compilation error", "compilation failed", "cannot find symbol", "type mismatch", "incompatible types"),
             "Fix the first compiler error and rerun the same compile task. Do not suppress compiler checks or skip tests.",
+        ),
+        (
+            "Android resource-linking failure",
+            ("android resource linking failed", "resource linking failed", "aapt: error", "aapt2 error", "error: resource ", "resource processing failed", "failed to process resources"),
+            "Inspect the first Android resource-linking error, confirm referenced drawable, layout, and string resources exist, and correct resource names or XML without bypassing the build.",
         ),
         (
             "Android manifest or SDK configuration failure",
