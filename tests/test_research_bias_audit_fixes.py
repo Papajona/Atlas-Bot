@@ -219,7 +219,10 @@ def test_fixed_signal_oos_reports_inference_benchmark_and_hold_horizon():
     assert result["purge_bars"] == 12
     assert result["embargo_bars"] == 12
     assert result["inference"]["status"] == "OK"
-    assert result["benchmark_comparison"]["status"] == "OK"
+    # This fixture is continuously exposed at every fold bar, so there is no
+    # non-wrapping, exposure-preserving entry shift. The benchmark must fail closed.
+    assert result["benchmark_comparison"]["status"] == "INSUFFICIENT_DATA"
+    assert result["benchmark_comparison"]["reason"] == "no_exposure_preserving_randomized_entry_control"
     assert "excess_return_vs_buy_and_hold" in result["benchmark_comparison"]
 
 
@@ -268,7 +271,11 @@ def test_benchmark_candidate_is_resimulated_and_liquidated_at_each_fold_end():
     second = _ohlcv_from_returns(
         np.r_[np.full(n - 1, -0.001), -0.03], "2026-02-01T00:00:00Z"
     )
-    signals = [np.ones(n, dtype=float), np.ones(n, dtype=float)]
+    signals = []
+    for _ in range(2):
+        signal = np.zeros(n, dtype=float)
+        signal[2:] = 1.0
+        signals.append(signal)
     atrs = [np.ones(n, dtype=float), np.ones(n, dtype=float)]
     supplied_streams = [np.full(n, 0.01), np.full(n, 0.01)]
     expected_blocks = [
