@@ -367,8 +367,10 @@ def transform_ai_providers(commit: str) -> None:
                 candidates = [module_base / "__init__.py", ROOT / "app.py"]
             else:
                 if module_name.startswith("app."):
-                    module_name = module_name[4:]
-                module_base = ROOT.joinpath(*module_name.split(".")) if module_name else ROOT
+                    package_module = module_name[4:]
+                    module_base = ROOT / "app" / Path(*package_module.split("."))
+                else:
+                    module_base = ROOT.joinpath(*module_name.split(".")) if module_name else ROOT
                 candidates = (
                     [module_base.with_suffix(".py"), module_base / "__init__.py"]
                     if module_name else []
@@ -392,25 +394,50 @@ def transform_ai_providers(commit: str) -> None:
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in {"__getattr__", "__dir__"}
             for node in module_tree.body
         )
+        def root_name(node: ast.AST) -> str | None:
+            while isinstance(node, (ast.Attribute, ast.Subscript)):
+                node = node.value
+            return node.id if isinstance(node, ast.Name) else None
+
+        def directly_assigns_all(target: ast.AST) -> bool:
+            return isinstance(target, ast.Name) and target.id == "__all__"
+
+        def mutates_all_target(target: ast.AST) -> bool:
+            return root_name(target) == "__all__" and not directly_assigns_all(target)
+
         for module_node in module_tree.body:
             if isinstance(module_node, ast.ImportFrom) and any(alias.name == "*" for alias in module_node.names):
                 has_nested_star = True
-            if isinstance(module_node, ast.Assign) and any(
-                "__all__" in _assigned_names(target) for target in module_node.targets
-            ):
-                all_values.append(module_node.value)
-            elif isinstance(module_node, ast.AnnAssign) and "__all__" in _assigned_names(module_node.target):
-                all_values.append(module_node.value)
-            elif isinstance(module_node, ast.AugAssign) and "__all__" in _assigned_names(module_node.target):
+
+            if isinstance(module_node, ast.Assign):
+                if any(directly_assigns_all(target) for target in module_node.targets):
+                    all_values.append(module_node.value)
+                if any(mutates_all_target(target) for target in module_node.targets):
+                    dynamic_all = True
+            elif isinstance(module_node, ast.AnnAssign):
+                if directly_assigns_all(module_node.target):
+                    all_values.append(module_node.value)
+                elif mutates_all_target(module_node.target):
+                    dynamic_all = True
+            elif isinstance(module_node, ast.AugAssign) and root_name(module_node.target) == "__all__":
                 dynamic_all = True
-            elif (
-                isinstance(module_node, ast.Expr)
-                and isinstance(module_node.value, ast.Call)
-                and isinstance(module_node.value.func, ast.Attribute)
-                and isinstance(module_node.value.func.value, ast.Name)
-                and module_node.value.func.value.id == "__all__"
+            elif isinstance(module_node, ast.Delete) and any(
+                root_name(target) == "__all__" for target in module_node.targets
             ):
                 dynamic_all = True
+
+            # Include indexed edits (e.g. __all__[0] = "json"), method calls
+            # (append/extend/insert/remove/clear), and nested mutations. If the
+            # export list is changed at runtime, static star-export inspection is unsafe.
+            for nested in ast.walk(module_node):
+                if (
+                    isinstance(nested, ast.Call)
+                    and isinstance(nested.func, ast.Attribute)
+                    and root_name(nested.func.value) == "__all__"
+                ):
+                    dynamic_all = True
+                elif isinstance(nested, ast.NamedExpr) and mutates_all_target(nested.target):
+                    dynamic_all = True
 
         if dynamic_all or len(all_values) > 1:
             raise MigrationError(
@@ -463,7 +490,11 @@ def transform_ai_providers(commit: str) -> None:
         return exports, bindings
 
     preserved_imports: list[str] = []
+    preserved_import_bindings: list[set[str]] = []
+    preserved_import_lines: list[int] = []
     retained_star_imports: list[str] = []
+    retained_star_exports: list[set[str]] = []
+    retained_star_lines: list[int] = []
     for node in import_nodes:
         if isinstance(node, ast.ImportFrom) and node.module == "__future__":
             continue
@@ -483,6 +514,8 @@ def transform_ai_providers(commit: str) -> None:
                         f"star import {source_module!r} exports canonical name {exported_name!r} with a different or unknown binding; refusing to change helper semantics"
                     )
             retained_star_imports.append(ast.unparse(node))
+            retained_star_exports.append(exported_names)
+            retained_star_lines.append(node.lineno)
             continue
 
         aliases = []
@@ -515,6 +548,22 @@ def transform_ai_providers(commit: str) -> None:
             preserved_imports.append(ast.unparse(ast.ImportFrom(
                 module=node.module, names=aliases, level=node.level
             )))
+        preserved_import_bindings.append({
+            alias.asname or (alias.name.split(".", 1)[0] if isinstance(node, ast.Import) else alias.name)
+            for alias in aliases
+        })
+        preserved_import_lines.append(node.lineno)
+
+    # The output format preserves star imports before the canonical body and explicit
+    # imports after it. Refuse a migration if moving them would reverse an overlapping
+    # binding that originally came from a later star import.
+    for bindings, explicit_line in zip(preserved_import_bindings, preserved_import_lines):
+        for star_exports, star_line in zip(retained_star_exports, retained_star_lines):
+            if bindings & star_exports and explicit_line < star_line:
+                raise MigrationError(
+                    "retained explicit import precedes a star import with overlapping exports; "
+                    "refusing to change helper bindings"
+                )
 
     canonical_lines = canonical.splitlines(keepends=True)
     header_end_line = 0
@@ -533,14 +582,14 @@ def transform_ai_providers(commit: str) -> None:
     canonical_header = "".join(canonical_lines[:header_end_line]).rstrip()
     canonical_body = "".join(canonical_lines[header_end_line:]).lstrip("\n")
     if retained_star_imports:
-        canonical_pieces = [piece for piece in (canonical_header, *sorted(set(retained_star_imports)), canonical_body.rstrip()) if piece.strip()]
+        canonical_pieces = [piece for piece in (canonical_header, *retained_star_imports, canonical_body.rstrip()) if piece.strip()]
         canonical_result = "\n\n".join(canonical_pieces) + "\n"
     else:
         canonical_result = canonical.rstrip()
 
     pieces = [canonical_result]
     if preserved_imports:
-        pieces.append("\n".join(sorted(set(preserved_imports))))
+        pieces.append("\n".join(preserved_imports))
     if extras:
         pieces.extend(extras)
     result = "\n\n".join(piece for piece in pieces if piece.strip()) + "\n"
