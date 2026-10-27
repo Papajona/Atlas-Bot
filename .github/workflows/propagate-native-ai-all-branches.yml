@@ -206,7 +206,7 @@ jobs:
               fi
               git commit -m "Remove reintroduced hosted AI wiring" >/dev/null
               new_sha="$(git rev-parse HEAD)"
-              if git push "--force-with-lease=refs/heads/$branch:$start_sha" origin "HEAD:refs/heads/$branch"; then
+              if git push origin "HEAD:refs/heads/$branch"; then
                 updated+=("$branch ($start_sha -> $new_sha)")
               else
                 git reset --hard "$start_sha" >/dev/null 2>&1 || true
@@ -232,7 +232,7 @@ jobs:
               continue
             fi
             new_sha="$(git rev-parse HEAD)"
-            if git push "--force-with-lease=refs/heads/$branch:$start_sha" origin "HEAD:refs/heads/$branch"; then
+            if git push origin "HEAD:refs/heads/$branch"; then
               updated+=("$branch ($start_sha -> $new_sha)")
             else
               failed+=("$branch: push rejected or branch ref changed/deleted; no retry or branch recreation attempted")
