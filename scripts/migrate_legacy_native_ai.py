@@ -202,6 +202,28 @@ def transform_config() -> None:
     path.write_text(result, encoding="utf-8")
 
 
+def _defined_names(node: ast.AST) -> set[str]:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {node.name}
+    if isinstance(node, ast.Assign):
+        return {name for target in node.targets for name in _assigned_names(target)}
+    if isinstance(node, ast.AnnAssign):
+        return _assigned_names(node.target)
+    if isinstance(node, ast.Import):
+        return {alias.asname or alias.name.split(".", 1)[0] for alias in node.names}
+    if isinstance(node, ast.ImportFrom):
+        return {alias.asname or alias.name for alias in node.names if alias.name != "*"}
+    return set()
+
+
+def _assigned_names(target: ast.AST) -> set[str]:
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return {name for item in target.elts for name in _assigned_names(item)}
+    return set()
+
+
 def transform_ai_providers(commit: str) -> None:
     """Replace hosted adapters with the Native AI facade while retaining unrelated helpers/imports."""
     path = ROOT / "app/ai_providers.py"
