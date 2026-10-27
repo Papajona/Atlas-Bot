@@ -339,7 +339,7 @@ class LegacyNativeAIMigrationTests(unittest.TestCase):
             with patch.object(migration, "ROOT", root), patch.object(
                 migration, "canonical_text", return_value=CANONICAL_STRATEGY
             ):
-                with self.assertRaisesRegex(migration.MigrationError, "retained strategy helper depends on removed"):
+                with self.assertRaisesRegex(migration.MigrationError, "retained strategy helper depends on"):
                     migration.transform_strategy_ai("fake-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 

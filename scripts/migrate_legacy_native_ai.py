@@ -465,7 +465,6 @@ def transform_strategy_ai(commit: str) -> None:
 
     edits: list[tuple[int, int, str]] = []
     found_generate = False
-    lines = source.splitlines(keepends=True)
     replacement_import_inserted = False
     for node in old_tree.body:
         name = _name(node)
@@ -890,7 +889,7 @@ def _apply_path_patch(base_commit: str, tip_commit: str, path: str) -> bool:
     if applied.returncode:
         # Restore the branch's exact starting content. A path absent at HEAD must be
         # removed from both index and worktree; git restore cannot restore a nonexistent path.
-        restored = _git("restore", "--source=HEAD", "--staged", "--worktree", "--", path, check=False)
+        _git("restore", "--source=HEAD", "--staged", "--worktree", "--", path, check=False)
         if _git("cat-file", "-e", f"HEAD:{path}", check=False).returncode != 0:
             _git("rm", "-f", "--cached", "--ignore-unmatch", "--", path, check=False)
             target = ROOT / path

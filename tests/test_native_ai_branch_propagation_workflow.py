@@ -1,6 +1,5 @@
 """Regression tests for the repository-wide native-AI propagation workflow."""
 
-import ast
 from pathlib import Path
 
 
