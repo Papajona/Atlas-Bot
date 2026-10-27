@@ -1518,10 +1518,14 @@ async def _gemini_json(prompt):
 from .ai_providers import AIProviderError, _gemini_json, _groq_json
 from .strategy_evidence import evidence_for
 
-class AIStrategySpec:
-    @classmethod
-    def model_validate(cls, value):
-        return value
+from pydantic import BaseModel, Field
+
+class AIStrategySpec(BaseModel):
+    strategy_family: str = "TREND"
+    validation_warnings: list[str] = Field(default_factory=list)
+    asset: str = "crypto"
+    symbols: list[str] = Field(default_factory=list)
+    timeframes: list[str] = Field(default_factory=list)
 
 SYSTEM_PROMPT = "Legacy strategy prompt"
 
@@ -1533,8 +1537,15 @@ async def _generate_with_provider(provider: str, prompt: str) -> dict:
         return await _gemini_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.gemini_strategy_model or settings.gemini_model)
     return await _groq_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.groq_strategy_model or settings.groq_model)
 
-def _apply_market_context(spec, asset=None, symbol=None, timeframe=None):
-    return spec
+def _apply_market_context(spec, *, asset=None, symbol=None, timeframe=None):
+    data = spec.model_dump()
+    if asset is not None:
+        data["asset"] = asset
+    if symbol is not None:
+        data["symbols"] = [symbol]
+    if timeframe is not None:
+        data["timeframes"] = [timeframe]
+    return AIStrategySpec.model_validate(data)
 
 async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None = None, symbol: str | None = None, timeframe: str | None = None) -> dict:
     \"\"\"Generate a real LLM strategy draft, validate it, and return an auditable result.\"\"\"
@@ -1632,34 +1643,67 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
                 self.assertNotIn("_generate_with_provider", result)
                 self.assertNotRegex(result, migration.PROVIDER_RE)
 
-    def test_ai_providers_known_cerebras_adapter_is_removed_with_legacy_provider_routes(self):
+    def test_ai_providers_only_removes_audited_cerebras_adapter(self):
         legacy = """import httpx
 from .config import settings
 
 class AIProviderError(RuntimeError):
     pass
 
-async def _cerebras_json(prompt, *, timeout=30.0, system_instruction=None, model=None):
+async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instruction: str | None = None, model: str | None = None) -> dict[str, Any]:
+    """Call Cerebras' OpenAI-compatible Chat Completions API; never grants execution authority."""
     if not settings.cerebras_api_key:
         raise AIProviderError("CEREBRAS_API_KEY is not configured")
+    url = "https://api.cerebras.ai/v1/chat/completions"
+    payload = {
+        "model": model or settings.cerebras_model,
+        "messages": [
+            {"role": "system", "content": (
+                system_instruction or ("You are Atlas Trading OS's research assistant. Analyze supplied research only. "
+                "Do not place trades, invent market data, or give guaranteed outcomes. Return JSON only.")
+            )},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"},
+    }
+    headers = {"Authorization": f"Bearer {settings.cerebras_api_key}", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post("https://api.cerebras.ai/v1/chat/completions")
-        body = response.json()
-    return body
+        response = await client.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        body = _response_json_object(response, "Cerebras")
+    try:
+        text = body["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise AIProviderError("Cerebras response did not contain generated text") from exc
+    return _extract_json(text)
 """
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            target = root / "app" / "ai_providers.py"
-            target.parent.mkdir()
-            target.write_text(legacy, encoding="utf-8")
-            with patch.object(migration, "ROOT", root), patch.object(
-                migration, "canonical_text", return_value="from .native_ai import AIProviderError\n"
-            ):
-                migration.transform_ai_providers("canonical-commit")
-            result = target.read_text(encoding="utf-8")
-        self.assertNotIn("_cerebras_json", result)
-        self.assertNotRegex(result, migration.PROVIDER_RE)
-        ast.parse(result, filename="app/ai_providers.py")
+        custom = legacy.replace(
+            "        response.raise_for_status()\\n        body = _response_json_object(response, \\"Cerebras\\")",
+            "        response.raise_for_status()\\n        record_provider_metrics()\\n        body = _response_json_object(response, \\"Cerebras\\")",
+        )
+        for label, source, should_refuse in (
+            ("audited", legacy, False),
+            ("custom-side-effect", custom, True),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                target = root / "app" / "ai_providers.py"
+                target.parent.mkdir()
+                target.write_text(source, encoding="utf-8")
+                with patch.object(migration, "ROOT", root), patch.object(
+                    migration, "canonical_text", return_value="from .native_ai import AIProviderError\\n"
+                ):
+                    if should_refuse:
+                        with self.assertRaisesRegex(migration.MigrationError, "unrecognized provider-bearing helper _cerebras_json"):
+                            migration.transform_ai_providers("canonical-commit")
+                        self.assertEqual(target.read_text(encoding="utf-8"), source)
+                        continue
+                    migration.transform_ai_providers("canonical-commit")
+                result = target.read_text(encoding="utf-8")
+                self.assertNotIn("_cerebras_json", result)
+                self.assertNotRegex(result, migration.PROVIDER_RE)
+                ast.parse(result, filename="app/ai_providers.py")
 
     def test_strategy_migration_refuses_to_discard_generator_validation(self):
         legacy = (
