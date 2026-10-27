@@ -182,3 +182,19 @@ def test_release_diagnostics_redacts_basic_authorization_before_returning_eviden
     assert "[REDACTED]" in redacted
     assert "Could not resolve" in json.dumps(report)
 
+def test_release_diagnostics_redacts_basic_authorization_without_losing_same_line_failure():
+    import json
+    from app.main import _redact_release_diagnostic_text, _release_diagnostic_report
+
+    supplied = "Authorization: Basic dXNlcjpwYXNz; HTTP 401 Could not GET https://repo.example/artifact"
+    redacted = _redact_release_diagnostic_text(supplied)
+    report = json.loads(_release_diagnostic_report(redacted, ""))
+
+    assert "dXNlcjpwYXNz" not in redacted
+    assert "dXNlcjpwYXNz" not in json.dumps(report)
+    assert "[REDACTED]" in redacted
+    assert "HTTP 401" in redacted
+    assert "HTTP 401" in json.dumps(report)
+    assert "Repository access or network failure" in report["likely_blockers"]
+
+
