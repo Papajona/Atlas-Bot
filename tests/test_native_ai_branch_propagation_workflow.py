@@ -14,8 +14,11 @@ WORKFLOW = (
 def test_update_refs_uses_supported_graphql_fields_and_compare_and_swap() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
-    assert "refUpdates: [{name: $name, beforeOid: $before, afterOid: $after, force: false}]" in workflow
-    assert '{ clientMutationId }' in workflow
+    assert (
+        "refUpdates: [{name: $name, beforeOid: $before, afterOid: $after, force: false}]"
+        in workflow
+    )
+    assert "{ clientMutationId }" in workflow
     assert '-F name="refs/heads/$branch"' in workflow
     assert '-F before="$expected_sha"' in workflow
     assert '-F after="$new_sha"' in workflow
