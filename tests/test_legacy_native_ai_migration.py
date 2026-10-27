@@ -1684,6 +1684,32 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
                         migration.transform_strategy_ai("fake-commit")
                 self.assertEqual(target.read_text(encoding="utf-8"), altered)
 
+        direct_dispatch_old = (
+            "async def _generate_with_provider(provider: str, prompt: str) -> dict:\n"
+            "    if provider == \"gemini\":\n"
+            "        return await _gemini_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.gemini_strategy_model or settings.gemini_model)\n"
+            "    return await _groq_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.groq_strategy_model or settings.groq_model)\n"
+        )
+        direct_dispatch_new = (
+            "async def _generate_with_provider(provider: str, prompt: str) -> dict:\n"
+            "    return await _gemini_json(prompt)\n"
+        )
+        altered = legacy_two.replace(direct_dispatch_old, direct_dispatch_new, 1)
+        self.assertNotEqual(altered, legacy_two, "fixture did not replace the multi-provider router")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(altered, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "_generate_with_provider contains additional or unknown behavior"
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), altered)
+
     def test_ai_providers_only_removes_audited_cerebras_adapter(self):
         legacy = """import httpx
 from .config import settings
@@ -1723,9 +1749,11 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
             '        body = _response_json_object(response, "Cerebras")',
             '        record_provider_metrics()\n        body = _response_json_object(response, "Cerebras")',
         )
+        custom_annotation = legacy.replace("prompt: str", "prompt: audit()")
         for label, source, should_refuse in (
             ("audited", legacy, False),
             ("custom-side-effect", custom, True),
+            ("side-effecting-annotation", custom_annotation, True),
         ):
             with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
