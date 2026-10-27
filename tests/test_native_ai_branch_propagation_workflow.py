@@ -60,7 +60,7 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert "git grep -IlEi" in workflow
     assert "git grep -nIEi" in workflow
     assert "AI_GATEWAY_API_KEY" in workflow
-    assert "OPENAI_API_KEY" in workflow
+    assert "OPENAI_[[:alnum:]_]+" in workflow
     assert "openai-compatible" in workflow
     assert 'git cherry-pick "$NATIVE_AI_COMMIT"' not in workflow
     assert 'git cherry-pick "$NATIVE_AI_RUNTIME_PATCH_COMMIT"' not in workflow
