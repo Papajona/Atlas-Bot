@@ -153,7 +153,12 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
     family = _classify_family(text)
     lower = text.lower()
     asks_both = any(x in lower for x in ("both directions", "long and short", "long/short", "both sides"))
-    asks_short = bool(re.search(r"\b(short|sell|bearish|downtrend)\b", lower))
+    asks_short = bool(
+        re.search(r"\b(?:bearish|downtrend)\b", lower)
+        or re.search(r"\b(?:shorting|selling)\b", lower)
+        or re.search(r"\bshort\s+(?!term\b|terms\b)(?:the\s+)?[a-z0-9][a-z0-9/_-]*\b", lower)
+        or re.search(r"\bsell\s+(?:only\b|(?:the\s+)?[a-z0-9][a-z0-9/_-]*\b)", lower)
+    )
     asks_long = bool(re.search(r"\b(long|buy|bullish|uptrend)\b", lower))
     direction = "BOTH" if asks_both or (asks_short and asks_long) else ("SHORT" if asks_short else "LONG")
     direction_ambiguous = not (asks_both or asks_short or asks_long)
