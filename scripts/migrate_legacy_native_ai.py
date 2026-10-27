@@ -463,7 +463,11 @@ def transform_ai_providers(commit: str) -> None:
         return exports, bindings
 
     preserved_imports: list[str] = []
+    preserved_import_bindings: list[set[str]] = []
+    preserved_import_lines: list[int] = []
     retained_star_imports: list[str] = []
+    retained_star_exports: list[set[str]] = []
+    retained_star_lines: list[int] = []
     for node in import_nodes:
         if isinstance(node, ast.ImportFrom) and node.module == "__future__":
             continue
@@ -483,6 +487,8 @@ def transform_ai_providers(commit: str) -> None:
                         f"star import {source_module!r} exports canonical name {exported_name!r} with a different or unknown binding; refusing to change helper semantics"
                     )
             retained_star_imports.append(ast.unparse(node))
+            retained_star_exports.append(exported_names)
+            retained_star_lines.append(node.lineno)
             continue
 
         aliases = []
@@ -515,6 +521,23 @@ def transform_ai_providers(commit: str) -> None:
             preserved_imports.append(ast.unparse(ast.ImportFrom(
                 module=node.module, names=aliases, level=node.level
             )))
+        preserved_import_bindings.append({
+            alias.asname or (alias.name.split(".", 1)[0] if isinstance(node, ast.Import) else alias.name)
+            for alias in aliases
+        })
+        preserved_import_lines.append(node.lineno)
+
+    # The output format keeps star imports before the canonical body and
+    # explicit imports after it.  That is safe unless an explicit import that
+    # originally came first overlaps a later star export: moving the two
+    # imports across the canonical body would reverse the winning binding.
+    for bindings, explicit_line in zip(preserved_import_bindings, preserved_import_lines):
+        for star_exports, star_line in zip(retained_star_exports, retained_star_lines):
+            if bindings & star_exports and explicit_line < star_line:
+                raise MigrationError(
+                    "retained explicit import precedes a star import with overlapping exports; "
+                    "refusing to change helper bindings"
+                )
 
     canonical_lines = canonical.splitlines(keepends=True)
     header_end_line = 0
@@ -533,14 +556,14 @@ def transform_ai_providers(commit: str) -> None:
     canonical_header = "".join(canonical_lines[:header_end_line]).rstrip()
     canonical_body = "".join(canonical_lines[header_end_line:]).lstrip("\n")
     if retained_star_imports:
-        canonical_pieces = [piece for piece in (canonical_header, *sorted(set(retained_star_imports)), canonical_body.rstrip()) if piece.strip()]
+        canonical_pieces = [piece for piece in (canonical_header, *retained_star_imports, canonical_body.rstrip()) if piece.strip()]
         canonical_result = "\n\n".join(canonical_pieces) + "\n"
     else:
         canonical_result = canonical.rstrip()
 
     pieces = [canonical_result]
     if preserved_imports:
-        pieces.append("\n".join(sorted(set(preserved_imports))))
+        pieces.append("\n".join(preserved_imports))
     if extras:
         pieces.extend(extras)
     result = "\n\n".join(piece for piece in pieces if piece.strip()) + "\n"

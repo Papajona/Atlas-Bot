@@ -151,6 +151,37 @@ def retained_helper():
             self.assertIn("return branch_helper()", result)
             self.assertNotRegex(result, migration.PROVIDER_RE)
 
+    def test_explicit_import_before_overlapping_star_import_fails_closed(self):
+        legacy = """from .explicit_helpers import helper
+from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+async def _gemini_json(prompt):
+    return {"prompt": prompt}
+
+def retained_helper():
+    return helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            explicit_module = root / "app" / "explicit_helpers.py"
+            star_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            explicit_module.write_text("def helper():\n    return 'explicit'\n", encoding="utf-8")
+            star_module.write_text("def helper():\n    return 'star'\n", encoding="utf-8")
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration,
+                "canonical_text",
+                return_value="from .native_ai import AIProviderError\n",
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "overlapping exports"):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_star_import_with_conflicting_native_error_binding_fails_closed(self):
         legacy = """from .branch_helpers import *
 
