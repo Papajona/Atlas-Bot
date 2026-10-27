@@ -492,6 +492,9 @@ def transform_daily_research() -> None:
                 expression = expression.value
             if not isinstance(expression, ast.Call):
                 return False
+            # Don't erase nested setup/configuration calls inside provider arguments.
+            if sum(1 for part in ast.walk(expression) if isinstance(part, ast.Call)) != 1:
+                return False
             return (
                 (isinstance(expression.func, ast.Name) and expression.func.id in provider_delegations)
                 or (isinstance(expression.func, ast.Attribute) and expression.func.attr in provider_delegations)
@@ -518,16 +521,13 @@ def transform_daily_research() -> None:
             else:
                 return False
             value = statement.value
-            if not isinstance(value, ast.Dict):
+            if not isinstance(value, ast.Dict) or len(value.keys) != 1 or len(value.values) != 1:
                 return False
-            if any(isinstance(part, ast.Call) for part in ast.walk(value)):
-                return False
-            pairs = [
-                (key.value, item.value)
-                for key, item in zip(value.keys, value.values)
-                if isinstance(key, ast.Constant) and isinstance(item, ast.Constant)
-            ]
-            return len(pairs) == 1 and pairs[0] == ("status", "NOT_CONFIGURED")
+            key, item = value.keys[0], value.values[0]
+            return (
+                isinstance(key, ast.Constant) and key.value == "status"
+                and isinstance(item, ast.Constant) and item.value == "NOT_CONFIGURED"
+            )
 
         body_is_provider_only = bool(node.body) and all(
             is_provider_only_statement(statement) for statement in node.body
