@@ -31,7 +31,7 @@ anything on the API, while the worker pool is always-on by design.
  Cloud Run job (alembic) ------------------------------------------/                              |  loops: reconcile, TRON, recovery,
  Redis <---- API (rate limit) ---- worker (execution lease)                                       |  key audit, research, bot controllers
  GCS atlas-models (API ro / worker rw)   GCS atlas-model-staging (worker rw)                      v
- Secret Manager (per-secret IAM: API, worker, migrator)                              exchanges (sandbox), TronGrid, Gemini, Groq
+ Secret Manager (per-secret IAM: API, worker, migrator)                              exchanges (sandbox), TronGrid, Atlas Native AI
 ```
 
 ---------------------------------------------------------------------------------------------------------------------------------
@@ -41,8 +41,7 @@ anything on the API, while the worker pool is always-on by design.
 **Tools:** `gcloud` (a version that has `gcloud run worker-pools`; the docs show it under both GA and `beta`, so check `gcloud run worker-pools deploy --help`),
 `git`, `python` 3.13 with the repo's `requirements.txt` + `requirements-dev.txt`, `openssl`, `psql`, `docker` (optional, local builds).
 
-**Accounts/services:** a GCP project with billing; a Supabase project (PostgreSQL URL + Auth with TOTP for admins); a managed Redis; a TronGrid API key; a
-Gemini key and a Groq key; an HTTPS domain for the load balancer.
+**Accounts/services:** a GCP project with billing; a Supabase project (PostgreSQL URL + Auth with TOTP for admins); a managed Redis; a TronGrid API key; an HTTPS domain for the load balancer.
 
 **Values you must generate once** (store them only in Secret Manager via bootstrap):
 
@@ -70,12 +69,8 @@ Gemini key and a Groq key; an HTTPS domain for the load balancer.
 | `atlas-model-signing-public-key` | yes | yes | no |
 | `atlas-model-signing-private-key` | **no** | yes (to sign trained models) | no |
 | `atlas-supabase-anon-key`, `atlas-funding-webhook-secret` | yes | no | no |
-| `atlas-gemini-api-key` | yes | yes | no |
-| `atlas-groq-api-key` | optional* | optional* | no |
 
-\* **Both Gemini and Groq must approve every trade plan** (the safety veto fails closed). The veto runs in `customer_start_bot` (API) **and** in the persisted bot
-cycles (worker). If either key is missing in a process, bots in that process return `NO_TRADE` (`ai_safety_not_configured`). Set Groq on **both** the API
-(`SECRET_GROQ_API_KEY_VERSION`) and the worker (`SECRET_GROQ_REF`). Both scripts now warn when it is missing.
+Atlas Native AI's local review is not a language-model opinion and has no execution authority. It fails closed when market data, price geometry, adaptive-model evidence, or directional signal is missing or inconsistent. Existing deterministic risk, paper-ledger, and execution gates remain authoritative.
 
 ### 3.2 Service accounts
 `SERVICE_ACCOUNT` (API, e.g. `atlas-trading-api`), `WORKER_SERVICE_ACCOUNT` (e.g. `atlas-trading-worker`), `MIGRATION_SERVICE_ACCOUNT` (default `atlas-migrator`).
@@ -84,12 +79,10 @@ Each gets `secretAccessor` only on the secrets in the table above. Review the bu
 ### 3.3 Key runtime settings (environment variables; field names of `app/config.py`)
 | Setting | Default | Meaning |
 |---|---|---|
-| `ENVIRONMENT` | script sets `production` | production enables strict startup validation (xpub, Supabase, webhook, model keys, backup URL, Redis rate limit) |
+| `ENVIRONMENT` | script sets `production` | production enables strict startup validation (xpub, Supabase, webhook, model-signing keys, backup URL, Redis rate limit) |
 | `PROCESS_ROLE` | `api` / `worker` / `job` | decides which loops start |
 | `BACKGROUND_RECONCILIATION_ENABLED` | API script `false`; default `true` | the worker relies on the default `true` |
 | `ADAPTIVE_BOT_CONTROLLER_ENABLED` | `true` | worker starts bot and executor controllers |
-| `GEMINI_MODEL` | `gemini-3.8-flash` | Single configured Gemini model; the exact-head Production Verification Gate must generate text with this model before release |
-| `GROQ_MODEL`, `GROQ_STRATEGY_MODEL` | `openai/gpt-oss-20b` | check with `python -m scripts.check_ai_models` before every deploy |
 | `RESEARCH_REQUIRE_COST_STRESS` / `RESEARCH_COST_STRESS_MULTIPLIER` | `true` / `2.0` | promotion needs a positive net edge at 2x costs |
 | `RESEARCH_MIN_DEFLATED_SHARPE` | `0.95` in production | production adaptive-model promotion fails closed below 0.95; development/staging may use a lower value for research |
 | `EDGE_DECAY_HALT_ENABLED`, `EDGE_DECAY_WINDOW_TRADES`, `EDGE_DECAY_MIN_TRADES`, `EDGE_DECAY_Z_HALT` | `true`, 100, 60, 2.0 | blocks **new** entries when recent realized net returns are significantly negative; closes always pass |
@@ -107,7 +100,7 @@ Abort and investigate on the first failed check; do not skip forward.
 ### Step 1: Bootstrap (once per project) -- `deploy/gcp-bootstrap.sh`
 Required environment: `GCP_PROJECT_ID GCP_REGION AR_REPOSITORY MODEL_BUCKET MODEL_STAGING_BUCKET SERVICE_ACCOUNT WORKER_SERVICE_ACCOUNT DATABASE_URL
 USDT_TRON_ACCOUNT_XPUB TRONGRID_API_KEY APP_ENCRYPTION_KEY REDIS_URL SUPABASE_URL SUPABASE_ANON_KEY FUNDING_WEBHOOK_SECRET ADMIN_SUPABASE_USER_IDS
-BACKUP_RECOVERY_URL GEMINI_API_KEY FORWARDED_ALLOW_IPS MODEL_SIGNING_PUBLIC_KEY MODEL_SIGNING_PRIVATE_KEY`; optional `GROQ_API_KEY`, `MIGRATION_SERVICE_ACCOUNT`.
+BACKUP_RECOVERY_URL  FORWARDED_ALLOW_IPS MODEL_SIGNING_PUBLIC_KEY MODEL_SIGNING_PRIVATE_KEY`; optional ``, `MIGRATION_SERVICE_ACCOUNT`.
 It enables the required APIs, creates the Artifact Registry repo, the three service accounts, the two buckets, every secret, and the per-secret IAM bindings.
 **Check:** `gcloud secrets list`, `gcloud iam service-accounts list`; confirm `atlas-model-signing-private-key` is readable by the **worker only**.
 
@@ -140,7 +133,7 @@ bash deploy/cloud-run-migration-job.sh        # deploys the job as atlas-migrato
 ### Step 6: Deploy the API -- `deploy/cloud-run-deploy.sh`
 Required: all Step-1 variables plus `CLOUD_RUN_SERVICE` and explicit secret versions `SECRET_DATABASE_VERSION SECRET_KEY_VERSION SECRET_TRON_XPUB_VERSION
 SECRET_APP_ENCRYPTION_VERSION SECRET_REDIS_URL_VERSION SECRET_TRONGRID_VERSION SECRET_MODEL_SIGNING_PUBLIC_VERSION SECRET_SUPABASE_ANON_KEY_VERSION
-SECRET_FUNDING_WEBHOOK_VERSION SECRET_GEMINI_API_KEY_VERSION` and (recommended) `SECRET_GROQ_API_KEY_VERSION`.
+SECRET_FUNDING_WEBHOOK_VERSION SECRET__VERSION` and (recommended) `SECRET__VERSION`.
 It deploys with `--execution-environment gen2`, the read-only models volume, ingress `internal-and-cloud-load-balancing`, and `--allow-unauthenticated`
 (authentication is enforced by the app; the ingress setting restricts who can reach it).
 **Check:** `GET /healthz` (liveness) then `GET /readyz` (database, migrations current, Redis, recovery config, admin auth). `/docs` must be off
@@ -152,7 +145,7 @@ export WORKER_POOL=atlas-trading-worker IMAGE=<same image> WORKER_SERVICE_ACCOUN
   DATABASE_SECRET_REF=atlas-database-url:<v> SECRET_REDIS_URL_REF=atlas-redis-url:<v> SECRET_KEY_REF=atlas-secret-key:<v> \
   SECRET_APP_ENCRYPTION_REF=atlas-app-encryption-key:<v> SECRET_TRON_XPUB_REF=atlas-usdt-tron-account-xpub:<v> SECRET_TRONGRID_REF=atlas-trongrid-api-key:<v> \
   SECRET_MODEL_SIGNING_PUBLIC_REF=atlas-model-signing-public-key:<v> SECRET_MODEL_SIGNING_PRIVATE_REF=atlas-model-signing-private-key:<v> \
-  SECRET_GEMINI_REF=atlas-gemini-api-key:<v> SECRET_GROQ_REF=atlas-groq-api-key:<v> BACKUP_RECOVERY_URL=... \
+  SECRET_GEMINI_REF=:<v> =:<v> BACKUP_RECOVERY_URL=... \
   RESEARCH_FEE_SOURCE="${RESEARCH_FEE_SOURCE:?set to actual fee source}" \\
   RESEARCH_FEE_EVIDENCE_ID="${RESEARCH_FEE_EVIDENCE_ID:?set to immutable evidence ID}" \\
   RESEARCH_MIN_DEFLATED_SHARPE="${RESEARCH_MIN_DEFLATED_SHARPE:-0.95}"
@@ -175,7 +168,7 @@ needed). Set `FORWARDED_ALLOW_IPS` to the load balancer's range. Re-run `/health
    `clientOrderId`, open/cancel/double-cancel, fee extraction vs the venue trade list, plus a reduce-only close on a derivatives testnet). A SKIP is not a pass.
 5. **Crash drill on staging:** `kill -9` the worker during a sandbox fill; confirm reconcile completes the order once, fees are charged once, and the
    ledger invariant stays `ok`.
-6. `python -m scripts.check_ai_models` passes (needs the provider keys).
+6. `python -m scripts.check_native_ai` passes (needs the provider keys).
 
 ### Step 10: Operate in paper mode, then decide
 Live trading requires the gates in section 11. Nothing in the deploy scripts enables it.
@@ -234,9 +227,9 @@ and before each release (the verify script does).
 |---|---|---|
 | Migration job had no `--service-account` | ran as the default compute identity, which bootstrap never granted the DB secret (or ran over-privileged) | dedicated `atlas-migrator`, DB-secret-only, `--max-retries 0 --task-timeout 900s` |
 | Worker script never set `BACKUP_RECOVERY_URL` | production startup refused to boot: the worker pool crash-looped | variable now required and passed |
-| API script spliced the Gemini secret without a leading comma when Groq was unset | `--set-secrets` became `...atlas-trongrid-api-key:2GEMINI_API_KEY=...`: an invalid deploy command on the no-Groq path | `AI_SECRET_ARGS` always starts with a comma; both branches checked |
-| Worker had no way to receive a Groq key | every worker bot cycle ended `ai_safety_not_configured` (NO_TRADE) because the veto needs both providers | optional `SECRET_GROQ_REF` + Groq model env added; warns when unset |
-| `gemini-2.5-*` defaults | models scheduled for shutdown Oct 2026 | current default is the single configured `gemini-3.8-flash` model; the historical standard-Flash diagnostic does not prove inference works for this model, so the exact-head production provider gate remains mandatory; `scripts/check_ai_models.py` |
+| API script spliced the Atlas Native AI secret without a leading comma when hosted AI provider was unset | `--set-secrets` became `...atlas-trongrid-api-key:2=...`: an invalid deploy command on the no-hosted AI provider path | `AI_SECRET_ARGS` always starts with a comma; both branches checked |
+| Worker had no way to receive a hosted AI provider key | every worker bot cycle ended `ai_safety_not_configured` (NO_TRADE) because the veto needs both providers | optional `` + hosted AI provider model env added; warns when unset |
+| `gemini-2.5-*` defaults | models scheduled for shutdown Oct 2026 | current default is the single configured `atlas-native-strategy-v1` model; the historical standard-Flash diagnostic does not prove inference works for this model, so the exact-head production provider gate remains mandatory; `scripts/check_ai_models.py` |
 | `DEPLOYMENT_ACCEPTANCE.md` stated `max=1, concurrency=1` and listed migrations after deploy | wrong numbers and order | corrected |
 | New real-ledger Postgres test not in the pre-flight script | concurrency of the actual ledger never exercised | added to `verify-live-money-runtime.sh` |
 
@@ -251,7 +244,7 @@ remain very large; docker-compose is for local use only (`redis:8-alpine`, `post
 |---|---|---|
 | Worker pool restarts immediately | missing `BACKUP_RECOVERY_URL`, xpub, signing private key, or Redis | `gcloud run worker-pools logs`/Cloud Logging; config validation names the missing setting |
 | API `readyz` fails | migrations behind, DB unreachable (`?ssl=require`), Redis down | run the migration job; check secrets and VPC egress |
-| Bots always `NO_TRADE` / `ai_safety_not_configured` | a provider key missing in that process (API or worker) | set Groq (and Gemini) in both |
+| Bots always `NO_TRADE` / `ai_safety_not_configured` | a provider key missing in that process (API or worker) | set hosted AI provider (and Atlas Native AI) in both |
 | `ai_safety_gate` vetoes | provider disagreed or returned invalid JSON | see `ADAPTIVE_BOT_AI_VETO` audit events; retry later |
 | Entries blocked "Edge-decay halt" | recent realized net returns significantly negative | review the strategy; the halt lifts as the window recovers; closes are never blocked |
 | Customer account `SUSPENDED` | key audit found extra permissions | the customer must re-issue a trade-only, no-withdraw key; incident `KEY_PERMISSIONS:<id>` |
@@ -275,7 +268,7 @@ DATABASE_URL=postgresql://... bash deploy/verify-live-money-runtime.sh
 bash deploy/cloud-run-deploy.sh                               # builds + deploys API
 IMAGE=... DATABASE_SECRET_REF=atlas-database-url:N CLOUD_RUN_MIGRATION_JOB=atlas-migrate bash deploy/cloud-run-migration-job.sh
 IMAGE=... (worker refs) bash deploy/cloud-run-worker-deploy.sh
-python -m scripts.check_ai_models
+python -m scripts.check_native_ai
 python -m scripts.exchange_sandbox_drill --i-understand-sandbox
 gcloud run services describe "$CLOUD_RUN_SERVICE" --region "$GCP_REGION" --format='value(status.url)'
 ```
