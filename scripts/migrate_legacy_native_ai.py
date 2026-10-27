@@ -1851,6 +1851,31 @@ def _is_safe_legacy_cerebras_adapter(node: ast.AST) -> bool:
     ):
         return False
 
+    def inert_type_annotation(value: ast.AST | None) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, ast.Constant):
+            return value.value is None
+        if isinstance(value, ast.Name):
+            return value.id in {"str", "float", "dict", "Any"}
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
+            return inert_type_annotation(value.left) and inert_type_annotation(value.right)
+        if isinstance(value, ast.Subscript):
+            return inert_type_annotation(value.value) and inert_type_annotation(value.slice)
+        if isinstance(value, (ast.Tuple, ast.List)):
+            return all(inert_type_annotation(item) for item in value.elts)
+        return False
+
+    parameters = [*args.posonlyargs, *args.args, *args.kwonlyargs]
+    if args.vararg is not None:
+        parameters.append(args.vararg)
+    if args.kwarg is not None:
+        parameters.append(args.kwarg)
+    if any(not inert_type_annotation(parameter.annotation) for parameter in parameters):
+        return False
+    if not inert_type_annotation(node.returns):
+        return False
+
     def is_name(value: ast.AST | None, expected: str) -> bool:
         return isinstance(value, ast.Name) and value.id == expected
 
