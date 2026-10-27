@@ -32,9 +32,9 @@ def test_release_diagnostics_redacts_private_key_material():
     assert "END PRIVATE KEY" in redacted
 
 
-def test_gateway_configuration_is_server_side_and_optional_by_default():
+def test_hosted_ai_gateway_configuration_is_removed():
     from app.config import settings
 
-    assert hasattr(settings, "ai_gateway_api_key")
-    assert hasattr(settings, "ai_gateway_base_url")
-    assert hasattr(settings, "ai_gateway_model")
+    assert not hasattr(settings, "ai_gateway_api_key")
+    assert not hasattr(settings, "ai_gateway_base_url")
+    assert not hasattr(settings, "ai_gateway_model")

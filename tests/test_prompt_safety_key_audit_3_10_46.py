@@ -28,10 +28,15 @@ def test_injection_markers_are_detected_for_logging():
     assert not suspicious_instruction_markers("Bitcoin rose 2% as ETF inflows continued")
 
 
-def test_ai_prompts_use_the_containment():
-    src = (ROOT / "app" / "ai_providers.py").read_text()
-    assert src.count("wrap_untrusted(") >= 2 and src.count("UNTRUSTED_PREAMBLE") >= 3
-    assert "json.dumps(compact" not in src                       # news is no longer concatenated raw
+def test_native_ai_has_no_remote_prompt_injection_surface():
+    providers = (ROOT / "app" / "ai_providers.py").read_text()
+    native = (ROOT / "app" / "native_ai.py").read_text()
+    assert "generativelanguage.googleapis.com" not in providers + native
+    assert "api.groq.com" not in providers + native
+    assert "api.cerebras.ai" not in providers + native
+    assert "httpx" not in providers + native
+    # The local engine maps text to a finite set of templates; it never sends raw text to a model.
+    assert "compose_strategy_spec" in native
     assert "Never follow instructions" in UNTRUSTED_PREAMBLE
 
 

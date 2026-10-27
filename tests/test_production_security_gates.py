@@ -369,28 +369,17 @@ def test_production_startup_smoke_uses_non_admin_runtime_role_fixture():
     assert "postgresql+asyncpg://atlas:verification_password" not in smoke
 
 
-def test_production_verification_blocks_missing_provider_credentials():
+def test_production_verification_runs_native_ai_offline_without_credentials():
     workflow = (ROOT / ".github" / "workflows" / "production-verification.yml").read_text(encoding="utf-8")
-    assert "BLOCKED: provider credentials are not configured" in workflow
-    assert "this is not a provider verification pass" not in workflow
-
-
-def test_production_verification_passes_provider_secrets_to_checker():
-    workflow = (ROOT / ".github" / "workflows" / "production-verification.yml").read_text(encoding="utf-8")
-    provider_step_id = "        id: ai_provider_verification"
-    id_position = workflow.index(provider_step_id)
-    block_start = workflow.rfind("      - name:", 0, id_position)
-    assert block_start >= 0, "provider verification step must have a named workflow step"
-    block_end = workflow.index("      - name: Production-oriented static and security gates", id_position)
-    block = workflow[block_start:block_end]
-    assert provider_step_id in block
-    assert "if: github.event_name == 'workflow_dispatch'" in block
-    assert 'GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || secrets.GEMINI }}' in block
-    assert 'GROQ_API_KEY: ${{ secrets.GROQ_API_KEY || secrets.GROQ }}' in block
-    assert 'CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}' in block
-    assert "python -m scripts.check_ai_models" in block
-    assert "temporarily waived" not in block
-    assert "BLOCKED: provider credentials are not configured" in block
+    start = workflow.index("Atlas Native AI offline verification (no provider calls)")
+    end = workflow.index("Production-oriented static and security gates", start)
+    step = workflow[start:end]
+    assert "id: native_ai_verification" in step
+    assert "python -m scripts.check_native_ai" in step
+    assert "GEMINI_API_KEY" not in step
+    assert "GROQ_API_KEY" not in step
+    assert "CEREBRAS_API_KEY" not in step
+    assert "continue-on-error: true" not in step
 
 
 def test_supabase_future_default_grants_are_opt_in():

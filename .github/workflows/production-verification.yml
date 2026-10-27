@@ -1,4 +1,4 @@
-name: Production Core Verification (live AI provider check manual)
+name: Production Core Verification (Atlas Native AI offline)
 on:
   workflow_dispatch:
   pull_request:
@@ -122,30 +122,9 @@ jobs:
           python -m alembic heads
       - name: Repository secret scan
         run: python scripts/check_no_secrets.py
-      - name: AI model/provider verification when credentials are supplied
-        if: github.event_name == 'workflow_dispatch'
-        id: ai_provider_verification
-        env:
-          PYTHONPATH: .
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || secrets.GEMINI }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY || secrets.GROQ }}
-          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
-          GEMINI_MODEL: gemini-3.8-flash
-        run: |
-          set +e
-          python -m scripts.check_ai_models 2>&1 | tee ai-provider-verification.log
-          status=${PIPESTATUS[0]}
-          set -e
-          if [ "$status" -eq 0 ]; then
-            echo "gemini_deferred=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          elif [ "$status" -eq 2 ]; then
-            echo "BLOCKED: provider credentials are not configured; production verification cannot pass without provider checks"
-            exit 2
-          else
-            echo "BLOCKED: AI model/provider verification failed with exit code $status"
-            exit "$status"
-          fi
+      - name: Atlas Native AI offline verification (no provider calls)
+        id: native_ai_verification
+        run: python -m scripts.check_native_ai
       - name: Production-oriented static and security gates
         run: |
           python -m compileall -q app alembic
@@ -214,29 +193,18 @@ jobs:
         run: |
           python -m pytest -m postgres -q -rs --junitxml=postgres-marked.xml
           python scripts/assert_no_skips.py postgres-marked.xml
-      - name: Report live provider verification result
+      - name: Report Atlas Native AI verification result
         if: always()
         env:
-          PROVIDER_VERIFICATION_OUTCOME: ${{ steps.ai_provider_verification.outcome }}
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          NATIVE_AI_VERIFICATION_OUTCOME: ${{ steps.native_ai_verification.outcome }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
-            echo "::notice title=Live provider verification deferred::Automatic CI did not call live AI providers; provider readiness remains unverified."
-            {
-              echo "## Live AI provider verification: NOT RUN"
-              echo "Automatic CI intentionally avoids live AI inference to conserve provider quota."
-              echo "Core tests, database checks, and security checks may pass, but this run is **not** a production release attestation."
-              echo "For an explicit provider attestation, manually run this workflow against the exact candidate commit when provider quota is available."
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          if [ "$PROVIDER_VERIFICATION_OUTCOME" != "success" ]; then
-            echo "## Live AI provider verification: FAILED" >> "$GITHUB_STEP_SUMMARY"
-            echo "BLOCKED: production provider verification requires successful live inference for every configured AI provider."
+          if [ "$NATIVE_AI_VERIFICATION_OUTCOME" != "success" ]; then
+            echo "## Atlas Native AI: FAILED" >> "$GITHUB_STEP_SUMMARY"
+            echo "BLOCKED: the offline Native AI health check did not pass."
             exit 1
           fi
           {
-            echo "## Live AI provider verification: PASSED"
-            echo "Live inference succeeded for every configured provider in this manual run."
+            echo "## Atlas Native AI: PASSED"
+            echo "Local strategy composition and deterministic review passed. No hosted AI inference or provider API quota was used."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "Live AI provider verification passed for every configured model."
+          echo "Atlas Native AI offline verification passed; zero external model calls."

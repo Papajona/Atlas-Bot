@@ -264,21 +264,7 @@ class Settings(BaseSettings):
     market_intelligence_enabled: bool = True
     market_intelligence_timeout_seconds: float = 8.0
     market_intelligence_max_news_items: int = 60
-    # AI research providers. Keys belong in Secret Manager / environment only.
-    # Optional OpenAI-compatible AI Gateway for authorized release diagnostics only.
-    ai_gateway_api_key: str = ""
-    ai_gateway_base_url: str = ""
-    ai_gateway_model: str = ""
-    gemini_api_key: str = ""
-    # Single-source Gemini model. The exact-head provider gate must prove inference before release.
-    gemini_model: str = "gemini-3.8-flash"
-    groq_api_key: str = ""
-    groq_model: str = "openai/gpt-oss-20b"
-    groq_strategy_model: str = "openai/gpt-oss-20b"
-    groq_max_completion_tokens: int = 2048
-    # Optional third-party fallback. Keep the key in Secret Manager/environment only.
-    cerebras_api_key: str = ""
-    cerebras_model: str = "gpt-oss-120b"
+    # Atlas Native AI is local and requires no hosted-model credentials.
 
     # Withdrawal approval/execution controls. Fund release is fail-closed unless explicitly configured.
     withdrawals_enabled: bool = False
@@ -560,16 +546,6 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"ENVIRONMENT must be one of {sorted(_VALID_ENVIRONMENTS)}, got {value!r}. "
                 "A typo here would otherwise silently skip production hardening checks."
-            )
-        return normalized
-
-    @field_validator("gemini_model")
-    @classmethod
-    def _validate_gemini_model(cls, value: str) -> str:
-        normalized = str(value or "").strip().removeprefix("models/")
-        if normalized != "gemini-3.8-flash":
-            raise ValueError(
-                "Gemini model must be exactly gemini-3.8-flash; alternative Gemini IDs are not permitted."
             )
         return normalized
 
