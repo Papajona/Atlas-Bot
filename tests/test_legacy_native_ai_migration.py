@@ -151,7 +151,7 @@ class LegacyNativeAIMigrationTests(unittest.TestCase):
             )
             config.write_text(mixed, encoding="utf-8")
             with patch.object(migration, "ROOT", root):
-                with self.assertRaisesRegex(migration.MigrationError, "sharing a line"):
+                with self.assertRaisesRegex(migration.MigrationError, "sharing a physical line"):
                     migration.transform_config()
             self.assertEqual(config.read_text(encoding="utf-8"), mixed)
 
