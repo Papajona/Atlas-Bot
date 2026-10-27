@@ -169,7 +169,7 @@ jobs:
           declare -a cleanup_warnings=()
           update_existing_branch_ref() {
             local branch="$1" expected_sha="$2" new_sha="$3"
-            local remote_sha branch_hash temp_ref update_rc ref_payload repository_id ref_id current_sha update_payload updated_sha
+            local remote_sha branch_hash temp_ref update_rc ref_payload repository_id current_sha update_payload updated_sha
             remote_sha="$(git ls-remote --heads origin "refs/heads/$branch" | awk 'NR == 1 {print $1}')"
             if [[ "$remote_sha" != "$expected_sha" ]]; then
               echo "Ref refs/heads/$branch changed or disappeared after enumeration; refusing to update it." >&2
@@ -191,17 +191,16 @@ jobs:
                 -F name="${GITHUB_REPOSITORY#*/}" \
                 -F qualifiedName="refs/heads/$branch")"; then
               repository_id="$(jq -r '.data.repository.id // empty' <<<"$ref_payload")"
-              ref_id="$(jq -r '.data.repository.ref.id // empty' <<<"$ref_payload")"
               current_sha="$(jq -r '.data.repository.ref.target.oid // empty' <<<"$ref_payload")"
-              if [[ -z "$repository_id" || -z "$ref_id" || "$current_sha" != "$expected_sha" ]]; then
+              if [[ -z "$repository_id" || "$current_sha" != "$expected_sha" ]]; then
                 echo "Ref refs/heads/$branch changed or disappeared before atomic update; refusing to overwrite it." >&2
               elif update_payload="$(gh api graphql \
-                  -f query='mutation($repoId: ID!, $refId: ID!, $before: GitObjectID!, $after: GitObjectID!) { updateRefs(input: {repositoryId: $repoId, refUpdates: [{refId: $refId, beforeOid: $before, afterOid: $after, force: false}]}) { ref { name target { oid } } } }' \
+                  -f query='mutation($repoId: ID!, $refId: ID!, $before: GitObjectID!, $after: GitObjectID!) { updateRefs(input: {repositoryId: $repoId, refUpdates: [{refName: $refName, beforeOid: $before, afterOid: $after, force: false}]}) { refUpdates { ref { name target { oid } } } } }' \
                   -F repoId="$repository_id" \
-                  -F refId="$ref_id" \
+                  -F refName="refs/heads/$branch" \
                   -F before="$expected_sha" \
                   -F after="$new_sha")"; then
-                updated_sha="$(jq -r '.data.updateRefs.ref.target.oid // empty' <<<"$update_payload")"
+                updated_sha="$(jq -r '.data.updateRefs.refUpdates[0].ref.target.oid // empty' <<<"$update_payload")"
                 if [[ "$updated_sha" == "$new_sha" ]]; then
                   update_rc=0
                 else
