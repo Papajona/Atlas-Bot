@@ -52,6 +52,7 @@ SA="${WORKER_SERVICE_ACCOUNT}@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 # Atlas Native AI is local and requires no hosted-model secrets.
 
 gcloud run worker-pools deploy "$WORKER_POOL" \
+  --project "$GCP_PROJECT_ID" \
   --region "$GCP_REGION" \
   --image "$IMAGE" \
   --service-account "$SA" \
