@@ -1679,8 +1679,8 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
     return _extract_json(text)
 """
         custom = legacy.replace(
-            "        response.raise_for_status()\\n        body = _response_json_object(response, \\"Cerebras\\")",
-            "        response.raise_for_status()\\n        record_provider_metrics()\\n        body = _response_json_object(response, \\"Cerebras\\")",
+            '        body = _response_json_object(response, "Cerebras")',
+            '        record_provider_metrics()\n        body = _response_json_object(response, "Cerebras")',
         )
         for label, source, should_refuse in (
             ("audited", legacy, False),
