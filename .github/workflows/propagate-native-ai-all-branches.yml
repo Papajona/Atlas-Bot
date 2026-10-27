@@ -1,0 +1,109 @@
+name: Propagate Atlas Native AI across branches
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/propagate-native-ai-all-branches.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: atlas-native-ai-branch-propagation
+  cancel-in-progress: false
+
+jobs:
+  propagate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout complete repository history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Propagate verified provider-free Native AI change to branch heads
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          NATIVE_AI_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
+          test "$(git rev-parse main)" = "$GITHUB_SHA"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin "+refs/heads/*:refs/remotes/origin/*" --prune
+
+          declare -a updated=()
+          declare -a skipped=()
+          declare -a failed=()
+
+          while IFS= read -r remote_ref; do
+            [[ -n "$remote_ref" ]] || continue
+            branch="${remote_ref#refs/remotes/origin/}"
+            [[ "$branch" == "main" ]] && continue
+
+            start_sha="$(git rev-parse "$remote_ref")"
+            if git merge-base --is-ancestor "$NATIVE_AI_COMMIT" "$start_sha"; then
+              skipped+=("$branch (already contains Native AI commit)")
+              continue
+            fi
+
+            git checkout --detach "$start_sha" >/dev/null 2>&1
+            if ! git cherry-pick -X theirs "$NATIVE_AI_COMMIT" >"$RUNNER_TEMP/cherry-pick.log" 2>&1; then
+              if [[ -n "$(git rev-parse -q --verify CHERRY_PICK_HEAD 2>/dev/null || true)" ]] && git diff --cached --quiet; then
+                git cherry-pick --skip >/dev/null 2>&1 || true
+              else
+                git cherry-pick --abort >/dev/null 2>&1 || true
+                failed+=("$branch: cherry-pick conflict")
+                echo "::warning title=Native AI propagation skipped::$branch could not cleanly accept the Native AI commit."
+                continue
+              fi
+            fi
+
+            # Fail closed: never push a branch if active app/config/deployment code still
+            # references Gemini or another hosted provider after propagation.
+            if grep -RInE 'gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_api_key|SECRET_GEMINI|GROQ_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|api\.groq\.com|api\.cerebras\.ai' \
+              app scripts deploy .github/workflows \
+              --exclude='propagate-native-ai-all-branches.yml' >"$RUNNER_TEMP/hosted-ai-scan.txt"; then
+              failed+=("$branch: active hosted-AI reference remains")
+              echo "::warning title=Native AI propagation skipped::$branch still has hosted-AI references in active code; branch not pushed."
+              sed -n '1,30p' "$RUNNER_TEMP/hosted-ai-scan.txt"
+              continue
+            fi
+
+            new_sha="$(git rev-parse HEAD)"
+            if [[ "$new_sha" == "$start_sha" ]]; then
+              skipped+=("$branch (patch already applied; scan clean)")
+              continue
+            fi
+            if git push origin "HEAD:refs/heads/$branch"; then
+              updated+=("$branch ($start_sha -> $new_sha)")
+            else
+              failed+=("$branch: push rejected, possibly protected branch")
+              echo "::warning title=Native AI propagation blocked::$branch could not be pushed; branch protections were not bypassed."
+            fi
+          done < <(git for-each-ref --format='%(refname)' refs/remotes/origin/ | grep -v '^refs/remotes/origin/HEAD$' | sort)
+
+          {
+            echo "## Atlas Native AI branch propagation"
+            echo
+            echo "- Canonical Native AI commit: `$NATIVE_AI_COMMIT`"
+            echo "- Updated branches: ${#updated[@]}"
+            printf '  - %s\n' "${updated[@]:-none}"
+            echo "- Skipped branches: ${#skipped[@]}"
+            printf '  - %s\n' "${skipped[@]:-none}"
+            echo "- Unresolved branches: ${#failed[@]}"
+            printf '  - %s\n' "${failed[@]:-none}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if (( ${#failed[@]} > 0 )); then
+            echo "::error title=Repository-wide Native AI cleanup incomplete::Some branches need reconciliation; see the workflow summary."
+            exit 1
+          fi
+          echo "PASS: all branch heads were either updated or already contained the provider-free Native AI change."
