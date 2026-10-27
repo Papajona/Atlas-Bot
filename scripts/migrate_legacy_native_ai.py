@@ -1494,34 +1494,6 @@ def transform_strategy_ai(commit: str) -> None:
             continue
         retained_nodes.append(node)
 
-    # Prove the canonical generator's global loads resolve after the migration.
-    local_names = {canonical_generate.name}
-    local_names.update(arg.arg for arg in ast.walk(canonical_generate.args) if isinstance(arg, ast.arg))
-    for part in ast.walk(canonical_generate):
-        if isinstance(part, ast.Name) and isinstance(part.ctx, (ast.Store, ast.Del)):
-            local_names.add(part.id)
-        elif isinstance(part, ast.ExceptHandler) and part.name:
-            local_names.add(part.name)
-        elif isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and part is not canonical_generate:
-            local_names.add(part.name)
-    canonical_global_loads = {
-        part.id for part in ast.walk(canonical_generate)
-        if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Load)
-    } - local_names - set(dir(builtins))
-    available_names: set[str] = set()
-    for retained_node in retained_nodes:
-        if isinstance(retained_node, ast.AnnAssign) and retained_node.value is None:
-            continue
-        available_names.update(_defined_names(retained_node))
-    remappable_names = {"NativeAIError", "compose_strategy_spec"}
-    missing_dependencies = sorted(canonical_global_loads - available_names - remappable_names)
-    if missing_dependencies:
-        raise MigrationError(
-            "canonical strategy generator depends on missing module binding(s): "
-            + ", ".join(missing_dependencies)
-            + "; refusing to publish a broken strategy module"
-        )
-
     # Scope-aware references distinguish a retained helper's parameter from a real
     # reference to a removed module global.
     retained_module = ast.Module(body=retained_nodes, type_ignores=[])
@@ -1591,6 +1563,34 @@ def transform_strategy_ai(commit: str) -> None:
             "retained strategy helper depends on non-native or aliased .ai_providers import(s) "
             + ", ".join(unsafe_imports)
             + "; only imports whose original symbol matches NativeAIError or compose_strategy_spec can be remapped"
+        )
+
+    # Prove the canonical generator's global loads resolve after the migration.
+    local_names = {canonical_generate.name}
+    local_names.update(arg.arg for arg in ast.walk(canonical_generate.args) if isinstance(arg, ast.arg))
+    for part in ast.walk(canonical_generate):
+        if isinstance(part, ast.Name) and isinstance(part.ctx, (ast.Store, ast.Del)):
+            local_names.add(part.id)
+        elif isinstance(part, ast.ExceptHandler) and part.name:
+            local_names.add(part.name)
+        elif isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and part is not canonical_generate:
+            local_names.add(part.name)
+    canonical_global_loads = {
+        part.id for part in ast.walk(canonical_generate)
+        if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Load)
+    } - local_names - set(dir(builtins))
+    available_names: set[str] = set()
+    for retained_node in retained_nodes:
+        if isinstance(retained_node, ast.AnnAssign) and retained_node.value is None:
+            continue
+        available_names.update(_defined_names(retained_node))
+    remappable_names = {"NativeAIError", "compose_strategy_spec"}
+    missing_dependencies = sorted(canonical_global_loads - available_names - remappable_names)
+    if missing_dependencies:
+        raise MigrationError(
+            "canonical strategy generator depends on missing module binding(s): "
+            + ", ".join(missing_dependencies)
+            + "; refusing to publish a broken strategy module"
         )
 
     edits: list[tuple[int, int, str]] = []
@@ -1944,9 +1944,8 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             raise MigrationError(
                 f"{path} retains provider text in a non-provider shell statement; refusing lossy deletion"
             )
-        if line.strip():
-            output.append(line)
-        elif original.strip():
+        # Preserve original blank lines, but do not keep lines emptied by provider removal.
+        if line.strip() or not original.strip():
             output.append(line)
 
     if skip_provider_block:
