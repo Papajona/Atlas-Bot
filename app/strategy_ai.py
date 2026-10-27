@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .config import settings
-from .ai_providers import AIProviderError, _cerebras_json, _gemini_json, _groq_json
+from .native_ai import NativeAIError, compose_strategy_spec
 from .strategy_evidence import evidence_for
 
 
@@ -79,54 +79,6 @@ class AIStrategySpec(BaseModel):
         return self
 
 
-SYSTEM_PROMPT = """You are Atlas Strategy Intelligence, a trading-strategy design assistant.
-Create a structured strategy specification from the user's natural-language request.
-You are NOT a broker, order executor, portfolio manager, or source of guaranteed returns.
-Never claim that a strategy is profitable or safe merely because it sounds plausible.
-Never invent current prices, market conditions, news, or backtest results.
-Only describe rules that can later be validated and backtested by Atlas.
-Use only these timeframes: 5m, 15m, 30m, 1h, 4h, 1d.
-Use only these asset classes: crypto, forex, commodity.
-Every strategy must contain explicit entry and exit conditions, risk controls, and both
-backtest and walk-forward requirements. Select exactly one supported strategy_family: TREND,
-MOMENTUM, BREAKOUT, MEAN_REVERSION, or ENSEMBLE. Atlas will validate that family; individual
-AI conditions are specifications and must not be presented as already backtested unless Atlas
-compiled and tested them. Keep execution_mode exactly PAPER_SHADOW_ONLY.
-Return JSON only matching the requested schema. Do not include markdown."""
-
-
-def _strategy_prompt(prompt: str, name: str) -> str:
-    return (
-        f"Requested strategy name: {name}\n"
-        f"User strategy request:\n{prompt}\n\n"
-        "Produce an Atlas StrategySpec JSON object with these fields: "
-        "version, title, summary, asset, symbols, timeframes, direction, strategy_family, entry_conditions, "
-        "exit_conditions, risk_per_trade, stop_loss_atr, take_profit_rr, sessions, assumptions, "
-        "validation_warnings, requires_backtest, requires_walk_forward, execution_mode, implementation_status. "
-        "Set strategy_family to exactly one of TREND, MOMENTUM, BREAKOUT, MEAN_REVERSION, or ENSEMBLE. "
-        "Use the platform risk limit as the maximum risk_per_trade. If the request asks for "
-        "unsupported or ambiguous behavior, record it in validation_warnings rather than inventing it."
-    )
-
-
-async def _generate_with_provider(provider: str, prompt: str) -> dict[str, Any]:
-    if provider == "gemini":
-        return await _gemini_json(
-            prompt,
-            system_instruction=SYSTEM_PROMPT,
-            model=settings.gemini_model,
-        )
-    if provider == "cerebras":
-        return await _cerebras_json(
-            prompt, system_instruction=SYSTEM_PROMPT, model=settings.cerebras_model
-        )
-    return await _groq_json(
-        prompt,
-        system_instruction=SYSTEM_PROMPT,
-        model=settings.groq_strategy_model or settings.groq_model,
-    )
-
-
 def _apply_market_context(spec: AIStrategySpec, *, asset: str | None = None, symbol: str | None = None, timeframe: str | None = None) -> AIStrategySpec:
     """Bind an AI draft to the market selected by the user before persistence/backtest."""
     warnings = list(spec.validation_warnings)
@@ -149,60 +101,20 @@ def _apply_market_context(spec: AIStrategySpec, *, asset: str | None = None, sym
 
 
 async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None = None, symbol: str | None = None, timeframe: str | None = None) -> dict[str, Any]:
-    """Generate a real LLM strategy draft, validate it, and return an auditable result.
-
-    Gemini is primary; Groq is a configured fallback. Neither provider can execute orders.
-    No deterministic keyword parser is used as a fallback because that would silently
-    reintroduce the capability mismatch this endpoint is designed to remove.
-    """
-    if not settings.gemini_api_key and not settings.groq_api_key and not settings.cerebras_api_key:
-        raise AIProviderError("No AI strategy provider is configured")
-
-    provider_errors: dict[str, str] = {}
-    provider_order = []
-    if settings.gemini_api_key:
-        provider_order.append("gemini")
-    if settings.groq_api_key:
-        provider_order.append("groq")
-    if settings.cerebras_api_key:
-        provider_order.append("cerebras")
-
-    raw: dict[str, Any] | None = None
-    provider_used = ""
-    for provider in provider_order:
-        try:
-            raw = await _generate_with_provider(provider, _strategy_prompt(prompt, name))
-            provider_used = provider
-            break
-        except Exception as exc:
-            provider_errors[provider] = str(exc)
-
-    if raw is None:
-        raise AIProviderError("All configured AI strategy providers failed: " + "; ".join(
-            f"{k}: {v}" for k, v in provider_errors.items()
-        ))
-
+    """Generate a local supported strategy template; no hosted model or network is used."""
     try:
+        raw = compose_strategy_spec(prompt=prompt, name=name, asset=asset, symbol=symbol,
+                                    timeframe=timeframe, max_risk_per_trade=settings.risk_per_trade)
         spec = AIStrategySpec.model_validate(raw)
         spec = _apply_market_context(spec, asset=asset, symbol=symbol, timeframe=timeframe)
     except Exception as exc:
-        raise AIProviderError(f"AI strategy failed schema validation: {exc}") from exc
-
-    family_key = {"TREND":"trend", "MOMENTUM":"momentum", "BREAKOUT":"breakout", "MEAN_REVERSION":"mean_reversion", "ENSEMBLE":"ensemble"}[spec.strategy_family]
+        raise NativeAIError(f"Atlas Native AI could not create a valid strategy draft: {exc}") from exc
+    family = {"TREND":"trend", "MOMENTUM":"momentum", "BREAKOUT":"breakout",
+              "MEAN_REVERSION":"mean_reversion", "ENSEMBLE":"ensemble"}[spec.strategy_family]
     return {
         "strategy": spec.model_dump(),
-        "evidence": evidence_for(family_key),
-        "ai": {
-            "provider": provider_used,
-            "model": (
-                settings.gemini_model if provider_used == "gemini"
-                else settings.groq_strategy_model if provider_used == "groq"
-                else settings.cerebras_model
-            ),
-            "fallback_used": provider_used != "gemini",
-            "provider_errors": provider_errors,
-            "execution_authority": False,
-            "requires_backtest": True,
-            "requires_walk_forward": True,
-        },
+        "evidence": evidence_for(family),
+        "ai": {"provider":"atlas_native", "model":"atlas-native-strategy-v1",
+               "fallback_used":False, "provider_errors":{}, "execution_authority":False,
+               "requires_backtest":True, "requires_walk_forward":True, "network_calls":0},
     }
