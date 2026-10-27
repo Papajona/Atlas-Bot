@@ -43,14 +43,15 @@ jobs:
           # Pin the additional cleanup to the commit that introduced the local release
           # analyzer, not to whatever unrelated source changes may later reach main.
           NATIVE_AI_EXTRA_COMMIT="$(git log --first-parent --format=%H --fixed-strings --grep='Remove remaining hosted AI release diagnostics and harden propagation' "$GITHUB_SHA" | head -n 1)"
-          NATIVE_AI_COMMIT="$NATIVE_AI_EXTRA_COMMIT"
-          git cat-file -e "$NATIVE_AI_INITIAL_BASE_COMMIT^{commit}"
-          git cat-file -e "$NATIVE_AI_INITIAL_COMMIT^{commit}"
-          git cat-file -e "$NATIVE_AI_EXTRA_BASE_COMMIT^{commit}"
           if [[ -z "$NATIVE_AI_EXTRA_COMMIT" ]]; then
             echo "Could not locate the reviewed local release-diagnostics cleanup merge commit." >&2
             exit 1
           fi
+          NATIVE_AI_COMMIT="$NATIVE_AI_EXTRA_COMMIT"
+          git cat-file -e "$NATIVE_AI_INITIAL_BASE_COMMIT^{commit}"
+          git cat-file -e "$NATIVE_AI_INITIAL_COMMIT^{commit}"
+          git cat-file -e "$NATIVE_AI_EXTRA_BASE_COMMIT^{commit}"
+          git cat-file -e "$NATIVE_AI_EXTRA_COMMIT^{commit}"
           extra_parent="$(git rev-parse "$NATIVE_AI_EXTRA_COMMIT^")"
           if [[ "$extra_parent" != "$NATIVE_AI_EXTRA_BASE_COMMIT" ]]; then
             echo "Refusing to propagate an unexpected cleanup range: expected parent $NATIVE_AI_EXTRA_BASE_COMMIT, found $extra_parent." >&2
@@ -404,7 +405,7 @@ jobs:
             after_refs="$(scan_active_provider_refs)" || { git reset --hard "$start_sha" >/dev/null 2>&1 || true; failed+=("$branch: post-change provider scan errored; branch left unchanged"); continue; }
             if [[ -n "$after_refs" ]]; then
               echo "ACTIVE PROVIDER REFERENCES REMAIN after per-path cleanup on $branch:" >&2
-              git grep -nIE 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|api\.groq\.com|api\.cerebras\.ai|api\.openai\.com|openai-compatible|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|CEREBRAS' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' >&2 || true
+              git grep -nIEi 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|api\.groq\.com|api\.cerebras\.ai|api\.openai\.com|openai-compatible|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|CEREBRAS' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' >&2 || true
               git reset --hard "$start_sha" >/dev/null 2>&1 || true
               failed+=("$branch: provider references remain after per-path cleanup; branch left unchanged")
               continue
