@@ -76,6 +76,13 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert r"api\.cerebras\.ai" in workflow
 
 
+def test_migration_helper_changes_retrigger_branch_propagation() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    push_trigger = workflow.split("  workflow_dispatch:", 1)[0]
+    assert '"scripts/migrate_legacy_native_ai.py"' in push_trigger
+    assert '" .github/workflows/propagate-native-ai-all-branches.yml"' not in push_trigger
+
+
 def test_provider_scan_filters_only_historical_pruning_proof_markers() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     assert "':!.github/workflows/prune-contained-branches-once.yml'" not in workflow
