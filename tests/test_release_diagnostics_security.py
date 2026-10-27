@@ -141,6 +141,21 @@ def test_android_resource_not_found_line_is_classified_as_resource_failure():
     assert "Android resource-linking failure" in report["likely_blockers"]
     assert "Kotlin or Java compilation failure" not in report["likely_blockers"]
 
+def test_escaped_quotes_inside_quoted_secret_are_fully_redacted():
+    import json
+    from app.main import _redact_release_diagnostic_text, _release_diagnostic_report
+
+    supplied = r'Could not resolve dependency; password="PREFIX\\"quoted-secret\\"-SUFFIX"'
+    redacted = _redact_release_diagnostic_text(supplied)
+    report = json.loads(_release_diagnostic_report(redacted, ""))
+
+    for fragment in ("PREFIX", "quoted-secret", "SUFFIX"):
+        assert fragment not in redacted
+        assert fragment not in json.dumps(report)
+    assert "[REDACTED]" in redacted
+    assert "Could not resolve" in json.dumps(report)
+
+
 def test_braced_unquoted_secret_is_fully_redacted_from_diagnostic_evidence():
     import json
     from app.main import _redact_release_diagnostic_text, _release_diagnostic_report
