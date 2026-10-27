@@ -89,10 +89,20 @@ jobs:
           python -m py_compile "$RUNNER_TEMP/migrate_legacy_native_ai.py"
 
           scan_active_provider_refs() {
-            local rc=0
-            git grep -IlEi 'gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' || rc=$?
+            local rc=0 matches filtered
+            if matches="$(git grep -nIEi 'gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py')"; then
+              rc=0
+            else
+              rc=$?
+            fi
             if (( rc == 1 )); then return 0; fi
             if (( rc != 0 )); then return "$rc"; fi
+            # These are historical proof-marker literals, not active provider wiring.
+            # Filter only those exact marker lines; scan every other line in this workflow.
+            filtered="$(printf '%s\n' "$matches" | awk '!($0 ~ /^\.github\/workflows\/prune-contained-branches-once\.yml:[0-9]+:/ && $0 ~ /grep -F .def _check_groq. >\/dev\/null/)')"
+            if [[ -n "$filtered" ]]; then
+              printf '%s\n' "$filtered"
+            fi
           }
 
           verify_native_ai_impl() {
@@ -179,6 +189,10 @@ jobs:
           ):
               if not hasattr(facade, name):
                   raise SystemExit(f"app.ai_providers is missing required symbol: {name}")
+          if facade.AIProviderError is not native.NativeAIError:
+              raise SystemExit(
+                  "app.ai_providers.AIProviderError must be the app.native_ai.NativeAIError compatibility alias"
+              )
 
           print("PASS: Native AI imports and compatibility exports resolve.")
           PY
