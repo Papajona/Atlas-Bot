@@ -101,7 +101,7 @@ def _apply_market_context(spec: AIStrategySpec, *, asset: str | None = None, sym
 
 
 async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None = None, symbol: str | None = None, timeframe: str | None = None) -> dict[str, Any]:
-    """Generate a local supported strategy template; no hosted model or network is used."""
+    """Generate an auditable local strategy template; no hosted model/network call occurs."""
     try:
         raw = compose_strategy_spec(prompt=prompt, name=name, asset=asset, symbol=symbol,
                                     timeframe=timeframe, max_risk_per_trade=settings.risk_per_trade)
