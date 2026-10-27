@@ -68,6 +68,8 @@ def test_legacy_branches_receive_runtime_only_patch_without_overwriting_conflict
     assert 'git checkout "$start_sha" -- "$path"' in workflow
     assert 'git cherry-pick' not in workflow
     assert "apply_native_ai_cleanup_paths" in workflow
+    assert "git grep -IlEi" in workflow
+    assert "git grep -nIEi" in workflow
     assert "verify_native_ai_impl" in workflow
     assert "provider references remain" in workflow
     assert 'if [[ -z "$before_refs" ]] && verify_native_ai_impl; then' in workflow
