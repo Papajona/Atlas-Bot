@@ -231,7 +231,7 @@ def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str, l
                     isinstance(func.value, ast.Name) and func.value.id in {"raw", "text"}
                     and len(condition.args) == 1 and not condition.keywords
                     and isinstance(condition.args[0], ast.Constant)
-                    and condition.args[0].value in {"json", "\\x60\\x60\\x60"}
+                    and condition.args[0].value in {"json", "\x60\x60\x60"}
                 )
         return False
 
@@ -275,13 +275,10 @@ def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str, l
                     or raised.exc.func.id != "AIProviderError"
                 ):
                     return False
-                names = {
-                    child.id if isinstance(child, ast.Name) else child.attr
-                    for child in ast.walk(handler.type)
-                    if isinstance(child, (ast.Name, ast.Attribute))
-                }
+                exception_nodes = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+                names = {ast.unparse(exception_node) for exception_node in exception_nodes}
                 allowed_exceptions = (
-                    {"JSONDecodeError", "TypeError", "ValueError", "UnicodeDecodeError"}
+                    {"json.JSONDecodeError", "TypeError", "ValueError", "UnicodeDecodeError"}
                     if name == "_extract_json"
                     else {"ValueError", "UnicodeDecodeError", "TypeError", "AttributeError"}
                 )
@@ -312,7 +309,7 @@ def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str, l
                     isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
                     and value.func.attr == "strip" and isinstance(value.func.value, ast.Name)
                     and value.func.value.id == "raw" and len(value.args) == 1
-                    and isinstance(value.args[0], ast.Constant) and value.args[0].value == "\\x60"
+                    and isinstance(value.args[0], ast.Constant) and value.args[0].value == "\x60"
                     and not value.keywords
                 ) or (
                     isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
@@ -400,7 +397,7 @@ def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str, l
                 or (
                     isinstance(func.value, ast.Name) and func.value.id == "raw"
                     and len(call.args) == 1
-                    and isinstance(call.args[0], ast.Constant) and call.args[0].value == "\\x60"
+                    and isinstance(call.args[0], ast.Constant) and call.args[0].value == "\x60"
                 )
             )
         ):
@@ -411,7 +408,7 @@ def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str, l
             and isinstance(func.value, ast.Name) and func.value.id in {"raw", "text"}
             and len(call.args) == 1 and not call.keywords
             and isinstance(call.args[0], ast.Constant)
-            and call.args[0].value in {"json", "\\x60\\x60\\x60"}
+            and call.args[0].value in {"json", "\x60\x60\x60"}
         ):
             continue
         if (
