@@ -414,10 +414,13 @@ def oos_benchmark_comparison(
             continue
 
         valid_shifts = []
-        # Both early and late non-wrapping shifts are allowed, but a control must
-        # retain every requested non-flat bar. This prevents fold-edge truncation
-        # from making random controls artificially under-exposed.
-        for shift in range(-(len(original_signal) - 1), len(original_signal)):
+        # The legal shift interval is bounded by the first and last requested
+        # exposure bars. Derive it directly to avoid trying offsets that would
+        # clip exposure, while still allowing both earlier and later entry times.
+        active_indices = np.flatnonzero(original_signal)
+        min_shift = -int(active_indices[0])
+        max_shift = len(original_signal) - 1 - int(active_indices[-1])
+        for shift in range(min_shift, max_shift + 1):
             if shift == 0:
                 continue
             shifted = _shift_signal(original_signal, int(shift))
