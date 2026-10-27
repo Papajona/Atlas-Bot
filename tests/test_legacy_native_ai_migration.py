@@ -107,7 +107,8 @@ class LegacyNativeAIMigrationTests(unittest.TestCase):
             result = target.read_text(encoding="utf-8")
             self.assertIn("keep_this = True", result)
             self.assertIn("review['run_drift']", result)
-            self.assertIn("native_research_review(research, intelligence)", result)
+            self.assertIn('native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))', result)
+            self.assertIn("native_research_review(native_research_input, intelligence)", result)
             self.assertNotRegex(result, migration.PROVIDER_RE)
 
     def test_scrub_workflow_removes_only_provider_entries(self):
