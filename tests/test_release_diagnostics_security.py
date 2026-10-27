@@ -153,3 +153,17 @@ def test_braced_unquoted_secret_is_fully_redacted_from_diagnostic_evidence():
     assert "SECRET}SUFFIX" not in json.dumps(report)
     assert "[REDACTED]" in redacted
     assert "Could not resolve" in json.dumps(report)
+
+def test_release_diagnostics_redacts_basic_authorization_before_returning_evidence():
+    import json
+    from app.main import _redact_release_diagnostic_text, _release_diagnostic_report
+
+    supplied = "Authorization: Basic dXNlcjpwYXNz; Could not resolve com.example:bad:1"
+    redacted = _redact_release_diagnostic_text(supplied)
+    report = json.loads(_release_diagnostic_report(redacted, ""))
+
+    assert "dXNlcjpwYXNz" not in redacted
+    assert "dXNlcjpwYXNz" not in json.dumps(report)
+    assert "[REDACTED]" in redacted
+    assert "Could not resolve" in json.dumps(report)
+
