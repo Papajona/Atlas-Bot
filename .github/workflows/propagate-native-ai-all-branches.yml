@@ -33,11 +33,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          NATIVE_AI_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
+          NATIVE_AI_CLEANUP_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
+          NATIVE_AI_CANONICAL_COMMIT="f8bb968198ec909e66cc04b888716f87ded6c0fa"
           NATIVE_AI_EXTRA_BASE_COMMIT="0d38f95079833804713fcba080caee38a6ddfb4c"
           NATIVE_AI_EXTRA_COMMIT="2317ccc4c3293e8bbd7043970876eceb509d2d1d"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          git cat-file -e "$NATIVE_AI_COMMIT^{commit}"
+          git cat-file -e "$NATIVE_AI_CLEANUP_COMMIT^{commit}"
+          git cat-file -e "$NATIVE_AI_CANONICAL_COMMIT^{commit}"
           git cat-file -e "$NATIVE_AI_EXTRA_BASE_COMMIT^{commit}"
           if [[ -z "$NATIVE_AI_EXTRA_COMMIT" ]]; then
             echo "Could not locate the reviewed release-diagnostics cleanup commit." >&2
@@ -290,7 +292,7 @@ jobs:
 
           # Do not replay the broad canonical commit. Apply only the AI settings/callsites
           # and provider-bearing deployment entries; the helper refuses unknown layouts.
-          if ! python "$RUNNER_TEMP/migrate_legacy_native_ai.py" --canonical-commit "$NATIVE_AI_COMMIT" --extra-base-commit "$NATIVE_AI_EXTRA_BASE_COMMIT" --extra-commit "$NATIVE_AI_EXTRA_COMMIT"; then
+          if ! python "$RUNNER_TEMP/migrate_legacy_native_ai.py" --canonical-commit "$NATIVE_AI_CANONICAL_COMMIT" --cleanup-commit "$NATIVE_AI_CLEANUP_COMMIT" --extra-base-commit "$NATIVE_AI_EXTRA_BASE_COMMIT" --extra-commit "$NATIVE_AI_EXTRA_COMMIT"; then
             git reset --hard "$start_sha" >/dev/null 2>&1 || true
             git clean -fd >/dev/null 2>&1 || true
             failed+=("$branch: semantic Native AI migration refused or failed; branch left unchanged")
@@ -346,7 +348,8 @@ jobs:
           {
             echo "## Atlas Native AI branch propagation"
             echo
-            echo "- Canonical Native AI commit: $NATIVE_AI_COMMIT"
+            echo "- Native AI cleanup commit: $NATIVE_AI_CLEANUP_COMMIT"
+            echo "- Canonical Native AI source commit: $NATIVE_AI_CANONICAL_COMMIT"
             echo "- Branches updated: ${#updated[@]}"
             printf '  - %s\n' "${updated[@]:-none}"
             echo "- Branches skipped after implementation and provider checks: ${#skipped[@]}"
