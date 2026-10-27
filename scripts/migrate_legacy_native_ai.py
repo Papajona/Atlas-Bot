@@ -403,6 +403,13 @@ def transform_daily_research() -> None:
         test_segment = ast.get_source_segment(source, node.test) or ""
         if not re.search(r"(?i)(?:gemini_api_key|groq_api_key|cerebras_api_key|ai_gateway_)", test_segment):
             continue
+        def is_review_result_target(target: ast.AST) -> bool:
+            if not isinstance(target, ast.Subscript) or not isinstance(target.value, ast.Name):
+                return False
+            if target.value.id != "review" or not isinstance(target.slice, ast.Constant):
+                return False
+            return target.slice.value in {"external_ai", "ai_review", "external_ai_review"}
+
         def is_provider_expression(expression: ast.AST | None) -> bool:
             if isinstance(expression, ast.Await):
                 expression = expression.value
@@ -415,22 +422,35 @@ def transform_daily_research() -> None:
 
         def is_provider_only_statement(statement: ast.AST) -> bool:
             if isinstance(statement, ast.Assign):
-                return len(statement.targets) == 1 and is_provider_expression(statement.value)
+                return (len(statement.targets) == 1
+                        and is_review_result_target(statement.targets[0])
+                        and is_provider_expression(statement.value))
             if isinstance(statement, ast.AnnAssign):
-                return is_provider_expression(statement.value)
-            if isinstance(statement, ast.Expr):
-                return is_provider_expression(statement.value)
-            if isinstance(statement, ast.Return):
-                return is_provider_expression(statement.value)
+                return is_review_result_target(statement.target) and is_provider_expression(statement.value)
+            # Returning from the enclosing routine changes control flow. Expression-only calls
+            # and arbitrary statements may contain side effects, so unknown shapes must fail closed.
             return False
 
         def is_not_configured_fallback(statement: ast.AST) -> bool:
-            if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            if isinstance(statement, ast.Assign):
+                if len(statement.targets) != 1 or not is_review_result_target(statement.targets[0]):
+                    return False
+            elif isinstance(statement, ast.AnnAssign):
+                if not is_review_result_target(statement.target):
+                    return False
+            else:
                 return False
             value = statement.value
-            if value is None or any(isinstance(part, ast.Call) for part in ast.walk(value)):
+            if not isinstance(value, ast.Dict):
                 return False
-            return "NOT_CONFIGURED" in (ast.get_source_segment(source, statement) or "")
+            if any(isinstance(part, ast.Call) for part in ast.walk(value)):
+                return False
+            pairs = [
+                (key.value, item.value)
+                for key, item in zip(value.keys, value.values)
+                if isinstance(key, ast.Constant) and isinstance(item, ast.Constant)
+            ]
+            return len(pairs) == 1 and pairs[0] == ("status", "NOT_CONFIGURED")
 
         body_is_provider_only = bool(node.body) and all(
             is_provider_only_statement(statement) for statement in node.body
