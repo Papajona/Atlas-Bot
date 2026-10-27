@@ -33,7 +33,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          NATIVE_AI_BASE_COMMIT="f9c1730c423ff40522366aab5a1bcc960ff1d5ac"
+          NATIVE_AI_INITIAL_BASE_COMMIT="95a59e5ad1a9cd67dd5be31280c21d1b402a5b3e"
           NATIVE_AI_INITIAL_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
           NATIVE_AI_EXTRA_BASE_COMMIT="0d38f95079833804713fcba080caee38a6ddfb4c"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
@@ -48,7 +48,7 @@ jobs:
             echo "Could not locate the reviewed local release-diagnostics cleanup commit." >&2
             exit 1
           fi
-          git cat-file -e "$NATIVE_AI_BASE_COMMIT^{commit}"
+          git cat-file -e "$NATIVE_AI_INITIAL_BASE_COMMIT^{commit}"
           git cat-file -e "$NATIVE_AI_INITIAL_COMMIT^{commit}"
           git cat-file -e "$NATIVE_AI_EXTRA_BASE_COMMIT^{commit}"
           git cat-file -e "$NATIVE_AI_EXTRA_COMMIT^{commit}"
@@ -181,7 +181,7 @@ jobs:
             local start_sha="$1" path
             patch_conflicts=()
             local revision_index base_commit tip_commit
-            local -a patch_bases=("$NATIVE_AI_BASE_COMMIT" "$NATIVE_AI_EXTRA_BASE_COMMIT")
+            local -a patch_bases=("$NATIVE_AI_INITIAL_BASE_COMMIT" "$NATIVE_AI_EXTRA_BASE_COMMIT")
             local -a patch_tips=("$NATIVE_AI_INITIAL_COMMIT" "$NATIVE_AI_EXTRA_COMMIT")
             for revision_index in "${!patch_bases[@]}"; do
               base_commit="${patch_bases[$revision_index]}"
