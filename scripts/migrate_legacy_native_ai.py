@@ -249,7 +249,7 @@ def _is_legacy_ai_provider_error_stub(node: ast.AST) -> bool:
 
 
 def transform_ai_providers(commit: str) -> None:
-    """Replace hosted adapters with the Native AI facade while retaining unrelated helpers/imports."""
+    """Replace hosted adapters while preserving only provably safe legacy bindings."""
     path = ROOT / "app/ai_providers.py"
     if not path.is_file():
         write_text("app/ai_providers.py", canonical_text(commit, "app/ai_providers.py"))
@@ -258,8 +258,6 @@ def transform_ai_providers(commit: str) -> None:
     if not PROVIDER_RE.search(source):
         # A legacy exception shim may be the only remaining difference in this
         # facade while the wider branch still contains provider references.
-        # Process only the exact recognized empty shim; leave other provider-neutral
-        # facades byte-for-byte unchanged.
         try:
             provider_neutral_tree = ast.parse(source, filename=str(path))
         except SyntaxError:
@@ -294,8 +292,7 @@ def transform_ai_providers(commit: str) -> None:
         start_line = min([node.lineno, *[decorator.lineno for decorator in getattr(node, "decorator_list", [])]])
         segment = "".join(source_lines[start_line - 1:node.end_lineno]).rstrip("\n")
         if name == "AIProviderError" and _is_legacy_ai_provider_error_stub(node):
-            # The Native AI facade exports AIProviderError as a compatibility alias
-            # for NativeAIError; this exact empty legacy subclass is safe to replace.
+            # This exact empty legacy subclass is safe to replace with the canonical alias.
             continue
         defined_names = _defined_names(node)
         collisions = defined_names & canonical_names
@@ -321,13 +318,19 @@ def transform_ai_providers(commit: str) -> None:
             )
         extras.append(segment.rstrip())
 
-    # Preserve dependencies for retained branch helpers without silently changing
-    # their import bindings. A retained import that collides with a canonical name
-    # must be the exact same import binding; otherwise refuse the migration.
     used_names: set[str] = set()
     for segment in extras:
         tree = ast.parse(segment)
         used_names.update(node.id for node in ast.walk(tree) if isinstance(node, ast.Name))
+
+    def import_signature(import_node: ast.AST, alias: ast.alias) -> tuple[str, int, str, str, str]:
+        if isinstance(import_node, ast.Import):
+            bound = alias.asname or alias.name.split(".", 1)[0]
+            return ("import", 0, "", alias.name, bound)
+        if isinstance(import_node, ast.ImportFrom):
+            bound = alias.asname or alias.name
+            return ("from", import_node.level, import_node.module or "", alias.name, bound)
+        raise MigrationError("unexpected non-import node while checking retained imports")
 
     def import_bindings(tree: ast.Module) -> dict[str, set[tuple[str, int, str, str, str]]]:
         bindings: dict[str, set[tuple[str, int, str, str, str]]] = {}
@@ -337,33 +340,149 @@ def transform_ai_providers(commit: str) -> None:
             for alias in import_node.names:
                 if alias.name == "*":
                     continue
-                if isinstance(import_node, ast.Import):
-                    bound = alias.asname or alias.name.split(".", 1)[0]
-                    signature = ("import", 0, "", alias.name, bound)
-                else:
-                    bound = alias.asname or alias.name
-                    signature = ("from", import_node.level, import_node.module or "", alias.name, bound)
-                bindings.setdefault(bound, set()).add(signature)
+                signature = import_signature(import_node, alias)
+                bindings.setdefault(signature[4], set()).add(signature)
         return bindings
 
     canonical_imports = import_bindings(canonical_tree)
+
+    def star_import_exports(
+        star_node: ast.ImportFrom,
+    ) -> tuple[set[str], dict[str, tuple[str, int, str, str, str] | None]]:
+        """Statically enumerate star exports and identify simple import-backed bindings."""
+        if star_node.level:
+            module_base = ROOT / "app"
+            for _ in range(star_node.level - 1):
+                module_base = module_base.parent
+            if star_node.module:
+                module_base = module_base.joinpath(*star_node.module.split("."))
+            candidates = (
+                [module_base.with_suffix(".py"), module_base / "__init__.py"]
+                if star_node.module else [module_base / "__init__.py"]
+            )
+        else:
+            module_name = star_node.module or ""
+            if module_name == "app":
+                module_base = ROOT / "app"
+                candidates = [module_base / "__init__.py", ROOT / "app.py"]
+            else:
+                if module_name.startswith("app."):
+                    module_name = module_name[4:]
+                module_base = ROOT.joinpath(*module_name.split(".")) if module_name else ROOT
+                candidates = (
+                    [module_base.with_suffix(".py"), module_base / "__init__.py"]
+                    if module_name else []
+                )
+        module_file = next((candidate for candidate in candidates if candidate.is_file()), None)
+        if module_file is None:
+            raise MigrationError(
+                f"cannot statically verify star-import exports for {star_node.module!r}; refusing to change retained helper bindings"
+            )
+        try:
+            module_tree = ast.parse(module_file.read_text(encoding="utf-8"), filename=str(module_file))
+        except (OSError, SyntaxError) as exc:
+            raise MigrationError(
+                f"cannot inspect star-import module {module_file}: {exc}"
+            ) from exc
+
+        all_values: list[ast.AST | None] = []
+        dynamic_all = False
+        has_nested_star = False
+        dynamic_exports = any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in {"__getattr__", "__dir__"}
+            for node in module_tree.body
+        )
+        for module_node in module_tree.body:
+            if isinstance(module_node, ast.ImportFrom) and any(alias.name == "*" for alias in module_node.names):
+                has_nested_star = True
+            if isinstance(module_node, ast.Assign) and any(
+                "__all__" in _assigned_names(target) for target in module_node.targets
+            ):
+                all_values.append(module_node.value)
+            elif isinstance(module_node, ast.AnnAssign) and "__all__" in _assigned_names(module_node.target):
+                all_values.append(module_node.value)
+            elif isinstance(module_node, ast.AugAssign) and "__all__" in _assigned_names(module_node.target):
+                dynamic_all = True
+            elif (
+                isinstance(module_node, ast.Expr)
+                and isinstance(module_node.value, ast.Call)
+                and isinstance(module_node.value.func, ast.Attribute)
+                and isinstance(module_node.value.func.value, ast.Name)
+                and module_node.value.func.value.id == "__all__"
+            ):
+                dynamic_all = True
+
+        if dynamic_all or len(all_values) > 1:
+            raise MigrationError(
+                f"star-import module {module_file} builds __all__ dynamically; refusing to guess its exports"
+            )
+        explicit_all = bool(all_values)
+        if explicit_all:
+            value = all_values[0]
+            if not isinstance(value, (ast.List, ast.Tuple, ast.Set)) or not all(
+                isinstance(item, ast.Constant) and isinstance(item.value, str)
+                for item in value.elts
+            ):
+                raise MigrationError(
+                    f"star-import module {module_file} has a non-literal __all__; refusing to guess its exports"
+                )
+            exports = {item.value for item in value.elts}
+        else:
+            if has_nested_star or dynamic_exports:
+                raise MigrationError(
+                    f"star-import module {module_file} has dynamic exports; refusing to guess its bindings"
+                )
+            if any(
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "exec"
+                for node in ast.walk(module_tree)
+            ):
+                raise MigrationError(
+                    f"star-import module {module_file} uses exec; refusing to guess its exports"
+                )
+            exports = {
+                name
+                for module_node in module_tree.body
+                for name in _defined_names(module_node)
+                if not name.startswith("_")
+            }
+
+        last_definitions: dict[str, ast.AST] = {}
+        for module_node in module_tree.body:
+            for defined_name in _defined_names(module_node):
+                last_definitions[defined_name] = module_node
+        bindings: dict[str, tuple[str, int, str, str, str] | None] = {}
+        for exported_name in exports:
+            definition = last_definitions.get(exported_name)
+            signature = None
+            if isinstance(definition, (ast.Import, ast.ImportFrom)):
+                for alias in definition.names:
+                    if alias.name != "*" and import_signature(definition, alias)[4] == exported_name:
+                        signature = import_signature(definition, alias)
+                        break
+            bindings[exported_name] = signature
+        return exports, bindings
+
     preserved_imports: list[str] = []
-    pre_canonical_imports: list[str] = []
+    retained_star_imports: list[str] = []
     for node in import_nodes:
         if isinstance(node, ast.ImportFrom) and node.module == "__future__":
             continue
-
-        # Star imports are not statically enumerable. Preserve a non-provider star
-        # import before the canonical facade so that canonical globals take priority,
-        # while retained branch helpers can still resolve their extra dependencies.
         if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
-            if extras:
-                source_module = "." * node.level + (node.module or "")
-                if PROVIDER_RE.search(source_module):
+            if not extras:
+                continue
+            source_module = "." * node.level + (node.module or "")
+            if PROVIDER_RE.search(source_module):
+                raise MigrationError(
+                    f"app/ai_providers.py has a provider-bearing star import used alongside retained helpers; refusing to preserve it: {source_module}"
+                )
+            exported_names, exported_bindings = star_import_exports(node)
+            for exported_name in sorted(exported_names & canonical_names):
+                signature = exported_bindings.get(exported_name)
+                if signature is None or signature not in canonical_imports.get(exported_name, set()):
                     raise MigrationError(
-                        f"app/ai_providers.py has a provider-bearing star import used alongside retained helpers; refusing to drop or preserve it: {source_module}"
+                        f"star import {source_module!r} exports canonical name {exported_name!r} with a different or unknown binding; refusing to change helper semantics"
                     )
-                pre_canonical_imports.append(ast.unparse(node))
+            retained_star_imports.append(ast.unparse(node))
             continue
 
         aliases = []
@@ -379,11 +498,7 @@ def transform_ai_providers(commit: str) -> None:
                     f"app/ai_providers.py retained helper depends on a provider-bearing import {alias.name!r}; refusing to leave it unresolved"
                 )
             if bound in canonical_names:
-                signature = (
-                    ("import", 0, "", alias.name, bound)
-                    if isinstance(node, ast.Import)
-                    else ("from", node.level, node.module or "", alias.name, bound)
-                )
+                signature = import_signature(node, alias)
                 if signature in canonical_imports.get(bound, set()):
                     # This import has exactly the same binding as the canonical one.
                     continue
@@ -401,10 +516,29 @@ def transform_ai_providers(commit: str) -> None:
                 module=node.module, names=aliases, level=node.level
             )))
 
-    pieces = []
-    if pre_canonical_imports:
-        pieces.extend(sorted(set(pre_canonical_imports)))
-    pieces.append(canonical.rstrip())
+    canonical_lines = canonical.splitlines(keepends=True)
+    header_end_line = 0
+    for index, node in enumerate(canonical_tree.body):
+        is_docstring = (
+            index == 0
+            and isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        )
+        is_future_import = isinstance(node, ast.ImportFrom) and node.module == "__future__"
+        if is_docstring or is_future_import:
+            header_end_line = node.end_lineno
+        else:
+            break
+    canonical_header = "".join(canonical_lines[:header_end_line]).rstrip()
+    canonical_body = "".join(canonical_lines[header_end_line:]).lstrip("\n")
+    if retained_star_imports:
+        canonical_pieces = [piece for piece in (canonical_header, *sorted(set(retained_star_imports)), canonical_body.rstrip()) if piece.strip()]
+        canonical_result = "\n\n".join(canonical_pieces) + "\n"
+    else:
+        canonical_result = canonical.rstrip()
+
+    pieces = [canonical_result]
     if preserved_imports:
         pieces.append("\n".join(sorted(set(preserved_imports))))
     if extras:
