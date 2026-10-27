@@ -17,6 +17,71 @@ SPEC.loader.exec_module(migration)
 
 CANONICAL_STRATEGY = """from .native_ai import NativeAIError, compose_strategy_spec
 from .strategy_evidence import evidence_for
+from .config import settings
+from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+ALLOWED_TIMEFRAMES = {"5m", "15m", "30m", "1h", "4h", "1d"}
+StrategyCondition = dict
+
+class AIStrategySpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: Literal["atlas-strategy-v1"] = "atlas-strategy-v1"
+    title: str = Field(min_length=2, max_length=120)
+    summary: str = Field(min_length=10, max_length=1000)
+    asset: Literal["crypto", "forex", "commodity"]
+    symbols: list[str] = Field(min_length=1, max_length=10)
+    timeframes: list[str] = Field(min_length=1, max_length=5)
+    direction: Literal["LONG", "SHORT", "BOTH", "AUTO"]
+    strategy_family: Literal["TREND", "MOMENTUM", "BREAKOUT", "MEAN_REVERSION", "ENSEMBLE"]
+    entry_conditions: list[StrategyCondition] = Field(min_length=1, max_length=12)
+    exit_conditions: list[StrategyCondition] = Field(min_length=1, max_length=8)
+    risk_per_trade: float = Field(gt=0, le=0.05)
+    stop_loss_atr: float | None = Field(default=None, gt=0, le=10)
+    take_profit_rr: float | None = Field(default=None, gt=0, le=10)
+    sessions: list[str] = Field(default_factory=list, max_length=8)
+    assumptions: list[str] = Field(default_factory=list, max_length=10)
+    validation_warnings: list[str] = Field(default_factory=list, max_length=12)
+    requires_backtest: Literal[True] = True
+    requires_walk_forward: Literal[True] = True
+    execution_mode: Literal["PAPER_SHADOW_ONLY"] = "PAPER_SHADOW_ONLY"
+    implementation_status: Literal["ATLAS_SUPPORTED_FAMILY"] = "ATLAS_SUPPORTED_FAMILY"
+
+    @field_validator("timeframes")
+    @classmethod
+    def validate_timeframes(cls, values: list[str]) -> list[str]:
+        if any(v not in ALLOWED_TIMEFRAMES for v in values):
+            raise ValueError(f"Unsupported timeframe; allowed: {sorted(ALLOWED_TIMEFRAMES)}")
+        return list(dict.fromkeys(values))
+
+    @field_validator("symbols")
+    @classmethod
+    def validate_symbols(cls, values: list[str]) -> list[str]:
+        cleaned = [str(v).strip() for v in values if str(v).strip()]
+        if not cleaned:
+            raise ValueError("At least one symbol is required")
+        return list(dict.fromkeys(cleaned))
+
+    @model_validator(mode="after")
+    def validate_risk_contract(self) -> "AIStrategySpec":
+        if self.risk_per_trade > settings.risk_per_trade:
+            self.validation_warnings.append(
+                f"Requested AI risk was capped at the platform maximum of {settings.risk_per_trade:.4f}."
+            )
+            self.risk_per_trade = settings.risk_per_trade
+        return self
+
+
+def _apply_market_context(spec: AIStrategySpec, *, asset: str | None = None, symbol: str | None = None, timeframe: str | None = None) -> AIStrategySpec:
+    data = spec.model_dump()
+    if asset is not None:
+        data["asset"] = asset
+    if symbol is not None:
+        data["symbols"] = [symbol]
+    if timeframe is not None:
+        data["timeframes"] = [timeframe]
+    return AIStrategySpec.model_validate(data)
+
 
 async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
     try:
