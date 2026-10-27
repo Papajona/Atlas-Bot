@@ -1660,7 +1660,15 @@ def transform_strategy_ai(commit: str) -> None:
         retained_symbols = symtable.symtable(ast.unparse(retained_module), str(path), "exec")
     except (SyntaxError, ValueError) as exc:
         raise MigrationError("unable to resolve retained strategy helper scopes safely") from exc
-    removed_local_dependencies = {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider"}
+    retained_module_bindings: set[str] = set()
+    for retained_node in retained_nodes:
+        # Delete targets are collisions for the facade, but do not prove a name is
+        # bound after migration; chained assignments retained verbatim do.
+        if not isinstance(retained_node, ast.Delete):
+            retained_module_bindings.update(_defined_names(retained_node))
+    removed_local_dependencies = (
+        {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider"} - retained_module_bindings
+    )
     retained_removed_global_uses: set[str] = set()
 
     def collect_removed_global_references(table: symtable.SymbolTable) -> None:
@@ -1724,20 +1732,27 @@ def transform_strategy_ai(commit: str) -> None:
             + "; only imports whose original symbol matches NativeAIError or compose_strategy_spec can be remapped"
         )
 
-    # Prove the canonical generator's global loads resolve after the migration.
-    local_names = {canonical_generate.name}
-    local_names.update(arg.arg for arg in ast.walk(canonical_generate.args) if isinstance(arg, ast.arg))
-    for part in ast.walk(canonical_generate):
-        if isinstance(part, ast.Name) and isinstance(part.ctx, (ast.Store, ast.Del)):
-            local_names.add(part.id)
-        elif isinstance(part, ast.ExceptHandler) and part.name:
-            local_names.add(part.name)
-        elif isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and part is not canonical_generate:
-            local_names.add(part.name)
-    canonical_global_loads = {
-        part.id for part in ast.walk(canonical_generate)
-        if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Load)
-    } - local_names - set(dir(builtins))
+    # Use Python's symbol table rather than treating every loaded Name as a module global:
+    # imports and assignments inside the canonical function are local bindings, not dependencies.
+    try:
+        canonical_scope = symtable.symtable(
+            ast.unparse(ast.Module(body=[canonical_generate], type_ignores=[])),
+            str(path),
+            "exec",
+        )
+    except (SyntaxError, ValueError) as exc:
+        raise MigrationError("unable to resolve canonical strategy generator scopes safely") from exc
+    canonical_global_loads: set[str] = set()
+
+    def collect_canonical_global_loads(table: symtable.SymbolTable) -> None:
+        for symbol in table.get_symbols():
+            if symbol.is_referenced() and symbol.is_global():
+                canonical_global_loads.add(symbol.get_name())
+        for child in table.get_children():
+            collect_canonical_global_loads(child)
+
+    collect_canonical_global_loads(canonical_scope)
+    canonical_global_loads -= set(dir(builtins))
     available_names: set[str] = set()
     for retained_node in retained_nodes:
         if isinstance(retained_node, ast.AnnAssign) and retained_node.value is None:
@@ -2213,6 +2228,34 @@ def apply_ancillary_patch(commit: str, path: str, extra_base: str, extra_commit:
             target.write_text(cleaned, encoding="utf-8")
 
 
+def _metadata_has_active_provider_wiring(text: str) -> bool:
+    """Allow inert prose, but reject provider settings, credential assignments, and endpoints."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return True
+
+    def visit(value, key_context="") -> bool:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_text = str(key)
+                if PROVIDER_FIELD_RE.search(key_text):
+                    return True
+                if visit(item, key_text):
+                    return True
+            return False
+        if isinstance(value, list):
+            return any(visit(item, key_context) for item in value)
+        if isinstance(value, str):
+            if KEY_ASSIGNMENT_RE.search(value) or SECRET_VERSION_RE.search(value) or HOST_RE.search(value):
+                return True
+            if re.search(r"(?i)(?:provider|gateway|model|api[_ -]?key|secret|endpoint)", key_context) and PROVIDER_RE.search(value):
+                return True
+        return False
+
+    return visit(data)
+
+
 def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:
     # Canonical Native AI source and the original provider-removal patch baseline are
     # independent pins: changing one must not widen the other per-path diff.
@@ -2235,7 +2278,13 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
     remaining = []
     for path in NATIVE_PATHS:
         target = ROOT / path
-        if target.is_file() and PROVIDER_RE.search(target.read_text(encoding="utf-8")):
+        if not target.is_file():
+            continue
+        contents = target.read_text(encoding="utf-8")
+        if path == "metadata.json":
+            if _metadata_has_active_provider_wiring(contents):
+                remaining.append(path)
+        elif PROVIDER_RE.search(contents):
             remaining.append(path)
     if remaining:
         raise MigrationError("provider references remain in: " + ", ".join(remaining))
