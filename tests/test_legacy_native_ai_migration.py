@@ -156,6 +156,28 @@ class LegacyNativeAIMigrationTests(unittest.TestCase):
             ast.parse(result, filename="app/daily_research.py")
             self.assertNotRegex(result, migration.PROVIDER_RE)
 
+    def test_daily_research_refuses_to_drop_audit_side_effect_in_provider_conditional(self):
+        legacy = (
+            "from .ai_providers import dual_ai_research_review\\n"
+            "async def run_daily_research():\\n"
+            "    review = {}\\n"
+            "    if settings.gemini_api_key:\\n"
+            "        await write_audit_record('provider selected')\\n"
+            "        review['external_ai'] = await dual_ai_research_review(research, intelligence)\\n"
+            "    else:\\n"
+            "        review['external_ai'] = {'status': 'NOT_CONFIGURED'}\\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "daily_research.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            original = target.read_text(encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "contains unrelated or unknown logic"):
+                    migration.transform_daily_research()
+            self.assertEqual(target.read_text(encoding="utf-8"), original)
+
     def test_scrub_workflow_removes_only_provider_entries(self):
         source = (
             "env:\n"
