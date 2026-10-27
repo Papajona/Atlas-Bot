@@ -755,6 +755,180 @@ def _assigned_names(target: ast.AST) -> set[str]:
 
 
 
+def _module_path_for_import(source_path: Path, node: ast.ImportFrom, imported_name: str | None = None) -> Path | None:
+    """Resolve a Python source module inside the checked-out repo without importing it."""
+    if node.level:
+        base = source_path.parent
+        for _ in range(node.level - 1):
+            base = base.parent
+        parts = node.module.split(".") if node.module else ([imported_name] if imported_name else [])
+        base = base.joinpath(*parts)
+    else:
+        module_name = node.module or imported_name
+        if not module_name:
+            return None
+        base = ROOT.joinpath(*module_name.split("."))
+    candidates = (base / "__init__.py", base.with_suffix(".py"))
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def _module_path_for_name(module_name: str) -> Path | None:
+    """Resolve a statically named project module, preferring package __init__.py."""
+    if not module_name or module_name.split(".", 1)[0] in {"pydantic", "pydantic_settings", "typing"}:
+        return None
+    base = ROOT.joinpath(*module_name.split("."))
+    candidates = (base / "__init__.py", base.with_suffix(".py"))
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def _resolve_class_symbol(
+    source_path: Path,
+    module_tree: ast.Module,
+    symbol_name: str,
+    seen: set[tuple[str, str]] | None = None,
+) -> tuple[Path, ast.Module, ast.ClassDef] | None:
+    """Resolve a class defined locally or imported from a statically resolvable project module."""
+    seen = set() if seen is None else set(seen)
+    key = (str(source_path), symbol_name)
+    if key in seen:
+        return None
+    seen.add(key)
+    matches = [
+        node for node in module_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == symbol_name
+    ]
+    if len(matches) == 1:
+        return source_path, module_tree, matches[0]
+    if matches:
+        return None
+    for import_node in module_tree.body:
+        if not isinstance(import_node, ast.ImportFrom):
+            continue
+        for alias in import_node.names:
+            if alias.name == "*" or (alias.asname or alias.name) != symbol_name:
+                continue
+            target_path = _module_path_for_import(source_path, import_node, alias.name)
+            if target_path is None:
+                continue
+            try:
+                target_tree = ast.parse(target_path.read_text(encoding="utf-8"), filename=str(target_path))
+            except (OSError, SyntaxError):
+                return None
+            return _resolve_class_symbol(target_path, target_tree, alias.name, seen)
+    return None
+
+
+def _dotted_ast_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _dotted_ast_name(node.value)
+        return f"{prefix}.{node.attr}" if prefix else None
+    return None
+
+
+def _resolve_base_class(
+    source_path: Path,
+    module_tree: ast.Module,
+    base: ast.AST,
+    seen: set[tuple[str, str]] | None = None,
+) -> tuple[Path, ast.Module, ast.ClassDef] | None:
+    if isinstance(base, ast.Name):
+        return _resolve_class_symbol(source_path, module_tree, base.id, seen)
+    if not isinstance(base, ast.Attribute):
+        return None
+    dotted = _dotted_ast_name(base.value)
+    if not dotted:
+        return None
+    module_name: str | None = None
+    for import_node in module_tree.body:
+        if isinstance(import_node, ast.Import):
+            for alias in import_node.names:
+                bound = alias.asname or alias.name.split(".", 1)[0]
+                if dotted == bound:
+                    module_name = alias.name
+                    break
+                if alias.asname and dotted == alias.asname:
+                    module_name = alias.name
+                    break
+        elif isinstance(import_node, ast.ImportFrom):
+            for alias in import_node.names:
+                if alias.name == "*" or (alias.asname or alias.name) != dotted:
+                    continue
+                target_path = _module_path_for_import(source_path, import_node, alias.name)
+                if target_path is not None:
+                    try:
+                        target_tree = ast.parse(target_path.read_text(encoding="utf-8"), filename=str(target_path))
+                    except (OSError, SyntaxError):
+                        return None
+                    return _resolve_class_symbol(target_path, target_tree, base.attr, seen)
+    if module_name:
+        target_path = _module_path_for_name(module_name)
+        if target_path is not None:
+            try:
+                target_tree = ast.parse(target_path.read_text(encoding="utf-8"), filename=str(target_path))
+            except (OSError, SyntaxError):
+                return None
+            return _resolve_class_symbol(target_path, target_tree, base.attr, seen)
+    return None
+
+
+def _is_pydantic_base(base: ast.AST, source_path: Path, module_tree: ast.Module) -> bool:
+    if isinstance(base, ast.Name):
+        for import_node in module_tree.body:
+            if not isinstance(import_node, ast.ImportFrom) or import_node.module not in {"pydantic", "pydantic.v1"}:
+                continue
+            for alias in import_node.names:
+                if alias.name == "BaseModel" and (alias.asname or alias.name) == base.id:
+                    return True
+    if isinstance(base, ast.Attribute) and base.attr == "BaseModel":
+        dotted = _dotted_ast_name(base.value)
+        if dotted:
+            for import_node in module_tree.body:
+                if not isinstance(import_node, ast.Import):
+                    continue
+                for alias in import_node.names:
+                    bound = alias.asname or alias.name.split(".", 1)[0]
+                    if bound == dotted and alias.name in {"pydantic", "pydantic.v1"}:
+                        return True
+    return False
+
+
+def _class_contract_info(
+    source_path: Path,
+    module_tree: ast.Module,
+    class_node: ast.ClassDef,
+    seen: set[tuple[str, str]] | None = None,
+) -> tuple[bool, set[str]]:
+    """Return whether a class is Pydantic-backed and its statically visible inherited fields."""
+    seen = set() if seen is None else set(seen)
+    key = (str(source_path), class_node.name)
+    if key in seen:
+        return False, set()
+    seen.add(key)
+    fields: set[str] = set()
+    for member in class_node.body:
+        if isinstance(member, ast.AnnAssign) and isinstance(member.target, ast.Name):
+            fields.add(member.target.id)
+        elif isinstance(member, ast.Assign):
+            fields.update(
+                target.id for target in member.targets if isinstance(target, ast.Name)
+            )
+    is_model = False
+    for base in class_node.bases:
+        if _is_pydantic_base(base, source_path, module_tree):
+            is_model = True
+            continue
+        resolved = _resolve_base_class(source_path, module_tree, base, seen)
+        if resolved is None:
+            continue
+        parent_path, parent_tree, parent_class = resolved
+        parent_is_model, parent_fields = _class_contract_info(parent_path, parent_tree, parent_class, seen)
+        is_model = is_model or parent_is_model
+        fields.update(parent_fields)
+    return is_model, fields
+
+
 def _is_legacy_ai_provider_error_stub(node: ast.AST) -> bool:
     """Recognize only the empty legacy exception class replaced by Native AI's alias."""
     if not isinstance(node, ast.ClassDef) or node.name != "AIProviderError":
@@ -1408,23 +1582,14 @@ def transform_strategy_ai(commit: str) -> None:
         )
         if legacy_spec is None:
             raise MigrationError("legacy strategy module lacks AIStrategySpec required by the canonical generator")
-        base_names = {
-            part.id if isinstance(part, ast.Name) else part.attr
-            for part in legacy_spec.bases
-            if isinstance(part, (ast.Name, ast.Attribute))
-        }
-        spec_fields = {
-            statement.target.id for statement in legacy_spec.body
-            if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name)
-        } | {
-            target.id for statement in legacy_spec.body if isinstance(statement, ast.Assign)
-            for target in statement.targets if isinstance(target, ast.Name)
-        }
+        is_model, effective_fields = _class_contract_info(path, old_tree, legacy_spec)
         required_spec_fields = {"asset", "symbols", "timeframes", "strategy_family", "validation_warnings"}
-        if "BaseModel" not in base_names or not required_spec_fields.issubset(spec_fields):
+        if not is_model or not required_spec_fields.issubset(effective_fields):
+            missing_fields = sorted(required_spec_fields - effective_fields)
+            detail = ", ".join(missing_fields) if missing_fields else "a verifiable Pydantic BaseModel ancestry"
             raise MigrationError(
-                "legacy AIStrategySpec does not satisfy the canonical generator contract "
-                "(BaseModel plus asset, symbols, timeframes, strategy_family, validation_warnings required)"
+                "legacy AIStrategySpec does not satisfy the canonical generator contract; "
+                f"missing or unverifiable contract: {detail}"
             )
 
         if canonical_context is not None:
@@ -1451,23 +1616,17 @@ def transform_strategy_ai(commit: str) -> None:
         if not config_path.is_file():
             raise MigrationError("app/config.py is absent; cannot verify canonical strategy risk configuration")
         config_tree = ast.parse(config_path.read_text(encoding="utf-8"), filename=str(config_path))
-        has_risk_setting = any(
-            isinstance(module_node, ast.ClassDef)
-            and any(
-                (
-                    isinstance(member, ast.AnnAssign)
-                    and isinstance(member.target, ast.Name)
-                    and member.target.id == "risk_per_trade"
-                ) or (
-                    isinstance(member, ast.Assign)
-                    and any(isinstance(target, ast.Name) and target.id == "risk_per_trade" for target in member.targets)
-                )
-                for member in module_node.body
-            )
-            for module_node in config_tree.body
+        settings_class = next(
+            (node for node in config_tree.body if isinstance(node, ast.ClassDef) and node.name == "Settings"),
+            None,
         )
-        if not has_risk_setting:
-            raise MigrationError("legacy app settings do not define risk_per_trade required by canonical strategy generation")
+        if settings_class is None:
+            raise MigrationError("app/config.py lacks a statically verifiable Settings class")
+        _, settings_fields = _class_contract_info(config_path, config_tree, settings_class)
+        if "risk_per_trade" not in settings_fields:
+            raise MigrationError(
+                "legacy Settings class does not define or inherit risk_per_trade required by canonical strategy generation"
+            )
 
     canonical_lines = canonical.splitlines(keepends=True)
     new_function = "".join(canonical_lines[canonical_generate.lineno - 1:canonical_generate.end_lineno])

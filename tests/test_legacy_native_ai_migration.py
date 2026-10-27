@@ -2104,5 +2104,144 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
         source = '{\n  "description": "Legacy audit note mentions Gemini, not a provider setting.",\n  "majorCapabilities": ["Historical Groq compatibility note"]\n}\n'
         self.assertEqual(migration.scrub_ancillary_text("metadata.json", source), source)
 
+
+    def test_strategy_migration_accepts_inherited_schema_fields_and_base_alias(self):
+        canonical = """from .config import settings
+from .native_ai import NativeAIError, compose_strategy_spec
+from .strategy_evidence import evidence_for
+from pydantic import BaseModel
+
+class AIStrategySpec(BaseModel):
+    asset: str
+    symbols: list[str]
+    timeframes: list[str]
+    strategy_family: str
+    validation_warnings: list[str]
+
+def _apply_market_context(spec, *, asset=None, symbol=None, timeframe=None):
+    return spec
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    raw = compose_strategy_spec(prompt=prompt, name=name, asset=asset, symbol=symbol,
+                                timeframe=timeframe, max_risk_per_trade=settings.risk_per_trade)
+    spec = AIStrategySpec.model_validate(raw)
+    spec = _apply_market_context(spec, asset=asset, symbol=symbol, timeframe=timeframe)
+    family = {"TREND": "trend", "MOMENTUM": "momentum"}[spec.strategy_family]
+    return {"strategy": spec.model_dump(), "evidence": evidence_for(family)}
+"""
+        legacy = """from .config import settings
+from .ai_providers import _gemini_json, _groq_json
+from .strategy_evidence import evidence_for
+from pydantic import BaseModel as SchemaModel
+
+class SharedSpec(SchemaModel):
+    asset: str
+    symbols: list[str]
+    timeframes: list[str]
+    strategy_family: str
+    validation_warnings: list[str]
+
+class AIStrategySpec(SharedSpec):
+    pass
+
+SYSTEM_PROMPT = "legacy"
+def _strategy_prompt(prompt, name):
+    return prompt
+
+async def _generate_with_provider(provider, prompt):
+    return await _gemini_json(prompt)
+
+def _apply_market_context(spec, asset=None, symbol=None, timeframe=None):
+    return spec
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    return await _generate_with_provider("gemini", prompt)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            (root / "app" / "strategy_ai.py").write_text(legacy, encoding="utf-8")
+            (root / "app" / "config.py").write_text(
+                "class Settings:\\n    risk_per_trade: float = 0.01\\n",
+                encoding="utf-8",
+            )
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_strategy_ai("fake-commit")
+            result = (root / "app" / "strategy_ai.py").read_text(encoding="utf-8")
+            self.assertIn("class AIStrategySpec(SharedSpec):", result)
+            ast.parse(result, filename="app/strategy_ai.py")
+
+    def test_strategy_migration_accepts_inherited_shared_risk_setting(self):
+        canonical = """from .config import settings
+from .native_ai import NativeAIError, compose_strategy_spec
+from .strategy_evidence import evidence_for
+from pydantic import BaseModel
+
+class AIStrategySpec(BaseModel):
+    asset: str
+    symbols: list[str]
+    timeframes: list[str]
+    strategy_family: str
+    validation_warnings: list[str]
+
+def _apply_market_context(spec, *, asset=None, symbol=None, timeframe=None):
+    return spec
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    raw = compose_strategy_spec(prompt=prompt, name=name, asset=asset, symbol=symbol,
+                                timeframe=timeframe, max_risk_per_trade=settings.risk_per_trade)
+    spec = AIStrategySpec.model_validate(raw)
+    spec = _apply_market_context(spec, asset=asset, symbol=symbol, timeframe=timeframe)
+    family = {"TREND": "trend", "MOMENTUM": "momentum"}[spec.strategy_family]
+    return {"strategy": spec.model_dump(), "evidence": evidence_for(family)}
+"""
+        legacy = """from .config import settings
+from .ai_providers import _gemini_json, _groq_json
+from .strategy_evidence import evidence_for
+from pydantic import BaseModel
+
+class AIStrategySpec(BaseModel):
+    asset: str
+    symbols: list[str]
+    timeframes: list[str]
+    strategy_family: str
+    validation_warnings: list[str]
+
+SYSTEM_PROMPT = "legacy"
+def _strategy_prompt(prompt, name):
+    return prompt
+
+async def _generate_with_provider(provider, prompt):
+    return await _gemini_json(prompt)
+
+def _apply_market_context(spec, asset=None, symbol=None, timeframe=None):
+    return spec
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    return await _generate_with_provider("gemini", prompt)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = root / "app"
+            app.mkdir()
+            (app / "strategy_ai.py").write_text(legacy, encoding="utf-8")
+            (app / "config.py").write_text(
+                "from .shared_settings import SharedRiskSettings\\nclass Settings(SharedRiskSettings):\\n    pass\\nsettings = Settings()\\n",
+                encoding="utf-8",
+            )
+            (app / "shared_settings.py").write_text(
+                "class SharedRiskSettings:\\n    risk_per_trade: float = 0.01\\n",
+                encoding="utf-8",
+            )
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_strategy_ai("fake-commit")
+            result = (app / "strategy_ai.py").read_text(encoding="utf-8")
+            self.assertIn("async def generate_strategy_draft", result)
+            ast.parse(result, filename="app/strategy_ai.py")
+
 if __name__ == "__main__":
     unittest.main()
