@@ -153,6 +153,14 @@ def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str, l
                     return False
             if isinstance(module_statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and module_statement.name == "json":
                 return False
+        for nested in ast.walk(legacy_tree):
+            if isinstance(nested, ast.alias) and (
+                (nested.asname == "json" and nested.name != "json")
+                or (nested.name == "json" and nested.asname is not None)
+            ):
+                return False
+            if isinstance(nested, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and nested.name == "json":
+                return False
         if json_import_count != 1 or any(
             isinstance(item, ast.Name) and item.id == "json"
             and isinstance(item.ctx, (ast.Store, ast.Del))
@@ -250,7 +258,7 @@ def _safe_canonical_json_helper(node: ast.AST, name: str, source_segment: str, l
         return False
 
     allowed_statement_types = (
-        ast.Assign, ast.AnnAssign, ast.If, ast.Try, ast.Return, ast.Raise, ast.Pass, ast.Expr,
+        ast.Assign, ast.If, ast.Try, ast.Return, ast.Raise, ast.Pass, ast.Expr,
     )
     for item in body_nodes:
         if isinstance(item, ast.stmt) and not isinstance(item, allowed_statement_types):
