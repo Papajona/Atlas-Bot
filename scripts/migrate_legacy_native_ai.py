@@ -1383,6 +1383,8 @@ def _strategy_provider_router(statements: list[ast.stmt]) -> bool:
     return adapter == expected and _strategy_provider_router(remaining)
 
 
+_STRATEGY_GENERATOR_REJECTION = "not evaluated"
+
 def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
     """Verify a complete provider orchestration contract before replacing it with Native AI.
 
@@ -1391,6 +1393,12 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
     non-execution result. Only this exact family is replaced; unknown calls, extra
     validation paths, and arbitrary side effects continue to fail closed.
     """
+    global _STRATEGY_GENERATOR_REJECTION
+    def reject(reason: str) -> bool:
+        global _STRATEGY_GENERATOR_REJECTION
+        _STRATEGY_GENERATOR_REJECTION = reason
+        return reject("guard-1")
+
     args = node.args
     if (
         node.decorator_list
@@ -1404,19 +1412,19 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
         or args.kw_defaults[1] is not None
         or any(not isinstance(item, ast.Constant) or item.value is not None for item in args.kw_defaults[2:])
     ):
-        return False
+        return reject("guard-2")
 
     body = list(node.body)
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
         body = body[1:]
     if not body or not isinstance(body[-1], ast.Return) or not isinstance(body[-1].value, ast.Dict):
-        return False
+        return reject("guard-3")
 
     top_return = body[-1].value
     if not all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in top_return.keys):
-        return False
+        return reject("guard-4")
     if {key.value for key in top_return.keys} != {"strategy", "evidence", "ai"}:
-        return False
+        return reject("guard-5")
     result_values = {
         key.value: value for key, value in zip(top_return.keys, top_return.values, strict=True)
     }
@@ -1437,14 +1445,14 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
         and evidence_value.args[0].id == "family_key"
         and isinstance(ai_value, ast.Dict)
     ):
-        return False
+        return reject("guard-6")
     if not all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in ai_value.keys):
-        return False
+        return reject("guard-7")
     ai_keys = {key.value for key in ai_value.keys}
     required_ai_keys = {"provider", "model", "execution_authority", "requires_backtest", "requires_walk_forward"}
     allowed_ai_keys = required_ai_keys | {"fallback_used", "provider_errors", "network_calls"}
     if not required_ai_keys.issubset(ai_keys) or not ai_keys.issubset(allowed_ai_keys):
-        return False
+        return reject("guard-8")
 
     allowed_tests = {
         "not settings.gemini_api_key and not settings.groq_api_key",
@@ -1458,7 +1466,7 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
     calls: list[ast.Call] = []
     for part in ast.walk(ast.Module(body=body, type_ignores=[])):
         if isinstance(part, ast.If) and ast.unparse(part.test) not in allowed_tests:
-            return False
+            return reject("guard-9")
         if isinstance(part, ast.For):
             if not (
                 isinstance(part.target, ast.Name)
@@ -1468,11 +1476,11 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
                 and len(part.body) == 1
                 and isinstance(part.body[0], ast.Try)
             ):
-                return False
+                return reject("guard-10")
         if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
             # The generator itself must not create helper scopes whose behavior is lost.
             if part is not node:
-                return False
+                return reject("guard-11")
         if isinstance(part, ast.Call):
             calls.append(part)
             if isinstance(part.func, ast.Name):
@@ -1480,17 +1488,17 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
                     "_generate_with_provider", "_strategy_prompt", "AIProviderError",
                     "str", "evidence_for", "_apply_market_context",
                 }:
-                    return False
+                    return reject("guard-12")
             elif isinstance(part.func, ast.Attribute):
                 allowed_attrs = {
                     "append", "items", "join", "model_validate", "model_dump",
                 }
                 if part.func.attr not in allowed_attrs:
-                    return False
+                    return reject("guard-13")
                 if part.func.attr == "append" and not (
                     isinstance(part.func.value, ast.Name) and part.func.value.id == "provider_order"
                 ):
-                    return False
+                    return reject("guard-14")
                 if part.func.attr == "join" and not (
                     isinstance(part.func.value, ast.Constant)
                     and part.func.value.value == "; "
@@ -1509,21 +1517,21 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
                     and isinstance(part.args[0].elt, ast.JoinedStr)
                     and not part.keywords
                 ):
-                    return False
+                    return reject("guard-15")
                 if part.func.attr == "items" and not (
                     isinstance(part.func.value, ast.Name) and part.func.value.id == "provider_errors"
                 ):
-                    return False
+                    return reject("guard-16")
                 if part.func.attr == "model_validate" and not (
                     isinstance(part.func.value, ast.Name) and part.func.value.id == "AIStrategySpec"
                 ):
-                    return False
+                    return reject("guard-17")
                 if part.func.attr == "model_dump" and not (
                     isinstance(part.func.value, ast.Name) and part.func.value.id == "spec"
                 ):
-                    return False
+                    return reject("guard-18")
             else:
-                return False
+                return reject("guard-19")
 
     if not any(
         isinstance(call.func, ast.Name) and call.func.id == "_strategy_prompt"
@@ -1533,7 +1541,7 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
         and not call.keywords
         for call in calls
     ):
-        return False
+        return reject("guard-20")
     if not any(
         isinstance(call.func, ast.Attribute)
         and isinstance(call.func.value, ast.Name)
@@ -1545,7 +1553,7 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
         and not call.keywords
         for call in calls
     ):
-        return False
+        return reject("guard-21")
     if not any(
         isinstance(call.func, ast.Name) and call.func.id == "_apply_market_context"
         and len(call.args) == 1 and isinstance(call.args[0], ast.Name) and call.args[0].id == "spec"
@@ -1555,7 +1563,7 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
         and {keyword.arg for keyword in call.keywords}.issubset({"asset", "symbol", "timeframe"})
         for call in calls
     ):
-        return False
+        return reject("guard-22")
     if not any(
         isinstance(call.func, ast.Name) and call.func.id == "_generate_with_provider"
         and len(call.args) == 2
@@ -1565,7 +1573,7 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
         and not call.keywords
         for call in calls
     ):
-        return False
+        return reject("guard-23")
 
     allowed_targets = {"provider_errors", "provider_order", "raw", "provider_used", "spec", "family_key"}
     raises = []
@@ -1589,7 +1597,7 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
                     and target.slice.id == "provider"
                 ):
                     continue
-                return False
+                return reject("guard-24")
         if isinstance(part, ast.Raise):
             if not (
                 isinstance(part.exc, ast.Call)
@@ -1600,7 +1608,7 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
                 and not part.exc.keywords
                 and (part.cause is None or (isinstance(part.cause, ast.Name) and part.cause.id == "exc"))
             ):
-                return False
+                return reject("guard-25")
             message = part.exc.args[0]
             if isinstance(message, ast.Constant) and message.value == "No AI strategy provider is configured":
                 raises.append("no-provider")
@@ -1622,7 +1630,7 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
             ):
                 raises.append("validation-failure")
             else:
-                return False
+                return reject("guard-26")
     return (
         provider_loop_count == 1
         and try_count == 2
@@ -1687,7 +1695,8 @@ def transform_strategy_ai(commit: str) -> None:
             )
     elif not _recognized_native_strategy_generator(legacy_generate):
         raise MigrationError(
-            "generate_strategy_draft contains branch-specific behavior beyond the recognized provider orchestration contract; refusing to overwrite it"
+            "generate_strategy_draft contains branch-specific behavior beyond the recognized provider orchestration contract; refusing to overwrite it ("
+            + _STRATEGY_GENERATOR_REJECTION + ")"
         )
 
     provider_definitions = definitions_by_name["_generate_with_provider"]
