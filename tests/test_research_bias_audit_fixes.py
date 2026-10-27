@@ -317,5 +317,6 @@ def test_flat_bars_with_missing_atr_do_not_invalidate_benchmark_controls():
         stop_atr=1.0, take_profit_atr=5.0, random_trials=20, seed=13,
     )
     assert report["status"] == "OK"
-    assert report["candidate_exit_count"] > 0
+    assert report["candidate_requested_exposure_bars"] == 12
+    assert report["random_control_requested_exposure_bars_median"] == 12.0
     assert report["random_trials"] == 20
