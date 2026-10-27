@@ -132,7 +132,6 @@ def _safe_canonical_json_helper(
     if name == "_extract_json":
         if [arg.arg for arg in args.args] != ["text"] or args.defaults:
             return False
-        local_names = {"text", "raw", "value", "exc"}
         return_name = "value"
         json_import_count = 0
         for statement in legacy_tree.body:
@@ -170,7 +169,6 @@ def _safe_canonical_json_helper(
             isinstance(args.defaults[0], ast.Constant) and isinstance(args.defaults[0].value, str)
         ):
             return False
-        local_names = {"response", "provider", "body", "exc"}
         return_name = "body"
         allowed_exceptions = {"ValueError", "UnicodeDecodeError", "TypeError", "AttributeError"}
 
