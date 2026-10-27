@@ -256,7 +256,16 @@ def transform_ai_providers(commit: str) -> None:
         return
     source = path.read_text(encoding="utf-8")
     if not PROVIDER_RE.search(source):
-        return
+        # A legacy exception shim may be the only remaining difference in this
+        # facade while the wider branch still contains provider references.
+        # Process only the exact recognized empty shim; leave other provider-neutral
+        # facades byte-for-byte unchanged.
+        try:
+            provider_neutral_tree = ast.parse(source, filename=str(path))
+        except SyntaxError:
+            return
+        if not any(_is_legacy_ai_provider_error_stub(node) for node in provider_neutral_tree.body):
+            return
 
     old_tree = ast.parse(source, filename=str(path))
     canonical = canonical_text(commit, "app/ai_providers.py")

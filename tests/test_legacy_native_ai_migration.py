@@ -57,6 +57,36 @@ def retained_helper():
             self.assertIn("raise AIProviderError('invalid input')", result)
             self.assertNotRegex(result, migration.PROVIDER_RE)
 
+    def test_ai_provider_error_stub_is_replaced_when_facade_has_no_provider_text(self):
+        legacy = """from .native_ai import NativeAIError
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    try:
+        raise NativeAIError("failure")
+    except AIProviderError:
+        return "handled"
+"""
+        self.assertIsNone(migration.PROVIDER_RE.search(legacy))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value="from .native_ai import AIProviderError\n\n"
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertNotIn("class AIProviderError", result)
+            self.assertIn("from .native_ai import AIProviderError", result)
+            self.assertIn("from .native_ai import NativeAIError", result)
+            self.assertIn("except AIProviderError", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
+
     def test_ai_provider_error_collision_with_custom_behavior_fails_closed(self):
         legacy = """class AIProviderError(RuntimeError):
     def __init__(self, message):
