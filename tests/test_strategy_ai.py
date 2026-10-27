@@ -48,3 +48,45 @@ def test_deployment_scripts_do_not_require_hosted_ai_provider_keys():
         text = (ROOT / path).read_text()
         for token in ("GEMINI_API_KEY", "GEMINI_MODEL", "GROQ_API_KEY", "CEREBRAS_API_KEY", "atlas-gemini-api-key"):
             assert token not in text, path
+
+
+
+def test_native_strategy_parser_preserves_multitimeframe_rules_and_avoids_substring_symbols():
+    from app.native_ai import compose_strategy_spec
+
+    spec = compose_strategy_spec(
+        prompt="15m breakout with 1h confirmation for forex trend together",
+        name="Multi-timeframe forex",
+        asset="forex",
+        timeframe="1h",
+    )
+    assert spec["symbols"] == ["EUR_USD"]
+    assert spec["strategy_family"] == "BREAKOUT"
+    assert set(spec["timeframes"]) == {"15m", "1h"}
+    condition_timeframes = {row["type"]: row["timeframe"] for row in spec["entry_conditions"]}
+    assert condition_timeframes["RANGE_BREAKOUT"] == "15m"
+    assert condition_timeframes["BREAKOUT_QUALITY"] == "1h"
+
+
+def test_native_strategy_parser_recognizes_ensemble_and_short_intent():
+    from app.native_ai import compose_strategy_spec
+
+    ensemble = compose_strategy_spec(
+        prompt="combine momentum and trend strategies for BTC",
+        name="Combined strategy",
+    )
+    assert ensemble["strategy_family"] == "ENSEMBLE"
+
+    short = compose_strategy_spec(
+        prompt="short the BTC market on a 1h timeframe",
+        name="Short BTC",
+    )
+    assert short["direction"] == "SHORT"
+
+    ambiguous = compose_strategy_spec(prompt="BTC strategy on 1h", name="Unspecified direction")
+    assert any("direction was explicit" in item.lower() for item in ambiguous["validation_warnings"])
+
+
+def test_worker_deployment_pins_explicit_gcp_project():
+    script = (ROOT / "deploy" / "cloud-run-worker-deploy.sh").read_text()
+    assert 'gcloud run worker-pools deploy "$WORKER_POOL" \\\\n  --project "$GCP_PROJECT_ID"' in script
