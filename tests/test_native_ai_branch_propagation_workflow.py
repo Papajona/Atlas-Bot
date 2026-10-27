@@ -64,6 +64,6 @@ def test_legacy_branches_receive_runtime_only_patch_with_hunk_conflicts_favoring
     assert 'if [[ -z "$before_refs" ]] && verify_native_ai_impl; then' in workflow
     assert "ACTIVE PROVIDER REFERENCES before propagation" in workflow
     assert "ACTIVE PROVIDER REFERENCES REMAIN after runtime-only patch" in workflow
-    assert r"generativelanguage\\.googleapis\\.com" in workflow
-    assert r"api\\.groq\\.com" in workflow
-    assert r"api\\.cerebras\\.ai" in workflow
+    assert r"generativelanguage\.googleapis\.com" in workflow
+    assert r"api\.groq\.com" in workflow
+    assert r"api\.cerebras\.ai" in workflow
