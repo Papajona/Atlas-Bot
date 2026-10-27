@@ -68,51 +68,41 @@ jobs:
           }
 
           require_success "ci.yml" "Atlas CI"
-          require_manual_provider_verification() {
-            local run_ids run_id run_json run_event run_sha run_branch run_status run_conclusion provider_conclusion
-
-            # Automatic push, pull-request, and scheduled checks skip live provider inference.
-            # Only successful manual verification on this exact main commit may attest providers.
+          require_native_ai_verification() {
+            local run_ids run_id run_json run_sha run_branch run_status run_conclusion native_conclusion
             run_ids="$(gh run list \
               --repo "$GITHUB_REPOSITORY" \
               --workflow "production-verification.yml" \
               --commit "$GITHUB_SHA" \
-              --event workflow_dispatch \
               --limit 100 \
-              --json databaseId,event,headSha,headBranch,status,conclusion \
-              --jq '[.[] | select(.event == "workflow_dispatch" and .headSha == "'"$GITHUB_SHA"'" and .headBranch == "main" and .status == "completed" and .conclusion == "success")] | sort_by(.databaseId) | reverse | .[].databaseId')"
-
+              --json databaseId,headSha,headBranch,status,conclusion \
+              --jq '[.[] | select(.headSha == "'"$GITHUB_SHA"'" and .headBranch == "main" and .status == "completed" and .conclusion == "success")] | sort_by(.databaseId) | reverse | .[].databaseId')"
             if [ -z "$run_ids" ]; then
-              echo "BLOCKED: no successful manual Production Core Verification run exists for exact main commit $GITHUB_SHA"
+              echo "BLOCKED: no successful Atlas Native AI verification exists for exact main commit $GITHUB_SHA"
               exit 1
             fi
-
             for run_id in $run_ids; do
-              run_json="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json event,headSha,headBranch,status,conclusion,jobs)"
-              run_event="$(jq -r '.event // ""' <<< "$run_json")"
+              run_json="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json headSha,headBranch,status,conclusion,jobs)"
               run_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
               run_branch="$(jq -r '.headBranch // ""' <<< "$run_json")"
               run_status="$(jq -r '.status // ""' <<< "$run_json")"
               run_conclusion="$(jq -r '.conclusion // ""' <<< "$run_json")"
-              provider_conclusion="$(jq -r '[.jobs[].steps[] | select(.name == "AI model/provider verification when credentials are supplied") | .conclusion][0] // ""' <<< "$run_json")"
-
-              if [ "$run_event" = "workflow_dispatch" ] \
-                && [ "$run_sha" = "$GITHUB_SHA" ] \
+              native_conclusion="$(jq -r '[.jobs[].steps[] | select(.name == "Atlas Native AI offline verification (no provider calls)") | .conclusion][0] // ""' <<< "$run_json")"
+              if [ "$run_sha" = "$GITHUB_SHA" ] \
                 && [ "$run_branch" = "main" ] \
                 && [ "$run_status" = "completed" ] \
                 && [ "$run_conclusion" = "success" ] \
-                && [ "$provider_conclusion" = "success" ]; then
-                echo "PASS: manual provider verification succeeded for exact main commit $GITHUB_SHA (run $run_id)"
+                && [ "$native_conclusion" = "success" ]; then
+                echo "PASS: Atlas Native AI offline verification passed on exact main commit $GITHUB_SHA (run $run_id)"
                 return 0
               fi
-              echo "Ignoring verification run $run_id: event=$run_event sha=$run_sha branch=$run_branch status=$run_status conclusion=$run_conclusion provider_step=$provider_conclusion"
+              echo "Ignoring verification run $run_id: sha=$run_sha branch=$run_branch conclusion=$run_conclusion native_ai_step=$native_conclusion"
             done
-
-            echo "BLOCKED: no successful manual provider-check step attests exact main commit $GITHUB_SHA"
+            echo "BLOCKED: no successful Native AI offline check attests exact main commit $GITHUB_SHA"
             exit 1
           }
           require_success "ledger-concurrency-check.yml" "PostgreSQL ledger concurrency"
-          require_manual_provider_verification
+          require_native_ai_verification
           require_staging_identity_success() {
             local run_id run_status run_conclusion job_conclusion
 
@@ -400,9 +390,6 @@ jobs:
           SECRET_SUPABASE_ANON_KEY_VERSION: ${{ secrets.SECRET_SUPABASE_ANON_KEY_VERSION }}
           SECRET_FUNDING_WEBHOOK_VERSION: ${{ secrets.SECRET_FUNDING_WEBHOOK_VERSION }}
           FORWARDED_ALLOW_IPS: ${{ secrets.FORWARDED_ALLOW_IPS }}
-          SECRET_GEMINI_API_KEY_VERSION: ${{ secrets.SECRET_GEMINI_API_KEY_VERSION }}
-          SECRET_GROQ_API_KEY_VERSION: ${{ secrets.SECRET_GROQ_API_KEY_VERSION }}
-          GEMINI_MODEL: gemini-3.8-flash
           RESEARCH_FEE_SOURCE: ${{ vars.RESEARCH_FEE_SOURCE }}
           RESEARCH_FEE_EVIDENCE_ID: ${{ vars.RESEARCH_FEE_EVIDENCE_ID }}
           RESEARCH_MIN_DEFLATED_SHARPE: ${{ vars.RESEARCH_MIN_DEFLATED_SHARPE }}
