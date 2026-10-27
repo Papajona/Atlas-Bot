@@ -21,12 +21,20 @@ from .strategy_evidence import evidence_for
 async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
     try:
         raw = compose_strategy_spec(prompt=prompt, name=name, asset=asset, symbol=symbol,
-                                   timeframe=timeframe, max_risk_per_trade=0.01)
+                                    timeframe=timeframe, max_risk_per_trade=settings.risk_per_trade)
+        spec = AIStrategySpec.model_validate(raw)
+        spec = _apply_market_context(spec, asset=asset, symbol=symbol, timeframe=timeframe)
     except Exception as exc:
-        raise NativeAIError(str(exc)) from exc
-    return {"strategy": raw, "evidence": evidence_for("trend"),
-            "ai": {"provider": "atlas_native", "model": "atlas-native-strategy-v1",
-                   "network_calls": 0}}
+        raise NativeAIError(f"Atlas Native AI could not create a valid strategy draft: {exc}") from exc
+    family = {"TREND":"trend", "MOMENTUM":"momentum", "BREAKOUT":"breakout",
+              "MEAN_REVERSION":"mean_reversion", "ENSEMBLE":"ensemble"}[spec.strategy_family]
+    return {
+        "strategy": spec.model_dump(),
+        "evidence": evidence_for(family),
+        "ai": {"provider":"atlas_native", "model":"atlas-native-strategy-v1",
+               "fallback_used":False, "provider_errors":{}, "execution_authority":False,
+               "requires_backtest":True, "requires_walk_forward":True, "network_calls":0},
+    }
 """
 
 
