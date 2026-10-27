@@ -27,7 +27,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Propagate verified provider-free Native AI change to branch heads
+      - name: Propagate provider-free Native AI to all branch heads without force-pushing
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -39,6 +39,53 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin "+refs/heads/*:refs/remotes/origin/*" --prune
 
+          # Paths changed by the reviewed Native AI PR. Preserve unrelated files and use
+          # three-way patching first; any unavoidable conflict is scoped to these files.
+          AI_PATHS=(
+            ".env.example"
+            ".github/workflows/production-deploy.yml"
+            ".github/workflows/production-verification.yml"
+            "app/ai_providers.py"
+            "app/config.py"
+            "app/daily_research.py"
+            "app/native_ai.py"
+            "app/strategy_ai.py"
+            "app/templates/customer.html"
+            "deploy/DEPLOY_WORKFLOW.md"
+            "deploy/cloud-run-deploy.sh"
+            "deploy/cloud-run-worker-deploy.sh"
+            "deploy/cloud-run.env.example"
+            "deploy/gcp-bootstrap.sh"
+            "metadata.json"
+            "scripts/check_ai_models.py"
+            "scripts/check_native_ai.py"
+            "scripts/verify_release.sh"
+            "tests/test_ai_providers.py"
+            "tests/test_audit_repair_regressions.py"
+            "tests/test_check_ai_models_http.py"
+            "tests/test_check_ai_models_import.py"
+            "tests/test_daily_research.py"
+            "tests/test_production_security_gates.py"
+            "tests/test_prompt_safety_key_audit_3_10_46.py"
+            "tests/test_release_diagnostics_security.py"
+            "tests/test_release_security_inventory_3_10_45.py"
+            "tests/test_strategy_ai.py"
+          )
+
+          is_ai_path() {
+            local candidate="$1" p
+            for p in "${AI_PATHS[@]}"; do
+              [[ "$candidate" == "$p" ]] && return 0
+            done
+            return 1
+          }
+
+          scan_active_provider_refs() {
+            grep -RIlE 'gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_api_key|SECRET_GEMINI|GROQ_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|api\.groq\.com|api\.cerebras\.ai' \
+              app scripts deploy .github/workflows \
+              --exclude='propagate-native-ai-all-branches.yml' 2>/dev/null || true
+          }
+
           declare -a updated=()
           declare -a skipped=()
           declare -a failed=()
@@ -47,53 +94,114 @@ jobs:
             [[ -n "$remote_ref" ]] || continue
             branch="${remote_ref#refs/remotes/origin/}"
             [[ "$branch" == "main" ]] && continue
-
             start_sha="$(git rev-parse "$remote_ref")"
             git checkout --detach "$start_sha" >/dev/null 2>&1
+
+            before_refs="$(scan_active_provider_refs)"
+            already_has_commit=false
             if git merge-base --is-ancestor "$NATIVE_AI_COMMIT" "$start_sha"; then
-              if grep -RInE 'gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\\.googleapis\\.com|_gemini_json|settings\\.gemini_api_key|SECRET_GEMINI|GROQ_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|api\\.groq\\.com|api\\.cerebras\\.ai' \\
-                app scripts deploy .github/workflows \\
-                --exclude='propagate-native-ai-all-branches.yml' >"$RUNNER_TEMP/hosted-ai-scan.txt"; then
-                failed+=("$branch: already contains Native AI commit but hosted-AI wiring was reintroduced")
-                echo "::warning title=Native AI branch needs repair::$branch contains old or reintroduced hosted-AI wiring."
-                sed -n '1,30p' "$RUNNER_TEMP/hosted-ai-scan.txt"
-              else
-                skipped+=("$branch (Native AI commit present; active-code scan clean)")
-              fi
+              already_has_commit=true
+            fi
+            if [[ "$already_has_commit" == true && -z "$before_refs" ]]; then
+              skipped+=("$branch (Native AI commit present; active code clean)")
               continue
             fi
-            if ! git cherry-pick -X theirs "$NATIVE_AI_COMMIT" >"$RUNNER_TEMP/cherry-pick.log" 2>&1; then
-              if [[ -n "$(git rev-parse -q --verify CHERRY_PICK_HEAD 2>/dev/null || true)" ]] && git diff --cached --quiet; then
-                git cherry-pick --skip >/dev/null 2>&1 || true
-              else
-                git cherry-pick --abort >/dev/null 2>&1 || true
-                failed+=("$branch: cherry-pick conflict")
-                echo "::warning title=Native AI propagation skipped::$branch could not cleanly accept the Native AI commit."
+
+            if [[ "$already_has_commit" == false ]]; then
+              if ! git cherry-pick -X theirs "$NATIVE_AI_COMMIT" >"$RUNNER_TEMP/cherry-pick.log" 2>&1; then
+                if [[ -z "$(git rev-parse -q --verify CHERRY_PICK_HEAD 2>/dev/null || true)" ]]; then
+                  failed+=("$branch: cherry-pick failed before conflict resolution")
+                  git cherry-pick --abort >/dev/null 2>&1 || true
+                  continue
+                fi
+                conflict_files="$(git diff --name-only --diff-filter=U)"
+                unsafe_conflict=false
+                while IFS= read -r f; do
+                  [[ -n "$f" ]] || continue
+                  if ! is_ai_path "$f"; then
+                    unsafe_conflict=true
+                    break
+                  fi
+                done <<< "$conflict_files"
+                if [[ "$unsafe_conflict" == true ]]; then
+                  git cherry-pick --abort >/dev/null 2>&1 || true
+                  failed+=("$branch: conflict touches unrelated file; left unchanged")
+                  continue
+                fi
+                while IFS= read -r f; do
+                  [[ -n "$f" ]] || continue
+                  git checkout --theirs -- "$f"
+                  git add -- "$f"
+                done <<< "$conflict_files"
+                if ! GIT_EDITOR=true git cherry-pick --continue >/dev/null 2>&1; then
+                  git cherry-pick --abort >/dev/null 2>&1 || true
+                  failed+=("$branch: Native AI conflict resolution failed")
+                  continue
+                fi
+              fi
+            else
+              # Reapply the Native AI patch if a later branch commit reintroduced hosted
+              # provider wiring after the canonical Native AI commit.
+              if [[ -n "$before_refs" ]]; then
+                if ! git diff "$NATIVE_AI_COMMIT^" "$NATIVE_AI_COMMIT" -- "${AI_PATHS[@]}" | git apply --3way --index -; then
+                  git reset --merge >/dev/null 2>&1 || true
+                  conflict_files="$(git diff --name-only --diff-filter=U)"
+                  unsafe_conflict=false
+                  while IFS= read -r f; do
+                    [[ -n "$f" ]] || continue
+                    if ! is_ai_path "$f"; then unsafe_conflict=true; break; fi
+                  done <<< "$conflict_files"
+                  if [[ "$unsafe_conflict" == true ]]; then
+                    failed+=("$branch: reintroduced provider wiring has conflicts outside AI files")
+                    continue
+                  fi
+                  while IFS= read -r f; do
+                    [[ -n "$f" ]] || continue
+                    git checkout "$NATIVE_AI_COMMIT" -- "$f"
+                    git add -- "$f"
+                  done <<< "$conflict_files"
+                fi
+              fi
+            fi
+
+            after_refs="$(scan_active_provider_refs)"
+            if [[ -n "$after_refs" ]]; then
+              unsafe_refs=false
+              while IFS= read -r f; do
+                [[ -n "$f" ]] || continue
+                if ! is_ai_path "$f"; then unsafe_refs=true; break; fi
+              done <<< "$after_refs"
+              if [[ "$unsafe_refs" == true ]]; then
+                failed+=("$branch: hosted AI remains in files outside reviewed AI path set")
+                echo "::warning title=Native AI cleanup needs reconciliation::$branch still contains active hosted-AI references:"
+                printf '%s\n' "$after_refs"
+                continue
+              fi
+              # Replace only affected AI files with the canonical provider-free implementation.
+              while IFS= read -r f; do
+                [[ -n "$f" ]] || continue
+                git checkout "$NATIVE_AI_COMMIT" -- "$f"
+                git add -- "$f"
+              done <<< "$after_refs"
+              after_refs="$(scan_active_provider_refs)"
+              if [[ -n "$after_refs" ]]; then
+                failed+=("$branch: hosted AI reference remains after scoped repair")
                 continue
               fi
             fi
 
-            # Fail closed: never push a branch if active app/config/deployment code still
-            # references Gemini or another hosted provider after propagation.
-            if grep -RInE 'gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_api_key|SECRET_GEMINI|GROQ_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|api\.groq\.com|api\.cerebras\.ai' \
-              app scripts deploy .github/workflows \
-              --exclude='propagate-native-ai-all-branches.yml' >"$RUNNER_TEMP/hosted-ai-scan.txt"; then
-              failed+=("$branch: active hosted-AI reference remains")
-              echo "::warning title=Native AI propagation skipped::$branch still has hosted-AI references in active code; branch not pushed."
-              sed -n '1,30p' "$RUNNER_TEMP/hosted-ai-scan.txt"
+            if [[ -z "$(git status --porcelain)" ]]; then
+              skipped+=("$branch (already clean after propagation)")
               continue
             fi
-
+            git add -- "${AI_PATHS[@]}" || true
+            git commit -m "Remove hosted AI wiring; use Atlas Native AI" >/dev/null
             new_sha="$(git rev-parse HEAD)"
-            if [[ "$new_sha" == "$start_sha" ]]; then
-              skipped+=("$branch (patch already applied; scan clean)")
-              continue
-            fi
             if git push origin "HEAD:refs/heads/$branch"; then
               updated+=("$branch ($start_sha -> $new_sha)")
             else
-              failed+=("$branch: push rejected, possibly protected branch")
-              echo "::warning title=Native AI propagation blocked::$branch could not be pushed; branch protections were not bypassed."
+              failed+=("$branch: push rejected by GitHub permissions/protection; branch left unchanged")
+              echo "::warning title=Native AI propagation blocked::$branch could not be pushed; protection was not bypassed."
             fi
           done < <(git for-each-ref --format='%(refname)' refs/remotes/origin/ | grep -v '^refs/remotes/origin/HEAD$' | sort)
 
@@ -101,16 +209,16 @@ jobs:
             echo "## Atlas Native AI branch propagation"
             echo
             echo "- Canonical Native AI commit: `$NATIVE_AI_COMMIT`"
-            echo "- Updated branches: ${#updated[@]}"
+            echo "- Branches updated: ${#updated[@]}"
             printf '  - %s\n' "${updated[@]:-none}"
-            echo "- Skipped branches: ${#skipped[@]}"
+            echo "- Branches skipped because already clean: ${#skipped[@]}"
             printf '  - %s\n' "${skipped[@]:-none}"
             echo "- Unresolved branches: ${#failed[@]}"
             printf '  - %s\n' "${failed[@]:-none}"
           } >> "$GITHUB_STEP_SUMMARY"
 
           if (( ${#failed[@]} > 0 )); then
-            echo "::error title=Repository-wide Native AI cleanup incomplete::Some branches need reconciliation; see the workflow summary."
+            echo "::error title=Repository-wide Native AI cleanup incomplete::Some branches need reconciliation; see workflow summary."
             exit 1
           fi
-          echo "PASS: all branch heads were either updated or already contained the provider-free Native AI change."
+          echo "PASS: every branch is either updated or already contains provider-free active code."
