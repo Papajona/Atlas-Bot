@@ -1408,9 +1408,6 @@ class AIProviderError(RuntimeError):
 async def _cerebras_json(prompt):
     return await httpx.post("https://api.cerebras.ai/v1/chat/completions", json={"prompt": prompt})
 
-async def _generate_with_provider(provider, prompt):
-    return await _cerebras_json(prompt)
-
 def retained_helper():
     return {"audit": "preserved"}
 """
