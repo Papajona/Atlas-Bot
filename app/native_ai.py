@@ -153,13 +153,22 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
     family = _classify_family(text)
     lower = text.lower()
     asks_both = any(x in lower for x in ("both directions", "long and short", "long/short", "both sides"))
-    asks_short = bool(
-        re.search(r"\b(?:bearish|downtrend)\b", lower)
-        or re.search(r"\b(?:shorting|selling)\b", lower)
-        or re.search(r"\bshort\s+(?!term\b|terms\b)(?:the\s+)?[a-z0-9][a-z0-9/_-]*\b", lower)
-        or re.search(r"\bsell\s+(?:only\b|(?:the\s+)?[a-z0-9][a-z0-9/_-]*\b)", lower)
+    # "short EMA" and "long EMA" describe indicator periods, while "sell when RSI"
+    # describes an exit. Only explicit direction phrases or a known instrument imply side.
+    known_symbol = (
+        r"(?:btc(?:\s*[/_-]?\s*usdt?)?|bitcoin|eth(?:\s*[/_-]?\s*usdt?)?|ethereum|"
+        r"eur\s*[/_-]?\s*usd|gbp\s*[/_-]?\s*usd|xau(?:\s*[/_-]?\s*usd)?|gold|wti|crude\s+oil)"
     )
-    asks_long = bool(re.search(r"\b(long|buy|bullish|uptrend)\b", lower))
+    asks_short = bool(
+        re.search(r"\b(?:bearish|downtrend|shorting|go\s+short|short\s+only|short[-\s]sell)\b", lower)
+        or re.search(rf"\bshort\s+(?:the\s+)?{known_symbol}\b", lower)
+        or re.search(r"\bsell\s+only\b", lower)
+        or re.search(rf"\bsell\s+(?:the\s+)?{known_symbol}\b", lower)
+    )
+    asks_long = bool(
+        re.search(r"\b(?:buy|bullish|uptrend)\b", lower)
+        or re.search(r"\blong\b(?!\s+(?:ema|sma|ma|moving\s+average|window|period|lookback|average)\b)", lower)
+    )
     direction = "BOTH" if asks_both or (asks_short and asks_long) else ("SHORT" if asks_short else "LONG")
     direction_ambiguous = not (asks_both or asks_short or asks_long)
     cap = _number(max_risk_per_trade)
