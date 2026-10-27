@@ -186,11 +186,18 @@ def _safe_canonical_json_helper(
         call = statement.exc
         if not is_name(call.func, "AIProviderError") or not call.args or call.keywords:
             return False
-        return all(
-            isinstance(part, (ast.Constant, ast.JoinedStr, ast.Name, ast.Call, ast.BinOp, ast.Attribute, ast.FormattedValue))
-            for part in ast.walk(call)
-            if isinstance(part, ast.expr)
-        )
+        for argument in call.args:
+            for part in ast.walk(argument):
+                if isinstance(part, (ast.Call, ast.Attribute, ast.Subscript, ast.NamedExpr, ast.Lambda)):
+                    return False
+                if isinstance(part, ast.FormattedValue) and not (
+                    isinstance(part.value, ast.Name) and part.format_spec is None
+                ):
+                    return False
+                if not isinstance(part, (ast.Constant, ast.JoinedStr, ast.Name, ast.BinOp, ast.FormattedValue)):
+                    if isinstance(part, ast.expr):
+                        return False
+        return True
 
     def is_isinstance_call(value: ast.AST, left: str, right: str) -> bool:
         return (
@@ -430,13 +437,50 @@ def _safe_canonical_json_helper(
                 return False
             if name == "_extract_json":
                 if item.func.attr == "loads" and is_name(item.func.value, "json"):
-                    continue
-                if item.func.attr in {"strip", "startswith", "lstrip"}:
-                    # Shape checks above validate receiver and arguments.
-                    if is_name(item.func.value, "text") or is_name(item.func.value, "raw") or isinstance(item.func.value, (ast.BoolOp, ast.Subscript)):
+                    if (
+                        len(item.args) == 1 and isinstance(item.args[0], ast.Name)
+                        and item.args[0].id in {"raw", "text"} and not item.keywords
+                    ):
+                        continue
+                    return False
+                if item.func.attr == "strip":
+                    if not item.keywords and (
+                        not item.args
+                        or (
+                            is_name(item.func.value, "raw") and len(item.args) == 1
+                            and is_string(item.args[0], "\x60")
+                        )
+                    ) and (
+                        is_name(item.func.value, "text") or is_name(item.func.value, "raw")
+                        or (
+                            isinstance(item.func.value, ast.BoolOp) and isinstance(item.func.value.op, ast.Or)
+                            and len(item.func.value.values) == 2
+                            and is_name(item.func.value.values[0], "text")
+                            and is_string(item.func.value.values[1], "")
+                        )
+                    ):
+                        continue
+                if item.func.attr == "startswith":
+                    if (
+                        is_name(item.func.value, "raw") and len(item.args) == 1
+                        and is_string(item.args[0], "\x60\x60\x60") or
+                        is_name(item.func.value, "raw") and len(item.args) == 1
+                        and is_string(item.args[0], "json")
+                    ) and not item.keywords:
+                        continue
+                if item.func.attr == "lstrip":
+                    receiver=item.func.value
+                    if (
+                        isinstance(receiver, ast.Subscript) and is_name(receiver.value, "raw")
+                        and isinstance(receiver.slice, ast.Slice)
+                        and isinstance(receiver.slice.lower, ast.Constant) and receiver.slice.lower.value == 4
+                        and receiver.slice.upper is None and receiver.slice.step is None
+                        and not item.args and not item.keywords
+                    ):
                         continue
             elif item.func.attr == "json" and is_name(item.func.value, "response"):
-                continue
+                if not item.args and not item.keywords:
+                    continue
             return False
         if isinstance(item, ast.Name) and item.id == "json" and isinstance(item.ctx, (ast.Store, ast.Del)):
             return False
