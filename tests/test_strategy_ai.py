@@ -1,125 +1,50 @@
 import asyncio
-import ast
 from pathlib import Path
-
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_strategy_ai_module_parses():
-    ast.parse((ROOT / "app" / "strategy_ai.py").read_text())
+def test_native_strategy_composer_builds_validated_paper_only_draft():
+    from app.strategy_ai import generate_strategy_draft
+    result = asyncio.run(generate_strategy_draft(
+        prompt="BTC breakout strategy on 1h, risk 0.5%, target 2R",
+        name="BTC local strategy", asset="crypto", symbol="BTC/USDT", timeframe="1h"))
+    spec = result["strategy"]
+    assert spec["strategy_family"] == "BREAKOUT"
+    assert spec["symbols"] == ["BTC/USDT"]
+    assert spec["timeframes"] == ["1h"]
+    assert spec["risk_per_trade"] <= 0.005
+    assert spec["execution_mode"] == "PAPER_SHADOW_ONLY"
+    assert spec["requires_backtest"] and spec["requires_walk_forward"]
+    assert result["ai"]["provider"] == "atlas_native"
+    assert result["ai"]["network_calls"] == 0
+    assert result["ai"]["execution_authority"] is False
 
 
-def test_strategy_ai_requires_real_provider(monkeypatch):
-    import app.strategy_ai as sai
-    monkeypatch.setattr(sai.settings, "gemini_api_key", "")
-    monkeypatch.setattr(sai.settings, "groq_api_key", "")
-    monkeypatch.setattr(sai.settings, "cerebras_api_key", "")
-    with pytest.raises(sai.AIProviderError, match="No AI strategy provider"):
-        asyncio.run(sai.generate_strategy_draft(prompt="Build a trend strategy for BTC using 1h confirmation", name="Test"))
+def test_native_strategy_parser_caps_risk_and_rejects_empty_prompt():
+    from app.native_ai import NativeAIError, compose_strategy_spec
+    with pytest.raises(NativeAIError):
+        compose_strategy_spec(prompt="", name="")
+    spec = compose_strategy_spec(prompt="Mean reversion for gold, risk 10%", name="Gold strategy",
+                                 asset="commodity", symbol="XAU_USD", timeframe="4h")
+    assert spec["strategy_family"] == "MEAN_REVERSION"
+    assert spec["risk_per_trade"] <= 0.005
+    assert any("capped" in item.lower() for item in spec["validation_warnings"])
 
 
-def test_strategy_ai_validates_and_caps_risk(monkeypatch):
-    import app.strategy_ai as sai
-    monkeypatch.setattr(sai.settings, "gemini_api_key", "configured")
-    monkeypatch.setattr(sai.settings, "groq_api_key", "")
-    monkeypatch.setattr(sai.settings, "cerebras_api_key", "")
-    monkeypatch.setattr(sai.settings, "risk_per_trade", 0.005)
-
-    async def fake(prompt, **kwargs):
-        return {
-            "version": "atlas-strategy-v1",
-            "title": "BTC Trend",
-            "summary": "Trend-following strategy with explicit confirmation and exits.",
-            "asset": "crypto",
-            "symbols": ["BTC/USDT:USDT"],
-            "timeframes": ["1h"],
-            "direction": "LONG",
-            "strategy_family": "TREND",
-            "entry_conditions": [{"type": "trend", "rule": "Price above the 200 EMA", "timeframe": "1h"}],
-            "exit_conditions": [{"type": "stop", "rule": "Stop at 2 ATR", "timeframe": "1h"}],
-            "risk_per_trade": 0.02,
-            "stop_loss_atr": 2.0,
-            "take_profit_rr": 2.0,
-            "sessions": [],
-            "assumptions": [],
-            "validation_warnings": [],
-            "requires_backtest": True,
-            "requires_walk_forward": True,
-            "execution_mode": "PAPER_SHADOW_ONLY",
-            "implementation_status": "ATLAS_SUPPORTED_FAMILY",
-        }
-
-    monkeypatch.setattr(sai, "_gemini_json", fake)
-    out = asyncio.run(sai.generate_strategy_draft(prompt="Build a BTC trend strategy", name="Test"))
-    assert out["ai"]["provider"] == "gemini"
-    assert out["ai"]["execution_authority"] is False
-    assert out["strategy"]["risk_per_trade"] == 0.005
-    assert out["strategy"]["execution_mode"] == "PAPER_SHADOW_ONLY"
-    assert out["strategy"]["validation_warnings"]
+def test_current_strategy_ui_describes_local_native_ai():
+    customer = (ROOT / "app" / "templates" / "customer.html").read_text()
+    assert "Atlas Native AI" in customer
+    assert "Generate Native AI strategy" in customer
+    assert "uses a real AI model" not in customer
 
 
-def test_strategy_endpoint_no_longer_contains_keyword_parser():
-    s = (ROOT / "app" / "main.py").read_text()
-    start = s.index('@app.post("/api/customer/strategy-builder")')
-    end = s.index('@app.get("/api/customer/strategy-builder")', start)
-    block = s[start:end]
-    # The builder endpoint now delegates to the Strategy Lab creation path (so drafts are
-    # validatable instead of orphaned); that shared path is what calls the real AI model.
-    assert "create_strategy_candidate(" in block
-    lab_start = s.index('async def create_strategy_candidate')
-    lab_end = s.index('@app.post("/api/customer/strategy-lab/candidates/{candidate_id}/validate")', lab_start)
-    assert "generate_strategy_draft" in s[lab_start:lab_end]
-    assert 'text=req.prompt.lower()' not in block
-    assert 'indicators=[k.upper()' not in block
-
-
-def test_strategy_deployment_wires_real_ai_secrets():
-    deploy = (ROOT / "deploy" / "cloud-run-deploy.sh").read_text()
-    bootstrap = (ROOT / "deploy" / "gcp-bootstrap.sh").read_text()
-    assert "SECRET_GEMINI_API_KEY_VERSION" in deploy
-    assert "atlas-gemini-api-key" in deploy
-    assert "GEMINI_API_KEY" in bootstrap
-    assert "atlas-gemini-api-key" in bootstrap
-    assert "CEREBRAS_API_KEY" in bootstrap
-    assert "atlas-cerebras-api-key" in bootstrap
-    assert "SECRET_CEREBRAS_API_KEY_VERSION" in deploy
-    assert "CEREBRAS_API_KEY=atlas-cerebras-api-key" in deploy
-    assert "CEREBRAS_MODEL=${CEREBRAS_MODEL:-" in deploy
-    worker_deploy = (ROOT / "deploy" / "cloud-run-worker-deploy.sh").read_text()
-    assert "SECRET_CEREBRAS_REF" in worker_deploy
-    for deployment in (deploy, worker_deploy):
-        assert "GEMINI_MODEL=gemini-3.8-flash" in deployment
-        assert "GEMINI_STRATEGY_MODEL" not in deployment
-        assert "${GEMINI_MODEL:-" not in deployment
-    assert "gemini-2.5" not in deploy
-
-
-def test_customer_ui_describes_real_ai_strategy_intelligence():
-    s=(ROOT/"app"/"templates"/"customer.html").read_text()
-    assert "Strategy Intelligence" in s
-    assert "real AI model" in s
-    assert "rule-based draft" not in s
-
-
-def test_strategy_ai_binds_market_context(monkeypatch):
-    import app.strategy_ai as sai
-    monkeypatch.setattr(sai.settings, "gemini_api_key", "configured")
-    monkeypatch.setattr(sai.settings, "groq_api_key", "")
-    async def fake(prompt, **kwargs):
-        return {
-            "version":"atlas-strategy-v1","title":"Wrong Context","summary":"A deliberately mismatched draft used for validation testing.",
-            "asset":"forex","symbols":["EUR_USD"],"timeframes":["4h"],"direction":"LONG","strategy_family":"TREND",
-            "entry_conditions":[{"type":"trend","rule":"Price above moving average","timeframe":"4h"}],
-            "exit_conditions":[{"type":"stop","rule":"Stop at 2 ATR","timeframe":"4h"}],
-            "risk_per_trade":0.005,"stop_loss_atr":2,"take_profit_rr":2,"sessions":[],"assumptions":[],"validation_warnings":[],
-            "requires_backtest":True,"requires_walk_forward":True,"execution_mode":"PAPER_SHADOW_ONLY","implementation_status":"ATLAS_SUPPORTED_FAMILY"
-        }
-    monkeypatch.setattr(sai, "_gemini_json", fake)
-    out=asyncio.run(sai.generate_strategy_draft(prompt="Build this strategy for BTC",name="Context",asset="crypto",symbol="BTC/USDT:USDT",timeframe="1h"))
-    spec=out["strategy"]
-    assert spec["asset"]=="crypto"
-    assert spec["symbols"]==["BTC/USDT:USDT"]
-    assert spec["timeframes"]==["1h"]
-    assert spec["validation_warnings"]
+def test_deployment_scripts_do_not_require_hosted_ai_provider_keys():
+    paths = ["deploy/cloud-run-deploy.sh", "deploy/cloud-run-worker-deploy.sh",
+             "deploy/gcp-bootstrap.sh", "deploy/cloud-run.env.example",
+             ".github/workflows/production-deploy.yml"]
+    for path in paths:
+        text = (ROOT / path).read_text()
+        for token in ("GEMINI_API_KEY", "GEMINI_MODEL", "GROQ_API_KEY", "CEREBRAS_API_KEY", "atlas-gemini-api-key"):
+            assert token not in text, path
