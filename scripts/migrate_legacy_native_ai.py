@@ -302,6 +302,28 @@ def transform_ai_providers(commit: str) -> None:
             runtime_error_shadowed = any(
                 "RuntimeError" in _defined_names(candidate)
                 for candidate in old_tree.body
+            ) or any(
+                (
+                    isinstance(candidate, ast.Name)
+                    and candidate.id == "RuntimeError"
+                    and isinstance(candidate.ctx, (ast.Store, ast.Del))
+                )
+                or (
+                    isinstance(candidate, ast.alias)
+                    and (
+                        candidate.asname == "RuntimeError"
+                        or (candidate.name == "RuntimeError" and candidate.asname is None)
+                    )
+                )
+                or (
+                    isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                    and candidate.name == "RuntimeError"
+                )
+                or (
+                    isinstance(candidate, ast.Global)
+                    and "RuntimeError" in candidate.names
+                )
+                for candidate in ast.walk(old_tree)
             )
             if runtime_error_shadowed:
                 raise MigrationError(
@@ -438,8 +460,18 @@ def transform_ai_providers(commit: str) -> None:
             has_direct_all_assignment = False
             if isinstance(module_node, ast.Assign):
                 has_direct_all_assignment = any(directly_assigns_all(target) for target in module_node.targets)
+                targets_bind_all = any("__all__" in _assigned_names(target) for target in module_node.targets)
                 if has_direct_all_assignment:
                     all_values.append(module_node.value)
+                    # Chained assignment (aliases = __all__ = [...]) leaks the same
+                    # mutable export list through another binding; reject it rather
+                    # than assume the alias will remain unchanged.
+                    if len(module_node.targets) != 1:
+                        dynamic_all = True
+                elif targets_bind_all:
+                    # Destructuring/attribute targets that include __all__ are not a
+                    # simple literal export declaration we can safely reason about.
+                    dynamic_all = True
                 if any(mutates_all_target(target) for target in module_node.targets):
                     dynamic_all = True
             elif isinstance(module_node, ast.AnnAssign):
