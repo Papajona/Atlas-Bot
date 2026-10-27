@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import tempfile
@@ -175,12 +176,15 @@ class LegacyNativeAIMigrationTests(unittest.TestCase):
             "ai_model": "gemini-3.5-flash",
             "gemini_api_key": "not-a-real-secret",
             "app_version": "3.10.47",
+            "description": "Gemini research is informational only and never enables live trading.",
         })
         result = migration.scrub_ancillary_text("metadata.json", source)
         parsed = json.loads(result)
         self.assertEqual(parsed["ai_model"], "atlas-native-strategy-v1")
         self.assertNotIn("gemini_api_key", parsed)
         self.assertEqual(parsed["app_version"], "3.10.47")
+        self.assertIn("informational only", parsed["description"])
+        self.assertNotIn("Gemini", parsed["description"])
 
 
     def test_shell_deployment_scrub_preserves_non_ai_settings_and_shell_syntax(self):
@@ -194,9 +198,10 @@ if [[ -z "$SECRET_GROQ_API_KEY_VERSION" ]]; then
   echo "WARNING: no Groq key configured"
 fi
 if [[ -n "$SECRET_GROQ_API_KEY_VERSION" ]]; then AI_SECRET_ARGS="${AI_SECRET_ARGS},GROQ_API_KEY=atlas-groq-api-key:${SECRET_GROQ_API_KEY_VERSION}"; fi
-ENV_VARS="^@^ENVIRONMENT=production@DATABASE_URL=${DATABASE_URL}@GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}@GROQ_MODEL=openai/gpt-oss-20b"
-gcloud run deploy atlas --set-env-vars "ENVIRONMENT=production,DATABASE_URL=${DATABASE_URL},GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash},GROQ_MODEL=openai/gpt-oss-20b" --set-secrets "DATABASE_URL=${DATABASE_SECRET_REF},GEMINI_API_KEY=${SECRET_GEMINI_API_KEY_VERSION}${AI_SECRET_ARGS}"
-for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key; do echo "$secret"; done
+ENV_VARS="^@^ENVIRONMENT=production@DATABASE_URL=${DATABASE_URL}@GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}@GROQ_MODEL=openai/gpt-oss-20b@OPENAI_ORGANIZATION=org-id"
+gcloud run deploy atlas --set-env-vars "ENVIRONMENT=production,DATABASE_URL=${DATABASE_URL},GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash},GROQ_MODEL=openai/gpt-oss-20b,OPENAI_ORGANIZATION=org-id" --set-secrets "DATABASE_URL=${DATABASE_SECRET_REF},GEMINI_API_KEY=${SECRET_GEMINI_API_KEY_VERSION}${AI_SECRET_ARGS}"
+grant_secret_access atlas-openai-api-key atlas-runtime
+for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-openai-api-key; do echo "$secret"; done
 '''
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "cloud-run-deploy.sh"
@@ -214,6 +219,8 @@ for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key; do echo 
         self.assertEqual(check.returncode, 0, check.stderr)
         self.assertIn("DATABASE_URL", cleaned)
         self.assertIn("DATABASE_SECRET_REF", cleaned)
+        self.assertNotIn("OPENAI_ORGANIZATION", cleaned)
+        self.assertNotIn("atlas-openai-api-key", cleaned)
         self.assertNotRegex(cleaned, migration.PROVIDER_RE)
 
 
