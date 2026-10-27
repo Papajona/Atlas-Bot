@@ -799,7 +799,7 @@ def transform_ai_providers(commit: str) -> None:
             canonical_nodes_by_name.setdefault(defined_name, canonical_node)
     canonical_names = set(canonical_nodes_by_name)
     provider_adapter_names = {
-        "_gemini_json", "_groq_json", "_prompt",
+        "_gemini_json", "_groq_json", "_cerebras_json", "_openai_json", "_prompt",
         "dual_ai_research_review", "dual_ai_trade_safety_review",
     }
     extras: list[str] = []
@@ -927,6 +927,13 @@ def transform_ai_providers(commit: str) -> None:
     for segment in extras:
         tree = ast.parse(segment)
         used_names.update(node.id for node in ast.walk(tree) if isinstance(node, ast.Name))
+
+    removed_adapter_dependencies = sorted(used_names & {"_cerebras_json", "_openai_json"})
+    if removed_adapter_dependencies:
+        raise MigrationError(
+            "retained app/ai_providers.py helpers depend on provider adapters that would be removed: "
+            + ", ".join(removed_adapter_dependencies)
+        )
 
     def import_signature(import_node: ast.AST, alias: ast.alias) -> tuple[str, int, str, str, str]:
         if isinstance(import_node, ast.Import):
@@ -1476,12 +1483,29 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
                     return False
             elif isinstance(part.func, ast.Attribute):
                 allowed_attrs = {
-                    "append", "items", "model_validate", "model_dump",
+                    "append", "items", "join", "model_validate", "model_dump",
                 }
                 if part.func.attr not in allowed_attrs:
                     return False
                 if part.func.attr == "append" and not (
                     isinstance(part.func.value, ast.Name) and part.func.value.id == "provider_order"
+                ):
+                    return False
+                if part.func.attr == "join" and not (
+                    isinstance(part.func.value, ast.Constant)
+                    and part.func.value.value == "; "
+                    and len(part.args) == 1
+                    and isinstance(part.args[0], ast.GeneratorExp)
+                    and isinstance(part.args[0].target, ast.Tuple)
+                    and len(part.args[0].target.elts) == 2
+                    and all(isinstance(item, ast.Name) for item in part.args[0].target.elts)
+                    and isinstance(part.args[0].iter, ast.Call)
+                    and isinstance(part.args[0].iter.func, ast.Attribute)
+                    and part.args[0].iter.func.attr == "items"
+                    and isinstance(part.args[0].iter.func.value, ast.Name)
+                    and part.args[0].iter.func.value.id == "provider_errors"
+                    and isinstance(part.args[0].elt, ast.JoinedStr)
+                    and not part.keywords
                 ):
                     return False
                 if part.func.attr == "items" and not (
@@ -1578,7 +1602,16 @@ def _recognized_native_strategy_generator(node: ast.AsyncFunctionDef) -> bool:
             message = part.exc.args[0]
             if isinstance(message, ast.Constant) and message.value == "No AI strategy provider is configured":
                 raises.append("no-provider")
-            elif isinstance(message, ast.Constant) and isinstance(message.value, str) and message.value.startswith("All configured AI strategy providers failed:"):
+            elif (
+                isinstance(message, ast.BinOp)
+                and isinstance(message.op, ast.Add)
+                and isinstance(message.left, ast.Constant)
+                and isinstance(message.left.value, str)
+                and message.left.value.startswith("All configured AI strategy providers failed:")
+                and isinstance(message.right, ast.Call)
+                and isinstance(message.right.func, ast.Attribute)
+                and message.right.func.attr == "join"
+            ):
                 raises.append("provider-failures")
             elif isinstance(message, ast.JoinedStr) and any(
                 isinstance(value, ast.Constant) and isinstance(value.value, str)
