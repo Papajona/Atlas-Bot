@@ -7768,7 +7768,9 @@ async def research_fx_execution_route(req: dict[str, object], x_admin_token: str
 
 # Authorized release diagnostics. The gateway key is read only from server configuration.
 _RELEASE_SECRET_PATTERNS = [
-    re.compile(r"""(?i)(authorization\s*[:=]\s*)(?:(?:bearer|basic|token|digest|negotiate)\s+)?[^\s,;"']+"""),
+    re.compile(
+        r"""(?ix)(authorization\s*[:=]\s*)(?:(?:bearer|basic|token|digest|negotiate)\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)|(?!(?:http|status)\s+(?:code\s+)?(?:401|403|404|429)\b)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+))"""
+    ),
     re.compile(
         r"""(?i)((?:"|')?(?:authorization|api[_-]?key|anon[_-]?key|service[_-]?role[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret(?:[_-]?key)?|private[_-]?key|client[_-]?secret|signing[_-]?key|encryption[_-]?key|credential|token)(?:"|')?\s*[:=]\s*)(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s,;]+))"""
     ),
