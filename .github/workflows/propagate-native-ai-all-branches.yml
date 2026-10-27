@@ -116,25 +116,9 @@ jobs:
                 fi
                 conflict_files="$(git diff --name-only --diff-filter=U)"
                 unsafe_conflict=false
-                while IFS= read -r f; do
-                  [[ -n "$f" ]] || continue
-                  if ! is_ai_path "$f"; then
-                    unsafe_conflict=true
-                    break
-                  fi
-                done <<< "$conflict_files"
-                if [[ "$unsafe_conflict" == true ]]; then
-                  git cherry-pick --abort >/dev/null 2>&1 || true
-                  failed+=("$branch: conflict touches unrelated file; left unchanged")
-                  continue
-                fi
-                while IFS= read -r f; do
-                  [[ -n "$f" ]] || continue
                 git cherry-pick --abort >/dev/null 2>&1 || true
                 failed+=("$branch: Native AI patch conflicts; branch left unchanged for manual reconciliation")
                 continue
-              fi
-              fi
             else
               # Reapply the Native AI patch if a later branch commit reintroduced hosted
               # provider wiring after the canonical Native AI commit.
