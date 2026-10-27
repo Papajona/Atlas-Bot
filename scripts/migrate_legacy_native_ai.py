@@ -128,68 +128,78 @@ def transform_config() -> None:
     except SyntaxError as exc:
         raise MigrationError(f"app/config.py cannot be parsed before provider cleanup: {exc}") from exc
 
-    edits: list[tuple[int, int, str]] = []
-    assignment_types = (ast.Assign, ast.AnnAssign)
+    def target_names(target: ast.AST) -> set[str]:
+        if isinstance(target, ast.Name):
+            return {target.id}
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return {name for item in target.elts for name in target_names(item)}
+        return set()
+
+    settings_classes = [
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name.lower() in {"settings", "appsettings", "atlassettings"}
+    ]
+    direct_setting_assignment_ids = {
+        id(statement)
+        for cls in settings_classes
+        for statement in cls.body
+        if isinstance(statement, (ast.Assign, ast.AnnAssign))
+    }
     statements = list(ast.walk(tree))
-    for node in statements:
-        if not isinstance(node, assignment_types):
-            continue
-        if isinstance(node, ast.Assign):
-            names = {name for target in node.targets for name in _assigned_names(target)}
-        else:
-            names = _assigned_names(node.target)
-        provider_names = {name for name in names if PROVIDER_FIELD_RE.search(name)}
+    assignments = [node for node in statements if isinstance(node, (ast.Assign, ast.AnnAssign))]
+    provider_nodes: list[ast.AST] = []
+    removable_lines: set[int] = set()
+
+    def is_provider_field(name: str) -> bool:
+        return bool(PROVIDER_FIELD_RE.search(name))
+
+    for node in assignments:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        names = {name for target in targets for name in target_names(target)}
+        provider_names = {name for name in names if is_provider_field(name)}
         if not provider_names:
             continue
-        if provider_names != names:
+        if id(node) not in direct_setting_assignment_ids:
             raise MigrationError(
-                "app/config.py has a combined provider/non-provider assignment; refusing to remove unrelated settings"
+                "app/config.py contains a provider-named assignment outside the Settings class; refusing to drop helper behavior"
             )
-        same_line_statements = [
-            other for other in statements
-            if other is not node
-            and isinstance(other, (ast.Assign, ast.AnnAssign, ast.Expr, ast.Import, ast.ImportFrom))
-            and getattr(other, "lineno", None) == node.lineno
-        ]
-        if same_line_statements:
+        if names != provider_names:
             raise MigrationError(
-                "app/config.py has a provider field sharing a line with another statement; refusing lossy cleanup"
+                "app/config.py has a mixed provider/unrelated assignment; refusing to remove unrelated settings"
             )
-        edits.append((node.lineno, node.end_lineno or node.lineno, ""))
+        provider_nodes.append(node)
+        removable_lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1)
 
-    result = _apply_line_edits(source, edits)
+    statement_types = (
+        ast.Assign, ast.AnnAssign, ast.Expr, ast.Import, ast.ImportFrom,
+        ast.Raise, ast.Return, ast.Assert, ast.AugAssign, ast.Delete,
+    )
+    for provider_node in provider_nodes:
+        start = provider_node.lineno
+        end = provider_node.end_lineno or start
+        for other in statements:
+            if other is provider_node or other in provider_nodes or not isinstance(other, statement_types):
+                continue
+            other_start = getattr(other, "lineno", None)
+            other_end = getattr(other, "end_lineno", None) or other_start
+            if other_start is not None and other_end is not None and other_start <= end and start <= other_end:
+                raise MigrationError(
+                    "app/config.py has a provider field sharing a physical line with a non-provider statement; refusing lossy cleanup"
+                )
+
+    lines = source.splitlines(keepends=True)
+    result = "".join(line for number, line in enumerate(lines, start=1) if number not in removable_lines)
     result = "".join(
         line for line in result.splitlines(keepends=True)
         if not (line.lstrip().startswith("#") and PROVIDER_RE.search(line))
     )
     if PROVIDER_RE.search(result):
         raise MigrationError(
-            "app/config.py still contains provider text outside isolated provider fields; refusing lossy cleanup"
+            "app/config.py still contains provider text outside isolated Settings fields; refusing lossy cleanup"
         )
     ast.parse(result, filename=str(path))
     path.write_text(result, encoding="utf-8")
-
-
-def _defined_names(node: ast.AST) -> set[str]:
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        return {node.name}
-    if isinstance(node, ast.Assign):
-        return {name for target in node.targets for name in _assigned_names(target)}
-    if isinstance(node, ast.AnnAssign):
-        return _assigned_names(node.target)
-    if isinstance(node, ast.Import):
-        return {alias.asname or alias.name.split(".", 1)[0] for alias in node.names}
-    if isinstance(node, ast.ImportFrom):
-        return {alias.asname or alias.name for alias in node.names if alias.name != "*"}
-    return set()
-
-
-def _assigned_names(target: ast.AST) -> set[str]:
-    if isinstance(target, ast.Name):
-        return {target.id}
-    if isinstance(target, (ast.Tuple, ast.List)):
-        return {name for item in target.elts for name in _assigned_names(item)}
-    return set()
 
 
 def transform_ai_providers(commit: str) -> None:
