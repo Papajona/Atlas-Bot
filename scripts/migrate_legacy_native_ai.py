@@ -322,6 +322,7 @@ def transform_strategy_ai(commit: str) -> None:
         return
     canonical = canonical_text(commit, "app/strategy_ai.py")
     old_tree = ast.parse(source, filename=str(path))
+    new_tree = ast.parse(canonical, filename="canonical app/strategy_ai.py")
 
     legacy_generate = next(
         (node for node in old_tree.body
@@ -330,11 +331,10 @@ def transform_strategy_ai(commit: str) -> None:
     )
     if legacy_generate is None:
         raise MigrationError("strategy module has no async generate_strategy_draft function")
-    # This canonical replacement is safe only for the known provider-only trampoline.
-    # Do not erase validation, market-context handling, or branch-specific control flow.
     body = legacy_generate.body
     safe_trampoline = (
-        len(body) == 1
+        not legacy_generate.decorator_list
+        and len(body) == 1
         and isinstance(body[0], ast.Return)
         and isinstance(body[0].value, ast.Await)
         and isinstance(body[0].value.value, ast.Call)
@@ -345,29 +345,78 @@ def transform_strategy_ai(commit: str) -> None:
         raise MigrationError(
             "generate_strategy_draft contains branch-specific behavior beyond the recognized provider trampoline; refusing to overwrite it"
         )
-    new_tree = ast.parse(canonical, filename="canonical app/strategy_ai.py")
-    canonical_generate = next((n for n in new_tree.body
-                               if isinstance(n, ast.AsyncFunctionDef) and n.name == "generate_strategy_draft"), None)
+
+    canonical_generate = next(
+        (node for node in new_tree.body
+         if isinstance(node, ast.AsyncFunctionDef) and node.name == "generate_strategy_draft"),
+        None,
+    )
     if canonical_generate is None:
         raise MigrationError("canonical strategy module lacks generate_strategy_draft")
     canonical_lines = canonical.splitlines(keepends=True)
     new_function = "".join(canonical_lines[canonical_generate.lineno - 1:canonical_generate.end_lineno])
+
+    removed_names = {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider", "generate_strategy_draft"}
+    ai_provider_imports: list[ast.ImportFrom] = []
+    retained_nodes: list[ast.AST] = []
+    import_aliases: set[str] = set()
+    for node in old_tree.body:
+        if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "ai_providers":
+            ai_provider_imports.append(node)
+            for alias in node.names:
+                if alias.name == "*":
+                    raise MigrationError(
+                        "strategy module uses a wildcard .ai_providers import; refusing to guess retained helper dependencies"
+                    )
+                import_aliases.add(alias.asname or alias.name)
+            continue
+        name = _name(node)
+        if name in removed_names:
+            continue
+        if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            continue
+        retained_nodes.append(node)
+
+    retained_name_uses = {
+        part.id
+        for node in retained_nodes
+        for part in ast.walk(node)
+        if isinstance(part, ast.Name)
+    }
+    used_removed_imports = import_aliases & retained_name_uses
+    remappable_names = {"NativeAIError", "compose_strategy_spec"}
+    unsafe_imports = sorted(used_removed_imports - remappable_names)
+    if unsafe_imports:
+        raise MigrationError(
+            "retained strategy helper depends on removed .ai_providers import(s) "
+            + ", ".join(unsafe_imports)
+            + "; refusing to drop those dependencies"
+        )
+
     edits: list[tuple[int, int, str]] = []
     found_generate = False
-    found_import = False
     lines = source.splitlines(keepends=True)
+    replacement_import_inserted = False
     for node in old_tree.body:
         name = _name(node)
         if name in {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider"}:
-            edits.append((node.lineno, node.end_lineno, ""))
+            start_line = min(
+                [node.lineno, *[decorator.lineno for decorator in getattr(node, "decorator_list", [])]]
+            )
+            edits.append((start_line, node.end_lineno, ""))
         elif isinstance(node, ast.AsyncFunctionDef) and name == "generate_strategy_draft":
             edits.append((node.lineno, node.end_lineno, new_function))
             found_generate = True
-    for index, line in enumerate(lines, start=1):
-        if re.search(r"^\s*from\s+\.ai_providers\s+import\b", line):
-            edits.append((index, index, "from .native_ai import NativeAIError, compose_strategy_spec\n"))
-            found_import = True
-    if not found_generate or not found_import:
+
+    for node in ai_provider_imports:
+        replacement = ""
+        if not replacement_import_inserted:
+            replacement = "from .native_ai import NativeAIError, compose_strategy_spec\n"
+            replacement_import_inserted = True
+        edits.append((node.lineno, node.end_lineno, replacement))
+
+    if not found_generate or not ai_provider_imports:
         raise MigrationError("strategy module layout is unexpected; refusing lossy rewrite")
     result = _apply_line_edits(source, edits)
     if PROVIDER_RE.search(result):
