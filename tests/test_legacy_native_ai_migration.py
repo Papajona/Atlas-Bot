@@ -868,6 +868,66 @@ def _extract_json(text):
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_json_helper_collision_refuses_state_mutation_return_drift_arity_and_property_chains(self):
+        unsafe_helpers = [
+            (
+                "state mutation",
+                """def _extract_json(text):
+    audit_cache["last_input"] = text
+    value = json.loads(text)
+    return value
+""",
+            ),
+            (
+                "wrong result",
+                """def _extract_json(text):
+    value = json.loads(text)
+    return text
+""",
+            ),
+            (
+                "extra argument",
+                """def _extract_json(text, json_module):
+    value = json_module.loads(text)
+    return value
+""",
+            ),
+            (
+                "property chain",
+                """def _extract_json(text):
+    raw = text.payload.strip()
+    value = json.loads(raw)
+    return value
+""",
+            ),
+        ]
+        canonical = """import json
+from .native_ai import AIProviderError
+
+def _extract_json(text):
+    value = json.loads(text)
+    return value
+"""
+        for label, helper in unsafe_helpers:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                target = root / "app" / "ai_providers.py"
+                target.parent.mkdir()
+                legacy = (
+                    "import json\\n\\n"
+                    "class AIProviderError(RuntimeError):\\n    pass\\n\\n"
+                    + helper
+                )
+                target.write_text(legacy, encoding="utf-8")
+                with patch.object(migration, "ROOT", root), patch.object(
+                    migration, "canonical_text", return_value=canonical
+                ):
+                    with self.assertRaisesRegex(
+                        migration.MigrationError, "branch-specific definition '_extract_json' that collides"
+                    ):
+                        migration.transform_ai_providers("canonical-commit")
+                self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_chained_assignment_cannot_overwrite_canonical_facade_name(self):
         legacy = """class AIProviderError(RuntimeError):
     pass
