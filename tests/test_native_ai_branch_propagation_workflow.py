@@ -74,9 +74,12 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert r"api\.cerebras\.ai" in workflow
 
 
-def test_provider_scan_excludes_static_markers_in_legacy_branch_pruning_workflow() -> None:
+def test_provider_scan_filters_only_historical_pruning_proof_markers() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    assert "':!.github/workflows/prune-contained-branches-once.yml'" in workflow
+    assert "':!.github/workflows/prune-contained-branches-once.yml'" not in workflow
+    assert "git grep -nIEi" in workflow
+    assert r"prune-contained-branches-once\\.yml:[0-9]+" in workflow
+    assert "grep -F .def _check_groq." in workflow
 
 
 def test_provider_free_branch_skip_requires_native_error_alias_identity() -> None:
