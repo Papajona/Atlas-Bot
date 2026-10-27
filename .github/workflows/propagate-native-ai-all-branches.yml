@@ -33,40 +33,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          NATIVE_AI_INITIAL_BASE_COMMIT="95a59e5ad1a9cd67dd5be31280c21d1b402a5b3e"
-          NATIVE_AI_INITIAL_COMMIT="47048b917d799de847571755970fb1eca7915ae8"
+          NATIVE_AI_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
           NATIVE_AI_EXTRA_BASE_COMMIT="0d38f95079833804713fcba080caee38a6ddfb4c"
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch origin "+refs/heads/*:refs/remotes/origin/*" --prune
-          # Pin the additional cleanup to the commit that introduced the local release
-          # analyzer, not to whatever unrelated source changes may later reach main.
           NATIVE_AI_EXTRA_COMMIT="$(git log --first-parent --format=%H --fixed-strings --grep='Remove remaining hosted AI release diagnostics and harden propagation' "$GITHUB_SHA" | head -n 1)"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git cat-file -e "$NATIVE_AI_COMMIT^{commit}"
+          git cat-file -e "$NATIVE_AI_EXTRA_BASE_COMMIT^{commit}"
           if [[ -z "$NATIVE_AI_EXTRA_COMMIT" ]]; then
-            echo "Could not locate the reviewed local release-diagnostics cleanup merge commit." >&2
+            echo "Could not locate the reviewed release-diagnostics cleanup commit." >&2
             exit 1
           fi
-          NATIVE_AI_COMMIT="$NATIVE_AI_EXTRA_COMMIT"
-          git cat-file -e "$NATIVE_AI_INITIAL_BASE_COMMIT^{commit}"
-          git cat-file -e "$NATIVE_AI_INITIAL_COMMIT^{commit}"
-          git cat-file -e "$NATIVE_AI_EXTRA_BASE_COMMIT^{commit}"
           git cat-file -e "$NATIVE_AI_EXTRA_COMMIT^{commit}"
           extra_parent="$(git rev-parse "$NATIVE_AI_EXTRA_COMMIT^")"
           if [[ "$extra_parent" != "$NATIVE_AI_EXTRA_BASE_COMMIT" ]]; then
             echo "Refusing to propagate an unexpected cleanup range: expected parent $NATIVE_AI_EXTRA_BASE_COMMIT, found $extra_parent." >&2
             exit 1
           fi
-          git cat-file -e "$NATIVE_AI_EXTRA_COMMIT^{commit}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin "+refs/heads/*:refs/remotes/origin/*" --prune
 
           # Only propagate the reviewed runtime/deployment cleanup. Legacy test files
           # often diverged or were deleted independently; carrying their whole changes
           # onto old branches adds conflicts without removing a live provider.
           NATIVE_AI_PATHS=(
             ".env.example"
-            "ENTRY_EXIT_3_9_0.md"
             ".github/workflows/production-deploy.yml"
             ".github/workflows/production-verification.yml"
+            "ENTRY_EXIT_3_9_0.md"
             "app/ai_providers.py"
             "app/config.py"
             "app/daily_research.py"
@@ -87,9 +81,14 @@ jobs:
             "scripts/verify_release.sh"
           )
 
+          # Load the migration helper from the exact triggering commit. It rewrites only
+          # provider-bearing functions/settings and preserves unrelated branch logic.
+          git show "$GITHUB_SHA:scripts/migrate_legacy_native_ai.py" > "$RUNNER_TEMP/migrate_legacy_native_ai.py"
+          python -m py_compile "$RUNNER_TEMP/migrate_legacy_native_ai.py"
+
           scan_active_provider_refs() {
             local rc=0
-            git grep -IlEi 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|api\.groq\.com|api\.cerebras\.ai|api\.openai\.com|openai-compatible|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|CEREBRAS' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' || rc=$?
+            git grep -IlEi 'gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|openai-compatible|api\.openai\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' || rc=$?
             if (( rc == 1 )); then return 0; fi
             if (( rc != 0 )); then return "$rc"; fi
           }
@@ -182,57 +181,6 @@ jobs:
           print("PASS: Native AI imports and compatibility exports resolve.")
           PY
           }
-          declare -a patch_conflicts=()
-          apply_native_ai_cleanup_paths() {
-            local start_sha="$1" path revision_index base_commit tip_commit conflict_path skip_path
-            patch_conflicts=()
-            local -a patch_bases=("$NATIVE_AI_INITIAL_BASE_COMMIT" "$NATIVE_AI_EXTRA_BASE_COMMIT")
-            local -a patch_tips=("$NATIVE_AI_INITIAL_COMMIT" "$NATIVE_AI_EXTRA_COMMIT")
-            for revision_index in "${!patch_bases[@]}"; do
-              base_commit="${patch_bases[$revision_index]}"
-              tip_commit="${patch_tips[$revision_index]}"
-              for path in "${NATIVE_AI_PATHS[@]}"; do
-                skip_path=false
-                for conflict_path in "${patch_conflicts[@]}"; do
-                  if [[ "$path" == "$conflict_path" ]]; then
-                    skip_path=true
-                    break
-                  fi
-                done
-                [[ "$skip_path" == true ]] && continue
-
-                if ! git diff --binary "$base_commit" "$tip_commit" -- "$path" > "$RUNNER_TEMP/native-ai-path.patch"; then
-                  echo "Could not prepare cleanup patch for $path between $base_commit and $tip_commit." >&2
-                  return 1
-                fi
-                [[ -s "$RUNNER_TEMP/native-ai-path.patch" ]] || continue
-                if git apply --3way --index "$RUNNER_TEMP/native-ai-path.patch" > "$RUNNER_TEMP/native-ai-path-apply.log" 2>&1; then
-                  continue
-                fi
-                echo "CONFLICT: preserving branch-specific content in $path on current branch $branch; patch range $base_commit..$tip_commit; diagnostic follows." >&2
-                cat "$RUNNER_TEMP/native-ai-path-apply.log" >&2 || true
-                if git cat-file -e "$start_sha:$path" 2>/dev/null; then
-                  if ! git reset "$start_sha" -- "$path" >/dev/null 2>&1 || ! git checkout "$start_sha" -- "$path" >/dev/null 2>&1; then
-                    echo "Could not restore conflicting path $path to its exact starting revision $start_sha." >&2
-                    git reset --hard "$start_sha" >/dev/null 2>&1 || true
-                    return 1
-                  fi
-                else
-                  # A branch that never had (or already deleted) this path must remain
-                  # without it; restore the starting tree rather than treating absence as
-                  # a fatal checkout failure.
-                  git rm -f --cached --ignore-unmatch -q -- "$path" >/dev/null 2>&1 || true
-                  rm -f -- "$path"
-                fi
-                patch_conflicts+=("$path")
-              done
-            done
-            if (( ${#patch_conflicts[@]} > 0 )); then
-              echo "Non-conflicting cleanup paths were applied; overlapping paths were preserved unchanged: ${patch_conflicts[*]}" >&2
-            fi
-            return 0
-          }
-
           declare -a cleanup_warnings=()
           update_existing_branch_ref() {
             local branch="$1" expected_sha="$2" new_sha="$3"
@@ -328,118 +276,65 @@ jobs:
             branch="${remote_ref#refs/remotes/origin/}"
             [[ "$branch" == "main" ]] && continue
             start_sha="$(git rev-parse "$remote_ref")"
-            # Each branch starts from a clean tree even if a previous iteration staged work.
-            git reset --hard "$start_sha" >/dev/null 2>&1
             git checkout --detach "$start_sha" >/dev/null 2>&1
 
             before_refs="$(scan_active_provider_refs)" || { failed+=("$branch: provider scan errored; branch left unchanged"); continue; }
-            if git merge-base --is-ancestor "$NATIVE_AI_COMMIT" "$start_sha"; then
-              if [[ -z "$before_refs" ]]; then
-                if verify_native_ai_impl; then
-                  skipped+=("$branch (Native AI implementation verified; active provider scan clean)")
-                else
-                  failed+=("$branch: canonical commit is an ancestor but Native AI implementation is missing or reverted; branch left unchanged")
-                fi
-                continue
-              fi
-              # Apply changes per path. Conflicting paths remain exactly as the branch
-              # had them; later provider and import checks decide whether the whole candidate is safe.
-              if ! apply_native_ai_cleanup_paths "$start_sha"; then
-                git reset --hard "$start_sha" >/dev/null 2>&1 || true
-                failed+=("$branch: could not safely prepare cleanup paths; branch left unchanged")
-                continue
-              fi
-              after_refs="$(scan_active_provider_refs)" || { git reset --hard "$start_sha" >/dev/null 2>&1 || true; failed+=("$branch: provider scan errored; branch left unchanged"); continue; }
-              if [[ -n "$after_refs" ]]; then
-                echo "ACTIVE PROVIDER REFERENCES REMAIN after targeted patch on $branch:" >&2
-                git grep -nIEi 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|api\.groq\.com|api\.cerebras\.ai|api\.openai\.com|openai-compatible|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|CEREBRAS' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' >&2 || true
-                git reset --hard "$start_sha" >/dev/null 2>&1 || true
-                failed+=("$branch: provider references remain after targeted Native AI patch; branch left unchanged")
-                continue
-              fi
-              if ! verify_native_ai_impl; then
-                git reset --hard "$start_sha" >/dev/null 2>&1 || true
-                failed+=("$branch: Native AI implementation verification failed after targeted patch; branch left unchanged")
-                continue
-              fi
-              if [[ -z "$(git status --porcelain)" ]]; then
-                skipped+=("$branch (active code provider-free)")
-                continue
-              fi
-              git commit -m "Remove reintroduced hosted AI wiring" >/dev/null
-              new_sha="$(git rev-parse HEAD)"
-              if update_existing_branch_ref "$branch" "$start_sha" "$new_sha"; then
-                updated+=("$branch ($start_sha -> $new_sha)")
-              else
-                update_status=$?
-                git reset --hard "$start_sha" >/dev/null 2>&1 || true
-                if [[ "$update_status" -eq 2 ]]; then
-                  failure_reason="remote branch state unresolved after update attempt; intended commit was not confirmed and remote state may have changed"
-                else
-                  failure_reason="requested update was not confirmed; workflow did not verify the intended commit on the remote"
-                fi
-                failed+=("$branch: $failure_reason")
-                echo "FAILED branch reconciliation: $branch: $failure_reason" >&2
-              fi
-              continue
-            fi
+          if [[ -z "$before_refs" ]] && verify_native_ai_impl; then
+            skipped+=("$branch (Native AI implementation verified; active provider scan clean)")
+            continue
+          fi
+          if [[ -n "$before_refs" ]]; then
+            echo "ACTIVE PROVIDER REFERENCES before semantic migration on $branch:" >&2
+            printf '%s\n' "$before_refs" >&2
+          fi
 
-            # Old branches that are already provider-free need only pass the
-            # implementation check; avoid an empty/cherry-pick-no-op being reported as
-            # a failure just because the canonical commit is not in their ancestry.
-            if [[ -z "$before_refs" ]] && verify_native_ai_impl; then
-              skipped+=("$branch (Native AI implementation verified; active provider scan clean)")
-              continue
-            fi
-            if [[ -n "$before_refs" ]]; then
-              echo "ACTIVE PROVIDER REFERENCES before propagation on $branch: $before_refs" >&2
-            fi
-            # Apply each runtime path independently. An overlapping path is restored
-            # to the exact branch version; only a candidate that passes the full provider
-            # scan and Native AI compatibility checks can be published.
-            if ! apply_native_ai_cleanup_paths "$start_sha"; then
-              git reset --hard "$start_sha" >/dev/null 2>&1 || true
-              failed+=("$branch: could not safely prepare cleanup paths; branch left unchanged")
-              continue
-            fi
-            after_refs="$(scan_active_provider_refs)" || { git reset --hard "$start_sha" >/dev/null 2>&1 || true; failed+=("$branch: post-change provider scan errored; branch left unchanged"); continue; }
-            if [[ -n "$after_refs" ]]; then
-              echo "ACTIVE PROVIDER REFERENCES REMAIN after per-path cleanup on $branch:" >&2
-              git grep -nIEi 'gemini|Gemini|GEMINI_API_KEY|GEMINI_MODEL|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|api\.groq\.com|api\.cerebras\.ai|api\.openai\.com|openai-compatible|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|CEREBRAS' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' >&2 || true
-              git reset --hard "$start_sha" >/dev/null 2>&1 || true
-              failed+=("$branch: provider references remain after per-path cleanup; branch left unchanged")
-              continue
-            fi
-            if ! verify_native_ai_impl; then
-              failed+=("$branch: Native AI implementation verification failed after per-path cleanup; branch left unchanged")
-              git reset --hard "$start_sha" >/dev/null 2>&1 || true
-              continue
-            fi
-            if [[ -z "$(git status --porcelain)" ]]; then
-              skipped+=("$branch (no applicable cleanup changes; provider and implementation checks passed)")
-              continue
-            fi
-            git diff --cached --check
-            git commit -m "Apply reviewed Native AI cleanup" >/dev/null
-            new_sha="$(git rev-parse HEAD)"
-            if [[ "$new_sha" == "$start_sha" ]]; then
-              git reset --hard "$start_sha" >/dev/null 2>&1 || true
-              failed+=("$branch: cleanup commit did not advance the branch tip; branch left unchanged")
-              continue
-            fi
-            if update_existing_branch_ref "$branch" "$start_sha" "$new_sha"; then
-              updated+=("$branch ($start_sha -> $new_sha)")
+          # Do not replay the broad canonical commit. Apply only the AI settings/callsites
+          # and provider-bearing deployment entries; the helper refuses unknown layouts.
+          if ! python "$RUNNER_TEMP/migrate_legacy_native_ai.py" --canonical-commit "$NATIVE_AI_COMMIT" --extra-base-commit "$NATIVE_AI_EXTRA_BASE_COMMIT" --extra-commit "$NATIVE_AI_EXTRA_COMMIT"; then
+            git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            failed+=("$branch: semantic Native AI migration refused or failed; branch left unchanged")
+            continue
+          fi
+
+          after_refs="$(scan_active_provider_refs)" || { git reset --hard "$start_sha" >/dev/null 2>&1 || true; failed+=("$branch: post-migration provider scan errored; branch left unchanged"); continue; }
+          if [[ -n "$after_refs" ]]; then
+            echo "ACTIVE PROVIDER REFERENCES REMAIN after semantic migration on $branch:" >&2
+            git grep -nIEi 'gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\\.googleapis\\.com|_gemini_json|settings\\.gemini_|settings\\.groq_api_key|settings\\.cerebras_api_key|settings\\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|openai-compatible|api\\.openai\\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\\.groq\\.com|api\\.cerebras\\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' >&2 || true
+            git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            failed+=("$branch: provider references remain after semantic migration; branch left unchanged")
+            continue
+          fi
+          if ! verify_native_ai_impl; then
+            git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            failed+=("$branch: Native AI implementation/import verification failed; branch left unchanged")
+            continue
+          fi
+          if ! git diff --check; then
+            git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            failed+=("$branch: whitespace validation failed; branch left unchanged")
+            continue
+          fi
+          if [[ -z "$(git status --porcelain)" ]]; then
+            skipped+=("$branch (already provider-free after verification)")
+            continue
+          fi
+          git add -A
+          git diff --cached --check
+          git commit -m "Remove hosted AI wiring with targeted Native AI migration" >/dev/null
+          new_sha="$(git rev-parse HEAD)"
+          if update_existing_branch_ref "$branch" "$start_sha" "$new_sha"; then
+            updated+=("$branch ($start_sha -> $new_sha)")
+          else
+            update_status=$?
+            git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            if [[ "$update_status" -eq 2 ]]; then
+              failure_reason="remote branch state unresolved after update attempt; intended commit was not confirmed and remote state may have changed"
             else
-              update_status=$?
-              git reset --hard "$start_sha" >/dev/null 2>&1 || true
-              if [[ "$update_status" -eq 2 ]]; then
-                failure_reason="remote branch state unresolved after update attempt; intended commit was not confirmed and remote state may have changed"
-              else
-                failure_reason="requested update was not confirmed; workflow did not verify the intended commit on the remote"
-              fi
-              failed+=("$branch: $failure_reason")
-              echo "FAILED branch reconciliation: $branch: $failure_reason" >&2
+              failure_reason="requested update was not confirmed; workflow did not verify the intended commit on the remote"
             fi
+            failed+=("$branch: $failure_reason")
+            echo "FAILED branch reconciliation: $branch: $failure_reason" >&2
+          fi
           done < <(git for-each-ref --format='%(refname)' refs/remotes/origin/ | grep -v '^refs/remotes/origin/HEAD$' | sort)
 
           {
