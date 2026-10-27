@@ -278,8 +278,7 @@ def transform_ai_providers(commit: str) -> None:
         "dual_ai_research_review", "dual_ai_trade_safety_review",
     }
     extras: list[str] = []
-    extra_defined_names: list[set[str]] = []
-    extra_definition_lines: list[int] = []
+    retained_definition_lines: dict[str, int] = {}
     import_nodes: list[ast.AST] = []
     source_lines = source.splitlines(keepends=True)
     for node in old_tree.body:
@@ -319,8 +318,8 @@ def transform_ai_providers(commit: str) -> None:
                 f"app/ai_providers.py contains an unrecognized provider-bearing helper {name or type(node).__name__}; refusing to overwrite it"
             )
         extras.append(segment.rstrip())
-        extra_defined_names.append(defined_names)
-        extra_definition_lines.append(node.lineno)
+        for defined_name in defined_names:
+            retained_definition_lines.setdefault(defined_name, node.lineno)
 
     used_names: set[str] = set()
     for segment in extras:
@@ -410,6 +409,12 @@ def transform_ai_providers(commit: str) -> None:
         def mutates_all_target(target: ast.AST) -> bool:
             return root_name(target) == "__all__" and not directly_assigns_all(target)
 
+        def references_all(value: ast.AST) -> bool:
+            return any(
+                isinstance(node, ast.Name) and node.id == "__all__"
+                for node in ast.walk(value)
+            )
+
         # Top-level control-flow can bind names not represented by _defined_names
         # (e.g. "for helper in values"). Do not infer star exports through such code.
         unsafe_module_statements = (
@@ -430,11 +435,20 @@ def transform_ai_providers(commit: str) -> None:
                     all_values.append(module_node.value)
                 if any(mutates_all_target(target) for target in module_node.targets):
                     dynamic_all = True
+                if (
+                    not has_direct_all_assignment
+                    and references_all(module_node.value)
+                ):
+                    # An alias can mutate the export list without mentioning
+                    # __all__ at the mutation site (for example, names.append(...)).
+                    dynamic_all = True
             elif isinstance(module_node, ast.AnnAssign):
                 has_direct_all_assignment = directly_assigns_all(module_node.target)
                 if has_direct_all_assignment:
                     all_values.append(module_node.value)
                 elif mutates_all_target(module_node.target):
+                    dynamic_all = True
+                elif module_node.value is not None and references_all(module_node.value):
                     dynamic_all = True
             elif isinstance(module_node, ast.AugAssign) and root_name(module_node.target) == "__all__":
                 dynamic_all = True
@@ -444,16 +458,6 @@ def transform_ai_providers(commit: str) -> None:
                 dynamic_all = True
 
             for nested in ast.walk(module_node):
-                # Reading __all__ can leak its mutable list through an alias
-                # (e.g. names = __all__; names.append(...)). Reject that escape
-                # rather than guessing the final export set.
-                if (
-                    isinstance(nested, ast.Name)
-                    and nested.id == "__all__"
-                    and isinstance(nested.ctx, ast.Load)
-                ):
-                    dynamic_all = True
-
                 if isinstance(nested, ast.Call):
                     # Any globals() access can create or mutate module exports through
                     # a computed name; fail closed even when the call is indirect,
@@ -595,17 +599,24 @@ def transform_ai_providers(commit: str) -> None:
         })
         preserved_import_lines.append(node.lineno)
 
-    # The output format preserves star imports before the canonical body and explicit
-    # imports after it. Refuse migrations whenever moving a star import before a retained
-    # local definition would reverse which binding wins in the original module.
-    for names, definition_line in zip(extra_defined_names, extra_definition_lines):
-        for star_exports, star_line in zip(retained_star_exports, retained_star_lines):
-            if names & star_exports and definition_line < star_line:
-                raise MigrationError(
-                    "retained definition precedes a later star import with overlapping exports; "
-                    "refusing to change helper bindings"
-                )
+    # The output format preserves star imports before the canonical body. Refuse a
+    # migration if moving one ahead of a retained definition would reverse an
+    # overlapping binding that originally came from the later star import.
+    for star_exports, star_line in zip(retained_star_exports, retained_star_lines):
+        overlapping_definitions = {
+            name for name in star_exports
+            if name in retained_definition_lines
+            and retained_definition_lines[name] < star_line
+        }
+        if overlapping_definitions:
+            raise MigrationError(
+                "retained definition precedes a star import with overlapping exports; "
+                "refusing to change helper bindings"
+            )
 
+    # Explicit imports are emitted after the canonical body as well. Refuse a
+    # migration if moving them would reverse an overlapping binding that originally
+    # came from a later star import.
     for bindings, explicit_line in zip(preserved_import_bindings, preserved_import_lines):
         for star_exports, star_line in zip(retained_star_exports, retained_star_lines):
             if bindings & star_exports and explicit_line < star_line:
