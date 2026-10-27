@@ -799,7 +799,7 @@ def transform_ai_providers(commit: str) -> None:
             canonical_nodes_by_name.setdefault(defined_name, canonical_node)
     canonical_names = set(canonical_nodes_by_name)
     provider_adapter_names = {
-        "_gemini_json", "_groq_json", "_cerebras_json", "_openai_json", "_prompt",
+        "_gemini_json", "_groq_json", "_cerebras_json", "_prompt",
         "dual_ai_research_review", "dual_ai_trade_safety_review",
     }
     extras: list[str] = []
@@ -815,6 +815,10 @@ def transform_ai_providers(commit: str) -> None:
             continue
         name = _name(node)
         if name in provider_adapter_names:
+            if name == "_cerebras_json" and not _is_safe_legacy_cerebras_adapter(node):
+                raise MigrationError(
+                    "app/ai_providers.py contains an unrecognized provider-bearing helper _cerebras_json; refusing to overwrite it"
+                )
             continue
         start_line = min([node.lineno, *[decorator.lineno for decorator in getattr(node, "decorator_list", [])]])
         segment = "".join(source_lines[start_line - 1:node.end_lineno]).rstrip("\n")
