@@ -37,8 +37,8 @@ class LegacyNativeAIMigrationTests(unittest.TestCase):
             config = root / "app" / "config.py"
             config.parent.mkdir()
             config.write_text(
-                "class Settings:\\n"
-                "    gemini_api_key: str = ''; withdrawals_enabled: bool = True\\n",
+                "class Settings:\n"
+                "    gemini_api_key: str = ''; withdrawals_enabled: bool = True\n",
                 encoding="utf-8",
             )
             with patch.object(migration, "ROOT", root):
@@ -175,14 +175,14 @@ class LegacyNativeAIMigrationTests(unittest.TestCase):
 
     def test_daily_research_refuses_to_drop_audit_side_effect_in_provider_conditional(self):
         legacy = (
-            "from .ai_providers import dual_ai_research_review\\n"
-            "async def run_daily_research():\\n"
-            "    review = {}\\n"
-            "    if settings.gemini_api_key:\\n"
-            "        await write_audit_record('provider selected')\\n"
-            "        review['external_ai'] = await dual_ai_research_review(research, intelligence)\\n"
-            "    else:\\n"
-            "        review['external_ai'] = {'status': 'NOT_CONFIGURED'}\\n"
+            "from .ai_providers import dual_ai_research_review\n"
+            "async def run_daily_research():\n"
+            "    review = {}\n"
+            "    if settings.gemini_api_key:\n"
+            "        await write_audit_record('provider selected')\n"
+            "        review['external_ai'] = await dual_ai_research_review(research, intelligence)\n"
+            "    else:\n"
+            "        review['external_ai'] = {'status': 'NOT_CONFIGURED'}\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
