@@ -60,8 +60,11 @@ def test_legacy_branches_receive_runtime_only_patch_without_overwriting_conflict
     assert 'NATIVE_AI_INITIAL_COMMIT="47048b917d799de847571755970fb1eca7915ae8"' in workflow
     assert 'NATIVE_AI_EXTRA_BASE_COMMIT="0d38f95079833804713fcba080caee38a6ddfb4c"' in workflow
     assert 'NATIVE_AI_COMMIT="$NATIVE_AI_EXTRA_COMMIT"' in workflow
-    assert "git log -S 'def _release_diagnostic_report'" in workflow
-    assert 'patch_bases=("$NATIVE_AI_BASE_COMMIT" "$NATIVE_AI_EXTRA_BASE_COMMIT")' in workflow
+    assert "git log -S 'def _release_diagnostic_report'" not in workflow
+    assert "git log --first-parent --format=%H --fixed-strings --grep='Remove remaining hosted AI release diagnostics and harden propagation'" in workflow
+    assert 'extra_parent="$(git rev-parse "$NATIVE_AI_EXTRA_COMMIT^")"' in workflow
+    assert 'if [[ "$extra_parent" != "$NATIVE_AI_EXTRA_BASE_COMMIT" ]]; then' in workflow
+    assert 'patch_bases=("$NATIVE_AI_INITIAL_BASE_COMMIT" "$NATIVE_AI_EXTRA_BASE_COMMIT")' in workflow
     assert 'patch_tips=("$NATIVE_AI_INITIAL_COMMIT" "$NATIVE_AI_EXTRA_COMMIT")' in workflow
     assert 'git diff --binary "$base_commit" "$tip_commit" -- "$path"' in workflow
     assert 'git apply --3way --index "$RUNNER_TEMP/native-ai-path.patch"' in workflow
@@ -73,7 +76,7 @@ def test_legacy_branches_receive_runtime_only_patch_without_overwriting_conflict
     assert 'git commit -m "Apply reviewed Native AI cleanup"' in workflow
     assert '[[ "$new_sha" == "$start_sha" ]]' in workflow
     assert 'git reset --hard "$start_sha" >/dev/null 2>&1\n            git checkout --detach "$start_sha"' in workflow
-    assert 'NATIVE_AI_EXTRA_COMMIT="d847ff8cd8340ccbb3de2a5a0457b607be6a86ad"' in workflow
+    assert 'NATIVE_AI_EXTRA_COMMIT="d847ff8cd8340ccbb3de2a5a0457b607be6a86ad"' not in workflow
     assert "git log -S 'def _release_diagnostic_report'" not in workflow
     assert "git grep -IlEi" in workflow
     assert "git grep -nIEi" in workflow
