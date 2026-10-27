@@ -85,6 +85,8 @@ jobs:
 
           # Load the migration helper from the exact triggering commit. It rewrites only
           # provider-bearing functions/settings and preserves unrelated branch logic.
+          # Only the reviewed two-provider/three-provider strategy fallback shapes are
+          # eligible for canonicalization; other branch-specific logic fails closed.
           git show "$GITHUB_SHA:scripts/migrate_legacy_native_ai.py" > "$RUNNER_TEMP/migrate_legacy_native_ai.py"
           python -m py_compile "$RUNNER_TEMP/migrate_legacy_native_ai.py"
 
