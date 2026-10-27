@@ -108,7 +108,7 @@ jobs:
             fi
 
             if [[ "$already_has_commit" == false ]]; then
-              if ! git cherry-pick "$NATIVE_AI_COMMIT" >"$RUNNER_TEMP/cherry-pick.log" 2>&1; then
+              if ! git cherry-pick -X theirs "$NATIVE_AI_COMMIT" >"$RUNNER_TEMP/cherry-pick.log" 2>&1; then
                 if [[ -z "$(git rev-parse -q --verify CHERRY_PICK_HEAD 2>/dev/null)" ]]; then
                   failed+=("$branch: cherry-pick failed before conflict resolution")
                   git cherry-pick --abort >/dev/null 2>&1 || true
