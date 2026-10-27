@@ -1776,6 +1776,271 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST) -> bool:
     )
 
 
+
+def _is_compatible_strategy_schema_and_context(tree: ast.Module) -> bool:
+    """Require a Pydantic strategy schema and object-returning market-context helper."""
+    base_model_imported = any(
+        isinstance(node, ast.ImportFrom) and node.module == "pydantic"
+        and node.level == 0
+        and any(alias.name == "BaseModel" and alias.asname is None for alias in node.names)
+        for node in tree.body
+    )
+    schemas = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"]
+    if not base_model_imported or len(schemas) != 1:
+        return False
+    schema = schemas[0]
+    if schema.decorator_list or not any(isinstance(base, ast.Name) and base.id == "BaseModel" for base in schema.bases):
+        return False
+    field_names = {
+        node.target.id
+        for node in schema.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+    }
+    if not {"strategy_family", "validation_warnings", "asset", "symbols", "timeframes"}.issubset(field_names):
+        return False
+    if any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in {"model_validate", "model_dump"}
+        for node in schema.body
+    ):
+        return False
+
+    contexts = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+    ]
+    if len(contexts) != 1:
+        return False
+    context = contexts[0]
+    args = context.args
+    if (
+        context.decorator_list or args.posonlyargs or [arg.arg for arg in args.args] != ["spec"]
+        or args.vararg or args.kwarg
+        or [arg.arg for arg in args.kwonlyargs] != ["asset", "symbol", "timeframe"]
+        or args.defaults or len(args.kw_defaults) != 3
+        or any(not isinstance(value, ast.Constant) or value.value is not None for value in args.kw_defaults)
+        or not context.body or not isinstance(context.body[-1], ast.Return)
+    ):
+        return False
+    return_node = context.body[-1].value
+    if (
+        not isinstance(return_node, ast.Call) or not isinstance(return_node.func, ast.Attribute)
+        or not isinstance(return_node.func.value, ast.Name) or return_node.func.value.id != "AIStrategySpec"
+        or return_node.func.attr != "model_validate" or len(return_node.args) != 1
+        or not isinstance(return_node.args[0], ast.Name) or return_node.args[0].id != "data"
+        or return_node.keywords
+    ):
+        return False
+    has_model_dump = any(
+        isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute)
+        and isinstance(item.func.value, ast.Name) and item.func.value.id == "spec"
+        and item.func.attr == "model_dump" and not item.args and not item.keywords
+        for item in ast.walk(context)
+    )
+    return has_model_dump
+
+
+def _is_safe_legacy_cerebras_adapter(node: ast.AST) -> bool:
+    """Allow only the audited Cerebras HTTP/JSON adapter, never arbitrary same-named helpers."""
+    if not isinstance(node, ast.AsyncFunctionDef) or node.name != "_cerebras_json" or node.decorator_list:
+        return False
+    args = node.args
+    if (
+        args.posonlyargs or [arg.arg for arg in args.args] != ["prompt"]
+        or args.vararg or args.kwarg or [arg.arg for arg in args.kwonlyargs] != ["timeout", "system_instruction", "model"]
+        or len(args.kw_defaults) != 3
+        or not isinstance(args.kw_defaults[0], ast.Constant) or args.kw_defaults[0].value != 30.0
+        or not isinstance(args.kw_defaults[1], ast.Constant) or args.kw_defaults[1].value is not None
+        or not isinstance(args.kw_defaults[2], ast.Constant) or args.kw_defaults[2].value is not None
+    ):
+        return False
+
+    def is_name(value: ast.AST | None, expected: str) -> bool:
+        return isinstance(value, ast.Name) and value.id == expected
+
+    def is_string(value: ast.AST | None, expected: str) -> bool:
+        return isinstance(value, ast.Constant) and value.value == expected
+
+    def is_attr(value: ast.AST | None, base: str, attr: str) -> bool:
+        return isinstance(value, ast.Attribute) and value.attr == attr and is_name(value.value, base)
+
+    def dict_entries(value: ast.AST, expected_keys: set[str]) -> dict[str, ast.AST] | None:
+        if not isinstance(value, ast.Dict):
+            return None
+        entries = {
+            key.value: item for key, item in zip(value.keys, value.values)
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        if set(entries) != expected_keys or len(value.keys) != len(expected_keys):
+            return None
+        return entries
+
+    def is_provider_key_guard(statement: ast.stmt) -> bool:
+        if not isinstance(statement, ast.If) or statement.orelse or len(statement.body) != 1:
+            return False
+        test = statement.test
+        if not (
+            isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+            and is_attr(test.operand, "settings", "cerebras_api_key")
+        ):
+            return False
+        raised = statement.body[0]
+        return (
+            isinstance(raised, ast.Raise) and isinstance(raised.exc, ast.Call)
+            and is_name(raised.exc.func, "AIProviderError") and len(raised.exc.args) == 1
+            and is_string(raised.exc.args[0], "CEREBRAS_API_KEY is not configured")
+            and not raised.exc.keywords and raised.cause is None
+        )
+
+    body = list(node.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]
+    if len(body) != 7:
+        return False
+    if not is_provider_key_guard(body[0]):
+        return False
+    url_assign, payload_assign, headers_assign, request_context, extract_try, result_return = (
+        body[1], body[2], body[3], body[4], body[5], body[6]
+    )
+    if (
+        not isinstance(url_assign, ast.Assign) or len(url_assign.targets) != 1
+        or not is_name(url_assign.targets[0], "url")
+        or not is_string(url_assign.value, "https://api.cerebras.ai/v1/chat/completions")
+    ):
+        return False
+
+    if not isinstance(payload_assign, ast.Assign) or len(payload_assign.targets) != 1 or not is_name(payload_assign.targets[0], "payload"):
+        return False
+    payload = dict_entries(payload_assign.value, {"model", "messages", "temperature", "response_format"})
+    if payload is None:
+        return False
+    model_expr = payload["model"]
+    if not (
+        isinstance(model_expr, ast.BoolOp) and isinstance(model_expr.op, ast.Or) and len(model_expr.values) == 2
+        and is_name(model_expr.values[0], "model") and is_attr(model_expr.values[1], "settings", "cerebras_model")
+    ):
+        return False
+    messages = payload["messages"]
+    if not isinstance(messages, ast.List) or len(messages.elts) != 2:
+        return False
+    system_message = dict_entries(messages.elts[0], {"role", "content"})
+    user_message = dict_entries(messages.elts[1], {"role", "content"})
+    if system_message is None or user_message is None:
+        return False
+    if not is_string(system_message["role"], "system") or not is_string(user_message["role"], "user"):
+        return False
+    system_content = system_message["content"]
+    if (
+        not isinstance(system_content, ast.BoolOp) or not isinstance(system_content.op, ast.Or)
+        or len(system_content.values) != 2 or not is_name(system_content.values[0], "system_instruction")
+        or not isinstance(system_content.values[1], ast.Constant) or not isinstance(system_content.values[1].value, str)
+    ):
+        return False
+    if not is_name(user_message["content"], "prompt"):
+        return False
+    if not (isinstance(payload["temperature"], ast.Constant) and payload["temperature"].value == 0.1):
+        return False
+    response_format = dict_entries(payload["response_format"], {"type"})
+    if response_format is None or not is_string(response_format["type"], "json_object"):
+        return False
+
+    if not isinstance(headers_assign, ast.Assign) or len(headers_assign.targets) != 1 or not is_name(headers_assign.targets[0], "headers"):
+        return False
+    headers = dict_entries(headers_assign.value, {"Authorization", "Content-Type"})
+    if headers is None:
+        return False
+    authorization = headers["Authorization"]
+    if not (
+        isinstance(authorization, ast.JoinedStr) and len(authorization.values) == 2
+        and is_string(authorization.values[0], "Bearer ")
+        and isinstance(authorization.values[1], ast.FormattedValue)
+        and is_attr(authorization.values[1].value, "settings", "cerebras_api_key")
+        and authorization.values[1].format_spec is None
+    ):
+        return False
+    if not is_string(headers["Content-Type"], "application/json"):
+        return False
+
+    if not isinstance(request_context, ast.AsyncWith) or request_context.orelse or len(request_context.items) != 1:
+        return False
+    item = request_context.items[0]
+    client_call = item.context_expr
+    if (
+        not isinstance(client_call, ast.Call) or not is_attr(client_call.func, "httpx", "AsyncClient")
+        or client_call.args or len(client_call.keywords) != 1
+        or client_call.keywords[0].arg != "timeout" or not is_name(client_call.keywords[0].value, "timeout")
+        or not is_name(item.optional_vars, "client") or len(request_context.body) != 3
+    ):
+        return False
+    response_assign, status_check, body_assign = request_context.body
+    if (
+        not isinstance(response_assign, ast.Assign) or len(response_assign.targets) != 1
+        or not is_name(response_assign.targets[0], "response") or not isinstance(response_assign.value, ast.Await)
+        or not isinstance(response_assign.value.value, ast.Call)
+        or not is_attr(response_assign.value.value.func, "client", "post")
+        or len(response_assign.value.value.args) != 1 or not is_name(response_assign.value.value.args[0], "url")
+        or {keyword.arg for keyword in response_assign.value.value.keywords} != {"headers", "json"}
+        or not all(
+            (keyword.arg == "headers" and is_name(keyword.value, "headers"))
+            or (keyword.arg == "json" and is_name(keyword.value, "payload"))
+            for keyword in response_assign.value.value.keywords
+        )
+    ):
+        return False
+    if (
+        not isinstance(status_check, ast.Expr) or not isinstance(status_check.value, ast.Call)
+        or not is_attr(status_check.value.func, "response", "raise_for_status")
+        or status_check.value.args or status_check.value.keywords
+    ):
+        return False
+    if not isinstance(body_assign, ast.Assign) or len(body_assign.targets) != 1 or not is_name(body_assign.targets[0], "body"):
+        return False
+    body_parser = body_assign.value
+    if not (
+        (isinstance(body_parser, ast.Call) and is_attr(body_parser.func, "response", "json")
+         and not body_parser.args and not body_parser.keywords)
+        or (isinstance(body_parser, ast.Call) and is_name(body_parser.func, "_response_json_object")
+            and len(body_parser.args) == 2 and is_name(body_parser.args[0], "response")
+            and is_string(body_parser.args[1], "Cerebras") and not body_parser.keywords)
+    ):
+        return False
+
+    if not isinstance(extract_try, ast.Try) or extract_try.orelse or extract_try.finalbody or len(extract_try.body) != 1 or len(extract_try.handlers) != 1:
+        return False
+    extract_assign = extract_try.body[0]
+    if not isinstance(extract_assign, ast.Assign) or len(extract_assign.targets) != 1 or not is_name(extract_assign.targets[0], "text"):
+        return False
+    content = extract_assign.value
+    for key in ("content", "message", "choices"):
+        if not isinstance(content, ast.Subscript):
+            return False
+        slice_node = content.slice
+        if not is_string(slice_node, key):
+            return False
+        content = content.value
+    if not (
+        isinstance(content, ast.Subscript) and isinstance(content.slice, ast.Constant)
+        and content.slice.value == 0 and is_name(content.value, "body")
+    ):
+        return False
+    handler = extract_try.handlers[0]
+    if not (
+        isinstance(handler.type, ast.Tuple) and [n.id for n in handler.type.elts if isinstance(n, ast.Name)] == ["KeyError", "IndexError", "TypeError"]
+        and len(handler.type.elts) == 3 and handler.name == "exc" and len(handler.body) == 1
+        and isinstance(handler.body[0], ast.Raise) and isinstance(handler.body[0].exc, ast.Call)
+        and is_name(handler.body[0].exc.func, "AIProviderError")
+        and len(handler.body[0].exc.args) == 1
+        and is_string(handler.body[0].exc.args[0], "Cerebras response did not contain generated text")
+        and not handler.body[0].exc.keywords and is_name(handler.body[0].cause, "exc")
+    ):
+        return False
+    return (
+        isinstance(result_return, ast.Return) and isinstance(result_return.value, ast.Call)
+        and is_name(result_return.value.func, "_extract_json")
+        and len(result_return.value.args) == 1 and is_name(result_return.value.args[0], "text")
+        and not result_return.value.keywords
+    )
+
+
 def transform_strategy_ai(commit: str) -> None:
     path = ROOT / "app/strategy_ai.py"
     if not path.is_file():
