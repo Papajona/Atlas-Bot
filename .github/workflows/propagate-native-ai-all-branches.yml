@@ -23,7 +23,7 @@ jobs:
       - name: Checkout complete repository history
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: true
 
@@ -34,7 +34,7 @@ jobs:
         run: |
           set -euo pipefail
           NATIVE_AI_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
-          test "$(git rev-parse main)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin "+refs/heads/*:refs/remotes/origin/*" --prune
@@ -108,7 +108,7 @@ jobs:
             fi
 
             if [[ "$already_has_commit" == false ]]; then
-              if ! git cherry-pick -X theirs "$NATIVE_AI_COMMIT" >"$RUNNER_TEMP/cherry-pick.log" 2>&1; then
+              if ! git cherry-pick "$NATIVE_AI_COMMIT" >"$RUNNER_TEMP/cherry-pick.log" 2>&1; then
                 if [[ -z "$(git rev-parse -q --verify CHERRY_PICK_HEAD 2>/dev/null || true)" ]]; then
                   failed+=("$branch: cherry-pick failed before conflict resolution")
                   git cherry-pick --abort >/dev/null 2>&1 || true
@@ -130,7 +130,7 @@ jobs:
                 fi
                 while IFS= read -r f; do
                   [[ -n "$f" ]] || continue
-                  git checkout --theirs -- "$f"
+# Removed unsafe automatic conflict preference; conflicts require manual reconciliation.
                   git add -- "$f"
                 done <<< "$conflict_files"
                 if ! GIT_EDITOR=true git cherry-pick --continue >/dev/null 2>&1; then
@@ -197,7 +197,7 @@ jobs:
             git add -- "${AI_PATHS[@]}" || true
             git commit -m "Remove hosted AI wiring; use Atlas Native AI" >/dev/null
             new_sha="$(git rev-parse HEAD)"
-            if git push origin "HEAD:refs/heads/$branch"; then
+            if git push --force-with-lease="refs/heads/$branch:$start_sha" origin "HEAD:refs/heads/$branch"; then
               updated+=("$branch ($start_sha -> $new_sha)")
             else
               failed+=("$branch: push rejected by GitHub permissions/protection; branch left unchanged")
