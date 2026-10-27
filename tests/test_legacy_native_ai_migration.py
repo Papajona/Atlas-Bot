@@ -269,7 +269,7 @@ def retained_helper():
                 "canonical_text",
                 return_value="from .native_ai import AIProviderError\n",
             ):
-                with self.assertRaisesRegex(migration.MigrationError, "builds __all__ dynamically"):
+                with self.assertRaisesRegex(migration.MigrationError, "dynamic exports or mutates __all__"):
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
@@ -415,6 +415,66 @@ def retained_helper():
                 migration, "canonical_text", return_value=canonical
             ):
                 with self.assertRaisesRegex(migration.MigrationError, "exports canonical name .* different or unknown binding"):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_local_definition_before_overlapping_star_import_fails_closed(self):
+        legacy = """def helper():
+    return 'local'
+
+from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text("def helper():\n    return 'star'\n", encoding="utf-8")
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration,
+                "canonical_text",
+                return_value="from .native_ai import AIProviderError\n",
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "definition precedes a later star import"):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_aliased_all_list_mutation_fails_closed(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                "__all__ = ['branch_helper']\n"
+                "names = __all__\n"
+                "names.append('NativeAIError')\n"
+                "class NativeAIError(RuntimeError):\n    pass\n"
+                "def branch_helper():\n    return True\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration,
+                "canonical_text",
+                return_value="from .native_ai import AIProviderError, NativeAIError\n",
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "dynamic exports or mutates __all__"):
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
