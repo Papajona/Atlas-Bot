@@ -155,6 +155,28 @@ class LegacyNativeAIMigrationTests(unittest.TestCase):
                     migration.transform_config()
             self.assertEqual(config.read_text(encoding="utf-8"), mixed)
 
+    def test_strategy_migration_refuses_to_drop_provider_helper_behavior(self):
+        legacy = (
+            "from .ai_providers import _gemini_json\n"
+            "SYSTEM_PROMPT = 'Gemini prompt'\n"
+            "async def _generate_with_provider(provider, prompt):\n"
+            "    validate_strategy_prompt(prompt)\n"
+            "    return await _gemini_json(prompt)\n\n"
+            "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+            "    return await _generate_with_provider('gemini', prompt)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "_generate_with_provider contains additional"):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_strategy_rewrites_provider_generator_and_preserves_schema_context(self):
         legacy = (
             "from .config import settings\n"
