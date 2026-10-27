@@ -1046,6 +1046,83 @@ def _extract_json(text):
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_equivalent_json_helper_ignores_unrelated_function_local_json_binding(self):
+        legacy = """import json
+
+class AIProviderError(RuntimeError):
+    pass
+
+def _extract_json(text):
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise AIProviderError("response object required")
+    return value
+
+def unrelated():
+    json = {"local": True}
+    return json
+"""
+        canonical = """import json
+from .native_ai import AIProviderError
+
+def _extract_json(text):
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise AIProviderError("response object required")
+    return value
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+        ast.parse(result, filename="app/ai_providers.py")
+        self.assertIn("def unrelated", result)
+        self.assertIn('json = {"local": True}', result)
+        self.assertIn("def _extract_json", result)
+        self.assertNotRegex(result, migration.PROVIDER_RE)
+
+    def test_equivalent_json_helper_allows_duplicate_standard_json_imports(self):
+        legacy = """import json
+import json
+
+class AIProviderError(RuntimeError):
+    pass
+
+def _extract_json(text):
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise AIProviderError("response object required")
+    return value
+"""
+        canonical = """import json
+from .native_ai import AIProviderError
+
+def _extract_json(text):
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise AIProviderError("response object required")
+    return value
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+        ast.parse(result, filename="app/ai_providers.py")
+        self.assertIn("def _extract_json", result)
+        self.assertNotRegex(result, migration.PROVIDER_RE)
+
     def test_side_effecting_parser_annotation_fails_closed(self):
         legacy = """import json
 
