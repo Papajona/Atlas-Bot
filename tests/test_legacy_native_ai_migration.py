@@ -2376,7 +2376,7 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
     def test_exact_schema_contract_rejects_import_time_class_body_risk_mutation(self):
         legacy = ast.parse(
             CANONICAL_STRATEGY
-            + "\\nclass BranchOverride:\\n    settings.risk_per_trade = 0.04\\n"
+            + "\nclass BranchOverride:\n    settings.risk_per_trade = 0.04\n"
         )
         canonical = ast.parse(CANONICAL_STRATEGY)
         with patch.object(migration, "ROOT", Path("/tmp/atlas-class-body-risk-test")):
@@ -2385,7 +2385,7 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
             )
 
     def test_exact_schema_contract_rejects_wildcard_import_after_validated_class(self):
-        legacy = ast.parse(CANONICAL_STRATEGY + "\\nfrom .branch_overrides import *\\n")
+        legacy = ast.parse(CANONICAL_STRATEGY + "\nfrom .branch_overrides import *\n")
         canonical = ast.parse(CANONICAL_STRATEGY)
         with patch.object(migration, "ROOT", Path("/tmp/atlas-wildcard-schema-test")):
             self.assertFalse(
