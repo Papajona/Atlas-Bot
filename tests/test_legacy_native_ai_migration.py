@@ -3041,7 +3041,7 @@ from .native_ai import AIProviderError
             self.assertNotRegex(result, migration.PROVIDER_RE)
 
     def test_strategy_migration_ignores_deletes_in_statically_false_while_none(self):
-        retained = "while None:\\n    del evidence_for\\n"
+        retained = "while None:\n    del evidence_for\n"
         legacy = _with_canonical_schema_context(
             self._legacy_strategy_with_retained_code(retained)
         )
