@@ -1,9 +1,11 @@
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from scripts.binance_spot_testnet_acceptance import (
+    _net_filled_base,
     active_spot_api_urls,
     cleanup_new_spot_base,
     require_testnet_spot_endpoints,
@@ -103,8 +105,10 @@ def test_cleanup_flattens_only_newly_received_base_and_tolerates_non_sellable_du
         base_asset="BTC",
         initial_free_base=1.0,
         min_amount=0.001,
+        drill_base_amount=Decimal("1.0"),
+        min_cost=Decimal("0"),
         stop_id="stop-1",
-        stop_client_id="stop-client-1",
+        stop_client_id=None,
     )
 
     assert client.cancelled == ["stop-1"]
@@ -152,6 +156,8 @@ def test_cleanup_reconciles_stop_when_creation_response_lost():
         base_asset="BTC",
         initial_free_base=1.0,
         min_amount=0.001,
+        drill_base_amount=Decimal("1.0"),
+        min_cost=Decimal("0"),
         stop_id=None,
         stop_client_id="stop-client-2",
     )
@@ -183,3 +189,123 @@ def test_binance_spot_harness_reconciles_after_flatten():
     assert "fetch_balance" in source
     assert "remaining_base" in source
     assert "sellable_residual" in source
+
+
+
+def test_stop_absence_is_not_assumed_after_ambiguous_create_and_cleanup_does_not_sell():
+    class Client:
+        def __init__(self):
+            self.base_free = "1.0"
+            self.queries = 0
+            self.sells_forbidden = False
+
+        def fetch_open_orders(self, symbol):
+            self.queries += 1
+            return []
+
+        def fetch_balance(self):
+            return {"free": {"BTC": self.base_free}}
+
+    class Broker:
+        def __init__(self):
+            self.sells = []
+
+        def normalize_amount(self, symbol, amount):
+            return str(int(amount * 1_000_000) / 1_000_000)
+
+        def market_order(self, *args):
+            self.sells.append(args)
+            return {"id": "must-not-sell"}
+
+    client, broker = Client(), Broker()
+    result = cleanup_new_spot_base(
+        broker, client, symbol="BTC/USDT", base_asset="BTC",
+        initial_free_base=Decimal("0"), drill_base_amount=Decimal("1.0"),
+        min_amount=Decimal("0.001"), min_cost=Decimal("0"),
+        stop_id=None, stop_client_id="ambiguous-stop",
+    )
+    assert client.queries == 3
+    assert broker.sells == []
+    assert result["ok"] is False
+    assert any("refusing to flatten" in error for error in result["errors"])
+
+
+def test_cleanup_respects_minimum_notional_and_reports_non_sellable_residual():
+    class Client:
+        def __init__(self):
+            self.base_free = "0.0005"
+
+        def fetch_balance(self):
+            return {"free": {"BTC": self.base_free}}
+
+    class Broker:
+        def __init__(self):
+            self.sells = []
+
+        def normalize_amount(self, symbol, amount):
+            return str(int(amount * 1_000_000) / 1_000_000)
+
+        def ticker(self, symbol):
+            return {"last": "100"}
+
+        def market_order(self, *args):
+            self.sells.append(args)
+            return {"id": "unexpected"}
+
+    client, broker = Client(), Broker()
+    result = cleanup_new_spot_base(
+        broker, client, symbol="BTC/USDT", base_asset="BTC",
+        initial_free_base=Decimal("0"), drill_base_amount=Decimal("0.0005"),
+        min_amount=Decimal("0.0001"), min_cost=Decimal("10"),
+        stop_id=None, stop_client_id=None,
+    )
+    assert broker.sells == []
+    assert result["ok"] is True
+    assert result["remaining_base"] == "0.0005"
+    assert result["residual_dust"] == "0.0005"
+
+
+def test_cleanup_never_sells_unrelated_balance_credit_above_this_drills_fill():
+    class Client:
+        def __init__(self):
+            self.base_free = Decimal("1.5")
+        def fetch_balance(self):
+            return {"free": {"BTC": str(self.base_free)}}
+
+    class Broker:
+        def __init__(self, client):
+            self.client = client
+            self.sells = []
+        def normalize_amount(self, symbol, amount):
+            return str(int(amount * 1_000_000) / 1_000_000)
+        def market_order(self, symbol, side, amount, client_order_id):
+            self.sells.append(Decimal(str(amount)))
+            self.client.base_free -= Decimal(str(amount))
+            return {"id": "sell-bounded"}
+        def fetch_order(self, order_id, symbol):
+            return {"id": order_id, "status": "closed", "filled": str(self.sells[-1])}
+
+    client = Client()
+    broker = Broker(client)
+    result = cleanup_new_spot_base(
+        broker, client, symbol="BTC/USDT", base_asset="BTC",
+        initial_free_base=Decimal("1.0"), drill_base_amount=Decimal("0.2"),
+        min_amount=Decimal("0.001"), min_cost=Decimal("0"),
+        stop_id=None, stop_client_id=None,
+    )
+    assert broker.sells == [Decimal("0.2")]
+    assert client.base_free == Decimal("1.3")
+    assert result["ok"] is True
+    # The extra 0.3 BTC credit belongs to neither the initial balance nor this drill.
+    assert result["remaining_base"] == "0"
+
+
+def test_net_filled_base_subtracts_fees_charged_in_base_asset():
+    order = {
+        "filled": "0.25",
+        "fees": [
+            {"currency": "BTC", "cost": "0.0004"},
+            {"currency": "USDT", "cost": "0.01"},
+        ],
+    }
+    assert _net_filled_base(order, "BTC") == Decimal("0.2496")
