@@ -3213,60 +3213,6 @@ def transform_strategy_ai(commit: str) -> None:
 
     removed_candidates = {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider"}
 
-    def guaranteed_bindings(node: ast.AST) -> set[str]:
-        if isinstance(node, ast.AnnAssign) and node.value is None:
-            # Annotation-only declarations do not create a runtime binding.
-            return set()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            return {node.name}
-        if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
-            # The body and target are not guaranteed to execute, even when a
-            # loop target has the same name as a missing global dependency.
-            return set()
-        if isinstance(node, ast.If):
-            condition_known = False
-            try:
-                condition = ast.literal_eval(node.test)
-                condition_known = True
-            except (ValueError, TypeError):
-                condition = None
-            if condition_known and bool(condition):
-                return set().union(*(guaranteed_bindings(part) for part in node.body)) if node.body else set()
-            if condition_known and not bool(condition):
-                return set().union(*(guaranteed_bindings(part) for part in node.orelse)) if node.orelse else set()
-            if node.orelse:
-                left = set().union(*(guaranteed_bindings(part) for part in node.body)) if node.body else set()
-                right = set().union(*(guaranteed_bindings(part) for part in node.orelse)) if node.orelse else set()
-                return left & right
-            return set()
-        if isinstance(node, (ast.Try, ast.TryStar)):
-            normal_parts = [*node.body, *node.orelse]
-            normal = set().union(*(guaranteed_bindings(part) for part in normal_parts)) if normal_parts else set()
-            if node.handlers:
-                handler_sets = [
-                    set().union(*(guaranteed_bindings(part) for part in handler.body)) if handler.body else set()
-                    for handler in node.handlers
-                ]
-                common_handlers = set.intersection(*handler_sets) if handler_sets else set()
-                normal &= common_handlers
-            # finally executes after every normal/handled exit, so a deletion
-            # or rebind there invalidates evidence from the try/except paths.
-            finally_changes = set().union(
-                *(_module_scope_maybe_binds(part, postponed_annotations=postponed_annotations) for part in node.finalbody)
-            ) if node.finalbody else set()
-            # An unconditional import in finally re-establishes its binding.
-            # Track statement order so a later assignment/delete still invalidates it.
-            finally_imports: set[str] = set()
-            for part in node.finalbody:
-                if isinstance(part, (ast.Import, ast.ImportFrom)):
-                    finally_imports.update(_defined_names(part))
-                else:
-                    finally_imports.difference_update(
-                        _module_scope_maybe_binds(part, postponed_annotations=postponed_annotations)
-                    )
-            return (normal - (finally_changes - finally_imports)) | finally_imports
-        return _defined_names(node)
-
     def module_execution_loads(node: ast.AST) -> set[str]:
         loaded: set[str] = set()
         if isinstance(node, ast.AnnAssign) and postponed_annotations:
@@ -3635,12 +3581,6 @@ def transform_strategy_ai(commit: str) -> None:
 
         names_bound = visible(_defined_names(node))
         return set(available) | names_bound
-
-    def class_scope_available_names(statements: list[ast.stmt]) -> set[str]:
-        state: set[str] = set()
-        for item in statements:
-            state = module_statement_bindings(item, state)
-        return state
 
     available_names: set[str] = set()
     for retained_node in retained_nodes:
