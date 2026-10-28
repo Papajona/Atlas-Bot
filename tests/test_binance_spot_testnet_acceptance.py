@@ -651,7 +651,9 @@ def _configure_main_fake(monkeypatch, scenario):
             return {"free": {"BTC": str(state["balance"]), "USDT": "1000"}}
 
         def fetch_order(self, order_id, symbol, params=None):
-            if order_id == state["stop_id"]:
+            # The ambiguous-submission path deliberately calls fetch_order(None, ...);
+            # never treat that missing ID as a match for the initially-None stop ID.
+            if order_id is not None and order_id == state["stop_id"]:
                 return {"id": order_id, "status": "canceled" if state["stop_cancelled"] else "open"}
             if params and params.get("origClientOrderId") == state["buy_client_id"]:
                 return {"id": "buy-1", "status": state["buy_status"], "filled": str(state["buy_filled"])}
