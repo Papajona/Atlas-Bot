@@ -156,6 +156,10 @@ def _with_canonical_schema_context(source: str) -> str:
     # _apply_market_context but lacks StrategyCondition must not receive a
     # second AIStrategySpec merely because one dependency is missing.
     remove_ranges: list[tuple[int, int]] = []
+    passthrough_imports: list[str] = []
+    canonical_import_names = {
+        "Literal", "BaseModel", "ConfigDict", "Field", "field_validator", "model_validator"
+    }
     for node in old_tree.body:
         if (
             isinstance(node, ast.ClassDef)
@@ -164,6 +168,20 @@ def _with_canonical_schema_context(source: str) -> str:
             isinstance(node, ast.FunctionDef)
             and node.name == "_apply_market_context"
         ):
+            remove_ranges.append((node.lineno, node.end_lineno))
+            continue
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module in {"pydantic", "typing"}:
+            # Rebuild fixture imports without duplicate canonical contract bindings.
+            # Duplicate BaseModel/Field imports make the static binding audit
+            # correctly fail closed, even when both imports originate in Pydantic.
+            remaining = [
+                alias for alias in node.names
+                if (alias.asname or alias.name) not in canonical_import_names
+            ]
+            if remaining:
+                passthrough_imports.append(
+                    ast.unparse(ast.ImportFrom(module=node.module, names=remaining, level=0))
+                )
             remove_ranges.append((node.lineno, node.end_lineno))
             continue
         if isinstance(node, ast.Assign):
@@ -197,6 +215,7 @@ def _with_canonical_schema_context(source: str) -> str:
     block = [
         "from typing import Literal\n",
         "from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator\n",
+        *[f"{statement}\n" for statement in passthrough_imports],
         "\n",
         *canonical_assignments,
         "\n",
@@ -3073,7 +3092,7 @@ def _extract_json(text):
 """
         class_payloads = [
             "    helper = lambda arg=(json := object()): arg\n",
-            "    def helper(self, arg: (json := object())):\n        return arg\n",
+            "    def helper(self, arg=(json := object())):\n        return arg\n",
         ]
         for payload in class_payloads:
             legacy = (
@@ -3110,7 +3129,7 @@ import json
 
 class LegacyNamespace:
     global json
-    def helper(self, arg: (json := object())):
+    def helper(self, arg: json):
         return arg
 
 class AIProviderError(RuntimeError):
