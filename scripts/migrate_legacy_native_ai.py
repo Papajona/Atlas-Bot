@@ -30,6 +30,10 @@ PROVIDER_FIELD_RE = re.compile(
     r"api\.groq\.com|api\.cerebras\.ai|api\.openai\.com|"
     r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|_gemini_json|_groq_json)"
 )
+# Detect active platform-owned provider secret references even under generic JSON keys.
+ATLAS_PROVIDER_SECRET_RE = re.compile(
+    r"(?i)\batlas[-_](?:openai|gemini|groq|cerebras|ai[-_]gateway)[-_][a-z0-9_-]*\b"
+)
 KEY_ASSIGNMENT_RE = re.compile(
     r"""(?ix)\b(?:SECRET_)?(?:GEMINI|GROQ|CEREBRAS|AI_GATEWAY|OPENAI)[A-Z0-9_]*\b
     \s*[:=]\s*(?:\$\{\{[^}]+\}\}|"[^"]*"|'[^']*'|[^,\s"']+)"""
@@ -807,14 +811,22 @@ def _resolve_class_symbol(
         for alias in import_node.names:
             if alias.name == "*" or (alias.asname or alias.name) != symbol_name:
                 continue
-            target_path = _module_path_for_import(source_path, import_node, alias.name)
-            if target_path is None:
+            if import_node.level and import_node.module is None:
+                package_dir = source_path.parent
+                for _ in range(import_node.level - 1):
+                    package_dir = package_dir.parent
+                target_path = package_dir / "__init__.py"
+            else:
+                target_path = _module_path_for_import(source_path, import_node, alias.name)
+            if target_path is None or not target_path.is_file():
                 continue
             try:
                 target_tree = ast.parse(target_path.read_text(encoding="utf-8"), filename=str(target_path))
             except (OSError, SyntaxError):
                 return None
-            return _resolve_class_symbol(target_path, target_tree, alias.name, seen)
+            resolved = _resolve_class_symbol(target_path, target_tree, alias.name, seen)
+            if resolved is not None:
+                return resolved
     return None
 
 
@@ -844,11 +856,11 @@ def _resolve_base_class(
     for import_node in module_tree.body:
         if isinstance(import_node, ast.Import):
             for alias in import_node.names:
-                bound = alias.asname or alias.name.split(".", 1)[0]
-                if dotted == bound:
-                    module_name = alias.name
-                    break
-                if alias.asname and dotted == alias.asname:
+                if alias.asname:
+                    if dotted == alias.asname:
+                        module_name = alias.name
+                        break
+                elif dotted == alias.name:
                     module_name = alias.name
                     break
         elif isinstance(import_node, ast.ImportFrom):
@@ -874,24 +886,58 @@ def _resolve_base_class(
 
 
 def _is_pydantic_base(base: ast.AST, source_path: Path, module_tree: ast.Module) -> bool:
+    """Accept only an unshadowed Pydantic v2 BaseModel binding."""
+    valid_imports: set[int] = set()
+    bound_name: str | None = None
+
     if isinstance(base, ast.Name):
-        for import_node in module_tree.body:
-            if not isinstance(import_node, ast.ImportFrom) or import_node.module not in {"pydantic", "pydantic.v1"}:
+        bound_name = base.id
+        for statement in module_tree.body:
+            if not isinstance(statement, ast.ImportFrom) or statement.module != "pydantic":
                 continue
-            for alias in import_node.names:
-                if alias.name == "BaseModel" and (alias.asname or alias.name) == base.id:
-                    return True
-    if isinstance(base, ast.Attribute) and base.attr == "BaseModel":
+            if any(alias.name == "BaseModel" and (alias.asname or alias.name) == bound_name
+                   for alias in statement.names):
+                valid_imports.add(id(statement))
+    elif isinstance(base, ast.Attribute) and base.attr == "BaseModel":
         dotted = _dotted_ast_name(base.value)
         if dotted:
-            for import_node in module_tree.body:
-                if not isinstance(import_node, ast.Import):
+            for statement in module_tree.body:
+                if not isinstance(statement, ast.Import):
                     continue
-                for alias in import_node.names:
-                    bound = alias.asname or alias.name.split(".", 1)[0]
-                    if bound == dotted and alias.name in {"pydantic", "pydantic.v1"}:
-                        return True
-    return False
+                if any(alias.name == "pydantic" and (alias.asname or alias.name.split(".", 1)[0]) == dotted
+                       for alias in statement.names):
+                    bound_name = dotted
+                    valid_imports.add(id(statement))
+
+    if not valid_imports or not bound_name:
+        return False
+
+    def rebinds(node: ast.AST) -> bool:
+        if id(node) in valid_imports:
+            return False
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == bound_name:
+                return True
+            if isinstance(node, ast.ClassDef):
+                global_names = {name for part in ast.walk(node) if isinstance(part, ast.Global) for name in part.names}
+                if bound_name in global_names:
+                    return any(
+                        isinstance(part, ast.Name) and part.id == bound_name
+                        and isinstance(part.ctx, (ast.Store, ast.Del))
+                        for part in ast.walk(node)
+                    )
+            return False
+        if isinstance(node, ast.ImportFrom):
+            if any((alias.asname or alias.name) == bound_name for alias in node.names):
+                return True
+        elif isinstance(node, ast.Import):
+            if any((alias.asname or alias.name.split(".", 1)[0]) == bound_name for alias in node.names):
+                return True
+        elif isinstance(node, ast.Name) and node.id == bound_name and isinstance(node.ctx, (ast.Store, ast.Del)):
+            return True
+        return any(rebinds(child) for child in ast.iter_child_nodes(node))
+
+    return not any(rebinds(statement) for statement in module_tree.body)
 
 
 def _class_contract_info(
@@ -900,21 +946,25 @@ def _class_contract_info(
     class_node: ast.ClassDef,
     seen: set[tuple[str, str]] | None = None,
 ) -> tuple[bool, set[str]]:
-    """Return whether a class is Pydantic-backed and its statically visible inherited fields."""
+    """Return verified model ancestry and effective fields with a runtime value or model-field semantics."""
     seen = set() if seen is None else set(seen)
     key = (str(source_path), class_node.name)
     if key in seen:
         return False, set()
     seen.add(key)
-    fields: set[str] = set()
+
+    annotated_fields: set[str] = set()
+    initialized_fields: set[str] = set()
     for member in class_node.body:
         if isinstance(member, ast.AnnAssign) and isinstance(member.target, ast.Name):
-            fields.add(member.target.id)
+            annotated_fields.add(member.target.id)
+            if member.value is not None:
+                initialized_fields.add(member.target.id)
         elif isinstance(member, ast.Assign):
-            fields.update(
-                target.id for target in member.targets if isinstance(target, ast.Name)
-            )
+            initialized_fields.update(target.id for target in member.targets if isinstance(target, ast.Name))
+
     is_model = False
+    inherited_fields: set[str] = set()
     for base in class_node.bases:
         if _is_pydantic_base(base, source_path, module_tree):
             is_model = True
@@ -925,8 +975,12 @@ def _class_contract_info(
         parent_path, parent_tree, parent_class = resolved
         parent_is_model, parent_fields = _class_contract_info(parent_path, parent_tree, parent_class, seen)
         is_model = is_model or parent_is_model
-        fields.update(parent_fields)
-    return is_model, fields
+        inherited_fields.update(parent_fields)
+
+    # Bare annotations are fields for verified Pydantic models, but are not proof
+    # that an ordinary settings/helper class initializes an attribute.
+    local_fields = annotated_fields if is_model else initialized_fields
+    return is_model, inherited_fields | local_fields
 
 
 def _is_legacy_ai_provider_error_stub(node: ast.AST) -> bool:
@@ -1576,13 +1630,11 @@ def transform_strategy_ai(commit: str) -> None:
         None,
     )
     if canonical_spec is not None:
-        legacy_spec = next(
-            (node for node in old_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"),
-            None,
-        )
-        if legacy_spec is None:
-            raise MigrationError("legacy strategy module lacks AIStrategySpec required by the canonical generator")
-        is_model, effective_fields = _class_contract_info(path, old_tree, legacy_spec)
+        resolved_spec = _resolve_class_symbol(path, old_tree, "AIStrategySpec")
+        if resolved_spec is None:
+            raise MigrationError("legacy strategy module lacks a statically resolvable AIStrategySpec required by the canonical generator")
+        legacy_spec_path, legacy_spec_tree, legacy_spec = resolved_spec
+        is_model, effective_fields = _class_contract_info(legacy_spec_path, legacy_spec_tree, legacy_spec)
         required_spec_fields = {"asset", "symbols", "timeframes", "strategy_family", "validation_warnings"}
         if not is_model or not required_spec_fields.issubset(effective_fields):
             missing_fields = sorted(required_spec_fields - effective_fields)
@@ -1660,15 +1712,89 @@ def transform_strategy_ai(commit: str) -> None:
         retained_symbols = symtable.symtable(ast.unparse(retained_module), str(path), "exec")
     except (SyntaxError, ValueError) as exc:
         raise MigrationError("unable to resolve retained strategy helper scopes safely") from exc
+    removed_candidates = {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider"}
+
+    def guaranteed_bindings(node: ast.AST) -> set[str]:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return {node.name}
+        if isinstance(node, ast.If):
+            try:
+                condition = ast.literal_eval(node.test)
+            except (ValueError, TypeError):
+                condition = None
+            if condition is True:
+                return set().union(*(guaranteed_bindings(part) for part in node.body)) if node.body else set()
+            if condition is False:
+                return set().union(*(guaranteed_bindings(part) for part in node.orelse)) if node.orelse else set()
+            if node.orelse:
+                body_names = set().union(*(guaranteed_bindings(part) for part in node.body)) if node.body else set()
+                else_names = set().union(*(guaranteed_bindings(part) for part in node.orelse)) if node.orelse else set()
+                return body_names & else_names
+            return set()
+        return _defined_names(node)
+
+    def module_execution_loads(node: ast.AST) -> set[str]:
+        loaded: set[str] = set()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            executable = [
+                *node.decorator_list, *node.args.defaults,
+                *(value for value in node.args.kw_defaults if value is not None),
+                *(arg.annotation for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs] if arg.annotation is not None),
+                *([node.args.vararg.annotation] if node.args.vararg and node.args.vararg.annotation is not None else []),
+                *([node.args.kwarg.annotation] if node.args.kwarg and node.args.kwarg.annotation is not None else []),
+                *([node.returns] if node.returns is not None else []),
+            ]
+            for part in executable:
+                loaded.update(module_execution_loads(part))
+            return loaded
+        if isinstance(node, ast.ClassDef):
+            for part in [*node.decorator_list, *node.bases, *(kw.value for kw in node.keywords), *node.body]:
+                loaded.update(module_execution_loads(part))
+            return loaded
+        if isinstance(node, ast.Lambda):
+            for part in [*node.args.defaults, *(value for value in node.args.kw_defaults if value is not None)]:
+                loaded.update(module_execution_loads(part))
+            return loaded
+        if isinstance(node, ast.If):
+            loaded.update(module_execution_loads(node.test))
+            try:
+                condition = ast.literal_eval(node.test)
+            except (ValueError, TypeError):
+                condition = None
+            selected = node.body if condition is True else node.orelse if condition is False else [*node.body, *node.orelse]
+            for part in selected:
+                loaded.update(module_execution_loads(part))
+            return loaded
+        if isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Load):
+                loaded.add(node.id)
+            return loaded
+        for child in ast.iter_child_nodes(node):
+            loaded.update(module_execution_loads(child))
+        return loaded
+
     retained_module_bindings: set[str] = set()
     for retained_node in retained_nodes:
-        # Delete targets are collisions for the facade, but do not prove a name is
-        # bound after migration; chained assignments retained verbatim do.
-        if not isinstance(retained_node, ast.Delete):
-            retained_module_bindings.update(_defined_names(retained_node))
-    removed_local_dependencies = (
-        {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider"} - retained_module_bindings
-    )
+        deleted_names = {
+            part.id
+            for target in retained_node.targets
+            for part in ast.walk(target)
+            if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Del)
+        } if isinstance(retained_node, ast.Delete) else set()
+        if deleted_names & removed_candidates:
+            raise MigrationError(
+                "retained strategy module deletes a removed global definition: "
+                + ", ".join(sorted(deleted_names & removed_candidates))
+            )
+        early_reads = (module_execution_loads(retained_node) & removed_candidates) - retained_module_bindings
+        if early_reads:
+            raise MigrationError(
+                "retained module code reads removed global(s) before a retained binding is available: "
+                + ", ".join(sorted(early_reads))
+            )
+        retained_module_bindings.update(guaranteed_bindings(retained_node))
+
+    removed_local_dependencies = removed_candidates - retained_module_bindings
     retained_removed_global_uses: set[str] = set()
 
     def collect_removed_global_references(table: symtable.SymbolTable) -> None:
@@ -1710,6 +1836,41 @@ def transform_strategy_ai(commit: str) -> None:
             raise MigrationError(
                 "strategy module __all__ exports definitions removed by migration: " + ", ".join(lost_exports)
             )
+
+    # Catch string exports appended after an initial __all__ assignment.
+    for retained_node in retained_nodes:
+        if isinstance(retained_node, ast.AugAssign) and isinstance(retained_node.target, ast.Name) and retained_node.target.id == "__all__":
+            if not isinstance(retained_node.op, ast.Add):
+                raise MigrationError("strategy module mutates __all__ dynamically; refusing to remove potentially exported names")
+            try:
+                added_exports = ast.literal_eval(retained_node.value)
+            except (ValueError, TypeError):
+                added_exports = None
+            if not isinstance(added_exports, (list, tuple, set)) or not all(isinstance(item, str) for item in added_exports):
+                raise MigrationError("strategy module mutates __all__ dynamically; refusing to remove potentially exported names")
+            lost = sorted(removed_local_dependencies & set(added_exports))
+            if lost:
+                raise MigrationError("strategy module __all__ exports definitions removed by migration: " + ", ".join(lost))
+        if isinstance(retained_node, ast.Expr) and isinstance(retained_node.value, ast.Call):
+            call = retained_node.value
+            if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name) and call.func.value.id == "__all__":
+                if call.func.attr not in {"append", "extend", "insert"}:
+                    raise MigrationError("strategy module mutates __all__ dynamically; refusing to remove potentially exported names")
+                try:
+                    values = [ast.literal_eval(arg) for arg in call.args]
+                except (ValueError, TypeError):
+                    values = []
+                flat = set()
+                for value in values:
+                    if isinstance(value, str):
+                        flat.add(value)
+                    elif isinstance(value, (list, tuple, set)) and all(isinstance(item, str) for item in value):
+                        flat.update(value)
+                    else:
+                        raise MigrationError("strategy module mutates __all__ dynamically; refusing to remove potentially exported names")
+                lost = sorted(removed_local_dependencies & flat)
+                if lost:
+                    raise MigrationError("strategy module __all__ exports definitions removed by migration: " + ", ".join(lost))
 
     retained_name_uses = {
         part.id
@@ -2148,7 +2309,7 @@ def scrub_ancillary_text(path: str, text: str) -> str:
                 }
             if isinstance(value, list):
                 return [scrub(item, key_context) for item in value]
-            if isinstance(value, str) and PROVIDER_RE.search(value):
+            if isinstance(value, str) and (PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value)):
                 if re.fullmatch(r"(?i)(?:[a-z0-9]+_)*model(?:_(?:id|name|version))?", key_context):
                     return "atlas-native-strategy-v1"
                 # Remove actual credentials/endpoints, but preserve descriptive and audit
@@ -2156,6 +2317,7 @@ def scrub_ancillary_text(path: str, text: str) -> str:
                 cleaned = SECRET_VERSION_RE.sub("", value)
                 cleaned = KEY_ASSIGNMENT_RE.sub("", cleaned)
                 cleaned = HOST_RE.sub("", cleaned)
+                cleaned = ATLAS_PROVIDER_SECRET_RE.sub("", cleaned)
                 cleaned = MODEL_RE.sub("atlas-native-strategy-v1", cleaned)
                 return cleaned
             return value
@@ -2247,7 +2409,7 @@ def _metadata_has_active_provider_wiring(text: str) -> bool:
         if isinstance(value, list):
             return any(visit(item, key_context) for item in value)
         if isinstance(value, str):
-            if KEY_ASSIGNMENT_RE.search(value) or SECRET_VERSION_RE.search(value) or HOST_RE.search(value):
+            if ATLAS_PROVIDER_SECRET_RE.search(value) or KEY_ASSIGNMENT_RE.search(value) or SECRET_VERSION_RE.search(value) or HOST_RE.search(value):
                 return True
             if re.search(r"(?i)(?:provider|gateway|model|api[_ -]?key|secret|endpoint)", key_context) and PROVIDER_RE.search(value):
                 return True
