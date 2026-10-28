@@ -69,6 +69,26 @@ def test_admin_lock_clears_authenticator_secrets_and_preserves_sign_out_access()
     assert "$('adminLogoutBtn').hidden=!token();" in lock
 
 
+def test_admin_login_and_mfa_verification_are_race_safe():
+    script = (ROOT / "app/static/admin-dashboard.js").read_text(encoding="utf-8")
+    login = script.split("async function adminLogin(){", 1)[1].split(
+        "async function adminEnroll(){", 1
+    )[0]
+    verification = script.split("async function adminMfaVerify(){", 1)[1].split(
+        "function adminLogout(){", 1
+    )[0]
+
+    parse_response = login.index("const result=await response.json().catch(()=>({}));")
+    epoch_check = login.index("if(attemptEpoch!==adminSessionEpoch)return;", parse_response)
+    token_install = login.index("sessionStorage.setItem('ait_admin_access_token',result.access_token);")
+    assert parse_response < epoch_check < token_install
+    assert "let adminMfaVerificationInFlight=false;" in script
+    assert "if(adminMfaVerificationInFlight||dashboardReady)return;" in verification
+    assert "let tokenUpgraded=false;" in verification
+    assert "(!tokenUpgraded&&verificationToken!==token())" in verification
+    assert "if(attemptEpoch===adminSessionEpoch)adminMfaVerificationInFlight=false;" in verification
+
+
 def test_admin_mfa_retries_expired_challenges_and_recovers_partial_enrollment():
     script = (ROOT / "app/static/admin-dashboard.js").read_text(encoding="utf-8")
     enrollment = script.split("async function adminEnroll(){", 1)[1].split(
