@@ -55,7 +55,9 @@ def test_polling_waits_for_mfa_verified_session_and_identity_is_token_bound():
     assert "setInterval(()=>{if(dashboardReady)refresh()},15000)" in js
     assert "setInterval(()=>{if(dashboardReady)loadWithdrawals()},20000)" in js
     assert "function adminLogout()" in js
-    assert "$('adminLogoutBtn').hidden=true" in js
+    assert "$('adminLogoutBtn').hidden=!token();" in js
+    resume = js[js.index("async function resumeAdminSession"):js.index("async function adminLogin")]
+    assert "$('adminLogoutBtn').hidden=false;" in resume
 
 
 def test_proposal_digest_is_shown_near_execute_and_missing_digest_cannot_execute():
