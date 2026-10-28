@@ -28,7 +28,8 @@ from app.customer_binance_execution import build_customer_binance_broker
 
 TESTNET_SPOT_HOST = "testnet.binance.vision"
 TERMINAL_ORDER_STATES = {"closed", "filled"}
-CANCELED_ORDER_STATES = {"canceled", "cancelled", "rejected", "expired"}
+CANCELED_ORDER_STATES = {"canceled", "cancelled", "rejected", "expired", "expired_in_match"}
+SAFE_TERMINAL_ORDER_STATES = TERMINAL_ORDER_STATES | CANCELED_ORDER_STATES
 
 
 def req(name: str) -> str:
@@ -129,11 +130,135 @@ def _wait_for_order(broker: Any, order_id: str, symbol: str, timeout_seconds: in
         last = broker.fetch_order(order_id, symbol)
         if not isinstance(last, dict):
             raise RuntimeError(f"Exchange returned malformed order state for {order_id}")
-        if str(last.get("status", "")).lower() in TERMINAL_ORDER_STATES:
+        if str(last.get("status", "")).lower() in SAFE_TERMINAL_ORDER_STATES:
             return last
         if time.monotonic() >= deadline:
             return last
         time.sleep(1)
+
+
+
+def _fetch_order_by_client_id(client: Any, symbol: str, client_order_id: str) -> dict[str, Any]:
+    """Reconcile an order whose submission response was lost using Binance's client ID."""
+    order = client.fetch_order(None, symbol, {"origClientOrderId": client_order_id})
+    if not isinstance(order, dict) or not order.get("id"):
+        raise RuntimeError(
+            f"could not reconcile buy order by client ID {client_order_id}: {order!r}"
+        )
+    return order
+
+
+def _cancel_and_wait_for_order_terminal(
+    broker: Any,
+    client: Any,
+    order_id: str,
+    symbol: str,
+    timeout_seconds: int = 10,
+) -> dict[str, Any]:
+    """Cancel an active buy and keep polling until no further fill can occur."""
+    deadline = time.monotonic() + timeout_seconds
+    last: dict[str, Any] = {}
+    last_error: Exception | None = None
+    while True:
+        last = broker.fetch_order(order_id, symbol)
+        if not isinstance(last, dict):
+            raise RuntimeError(f"exchange returned malformed order state for {order_id}")
+        if str(last.get("status", "")).lower() in SAFE_TERMINAL_ORDER_STATES:
+            return last
+        try:
+            client.cancel_order(order_id, symbol)
+            last_error = None
+        except Exception as exc:
+            last_error = exc
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"could not verify buy order {order_id} is terminal after cancellation; "
+                f"last state={last!r}; cancel error={last_error!r}"
+            )
+        time.sleep(0.5)
+
+
+def _reconcile_buy_order(
+    broker: Any,
+    client: Any,
+    *,
+    symbol: str,
+    base_asset: str,
+    client_order_id: str,
+    order_id: str | None,
+) -> tuple[str, dict[str, Any], Decimal]:
+    """Resolve ambiguous submissions, stop any still-open buy, and retain partial fills."""
+    if order_id:
+        state = broker.fetch_order(order_id, symbol)
+    else:
+        state = _fetch_order_by_client_id(client, symbol, client_order_id)
+        order_id = str(state["id"])
+    if not isinstance(state, dict):
+        raise RuntimeError(f"exchange returned malformed buy order state for {order_id}")
+    if str(state.get("status", "")).lower() not in SAFE_TERMINAL_ORDER_STATES:
+        state = _cancel_and_wait_for_order_terminal(broker, client, order_id, symbol)
+    status = str(state.get("status", "")).lower()
+    if status not in SAFE_TERMINAL_ORDER_STATES:
+        raise RuntimeError(
+            f"buy order {order_id} is not terminal; refusing cleanup while it may still fill: {state!r}"
+        )
+    # Preserve positive partial fills even when the final state is canceled/expired.
+    return order_id, state, _net_filled_base(state, base_asset)
+
+
+def _market_order_min_notional_rule(market: dict[str, Any]) -> tuple[Decimal, int | None]:
+    """Return the active market-order minimum and its required reference-price window."""
+    info = market.get("info") if isinstance(market.get("info"), dict) else {}
+    filters = info.get("filters") if isinstance(info.get("filters"), list) else []
+    rules: list[tuple[Decimal, int]] = []
+    for rule in filters:
+        if not isinstance(rule, dict) or rule.get("filterType") not in {"MIN_NOTIONAL", "NOTIONAL"}:
+            continue
+        applies = rule.get("applyToMarket", rule.get("applyMinToMarket", True))
+        if str(applies).strip().lower() in {"false", "0", "no"}:
+            continue
+        minimum = dec(rule.get("minNotional") or rule.get("notional") or "0")
+        if minimum <= 0:
+            continue
+        try:
+            avg_price_mins = int(rule.get("avgPriceMins", 0))
+        except (TypeError, ValueError):
+            return minimum, None
+        rules.append((minimum, avg_price_mins))
+    if rules:
+        highest_minimum = max(value for value, _ in rules)
+        reference_windows = {window for value, window in rules if value == highest_minimum}
+        return highest_minimum, next(iter(reference_windows)) if len(reference_windows) == 1 else None
+    limits = market.get("limits") if isinstance(market.get("limits"), dict) else {}
+    cost = limits.get("cost") if isinstance(limits.get("cost"), dict) else {}
+    fallback = dec(cost.get("min") or "0")
+    return fallback, None if fallback > 0 else 0
+
+
+def _market_order_reference_price(
+    client: Any, symbol: str, avg_price_mins: int | None, last_price: Decimal
+) -> Decimal | None:
+    """Use Binance's applicable market-order reference price, never a mismatched average window."""
+    if avg_price_mins is None:
+        return None
+    if avg_price_mins == 0:
+        return last_price if last_price > 0 else None
+    endpoint = getattr(client, "publicGetAvgPrice", None) or getattr(client, "public_get_avg_price", None)
+    if not callable(endpoint):
+        return None
+    try:
+        market_fn = getattr(client, "market", None)
+        market_info = market_fn(symbol) if callable(market_fn) else None
+        market_id = market_info.get("id") if isinstance(market_info, dict) else None
+        if not market_id:
+            market_id = symbol.replace("/", "").split(":")[0]
+        response = endpoint({"symbol": market_id})
+        if not isinstance(response, dict) or int(response.get("mins", -1)) != avg_price_mins:
+            return None
+        price = dec(response.get("price"))
+        return price if price > 0 else None
+    except Exception:
+        return None
 
 
 def _cancel_stop_if_present(
@@ -246,6 +371,7 @@ def cleanup_new_spot_base(
     drill_base_amount: Decimal,
     min_amount: Decimal,
     min_cost: Decimal = Decimal("0"),
+    min_cost_reference_mins: int | None = 0,
     stop_id: str | None,
     stop_client_id: str | None,
 ) -> dict[str, Any]:
@@ -295,20 +421,28 @@ def cleanup_new_spot_base(
     if min_cost > 0:
         try:
             ticker = broker.ticker(symbol)
-            cleanup_price = dec(ticker.get("last") if isinstance(ticker, dict) else None)
-            if cleanup_price <= 0:
-                raise RuntimeError(f"exchange returned an invalid cleanup price: {cleanup_price}")
+            last_price = dec(ticker.get("last") if isinstance(ticker, dict) else None)
+            if last_price <= 0:
+                raise RuntimeError(f"exchange returned an invalid cleanup price: {last_price}")
+            cleanup_price = _market_order_reference_price(
+                client, symbol, min_cost_reference_mins, last_price
+            )
+            if cleanup_price is None:
+                errors.append(
+                    "Binance market-order notional reference price could not be verified; "
+                    "residual inventory will not be certified as dust"
+                )
         except Exception as exc:
             errors.append(f"could not verify minimum-notional rule for cleanup: {exc}")
 
-    def is_sellable(amount: Decimal) -> bool:
+    def is_sellable(amount: Decimal) -> bool | None:
         if amount <= 0:
             return False
         if min_amount > 0 and amount < min_amount:
             return False
         if min_cost > 0:
             if cleanup_price is None:
-                raise RuntimeError("current market price is unavailable for minimum-notional validation")
+                return None
             if amount * cleanup_price < min_cost:
                 return False
         return True
@@ -320,7 +454,9 @@ def cleanup_new_spot_base(
             raise RuntimeError("Exchange adapter normalized a negative cleanup amount")
         if sell_amount > drill_cap:
             raise RuntimeError("Exchange adapter normalized cleanup above this drill's acquired amount")
-        if is_sellable(sell_amount):
+        # Unknown reference price is not proof of dust: attempt the exchange order,
+        # then fail closed if the resulting residual still cannot be classified.
+        if is_sellable(sell_amount) is not False:
             flat = broker.market_order(
                 symbol,
                 "sell",
@@ -352,6 +488,11 @@ def cleanup_new_spot_base(
         if sellable_residual is True:
             errors.append(
                 f"sellable {base_asset} residual remains after cleanup: {residual}"
+            )
+        elif residual > 0 and sellable_residual is None:
+            errors.append(
+                f"{base_asset} residual {residual} is unverified; refusing to report it as dust "
+                "without the applicable Binance market-order notional reference price"
             )
         return {
             "ok": not errors,
@@ -413,9 +554,11 @@ def main() -> int:
     if last <= 0:
         raise RuntimeError(f"Exchange returned an invalid last price: {last}")
     limits = market.get("limits") or {}
-    min_cost = dec(((limits.get("cost") or {}).get("min")) or "0")
+    min_cost, min_cost_reference_mins = _market_order_min_notional_rule(market)
     min_amount = dec(((limits.get("amount") or {}).get("min")) or "0")
-    budget = max(Decimal("15"), min_cost * Decimal("1.25"))
+    # Size above the boundary to tolerate small differences between last price and
+    # Binance's required average-price reference window.
+    budget = max(Decimal("15"), min_cost * Decimal("2"))
     amount = dec(broker.normalize_amount(symbol, float(max(min_amount, budget / last))))
     if amount <= 0 or amount * last < min_cost:
         raise RuntimeError(f"Invalid test amount {amount}; price={last}; min_cost={min_cost}")
@@ -432,6 +575,9 @@ def main() -> int:
     report["steps"].append({"step": "authenticated_balance", "ok": True})
 
     buy_attempted = False
+    buy_client_order_id: str | None = None
+    buy_order_id: str | None = None
+    buy_order_terminal = False
     stop_id: str | None = None
     stop_client_id: str | None = None
     operation_error: Exception | None = None
@@ -439,18 +585,29 @@ def main() -> int:
 
     try:
         buy_attempted = True
-        order = broker.market_order(
-            symbol, "buy", float(amount), "atlas-tn-" + uuid.uuid4().hex[:20]
-        )
+        # Keep the client ID before network submission so a lost response can be
+        # reconciled instead of losing the order identity in the finally path.
+        buy_client_order_id = "atlas-tn-" + uuid.uuid4().hex[:20]
+        order = broker.market_order(symbol, "buy", float(amount), buy_client_order_id)
+        if isinstance(order, dict) and order.get("id"):
+            buy_order_id = str(order["id"])
         if not isinstance(order, dict) or not order.get("id"):
             raise RuntimeError(f"Testnet market buy did not return an order ID: {order!r}")
-        oid = str(order["id"])
-        order = _wait_for_order(broker, oid, symbol)
-        if str(order.get("status", "")).lower() not in TERMINAL_ORDER_STATES or dec(
-            order.get("filled") or "0"
-        ) <= 0:
-            raise RuntimeError(f"Testnet market order did not fill: {order!r}")
+        order = _wait_for_order(broker, buy_order_id, symbol)
+        # Record fills before status validation: canceled/expired orders may still
+        # contain a positive partial fill which cleanup must attribute and flatten.
         drill_base_amount = _net_filled_base(order, base_asset)
+        if str(order.get("status", "")).lower() not in SAFE_TERMINAL_ORDER_STATES:
+            buy_order_id, order, drill_base_amount = _reconcile_buy_order(
+                broker, client, symbol=symbol, base_asset=base_asset,
+                client_order_id=buy_client_order_id, order_id=buy_order_id,
+            )
+        buy_order_terminal = str(order.get("status", "")).lower() in SAFE_TERMINAL_ORDER_STATES
+        if (
+            str(order.get("status", "")).lower() not in TERMINAL_ORDER_STATES
+            or dec(order.get("filled") or "0") <= 0
+        ):
+            raise RuntimeError(f"Testnet market order did not fill completely: {order!r}")
         if drill_base_amount <= 0:
             raise RuntimeError("Filled order did not establish a positive net base-asset quantity")
         report["steps"].append(
@@ -507,18 +664,52 @@ def main() -> int:
         )
     finally:
         if buy_attempted:
-            cleanup = cleanup_new_spot_base(
-                broker,
-                client,
-                symbol=symbol,
-                base_asset=base_asset,
-                initial_free_base=initial_free_base,
-                drill_base_amount=drill_base_amount,
-                min_amount=min_amount,
-                min_cost=min_cost,
-                stop_id=stop_id,
-                stop_client_id=stop_client_id,
-            )
+            # Reconcile every attempted buy, including a submission whose response
+            # was lost. Never flatten while a buy can still acquire additional base.
+            reconciliation_error: Exception | None = None
+            try:
+                if not buy_client_order_id:
+                    raise RuntimeError("buy client order ID was not retained before submission")
+                buy_order_id, final_buy_state, final_drill_cap = _reconcile_buy_order(
+                    broker, client, symbol=symbol, base_asset=base_asset,
+                    client_order_id=buy_client_order_id, order_id=buy_order_id,
+                )
+                drill_base_amount = final_drill_cap
+                buy_order_terminal = (
+                    str(final_buy_state.get("status", "")).lower()
+                    in SAFE_TERMINAL_ORDER_STATES
+                )
+            except Exception as exc:
+                reconciliation_error = exc
+                buy_order_terminal = False
+                report["steps"].append(
+                    {"step": "buy_order_reconciliation", "ok": False, "error": str(exc)}
+                )
+
+            if buy_order_terminal:
+                cleanup = cleanup_new_spot_base(
+                    broker,
+                    client,
+                    symbol=symbol,
+                    base_asset=base_asset,
+                    initial_free_base=initial_free_base,
+                    drill_base_amount=drill_base_amount,
+                    min_amount=min_amount,
+                    min_cost=min_cost,
+                    min_cost_reference_mins=min_cost_reference_mins,
+                    stop_id=stop_id,
+                    stop_client_id=stop_client_id,
+                )
+            else:
+                cleanup = {
+                    "ok": False,
+                    "remaining_base": None,
+                    "residual_dust": None,
+                    "errors": [
+                        "buy order could not be proven terminal; no cleanup sell was attempted",
+                        str(reconciliation_error) if reconciliation_error else "unknown buy-order reconciliation failure",
+                    ],
+                }
             report["steps"].append(
                 {"step": "emergency_cancel_and_spot_flatten", **cleanup}
             )
