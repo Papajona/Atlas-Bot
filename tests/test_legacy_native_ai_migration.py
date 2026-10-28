@@ -3169,9 +3169,6 @@ def _extract_json(text):
         import typing
 
         canonical = """import json
-from .native_ai import AIProviderError
-def _extract_json(text):
-    return json.loads(text)
 """
         legacy = """from __future__ import annotations
 import json
