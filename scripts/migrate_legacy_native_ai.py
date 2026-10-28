@@ -2177,8 +2177,12 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
         if isinstance(node, ast.Assign):
             if any(name in _assigned_names(target) or _rooted_name(target) == name for target in node.targets):
                 return True
-            return any(isinstance(part, ast.Name) and part.id == name and isinstance(part.ctx, ast.Load)
-                       for part in ast.walk(node.value))
+            # A direct alias can expose a mutable dependent object to later code;
+            # a mere use as a call target (e.g. ConfigDict(...)) is not a mutation.
+            return (
+                isinstance(node.value, (ast.Name, ast.Attribute, ast.Subscript))
+                and _rooted_name(node.value) == name
+            )
         if isinstance(node, ast.AnnAssign):
             if name in _assigned_names(node.target) or _rooted_name(node.target) == name:
                 return True
