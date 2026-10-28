@@ -65,6 +65,35 @@ function lockAdminDashboard(message,clearTokens=true){
   $('adminLogoutBtn').hidden=!token();
   $('adminEnrollBtn').hidden=!token();
 }
+function req(){return {asset:$('asset').value,symbol:$('symbol').value.trim(),exchange:$('exchange').value.trim(),timeframe:$('tf').value,days:+$('days').value,folds:+$('folds').value,min_train:800}}
+function showResult(value){$('output').textContent=typeof value==='string'?value:JSON.stringify(value,null,2)}
+async function action(path,body=req()){try{showResult(await api(path,{method:'POST',body:JSON.stringify(body)}))}catch(error){showResult(error.message)}}
+async function refresh(){try{const [state,trades]=await Promise.all([api('/api/state'),api('/api/trades')]);$('engine').textContent=state.engine||state.status||'—';$('live').textContent='Live switch '+(state.live?'ON':'OFF');$('kill').textContent=state.halted?'HALTED':'READY';$('positions').textContent='Positions '+(state.positions??'—');$('trades').replaceChildren(...(Array.isArray(trades)?trades:trades.items||[]).map(t=>{const row=document.createElement('tr');row.innerHTML='<td>'+esc(t.created_at||t.timestamp||'—')+'</td><td>'+esc(t.symbol||'—')+'</td><td>'+esc(t.side||'—')+'</td><td>'+esc(t.requested_qty??'—')+'</td><td>'+esc(t.filled_qty??'—')+'</td><td>'+esc(t.average_price??'—')+'</td><td>'+esc(t.mode||'—')+'</td><td>'+esc(t.status||'—')+'</td>';return row}))}catch(error){if(dashboardReady)$('output').textContent=error.message}}
+async function loadMargin(){try{const m=await api('/api/admin/billing/margin');$('marginRevenue').textContent=m.revenue??m.subscription_revenue??'—';$('marginCosts').textContent=m.costs??m.operating_costs??'—';$('marginRef').textContent=m.referrals??m.referral_commissions??'—';$('marginPct').textContent=m.margin_pct??m.contribution_margin_pct??'—';$('marginProfit').textContent=m.profit??m.contribution_margin??'—'}catch(error){if(dashboardReady)$('marginProfit').textContent=error.message}}
+async function loadRoles(){try{const data=await api('/api/admin/security/roles');const rows=Array.isArray(data)?data:data.items||data.roles||[];$('roles').replaceChildren(...rows.map(r=>{const row=document.createElement('tr');row.innerHTML='<td>'+esc(r.user_id||r.user_uuid||'—')+'</td><td>'+esc(r.role||r.role_name||'—')+'</td><td>'+esc(r.active?'Yes':'No')+'</td><td>'+esc(r.created_at||'—')+'</td>';return row}))}catch(error){if(dashboardReady)$('roles').textContent=error.message}}
+async function loadWithdrawals(){try{const [summary,data]=await Promise.all([api('/api/admin/withdrawals/summary'),api('/api/admin/withdrawals?status='+encodeURIComponent($('wdFilter').value))]);const s=summary||{};[['wdPending','pending'],['wdApproved','approved'],['wdInFlight','in_flight'],['wdRejected','rejected']].forEach(([id,key])=>$(id).textContent=s[key]??s[key.toUpperCase()]??'0');const rows=Array.isArray(data)?data:data.items||data.withdrawals||[];$('withdrawalRows').replaceChildren(...rows.map(withdrawalRow))}catch(error){if(dashboardReady)$('wdError').textContent=error.message}}
+function withdrawalRow(w){const row=document.createElement('tr');const id=w.id||w.withdrawal_id;row.innerHTML='<td>'+esc(id)+'</td><td>'+esc(w.customer_id||w.user_id||'—')+'</td><td>'+esc(w.amount??'—')+' '+esc(w.currency||'')+'</td><td>'+esc(w.destination||w.destination_address||'—')+'</td><td>'+esc(w.risk_status||w.risk||'—')+'</td><td>'+esc(w.approval_status||'—')+'</td><td>'+esc(w.status||'—')+'</td><td><button data-action="approve-withdrawal" data-withdrawal-id="'+esc(id)+'">Approve</button> <button data-action="reject-withdrawal" data-withdrawal-id="'+esc(id)+'">Reject</button></td>';return row}
+async function approveWithdrawal(id){return action('/api/admin/withdrawals/'+encodeURIComponent(id)+'/approve',{approver_token:$('approverToken').value,admin_id:$('adminId').value})}
+async function rejectWithdrawal(id){return action('/api/admin/withdrawals/'+encodeURIComponent(id)+'/reject',{approver_token:$('approverToken').value,admin_id:$('adminId').value})}
+async function executeWithdrawal(id){return action('/api/admin/withdrawals/'+encodeURIComponent(id)+'/release',{release_token:$('releaseToken').value,release_operator_id:$('releaseId').value,signature:$('releaseSignature').value})}
+async function prepareWithdrawalProposal(id){return action('/api/admin/withdrawals/'+encodeURIComponent(id)+'/proposal',{})}
+async function reconcileWithdrawal(id){return action('/api/admin/withdrawals/'+encodeURIComponent(id)+'/reconcile',{})}
+async function saveRole(){return action('/api/admin/security/roles',{user_id:$('roleUserId').value.trim(),role:$('roleName').value,active:$('roleActive').value==='true'})}
+async function reconcile(){return action('/api/reconcile',{})}
+function train(){return action('/api/train',req())}
+function backtest(){return action('/api/backtest',req())}
+function strategyBacktest(){return action('/api/strategy/backtest',req())}
+function backtestAll(){return action('/api/research/backtest-all',req())}
+function metaLabelAudit(){return action('/api/research/meta-label',req())}
+function aiReview(){return action('/api/research/review',req())}
+function paperSignals(){return action('/api/research/paper-signals',req())}
+function signal(){return action('/api/signal',req())}
+function strategySignal(){return action('/api/strategy/signal',req())}
+function paperStep(){return action('/api/paper/step',req())}
+function halt(){return action('/api/risk/kill',req())}
+function resetRisk(){return action('/api/risk/reset',req())}
+function disableLive(){return action('/api/live/disable',req())}
+
 function activateDashboard(){
   if(!token()||(adminMfaRequired&&sessionStorage.getItem('ait_admin_mfa_verified')!=='true')){
     lockAdminDashboard('The server has not confirmed the required administrator authentication level. Protected data remains locked.');
@@ -136,6 +165,7 @@ async function adminLogin(){
     const response=await fetch('/api/admin/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:$('adminEmail').value.trim(),password:$('adminPassword').value})});
     if(attemptEpoch!==adminSessionEpoch)return;
     const result=await response.json().catch(()=>({}));
+    if(attemptEpoch!==adminSessionEpoch)return;
     if(!response.ok)throw new Error(detailText(result.detail)||detailText(result.message)||'Administrator login failed');
     if(!result.access_token)throw new Error('Authentication response did not contain an access token.');
     sessionStorage.setItem('ait_admin_access_token',result.access_token);
