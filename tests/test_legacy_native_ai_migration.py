@@ -2471,6 +2471,51 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
                     )
                 )
 
+    def test_exact_schema_contract_rejects_missing_canonical_validator(self):
+        legacy = ast.parse(CANONICAL_STRATEGY)
+        canonical = ast.parse(CANONICAL_STRATEGY)
+        schema = next(
+            node for node in legacy.body
+            if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"
+        )
+        schema.body = [
+            node for node in schema.body
+            if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == "validate_timeframes")
+        ]
+        self.assertFalse(
+            migration._is_compatible_strategy_schema_and_context(legacy, canonical)
+        )
+
+    def test_exact_schema_contract_accepts_proven_pydantic_basemodel_alias(self):
+        legacy = ast.parse(CANONICAL_STRATEGY)
+        canonical = ast.parse(CANONICAL_STRATEGY)
+        pydantic_import = next(
+            node for node in legacy.body
+            if isinstance(node, ast.ImportFrom) and node.module == "pydantic"
+        )
+        pydantic_import.names.append(ast.alias(name="BaseModel", asname="Model"))
+        schema = next(
+            node for node in legacy.body
+            if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"
+        )
+        schema.bases[0] = ast.Name(id="Model", ctx=ast.Load())
+        self.assertTrue(
+            migration._is_compatible_strategy_schema_and_context(legacy, canonical)
+        )
+
+    def test_exact_schema_contract_rejects_market_binding_before_model_dump(self):
+        legacy = ast.parse(CANONICAL_STRATEGY)
+        canonical = ast.parse(CANONICAL_STRATEGY)
+        context = next(
+            node for node in legacy.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+        )
+        context.body[0], context.body[1] = context.body[1], context.body[0]
+        self.assertFalse(
+            migration._is_compatible_strategy_schema_and_context(legacy, canonical)
+        )
+
     def test_exact_schema_contract_rejects_import_time_class_body_risk_mutation(self):
         legacy = ast.parse(
             CANONICAL_STRATEGY
