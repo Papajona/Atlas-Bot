@@ -1622,7 +1622,7 @@ async def _gemini_json(prompt):
                 "'timeframes':[timeframe] if timeframe else ['1h'],'direction':'LONG','strategy_family':'TREND',"
                 "'entry_conditions':[{'type':'indicator','rule':'RSI is above threshold','timeframe':timeframe or '1h'}],"
                 "'exit_conditions':[{'type':'indicator','rule':'RSI is below threshold','timeframe':timeframe or '1h'}],"
-                "'risk_per_trade':0.01,'validation_warnings':[],'requires_backtest':True,'requires_walk_forward':True,"
+                "'risk_per_trade':max_risk_per_trade * 2,'validation_warnings':[],'requires_backtest':True,'requires_walk_forward':True,"
                 "'execution_mode':'PAPER_SHADOW_ONLY','implementation_status':'ATLAS_SUPPORTED_FAMILY'}\n",
                 encoding="utf-8",
             )
@@ -1641,6 +1641,8 @@ async def _gemini_json(prompt):
                     asset="forex", symbol="EUR_USD", timeframe="1h",
                 ))
                 self.assertEqual(outcome["strategy"]["strategy_family"], "TREND")
+                self.assertEqual(outcome["strategy"]["risk_per_trade"], 0.01)
+                self.assertTrue(any("capped" in warning for warning in outcome["strategy"]["validation_warnings"]))
                 self.assertEqual(outcome["ai"]["provider"], "atlas_native")
                 self.assertEqual(outcome["ai"]["network_calls"], 0)
             finally:
