@@ -2043,6 +2043,16 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
         )
         shadowed_tree = ast.parse("import ai_providers\nai_providers = object()")
         self.assertIsNone(migration._provider_adapter_name(qualified_call, shadowed_tree))
+        aliased_tree = ast.parse("import ai_providers as providers")
+        self.assertIsNone(migration._provider_adapter_name(qualified_call, aliased_tree))
+        aliased_call_tree = ast.parse(
+            "async def sample():\n    await providers._gemini_json(prompt)\n"
+        )
+        aliased_call = aliased_call_tree.body[0].body[0].value.value.func
+        self.assertEqual(
+            migration._provider_adapter_name(aliased_call, aliased_tree),
+            "_gemini_json",
+        )
 
     def test_strategy_migration_refuses_to_drop_import_used_by_retained_helper(self):
         legacy = (
