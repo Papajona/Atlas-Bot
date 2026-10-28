@@ -1120,8 +1120,30 @@ def transform_ai_providers(commit: str) -> None:
     import_nodes: list[ast.AST] = []
     source_lines = source.splitlines(keepends=True)
 
+    literalize_annotations = (
+        postponed_annotations and not _uses_postponed_annotations(canonical_tree)
+    )
+    retained_annotation_names: set[str] = set()
+
+    def annotation_names(node: ast.AST) -> set[str]:
+        names: set[str] = set()
+        for part in ast.walk(node):
+            annotations: list[ast.AST] = []
+            if isinstance(part, ast.arg) and part.annotation is not None:
+                annotations.append(part.annotation)
+            elif isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef)) and part.returns is not None:
+                annotations.append(part.returns)
+            elif isinstance(part, ast.AnnAssign):
+                annotations.append(part.annotation)
+            for annotation in annotations:
+                names.update(
+                    child.id for child in ast.walk(annotation)
+                    if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+                )
+        return names
+
     def literalize_deferred_annotations(source_segment: str) -> str:
-        """Preserve future-annotation behavior for retained nodes without changing canonical code."""
+        """Preserve deferred annotations only when canonical output evaluates them eagerly."""
         try:
             parsed_segment = ast.parse(source_segment, filename=str(path))
         except SyntaxError as exc:
@@ -1258,9 +1280,13 @@ def transform_ai_providers(commit: str) -> None:
             raise MigrationError(
                 f"app/ai_providers.py contains an unrecognized provider-bearing helper {name or type(node).__name__}; refusing to overwrite it"
             )
+        if literalize_annotations:
+            # Annotation expressions become string constants below; retain their
+            # source-level names for import selection and typing.get_type_hints.
+            retained_annotation_names.update(annotation_names(node))
         extras.append(
             literalize_deferred_annotations(segment).rstrip()
-            if postponed_annotations else segment.rstrip()
+            if literalize_annotations else segment.rstrip()
         )
         extra_defined_names.append(defined_names)
         extra_definition_lines.append(node.lineno)
@@ -1269,6 +1295,7 @@ def transform_ai_providers(commit: str) -> None:
     for segment in extras:
         tree = ast.parse(segment)
         used_names.update(node.id for node in ast.walk(tree) if isinstance(node, ast.Name))
+    used_names.update(retained_annotation_names)
 
     def import_signature(import_node: ast.AST, alias: ast.alias) -> tuple[str, int, str, str, str]:
         if isinstance(import_node, ast.Import):
