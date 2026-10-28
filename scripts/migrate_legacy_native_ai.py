@@ -2312,12 +2312,19 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
     proven_pydantic_base_aliases = {
         schema.bases[0].id
     } if isinstance(schema.bases[0], ast.Name) else set()
+    replacement_import_names = {"NativeAIError", "compose_strategy_spec"}
     for source_module, dependent_names in (
         (schema_tree, schema_dependencies),
         (tree, context_dependencies),
     ):
         for dependency in dependent_names:
-            if source_module is schema_tree and dependency in proven_pydantic_base_aliases:
+            # transform_strategy_ai inserts both names before the retained schema;
+            # a BaseModel alias with either name would be overwritten at runtime.
+            if (
+                source_module is schema_tree
+                and dependency in proven_pydantic_base_aliases
+                and dependency not in replacement_import_names
+            ):
                 continue
             legacy_binding = module_binding_signature(source_module, dependency)
             canonical_binding = module_binding_signature(canonical_tree, dependency)
