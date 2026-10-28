@@ -3133,6 +3133,50 @@ from .native_ai import AIProviderError
                     migration.transform_strategy_ai("fake-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_strategy_migration_accepts_binding_imported_by_nonempty_literal_loop(self):
+        retained = "for _ in [1]:\\n    from .strategy_evidence import evidence_for\\n"
+        legacy = self._legacy_strategy_with_retained_code(retained).replace(
+            "from .strategy_evidence import evidence_for\\n", "", 1
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                migration.transform_strategy_ai("fake-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("async def generate_strategy_draft", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
+    def test_strategy_migration_preserves_bindings_through_compound_loop_breaks(self):
+        bodies = (
+            "try:\\n    break\\n",
+            "with open(__file__, 'r'):\\n    break\\n",
+            "match 'stop':\\n    case 'stop':\\n        break\\n",
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                retained = "for _ in [1]:\\n" + "".join(
+                    "    " + line if line.strip() else line
+                    for line in body.splitlines(keepends=True)
+                )
+                legacy = self._legacy_strategy_with_retained_code(retained)
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    target = root / "app" / "strategy_ai.py"
+                    target.parent.mkdir()
+                    target.write_text(legacy, encoding="utf-8")
+                    with patch.object(migration, "ROOT", root), patch.object(
+                        migration, "canonical_text", return_value=CANONICAL_STRATEGY
+                    ):
+                        migration.transform_strategy_ai("fake-commit")
+                    result = target.read_text(encoding="utf-8")
+                    self.assertIn("async def generate_strategy_draft", result)
+                    self.assertNotRegex(result, migration.PROVIDER_RE)
+
     def test_strategy_migration_rejects_dependency_deleted_in_finally(self):
         legacy = _with_canonical_schema_context(
             self._legacy_strategy_with_retained_code("")
