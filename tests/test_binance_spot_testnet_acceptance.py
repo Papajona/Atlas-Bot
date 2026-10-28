@@ -168,7 +168,7 @@ def test_cleanup_reconciles_stop_when_creation_response_lost():
         client,
         symbol="BTC/USDT",
         base_asset="BTC",
-        initial_free_base=Decimal("1.0"),
+        initial_free_base=Decimal("0"),
         min_amount=0.001,
         drill_base_amount=Decimal("1.0"),
         min_cost=Decimal("0"),
