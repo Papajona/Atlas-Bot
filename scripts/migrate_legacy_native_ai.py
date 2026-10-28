@@ -1605,7 +1605,19 @@ def transform_ai_providers(commit: str) -> None:
             break
     canonical_header = "".join(canonical_lines[:header_end_line]).rstrip()
     canonical_body = "".join(canonical_lines[header_end_line:]).lstrip("\n")
-    if retained_star_imports:
+    # A retained module may rely on postponed annotations for otherwise-valid
+    # annotation expressions. The canonical source can omit this future import,
+    # but dropping it changes execution semantics for retained helpers. Carry the
+    # future import into the generated module header (after a docstring, if present).
+    retain_future_annotations = (
+        postponed_annotations and not _uses_postponed_annotations(canonical_tree)
+    )
+    if retain_future_annotations:
+        future_import = "from __future__ import annotations"
+        canonical_header = (
+            f"{canonical_header}\n{future_import}" if canonical_header else future_import
+        )
+    if retained_star_imports or retain_future_annotations:
         canonical_pieces = [piece for piece in (canonical_header, *retained_star_imports, canonical_body.rstrip()) if piece.strip()]
         canonical_result = "\n\n".join(canonical_pieces) + "\n"
     else:
