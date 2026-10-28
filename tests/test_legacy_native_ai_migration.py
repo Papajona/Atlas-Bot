@@ -1997,7 +1997,10 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
 
     def test_qualified_provider_adapter_requires_a_proven_module_binding(self):
         import_tree = ast.parse("import ai_providers")
-        qualified_call = ast.parse("await ai_providers._gemini_json(prompt)").body[0].value.value.func
+        qualified_module = ast.parse(
+            "async def sample():\\n    await ai_providers._gemini_json(prompt)\\n"
+        )
+        qualified_call = qualified_module.body[0].body[0].value.value.func
         self.assertEqual(
             migration._provider_adapter_name(qualified_call, import_tree),
             "_gemini_json",
