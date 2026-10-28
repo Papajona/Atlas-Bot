@@ -3083,8 +3083,10 @@ def scrub_ancillary_text(path: str, text: str) -> str:
         except json.JSONDecodeError as exc:
             raise MigrationError(f"metadata.json is invalid JSON: {exc}") from exc
 
+        remove_sentinel = object()
+
         def scrub(value, key_context=""):
-            remove = scrub.REMOVE
+            remove = remove_sentinel
             if isinstance(value, dict):
                 named_setting = next(
                     (item for key, item in value.items()
@@ -3121,9 +3123,8 @@ def scrub_ancillary_text(path: str, text: str) -> str:
                 return cleaned
             return value
 
-        scrub.REMOVE = object()
         scrubbed = scrub(data)
-        if scrubbed is scrub.REMOVE:
+        if scrubbed is remove_sentinel:
             scrubbed = {}
         return json.dumps(scrubbed, indent=2, ensure_ascii=False) + "\n"
 
