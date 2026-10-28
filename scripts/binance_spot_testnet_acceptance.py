@@ -435,7 +435,6 @@ def main() -> int:
     stop_id: str | None = None
     stop_client_id: str | None = None
     operation_error: Exception | None = None
-    fill: dict[str, Any] | None = None
     drill_base_amount = Decimal("0")
 
     try:
@@ -451,7 +450,6 @@ def main() -> int:
             order.get("filled") or "0"
         ) <= 0:
             raise RuntimeError(f"Testnet market order did not fill: {order!r}")
-        fill = order
         drill_base_amount = _net_filled_base(order, base_asset)
         if drill_base_amount <= 0:
             raise RuntimeError("Filled order did not establish a positive net base-asset quantity")
