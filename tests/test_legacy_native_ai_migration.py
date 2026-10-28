@@ -2780,7 +2780,7 @@ def retained_helper():
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
     def test_strategy_migration_accepts_dependency_bound_in_both_try_and_except_paths(self):
-        legacy = self._with_canonical_schema_context(
+        legacy = _with_canonical_schema_context(
             self._legacy_strategy_with_retained_code("")
         )
         legacy = legacy.replace(
@@ -2840,7 +2840,7 @@ from .native_ai import AIProviderError
             self.assertNotIn("class AIProviderError(RuntimeError)", result)
 
     def test_strategy_migration_rejects_dependency_deleted_in_finally(self):
-        legacy = self._with_canonical_schema_context(
+        legacy = _with_canonical_schema_context(
             self._legacy_strategy_with_retained_code("")
         )
         legacy = legacy.replace(
@@ -2869,7 +2869,7 @@ from .native_ai import AIProviderError
 
 
     def test_strategy_migration_rejects_dependency_deleted_by_global_in_finally_class(self):
-        legacy = self._with_canonical_schema_context(
+        legacy = _with_canonical_schema_context(
             self._legacy_strategy_with_retained_code("")
         )
         legacy = legacy.replace(
