@@ -3275,135 +3275,6 @@ def transform_strategy_ai(commit: str) -> None:
             loaded.update(module_execution_loads(child))
         return loaded
 
-    retained_module_bindings: set[str] = set()
-    for retained_node in retained_nodes:
-        if isinstance(retained_node, ast.Delete):
-            deleted = {
-                part.id for target in retained_node.targets for part in ast.walk(target)
-                if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Del)
-            } & removed_candidates
-            if deleted:
-                raise MigrationError(
-                    "retained strategy module deletes a removed global definition: " + ", ".join(sorted(deleted))
-                )
-        early_reads = (module_execution_loads(retained_node) & removed_candidates) - retained_module_bindings
-        if early_reads:
-            raise MigrationError(
-                "retained module code reads removed global(s) before a retained binding is available: "
-                + ", ".join(sorted(early_reads))
-            )
-        retained_module_bindings.update(guaranteed_bindings(retained_node))
-
-    removed_local_dependencies = removed_candidates - retained_module_bindings
-    retained_module = ast.Module(body=retained_nodes, type_ignores=[])
-    try:
-        retained_symbols = symtable.symtable(ast.unparse(retained_module), str(path), "exec")
-    except (SyntaxError, ValueError) as exc:
-        raise MigrationError("unable to resolve retained strategy helper scopes safely") from exc
-    retained_removed_global_uses: set[str] = set()
-
-    def collect_removed_global_references(table: symtable.SymbolTable) -> None:
-        for removed_name in removed_local_dependencies:
-            try:
-                symbol = table.lookup(removed_name)
-            except KeyError:
-                continue
-            if symbol.is_referenced() and symbol.is_global():
-                retained_removed_global_uses.add(removed_name)
-        for child in table.get_children():
-            collect_removed_global_references(child)
-
-    collect_removed_global_references(retained_symbols)
-    if retained_removed_global_uses:
-        raise MigrationError(
-            "retained strategy helper depends on removed local definition(s) "
-            + ", ".join(sorted(retained_removed_global_uses))
-            + "; refusing to remove prompt or provider behavior"
-        )
-
-    for retained_node in retained_nodes:
-        targets = (
-            retained_node.targets if isinstance(retained_node, ast.Assign)
-            else [retained_node.target] if isinstance(retained_node, ast.AnnAssign)
-            else []
-        )
-        if any(isinstance(target, ast.Name) and target.id == "__all__" for target in targets):
-            try:
-                exports = ast.literal_eval(retained_node.value) if retained_node.value is not None else None
-            except (ValueError, TypeError):
-                exports = None
-            if not isinstance(exports, (list, tuple, set)) or not all(isinstance(item, str) for item in exports):
-                raise MigrationError("strategy module has dynamic __all__; refusing to remove names that may be exported")
-            lost = sorted(removed_local_dependencies & set(exports))
-            if lost:
-                raise MigrationError("strategy module __all__ exports definitions removed by migration: " + ", ".join(lost))
-        if isinstance(retained_node, ast.AugAssign) and isinstance(retained_node.target, ast.Name) and retained_node.target.id == "__all__":
-            if not isinstance(retained_node.op, ast.Add):
-                raise MigrationError("strategy module mutates __all__ dynamically; refusing to remove potentially exported names")
-            try:
-                values = ast.literal_eval(retained_node.value)
-            except (ValueError, TypeError):
-                values = None
-            if not isinstance(values, (list, tuple, set)) or not all(isinstance(item, str) for item in values):
-                raise MigrationError("strategy module mutates __all__ dynamically; refusing to remove potentially exported names")
-            lost = sorted(removed_local_dependencies & set(values))
-            if lost:
-                raise MigrationError("strategy module __all__ exports definitions removed by migration: " + ", ".join(lost))
-        if isinstance(retained_node, ast.Expr) and isinstance(retained_node.value, ast.Call):
-            call = retained_node.value
-            if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name) and call.func.value.id == "__all__":
-                if call.func.attr not in {"append", "extend", "insert"}:
-                    raise MigrationError("strategy module mutates __all__ dynamically; refusing to remove potentially exported names")
-                try:
-                    values = [ast.literal_eval(arg) for arg in call.args]
-                except (ValueError, TypeError):
-                    values = []
-                flattened: set[str] = set()
-                for value in values:
-                    if isinstance(value, str):
-                        flattened.add(value)
-                    elif isinstance(value, (list, tuple, set)) and all(isinstance(item, str) for item in value):
-                        flattened.update(value)
-                    else:
-                        raise MigrationError("strategy module mutates __all__ dynamically; refusing to remove potentially exported names")
-                lost = sorted(removed_local_dependencies & flattened)
-                if lost:
-                    raise MigrationError("strategy module __all__ exports definitions removed by migration: " + ", ".join(lost))
-
-    retained_name_uses = {
-        part.id
-        for node in retained_nodes
-        for part in ast.walk(node)
-        if isinstance(part, ast.Name)
-    }
-    used_removed_imports = set(imported_symbols_by_bound_name) & retained_name_uses
-    native_symbols = {"NativeAIError", "compose_strategy_spec"}
-    unsafe_imports: list[str] = []
-    for bound_name in sorted(used_removed_imports):
-        original_names = imported_symbols_by_bound_name[bound_name]
-        if bound_name not in native_symbols or original_names != {bound_name}:
-            original_text = ", ".join(sorted(original_names))
-            unsafe_imports.append(f"{original_text} bound as {bound_name}")
-    if unsafe_imports:
-        raise MigrationError(
-            "retained strategy helper depends on non-native or aliased .ai_providers import(s) "
-            + ", ".join(unsafe_imports)
-            + "; only imports whose original symbol matches NativeAIError or compose_strategy_spec can be remapped"
-        )
-    # Verify that every global read in the transplanted generator is still available.
-    local_names = {canonical_generate.name}
-    local_names.update(arg.arg for arg in ast.walk(canonical_generate.args) if isinstance(arg, ast.arg))
-    for part in ast.walk(canonical_generate):
-        if isinstance(part, ast.Name) and isinstance(part.ctx, (ast.Store, ast.Del)):
-            local_names.add(part.id)
-        elif isinstance(part, ast.ExceptHandler) and part.name:
-            local_names.add(part.name)
-        elif isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and part is not canonical_generate:
-            local_names.add(part.name)
-    canonical_global_loads = {
-        part.id for part in ast.walk(canonical_generate)
-        if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Load)
-    } - local_names - set(dir(builtins))
     def module_statement_bindings(
         node: ast.AST,
         available: set[str],
@@ -3584,6 +3455,136 @@ def transform_strategy_ai(commit: str) -> None:
         names_bound = visible(_defined_names(node))
         return set(available) | names_bound
 
+
+    retained_module_bindings: set[str] = set()
+    for retained_node in retained_nodes:
+        if isinstance(retained_node, ast.Delete):
+            deleted = {
+                part.id for target in retained_node.targets for part in ast.walk(target)
+                if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Del)
+            } & removed_candidates
+            if deleted:
+                raise MigrationError(
+                    "retained strategy module deletes a removed global definition: " + ", ".join(sorted(deleted))
+                )
+        early_reads = (module_execution_loads(retained_node) & removed_candidates) - retained_module_bindings
+        if early_reads:
+            raise MigrationError(
+                "retained module code reads removed global(s) before a retained binding is available: "
+                + ", ".join(sorted(early_reads))
+            )
+        retained_module_bindings = module_statement_bindings(retained_node, retained_module_bindings)
+
+    removed_local_dependencies = removed_candidates - retained_module_bindings
+    retained_module = ast.Module(body=retained_nodes, type_ignores=[])
+    try:
+        retained_symbols = symtable.symtable(ast.unparse(retained_module), str(path), "exec")
+    except (SyntaxError, ValueError) as exc:
+        raise MigrationError("unable to resolve retained strategy helper scopes safely") from exc
+    retained_removed_global_uses: set[str] = set()
+
+    def collect_removed_global_references(table: symtable.SymbolTable) -> None:
+        for removed_name in removed_local_dependencies:
+            try:
+                symbol = table.lookup(removed_name)
+            except KeyError:
+                continue
+            if symbol.is_referenced() and symbol.is_global():
+                retained_removed_global_uses.add(removed_name)
+        for child in table.get_children():
+            collect_removed_global_references(child)
+
+    collect_removed_global_references(retained_symbols)
+    if retained_removed_global_uses:
+        raise MigrationError(
+            "retained strategy helper depends on removed local definition(s) "
+            + ", ".join(sorted(retained_removed_global_uses))
+            + "; refusing to remove prompt or provider behavior"
+        )
+
+    for retained_node in retained_nodes:
+        targets = (
+            retained_node.targets if isinstance(retained_node, ast.Assign)
+            else [retained_node.target] if isinstance(retained_node, ast.AnnAssign)
+            else []
+        )
+        if any(isinstance(target, ast.Name) and target.id == "__all__" for target in targets):
+            try:
+                exports = ast.literal_eval(retained_node.value) if retained_node.value is not None else None
+            except (ValueError, TypeError):
+                exports = None
+            if not isinstance(exports, (list, tuple, set)) or not all(isinstance(item, str) for item in exports):
+                raise MigrationError("strategy module has dynamic __all__; refusing to remove names that may be exported")
+            lost = sorted(removed_local_dependencies & set(exports))
+            if lost:
+                raise MigrationError("strategy module __all__ exports definitions removed by migration: " + ", ".join(lost))
+        if isinstance(retained_node, ast.AugAssign) and isinstance(retained_node.target, ast.Name) and retained_node.target.id == "__all__":
+            if not isinstance(retained_node.op, ast.Add):
+                raise MigrationError("strategy module mutates __all__ dynamically; refusing to remove potentially exported names")
+            try:
+                values = ast.literal_eval(retained_node.value)
+            except (ValueError, TypeError):
+                values = None
+            if not isinstance(values, (list, tuple, set)) or not all(isinstance(item, str) for item in values):
+                raise MigrationError("strategy module mutates __all__ dynamically; refusing to remove potentially exported names")
+            lost = sorted(removed_local_dependencies & set(values))
+            if lost:
+                raise MigrationError("strategy module __all__ exports definitions removed by migration: " + ", ".join(lost))
+        if isinstance(retained_node, ast.Expr) and isinstance(retained_node.value, ast.Call):
+            call = retained_node.value
+            if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name) and call.func.value.id == "__all__":
+                if call.func.attr not in {"append", "extend", "insert"}:
+                    raise MigrationError("strategy module mutates __all__ dynamically; refusing to remove potentially exported names")
+                try:
+                    values = [ast.literal_eval(arg) for arg in call.args]
+                except (ValueError, TypeError):
+                    values = []
+                flattened: set[str] = set()
+                for value in values:
+                    if isinstance(value, str):
+                        flattened.add(value)
+                    elif isinstance(value, (list, tuple, set)) and all(isinstance(item, str) for item in value):
+                        flattened.update(value)
+                    else:
+                        raise MigrationError("strategy module mutates __all__ dynamically; refusing to remove potentially exported names")
+                lost = sorted(removed_local_dependencies & flattened)
+                if lost:
+                    raise MigrationError("strategy module __all__ exports definitions removed by migration: " + ", ".join(lost))
+
+    retained_name_uses = {
+        part.id
+        for node in retained_nodes
+        for part in ast.walk(node)
+        if isinstance(part, ast.Name)
+    }
+    used_removed_imports = set(imported_symbols_by_bound_name) & retained_name_uses
+    native_symbols = {"NativeAIError", "compose_strategy_spec"}
+    unsafe_imports: list[str] = []
+    for bound_name in sorted(used_removed_imports):
+        original_names = imported_symbols_by_bound_name[bound_name]
+        if bound_name not in native_symbols or original_names != {bound_name}:
+            original_text = ", ".join(sorted(original_names))
+            unsafe_imports.append(f"{original_text} bound as {bound_name}")
+    if unsafe_imports:
+        raise MigrationError(
+            "retained strategy helper depends on non-native or aliased .ai_providers import(s) "
+            + ", ".join(unsafe_imports)
+            + "; only imports whose original symbol matches NativeAIError or compose_strategy_spec can be remapped"
+        )
+    # Verify that every global read in the transplanted generator is still available.
+    local_names = {canonical_generate.name}
+    local_names.update(arg.arg for arg in ast.walk(canonical_generate.args) if isinstance(arg, ast.arg))
+    for part in ast.walk(canonical_generate):
+        if isinstance(part, ast.Name) and isinstance(part.ctx, (ast.Store, ast.Del)):
+            local_names.add(part.id)
+        elif isinstance(part, ast.ExceptHandler) and part.name:
+            local_names.add(part.name)
+        elif isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and part is not canonical_generate:
+            local_names.add(part.name)
+    canonical_global_loads = {
+        part.id for part in ast.walk(canonical_generate)
+        if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Load)
+    } - local_names - set(dir(builtins))
     available_names: set[str] = set()
     for retained_node in retained_nodes:
         available_names = module_statement_bindings(retained_node, available_names)
