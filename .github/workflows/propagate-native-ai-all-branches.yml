@@ -109,11 +109,12 @@ jobs:
             # containing an Atlas provider secret cannot bypass this skip gate.
             local metadata_matches=""
             if [[ -f metadata.json ]]; then
-              metadata_matches="$(python - <<'PY'
+              metadata_matches="$(MIGRATION_HELPER="$RUNNER_TEMP/migrate_legacy_native_ai.py" python - <<'PY'
           import importlib.util
+          import os
           from pathlib import Path
 
-          helper_path = Path("scripts/migrate_legacy_native_ai.py")
+          helper_path = Path(os.environ["MIGRATION_HELPER"])
           spec = importlib.util.spec_from_file_location("atlas_native_ai_metadata_check", helper_path)
           if spec is None or spec.loader is None:
               raise SystemExit("Could not load Native AI metadata checker")
