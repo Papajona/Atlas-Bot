@@ -3046,10 +3046,7 @@ def _extract_json(text):
 
 
     def test_postponed_annotations_do_not_count_as_executed_class_global_mutations(self):
-        canonical = """import json
-from .native_ai import AIProviderError
-def _extract_json(text):
-    return json.loads(text)
+        canonical = """from .native_ai import AIProviderError
 """
         legacy = """from __future__ import annotations
 import json
