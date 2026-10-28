@@ -881,11 +881,13 @@ def _class_scope_global_mutations(
             return
         if isinstance(part, ast.If):
             visit(part.test)
+            condition_known = False
             try:
                 condition = ast.literal_eval(part.test)
+                condition_known = True
             except (ValueError, TypeError):
                 condition = None
-            selected = part.body if condition is True else part.orelse if condition is False else None
+            selected = (part.body if bool(condition) else part.orelse) if condition_known else None
             statements = selected if selected is not None else [*part.body, *part.orelse]
             for statement in statements:
                 visit(statement)
@@ -906,11 +908,13 @@ def _class_scope_global_mutations(
             return
         if isinstance(part, ast.While):
             visit(part.test)
+            condition_known = False
             try:
                 condition = ast.literal_eval(part.test)
+                condition_known = True
             except (ValueError, TypeError):
                 condition = None
-            statements = part.orelse if condition is False else [*part.body, *part.orelse]
+            statements = part.orelse if condition_known and not bool(condition) else [*part.body, *part.orelse]
             for statement in statements:
                 visit(statement)
             return
@@ -1007,12 +1011,14 @@ def _module_scope_maybe_binds(node: ast.AST, *, postponed_annotations: bool = Fa
             # Static conditions make one branch unreachable; inspect the test
             # (a walrus may still bind in the containing module) and only the
             # branch Python can execute.
+            condition_known = False
             try:
                 condition = ast.literal_eval(part.test)
+                condition_known = True
             except (ValueError, TypeError):
                 condition = None
             visit(part.test)
-            selected = part.body if condition is True else part.orelse if condition is False else None
+            selected = (part.body if bool(condition) else part.orelse) if condition_known else None
             if selected is not None:
                 for statement in selected:
                     visit(statement)
@@ -1049,11 +1055,13 @@ def _module_scope_maybe_binds(node: ast.AST, *, postponed_annotations: bool = Fa
                     visit(statement)
                 return
         if isinstance(part, ast.While):
+            condition_known = False
             try:
                 condition = ast.literal_eval(part.test)
+                condition_known = True
             except (ValueError, TypeError):
                 condition = None
-            if condition is False:
+            if condition_known and not bool(condition):
                 for statement in part.orelse:
                     visit(statement)
                 return
@@ -1143,7 +1151,7 @@ def transform_ai_providers(commit: str) -> None:
         return names
 
     def literalize_deferred_annotations(source_segment: str) -> str:
-        """Preserve deferred annotations only when canonical output evaluates them eagerly."""
+        """Defer retained annotations as strings without rewriting comments or formatting."""
         try:
             parsed_segment = ast.parse(source_segment, filename=str(path))
         except SyntaxError as exc:
@@ -1155,14 +1163,41 @@ def transform_ai_providers(commit: str) -> None:
                 "retained provider helper did not parse as one top-level statement"
             )
         retained_node = parsed_segment.body[0]
+        annotations: list[ast.AST] = []
         for part in ast.walk(retained_node):
             if isinstance(part, ast.arg) and part.annotation is not None:
-                part.annotation = ast.Constant(value=ast.unparse(part.annotation))
+                annotations.append(part.annotation)
             elif isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef)) and part.returns is not None:
-                part.returns = ast.Constant(value=ast.unparse(part.returns))
+                annotations.append(part.returns)
             elif isinstance(part, ast.AnnAssign):
-                part.annotation = ast.Constant(value=ast.unparse(part.annotation))
-        return ast.unparse(retained_node)
+                annotations.append(part.annotation)
+        if not annotations:
+            return source_segment
+
+        source_lines = source_segment.splitlines(keepends=True)
+
+        def source_offset(line_number: int, byte_column: int) -> int:
+            if line_number < 1 or line_number > len(source_lines):
+                raise MigrationError("retained annotation source position is outside its helper")
+            prefix = "".join(source_lines[:line_number - 1])
+            line = source_lines[line_number - 1]
+            try:
+                column = len(line.encode("utf-8")[:byte_column].decode("utf-8"))
+            except UnicodeDecodeError as exc:
+                raise MigrationError("retained annotation has an invalid UTF-8 source position") from exc
+            return len(prefix) + column
+
+        edits: list[tuple[int, int, str]] = []
+        for annotation in annotations:
+            expression = ast.get_source_segment(source_segment, annotation)
+            if expression is None:
+                raise MigrationError("could not recover retained annotation source text")
+            start = source_offset(annotation.lineno, annotation.col_offset)
+            end = source_offset(annotation.end_lineno, annotation.end_col_offset)
+            edits.append((start, end, repr(expression)))
+        for start, end, replacement in sorted(edits, key=lambda item: item[0], reverse=True):
+            source_segment = source_segment[:start] + replacement + source_segment[end:]
+        return source_segment
 
     for node in old_tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -3189,13 +3224,15 @@ def transform_strategy_ai(commit: str) -> None:
             # loop target has the same name as a missing global dependency.
             return set()
         if isinstance(node, ast.If):
+            condition_known = False
             try:
                 condition = ast.literal_eval(node.test)
+                condition_known = True
             except (ValueError, TypeError):
                 condition = None
-            if condition is True:
+            if condition_known and bool(condition):
                 return set().union(*(guaranteed_bindings(part) for part in node.body)) if node.body else set()
-            if condition is False:
+            if condition_known and not bool(condition):
                 return set().union(*(guaranteed_bindings(part) for part in node.orelse)) if node.orelse else set()
             if node.orelse:
                 left = set().union(*(guaranteed_bindings(part) for part in node.body)) if node.body else set()
@@ -3272,11 +3309,15 @@ def transform_strategy_ai(commit: str) -> None:
             return loaded
         if isinstance(node, ast.If):
             loaded.update(module_execution_loads(node.test))
+            condition_known = False
             try:
                 condition = ast.literal_eval(node.test)
+                condition_known = True
             except (ValueError, TypeError):
                 condition = None
-            selected = node.body if condition is True else node.orelse if condition is False else [*node.body, *node.orelse]
+            selected = (
+                node.body if bool(condition) else node.orelse
+            ) if condition_known else [*node.body, *node.orelse]
             for part in selected:
                 loaded.update(module_execution_loads(part))
             return loaded
@@ -3417,8 +3458,44 @@ def transform_strategy_ai(commit: str) -> None:
         part.id for part in ast.walk(canonical_generate)
         if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Load)
     } - local_names - set(dir(builtins))
+    def possibly_deleted_module_names(statement: ast.AST) -> set[str]:
+        """Find names a retained module-level statement may delete at import time."""
+        deleted: set[str] = set()
+
+        def class_global_names(class_node: ast.ClassDef) -> set[str]:
+            declared: set[str] = set()
+            pending = list(class_node.body)
+            while pending:
+                part = pending.pop()
+                if isinstance(part, ast.Global):
+                    declared.update(part.names)
+                    continue
+                if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                    continue
+                pending.extend(ast.iter_child_nodes(part))
+            return declared
+
+        def visit(part: ast.AST, *, in_class: bool = False, class_globals: set[str] | None = None) -> None:
+            if isinstance(part, ast.Delete):
+                names = {name for target in part.targets for name in _assigned_names(target)}
+                deleted.update(names & (class_globals or set()) if in_class else names)
+                return
+            if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                return
+            if isinstance(part, ast.ClassDef):
+                globals_in_class = class_global_names(part)
+                for child in part.body:
+                    visit(child, in_class=True, class_globals=globals_in_class)
+                return
+            for child in ast.iter_child_nodes(part):
+                visit(child, in_class=in_class, class_globals=class_globals)
+
+        visit(statement)
+        return deleted
+
     available_names: set[str] = set()
     for retained_node in retained_nodes:
+        available_names.difference_update(possibly_deleted_module_names(retained_node))
         if isinstance(retained_node, ast.AnnAssign) and retained_node.value is None:
             continue
         available_names.update(guaranteed_bindings(retained_node))
