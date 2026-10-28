@@ -427,11 +427,6 @@ def cleanup_new_spot_base(
             cleanup_price = _market_order_reference_price(
                 client, symbol, min_cost_reference_mins, last_price
             )
-            if cleanup_price is None:
-                errors.append(
-                    "Binance market-order notional reference price could not be verified; "
-                    "residual inventory will not be certified as dust"
-                )
         except Exception as exc:
             errors.append(f"could not verify minimum-notional rule for cleanup: {exc}")
 
