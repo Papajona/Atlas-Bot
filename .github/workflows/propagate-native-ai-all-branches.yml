@@ -100,8 +100,32 @@ jobs:
             # These are historical proof-marker literals, not active provider wiring.
             # Filter only those exact marker lines; scan every other line in this workflow.
             filtered="$(printf '%s\n' "$matches" | awk '!($0 ~ /^\.github\/workflows\/prune-contained-branches-once\.yml:[0-9]+:/ && $0 ~ /grep -F .def _check_groq. >\/dev\/null/)')"
+            # The grep scan intentionally excludes JSON metadata to avoid treating inert
+            # prose as provider wiring. Use the migration helper's semantic checker for
+            # metadata so secretRef-only configuration cannot bypass the fast path.
+            local metadata_matches=""
+            if [[ -f metadata.json ]]; then
+              metadata_matches="$(python - <<'PY'
+          import importlib.util
+          from pathlib import Path
+
+          helper_path = Path("scripts/migrate_legacy_native_ai.py")
+          spec = importlib.util.spec_from_file_location("atlas_native_ai_migration_metadata", helper_path)
+          if spec is None or spec.loader is None:
+              raise SystemExit("Could not load migration metadata checker")
+          helper = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(helper)
+          metadata = Path("metadata.json").read_text(encoding="utf-8")
+          if helper._metadata_has_active_provider_wiring(metadata):
+              print("metadata.json: active provider configuration or secret reference")
+          PY
+              )" || return $?
+            fi
             if [[ -n "$filtered" ]]; then
               printf '%s\n' "$filtered"
+            fi
+            if [[ -n "$metadata_matches" ]]; then
+              printf '%s\n' "$metadata_matches"
             fi
           }
 
