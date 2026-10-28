@@ -766,15 +766,15 @@ def _assigned_names(target: ast.AST) -> set[str]:
 
 
 def _class_scope_global_mutations(node: ast.ClassDef) -> set[str]:
-    """Find module writes executed by a class body through explicit global declarations."""
+    """Find module writes executed by a class suite through explicit global declarations."""
     declared: set[str] = set()
 
     def collect_declarations(part: ast.AST) -> None:
         if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            # These are separate scopes; their own global declarations do not
+            # make names global in this surrounding class suite.
             return
         if isinstance(part, ast.ClassDef) and part is not node:
-            # Nested class bodies are distinct scopes; collect their module writes
-            # separately when the nested class statement is actually executed.
             return
         if isinstance(part, ast.Global):
             declared.update(part.names)
@@ -786,22 +786,87 @@ def _class_scope_global_mutations(node: ast.ClassDef) -> set[str]:
         collect_declarations(statement)
     mutations: set[str] = set()
 
+    def visit_definition_time_expressions(part: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        expressions: list[ast.AST] = [
+            *part.decorator_list,
+            *part.args.defaults,
+            *(value for value in part.args.kw_defaults if value is not None),
+            *(
+                arg.annotation
+                for arg in [
+                    *part.args.posonlyargs,
+                    *part.args.args,
+                    *part.args.kwonlyargs,
+                ]
+                if arg.annotation is not None
+            ),
+            *(
+                [part.args.vararg.annotation]
+                if part.args.vararg and part.args.vararg.annotation is not None
+                else []
+            ),
+            *(
+                [part.args.kwarg.annotation]
+                if part.args.kwarg and part.args.kwarg.annotation is not None
+                else []
+            ),
+            *([part.returns] if part.returns is not None else []),
+        ]
+        for expression in expressions:
+            visit(expression)
+
     def visit(part: ast.AST) -> None:
-        if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            # Function bodies run later; only expressions evaluated while defining
-            # the callable can execute during class creation.
-            expressions: list[ast.AST] = []
-            if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                expressions.extend(part.decorator_list)
-                expressions.extend(part.args.defaults)
-                expressions.extend(v for v in part.args.kw_defaults if v is not None)
-            for expression in expressions:
+        if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # Defining a callable binds its name in the enclosing scope, and the
+            # decorators/defaults/annotations execute immediately in class scope.
+            if part.name in declared:
+                mutations.add(part.name)
+            visit_definition_time_expressions(part)
+            return
+        if isinstance(part, ast.Lambda):
+            # Lambda bodies run later, but defaults execute when the lambda is made.
+            for expression in [
+                *part.args.defaults,
+                *(value for value in part.args.kw_defaults if value is not None),
+            ]:
                 visit(expression)
             return
         if isinstance(part, ast.ClassDef) and part is not node:
-            for expression in [*part.decorator_list, *part.bases, *(kw.value for kw in part.keywords)]:
+            # A nested class statement binds its name in the enclosing class
+            # namespace, or in the module if that name was declared global.
+            if part.name in declared:
+                mutations.add(part.name)
+            for expression in [
+                *part.decorator_list,
+                *part.bases,
+                *(keyword.value for keyword in part.keywords),
+            ]:
                 visit(expression)
             mutations.update(_class_scope_global_mutations(part))
+            return
+        if isinstance(part, ast.ExceptHandler):
+            # The exception target is string-valued in the AST and is implicitly
+            # deleted at handler exit; with global, this clears the module binding.
+            if part.name and part.name in declared:
+                mutations.add(part.name)
+            if part.type is not None:
+                visit(part.type)
+            for statement in part.body:
+                visit(statement)
+            return
+        if isinstance(part, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            # Comprehension targets are local to the implicit comprehension scope.
+            # Inspect iterables, filters, and result expressions so walrus targets
+            # in those expressions still count as enclosing-scope mutations.
+            for generator in part.generators:
+                visit(generator.iter)
+                for condition in generator.ifs:
+                    visit(condition)
+            if isinstance(part, ast.DictComp):
+                visit(part.key)
+                visit(part.value)
+            else:
+                visit(part.elt)
             return
         if isinstance(part, ast.If):
             visit(part.test)
@@ -810,12 +875,9 @@ def _class_scope_global_mutations(node: ast.ClassDef) -> set[str]:
             except (ValueError, TypeError):
                 condition = None
             selected = part.body if condition is True else part.orelse if condition is False else None
-            if selected is not None:
-                for statement in selected:
-                    visit(statement)
-            else:
-                for statement in [*part.body, *part.orelse]:
-                    visit(statement)
+            statements = selected if selected is not None else [*part.body, *part.orelse]
+            for statement in statements:
+                visit(statement)
             return
         if isinstance(part, (ast.For, ast.AsyncFor)):
             visit(part.iter)
@@ -851,7 +913,6 @@ def _class_scope_global_mutations(node: ast.ClassDef) -> set[str]:
     for statement in node.body:
         visit(statement)
     return mutations
-
 
 def _module_scope_maybe_binds(node: ast.AST) -> set[str]:
     """Return module names a statement may bind/delete without counting local scopes.
