@@ -2805,5 +2805,66 @@ def retained_helper():
             self.assertNotRegex(result, migration.PROVIDER_RE)
 
 
+
+
+    def test_module_scope_binding_analysis_ignores_statically_unreachable_if_branches(self):
+        source = ast.parse("if False:\n    json = replacement\nelse:\n    keep = True\n")
+        bindings = migration._module_scope_maybe_binds(source.body[0])
+        self.assertNotIn("json", bindings)
+        self.assertIn("keep", bindings)
+
+    def test_provider_facade_allows_dead_branch_that_mentions_canonical_import(self):
+        legacy = """import json
+
+if False:
+    json = replacement
+
+class AIProviderError(RuntimeError):
+    pass
+"""
+        canonical = """import json
+from .native_ai import AIProviderError
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("import json", result)
+            self.assertIn("if False:", result)
+            self.assertNotIn("class AIProviderError(RuntimeError)", result)
+
+    def test_strategy_migration_rejects_dependency_deleted_in_finally(self):
+        legacy = self._with_canonical_schema_context(
+            self._legacy_strategy_with_retained_code("")
+        )
+        legacy = legacy.replace(
+            "from .strategy_evidence import evidence_for\n",
+            "try:\n"
+            "    from .strategy_evidence import evidence_for\n"
+            "finally:\n"
+            "    del evidence_for\n",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "canonical strategy generator depends on missing module binding.*evidence_for",
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
 if __name__ == "__main__":
     unittest.main()
