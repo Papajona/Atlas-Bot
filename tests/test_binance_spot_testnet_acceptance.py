@@ -183,6 +183,9 @@ def test_cleanup_reconciles_stop_when_creation_response_lost():
 def test_binance_spot_harness_requires_opt_in_sandbox_and_verified_cleanup_boundary():
     source = (ROOT / "scripts/binance_spot_testnet_acceptance.py").read_text(encoding="utf-8")
     assert 'os.getenv("ATLAS_BINANCE_TESTNET", "").strip().lower() != "true"' in source
+    assert 'os.getenv("ATLAS_TESTNET_ACCOUNT_EXCLUSIVE", "").strip().lower() != "true"' in source
+    assert "client.fetch_open_orders(symbol)" in source
+    assert "free_delta != drill_cap" in source
     assert "require_testnet_spot_endpoints(client)" in source
     assert "if not broker.config.sandbox:" in source
     assert "enable_withdrawals=False" in source
@@ -550,6 +553,17 @@ def test_market_order_min_notional_uses_filter_reference_window():
     ]
 
 
+def test_inactive_market_notional_filters_do_not_reappear_through_generic_cost_limit():
+    market = {
+        "limits": {"cost": {"min": 25}},
+        "info": {"filters": [
+            {"filterType": "MIN_NOTIONAL", "minNotional": "25", "applyToMarket": False, "avgPriceMins": 5},
+            {"filterType": "NOTIONAL", "minNotional": "30", "applyMinToMarket": False, "avgPriceMins": 1},
+        ]},
+    }
+    assert _market_order_min_notional_rule(market) == []
+
+
 def test_market_order_min_notional_preserves_distinct_reference_windows():
     market = {
         "limits": {"cost": {"min": 5}},
@@ -623,6 +637,7 @@ def _configure_main_fake(monkeypatch, scenario):
     from scripts import binance_spot_testnet_acceptance as drill
 
     monkeypatch.setenv("ATLAS_BINANCE_TESTNET", "true")
+    monkeypatch.setenv("ATLAS_TESTNET_ACCOUNT_EXCLUSIVE", "true")
     monkeypatch.setenv("ATLAS_TESTNET_BINANCE_API_KEY", "test-key")
     monkeypatch.setenv("ATLAS_TESTNET_BINANCE_API_SECRET", "test-secret")
     state = {
@@ -652,11 +667,13 @@ def _configure_main_fake(monkeypatch, scenario):
 
         def fetch_order(self, order_id, symbol, params=None):
             # The ambiguous-submission path deliberately calls fetch_order(None, ...);
-            # never treat that missing ID as a match for the initially-None stop ID.
+            # resolve the retained client ID for both buy and protective-stop orders.
             if order_id is not None and order_id == state["stop_id"]:
                 return {"id": order_id, "status": "canceled" if state["stop_cancelled"] else "open"}
             if params and params.get("origClientOrderId") == state["buy_client_id"]:
                 return {"id": "buy-1", "status": state["buy_status"], "filled": str(state["buy_filled"])}
+            if params and params.get("origClientOrderId") == state["stop_client_id"] and state["stop_id"]:
+                return {"id": state["stop_id"], "status": "canceled" if state["stop_cancelled"] else "open"}
             raise AssertionError(f"unexpected raw client order lookup: {order_id!r}, {params!r}")
 
         def fetch_open_orders(self, symbol):
