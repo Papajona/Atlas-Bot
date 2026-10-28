@@ -87,6 +87,7 @@ def test_admin_dashboard_keeps_every_dispatched_handler_and_resumes_saved_sessio
     ):
         assert f"function {name}(" in script or f"async function {name}(" in script
 
+    assert script.count("resumeAdminSession();") == 2  # login success + one page-load resume
     assert script.rstrip().endswith("resumeAdminSession();")
 
 def test_admin_lock_clears_authenticator_secrets_and_preserves_sign_out_access():
