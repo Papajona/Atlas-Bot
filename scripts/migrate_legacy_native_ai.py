@@ -2275,9 +2275,9 @@ def _is_compatible_strategy_schema_and_context(
                 return None
         return signatures[0]
 
-    def dependent_global_names(schema_node: ast.ClassDef, context_node: ast.FunctionDef) -> set[str] | None:
+    def dependent_global_names(*nodes: ast.AST) -> set[str] | None:
         try:
-            isolated = ast.Module(body=[schema_node, context_node], type_ignores=[])
+            isolated = ast.Module(body=list(nodes), type_ignores=[])
             table = symtable.symtable(ast.unparse(isolated), "<strategy-contract>", "exec")
         except (SyntaxError, ValueError):
             return None
@@ -2293,32 +2293,39 @@ def _is_compatible_strategy_schema_and_context(
         visit(table)
         return names
 
-    # Identical class/context AST does not imply identical runtime validation: Pydantic
-    # resolves field types and validator globals from the containing module at class
-    # creation/call time. Verify every global they use against the pinned canonical AST.
-    dependent_names = dependent_global_names(schema, contexts[0])
-    if dependent_names is None:
-        return _reject("source-line-346")
-    for dependency in dependent_names:
-        legacy_binding = module_binding_signature(schema_tree, dependency)
-        canonical_binding = module_binding_signature(canonical_tree, dependency)
-        if _debug:
-            print(
-                f"schema dependency {dependency}: legacy_missing={legacy_binding is None}, "
-                f"canonical_missing={canonical_binding is None}, bindings_equal={legacy_binding == canonical_binding}"
-            )
-        if dependency == "AIStrategySpec":
-            # The legacy class may have semantically compatible optional extensions, so
-            # don't require its entire AST to be canonical. Do require one unambiguous
-            # class/import binding in each module, with no later conditional rebinding.
-            if legacy_binding is None or module_binding_signature(tree, dependency) is None:
-                return _reject("source-line-355")
-            continue
-        if dependency in dir(builtins) and legacy_binding is None and canonical_binding is None:
-            # A built-in is safe only when neither module shadows it.
-            continue
-        if legacy_binding is None or legacy_binding != canonical_binding:
-            return _reject("source-line-361")
+    # The schema class is resolved from its defining module, which may differ from the
+    # strategy module containing _apply_market_context. Resolve each set of globals in
+    # the module where its referencing code actually executes.
+    schema_dependencies = dependent_global_names(schema)
+    context_dependencies = dependent_global_names(contexts[0])
+    if schema_dependencies is None or context_dependencies is None:
+        return _reject("dependency-symbol-table")
+
+    for source_module, dependent_names in (
+        (schema_tree, schema_dependencies),
+        (tree, context_dependencies),
+    ):
+        for dependency in dependent_names:
+            legacy_binding = module_binding_signature(source_module, dependency)
+            canonical_binding = module_binding_signature(canonical_tree, dependency)
+            if _debug:
+                print(
+                    f"{'schema' if source_module is schema_tree else 'context'} dependency {dependency}: "
+                    f"legacy_missing={legacy_binding is None}, "
+                    f"canonical_missing={canonical_binding is None}, bindings_equal={legacy_binding == canonical_binding}"
+                )
+            if dependency == "AIStrategySpec":
+                # The legacy schema may have optional extensions, and the context may
+                # import the class from its defining module. Require unambiguous bindings
+                # without requiring an imported class to have the canonical local AST.
+                if legacy_binding is None or module_binding_signature(tree, dependency) is None:
+                    return _reject("strategy-class-binding")
+                continue
+            if dependency in dir(builtins) and legacy_binding is None and canonical_binding is None:
+                # A built-in is safe only when neither source module shadows it.
+                continue
+            if legacy_binding is None or legacy_binding != canonical_binding:
+                return _reject("module-binding-mismatch")
 
     if (
         ast.dump(schema, include_attributes=False) == ast.dump(canonical_schema, include_attributes=False)
