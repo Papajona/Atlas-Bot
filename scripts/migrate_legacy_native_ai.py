@@ -33,6 +33,9 @@ PROVIDER_FIELD_RE = re.compile(
 ATLAS_PROVIDER_SECRET_RE = re.compile(
     r"(?i)\batlas[-_](?:openai|gemini|groq|cerebras|ai[-_]gateway)[-_][a-z0-9_-]*\b"
 )
+PROVIDER_SETTING_NAME_RE = re.compile(
+    r"(?i)^(?:SECRET_)?(?:GEMINI|GROQ|CEREBRAS|AI_GATEWAY|OPENAI)_[A-Z0-9_]+$"
+)
 KEY_ASSIGNMENT_RE = re.compile(
     r"""(?ix)\b(?:SECRET_)?(?:GEMINI|GROQ|CEREBRAS|AI_GATEWAY|OPENAI)[A-Z0-9_]*\b
     \s*[:=]\s*(?:\$\{\{[^}]+\}\}|"[^"]*"|'[^']*'|[^,\s"']+)"""
@@ -3081,14 +3084,31 @@ def scrub_ancillary_text(path: str, text: str) -> str:
             raise MigrationError(f"metadata.json is invalid JSON: {exc}") from exc
 
         def scrub(value, key_context=""):
+            remove = scrub.REMOVE
             if isinstance(value, dict):
-                return {
-                    k: scrub(v, str(k))
-                    for k, v in value.items()
-                    if not PROVIDER_FIELD_RE.search(str(k))
-                }
+                named_setting = next(
+                    (item for key, item in value.items()
+                     if str(key).lower() in {"name", "key", "setting", "variable"} and isinstance(item, str)),
+                    None,
+                )
+                has_payload = any(
+                    str(key).lower() in {"value", "secretref", "secret_ref", "version", "endpoint"}
+                    for key in value
+                )
+                if isinstance(named_setting, str) and PROVIDER_SETTING_NAME_RE.fullmatch(named_setting) and has_payload:
+                    return remove
+                result = {}
+                for key, item in value.items():
+                    if PROVIDER_FIELD_RE.search(str(key)):
+                        continue
+                    cleaned_item = scrub(item, str(key))
+                    if cleaned_item is not remove:
+                        result[key] = cleaned_item
+                return result
             if isinstance(value, list):
-                return [scrub(item, key_context) for item in value]
+                return [cleaned for item in value if (cleaned := scrub(item, key_context)) is not remove]
+            if isinstance(value, str) and key_context.lower() in {"name", "key", "setting", "variable"} and PROVIDER_SETTING_NAME_RE.fullmatch(value):
+                return ""
             if isinstance(value, str) and (PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value)):
                 if re.fullmatch(r"(?i)(?:[a-z0-9]+_)*model(?:_(?:id|name|version))?", key_context):
                     return "atlas-native-strategy-v1"
@@ -3101,7 +3121,11 @@ def scrub_ancillary_text(path: str, text: str) -> str:
                 return cleaned
             return value
 
-        return json.dumps(scrub(data), indent=2, ensure_ascii=False) + "\n"
+        scrub.REMOVE = object()
+        scrubbed = scrub(data)
+        if scrubbed is scrub.REMOVE:
+            scrubbed = {}
+        return json.dumps(scrubbed, indent=2, ensure_ascii=False) + "\n"
 
     kept: list[str] = []
     for line in text.splitlines(keepends=True):
@@ -3169,6 +3193,17 @@ def _metadata_has_active_provider_wiring(text: str) -> bool:
 
     def visit(value, key_context: str = "") -> bool:
         if isinstance(value, dict):
+            named_setting = next(
+                (item for key, item in value.items()
+                 if str(key).lower() in {"name", "key", "setting", "variable"} and isinstance(item, str)),
+                None,
+            )
+            has_payload = any(
+                str(key).lower() in {"value", "secretref", "secret_ref", "version", "endpoint"}
+                for key in value
+            )
+            if isinstance(named_setting, str) and PROVIDER_SETTING_NAME_RE.fullmatch(named_setting) and has_payload:
+                return True
             for key, item in value.items():
                 key_text = str(key)
                 if PROVIDER_FIELD_RE.search(key_text):
@@ -3179,6 +3214,8 @@ def _metadata_has_active_provider_wiring(text: str) -> bool:
         if isinstance(value, list):
             return any(visit(item, key_context) for item in value)
         if isinstance(value, str):
+            if key_context.lower() in {"name", "key", "setting", "variable"} and PROVIDER_SETTING_NAME_RE.fullmatch(value):
+                return True
             if (
                 ATLAS_PROVIDER_SECRET_RE.search(value)
                 or KEY_ASSIGNMENT_RE.search(value)
