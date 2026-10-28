@@ -2327,10 +2327,11 @@ def _is_compatible_strategy_schema_and_context(
             if legacy_binding is None or legacy_binding != canonical_binding:
                 return _reject("module-binding-mismatch")
 
-    if (
-        ast.dump(schema, include_attributes=False) == ast.dump(canonical_schema, include_attributes=False)
-        and ast.dump(contexts[0], include_attributes=False)
-        == ast.dump(canonical_contexts[0], include_attributes=False)
+    # The field/method/configuration checks above already validate a semantically
+    # compatible schema. If its context binder is byte-for-byte canonical, do not
+    # re-interpret that known-safe AST through the stricter legacy-shape fallback.
+    if ast.dump(contexts[0], include_attributes=False) == ast.dump(
+        canonical_contexts[0], include_attributes=False
     ):
         return True
     context = contexts[0]
