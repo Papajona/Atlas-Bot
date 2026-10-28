@@ -121,11 +121,11 @@ def _with_canonical_schema_context(source: str) -> str:
     spec_source = canonical_lines[canonical_spec.lineno - 1:canonical_spec.end_lineno]
     context_source = canonical_lines[canonical_context.lineno - 1:canonical_context.end_lineno]
     pydantic_block = [
-        "from typing import Literal\\n",
-        "from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator\\n",
-        'ALLOWED_TIMEFRAMES = {"5m", "15m", "30m", "1h", "4h", "1d"}\\n',
-        "StrategyCondition = dict\\n",
-        "\\n",
+        "from typing import Literal\n",
+        "from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator\n",
+        'ALLOWED_TIMEFRAMES = {"5m", "15m", "30m", "1h", "4h", "1d"}\n',
+        "StrategyCondition = dict\n",
+        "\n",
     ]
     edits = [
         (old_spec.lineno, old_spec.end_lineno, spec_source),
@@ -2286,6 +2286,23 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
         self.assertEqual(parsed["description"], "Gemini research is informational only and never enables live trading.")
 
 
+    def test_schema_checker_rejects_missing_canonical_title_constraints(self):
+        tree = ast.parse(CANONICAL_STRATEGY)
+        canonical_tree = ast.parse(CANONICAL_STRATEGY)
+        spec = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
+        title = next(node for node in spec.body if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "title")
+        title.value = None
+        with patch.object(migration, "ROOT", Path("/tmp/atlas-schema-contract-test")):
+            self.assertFalse(migration._is_compatible_strategy_schema_and_context(tree, canonical_tree))
+
+    def test_schema_checker_requires_asset_symbol_and_timeframe_binding(self):
+        tree = ast.parse(CANONICAL_STRATEGY)
+        canonical_tree = ast.parse(CANONICAL_STRATEGY)
+        context = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context")
+        context.body = [node for node in context.body if not isinstance(node, ast.If)]
+        with patch.object(migration, "ROOT", Path("/tmp/atlas-schema-context-test")):
+            self.assertFalse(migration._is_compatible_strategy_schema_and_context(tree, canonical_tree))
+
     def test_schema_checker_rejects_classvar_for_required_strategy_field(self):
         legacy = CANONICAL_STRATEGY.replace(
             '    asset: Literal["crypto", "forex", "commodity"]',
@@ -2302,6 +2319,13 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
         self.assertTrue(migration._metadata_has_active_provider_wiring(
             '{"secretRef": "atlas-openai-api-key"}'
         ))
+        self.assertTrue(migration._metadata_has_active_provider_wiring(
+            '{"secretRef": "OPENAI_API_KEY"}'
+        ))
+        self.assertEqual(
+            json.loads(migration.scrub_ancillary_text("metadata.json", '{"secretRef": "OPENAI_API_KEY"}')),
+            {},
+        )
         self.assertTrue(migration._metadata_has_active_provider_wiring(
             '{"credentials": "OPENAI_API_KEY=example"}'
         ))
