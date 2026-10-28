@@ -104,6 +104,23 @@ def _free_balance(client: Any, asset: str) -> Decimal:
     return value
 
 
+def _net_filled_base(order: dict[str, Any] | None, base_asset: str) -> Decimal:
+    """Bound cleanup to the base quantity this drill actually acquired, net of base fees."""
+    if not isinstance(order, dict):
+        return Decimal("0")
+    gross = max(Decimal("0"), dec(order.get("filled") or "0"))
+    raw_fees = order.get("fees")
+    fees = raw_fees if isinstance(raw_fees, list) else [order.get("fee")]
+    base_fee = Decimal("0")
+    for fee in fees:
+        if not isinstance(fee, dict):
+            continue
+        currency = str(fee.get("currency") or fee.get("asset") or "").upper()
+        if currency == base_asset.upper():
+            base_fee += max(Decimal("0"), dec(fee.get("cost") or fee.get("amount") or "0"))
+    return max(Decimal("0"), gross - base_fee)
+
+
 def _wait_for_order(broker: Any, order_id: str, symbol: str, timeout_seconds: int = 30) -> dict:
     deadline = time.monotonic() + timeout_seconds
     last: dict = {}
@@ -124,38 +141,73 @@ def _cancel_stop_if_present(
     stop_id: str | None,
     stop_client_id: str | None,
     errors: list[str],
-) -> None:
+) -> bool:
+    """Cancel a known stop or fail closed when an ambiguously-created stop cannot be ruled out."""
+    if not stop_id and not stop_client_id:
+        return True
+
     cancel_error: Exception | None = None
+    cancel_requested = False
     if stop_id:
         try:
             client.cancel_order(stop_id, symbol)
-            return
+            cancel_requested = True
+            if not stop_client_id:
+                return True
         except Exception as exc:
             cancel_error = exc
-    # create_order/cancel_order can time out after the exchange accepted the
-    # request. Recover by the client order ID and re-check the authoritative
-    # open-order list before selling any available base.
-    if stop_client_id:
+
+    if not stop_client_id:
+        if cancel_error is not None:
+            errors.append(f"could not cancel protective stop {stop_id}: {cancel_error}")
+            return False
+        return cancel_requested
+
+    last_error: Exception | None = None
+    for attempt in range(3):
         try:
             open_orders = client.fetch_open_orders(symbol)
+            if not isinstance(open_orders, list):
+                raise RuntimeError("exchange returned malformed open-order data")
             matched = []
             for order in open_orders:
                 info = order.get("info") if isinstance(order.get("info"), dict) else {}
                 client_id = order.get("clientOrderId") or info.get("clientOrderId")
                 if str(client_id or "") == stop_client_id and order.get("id") is not None:
                     matched.append(order)
-            for order in matched:
-                client.cancel_order(str(order["id"]), symbol)
-            if not matched:
-                return
-            return
+            if matched:
+                for order in matched:
+                    client.cancel_order(str(order["id"]), symbol)
+                cancel_requested = True
+                last_error = None
+            elif cancel_requested:
+                # A previously accepted cancellation plus a subsequent authoritative
+                # open-order read is sufficient to proceed with flattening.
+                return True
+            elif attempt == 2:
+                # The create/cancel response may have been lost before the exchange
+                # made an accepted order visible. Absence from one or more list reads
+                # is not proof that no live stop exists, so do not sell around it.
+                errors.append(
+                    f"could not verify protective stop {stop_client_id} is absent; "
+                    "refusing to flatten while a stop may remain open"
+                )
+                return False
         except Exception as exc:
-            if cancel_error is not None:
-                errors.append(f"could not cancel protective stop {stop_id}: {cancel_error}")
-            errors.append(f"could not reconcile/cancel protective stop {stop_client_id}: {exc}")
-            return
-    if cancel_error is not None:
-        errors.append(f"could not cancel protective stop {stop_id}: {cancel_error}")
+            last_error = exc
+            if attempt == 2:
+                if cancel_error is not None:
+                    errors.append(f"could not cancel protective stop {stop_id}: {cancel_error}")
+                errors.append(
+                    f"could not reconcile/cancel protective stop {stop_client_id}: {last_error}; "
+                    "refusing to flatten"
+                )
+                return False
+        if attempt < 2:
+            time.sleep(0.5)
+
+    errors.append(f"could not verify protective stop {stop_client_id} is absent; refusing to flatten")
+    return False
 
 
 def cleanup_new_spot_base(
@@ -165,13 +217,15 @@ def cleanup_new_spot_base(
     symbol: str,
     base_asset: str,
     initial_free_base: Decimal,
+    drill_base_amount: Decimal,
     min_amount: Decimal,
+    min_cost: Decimal = Decimal("0"),
     stop_id: str | None,
     stop_client_id: str | None,
 ) -> dict[str, Any]:
-    """Best-effort, balance-verified cleanup of only the base acquired by this drill."""
+    """Best-effort cleanup, capped to this drill's acquired base and verified exchange minima."""
     errors: list[str] = []
-    _cancel_stop_if_present(client, symbol, stop_id, stop_client_id, errors)
+    stop_safe = _cancel_stop_if_present(client, symbol, stop_id, stop_client_id, errors)
 
     try:
         current = _free_balance(client, base_asset)
@@ -184,12 +238,49 @@ def cleanup_new_spot_base(
             "errors": errors,
         }
 
-    new_base = max(Decimal("0"), current - initial_free_base)
+    # A wallet balance delta may include unrelated deposits or concurrent trades.
+    # Never sell more than this order's filled quantity, reduced by base-denominated fees.
+    drill_cap = max(Decimal("0"), drill_base_amount)
+    free_delta = max(Decimal("0"), current - initial_free_base)
+    new_base = min(free_delta, drill_cap)
+    if not stop_safe:
+        return {
+            "ok": False,
+            "remaining_base": str(new_base),
+            "residual_dust": None,
+            "errors": errors,
+        }
+
+    cleanup_price: Decimal | None = None
+    if min_cost > 0:
+        try:
+            ticker = broker.ticker(symbol)
+            cleanup_price = dec(ticker.get("last") if isinstance(ticker, dict) else None)
+            if cleanup_price <= 0:
+                raise RuntimeError(f"exchange returned an invalid cleanup price: {cleanup_price}")
+        except Exception as exc:
+            errors.append(f"could not verify minimum-notional rule for cleanup: {exc}")
+
+    def is_sellable(amount: Decimal) -> bool:
+        if amount <= 0:
+            return False
+        if min_amount > 0 and amount < min_amount:
+            return False
+        if min_cost > 0:
+            if cleanup_price is None:
+                raise RuntimeError("current market price is unavailable for minimum-notional validation")
+            if amount * cleanup_price < min_cost:
+                return False
+        return True
+
+    sold_amount = Decimal("0")
     try:
         sell_amount = dec(broker.normalize_amount(symbol, float(new_base)))
         if sell_amount < 0:
             raise RuntimeError("Exchange adapter normalized a negative cleanup amount")
-        if sell_amount > 0 and (min_amount <= 0 or sell_amount >= min_amount):
+        if sell_amount > drill_cap:
+            raise RuntimeError("Exchange adapter normalized cleanup above this drill's acquired amount")
+        if is_sellable(sell_amount):
             flat = broker.market_order(
                 symbol,
                 "sell",
@@ -201,26 +292,33 @@ def cleanup_new_spot_base(
             flat_order = _wait_for_order(broker, str(flat["id"]), symbol)
             if str(flat_order.get("status", "")).lower() not in TERMINAL_ORDER_STATES:
                 raise RuntimeError(f"Cleanup market sell did not finish before timeout: {flat_order!r}")
-            if dec(flat_order.get("filled") or "0") <= 0:
+            sold_amount = min(drill_cap, max(Decimal("0"), dec(flat_order.get("filled") or "0")))
+            if sold_amount <= 0:
                 raise RuntimeError(f"Cleanup market sell did not fill: {flat_order!r}")
     except Exception as exc:
         errors.append(f"cleanup market sell failed: {exc}")
 
     try:
         final_free = _free_balance(client, base_asset)
-        residual = max(Decimal("0"), final_free - initial_free_base)
+        remaining_cap = max(Decimal("0"), drill_cap - sold_amount)
+        residual = min(max(Decimal("0"), final_free - initial_free_base), remaining_cap)
         normalized_residual = dec(broker.normalize_amount(symbol, float(residual)))
-        sellable_residual = normalized_residual > 0 and (
-            min_amount <= 0 or normalized_residual >= min_amount
-        )
-        if sellable_residual:
+        sellable_residual: bool | None
+        try:
+            sellable_residual = is_sellable(normalized_residual)
+        except Exception as exc:
+            errors.append(f"could not verify whether residual base is sellable: {exc}")
+            sellable_residual = None
+        if sellable_residual is True:
             errors.append(
                 f"sellable {base_asset} residual remains after cleanup: {residual}"
             )
         return {
             "ok": not errors,
             "remaining_base": str(residual),
-            "residual_dust": str(residual) if residual > 0 and not sellable_residual else "0",
+            "residual_dust": (
+                "0" if residual == 0 else str(residual) if sellable_residual is False else None
+            ),
             "errors": errors,
         }
     except Exception as exc:
@@ -287,6 +385,7 @@ def main() -> int:
     stop_client_id: str | None = None
     operation_error: Exception | None = None
     fill: dict[str, Any] | None = None
+    drill_base_amount = Decimal("0")
 
     try:
         buy_attempted = True
@@ -302,6 +401,9 @@ def main() -> int:
         ) <= 0:
             raise RuntimeError(f"Testnet market order did not fill: {order!r}")
         fill = order
+        drill_base_amount = _net_filled_base(order, base_asset)
+        if drill_base_amount <= 0:
+            raise RuntimeError("Filled order did not establish a positive net base-asset quantity")
         report["steps"].append(
             {
                 "step": "spot_market_fill",
@@ -323,9 +425,10 @@ def main() -> int:
 
         # Use free base actually received, not the order's gross filled amount.
         # Binance may deduct commissions in the base asset.
-        new_free_base = max(
+        free_delta = max(
             Decimal("0"), _free_balance(client, base_asset) - initial_free_base
         )
+        new_free_base = min(free_delta, drill_base_amount)
         stop_amount = dec(broker.normalize_amount(symbol, float(new_free_base)))
         if stop_amount <= 0 or (min_amount > 0 and stop_amount < min_amount):
             raise RuntimeError(
@@ -361,7 +464,9 @@ def main() -> int:
                 symbol=symbol,
                 base_asset=base_asset,
                 initial_free_base=initial_free_base,
+                drill_base_amount=drill_base_amount,
                 min_amount=min_amount,
+                min_cost=min_cost,
                 stop_id=stop_id,
                 stop_client_id=stop_client_id,
             )
