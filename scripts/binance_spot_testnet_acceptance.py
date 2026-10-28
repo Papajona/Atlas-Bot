@@ -614,7 +614,7 @@ def main() -> int:
             {
                 "step": "spot_market_fill",
                 "ok": True,
-                "order_id": oid,
+                "order_id": buy_order_id,
                 "filled": str(order.get("filled")),
             }
         )
