@@ -3126,6 +3126,9 @@ def transform_strategy_ai(commit: str) -> None:
     removed_candidates = {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider"}
 
     def guaranteed_bindings(node: ast.AST) -> set[str]:
+        if isinstance(node, ast.AnnAssign) and node.value is None:
+            # Annotation-only declarations do not create a runtime binding.
+            return set()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             return {node.name}
         if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
