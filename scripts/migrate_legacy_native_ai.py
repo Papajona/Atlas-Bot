@@ -1911,11 +1911,21 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
     canonical_body = body_without_docstring(canonical_schema)
     schema_body = body_without_docstring(schema)
 
+    def is_classvar(annotation: ast.AST) -> bool:
+        value = annotation.value if isinstance(annotation, ast.Subscript) else annotation
+        return (
+            isinstance(value, ast.Name) and value.id == "ClassVar"
+        ) or (
+            isinstance(value, ast.Attribute) and value.attr == "ClassVar"
+        )
+
     def field_map(body: list[ast.stmt]) -> dict[str, ast.AnnAssign]:
         return {
             statement.target.id: statement
             for statement in body
-            if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name)
+            if isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and not is_classvar(statement.annotation)
         }
 
     canonical_fields = field_map(canonical_body)
@@ -2520,6 +2530,17 @@ def transform_strategy_ai(commit: str) -> None:
                 right = set().union(*(guaranteed_bindings(part) for part in node.orelse)) if node.orelse else set()
                 return left & right
             return set()
+        if isinstance(node, (ast.Try, ast.TryStar)):
+            normal_parts = [*node.body, *node.orelse]
+            normal = set().union(*(guaranteed_bindings(part) for part in normal_parts)) if normal_parts else set()
+            if not node.handlers:
+                return normal
+            handler_sets = [
+                set().union(*(guaranteed_bindings(part) for part in handler.body)) if handler.body else set()
+                for handler in node.handlers
+            ]
+            common_handlers = set.intersection(*handler_sets) if handler_sets else set()
+            return normal & common_handlers
         return _defined_names(node)
 
     def module_execution_loads(node: ast.AST) -> set[str]:
