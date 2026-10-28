@@ -1699,7 +1699,11 @@ def _provider_adapter_name(func: ast.AST, module_tree: ast.Module | None = None)
             if alias.name not in {"ai_providers", "app.ai_providers"}:
                 continue
             bound = alias.asname or alias.name.split(".", 1)[0]
-            if receiver not in {bound, alias.name}:
+            # An explicit alias is the only name introduced by this import. The
+            # original module path is valid only for an unaliased import such as
+            # import app.ai_providers (which binds the root app).
+            permitted_receivers = {bound} if alias.asname else {bound, alias.name}
+            if receiver not in permitted_receivers:
                 continue
             # A later top-level assignment/import/delete that can shadow the module
             # prevents us from treating a same-named attribute as a trusted adapter.
