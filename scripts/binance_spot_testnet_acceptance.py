@@ -125,24 +125,37 @@ def _cancel_stop_if_present(
     stop_client_id: str | None,
     errors: list[str],
 ) -> None:
+    cancel_error: Exception | None = None
     if stop_id:
         try:
             client.cancel_order(stop_id, symbol)
             return
         except Exception as exc:
-            errors.append(f"could not cancel protective stop {stop_id}: {exc}")
-    # create_order can time out after the exchange accepted the stop, before it
-    # returned an ID. Recover it using the client order ID before selling base.
-    if stop_client_id and not stop_id:
+            cancel_error = exc
+    # create_order/cancel_order can time out after the exchange accepted the
+    # request. Recover by the client order ID and re-check the authoritative
+    # open-order list before selling any available base.
+    if stop_client_id:
         try:
             open_orders = client.fetch_open_orders(symbol)
+            matched = []
             for order in open_orders:
                 info = order.get("info") if isinstance(order.get("info"), dict) else {}
                 client_id = order.get("clientOrderId") or info.get("clientOrderId")
                 if str(client_id or "") == stop_client_id and order.get("id") is not None:
-                    client.cancel_order(str(order["id"]), symbol)
+                    matched.append(order)
+            for order in matched:
+                client.cancel_order(str(order["id"]), symbol)
+            if not matched:
+                return
+            return
         except Exception as exc:
+            if cancel_error is not None:
+                errors.append(f"could not cancel protective stop {stop_id}: {cancel_error}")
             errors.append(f"could not reconcile/cancel protective stop {stop_client_id}: {exc}")
+            return
+    if cancel_error is not None:
+        errors.append(f"could not cancel protective stop {stop_id}: {cancel_error}")
 
 
 def cleanup_new_spot_base(
