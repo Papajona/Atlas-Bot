@@ -2194,9 +2194,13 @@ def _is_compatible_strategy_schema_and_context(
         if isinstance(node, ast.AnnAssign):
             if name in _assigned_names(node.target) or _rooted_name(node.target) == name:
                 return True
-            return node.value is not None and any(
-                isinstance(part, ast.Name) and part.id == name and isinstance(part.ctx, ast.Load)
-                for part in ast.walk(node.value)
+            # An annotation/default may legitimately *use* a dependency (e.g. Field(...)).
+            # Only a direct value alias exposes the original dependency object to later
+            # mutation; nested calls and validator declarations are reads, not rebinding.
+            return (
+                node.value is not None
+                and isinstance(node.value, (ast.Name, ast.Attribute, ast.Subscript))
+                and _rooted_name(node.value) == name
             )
         if isinstance(node, ast.AugAssign):
             return name in _assigned_names(node.target) or _rooted_name(node.target) == name
