@@ -3040,6 +3040,24 @@ from .native_ai import AIProviderError
             self.assertIn("async def generate_strategy_draft", result)
             self.assertNotRegex(result, migration.PROVIDER_RE)
 
+    def test_strategy_migration_ignores_deletes_in_statically_false_while_none(self):
+        retained = "while None:\\n    del evidence_for\\n"
+        legacy = _with_canonical_schema_context(
+            self._legacy_strategy_with_retained_code(retained)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                migration.transform_strategy_ai("fake-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("async def generate_strategy_draft", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
     def test_strategy_migration_rejects_import_then_delete_inside_taken_branch(self):
         retained = (
             "if True:\n"
