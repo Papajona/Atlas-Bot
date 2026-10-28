@@ -3084,11 +3084,11 @@ from .native_ai import AIProviderError
 
     def test_strategy_migration_rejects_exception_path_between_delete_and_rebind(self):
         retained = (
-            "try:\\n"
-            "    del evidence_for\\n"
-            "    from .strategy_evidence import evidence_for\\n"
-            "except ImportError:\\n"
-            "    pass\\n"
+            "try:\n"
+            "    del evidence_for\n"
+            "    from .strategy_evidence import evidence_for\n"
+            "except ImportError:\n"
+            "    pass\n"
         )
         legacy = _with_canonical_schema_context(
             self._legacy_strategy_with_retained_code(retained)
@@ -3110,10 +3110,10 @@ from .native_ai import AIProviderError
 
     def test_strategy_migration_rejects_loop_delete_before_break_and_dead_rebind(self):
         retained = (
-            "for _ in [1]:\\n"
-            "    del evidence_for\\n"
-            "    break\\n"
-            "    from .strategy_evidence import evidence_for\\n"
+            "for _ in [1]:\n"
+            "    del evidence_for\n"
+            "    break\n"
+            "    from .strategy_evidence import evidence_for\n"
         )
         legacy = _with_canonical_schema_context(
             self._legacy_strategy_with_retained_code(retained)
