@@ -823,6 +823,23 @@ def _module_scope_maybe_binds(node: ast.AST) -> set[str]:
             for statement in part.body:
                 visit(statement)
             return
+        if isinstance(part, ast.If):
+            # Static conditions make one branch unreachable; inspect the test
+            # (a walrus may still bind in the containing module) and only the
+            # branch Python can execute.
+            try:
+                condition = ast.literal_eval(part.test)
+            except (ValueError, TypeError):
+                condition = None
+            visit(part.test)
+            selected = part.body if condition is True else part.orelse if condition is False else None
+            if selected is not None:
+                for statement in selected:
+                    visit(statement)
+                return
+            for statement in [*part.body, *part.orelse]:
+                visit(statement)
+            return
         if isinstance(part, ast.MatchAs) and part.name:
             names.add(part.name)
         elif isinstance(part, ast.MatchStar) and part.name:
@@ -2941,14 +2958,19 @@ def transform_strategy_ai(commit: str) -> None:
         if isinstance(node, (ast.Try, ast.TryStar)):
             normal_parts = [*node.body, *node.orelse]
             normal = set().union(*(guaranteed_bindings(part) for part in normal_parts)) if normal_parts else set()
-            if not node.handlers:
-                return normal
-            handler_sets = [
-                set().union(*(guaranteed_bindings(part) for part in handler.body)) if handler.body else set()
-                for handler in node.handlers
-            ]
-            common_handlers = set.intersection(*handler_sets) if handler_sets else set()
-            return normal & common_handlers
+            if node.handlers:
+                handler_sets = [
+                    set().union(*(guaranteed_bindings(part) for part in handler.body)) if handler.body else set()
+                    for handler in node.handlers
+                ]
+                common_handlers = set.intersection(*handler_sets) if handler_sets else set()
+                normal &= common_handlers
+            # finally executes after every normal/handled exit, so a deletion
+            # or rebind there invalidates evidence from the try/except paths.
+            finally_changes = set().union(
+                *(_module_scope_maybe_binds(part) for part in node.finalbody)
+            ) if node.finalbody else set()
+            return normal - finally_changes
         return _defined_names(node)
 
     def module_execution_loads(node: ast.AST) -> set[str]:
