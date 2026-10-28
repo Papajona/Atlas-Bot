@@ -2076,7 +2076,7 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
     def test_strategy_migration_rejects_missing_canonical_generator_dependency(self):
-        legacy = self._legacy_strategy_with_retained_code("evidence_for: object\n")
+        legacy = self._legacy_strategy_with_retained_code("AIStrategySpec: object\n")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             target = root / "app" / "strategy_ai.py"
@@ -2086,7 +2086,7 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
                 migration, "canonical_text", return_value=CANONICAL_STRATEGY
             ):
                 with self.assertRaisesRegex(
-                    migration.MigrationError, "canonical strategy generator depends on missing module binding.*evidence_for"
+                    migration.MigrationError, "canonical strategy generator depends on missing module binding.*AIStrategySpec"
                 ):
                     migration.transform_strategy_ai("fake-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
