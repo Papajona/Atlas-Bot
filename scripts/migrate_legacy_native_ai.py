@@ -2911,7 +2911,8 @@ def scrub_ancillary_text(path: str, text: str) -> str:
                 cleaned = HOST_RE.sub("", cleaned)
                 cleaned = ATLAS_PROVIDER_SECRET_RE.sub("", cleaned)
                 cleaned = MODEL_RE.sub("atlas-native-strategy-v1", cleaned)
-                return PROVIDER_RE.sub("legacy provider", cleaned)
+                # Descriptive/audit prose may mention historical providers; preserve it.
+                return cleaned
             return value
 
         return json.dumps(scrub(data), indent=2, ensure_ascii=False) + "\n"
