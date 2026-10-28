@@ -3164,6 +3164,88 @@ def _extract_json(text):
             self.assertEqual(retained_method.args.args[1].annotation.value, "json")
             self.assertNotIn("def _generate_with_provider", result)
 
+    def test_retained_postponed_annotations_keep_imports_for_get_type_hints(self):
+        import types
+        import typing
+
+        canonical = """import json
+from .native_ai import AIProviderError
+def _extract_json(text):
+    return json.loads(text)
+"""
+        legacy = """from __future__ import annotations
+import json
+from typing import Any
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper(value: Any):
+    return value
+
+def _extract_json(text):
+    return json.loads(text)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package = root / "app"
+            package.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            target = package / "ai_providers.py"
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("from typing import Any", result)
+            module = types.ModuleType("app.ai_providers")
+            module.__package__ = "app"
+            exec(compile(result, str(target), "exec"), module.__dict__)
+            self.assertEqual(
+                typing.get_type_hints(module.retained_helper),
+                {"value": typing.Any},
+            )
+
+    def test_canonical_future_annotations_are_not_stringized_twice_in_retained_helpers(self):
+        canonical = """from __future__ import annotations
+from .native_ai import AIProviderError
+"""
+        legacy = """from __future__ import annotations
+import json
+
+class LegacyNamespace:
+    def helper(self, value: list[str]):
+        return value
+
+class AIProviderError(RuntimeError):
+    pass
+
+def _extract_json(text):
+    return json.loads(text)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            parsed = ast.parse(result, filename=str(target))
+            retained_class = next(
+                node for node in parsed.body
+                if isinstance(node, ast.ClassDef) and node.name == "LegacyNamespace"
+            )
+            helper = next(
+                node for node in retained_class.body
+                if isinstance(node, ast.FunctionDef) and node.name == "helper"
+            )
+            self.assertIsInstance(helper.args.args[1].annotation, ast.Subscript)
+            self.assertIn("from __future__ import annotations", result)
+
     def test_class_global_comprehension_target_does_not_block_facade_migration(self):
         legacy = """import json
 
