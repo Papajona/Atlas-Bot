@@ -761,6 +761,103 @@ def _assigned_names(target: ast.AST) -> set[str]:
 
 
 
+
+
+def _module_scope_maybe_binds(node: ast.AST) -> set[str]:
+    """Return module names a statement may bind/delete without counting local scopes.
+
+    This is deliberately conservative for module-level control flow: a loop
+    target may rebind a canonical import if an iteration occurs, but must not
+    count as a guaranteed dependency in a migration.
+    """
+    names: set[str] = set()
+
+    def visit(part: ast.AST) -> None:
+        if isinstance(part, ast.Lambda):
+            for expression in [
+                *part.args.defaults,
+                *(value for value in part.args.kw_defaults if value is not None),
+            ]:
+                visit(expression)
+            return
+        if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(part.name)
+            # Definition-time expressions execute in module scope; the function
+            # body does not, so a local walrus/assignment must not look global.
+            expressions = [
+                *part.decorator_list,
+                *part.args.defaults,
+                *(value for value in part.args.kw_defaults if value is not None),
+                *(arg.annotation for arg in [
+                    *part.args.posonlyargs, *part.args.args, *part.args.kwonlyargs
+                ] if arg.annotation is not None),
+                *([part.args.vararg.annotation] if part.args.vararg and part.args.vararg.annotation is not None else []),
+                *([part.args.kwarg.annotation] if part.args.kwarg and part.args.kwarg.annotation is not None else []),
+                *([part.returns] if part.returns is not None else []),
+            ]
+            for expression in expressions:
+                visit(expression)
+            return
+        if isinstance(part, ast.ClassDef):
+            names.add(part.name)
+            # Class attributes have their own namespace. Inspect only expressions
+            # executed in the containing module while creating the class.
+            for expression in [*part.decorator_list, *part.bases, *(kw.value for kw in part.keywords)]:
+                visit(expression)
+            return
+        if isinstance(part, (ast.Import, ast.ImportFrom)):
+            names.update(_defined_names(part))
+            return
+        if isinstance(part, ast.comprehension):
+            # Comprehension targets are local to the implicit comprehension
+            # scope; iterables and filters can still contain outer-scope walruses.
+            visit(part.iter)
+            for condition in part.ifs:
+                visit(condition)
+            return
+        if isinstance(part, ast.ExceptHandler):
+            if part.name:
+                names.add(part.name)
+            if part.type is not None:
+                visit(part.type)
+            for statement in part.body:
+                visit(statement)
+            return
+        if isinstance(part, ast.MatchAs) and part.name:
+            names.add(part.name)
+        elif isinstance(part, ast.MatchStar) and part.name:
+            names.add(part.name)
+        elif isinstance(part, ast.MatchMapping) and part.rest:
+            names.add(part.rest)
+        if isinstance(part, ast.Name) and isinstance(part.ctx, (ast.Store, ast.Del)):
+            names.add(part.id)
+        if isinstance(part, (ast.For, ast.AsyncFor)):
+            # Known-empty literal iterables cannot bind their target or execute
+            # the loop body. The else clause can still execute.
+            try:
+                iterable = ast.literal_eval(part.iter)
+            except (ValueError, TypeError):
+                iterable = None
+            if isinstance(iterable, (list, tuple, dict, set, str, bytes)) and not iterable:
+                for statement in part.orelse:
+                    visit(statement)
+                return
+        if isinstance(part, ast.While):
+            try:
+                condition = ast.literal_eval(part.test)
+            except (ValueError, TypeError):
+                condition = None
+            if condition is False:
+                for statement in part.orelse:
+                    visit(statement)
+                return
+        for child in ast.iter_child_nodes(part):
+            visit(child)
+
+    visit(node)
+    return names
+
+
 def _is_legacy_ai_provider_error_stub(node: ast.AST) -> bool:
     """Recognize only the empty legacy exception class replaced by Native AI's alias."""
     if not isinstance(node, ast.ClassDef) or node.name != "AIProviderError":
@@ -891,7 +988,7 @@ def transform_ai_providers(commit: str) -> None:
                     "legacy AIProviderError base RuntimeError is imported or rebound in this facade; refusing to replace a possibly custom exception"
                 )
             continue
-        defined_names = _defined_names(node)
+        defined_names = _defined_names(node) | _module_scope_maybe_binds(node)
         collisions = defined_names & canonical_names
         if collisions:
             equivalent = all(
@@ -1155,9 +1252,29 @@ def transform_ai_providers(commit: str) -> None:
             }
 
         last_definitions: dict[str, ast.AST] = {}
+        deleted_bindings: set[str] = set()
         for module_node in module_tree.body:
+            if isinstance(module_node, ast.Delete):
+                deleted_names = {
+                    name for target in module_node.targets for name in _assigned_names(target)
+                }
+                deleted_bindings.update(deleted_names)
+                for deleted_name in deleted_names:
+                    last_definitions.pop(deleted_name, None)
+                continue
             for defined_name in _defined_names(module_node):
                 last_definitions[defined_name] = module_node
+                deleted_bindings.discard(defined_name)
+        if explicit_all and deleted_bindings.intersection(exports):
+            deleted_exports = sorted(deleted_bindings.intersection(exports))
+            raise MigrationError(
+                f"star-import module {module_file} declares deleted name(s) in __all__: "
+                + ", ".join(deleted_exports)
+            )
+        if not explicit_all:
+            # Default star exports reflect names actually left in the module
+            # namespace after top-level deletion, not every name seen earlier.
+            exports.difference_update(deleted_bindings)
         bindings: dict[str, tuple[str, int, str, str, str] | None] = {}
         for exported_name in exports:
             definition = last_definitions.get(exported_name)
@@ -1731,7 +1848,7 @@ def _provider_adapter_name(func: ast.AST, module_tree: ast.Module | None = None)
                     if shadowed:
                         break
                     continue
-                if bound in _defined_names(other):
+                if bound in (_defined_names(other) | _module_scope_maybe_binds(other)):
                     shadowed = True
                     break
             if not shadowed:
@@ -2803,6 +2920,10 @@ def transform_strategy_ai(commit: str) -> None:
     def guaranteed_bindings(node: ast.AST) -> set[str]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             return {node.name}
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+            # The body and target are not guaranteed to execute, even when a
+            # loop target has the same name as a missing global dependency.
+            return set()
         if isinstance(node, ast.If):
             try:
                 condition = ast.literal_eval(node.test)
@@ -3003,7 +3124,7 @@ def transform_strategy_ai(commit: str) -> None:
     for retained_node in retained_nodes:
         if isinstance(retained_node, ast.AnnAssign) and retained_node.value is None:
             continue
-        available_names.update(_defined_names(retained_node))
+        available_names.update(guaranteed_bindings(retained_node))
     remappable_names = {"NativeAIError", "compose_strategy_spec"}
     missing_dependencies = sorted(canonical_global_loads - available_names - remappable_names)
     if missing_dependencies:
