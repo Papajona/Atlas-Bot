@@ -2161,8 +2161,19 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
         self.assertNotIn("gemini_api_key", parsed)
         self.assertEqual(parsed["app_version"], "3.10.47")
         self.assertIn("informational only", parsed["description"])
-        self.assertNotIn("Gemini", parsed["description"])
+        self.assertEqual(parsed["description"], "Gemini research is informational only and never enables live trading.")
 
+
+    def test_metadata_checker_rejects_provider_secret_refs_but_allows_descriptive_mentions(self):
+        self.assertTrue(migration._metadata_has_active_provider_wiring(
+            '{"secretRef": "atlas-openai-api-key"}'
+        ))
+        self.assertTrue(migration._metadata_has_active_provider_wiring(
+            '{"credentials": "OPENAI_API_KEY=example"}'
+        ))
+        self.assertFalse(migration._metadata_has_active_provider_wiring(
+            '{"description": "Historical Gemini and Groq review note"}'
+        ))
 
     def test_shell_deployment_scrub_preserves_non_ai_settings_and_shell_syntax(self):
         source = r'''#!/usr/bin/env bash
