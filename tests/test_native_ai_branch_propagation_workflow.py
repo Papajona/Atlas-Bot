@@ -105,10 +105,13 @@ def test_migration_script_preserves_unrelated_branch_logic_and_fails_closed() ->
     assert '_git("diff", "--cached", "--check")' in helper
 
 
-def test_provider_scan_excludes_metadata_prose_but_helper_checks_active_wiring() -> None:
+def test_provider_scan_excludes_metadata_prose_but_checks_active_secret_references() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     helper = MIGRATION.read_text(encoding="utf-8")
     assert "':!metadata.json'" in workflow
+    assert 'helper._metadata_has_active_provider_wiring(metadata)' in workflow
+    assert 'metadata.json: active provider configuration or secret reference' in workflow
+    assert "ATLAS_PROVIDER_SECRET_RE" in helper
     assert "def _metadata_has_active_provider_wiring" in helper
     assert 'if path == "metadata.json":' in helper
 
