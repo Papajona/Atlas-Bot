@@ -7,6 +7,7 @@ import pytest
 from scripts.binance_spot_testnet_acceptance import (
     _market_order_min_notional_rule,
     _market_order_reference_price,
+    _cancel_stop_if_present,
     _net_filled_base,
     _reconcile_buy_order,
     active_spot_api_urls,
@@ -178,6 +179,68 @@ def test_cleanup_reconciles_stop_when_creation_response_lost():
     assert client.cancelled == ["stop-2"]
     assert result["ok"] is True
     assert result["remaining_base"] == "0"
+
+
+def test_cleanup_resolves_terminal_stop_by_client_id_when_open_orders_are_stale():
+    class Client:
+        def __init__(self):
+            self.base_free = Decimal("1.0")
+            self.lookups = []
+            self.open_order_queries = 0
+
+        def fetch_order(self, order_id, symbol, params=None):
+            self.lookups.append((order_id, params))
+            if order_id is None and params == {"origClientOrderId": "stop-terminal-client"}:
+                return {"id": "stop-terminal", "status": "canceled"}
+            if order_id == "stop-terminal":
+                return {"id": order_id, "status": "canceled"}
+            raise AssertionError(f"unexpected order lookup: {order_id!r}, {params!r}")
+
+        def fetch_open_orders(self, symbol):
+            self.open_order_queries += 1
+            return []
+
+        def fetch_balance(self):
+            return {"free": {"BTC": str(self.base_free)}}
+
+    class Broker:
+        def __init__(self, client):
+            self.client = client
+            self.sells = []
+
+        def normalize_amount(self, symbol, amount):
+            return str(amount)
+
+        def market_order(self, symbol, side, amount, client_order_id):
+            self.sells.append(Decimal(str(amount)))
+            self.client.base_free -= Decimal(str(amount))
+            return {"id": "sell-terminal-stop"}
+
+        def fetch_order(self, order_id, symbol):
+            return {"id": order_id, "status": "closed", "filled": str(self.sells[-1])}
+
+    client = Client()
+    broker = Broker(client)
+    result = cleanup_new_spot_base(
+        broker, client, symbol="BTC/USDT", base_asset="BTC",
+        initial_free_base=Decimal("0"), drill_base_amount=Decimal("1.0"),
+        min_amount=Decimal("0.001"), min_cost=Decimal("0"),
+        stop_id=None, stop_client_id="stop-terminal-client",
+    )
+
+    assert client.lookups[0] == (None, {"origClientOrderId": "stop-terminal-client"})
+    assert result["ok"] is True
+    assert client.base_free == Decimal("0.0")
+    assert broker.sells == [Decimal("1.0")]
+
+
+def test_main_requires_explicit_exclusive_testnet_account_attestation(monkeypatch):
+    from scripts import binance_spot_testnet_acceptance as drill
+
+    monkeypatch.setenv("ATLAS_BINANCE_TESTNET", "true")
+    monkeypatch.delenv("ATLAS_TESTNET_ACCOUNT_EXCLUSIVE", raising=False)
+    with pytest.raises(SystemExit, match="ATLAS_TESTNET_ACCOUNT_EXCLUSIVE=true"):
+        drill.main()
 
 
 def test_binance_spot_harness_requires_opt_in_sandbox_and_verified_cleanup_boundary():
