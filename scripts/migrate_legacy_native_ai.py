@@ -28,6 +28,9 @@ PROVIDER_FIELD_RE = re.compile(
     r"api\.groq\.com|api\.cerebras\.ai|api\.openai\.com|"
     r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|_gemini_json|_groq_json)"
 )
+ATLAS_PROVIDER_SECRET_RE = re.compile(
+    r"(?i)\batlas[-_](?:openai|gemini|groq|cerebras|ai[-_]gateway)[-_][a-z0-9_-]*\b"
+)
 KEY_ASSIGNMENT_RE = re.compile(
     r"""(?ix)\b(?:SECRET_)?(?:GEMINI|GROQ|CEREBRAS|AI_GATEWAY|OPENAI)[A-Z0-9_]*\b
     \s*[:=]\s*(?:\$\{\{[^}]+\}\}|"[^"]*"|'[^']*'|[^,\s"']+)"""
@@ -2900,12 +2903,13 @@ def scrub_ancillary_text(path: str, text: str) -> str:
                 }
             if isinstance(value, list):
                 return [scrub(item, key_context) for item in value]
-            if isinstance(value, str) and PROVIDER_RE.search(value):
+            if isinstance(value, str) and (PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value)):
                 if re.fullmatch(r"(?i)(?:[a-z0-9]+_)*model(?:_(?:id|name|version))?", key_context):
                     return "atlas-native-strategy-v1"
                 cleaned = SECRET_VERSION_RE.sub("", value)
                 cleaned = KEY_ASSIGNMENT_RE.sub("", cleaned)
                 cleaned = HOST_RE.sub("", cleaned)
+                cleaned = ATLAS_PROVIDER_SECRET_RE.sub("", cleaned)
                 cleaned = MODEL_RE.sub("atlas-native-strategy-v1", cleaned)
                 return PROVIDER_RE.sub("legacy provider", cleaned)
             return value
@@ -2969,6 +2973,39 @@ def apply_ancillary_patch(commit: str, path: str, extra_base: str, extra_commit:
             target.write_text(cleaned, encoding="utf-8")
 
 
+def _metadata_has_active_provider_wiring(text: str) -> bool:
+    """Permit inert descriptive prose, but reject real provider configuration and credentials."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return True
+
+    def visit(value, key_context: str = "") -> bool:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_text = str(key)
+                if PROVIDER_FIELD_RE.search(key_text):
+                    return True
+                if visit(item, key_text):
+                    return True
+            return False
+        if isinstance(value, list):
+            return any(visit(item, key_context) for item in value)
+        if isinstance(value, str):
+            if (
+                ATLAS_PROVIDER_SECRET_RE.search(value)
+                or KEY_ASSIGNMENT_RE.search(value)
+                or SECRET_VERSION_RE.search(value)
+                or HOST_RE.search(value)
+            ):
+                return True
+            if re.search(r"(?i)(?:provider|gateway|model|api[_ -]?key|secret|endpoint)", key_context) and PROVIDER_RE.search(value):
+                return True
+        return False
+
+    return visit(data)
+
+
 def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:
     # Canonical Native AI source and the original provider-removal patch baseline are
     # independent pins: changing one must not widen the other per-path diff.
@@ -2991,7 +3028,13 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
     remaining = []
     for path in NATIVE_PATHS:
         target = ROOT / path
-        if target.is_file() and PROVIDER_RE.search(target.read_text(encoding="utf-8")):
+        if not target.is_file():
+            continue
+        contents = target.read_text(encoding="utf-8")
+        if path == "metadata.json":
+            if _metadata_has_active_provider_wiring(contents):
+                remaining.append(path)
+        elif PROVIDER_RE.search(contents):
             remaining.append(path)
     if remaining:
         raise MigrationError("provider references remain in: " + ", ".join(remaining))
