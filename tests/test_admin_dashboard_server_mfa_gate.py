@@ -48,8 +48,11 @@ def test_admin_dashboard_discards_stale_requests_after_session_changes():
     assert "const requestEpoch=adminSessionEpoch;" in script
     assert "const requestToken=token();" in script
     assert "requestEpoch===adminSessionEpoch&&requestToken===token()" in script
-    assert "if(sameSession)lockAdminDashboard(" in script
-    assert "if(!sameSession)throw new Error('Discarded stale administrator response after the session changed.');" in script
+    assert "if(!sameSession){" in script
+    assert "staleError.staleAdminSession=true;" in script
+    assert "if(e?.staleAdminSession)return;" in script
+    assert "Withdrawal queue: '+e.message" in script
+    assert "Role management requires ADMINISTRATOR: '+esc(e.message)" in script
     assert "if(attemptEpoch!==adminSessionEpoch)return;" in script
 
 
