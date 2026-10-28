@@ -1313,7 +1313,7 @@ def _extract_json(text):
             with patch.object(migration, "ROOT", root), patch.object(
                 migration, "canonical_text", return_value=canonical
             ):
-                with self.assertRaisesRegex(migration.MigrationError, "branch-specific definition '_extract_json' that collides"):
+                with self.assertRaisesRegex(migration.MigrationError, "branch-specific definition 'json' that collides"):
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
@@ -2780,7 +2780,9 @@ def retained_helper():
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
     def test_strategy_migration_accepts_dependency_bound_in_both_try_and_except_paths(self):
-        legacy = self._legacy_strategy_with_retained_code("")
+        legacy = self._with_canonical_schema_context(
+            self._legacy_strategy_with_retained_code("")
+        )
         legacy = legacy.replace(
             "from .strategy_evidence import evidence_for\n",
             "try:\n"
