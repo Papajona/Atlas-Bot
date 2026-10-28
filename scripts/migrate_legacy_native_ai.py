@@ -1949,8 +1949,16 @@ def _is_unshadowed_pydantic_v2_model(
     return not any(rebinds(statement) for statement in schema_tree.body)
 
 
-def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree: ast.Module) -> bool:
+def _is_compatible_strategy_schema_and_context(
+    tree: ast.Module, canonical_tree: ast.Module, *, _debug: bool = False
+) -> bool:
     """Verify a legacy schema/context contract without requiring identical source syntax."""
+
+    def _reject(reason: str) -> bool:
+        if _debug:
+            print(f"schema compatibility rejected at {reason}")
+        return False
+
     canonical_schemas = [
         node for node in canonical_tree.body
         if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"
@@ -1958,16 +1966,16 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
     source_path = ROOT / "app" / "strategy_ai.py"
     resolved = _resolve_class_definition(source_path, tree, "AIStrategySpec")
     if len(canonical_schemas) != 1 or resolved is None:
-        return False
+        return _reject("source-line-18")
     schema_path, schema_tree, schema = resolved
     canonical_schema = canonical_schemas[0]
     if not _is_unshadowed_pydantic_v2_model(schema, schema_path, schema_tree):
-        return False
+        return _reject("source-line-22")
     if not any(
         isinstance(base, ast.Name) and base.id == "BaseModel"
         for base in canonical_schema.bases
     ):
-        return False
+        return _reject("source-line-27")
 
     def body_without_docstring(node: ast.ClassDef) -> list[ast.stmt]:
         body = list(node.body)
@@ -1998,7 +2006,7 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
     canonical_fields = field_map(canonical_body)
     fields = field_map(schema_body)
     if not canonical_fields or not set(canonical_fields).issubset(fields):
-        return False
+        return _reject("source-line-58")
 
     def expand_alias(node: ast.AST, aliases: dict[str, ast.AST], seen_aliases: set[str] | None = None) -> ast.AST:
         seen_aliases = set() if seen_aliases is None else seen_aliases
@@ -2082,23 +2090,23 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
     for name, canonical_field in canonical_fields.items():
         legacy_field = fields[name]
         if not annotation_compatible(legacy_field.annotation, canonical_field.annotation):
-            return False
+            return _reject("source-line-142")
         # A weaker legacy declaration must not bypass canonical length/range constraints
         # or make a required canonical field optional.
         if field_has_nondefault_constraints(canonical_field) and ast.dump(
             legacy_field, include_attributes=False
         ) != ast.dump(canonical_field, include_attributes=False):
-            return False
+            return _reject("source-line-148")
         if field_has_nondefault_constraints(legacy_field) and ast.dump(
             legacy_field, include_attributes=False
         ) != ast.dump(canonical_field, include_attributes=False):
-            return False
+            return _reject("source-line-152")
         if field_is_required(canonical_field) and not field_is_required(legacy_field):
-            return False
+            return _reject("source-line-154")
 
     for name, statement in fields.items():
         if name not in canonical_fields and field_is_required(statement):
-            return False
+            return _reject("source-line-158")
 
     canonical_methods = {
         node.name: node for node in canonical_body
@@ -2111,7 +2119,7 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
     if any(name not in canonical_methods or ast.dump(method, include_attributes=False)
            != ast.dump(canonical_methods[name], include_attributes=False)
            for name, method in methods.items()):
-        return False
+        return _reject("source-line-171")
 
     def model_config_node(body: list[ast.stmt]) -> ast.stmt | None:
         matches = [
@@ -2124,13 +2132,13 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
     canonical_config = model_config_node(canonical_body)
     config = model_config_node(schema_body)
     if config is not None and (canonical_config is None or ast.dump(config, include_attributes=False) != ast.dump(canonical_config, include_attributes=False)):
-        return False
+        return _reject("source-line-184")
 
     allowed_ids = {id(node) for node in fields.values()} | {id(node) for node in methods.values()}
     if config is not None:
         allowed_ids.add(id(config))
     if any(id(statement) not in allowed_ids for statement in schema_body):
-        return False
+        return _reject("source-line-190")
 
     contexts = [
         node for node in tree.body
@@ -2141,7 +2149,7 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
         if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
     ]
     if len(contexts) != 1 or len(canonical_contexts) != 1:
-        return False
+        return _reject("source-line-201")
 
     def _rooted_name(node: ast.AST) -> str | None:
         while isinstance(node, (ast.Attribute, ast.Subscript)):
@@ -2286,7 +2294,7 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
     # creation/call time. Verify every global they use against the pinned canonical AST.
     dependent_names = dependent_global_names(schema, contexts[0])
     if dependent_names is None:
-        return False
+        return _reject("source-line-346")
     for dependency in dependent_names:
         legacy_binding = module_binding_signature(schema_tree, dependency)
         canonical_binding = module_binding_signature(canonical_tree, dependency)
@@ -2295,13 +2303,13 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
             # don't require its entire AST to be canonical. Do require one unambiguous
             # class/import binding in each module, with no later conditional rebinding.
             if legacy_binding is None or module_binding_signature(tree, dependency) is None:
-                return False
+                return _reject("source-line-355")
             continue
         if dependency in dir(builtins) and legacy_binding is None and canonical_binding is None:
             # A built-in is safe only when neither module shadows it.
             continue
         if legacy_binding is None or legacy_binding != canonical_binding:
-            return False
+            return _reject("source-line-361")
 
     if (
         ast.dump(schema, include_attributes=False) == ast.dump(canonical_schema, include_attributes=False)
@@ -2318,11 +2326,11 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
         or any(not isinstance(value, ast.Constant) or value.value is not None for value in args.kw_defaults)
         or not context.body or not isinstance(context.body[-1], ast.Return)
     ):
-        return False
+        return _reject("source-line-378")
 
     returns = [node for node in ast.walk(context) if isinstance(node, ast.Return)]
     if len(returns) != 1 or returns[0] is not context.body[-1]:
-        return False
+        return _reject("source-line-382")
     result = returns[0].value
     if (
         not isinstance(result, ast.Call) or not isinstance(result.func, ast.Attribute)
@@ -2330,7 +2338,7 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
         or result.func.attr != "model_validate" or len(result.args) != 1
         or not isinstance(result.args[0], ast.Name) or result.args[0].id != "data" or result.keywords
     ):
-        return False
+        return _reject("source-line-390")
     assignments = [
         statement for statement in context.body
         if isinstance(statement, ast.Assign) and len(statement.targets) == 1
@@ -2340,7 +2348,7 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
         and statement.value.func.attr == "model_dump" and not statement.value.args and not statement.value.keywords
     ]
     if len(assignments) != 1 or assignments[0].lineno >= returns[0].lineno:
-        return False
+        return _reject("source-line-400")
 
     # All three user-selected market dimensions must be written into model data.
     # Otherwise the rewritten generator can validate a draft for a different market.
@@ -2349,7 +2357,7 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
         if statement is assignments[0] or statement is returns[0]:
             continue
         if not isinstance(statement, ast.If) or statement.orelse or len(statement.body) != 1:
-            return False
+            return _reject("source-line-409")
         test = statement.test
         if not (
             isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.IsNot)
@@ -2357,22 +2365,22 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
             and test.comparators[0].value is None and isinstance(test.left, ast.Name)
             and test.left.id in {"asset", "symbol", "timeframe"}
         ):
-            return False
+            return _reject("source-line-417")
         assignment = statement.body[0]
         if not isinstance(assignment, ast.Assign) or len(assignment.targets) != 1 or not isinstance(assignment.targets[0], ast.Subscript):
-            return False
+            return _reject("source-line-420")
         target = assignment.targets[0]
         if not isinstance(target.value, ast.Name) or target.value.id != "data" or not isinstance(target.slice, ast.Constant):
-            return False
+            return _reject("source-line-423")
         expected_key = {"asset": "asset", "symbol": "symbols", "timeframe": "timeframes"}[test.left.id]
         if target.slice.value != expected_key:
-            return False
+            return _reject("source-line-426")
         if test.left.id in {"asset", "timeframe"}:
             if not isinstance(assignment.value, ast.Name) or assignment.value.id != test.left.id:
-                return False
+                return _reject("source-line-429")
         else:
             if not isinstance(assignment.value, ast.List) or len(assignment.value.elts) != 1 or not isinstance(assignment.value.elts[0], ast.Name) or assignment.value.elts[0].id != "symbol":
-                return False
+                return _reject("source-line-432")
         bound_market_fields.add(test.left.id)
     return bound_market_fields == {"asset", "symbol", "timeframe"}
 
