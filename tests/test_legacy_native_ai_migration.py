@@ -2247,6 +2247,18 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
         self.assertEqual(parsed["description"], "Gemini research is informational only and never enables live trading.")
 
 
+    def test_schema_checker_rejects_classvar_for_required_strategy_field(self):
+        legacy = CANONICAL_STRATEGY.replace(
+            '    asset: Literal["crypto", "forex", "commodity"]\\n',
+            '    asset: ClassVar[Literal["crypto", "forex", "commodity"]]\\n',
+        )
+        self.assertNotEqual(legacy, CANONICAL_STRATEGY)
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(migration, "ROOT", Path(tmp)):
+                self.assertFalse(migration._is_compatible_strategy_schema_and_context(
+                    ast.parse(legacy), ast.parse(CANONICAL_STRATEGY)
+                ))
+
     def test_metadata_checker_rejects_provider_secret_refs_but_allows_descriptive_mentions(self):
         self.assertTrue(migration._metadata_has_active_provider_wiring(
             '{"secretRef": "atlas-openai-api-key"}'
