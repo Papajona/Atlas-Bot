@@ -39,3 +39,49 @@ def test_admin_mfa_enrollment_and_status_announcements_are_accessible():
     assert 'id="withdrawalRows" aria-live="polite"' in template
     assert 'id="roles" aria-live="polite"' in template
     assert 'id="trades" aria-live="polite"' in template
+
+
+def test_admin_dashboard_discards_stale_requests_after_session_changes():
+    script = (ROOT / "app/static/admin-dashboard.js").read_text(encoding="utf-8")
+
+    assert "let adminSessionEpoch=0;" in script
+    assert "const requestEpoch=adminSessionEpoch;" in script
+    assert "const requestToken=token();" in script
+    assert "requestEpoch===adminSessionEpoch&&requestToken===token()" in script
+    assert "if(sameSession)lockAdminDashboard(" in script
+    assert "if(!sameSession)throw new Error('Discarded stale administrator response after the session changed.');" in script
+    assert "if(attemptEpoch!==adminSessionEpoch)return;" in script
+
+
+def test_admin_lock_clears_authenticator_secrets_and_preserves_sign_out_access():
+    script = (ROOT / "app/static/admin-dashboard.js").read_text(encoding="utf-8")
+    lock = script.split("function lockAdminDashboard(message,clearTokens=true){", 1)[1].split(
+        "function activateDashboard(){", 1
+    )[0]
+
+    assert "adminSessionEpoch+=1;" in lock
+    assert "window.adminMfaFactorId=null;" in lock
+    assert "window.adminMfaChallengeId=null;" in lock
+    assert "$('adminMfaEnrollment').hidden=true;" in lock
+    assert "$('adminMfaQr').removeAttribute('src');" in lock
+    assert "$('adminMfaSecret').textContent='';" in lock
+    assert "$('adminMfaCode').value='';" in lock
+    assert "$('adminLogoutBtn').hidden=!token();" in lock
+
+
+def test_admin_mfa_retries_expired_challenges_and_recovers_partial_enrollment():
+    script = (ROOT / "app/static/admin-dashboard.js").read_text(encoding="utf-8")
+    enrollment = script.split("async function adminEnroll(){", 1)[1].split(
+        "async function adminMfaVerify(){", 1
+    )[0]
+    verification = script.split("async function adminMfaVerify(){", 1)[1].split(
+        "function adminLogout(){", 1
+    )[0]
+    enrollment_catch = enrollment.split("}catch(error){", 1)[1]
+
+    assert "if(attemptEpoch!==adminSessionEpoch)return;" in enrollment_catch
+    assert "$('adminMfaBox').style.display='block';" in enrollment_catch
+    assert "$('adminMfaVerifyBtn').style.display='inline-block';" in enrollment_catch
+    assert "window.adminMfaChallengeId=null;" in verification
+    assert "if(!window.adminMfaChallengeId){" in verification
+    assert "You can retry; a fresh challenge will be requested." in verification
