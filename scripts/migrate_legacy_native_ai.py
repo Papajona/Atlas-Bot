@@ -7,6 +7,8 @@ whose unrelated hunks collide with each branch. It deliberately refuses uncertai
 from __future__ import annotations
 
 import ast
+import builtins
+import symtable
 import json
 import re
 import subprocess
@@ -753,6 +755,180 @@ def _assigned_names(target: ast.AST) -> set[str]:
 
 
 
+def _module_path_for_import(source_path: Path, node: ast.ImportFrom, imported_name: str | None = None) -> Path | None:
+    """Resolve a Python source module inside the checked-out repo without importing it."""
+    if node.level:
+        base = source_path.parent
+        for _ in range(node.level - 1):
+            base = base.parent
+        parts = node.module.split(".") if node.module else ([imported_name] if imported_name else [])
+        base = base.joinpath(*parts)
+    else:
+        module_name = node.module or imported_name
+        if not module_name:
+            return None
+        base = ROOT.joinpath(*module_name.split("."))
+    candidates = (base / "__init__.py", base.with_suffix(".py"))
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def _module_path_for_name(module_name: str) -> Path | None:
+    """Resolve a statically named project module, preferring package __init__.py."""
+    if not module_name or module_name.split(".", 1)[0] in {"pydantic", "pydantic_settings", "typing"}:
+        return None
+    base = ROOT.joinpath(*module_name.split("."))
+    candidates = (base / "__init__.py", base.with_suffix(".py"))
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def _resolve_class_symbol(
+    source_path: Path,
+    module_tree: ast.Module,
+    symbol_name: str,
+    seen: set[tuple[str, str]] | None = None,
+) -> tuple[Path, ast.Module, ast.ClassDef] | None:
+    """Resolve a class defined locally or imported from a statically resolvable project module."""
+    seen = set() if seen is None else set(seen)
+    key = (str(source_path), symbol_name)
+    if key in seen:
+        return None
+    seen.add(key)
+    matches = [
+        node for node in module_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == symbol_name
+    ]
+    if len(matches) == 1:
+        return source_path, module_tree, matches[0]
+    if matches:
+        return None
+    for import_node in module_tree.body:
+        if not isinstance(import_node, ast.ImportFrom):
+            continue
+        for alias in import_node.names:
+            if alias.name == "*" or (alias.asname or alias.name) != symbol_name:
+                continue
+            target_path = _module_path_for_import(source_path, import_node, alias.name)
+            if target_path is None:
+                continue
+            try:
+                target_tree = ast.parse(target_path.read_text(encoding="utf-8"), filename=str(target_path))
+            except (OSError, SyntaxError):
+                return None
+            return _resolve_class_symbol(target_path, target_tree, alias.name, seen)
+    return None
+
+
+def _dotted_ast_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _dotted_ast_name(node.value)
+        return f"{prefix}.{node.attr}" if prefix else None
+    return None
+
+
+def _resolve_base_class(
+    source_path: Path,
+    module_tree: ast.Module,
+    base: ast.AST,
+    seen: set[tuple[str, str]] | None = None,
+) -> tuple[Path, ast.Module, ast.ClassDef] | None:
+    if isinstance(base, ast.Name):
+        return _resolve_class_symbol(source_path, module_tree, base.id, seen)
+    if not isinstance(base, ast.Attribute):
+        return None
+    dotted = _dotted_ast_name(base.value)
+    if not dotted:
+        return None
+    module_name: str | None = None
+    for import_node in module_tree.body:
+        if isinstance(import_node, ast.Import):
+            for alias in import_node.names:
+                bound = alias.asname or alias.name.split(".", 1)[0]
+                if dotted == bound:
+                    module_name = alias.name
+                    break
+                if alias.asname and dotted == alias.asname:
+                    module_name = alias.name
+                    break
+        elif isinstance(import_node, ast.ImportFrom):
+            for alias in import_node.names:
+                if alias.name == "*" or (alias.asname or alias.name) != dotted:
+                    continue
+                target_path = _module_path_for_import(source_path, import_node, alias.name)
+                if target_path is not None:
+                    try:
+                        target_tree = ast.parse(target_path.read_text(encoding="utf-8"), filename=str(target_path))
+                    except (OSError, SyntaxError):
+                        return None
+                    return _resolve_class_symbol(target_path, target_tree, base.attr, seen)
+    if module_name:
+        target_path = _module_path_for_name(module_name)
+        if target_path is not None:
+            try:
+                target_tree = ast.parse(target_path.read_text(encoding="utf-8"), filename=str(target_path))
+            except (OSError, SyntaxError):
+                return None
+            return _resolve_class_symbol(target_path, target_tree, base.attr, seen)
+    return None
+
+
+def _is_pydantic_base(base: ast.AST, source_path: Path, module_tree: ast.Module) -> bool:
+    if isinstance(base, ast.Name):
+        for import_node in module_tree.body:
+            if not isinstance(import_node, ast.ImportFrom) or import_node.module not in {"pydantic", "pydantic.v1"}:
+                continue
+            for alias in import_node.names:
+                if alias.name == "BaseModel" and (alias.asname or alias.name) == base.id:
+                    return True
+    if isinstance(base, ast.Attribute) and base.attr == "BaseModel":
+        dotted = _dotted_ast_name(base.value)
+        if dotted:
+            for import_node in module_tree.body:
+                if not isinstance(import_node, ast.Import):
+                    continue
+                for alias in import_node.names:
+                    bound = alias.asname or alias.name.split(".", 1)[0]
+                    if bound == dotted and alias.name in {"pydantic", "pydantic.v1"}:
+                        return True
+    return False
+
+
+def _class_contract_info(
+    source_path: Path,
+    module_tree: ast.Module,
+    class_node: ast.ClassDef,
+    seen: set[tuple[str, str]] | None = None,
+) -> tuple[bool, set[str]]:
+    """Return whether a class is Pydantic-backed and its statically visible inherited fields."""
+    seen = set() if seen is None else set(seen)
+    key = (str(source_path), class_node.name)
+    if key in seen:
+        return False, set()
+    seen.add(key)
+    fields: set[str] = set()
+    for member in class_node.body:
+        if isinstance(member, ast.AnnAssign) and isinstance(member.target, ast.Name):
+            fields.add(member.target.id)
+        elif isinstance(member, ast.Assign):
+            fields.update(
+                target.id for target in member.targets if isinstance(target, ast.Name)
+            )
+    is_model = False
+    for base in class_node.bases:
+        if _is_pydantic_base(base, source_path, module_tree):
+            is_model = True
+            continue
+        resolved = _resolve_base_class(source_path, module_tree, base, set())
+        if resolved is None:
+            continue
+        parent_path, parent_tree, parent_class = resolved
+        parent_is_model, parent_fields = _class_contract_info(parent_path, parent_tree, parent_class, seen)
+        is_model = is_model or parent_is_model
+        fields.update(parent_fields)
+    return is_model, fields
+
+
 def _is_legacy_ai_provider_error_stub(node: ast.AST) -> bool:
     """Recognize only the empty legacy exception class replaced by Native AI's alias."""
     if not isinstance(node, ast.ClassDef) or node.name != "AIProviderError":
@@ -1389,6 +1565,69 @@ def transform_strategy_ai(commit: str) -> None:
 
     if canonical_generate is None:
         raise MigrationError("canonical strategy module lacks generate_strategy_draft")
+    # Check retained schema/helper contracts before transplanting the canonical generator.
+    canonical_spec = next(
+        (node for node in new_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"),
+        None,
+    )
+    canonical_context = next(
+        (node for node in new_tree.body
+         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_apply_market_context"),
+        None,
+    )
+    if canonical_spec is not None:
+        legacy_spec = next(
+            (node for node in old_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"),
+            None,
+        )
+        if legacy_spec is None:
+            raise MigrationError("legacy strategy module lacks AIStrategySpec required by the canonical generator")
+        is_model, effective_fields = _class_contract_info(path, old_tree, legacy_spec)
+        required_spec_fields = {"asset", "symbols", "timeframes", "strategy_family", "validation_warnings"}
+        if not is_model or not required_spec_fields.issubset(effective_fields):
+            missing_fields = sorted(required_spec_fields - effective_fields)
+            detail = ", ".join(missing_fields) if missing_fields else "a verifiable Pydantic BaseModel ancestry"
+            raise MigrationError(
+                "legacy AIStrategySpec does not satisfy the canonical generator contract; "
+                f"missing or unverifiable contract: {detail}"
+            )
+
+        if canonical_context is not None:
+            legacy_context = next(
+                (node for node in old_tree.body
+                 if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"),
+                None,
+            )
+            if legacy_context is None:
+                raise MigrationError(
+                    "legacy strategy module lacks a synchronous _apply_market_context required by the canonical generator"
+                )
+            arguments = legacy_context.args
+            positional = [*arguments.posonlyargs, *arguments.args]
+            parameter_names = {arg.arg for arg in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)}
+            required_context_keywords = {"asset", "symbol", "timeframe"}
+            supports_keywords = arguments.kwarg is not None or required_context_keywords.issubset(parameter_names)
+            if not positional or positional[0].arg != "spec" or not supports_keywords:
+                raise MigrationError(
+                    "legacy _apply_market_context signature is incompatible with canonical keyword calls"
+                )
+
+        config_path = ROOT / "app/config.py"
+        if not config_path.is_file():
+            raise MigrationError("app/config.py is absent; cannot verify canonical strategy risk configuration")
+        config_tree = ast.parse(config_path.read_text(encoding="utf-8"), filename=str(config_path))
+        settings_class = next(
+            (node for node in config_tree.body if isinstance(node, ast.ClassDef) and node.name == "Settings"),
+            None,
+        )
+        if settings_class is None:
+            raise MigrationError("app/config.py lacks a statically verifiable Settings class")
+        _, settings_fields = _class_contract_info(config_path, config_tree, settings_class)
+        if "risk_per_trade" not in settings_fields:
+            raise MigrationError(
+                "legacy Settings class does not define or inherit risk_per_trade required by canonical strategy generation"
+            )
+
     canonical_lines = canonical.splitlines(keepends=True)
     new_function = "".join(canonical_lines[canonical_generate.lineno - 1:canonical_generate.end_lineno])
 
@@ -1414,6 +1653,64 @@ def transform_strategy_ai(commit: str) -> None:
             continue
         retained_nodes.append(node)
 
+    # Scope-aware references distinguish a retained helper's parameter from a real
+    # reference to a removed module global.
+    retained_module = ast.Module(body=retained_nodes, type_ignores=[])
+    try:
+        retained_symbols = symtable.symtable(ast.unparse(retained_module), str(path), "exec")
+    except (SyntaxError, ValueError) as exc:
+        raise MigrationError("unable to resolve retained strategy helper scopes safely") from exc
+    retained_module_bindings: set[str] = set()
+    for retained_node in retained_nodes:
+        # Delete targets are collisions for the facade, but do not prove a name is
+        # bound after migration; chained assignments retained verbatim do.
+        if not isinstance(retained_node, ast.Delete):
+            retained_module_bindings.update(_defined_names(retained_node))
+    removed_local_dependencies = (
+        {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider"} - retained_module_bindings
+    )
+    retained_removed_global_uses: set[str] = set()
+
+    def collect_removed_global_references(table: symtable.SymbolTable) -> None:
+        for removed_name in removed_local_dependencies:
+            try:
+                symbol = table.lookup(removed_name)
+            except KeyError:
+                continue
+            if symbol.is_referenced() and symbol.is_global():
+                retained_removed_global_uses.add(removed_name)
+        for child in table.get_children():
+            collect_removed_global_references(child)
+
+    collect_removed_global_references(retained_symbols)
+    if retained_removed_global_uses:
+        raise MigrationError(
+            "retained strategy helper depends on removed local definition(s) "
+            + ", ".join(sorted(retained_removed_global_uses))
+            + "; refusing to remove prompt or provider behavior"
+        )
+
+    # __all__ is string-based, so Name-node dependency scans do not see removed exports.
+    for retained_node in retained_nodes:
+        targets = (
+            retained_node.targets if isinstance(retained_node, ast.Assign)
+            else [retained_node.target] if isinstance(retained_node, ast.AnnAssign)
+            else []
+        )
+        if not any(isinstance(target, ast.Name) and target.id == "__all__" for target in targets):
+            continue
+        try:
+            exports = ast.literal_eval(retained_node.value) if retained_node.value is not None else None
+        except (ValueError, TypeError):
+            exports = None
+        if not isinstance(exports, (list, tuple, set)) or not all(isinstance(export, str) for export in exports):
+            raise MigrationError("strategy module has dynamic __all__; refusing to remove names that may be exported")
+        lost_exports = sorted(removed_local_dependencies & set(exports))
+        if lost_exports:
+            raise MigrationError(
+                "strategy module __all__ exports definitions removed by migration: " + ", ".join(lost_exports)
+            )
+
     retained_name_uses = {
         part.id
         for node in retained_nodes
@@ -1433,6 +1730,41 @@ def transform_strategy_ai(commit: str) -> None:
             "retained strategy helper depends on non-native or aliased .ai_providers import(s) "
             + ", ".join(unsafe_imports)
             + "; only imports whose original symbol matches NativeAIError or compose_strategy_spec can be remapped"
+        )
+
+    # Use Python's symbol table rather than treating every loaded Name as a module global:
+    # imports and assignments inside the canonical function are local bindings, not dependencies.
+    try:
+        canonical_scope = symtable.symtable(
+            ast.unparse(ast.Module(body=[canonical_generate], type_ignores=[])),
+            str(path),
+            "exec",
+        )
+    except (SyntaxError, ValueError) as exc:
+        raise MigrationError("unable to resolve canonical strategy generator scopes safely") from exc
+    canonical_global_loads: set[str] = set()
+
+    def collect_canonical_global_loads(table: symtable.SymbolTable) -> None:
+        for symbol in table.get_symbols():
+            if symbol.is_referenced() and symbol.is_global():
+                canonical_global_loads.add(symbol.get_name())
+        for child in table.get_children():
+            collect_canonical_global_loads(child)
+
+    collect_canonical_global_loads(canonical_scope)
+    canonical_global_loads -= set(dir(builtins))
+    available_names: set[str] = set()
+    for retained_node in retained_nodes:
+        if isinstance(retained_node, ast.AnnAssign) and retained_node.value is None:
+            continue
+        available_names.update(_defined_names(retained_node))
+    remappable_names = {"NativeAIError", "compose_strategy_spec"}
+    missing_dependencies = sorted(canonical_global_loads - available_names - remappable_names)
+    if missing_dependencies:
+        raise MigrationError(
+            "canonical strategy generator depends on missing module binding(s): "
+            + ", ".join(missing_dependencies)
+            + "; refusing to publish a broken strategy module"
         )
 
     edits: list[tuple[int, int, str]] = []
@@ -1786,9 +2118,8 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             raise MigrationError(
                 f"{path} retains provider text in a non-provider shell statement; refusing lossy deletion"
             )
-        if line.strip():
-            output.append(line)
-        elif original.strip():
+        # Preserve original blank lines, but do not keep lines emptied by provider removal.
+        if line.strip() or not original.strip():
             output.append(line)
 
     if skip_provider_block:
@@ -1811,26 +2142,39 @@ def scrub_ancillary_text(path: str, text: str) -> str:
         def scrub(value, key_context=""):
             if isinstance(value, dict):
                 return {
-                    k: scrub(v, str(k))
-                    for k, v in value.items()
-                    if not PROVIDER_FIELD_RE.search(str(k))
+                    key: scrub(item, str(key))
+                    for key, item in value.items()
+                    if not PROVIDER_FIELD_RE.search(str(key))
                 }
             if isinstance(value, list):
                 return [scrub(item, key_context) for item in value]
             if isinstance(value, str) and PROVIDER_RE.search(value):
                 if re.fullmatch(r"(?i)(?:[a-z0-9]+_)*model(?:_(?:id|name|version))?", key_context):
                     return "atlas-native-strategy-v1"
+                # Remove actual credentials/endpoints, but preserve descriptive and audit
+                # values that merely mention a provider name.
                 cleaned = SECRET_VERSION_RE.sub("", value)
                 cleaned = KEY_ASSIGNMENT_RE.sub("", cleaned)
                 cleaned = HOST_RE.sub("", cleaned)
                 cleaned = MODEL_RE.sub("atlas-native-strategy-v1", cleaned)
-                return PROVIDER_RE.sub("legacy provider", cleaned)
+                return cleaned
             return value
 
-        return json.dumps(scrub(data), indent=2, ensure_ascii=False) + "\n"
+        scrubbed = scrub(data)
+        # Keep whitespace, key order, and formatting stable for a semantic no-op.
+        if scrubbed == data:
+            return text
+        encoded = json.dumps(scrubbed, indent=2, ensure_ascii=False) + "\n"
+        json.loads(encoded)
+        return encoded
 
     kept: list[str] = []
     for line in text.splitlines(keepends=True):
+        if path == ".env.example" and line.lstrip().startswith("#") and (
+            re.search(r"(?i)optional server-side.*(?:provider gateway|ai gateway|openai-compatible gateway)", line)
+            or re.search(r"(?i)keep the key in server Secret Manager", line)
+        ):
+            continue
         if not PROVIDER_RE.search(line):
             kept.append(line)
             continue
@@ -1848,8 +2192,6 @@ def scrub_ancillary_text(path: str, text: str) -> str:
     cleaned = "".join(_remove_empty_env(kept))
     if PROVIDER_RE.search(cleaned):
         raise MigrationError(f"{path} still contains provider references")
-    if path == "metadata.json":
-        json.loads(cleaned)
     return cleaned
 
 
@@ -1886,6 +2228,34 @@ def apply_ancillary_patch(commit: str, path: str, extra_base: str, extra_commit:
             target.write_text(cleaned, encoding="utf-8")
 
 
+def _metadata_has_active_provider_wiring(text: str) -> bool:
+    """Allow inert prose, but reject provider settings, credential assignments, and endpoints."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return True
+
+    def visit(value, key_context="") -> bool:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_text = str(key)
+                if PROVIDER_FIELD_RE.search(key_text):
+                    return True
+                if visit(item, key_text):
+                    return True
+            return False
+        if isinstance(value, list):
+            return any(visit(item, key_context) for item in value)
+        if isinstance(value, str):
+            if KEY_ASSIGNMENT_RE.search(value) or SECRET_VERSION_RE.search(value) or HOST_RE.search(value):
+                return True
+            if re.search(r"(?i)(?:provider|gateway|model|api[_ -]?key|secret|endpoint)", key_context) and PROVIDER_RE.search(value):
+                return True
+        return False
+
+    return visit(data)
+
+
 def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:
     # Canonical Native AI source and the original provider-removal patch baseline are
     # independent pins: changing one must not widen the other per-path diff.
@@ -1908,7 +2278,13 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
     remaining = []
     for path in NATIVE_PATHS:
         target = ROOT / path
-        if target.is_file() and PROVIDER_RE.search(target.read_text(encoding="utf-8")):
+        if not target.is_file():
+            continue
+        contents = target.read_text(encoding="utf-8")
+        if path == "metadata.json":
+            if _metadata_has_active_provider_wiring(contents):
+                remaining.append(path)
+        elif PROVIDER_RE.search(contents):
             remaining.append(path)
     if remaining:
         raise MigrationError("provider references remain in: " + ", ".join(remaining))

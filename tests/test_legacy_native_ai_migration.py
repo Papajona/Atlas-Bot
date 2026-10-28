@@ -1729,7 +1729,7 @@ async def _gemini_json(prompt):
         self.assertNotIn("gemini_api_key", parsed)
         self.assertEqual(parsed["app_version"], "3.10.47")
         self.assertIn("informational only", parsed["description"])
-        self.assertNotIn("Gemini", parsed["description"])
+        self.assertEqual(parsed["description"], "Gemini research is informational only and never enables live trading.")
 
 
     def test_shell_deployment_scrub_preserves_non_ai_settings_and_shell_syntax(self):
@@ -1826,6 +1826,541 @@ async def keep_customer_route():
         self.assertIn("async def keep_customer_route", result)
         ast.parse(result, filename="app/main.py")
 
+
+    def test_strategy_migration_refuses_when_canonical_generator_dependency_is_missing(self):
+        legacy = (
+            "from .config import settings\n"
+            "from .ai_providers import AIProviderError, _gemini_json, _groq_json\n"
+            "evidence_for: object\n"
+            "SYSTEM_PROMPT = 'legacy prompt'\n"
+            "def _strategy_prompt(prompt, name):\n"
+            "    return prompt\n\n"
+            "async def _generate_with_provider(provider, prompt):\n"
+            "    return await _gemini_json(prompt)\n\n"
+            "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+            "    return await _generate_with_provider('gemini', prompt)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "canonical strategy generator depends on missing module binding.*evidence_for",
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
+    def test_strategy_migration_refuses_retained_helper_using_removed_prompt_data(self):
+        legacy = (
+            "from .config import settings\n"
+            "from .ai_providers import AIProviderError, _gemini_json, _groq_json\n"
+            "from .strategy_evidence import evidence_for\n\n"
+            "SYSTEM_PROMPT = 'legacy prompt'\n\n"
+            "def _strategy_prompt(prompt, name):\n"
+            "    return prompt\n\n"
+            "async def _generate_with_provider(provider, prompt):\n"
+            "    return await _gemini_json(prompt)\n\n"
+            "def retained_prompt_audit():\n"
+            "    return SYSTEM_PROMPT\n\n"
+            "def _apply_market_context(spec, asset=None, symbol=None, timeframe=None):\n"
+            "    return spec\n\n"
+            "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+            "    return await _generate_with_provider('gemini', prompt)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "retained strategy helper depends on removed local definition.*SYSTEM_PROMPT",
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
+    def test_strategy_migration_refuses_removed_prompt_in_all_exports(self):
+        legacy = (
+            "from .config import settings\n"
+            "from .ai_providers import _gemini_json, _groq_json\n"
+            "from .strategy_evidence import evidence_for\n"
+            "__all__ = ['SYSTEM_PROMPT']\n"
+            "SYSTEM_PROMPT = 'legacy prompt'\n"
+            "def _strategy_prompt(prompt, name):\n"
+            "    return prompt\n\n"
+            "async def _generate_with_provider(provider, prompt):\n"
+            "    return await _gemini_json(prompt)\n\n"
+            "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+            "    return await _generate_with_provider('gemini', prompt)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "__all__ exports definitions removed by migration.*SYSTEM_PROMPT",
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
+    def test_strategy_migration_allows_retained_helper_parameter_shadowing_prompt_global(self):
+        legacy = (
+            "from .config import settings\n"
+            "from .ai_providers import _gemini_json, _groq_json\n"
+            "from .strategy_evidence import evidence_for\n"
+            "SYSTEM_PROMPT = 'legacy prompt'\n"
+            "def _strategy_prompt(prompt, name):\n"
+            "    return prompt\n\n"
+            "async def _generate_with_provider(provider, prompt):\n"
+            "    return await _gemini_json(prompt)\n\n"
+            "def audit(SYSTEM_PROMPT):\n"
+            "    return SYSTEM_PROMPT\n\n"
+            "def _apply_market_context(spec, asset=None, symbol=None, timeframe=None):\n"
+            "    return spec\n\n"
+            "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+            "    return await _generate_with_provider('gemini', prompt)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                migration.transform_strategy_ai("fake-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("def audit(SYSTEM_PROMPT):", result)
+            self.assertIn("return SYSTEM_PROMPT", result)
+            self.assertNotIn("SYSTEM_PROMPT = ", result)
+            ast.parse(result, filename="app/strategy_ai.py")
+
+
+    def test_strategy_migration_rejects_incompatible_retained_schema(self):
+        canonical = """from .config import settings
+from .native_ai import NativeAIError, compose_strategy_spec
+from .strategy_evidence import evidence_for
+
+class AIStrategySpec(BaseModel):
+    asset: str
+    symbols: list[str]
+    timeframes: list[str]
+    strategy_family: str
+    validation_warnings: list[str]
+
+def _apply_market_context(spec, *, asset=None, symbol=None, timeframe=None):
+    return spec
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    try:
+        raw = compose_strategy_spec(prompt=prompt, name=name, asset=asset, symbol=symbol,
+                                   timeframe=timeframe, max_risk_per_trade=settings.risk_per_trade)
+        spec = AIStrategySpec.model_validate(raw)
+        spec = _apply_market_context(spec, asset=asset, symbol=symbol, timeframe=timeframe)
+    except Exception as exc:
+        raise NativeAIError(str(exc)) from exc
+    family = {"TREND": "trend", "MOMENTUM": "momentum"}[spec.strategy_family]
+    return {"strategy": spec.model_dump(), "evidence": evidence_for(family)}
+"""
+        legacy = (
+            "from .config import settings\n"
+            "from .ai_providers import _gemini_json, _groq_json\n"
+            "from .strategy_evidence import evidence_for\n"
+            "class AIStrategySpec:\n"
+            "    pass\n\n"
+            "SYSTEM_PROMPT = 'legacy prompt'\n"
+            "def _strategy_prompt(prompt, name):\n"
+            "    return prompt\n\n"
+            "async def _generate_with_provider(provider, prompt):\n"
+            "    return await _gemini_json(prompt)\n\n"
+            "def _apply_market_context(spec, asset=None, symbol=None, timeframe=None):\n"
+            "    return spec\n\n"
+            "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+            "    return await _generate_with_provider('gemini', prompt)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "AIStrategySpec does not satisfy the canonical generator contract",
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
+    def test_shell_deployment_scrub_preserves_blank_lines_without_provider_text(self):
+        source = "#!/usr/bin/env bash\nset -euo pipefail\n\nDATABASE_URL=\n\n"
+        self.assertEqual(
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source),
+            source,
+        )
+
+
+    def test_metadata_scrub_preserves_original_format_when_nothing_changes(self):
+        source = '{\n  "name": "Atlas Trading",\n  "majorCapabilities": ["PAPER_MODE"]\n}\n'
+        self.assertEqual(migration.scrub_ancillary_text("metadata.json", source), source)
+
+
+    def test_env_example_drops_obsolete_provider_gateway_comments(self):
+        source = (
+            "# Optional server-side legacy provider gateway for admin release diagnostics.\n"
+            "# Keep the key in server Secret Manager; never put it in Android resources/build config.\n"
+            "PAPER_TRADING=true\n"
+        )
+        cleaned = migration.scrub_ancillary_text(".env.example", source)
+        self.assertNotIn("gateway", cleaned.lower())
+        self.assertNotIn("Secret Manager", cleaned)
+        self.assertIn("PAPER_TRADING=true", cleaned)
+
+
+    def test_strategy_migration_rejects_async_market_context_helper(self):
+        canonical = """from .config import settings
+from .native_ai import NativeAIError, compose_strategy_spec
+from .strategy_evidence import evidence_for
+from pydantic import BaseModel
+
+class AIStrategySpec(BaseModel):
+    asset: str
+    symbols: list[str]
+    timeframes: list[str]
+    strategy_family: str
+    validation_warnings: list[str]
+
+def _apply_market_context(spec, *, asset=None, symbol=None, timeframe=None):
+    return spec
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    raw = compose_strategy_spec(prompt=prompt, name=name, asset=asset, symbol=symbol,
+                                timeframe=timeframe, max_risk_per_trade=settings.risk_per_trade)
+    spec = AIStrategySpec.model_validate(raw)
+    spec = _apply_market_context(spec, asset=asset, symbol=symbol, timeframe=timeframe)
+    family = {"TREND": "trend", "MOMENTUM": "momentum"}[spec.strategy_family]
+    return {"strategy": spec.model_dump(), "evidence": evidence_for(family)}
+"""
+        legacy = """from .config import settings
+from .ai_providers import NativeAIError, _gemini_json, _groq_json
+from .strategy_evidence import evidence_for
+from pydantic import BaseModel
+
+class AIStrategySpec(BaseModel):
+    asset: str
+    symbols: list[str]
+    timeframes: list[str]
+    strategy_family: str
+    validation_warnings: list[str]
+
+SYSTEM_PROMPT = "legacy"
+def _strategy_prompt(prompt, name):
+    return prompt
+
+async def _generate_with_provider(provider, prompt):
+    return await _gemini_json(prompt)
+
+async def _apply_market_context(spec, asset=None, symbol=None, timeframe=None):
+    return spec
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    return await _generate_with_provider("gemini", prompt)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            (root / "app" / "strategy_ai.py").write_text(legacy, encoding="utf-8")
+            (root / "app" / "config.py").write_text(
+                "class Settings:\n    risk_per_trade: float = 0.01\n",
+                encoding="utf-8",
+            )
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "lacks a synchronous _apply_market_context"):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual((root / "app" / "strategy_ai.py").read_text(encoding="utf-8"), legacy)
+
+
+    def test_metadata_scrub_preserves_descriptive_provider_mentions(self):
+        source = '{\n  "description": "Legacy audit note mentions Gemini, not a provider setting.",\n  "majorCapabilities": ["Historical Groq compatibility note"]\n}\n'
+        self.assertEqual(migration.scrub_ancillary_text("metadata.json", source), source)
+
+
+    def test_strategy_migration_accepts_inherited_schema_fields_and_base_alias(self):
+        canonical = """from .config import settings
+from .native_ai import NativeAIError, compose_strategy_spec
+from .strategy_evidence import evidence_for
+from pydantic import BaseModel
+
+class AIStrategySpec(BaseModel):
+    asset: str
+    symbols: list[str]
+    timeframes: list[str]
+    strategy_family: str
+    validation_warnings: list[str]
+
+def _apply_market_context(spec, *, asset=None, symbol=None, timeframe=None):
+    return spec
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    raw = compose_strategy_spec(prompt=prompt, name=name, asset=asset, symbol=symbol,
+                                timeframe=timeframe, max_risk_per_trade=settings.risk_per_trade)
+    spec = AIStrategySpec.model_validate(raw)
+    spec = _apply_market_context(spec, asset=asset, symbol=symbol, timeframe=timeframe)
+    family = {"TREND": "trend", "MOMENTUM": "momentum"}[spec.strategy_family]
+    return {"strategy": spec.model_dump(), "evidence": evidence_for(family)}
+"""
+        legacy = """from .config import settings
+from .ai_providers import _gemini_json, _groq_json
+from .strategy_evidence import evidence_for
+from pydantic import BaseModel as SchemaModel
+
+class SharedSpec(SchemaModel):
+    asset: str
+    symbols: list[str]
+    timeframes: list[str]
+    strategy_family: str
+    validation_warnings: list[str]
+
+class AIStrategySpec(SharedSpec):
+    pass
+
+SYSTEM_PROMPT = "legacy"
+def _strategy_prompt(prompt, name):
+    return prompt
+
+async def _generate_with_provider(provider, prompt):
+    return await _gemini_json(prompt)
+
+def _apply_market_context(spec, asset=None, symbol=None, timeframe=None):
+    return spec
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    return await _generate_with_provider("gemini", prompt)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            (root / "app" / "strategy_ai.py").write_text(legacy, encoding="utf-8")
+            (root / "app" / "config.py").write_text(
+                "class Settings:\n    risk_per_trade: float = 0.01\n",
+                encoding="utf-8",
+            )
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_strategy_ai("fake-commit")
+            result = (root / "app" / "strategy_ai.py").read_text(encoding="utf-8")
+            self.assertIn("class AIStrategySpec(SharedSpec):", result)
+            ast.parse(result, filename="app/strategy_ai.py")
+
+    def test_strategy_migration_accepts_inherited_shared_risk_setting(self):
+        canonical = """from .config import settings
+from .native_ai import NativeAIError, compose_strategy_spec
+from .strategy_evidence import evidence_for
+from pydantic import BaseModel
+
+class AIStrategySpec(BaseModel):
+    asset: str
+    symbols: list[str]
+    timeframes: list[str]
+    strategy_family: str
+    validation_warnings: list[str]
+
+def _apply_market_context(spec, *, asset=None, symbol=None, timeframe=None):
+    return spec
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    raw = compose_strategy_spec(prompt=prompt, name=name, asset=asset, symbol=symbol,
+                                timeframe=timeframe, max_risk_per_trade=settings.risk_per_trade)
+    spec = AIStrategySpec.model_validate(raw)
+    spec = _apply_market_context(spec, asset=asset, symbol=symbol, timeframe=timeframe)
+    family = {"TREND": "trend", "MOMENTUM": "momentum"}[spec.strategy_family]
+    return {"strategy": spec.model_dump(), "evidence": evidence_for(family)}
+"""
+        legacy = """from .config import settings
+from .ai_providers import _gemini_json, _groq_json
+from .strategy_evidence import evidence_for
+from pydantic import BaseModel
+
+class AIStrategySpec(BaseModel):
+    asset: str
+    symbols: list[str]
+    timeframes: list[str]
+    strategy_family: str
+    validation_warnings: list[str]
+
+SYSTEM_PROMPT = "legacy"
+def _strategy_prompt(prompt, name):
+    return prompt
+
+async def _generate_with_provider(provider, prompt):
+    return await _gemini_json(prompt)
+
+def _apply_market_context(spec, asset=None, symbol=None, timeframe=None):
+    return spec
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    return await _generate_with_provider("gemini", prompt)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = root / "app"
+            app.mkdir()
+            (app / "strategy_ai.py").write_text(legacy, encoding="utf-8")
+            (app / "config.py").write_text(
+                "from .shared_settings import SharedRiskSettings\nclass Settings(SharedRiskSettings):\n    pass\nsettings = Settings()\n",
+                encoding="utf-8",
+            )
+            (app / "shared_settings.py").write_text(
+                "class SharedRiskSettings:\n    risk_per_trade: float = 0.01\n",
+                encoding="utf-8",
+            )
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_strategy_ai("fake-commit")
+            result = (app / "strategy_ai.py").read_text(encoding="utf-8")
+            self.assertIn("async def generate_strategy_draft", result)
+            ast.parse(result, filename="app/strategy_ai.py")
+
+
+    def test_strategy_migration_accepts_local_imports_inside_canonical_generator(self):
+        canonical = """from .config import settings
+from .native_ai import NativeAIError, compose_strategy_spec
+from .strategy_evidence import evidence_for
+from pydantic import BaseModel
+
+class AIStrategySpec(BaseModel):
+    asset: str
+    symbols: list[str]
+    timeframes: list[str]
+    strategy_family: str
+    validation_warnings: list[str]
+
+def _apply_market_context(spec, *, asset=None, symbol=None, timeframe=None):
+    return spec
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    import json
+    _payload = json.loads(prompt)
+    raw = compose_strategy_spec(prompt=prompt, name=name, asset=asset, symbol=symbol,
+                                timeframe=timeframe, max_risk_per_trade=settings.risk_per_trade)
+    spec = AIStrategySpec.model_validate(raw)
+    spec = _apply_market_context(spec, asset=asset, symbol=symbol, timeframe=timeframe)
+    family = {"TREND": "trend", "MOMENTUM": "momentum"}[spec.strategy_family]
+    return {"strategy": spec.model_dump(), "evidence": evidence_for(family)}
+"""
+        legacy = """from .config import settings
+from .ai_providers import _gemini_json, _groq_json
+from .strategy_evidence import evidence_for
+from pydantic import BaseModel
+
+class AIStrategySpec(BaseModel):
+    asset: str
+    symbols: list[str]
+    timeframes: list[str]
+    strategy_family: str
+    validation_warnings: list[str]
+
+SYSTEM_PROMPT = "legacy"
+def _strategy_prompt(prompt, name):
+    return prompt
+
+async def _generate_with_provider(provider, prompt):
+    return await _gemini_json(prompt)
+
+def _apply_market_context(spec, asset=None, symbol=None, timeframe=None):
+    return spec
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    return await _generate_with_provider("gemini", prompt)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            (root / "app" / "strategy_ai.py").write_text(legacy, encoding="utf-8")
+            (root / "app" / "config.py").write_text(
+                "class Settings:\n    risk_per_trade: float = 0.01\n",
+                encoding="utf-8",
+            )
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_strategy_ai("fake-commit")
+            result = (root / "app" / "strategy_ai.py").read_text(encoding="utf-8")
+            self.assertIn("import json", result)
+            ast.parse(result, filename="app/strategy_ai.py")
+
+    def test_strategy_migration_preserves_retained_chained_prompt_binding(self):
+        legacy = """from .config import settings
+from .ai_providers import AIProviderError, _gemini_json, _groq_json
+from .strategy_evidence import evidence_for
+audit_value = SYSTEM_PROMPT = "legacy audit text"
+
+def audit_prompt():
+    return SYSTEM_PROMPT
+
+async def _generate_with_provider(provider, prompt):
+    return await _gemini_json(prompt)
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    return await _generate_with_provider("gemini", prompt)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                migration.transform_strategy_ai("fake-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn('audit_value = SYSTEM_PROMPT = "legacy audit text"', result)
+            self.assertIn("def audit_prompt():", result)
+            self.assertIn("return SYSTEM_PROMPT", result)
+            ast.parse(result, filename="app/strategy_ai.py")
+
+    def test_migrate_final_scan_allows_descriptive_provider_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metadata = root / "metadata.json"
+            original = '{\n  "description": "Historical Gemini and Groq review note",\n  "majorCapabilities": ["PAPER_MODE"]\n}\n'
+            metadata.write_text(original, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), \
+                 patch.object(migration, "NATIVE_PATHS", ("metadata.json",)), \
+                 patch.object(migration, "ANCILLARY_PATHS", ()), \
+                 patch.object(migration, "canonical_text", return_value=""), \
+                 patch.object(migration, "transform_ai_providers"), \
+                 patch.object(migration, "write_text"), \
+                 patch.object(migration, "transform_config"), \
+                 patch.object(migration, "transform_strategy_ai"), \
+                 patch.object(migration, "transform_daily_research"), \
+                 patch.object(migration, "transform_release_diagnostics"), \
+                 patch.object(migration, "apply_ancillary_patch"), \
+                 patch.object(migration, "_git"):
+                migration.migrate("canonical", "cleanup", "extra-base", "extra")
+            self.assertEqual(metadata.read_text(encoding="utf-8"), original)
 
 if __name__ == "__main__":
     unittest.main()
