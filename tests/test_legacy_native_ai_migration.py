@@ -3148,10 +3148,20 @@ def _extract_json(text):
             ):
                 migration.transform_ai_providers("canonical-commit")
             result = target.read_text(encoding="utf-8")
-            ast.parse(result, filename=str(target))
+            parsed_result = ast.parse(result, filename=str(target))
             compile(result, str(target), "exec")
             self.assertIn("class LegacyNamespace:", result)
-            self.assertIn("from __future__ import annotations", result)
+            self.assertNotIn("from __future__ import annotations", result)
+            retained_class = next(
+                node for node in parsed_result.body
+                if isinstance(node, ast.ClassDef) and node.name == "LegacyNamespace"
+            )
+            retained_method = next(
+                node for node in retained_class.body
+                if isinstance(node, ast.FunctionDef) and node.name == "helper"
+            )
+            self.assertIsInstance(retained_method.args.args[1].annotation, ast.Constant)
+            self.assertEqual(retained_method.args.args[1].annotation.value, "json")
             self.assertNotIn("def _generate_with_provider", result)
 
     def test_class_global_comprehension_target_does_not_block_facade_migration(self):
