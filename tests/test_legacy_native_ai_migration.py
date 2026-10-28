@@ -1571,6 +1571,7 @@ async def _gemini_json(prompt):
             "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
             "    return await _generate_with_provider('gemini', prompt)\n"
         )
+        legacy = _with_canonical_schema_context(legacy)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             target = root / "app" / "strategy_ai.py"
@@ -1756,6 +1757,7 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
         )
 
         for label, legacy in (("two-provider", legacy_two), ("three-provider", legacy_three)):
+            legacy = _with_canonical_schema_context(legacy)
             with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 target = root / "app" / "strategy_ai.py"
