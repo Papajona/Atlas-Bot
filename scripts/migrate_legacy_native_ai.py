@@ -1672,6 +1672,16 @@ def _is_safe_legacy_hosted_strategy_generator(node: ast.AST) -> bool:
     return True
 
 
+def _dotted_ast_name(node: ast.AST) -> str | None:
+    """Return a dotted name only for a pure Name/Attribute expression."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _dotted_ast_name(node.value)
+        return f"{parent}.{node.attr}" if parent else None
+    return None
+
+
 def _provider_adapter_name(func: ast.AST, module_tree: ast.Module | None = None) -> str | None:
     """Resolve only a known provider adapter function or an imported ai_providers module attribute."""
     allowed = {"_gemini_json", "_groq_json", "_cerebras_json", "_openai_json"}
@@ -2069,11 +2079,17 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
         legacy_field = fields[name]
         if not annotation_compatible(legacy_field.annotation, canonical_field.annotation):
             return False
+        # A weaker legacy declaration must not bypass canonical length/range constraints
+        # or make a required canonical field optional.
+        if field_has_nondefault_constraints(canonical_field) and ast.dump(
+            legacy_field, include_attributes=False
+        ) != ast.dump(canonical_field, include_attributes=False):
+            return False
         if field_has_nondefault_constraints(legacy_field) and ast.dump(
             legacy_field, include_attributes=False
         ) != ast.dump(canonical_field, include_attributes=False):
             return False
-        if field_is_required(legacy_field) and not field_is_required(canonical_field):
+        if field_is_required(canonical_field) and not field_is_required(legacy_field):
             return False
 
     for name, statement in fields.items():
@@ -2155,7 +2171,9 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
     if len(assignments) != 1 or assignments[0].lineno >= returns[0].lineno:
         return False
 
-    # Preserve market binding but reject any unrecognized statements or side effects.
+    # All three user-selected market dimensions must be written into model data.
+    # Otherwise the rewritten generator can validate a draft for a different market.
+    bound_market_fields: set[str] = set()
     for statement in context.body:
         if statement is assignments[0] or statement is returns[0]:
             continue
@@ -2184,7 +2202,8 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
         else:
             if not isinstance(assignment.value, ast.List) or len(assignment.value.elts) != 1 or not isinstance(assignment.value.elts[0], ast.Name) or assignment.value.elts[0].id != "symbol":
                 return False
-    return True
+        bound_market_fields.add(test.left.id)
+    return bound_market_fields == {"asset", "symbol", "timeframe"}
 
 
 def _is_safe_legacy_cerebras_adapter(node: ast.AST) -> bool:
@@ -3171,7 +3190,10 @@ def scrub_ancillary_text(path: str, text: str) -> str:
                     return remove
                 result = {}
                 for key, item in value.items():
-                    if PROVIDER_FIELD_RE.search(str(key)):
+                    key_text = str(key)
+                    if PROVIDER_FIELD_RE.search(key_text):
+                        continue
+                    if key_text.lower() in {"secretref", "secret_ref"} and isinstance(item, str) and PROVIDER_SETTING_NAME_RE.fullmatch(item):
                         continue
                     cleaned_item = scrub(item, str(key))
                     if cleaned_item is not remove:
@@ -3285,7 +3307,7 @@ def _metadata_has_active_provider_wiring(text: str) -> bool:
         if isinstance(value, list):
             return any(visit(item, key_context) for item in value)
         if isinstance(value, str):
-            if key_context.lower() in {"name", "key", "setting", "variable"} and PROVIDER_SETTING_NAME_RE.fullmatch(value):
+            if key_context.lower() in {"name", "key", "setting", "variable", "secretref", "secret_ref"} and PROVIDER_SETTING_NAME_RE.fullmatch(value):
                 return True
             if (
                 ATLAS_PROVIDER_SECRET_RE.search(value)
