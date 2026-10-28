@@ -3010,6 +3010,43 @@ def _extract_json(text):
                 self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
 
+
+    def test_postponed_annotations_do_not_count_as_executed_class_global_mutations(self):
+        canonical = """import json
+from .native_ai import AIProviderError
+def _extract_json(text):
+    return json.loads(text)
+"""
+        legacy = """from __future__ import annotations
+import json
+
+class LegacyNamespace:
+    global json
+    def helper(self, arg: (json := object())):
+        return arg
+
+class AIProviderError(RuntimeError):
+    pass
+
+def _extract_json(text):
+    return json.loads(text)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            ast.parse(result, filename=str(target))
+            compile(result, str(target), "exec")
+            self.assertIn("class LegacyNamespace:", result)
+            self.assertIn("from __future__ import annotations", result)
+            self.assertNotIn("def _generate_with_provider", result)
+
     def test_class_global_comprehension_target_does_not_block_facade_migration(self):
         legacy = """import json
 
