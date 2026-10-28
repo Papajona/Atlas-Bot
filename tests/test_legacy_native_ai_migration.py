@@ -2504,6 +2504,23 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
             migration._is_compatible_strategy_schema_and_context(legacy, canonical)
         )
 
+    def test_exact_schema_contract_rejects_basemodel_alias_shadowed_by_native_import(self):
+        legacy = ast.parse(CANONICAL_STRATEGY)
+        canonical = ast.parse(CANONICAL_STRATEGY)
+        pydantic_import = next(
+            node for node in legacy.body
+            if isinstance(node, ast.ImportFrom) and node.module == "pydantic"
+        )
+        pydantic_import.names.append(ast.alias(name="BaseModel", asname="NativeAIError"))
+        schema = next(
+            node for node in legacy.body
+            if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"
+        )
+        schema.bases[0] = ast.Name(id="NativeAIError", ctx=ast.Load())
+        self.assertFalse(
+            migration._is_compatible_strategy_schema_and_context(legacy, canonical)
+        )
+
     def test_exact_schema_contract_rejects_market_binding_before_model_dump(self):
         legacy = ast.parse(CANONICAL_STRATEGY)
         canonical = ast.parse(CANONICAL_STRATEGY)
