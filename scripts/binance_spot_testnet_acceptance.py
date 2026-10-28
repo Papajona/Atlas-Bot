@@ -106,13 +106,57 @@ def _free_balance(client: Any, asset: str) -> Decimal:
     return value
 
 
-def _net_filled_base(order: dict[str, Any] | None, base_asset: str) -> Decimal:
-    """Bound cleanup to the base quantity this drill actually acquired, net of base fees."""
+def _net_filled_base(
+    order: dict[str, Any] | None,
+    base_asset: str,
+    *,
+    client: Any | None = None,
+    symbol: str | None = None,
+    order_id: str | None = None,
+) -> Decimal:
+    """Return the acquired base quantity, verifying commissions from the trades.
+
+    Binance does not reliably put commissions on an order-status response.  A
+    client is therefore required in the acceptance path so that the order's
+    trades, rather than a missing order-level fee, establish the net fill.
+    """
     if not isinstance(order, dict):
         return Decimal("0")
     gross = max(Decimal("0"), dec(order.get("filled") or "0"))
-    raw_fees = order.get("fees")
-    fees = raw_fees if isinstance(raw_fees, list) and raw_fees else [order.get("fee")]
+    if client is not None:
+        if not symbol or not order_id or not callable(getattr(client, "fetch_my_trades", None)):
+            raise RuntimeError("could not verify buy commissions from exchange trades")
+        trades = client.fetch_my_trades(symbol, params={"orderId": order_id})
+        if not isinstance(trades, list) or (gross > 0 and not trades):
+            raise RuntimeError("exchange returned no verifiable trades for the filled buy")
+        fees: list[dict[str, Any]] = []
+        for trade in trades:
+            if not isinstance(trade, dict):
+                raise RuntimeError("exchange returned malformed buy trade data")
+            trade_order_id = trade.get("order") or trade.get("orderId")
+            if trade_order_id is not None and str(trade_order_id) != str(order_id):
+                raise RuntimeError("exchange returned a trade for a different buy order")
+            raw_fees = trade.get("fees")
+            if isinstance(raw_fees, list) and raw_fees and any(
+                isinstance(fee, dict) for fee in raw_fees
+            ):
+                fees.extend(fee for fee in raw_fees if isinstance(fee, dict))
+            elif isinstance(trade.get("fee"), dict):
+                fees.append(trade["fee"])
+            else:
+                info = trade.get("info")
+                if isinstance(info, dict) and info.get("commissionAsset") is not None:
+                    fees.append({"currency": info.get("commissionAsset"), "cost": info.get("commission")})
+                else:
+                    raise RuntimeError("buy trade omitted commission data")
+    else:
+        # Retain the pure calculation for callers/tests that already provide
+        # explicitly verified order-level fees; production reconciliation above
+        # always supplies the exchange client.
+        raw_fees = order.get("fees")
+        fees = raw_fees if isinstance(raw_fees, list) and raw_fees else [order.get("fee")]
+        if not any(isinstance(fee, dict) for fee in fees):
+            raise RuntimeError("buy order omitted commission data")
     base_fee = Decimal("0")
     for fee in fees:
         if not isinstance(fee, dict):
@@ -203,7 +247,9 @@ def _reconcile_buy_order(
             f"buy order {order_id} is not terminal; refusing cleanup while it may still fill: {state!r}"
         )
     # Preserve positive partial fills even when the final state is canceled/expired.
-    return order_id, state, _net_filled_base(state, base_asset)
+    return order_id, state, _net_filled_base(
+        state, base_asset, client=client, symbol=symbol, order_id=order_id
+    )
 
 
 def _market_order_min_notional_rule(
@@ -661,7 +707,9 @@ def main() -> int:
         order = _wait_for_order(broker, buy_order_id, symbol)
         # Record fills before status validation: canceled/expired orders may still
         # contain a positive partial fill which cleanup must attribute and flatten.
-        drill_base_amount = _net_filled_base(order, base_asset)
+        drill_base_amount = _net_filled_base(
+            order, base_asset, client=client, symbol=symbol, order_id=buy_order_id
+        )
         if str(order.get("status", "")).lower() not in SAFE_TERMINAL_ORDER_STATES:
             buy_order_id, order, drill_base_amount = _reconcile_buy_order(
                 broker, client, symbol=symbol, base_asset=base_asset,

@@ -390,6 +390,38 @@ def test_net_filled_base_subtracts_fees_charged_in_base_asset():
     assert _net_filled_base(order, "BTC") == Decimal("0.2496")
 
 
+def test_net_filled_base_reconciles_base_fee_from_trades_when_order_has_no_fee():
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def fetch_my_trades(self, symbol, params=None):
+            self.calls.append((symbol, params))
+            return [{"order": "buy-1", "fee": {"currency": "BTC", "cost": "0.0004"}}]
+
+    client = Client()
+    order = {"id": "buy-1", "filled": "0.25"}
+    assert _net_filled_base(
+        order, "BTC", client=client, symbol="BTC/USDT", order_id="buy-1"
+    ) == Decimal("0.2496")
+    assert client.calls == [("BTC/USDT", {"orderId": "buy-1"})]
+
+
+def test_net_filled_base_fails_closed_when_trade_data_is_unavailable():
+    class Client:
+        def fetch_my_trades(self, symbol, params=None):
+            return []
+
+    with pytest.raises(RuntimeError, match="no verifiable trades"):
+        _net_filled_base(
+            {"id": "buy-1", "filled": "0.25"},
+            "BTC",
+            client=Client(),
+            symbol="BTC/USDT",
+            order_id="buy-1",
+        )
+
+
 def test_cleanup_refuses_to_sell_when_balance_delta_exceeds_drill_fill():
     class FakeClient:
         def __init__(self):
@@ -541,6 +573,9 @@ def test_ambiguous_buy_submission_can_be_reconciled_by_client_order_id():
         def fetch_order(self, order_id, symbol, params):
             self.calls.append((order_id, symbol, params))
             return {"id": "buy-recovered", "status": "closed", "filled": "0.5", "fee": {"currency": "BTC", "cost": "0.001"}}
+
+        def fetch_my_trades(self, symbol, params=None):
+            return [{"order": "buy-recovered", "fee": {"currency": "BTC", "cost": "0.001"}}]
 
     class FakeBroker:
         def fetch_order(self, order_id, symbol):
