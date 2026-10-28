@@ -2999,10 +2999,10 @@ from .native_ai import AIProviderError
 
     def test_strategy_migration_rejects_exception_target_that_deletes_generator_dependency(self):
         retained = (
-            "try:\\n"
-            "    raise RuntimeError('exercise handler target cleanup')\\n"
-            "except RuntimeError as evidence_for:\\n"
-            "    pass\\n"
+            "try:\n"
+            "    raise RuntimeError('exercise handler target cleanup')\n"
+            "except RuntimeError as evidence_for:\n"
+            "    pass\n"
         )
         legacy = _with_canonical_schema_context(
             self._legacy_strategy_with_retained_code(retained)
@@ -3023,7 +3023,7 @@ from .native_ai import AIProviderError
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
     def test_strategy_migration_ignores_delete_in_statically_unreachable_branch(self):
-        retained = "if False:\\n    del evidence_for\\n"
+        retained = "if False:\n    del evidence_for\n"
         legacy = _with_canonical_schema_context(
             self._legacy_strategy_with_retained_code(retained)
         )
@@ -3042,9 +3042,9 @@ from .native_ai import AIProviderError
 
     def test_strategy_migration_rejects_import_then_delete_inside_taken_branch(self):
         retained = (
-            "if True:\\n"
-            "    from .strategy_evidence import evidence_for\\n"
-            "    del evidence_for\\n"
+            "if True:\n"
+            "    from .strategy_evidence import evidence_for\n"
+            "    del evidence_for\n"
         )
         legacy = _with_canonical_schema_context(
             self._legacy_strategy_with_retained_code(retained)
