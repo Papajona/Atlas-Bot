@@ -2109,9 +2109,21 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
         node.name: node for node in schema_body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    if any(name not in canonical_methods or ast.dump(method, include_attributes=False)
-           != ast.dump(canonical_methods[name], include_attributes=False)
-           for name, method in methods.items()):
+    # Never retain a schema with a missing validator: checking only methods that
+    # happen to exist permits a branch to remove canonical symbol/timeframe/risk gates.
+    if any(
+        name not in methods
+        or ast.dump(methods[name], include_attributes=False)
+        != ast.dump(canonical_method, include_attributes=False)
+        for name, canonical_method in canonical_methods.items()
+    ):
+        return False
+    if any(
+        name not in canonical_methods
+        or ast.dump(method, include_attributes=False)
+        != ast.dump(canonical_methods[name], include_attributes=False)
+        for name, method in methods.items()
+    ):
         return False
 
     def model_config_node(body: list[ast.stmt]) -> ast.stmt | None:
@@ -2294,11 +2306,19 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
     if schema_dependencies is None or context_dependencies is None:
         return False
 
+    # The schema's base-class name may be a proven alias of pydantic.BaseModel.
+    # The helper above already proves its import origin and absence of shadowing; it
+    # must not then be rejected merely because canonical source uses another spelling.
+    proven_pydantic_base_aliases = {
+        schema.bases[0].id
+    } if isinstance(schema.bases[0], ast.Name) else set()
     for source_module, dependent_names in (
         (schema_tree, schema_dependencies),
         (tree, context_dependencies),
     ):
         for dependency in dependent_names:
+            if source_module is schema_tree and dependency in proven_pydantic_base_aliases:
+                continue
             legacy_binding = module_binding_signature(source_module, dependency)
             canonical_binding = module_binding_signature(canonical_tree, dependency)
             if dependency == "AIStrategySpec":
@@ -2352,6 +2372,15 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
         and statement.value.func.attr == "model_dump" and not statement.value.args and not statement.value.keywords
     ]
     if len(assignments) != 1 or assignments[0].lineno >= returns[0].lineno:
+        return False
+    # The dump assignment must be the first executable statement: otherwise an
+    # accepted market guard may reference data before it exists.
+    executable_body = list(context.body)
+    if executable_body and isinstance(executable_body[0], ast.Expr) and isinstance(
+        executable_body[0].value, ast.Constant
+    ) and isinstance(executable_body[0].value.value, str):
+        executable_body = executable_body[1:]
+    if not executable_body or executable_body[0] is not assignments[0]:
         return False
 
     # All three user-selected market dimensions must be written into model data.
