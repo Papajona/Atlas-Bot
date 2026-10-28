@@ -2298,6 +2298,11 @@ def _is_compatible_strategy_schema_and_context(
     for dependency in dependent_names:
         legacy_binding = module_binding_signature(schema_tree, dependency)
         canonical_binding = module_binding_signature(canonical_tree, dependency)
+        if _debug:
+            print(
+                f"schema dependency {dependency}: legacy_missing={legacy_binding is None}, "
+                f"canonical_missing={canonical_binding is None}, bindings_equal={legacy_binding == canonical_binding}"
+            )
         if dependency == "AIStrategySpec":
             # The legacy class may have semantically compatible optional extensions, so
             # don't require its entire AST to be canonical. Do require one unambiguous
