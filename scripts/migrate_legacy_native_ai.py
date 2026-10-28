@@ -1774,18 +1774,124 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST) -> bool:
 
 
 
+def _module_path_for_import(source_path: Path, node: ast.ImportFrom, imported_name: str | None = None) -> Path | None:
+    """Resolve a statically named project import without importing application code."""
+    if node.level and node.module is None:
+        package_dir = source_path.parent
+        for _ in range(node.level - 1):
+            package_dir = package_dir.parent
+        return package_dir / "__init__.py"
+    if node.level:
+        base = source_path.parent
+        for _ in range(node.level - 1):
+            base = base.parent
+        module_name = node.module
+        if not module_name:
+            return None
+        base = base.joinpath(*module_name.split("."))
+    else:
+        if not node.module:
+            return None
+        base = ROOT.joinpath(*node.module.split("."))
+    candidates = (base / "__init__.py", base.with_suffix(".py"))
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def _resolve_class_definition(
+    source_path: Path,
+    module_tree: ast.Module,
+    symbol_name: str,
+    seen: set[tuple[str, str]] | None = None,
+) -> tuple[Path, ast.Module, ast.ClassDef] | None:
+    """Resolve a local or imported class, including package-level re-exports."""
+    seen = set() if seen is None else set(seen)
+    key = (str(source_path), symbol_name)
+    if key in seen:
+        return None
+    seen.add(key)
+    matches = [node for node in module_tree.body if isinstance(node, ast.ClassDef) and node.name == symbol_name]
+    if len(matches) == 1:
+        return source_path, module_tree, matches[0]
+    if matches:
+        return None
+    for import_node in module_tree.body:
+        if not isinstance(import_node, ast.ImportFrom):
+            continue
+        for alias in import_node.names:
+            if alias.name == "*" or (alias.asname or alias.name) != symbol_name:
+                continue
+            target_path = _module_path_for_import(source_path, import_node, alias.name)
+            if target_path is None or not target_path.is_file():
+                continue
+            try:
+                target_tree = ast.parse(target_path.read_text(encoding="utf-8"), filename=str(target_path))
+            except (OSError, SyntaxError):
+                return None
+            resolved = _resolve_class_definition(target_path, target_tree, alias.name, seen)
+            if resolved is not None:
+                return resolved
+    return None
+
+
+def _is_unshadowed_pydantic_v2_model(
+    schema: ast.ClassDef, schema_path: Path, schema_tree: ast.Module
+) -> bool:
+    """Prove that the model's BaseModel base is the real Pydantic v2 symbol."""
+    if schema.decorator_list or schema.keywords or len(schema.bases) != 1:
+        return False
+    base = schema.bases[0]
+    binding: str | None = None
+    allowed_import_ids: set[int] = set()
+    if isinstance(base, ast.Name):
+        binding = base.id
+        for statement in schema_tree.body:
+            if isinstance(statement, ast.ImportFrom) and statement.level == 0 and statement.module == "pydantic":
+                if any(alias.name == "BaseModel" and (alias.asname or alias.name) == binding for alias in statement.names):
+                    allowed_import_ids.add(id(statement))
+    elif isinstance(base, ast.Attribute) and base.attr == "BaseModel" and isinstance(base.value, ast.Name):
+        binding = base.value.id
+        for statement in schema_tree.body:
+            if isinstance(statement, ast.Import):
+                if any(alias.name == "pydantic" and (alias.asname or alias.name.split(".", 1)[0]) == binding
+                       for alias in statement.names):
+                    allowed_import_ids.add(id(statement))
+    if not binding or not allowed_import_ids:
+        return False
+
+    def rebinds(node: ast.AST) -> bool:
+        if id(node) in allowed_import_ids:
+            return False
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return node.name == binding
+        if isinstance(node, ast.ImportFrom):
+            return any((alias.asname or alias.name) == binding for alias in node.names)
+        if isinstance(node, ast.Import):
+            return any((alias.asname or alias.name.split(".", 1)[0]) == binding for alias in node.names)
+        if isinstance(node, ast.Name) and node.id == binding and isinstance(node.ctx, (ast.Store, ast.Del)):
+            return True
+        return any(rebinds(child) for child in ast.iter_child_nodes(node))
+
+    return not any(rebinds(statement) for statement in schema_tree.body)
+
+
 def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree: ast.Module) -> bool:
-    """Require a retained schema that exactly accepts the canonical composer contract."""
+    """Verify a legacy schema/context contract without requiring identical source syntax."""
     canonical_schemas = [
         node for node in canonical_tree.body
         if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"
     ]
-    schemas = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"]
-    if len(canonical_schemas) != 1 or len(schemas) != 1:
+    source_path = ROOT / "app" / "strategy_ai.py"
+    resolved = _resolve_class_definition(source_path, tree, "AIStrategySpec")
+    if len(canonical_schemas) != 1 or resolved is None:
         return False
-    canonical_schema, schema = canonical_schemas[0], schemas[0]
-    if schema.decorator_list or any(ast.dump(a, include_attributes=False) != ast.dump(b, include_attributes=False)
-                                    for a, b in zip(schema.bases, canonical_schema.bases)) or len(schema.bases) != len(canonical_schema.bases):
+    schema_path, schema_tree, schema = resolved
+    canonical_schema = canonical_schemas[0]
+    if not _is_unshadowed_pydantic_v2_model(schema, schema_path, schema_tree):
+        return False
+    if not any(
+        isinstance(base, ast.Name) and base.id == "BaseModel"
+        for base in canonical_schema.bases
+    ):
         return False
 
     def body_without_docstring(node: ast.ClassDef) -> list[ast.stmt]:
@@ -1796,6 +1902,7 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
 
     canonical_body = body_without_docstring(canonical_schema)
     schema_body = body_without_docstring(schema)
+
     def field_map(body: list[ast.stmt]) -> dict[str, ast.AnnAssign]:
         return {
             statement.target.id: statement
@@ -1805,51 +1912,114 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
 
     canonical_fields = field_map(canonical_body)
     fields = field_map(schema_body)
-    if len(canonical_fields) == 0 or not set(canonical_fields).issubset(fields):
+    if not canonical_fields or not set(canonical_fields).issubset(fields):
         return False
-    # The field annotations/defaults/Field constraints of every canonical output field
-    # must match exactly, so tighter hosted-only constraints cannot make native drafts
-    # fail validation. Additional required fields are forbidden below.
-    for name, canonical_field in canonical_fields.items():
-        if ast.dump(fields[name], include_attributes=False) != ast.dump(canonical_field, include_attributes=False):
-            return False
+
+    def expand_alias(node: ast.AST, aliases: dict[str, ast.AST], seen_aliases: set[str] | None = None) -> ast.AST:
+        seen_aliases = set() if seen_aliases is None else seen_aliases
+        if isinstance(node, ast.Name) and node.id in aliases and node.id not in seen_aliases:
+            return expand_alias(aliases[node.id], aliases, seen_aliases | {node.id})
+        if isinstance(node, ast.Subscript):
+            return ast.Subscript(
+                value=expand_alias(node.value, aliases, seen_aliases),
+                slice=expand_alias(node.slice, aliases, seen_aliases),
+                ctx=node.ctx,
+            )
+        if isinstance(node, ast.BinOp):
+            return ast.BinOp(
+                left=expand_alias(node.left, aliases, seen_aliases),
+                op=node.op,
+                right=expand_alias(node.right, aliases, seen_aliases),
+            )
+        if isinstance(node, ast.Tuple):
+            return ast.Tuple(elts=[expand_alias(item, aliases, seen_aliases) for item in node.elts], ctx=node.ctx)
+        return node
+
+    def simple_aliases(module: ast.Module) -> dict[str, ast.AST]:
+        return {
+            target.id: node.value
+            for node in module.body
+            if isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, (ast.Name, ast.Subscript, ast.BinOp, ast.Tuple))
+            for target in node.targets
+        }
+
+    canonical_aliases = simple_aliases(canonical_tree)
+    legacy_aliases = simple_aliases(schema_tree)
+
+    def annotation_compatible(legacy_annotation: ast.AST, canonical_annotation: ast.AST) -> bool:
+        legacy_norm = expand_alias(legacy_annotation, legacy_aliases)
+        canonical_norm = expand_alias(canonical_annotation, canonical_aliases)
+        if ast.dump(legacy_norm, include_attributes=False) == ast.dump(canonical_norm, include_attributes=False):
+            return True
+        if isinstance(legacy_norm, ast.Name) and legacy_norm.id in {"str", "bool", "int", "float"}:
+            if isinstance(canonical_norm, ast.Subscript) and isinstance(canonical_norm.value, ast.Name) and canonical_norm.value.id == "Literal":
+                return True
+        if isinstance(legacy_norm, ast.Subscript) and isinstance(canonical_norm, ast.Subscript):
+            if not annotation_compatible(legacy_norm.value, canonical_norm.value):
+                return False
+            return annotation_compatible(legacy_norm.slice, canonical_norm.slice)
+        if isinstance(legacy_norm, ast.BinOp) and isinstance(canonical_norm, ast.BinOp):
+            return (
+                type(legacy_norm.op) is type(canonical_norm.op)
+                and annotation_compatible(legacy_norm.left, canonical_norm.left)
+                and annotation_compatible(legacy_norm.right, canonical_norm.right)
+            )
+        if isinstance(legacy_norm, ast.Tuple) and isinstance(canonical_norm, ast.Tuple):
+            return len(legacy_norm.elts) == len(canonical_norm.elts) and all(
+                annotation_compatible(a, b) for a, b in zip(legacy_norm.elts, canonical_norm.elts)
+            )
+        return False
 
     def field_is_required(statement: ast.AnnAssign) -> bool:
         default = statement.value
         if default is None:
             return True
         if isinstance(default, ast.Call) and isinstance(default.func, ast.Name) and default.func.id == "Field":
-            default_keywords = {keyword.arg: keyword.value for keyword in default.keywords}
-            if "default_factory" in default_keywords:
+            keywords = {keyword.arg: keyword.value for keyword in default.keywords}
+            if "default_factory" in keywords:
                 return False
-            if "default" in default_keywords:
-                value = default_keywords["default"]
+            if "default" in keywords:
+                value = keywords["default"]
                 return isinstance(value, ast.Constant) and value.value is Ellipsis
             if default.args:
                 return isinstance(default.args[0], ast.Constant) and default.args[0].value is Ellipsis
             return True
         return False
 
+    def field_has_nondefault_constraints(statement: ast.AnnAssign) -> bool:
+        value = statement.value
+        if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name) or value.func.id != "Field":
+            return False
+        return bool(value.args) or any(keyword.arg not in {"default", "default_factory"} for keyword in value.keywords)
+
+    for name, canonical_field in canonical_fields.items():
+        legacy_field = fields[name]
+        if not annotation_compatible(legacy_field.annotation, canonical_field.annotation):
+            return False
+        if field_has_nondefault_constraints(legacy_field) and ast.dump(
+            legacy_field, include_attributes=False
+        ) != ast.dump(canonical_field, include_attributes=False):
+            return False
+        if field_is_required(legacy_field) and not field_is_required(canonical_field):
+            return False
+
     for name, statement in fields.items():
         if name not in canonical_fields and field_is_required(statement):
             return False
 
-    def method_map(body: list[ast.stmt]) -> dict[str, ast.AST]:
-        return {
-            statement.name: statement
-            for statement in body
-            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
-
-    canonical_methods = method_map(canonical_body)
-    methods = method_map(schema_body)
-    if set(methods) != set(canonical_methods):
-        return False
-    if any(
-        ast.dump(methods[name], include_attributes=False)
-        != ast.dump(canonical_methods[name], include_attributes=False)
-        for name in canonical_methods
-    ):
+    canonical_methods = {
+        node.name: node for node in canonical_body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    methods = {
+        node.name: node for node in schema_body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    if any(name not in canonical_methods or ast.dump(method, include_attributes=False)
+           != ast.dump(canonical_methods[name], include_attributes=False)
+           for name, method in methods.items()):
         return False
 
     def model_config_node(body: list[ast.stmt]) -> ast.stmt | None:
@@ -1862,12 +2032,12 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
 
     canonical_config = model_config_node(canonical_body)
     config = model_config_node(schema_body)
-    if canonical_config is None or config is None or ast.dump(config, include_attributes=False) != ast.dump(canonical_config, include_attributes=False):
+    if config is not None and (canonical_config is None or ast.dump(config, include_attributes=False) != ast.dump(canonical_config, include_attributes=False)):
         return False
 
-    # Fail closed on unrecognized class-body behavior; docstrings, field assignments,
-    # model_config, and validator methods are the only accepted class-body forms.
-    allowed_ids = {id(node) for node in fields.values()} | {id(node) for node in methods.values()} | {id(config)}
+    allowed_ids = {id(node) for node in fields.values()} | {id(node) for node in methods.values()}
+    if config is not None:
+        allowed_ids.add(id(config))
     if any(id(statement) not in allowed_ids for statement in schema_body):
         return False
 
@@ -1895,28 +2065,55 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
     returns = [node for node in ast.walk(context) if isinstance(node, ast.Return)]
     if len(returns) != 1 or returns[0] is not context.body[-1]:
         return False
+    result = returns[0].value
+    if (
+        not isinstance(result, ast.Call) or not isinstance(result.func, ast.Attribute)
+        or not isinstance(result.func.value, ast.Name) or result.func.value.id != "AIStrategySpec"
+        or result.func.attr != "model_validate" or len(result.args) != 1
+        or not isinstance(result.args[0], ast.Name) or result.args[0].id != "data" or result.keywords
+    ):
+        return False
     assignments = [
         statement for statement in context.body
-        if isinstance(statement, ast.Assign)
-        and len(statement.targets) == 1
-        and isinstance(statement.targets[0], ast.Name)
-        and statement.targets[0].id == "data"
-        and isinstance(statement.value, ast.Call)
-        and isinstance(statement.value.func, ast.Attribute)
-        and isinstance(statement.value.func.value, ast.Name)
-        and statement.value.func.value.id == "spec"
-        and statement.value.func.attr == "model_dump"
-        and not statement.value.args and not statement.value.keywords
+        if isinstance(statement, ast.Assign) and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name) and statement.targets[0].id == "data"
+        and isinstance(statement.value, ast.Call) and isinstance(statement.value.func, ast.Attribute)
+        and isinstance(statement.value.func.value, ast.Name) and statement.value.func.value.id == "spec"
+        and statement.value.func.attr == "model_dump" and not statement.value.args and not statement.value.keywords
     ]
     if len(assignments) != 1 or assignments[0].lineno >= returns[0].lineno:
         return False
-    result = returns[0].value
-    return (
-        isinstance(result, ast.Call) and isinstance(result.func, ast.Attribute)
-        and isinstance(result.func.value, ast.Name) and result.func.value.id == "AIStrategySpec"
-        and result.func.attr == "model_validate" and len(result.args) == 1
-        and isinstance(result.args[0], ast.Name) and result.args[0].id == "data" and not result.keywords
-    )
+
+    # Preserve market binding but reject any unrecognized statements or side effects.
+    for statement in context.body:
+        if statement is assignments[0] or statement is returns[0]:
+            continue
+        if not isinstance(statement, ast.If) or statement.orelse or len(statement.body) != 1:
+            return False
+        test = statement.test
+        if not (
+            isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.IsNot)
+            and len(test.comparators) == 1 and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value is None and isinstance(test.left, ast.Name)
+            and test.left.id in {"asset", "symbol", "timeframe"}
+        ):
+            return False
+        assignment = statement.body[0]
+        if not isinstance(assignment, ast.Assign) or len(assignment.targets) != 1 or not isinstance(assignment.targets[0], ast.Subscript):
+            return False
+        target = assignment.targets[0]
+        if not isinstance(target.value, ast.Name) or target.value.id != "data" or not isinstance(target.slice, ast.Constant):
+            return False
+        expected_key = {"asset": "asset", "symbol": "symbols", "timeframe": "timeframes"}[test.left.id]
+        if target.slice.value != expected_key:
+            return False
+        if test.left.id in {"asset", "timeframe"}:
+            if not isinstance(assignment.value, ast.Name) or assignment.value.id != test.left.id:
+                return False
+        else:
+            if not isinstance(assignment.value, ast.List) or len(assignment.value.elts) != 1 or not isinstance(assignment.value.elts[0], ast.Name) or assignment.value.elts[0].id != "symbol":
+                return False
+    return True
 
 
 def _is_safe_legacy_cerebras_adapter(node: ast.AST) -> bool:
@@ -2069,7 +2266,7 @@ def _is_safe_legacy_cerebras_adapter(node: ast.AST) -> bool:
     if not is_string(headers["Content-Type"], "application/json"):
         return False
 
-    if not isinstance(request_context, ast.AsyncWith) or request_context.orelse or len(request_context.items) != 1:
+    if not isinstance(request_context, ast.AsyncWith) or len(request_context.items) != 1:
         return False
     item = request_context.items[0]
     client_call = item.context_expr
@@ -2148,64 +2345,6 @@ def _is_safe_legacy_cerebras_adapter(node: ast.AST) -> bool:
         and not result_return.value.keywords
     )
 
-
-
-def _is_compatible_strategy_schema_and_context(tree: ast.Module) -> bool:
-    """Ensure the retained schema/helper return the Pydantic object the new generator expects."""
-    imported_base_model = any(
-        isinstance(node, ast.ImportFrom) and node.module == "pydantic" and node.level == 0
-        and any(alias.name == "BaseModel" and alias.asname is None for alias in node.names)
-        for node in tree.body
-    )
-    classes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"]
-    if not imported_base_model or len(classes) != 1:
-        return False
-    schema = classes[0]
-    if schema.decorator_list or not any(isinstance(base, ast.Name) and base.id == "BaseModel" for base in schema.bases):
-        return False
-    fields = {
-        node.target.id for node in schema.body
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
-    }
-    required_fields = {"strategy_family", "validation_warnings", "asset", "symbols", "timeframes"}
-    if not required_fields.issubset(fields):
-        return False
-    if any(
-        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in {"model_validate", "model_dump"}
-        for node in schema.body
-    ):
-        return False
-
-    contexts = [
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
-    ]
-    if len(contexts) != 1:
-        return False
-    context = contexts[0]
-    args = context.args
-    if (
-        context.decorator_list or args.posonlyargs or [arg.arg for arg in args.args] != ["spec"]
-        or args.vararg or args.kwarg or [arg.arg for arg in args.kwonlyargs] != ["asset", "symbol", "timeframe"]
-        or args.defaults or len(args.kw_defaults) != 3
-        or any(not isinstance(value, ast.Constant) or value.value is not None for value in args.kw_defaults)
-        or not context.body or not isinstance(context.body[-1], ast.Return)
-    ):
-        return False
-    result = context.body[-1].value
-    if (
-        not isinstance(result, ast.Call) or not isinstance(result.func, ast.Attribute)
-        or not isinstance(result.func.value, ast.Name) or result.func.value.id != "AIStrategySpec"
-        or result.func.attr != "model_validate" or len(result.args) != 1
-        or not isinstance(result.args[0], ast.Name) or result.args[0].id != "data" or result.keywords
-    ):
-        return False
-    return any(
-        isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute)
-        and isinstance(item.func.value, ast.Name) and item.func.value.id == "spec"
-        and item.func.attr == "model_dump" and not item.args and not item.keywords
-        for item in ast.walk(context)
-    )
 
 
 def transform_strategy_ai(commit: str) -> None:
