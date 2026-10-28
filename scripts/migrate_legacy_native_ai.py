@@ -2143,32 +2143,112 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
     if len(contexts) != 1 or len(canonical_contexts) != 1:
         return False
 
+    def _rooted_name(node: ast.AST) -> str | None:
+        while isinstance(node, (ast.Attribute, ast.Subscript)):
+            node = node.value
+        return node.id if isinstance(node, ast.Name) else None
+
+    def _module_flow_rebinds_or_mutates(node: ast.AST, name: str) -> bool:
+        """Detect conditional stores, aliases, and expression-level mutations of a module binding."""
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == name:
+                return True
+            # A function with global declaration can rebind or mutate the module value later.
+            return any(isinstance(part, ast.Global) and name in part.names for part in ast.walk(node))
+        if isinstance(node, ast.ClassDef):
+            if node.name == name:
+                return True
+            return any(isinstance(part, ast.Global) and name in part.names for part in ast.walk(node))
+        if isinstance(node, ast.Lambda):
+            return False
+        if isinstance(node, ast.Import):
+            return any((alias.asname or alias.name.split(".", 1)[0]) == name for alias in node.names)
+        if isinstance(node, ast.ImportFrom):
+            return any(alias.name != "*" and (alias.asname or alias.name) == name for alias in node.names)
+        if isinstance(node, ast.Assign):
+            if any(name in _assigned_names(target) or _rooted_name(target) == name for target in node.targets):
+                return True
+            return any(isinstance(part, ast.Name) and part.id == name and isinstance(part.ctx, ast.Load)
+                       for part in ast.walk(node.value))
+        if isinstance(node, ast.AnnAssign):
+            if name in _assigned_names(node.target) or _rooted_name(node.target) == name:
+                return True
+            return node.value is not None and any(
+                isinstance(part, ast.Name) and part.id == name and isinstance(part.ctx, ast.Load)
+                for part in ast.walk(node.value)
+            )
+        if isinstance(node, ast.AugAssign):
+            return name in _assigned_names(node.target) or _rooted_name(node.target) == name
+        if isinstance(node, ast.Delete):
+            return any(name in _assigned_names(target) or _rooted_name(target) == name for target in node.targets)
+        if isinstance(node, ast.NamedExpr):
+            return name in _assigned_names(node.target) or _rooted_name(node.target) == name
+        if isinstance(node, ast.Expr):
+            # A module-scope expression that touches the dependent object could mutate it
+            # (e.g. ALLOWED_TIMEFRAMES.clear()); conservatively refuse to infer it safe.
+            return any(isinstance(part, ast.Name) and part.id == name and isinstance(part.ctx, ast.Load)
+                       for part in ast.walk(node))
+        if isinstance(node, (ast.For, ast.AsyncFor)):
+            if name in _assigned_names(node.target) or _rooted_name(node.target) == name:
+                return True
+        if isinstance(node, (ast.With, ast.AsyncWith)):
+            if any(item.optional_vars is not None and
+                   (name in _assigned_names(item.optional_vars) or _rooted_name(item.optional_vars) == name)
+                   for item in node.items):
+                return True
+        if isinstance(node, ast.ExceptHandler) and node.name == name:
+            return True
+        if isinstance(node, ast.MatchAs) and node.name == name:
+            return True
+        if isinstance(node, ast.MatchStar) and node.name == name:
+            return True
+        if isinstance(node, ast.MatchMapping) and node.rest == name:
+            return True
+        return any(_module_flow_rebinds_or_mutates(child, name) for child in ast.iter_child_nodes(node))
+
     def module_binding_signature(module: ast.Module, name: str) -> tuple[str, ...] | None:
-        """Return one statically known module binding; ambiguous/rebound names fail closed."""
+        """Return one statically proven module binding, rejecting aliases and conditional mutations."""
         signatures: list[tuple[str, ...]] = []
+        binding_statement_ids: set[int] = set()
         for statement in module.body:
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 if statement.name == name:
                     signatures.append((type(statement).__name__, ast.dump(statement, include_attributes=False)))
+                    binding_statement_ids.add(id(statement))
             elif isinstance(statement, ast.ImportFrom):
                 for alias in statement.names:
                     if alias.name != "*" and (alias.asname or alias.name) == name:
                         signatures.append(("ImportFrom", str(statement.level), statement.module or "", alias.name, alias.asname or ""))
+                        binding_statement_ids.add(id(statement))
             elif isinstance(statement, ast.Import):
                 for alias in statement.names:
                     if (alias.asname or alias.name.split(".", 1)[0]) == name:
                         signatures.append(("Import", alias.name, alias.asname or ""))
+                        binding_statement_ids.add(id(statement))
             elif isinstance(statement, ast.Assign):
-                if any(name in _assigned_names(target) for target in statement.targets):
+                if any(name in _assigned_names(target) or _rooted_name(target) == name for target in statement.targets):
                     signatures.append(("Assign", ast.dump(statement, include_attributes=False)))
+                    binding_statement_ids.add(id(statement))
             elif isinstance(statement, ast.AnnAssign):
-                if name in _assigned_names(statement.target):
+                if name in _assigned_names(statement.target) or _rooted_name(statement.target) == name:
                     signatures.append(("AnnAssign", ast.dump(statement, include_attributes=False)))
+                    binding_statement_ids.add(id(statement))
             elif isinstance(statement, (ast.AugAssign, ast.Delete)):
                 targets = [statement.target] if isinstance(statement, ast.AugAssign) else statement.targets
-                if any(name in _assigned_names(target) for target in targets):
+                if any(name in _assigned_names(target) or _rooted_name(target) == name for target in targets):
                     signatures.append((type(statement).__name__, ast.dump(statement, include_attributes=False)))
-        return signatures[0] if len(signatures) == 1 else None
+                    binding_statement_ids.add(id(statement))
+
+        if len(signatures) != 1:
+            return None
+        # A second assignment hidden inside if/try/loop/match or a module-level expression
+        # that mutates the object invalidates the otherwise direct binding.
+        for statement in module.body:
+            if id(statement) in binding_statement_ids:
+                continue
+            if _module_flow_rebinds_or_mutates(statement, name):
+                return None
+        return signatures[0]
 
     def dependent_global_names(schema_node: ast.ClassDef, context_node: ast.FunctionDef) -> set[str] | None:
         try:
@@ -2180,7 +2260,7 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
 
         def visit(symbol_table: symtable.SymbolTable) -> None:
             for symbol in symbol_table.get_symbols():
-                if symbol.is_referenced() and symbol.is_global() and symbol.get_name() not in dir(builtins):
+                if symbol.is_referenced() and symbol.is_global():
                     names.add(symbol.get_name())
             for child in symbol_table.get_children():
                 visit(child)
@@ -2197,6 +2277,16 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
     for dependency in dependent_names:
         legacy_binding = module_binding_signature(schema_tree, dependency)
         canonical_binding = module_binding_signature(canonical_tree, dependency)
+        if dependency == "AIStrategySpec":
+            # The legacy class may have semantically compatible optional extensions, so
+            # don't require its entire AST to be canonical. Do require one unambiguous
+            # class/import binding in each module, with no later conditional rebinding.
+            if legacy_binding is None or module_binding_signature(tree, dependency) is None:
+                return False
+            continue
+        if dependency in dir(builtins) and legacy_binding is None and canonical_binding is None:
+            # A built-in is safe only when neither module shadows it.
+            continue
         if legacy_binding is None or legacy_binding != canonical_binding:
             return False
 
