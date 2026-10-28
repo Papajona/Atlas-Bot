@@ -8,6 +8,7 @@ This package is intentionally split into two independent drills.
 
 Safety gates:
 - `ATLAS_BINANCE_TESTNET=true` is mandatory.
+- `ATLAS_TESTNET_ACCOUNT_EXCLUSIVE=true` is mandatory as an explicit operator attestation that no other actor/process will trade or transfer assets in the dedicated account during the drill.
 - `ATLAS_TESTNET_BINANCE_API_KEY` and `ATLAS_TESTNET_BINANCE_API_SECRET` are required.
 - Atlas customer Binance broker construction is reused with `sandbox=True`.
 - The resulting CCXT endpoint must contain `testnet.binance.vision`.
@@ -20,13 +21,16 @@ Safety gates:
 
 The script does not claim custody funding. Binance documents that Spot Test Network balances are virtual and cannot be transferred in or out.
 
+Run only with a dedicated Binance Spot Testnet account that has **zero free base-asset balance**, **no open orders for the selected symbol**, and exclusive use for the duration of the drill. The required `ATLAS_TESTNET_ACCOUNT_EXCLUSIVE=true` flag is an explicit operator attestation; Binance does not provide a general-purpose account lock through this harness, so do not share the account or credentials with another actor/process. The balance cap is only a quantity ceiling, not proof of provenance: cleanup is refused unless the post-stop-cancel balance delta exactly matches the confirmed net fill. Any mismatch requires manual reconciliation; the harness will not sell an approximated amount.
+
 Run only with a dedicated Binance Spot Testnet account:
 
 ```bash
-ATLAS_BINANCE_TESTNET=true \\
-ATLAS_TESTNET_BINANCE_API_KEY='...' \\
-ATLAS_TESTNET_BINANCE_API_SECRET='...' \\
-ATLAS_TESTNET_SYMBOL='BTC/USDT' \\
+ATLAS_BINANCE_TESTNET=true  \
+ATLAS_TESTNET_ACCOUNT_EXCLUSIVE=true  \
+ATLAS_TESTNET_BINANCE_API_KEY='...'  \
+ATLAS_TESTNET_BINANCE_API_SECRET='...'  \
+ATLAS_TESTNET_SYMBOL='BTC/USDT'  \
 python scripts/binance_spot_testnet_acceptance.py
 ```
 
