@@ -2954,8 +2954,8 @@ from .native_ai import AIProviderError
             self._legacy_strategy_with_retained_code("")
         )
         legacy = legacy.replace(
-            "from .strategy_evidence import evidence_for\\n",
-            "from .strategy_evidence import evidence_for\\ndel evidence_for\\n",
+            "from .strategy_evidence import evidence_for\n",
+            "from .strategy_evidence import evidence_for\ndel evidence_for\n",
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2977,10 +2977,10 @@ from .native_ai import AIProviderError
             self._legacy_strategy_with_retained_code("")
         )
         legacy = legacy.replace(
-            "from .strategy_evidence import evidence_for\\n",
-            "from .strategy_evidence import evidence_for\\n"
-            "if SHOULD_CLEAN_UP:\\n"
-            "    del evidence_for\\n",
+            "from .strategy_evidence import evidence_for\n",
+            "from .strategy_evidence import evidence_for\n"
+            "if SHOULD_CLEAN_UP:\n"
+            "    del evidence_for\n",
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3267,7 +3267,7 @@ def retained_plain(value):  # keep plain helper comment
 async def _gemini_json(prompt):
     return {"prompt": prompt}
 """
-        canonical = "from .native_ai import AIProviderError\\n"
+        canonical = "from .native_ai import AIProviderError\n"
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             target = root / "app" / "ai_providers.py"
