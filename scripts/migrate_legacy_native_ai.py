@@ -761,6 +761,309 @@ def _assigned_names(target: ast.AST) -> set[str]:
 
 
 
+
+
+
+
+def _uses_postponed_annotations(tree: ast.Module) -> bool:
+    """Return whether the module defers annotation evaluation via __future__."""
+    return any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "__future__"
+        and any(alias.name == "annotations" for alias in node.names)
+        for node in tree.body
+    )
+
+
+def _class_scope_global_mutations(
+    node: ast.ClassDef, *, postponed_annotations: bool = False
+) -> set[str]:
+    """Find module writes executed by a class suite through explicit global declarations."""
+    declared: set[str] = set()
+
+    def collect_declarations(part: ast.AST) -> None:
+        if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            # These are separate scopes; their own global declarations do not
+            # make names global in this surrounding class suite.
+            return
+        if isinstance(part, ast.ClassDef) and part is not node:
+            return
+        if isinstance(part, ast.Global):
+            declared.update(part.names)
+            return
+        for child in ast.iter_child_nodes(part):
+            collect_declarations(child)
+
+    for statement in node.body:
+        collect_declarations(statement)
+    mutations: set[str] = set()
+
+    def visit_definition_time_expressions(part: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        # Decorators and defaults always execute when the class body defines a
+        # function. With postponed annotations, annotations are stringized and
+        # must not be treated as module mutations.
+        expressions: list[ast.AST] = [
+            *part.decorator_list,
+            *part.args.defaults,
+            *(value for value in part.args.kw_defaults if value is not None),
+        ]
+        if not postponed_annotations:
+            expressions.extend(
+                arg.annotation
+                for arg in [
+                    *part.args.posonlyargs,
+                    *part.args.args,
+                    *part.args.kwonlyargs,
+                ]
+                if arg.annotation is not None
+            )
+            if part.args.vararg and part.args.vararg.annotation is not None:
+                expressions.append(part.args.vararg.annotation)
+            if part.args.kwarg and part.args.kwarg.annotation is not None:
+                expressions.append(part.args.kwarg.annotation)
+            if part.returns is not None:
+                expressions.append(part.returns)
+        for expression in expressions:
+            visit(expression)
+
+    def visit(part: ast.AST) -> None:
+        if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # Defining a callable binds its name in the enclosing scope, and the
+            # decorators/defaults/annotations execute immediately in class scope.
+            if part.name in declared:
+                mutations.add(part.name)
+            visit_definition_time_expressions(part)
+            return
+        if isinstance(part, ast.Lambda):
+            # Lambda bodies run later, but defaults execute when the lambda is made.
+            for expression in [
+                *part.args.defaults,
+                *(value for value in part.args.kw_defaults if value is not None),
+            ]:
+                visit(expression)
+            return
+        if isinstance(part, ast.ClassDef) and part is not node:
+            # A nested class statement binds its name in the enclosing class
+            # namespace, or in the module if that name was declared global.
+            if part.name in declared:
+                mutations.add(part.name)
+            for expression in [
+                *part.decorator_list,
+                *part.bases,
+                *(keyword.value for keyword in part.keywords),
+            ]:
+                visit(expression)
+            mutations.update(_class_scope_global_mutations(part, postponed_annotations=postponed_annotations))
+            return
+        if isinstance(part, ast.ExceptHandler):
+            # The exception target is string-valued in the AST and is implicitly
+            # deleted at handler exit; with global, this clears the module binding.
+            if part.name and part.name in declared:
+                mutations.add(part.name)
+            if part.type is not None:
+                visit(part.type)
+            for statement in part.body:
+                visit(statement)
+            return
+        if isinstance(part, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            # Comprehension targets are local to the implicit comprehension scope.
+            # Inspect iterables, filters, and result expressions so walrus targets
+            # in those expressions still count as enclosing-scope mutations.
+            for generator in part.generators:
+                visit(generator.iter)
+                for condition in generator.ifs:
+                    visit(condition)
+            if isinstance(part, ast.DictComp):
+                visit(part.key)
+                visit(part.value)
+            else:
+                visit(part.elt)
+            return
+        if isinstance(part, ast.If):
+            visit(part.test)
+            try:
+                condition = ast.literal_eval(part.test)
+            except (ValueError, TypeError):
+                condition = None
+            selected = part.body if condition is True else part.orelse if condition is False else None
+            statements = selected if selected is not None else [*part.body, *part.orelse]
+            for statement in statements:
+                visit(statement)
+            return
+        if isinstance(part, (ast.For, ast.AsyncFor)):
+            visit(part.iter)
+            try:
+                iterable = ast.literal_eval(part.iter)
+            except (ValueError, TypeError):
+                iterable = None
+            if isinstance(iterable, (list, tuple, dict, set, str, bytes)) and not iterable:
+                for statement in part.orelse:
+                    visit(statement)
+                return
+            visit(part.target)
+            for statement in [*part.body, *part.orelse]:
+                visit(statement)
+            return
+        if isinstance(part, ast.While):
+            visit(part.test)
+            try:
+                condition = ast.literal_eval(part.test)
+            except (ValueError, TypeError):
+                condition = None
+            statements = part.orelse if condition is False else [*part.body, *part.orelse]
+            for statement in statements:
+                visit(statement)
+            return
+        if isinstance(part, ast.AnnAssign) and postponed_annotations:
+            # Postponed class/module annotations are strings, not executed AST.
+            # Still inspect a real value expression for annotated assignments.
+            if part.value is not None:
+                visit(part.target)
+                visit(part.value)
+            elif not isinstance(part.target, ast.Name):
+                visit(part.target)
+            return
+        if isinstance(part, ast.Name) and part.id in declared and isinstance(part.ctx, (ast.Store, ast.Del)):
+            mutations.add(part.id)
+        elif isinstance(part, (ast.Import, ast.ImportFrom)):
+            mutations.update(_defined_names(part) & declared)
+        for child in ast.iter_child_nodes(part):
+            visit(child)
+
+    for statement in node.body:
+        visit(statement)
+    return mutations
+
+def _module_scope_maybe_binds(node: ast.AST, *, postponed_annotations: bool = False) -> set[str]:
+    """Return module names a statement may bind/delete without counting local scopes.
+
+    This is deliberately conservative for module-level control flow: a loop
+    target may rebind a canonical import if an iteration occurs, but must not
+    count as a guaranteed dependency in a migration.
+    """
+    names: set[str] = set()
+
+    def visit(part: ast.AST) -> None:
+        if isinstance(part, ast.Lambda):
+            for expression in [
+                *part.args.defaults,
+                *(value for value in part.args.kw_defaults if value is not None),
+            ]:
+                visit(expression)
+            return
+        if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(part.name)
+            # Definition-time expressions execute in module scope; the function
+            # body does not, so a local walrus/assignment must not look global.
+            expressions = [
+                *part.decorator_list,
+                *part.args.defaults,
+                *(value for value in part.args.kw_defaults if value is not None),
+            ]
+            if not postponed_annotations:
+                expressions.extend(
+                    arg.annotation
+                    for arg in [
+                        *part.args.posonlyargs, *part.args.args, *part.args.kwonlyargs
+                    ]
+                    if arg.annotation is not None
+                )
+                if part.args.vararg and part.args.vararg.annotation is not None:
+                    expressions.append(part.args.vararg.annotation)
+                if part.args.kwarg and part.args.kwarg.annotation is not None:
+                    expressions.append(part.args.kwarg.annotation)
+                if part.returns is not None:
+                    expressions.append(part.returns)
+            for expression in expressions:
+                visit(expression)
+            return
+        if isinstance(part, ast.ClassDef):
+            names.add(part.name)
+            # Class attributes have their own namespace, except explicit global
+            # writes/deletes in the executing class suite.
+            for expression in [*part.decorator_list, *part.bases, *(kw.value for kw in part.keywords)]:
+                visit(expression)
+            names.update(_class_scope_global_mutations(part, postponed_annotations=postponed_annotations))
+            return
+        if isinstance(part, (ast.Import, ast.ImportFrom)):
+            names.update(_defined_names(part))
+            return
+        if isinstance(part, ast.comprehension):
+            # Comprehension targets are local to the implicit comprehension
+            # scope; iterables and filters can still contain outer-scope walruses.
+            visit(part.iter)
+            for condition in part.ifs:
+                visit(condition)
+            return
+        if isinstance(part, ast.ExceptHandler):
+            if part.name:
+                names.add(part.name)
+            if part.type is not None:
+                visit(part.type)
+            for statement in part.body:
+                visit(statement)
+            return
+        if isinstance(part, ast.If):
+            # Static conditions make one branch unreachable; inspect the test
+            # (a walrus may still bind in the containing module) and only the
+            # branch Python can execute.
+            try:
+                condition = ast.literal_eval(part.test)
+            except (ValueError, TypeError):
+                condition = None
+            visit(part.test)
+            selected = part.body if condition is True else part.orelse if condition is False else None
+            if selected is not None:
+                for statement in selected:
+                    visit(statement)
+                return
+            for statement in [*part.body, *part.orelse]:
+                visit(statement)
+            return
+        if isinstance(part, ast.AnnAssign) and postponed_annotations:
+            # With postponed annotations an annotation-only name does not bind,
+            # and its annotation expression is never evaluated.
+            if part.value is not None:
+                visit(part.target)
+                visit(part.value)
+            elif not isinstance(part.target, ast.Name):
+                visit(part.target)
+            return
+        if isinstance(part, ast.MatchAs) and part.name:
+            names.add(part.name)
+        elif isinstance(part, ast.MatchStar) and part.name:
+            names.add(part.name)
+        elif isinstance(part, ast.MatchMapping) and part.rest:
+            names.add(part.rest)
+        if isinstance(part, ast.Name) and isinstance(part.ctx, (ast.Store, ast.Del)):
+            names.add(part.id)
+        if isinstance(part, (ast.For, ast.AsyncFor)):
+            # Known-empty literal iterables cannot bind their target or execute
+            # the loop body. The else clause can still execute.
+            try:
+                iterable = ast.literal_eval(part.iter)
+            except (ValueError, TypeError):
+                iterable = None
+            if isinstance(iterable, (list, tuple, dict, set, str, bytes)) and not iterable:
+                for statement in part.orelse:
+                    visit(statement)
+                return
+        if isinstance(part, ast.While):
+            try:
+                condition = ast.literal_eval(part.test)
+            except (ValueError, TypeError):
+                condition = None
+            if condition is False:
+                for statement in part.orelse:
+                    visit(statement)
+                return
+        for child in ast.iter_child_nodes(part):
+            visit(child)
+
+    visit(node)
+    return names
+
+
 def _is_legacy_ai_provider_error_stub(node: ast.AST) -> bool:
     """Recognize only the empty legacy exception class replaced by Native AI's alias."""
     if not isinstance(node, ast.ClassDef) or node.name != "AIProviderError":
@@ -799,6 +1102,7 @@ def transform_ai_providers(commit: str) -> None:
             return
 
     old_tree = ast.parse(source, filename=str(path))
+    postponed_annotations = _uses_postponed_annotations(old_tree)
     canonical = canonical_text(commit, "app/ai_providers.py")
     canonical_tree = ast.parse(canonical, filename="canonical app/ai_providers.py")
     canonical_nodes_by_name: dict[str, ast.AST] = {}
@@ -815,6 +1119,51 @@ def transform_ai_providers(commit: str) -> None:
     extra_definition_lines: list[int] = []
     import_nodes: list[ast.AST] = []
     source_lines = source.splitlines(keepends=True)
+
+    literalize_annotations = (
+        postponed_annotations and not _uses_postponed_annotations(canonical_tree)
+    )
+    retained_annotation_names: set[str] = set()
+
+    def annotation_names(node: ast.AST) -> set[str]:
+        names: set[str] = set()
+        for part in ast.walk(node):
+            annotations: list[ast.AST] = []
+            if isinstance(part, ast.arg) and part.annotation is not None:
+                annotations.append(part.annotation)
+            elif isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef)) and part.returns is not None:
+                annotations.append(part.returns)
+            elif isinstance(part, ast.AnnAssign):
+                annotations.append(part.annotation)
+            for annotation in annotations:
+                names.update(
+                    child.id for child in ast.walk(annotation)
+                    if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+                )
+        return names
+
+    def literalize_deferred_annotations(source_segment: str) -> str:
+        """Preserve deferred annotations only when canonical output evaluates them eagerly."""
+        try:
+            parsed_segment = ast.parse(source_segment, filename=str(path))
+        except SyntaxError as exc:
+            raise MigrationError(
+                "cannot preserve postponed annotations in retained provider helper"
+            ) from exc
+        if len(parsed_segment.body) != 1:
+            raise MigrationError(
+                "retained provider helper did not parse as one top-level statement"
+            )
+        retained_node = parsed_segment.body[0]
+        for part in ast.walk(retained_node):
+            if isinstance(part, ast.arg) and part.annotation is not None:
+                part.annotation = ast.Constant(value=ast.unparse(part.annotation))
+            elif isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef)) and part.returns is not None:
+                part.returns = ast.Constant(value=ast.unparse(part.returns))
+            elif isinstance(part, ast.AnnAssign):
+                part.annotation = ast.Constant(value=ast.unparse(part.annotation))
+        return ast.unparse(retained_node)
+
     for node in old_tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             import_nodes.append(node)
@@ -891,7 +1240,7 @@ def transform_ai_providers(commit: str) -> None:
                     "legacy AIProviderError base RuntimeError is imported or rebound in this facade; refusing to replace a possibly custom exception"
                 )
             continue
-        defined_names = _defined_names(node)
+        defined_names = _defined_names(node) | _module_scope_maybe_binds(node, postponed_annotations=postponed_annotations)
         collisions = defined_names & canonical_names
         if collisions:
             equivalent = all(
@@ -931,7 +1280,14 @@ def transform_ai_providers(commit: str) -> None:
             raise MigrationError(
                 f"app/ai_providers.py contains an unrecognized provider-bearing helper {name or type(node).__name__}; refusing to overwrite it"
             )
-        extras.append(segment.rstrip())
+        if literalize_annotations:
+            # Annotation expressions become string constants below; retain their
+            # source-level names for import selection and typing.get_type_hints.
+            retained_annotation_names.update(annotation_names(node))
+        extras.append(
+            literalize_deferred_annotations(segment).rstrip()
+            if literalize_annotations else segment.rstrip()
+        )
         extra_defined_names.append(defined_names)
         extra_definition_lines.append(node.lineno)
 
@@ -939,6 +1295,7 @@ def transform_ai_providers(commit: str) -> None:
     for segment in extras:
         tree = ast.parse(segment)
         used_names.update(node.id for node in ast.walk(tree) if isinstance(node, ast.Name))
+    used_names.update(retained_annotation_names)
 
     def import_signature(import_node: ast.AST, alias: ast.alias) -> tuple[str, int, str, str, str]:
         if isinstance(import_node, ast.Import):
@@ -1155,9 +1512,29 @@ def transform_ai_providers(commit: str) -> None:
             }
 
         last_definitions: dict[str, ast.AST] = {}
+        deleted_bindings: set[str] = set()
         for module_node in module_tree.body:
+            if isinstance(module_node, ast.Delete):
+                deleted_names = {
+                    name for target in module_node.targets for name in _assigned_names(target)
+                }
+                deleted_bindings.update(deleted_names)
+                for deleted_name in deleted_names:
+                    last_definitions.pop(deleted_name, None)
+                continue
             for defined_name in _defined_names(module_node):
                 last_definitions[defined_name] = module_node
+                deleted_bindings.discard(defined_name)
+        if explicit_all and deleted_bindings.intersection(exports):
+            deleted_exports = sorted(deleted_bindings.intersection(exports))
+            raise MigrationError(
+                f"star-import module {module_file} declares deleted name(s) in __all__: "
+                + ", ".join(deleted_exports)
+            )
+        if not explicit_all:
+            # Default star exports reflect names actually left in the module
+            # namespace after top-level deletion, not every name seen earlier.
+            exports.difference_update(deleted_bindings)
         bindings: dict[str, tuple[str, int, str, str, str] | None] = {}
         for exported_name in exports:
             definition = last_definitions.get(exported_name)
@@ -1731,7 +2108,7 @@ def _provider_adapter_name(func: ast.AST, module_tree: ast.Module | None = None)
                     if shadowed:
                         break
                     continue
-                if bound in _defined_names(other):
+                if bound in (_defined_names(other) | _module_scope_maybe_binds(other, postponed_annotations=_uses_postponed_annotations(module_tree))):
                     shadowed = True
                     break
             if not shadowed:
@@ -2665,6 +3042,7 @@ def transform_strategy_ai(commit: str) -> None:
         return
     canonical = canonical_text(commit, "app/strategy_ai.py")
     old_tree = ast.parse(source, filename=str(path))
+    postponed_annotations = _uses_postponed_annotations(old_tree)
     new_tree = ast.parse(canonical, filename="canonical app/strategy_ai.py")
 
     removed_names = {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider", "generate_strategy_draft"}
@@ -2801,8 +3179,15 @@ def transform_strategy_ai(commit: str) -> None:
     removed_candidates = {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider"}
 
     def guaranteed_bindings(node: ast.AST) -> set[str]:
+        if isinstance(node, ast.AnnAssign) and node.value is None:
+            # Annotation-only declarations do not create a runtime binding.
+            return set()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             return {node.name}
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+            # The body and target are not guaranteed to execute, even when a
+            # loop target has the same name as a missing global dependency.
+            return set()
         if isinstance(node, ast.If):
             try:
                 condition = ast.literal_eval(node.test)
@@ -2820,27 +3205,60 @@ def transform_strategy_ai(commit: str) -> None:
         if isinstance(node, (ast.Try, ast.TryStar)):
             normal_parts = [*node.body, *node.orelse]
             normal = set().union(*(guaranteed_bindings(part) for part in normal_parts)) if normal_parts else set()
-            if not node.handlers:
-                return normal
-            handler_sets = [
-                set().union(*(guaranteed_bindings(part) for part in handler.body)) if handler.body else set()
-                for handler in node.handlers
-            ]
-            common_handlers = set.intersection(*handler_sets) if handler_sets else set()
-            return normal & common_handlers
+            if node.handlers:
+                handler_sets = [
+                    set().union(*(guaranteed_bindings(part) for part in handler.body)) if handler.body else set()
+                    for handler in node.handlers
+                ]
+                common_handlers = set.intersection(*handler_sets) if handler_sets else set()
+                normal &= common_handlers
+            # finally executes after every normal/handled exit, so a deletion
+            # or rebind there invalidates evidence from the try/except paths.
+            finally_changes = set().union(
+                *(_module_scope_maybe_binds(part, postponed_annotations=postponed_annotations) for part in node.finalbody)
+            ) if node.finalbody else set()
+            # An unconditional import in finally re-establishes its binding.
+            # Track statement order so a later assignment/delete still invalidates it.
+            finally_imports: set[str] = set()
+            for part in node.finalbody:
+                if isinstance(part, (ast.Import, ast.ImportFrom)):
+                    finally_imports.update(_defined_names(part))
+                else:
+                    finally_imports.difference_update(
+                        _module_scope_maybe_binds(part, postponed_annotations=postponed_annotations)
+                    )
+            return (normal - (finally_changes - finally_imports)) | finally_imports
         return _defined_names(node)
 
     def module_execution_loads(node: ast.AST) -> set[str]:
         loaded: set[str] = set()
+        if isinstance(node, ast.AnnAssign) and postponed_annotations:
+            # Do not count postponed annotation names as runtime reads.
+            if node.value is not None:
+                loaded.update(module_execution_loads(node.target))
+                loaded.update(module_execution_loads(node.value))
+            elif not isinstance(node.target, ast.Name):
+                loaded.update(module_execution_loads(node.target))
+            return loaded
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             executed = [
                 *node.decorator_list, *node.args.defaults,
                 *(value for value in node.args.kw_defaults if value is not None),
-                *(arg.annotation for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs] if arg.annotation is not None),
-                *([node.args.vararg.annotation] if node.args.vararg and node.args.vararg.annotation is not None else []),
-                *([node.args.kwarg.annotation] if node.args.kwarg and node.args.kwarg.annotation is not None else []),
-                *([node.returns] if node.returns is not None else []),
             ]
+            if not postponed_annotations:
+                executed.extend(
+                    arg.annotation
+                    for arg in [
+                        *node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs
+                    ]
+                    if arg.annotation is not None
+                )
+                if node.args.vararg and node.args.vararg.annotation is not None:
+                    executed.append(node.args.vararg.annotation)
+                if node.args.kwarg and node.args.kwarg.annotation is not None:
+                    executed.append(node.args.kwarg.annotation)
+                if node.returns is not None:
+                    executed.append(node.returns)
             for part in executed:
                 loaded.update(module_execution_loads(part))
             return loaded
@@ -3003,7 +3421,7 @@ def transform_strategy_ai(commit: str) -> None:
     for retained_node in retained_nodes:
         if isinstance(retained_node, ast.AnnAssign) and retained_node.value is None:
             continue
-        available_names.update(_defined_names(retained_node))
+        available_names.update(guaranteed_bindings(retained_node))
     remappable_names = {"NativeAIError", "compose_strategy_spec"}
     missing_dependencies = sorted(canonical_global_loads - available_names - remappable_names)
     if missing_dependencies:
