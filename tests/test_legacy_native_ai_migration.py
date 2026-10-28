@@ -2370,7 +2370,7 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
         schema.body.insert(validator_index, optional_field)
         with patch.object(migration, "ROOT", Path("/tmp/atlas-optional-schema-test")):
             self.assertTrue(
-                migration._is_compatible_strategy_schema_and_context(legacy, canonical, _debug=True)
+                migration._is_compatible_strategy_schema_and_context(legacy, canonical)
             )
 
     def test_imported_schema_checks_context_globals_in_strategy_module(self):
