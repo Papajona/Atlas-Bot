@@ -1585,7 +1585,7 @@ async def _gemini_json(prompt):
             self.assertIn("class AIStrategySpec", result)
             self.assertIn("def _apply_market_context", result)
             self.assertIn("compose_strategy_spec", result)
-            self.assertIn('provider": "atlas_native"', result)
+            self.assertIn('"provider":"atlas_native"', result)
             self.assertNotRegex(result, migration.PROVIDER_RE)
             self.assertNotIn("_generate_with_provider", result)
 
