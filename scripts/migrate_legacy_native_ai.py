@@ -2142,9 +2142,64 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
     ]
     if len(contexts) != 1 or len(canonical_contexts) != 1:
         return False
-    # A byte-for-byte canonical AST contract already proves the full field and market
-    # semantics. This also avoids reparsing equivalently canonical fixtures through
-    # the compatibility path intended for older but structurally recognizable models.
+
+    def module_binding_signature(module: ast.Module, name: str) -> tuple[str, ...] | None:
+        """Return one statically known module binding; ambiguous/rebound names fail closed."""
+        signatures: list[tuple[str, ...]] = []
+        for statement in module.body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if statement.name == name:
+                    signatures.append((type(statement).__name__, ast.dump(statement, include_attributes=False)))
+            elif isinstance(statement, ast.ImportFrom):
+                for alias in statement.names:
+                    if alias.name != "*" and (alias.asname or alias.name) == name:
+                        signatures.append(("ImportFrom", str(statement.level), statement.module or "", alias.name, alias.asname or ""))
+            elif isinstance(statement, ast.Import):
+                for alias in statement.names:
+                    if (alias.asname or alias.name.split(".", 1)[0]) == name:
+                        signatures.append(("Import", alias.name, alias.asname or ""))
+            elif isinstance(statement, ast.Assign):
+                if any(name in _assigned_names(target) for target in statement.targets):
+                    signatures.append(("Assign", ast.dump(statement, include_attributes=False)))
+            elif isinstance(statement, ast.AnnAssign):
+                if name in _assigned_names(statement.target):
+                    signatures.append(("AnnAssign", ast.dump(statement, include_attributes=False)))
+            elif isinstance(statement, (ast.AugAssign, ast.Delete)):
+                targets = [statement.target] if isinstance(statement, ast.AugAssign) else statement.targets
+                if any(name in _assigned_names(target) for target in targets):
+                    signatures.append((type(statement).__name__, ast.dump(statement, include_attributes=False)))
+        return signatures[0] if len(signatures) == 1 else None
+
+    def dependent_global_names(schema_node: ast.ClassDef, context_node: ast.FunctionDef) -> set[str] | None:
+        try:
+            isolated = ast.Module(body=[schema_node, context_node], type_ignores=[])
+            table = symtable.symtable(ast.unparse(isolated), "<strategy-contract>", "exec")
+        except (SyntaxError, ValueError):
+            return None
+        names: set[str] = set()
+
+        def visit(symbol_table: symtable.SymbolTable) -> None:
+            for symbol in symbol_table.get_symbols():
+                if symbol.is_referenced() and symbol.is_global() and symbol.get_name() not in dir(builtins):
+                    names.add(symbol.get_name())
+            for child in symbol_table.get_children():
+                visit(child)
+
+        visit(table)
+        return names
+
+    # Identical class/context AST does not imply identical runtime validation: Pydantic
+    # resolves field types and validator globals from the containing module at class
+    # creation/call time. Verify every global they use against the pinned canonical AST.
+    dependent_names = dependent_global_names(schema, contexts[0])
+    if dependent_names is None:
+        return False
+    for dependency in dependent_names:
+        legacy_binding = module_binding_signature(schema_tree, dependency)
+        canonical_binding = module_binding_signature(canonical_tree, dependency)
+        if legacy_binding is None or legacy_binding != canonical_binding:
+            return False
+
     if (
         ast.dump(schema, include_attributes=False) == ast.dump(canonical_schema, include_attributes=False)
         and ast.dump(contexts[0], include_attributes=False)
