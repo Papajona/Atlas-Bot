@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/propagate-native-ai-all-branches.yml"
+      - "scripts/migrate_legacy_native_ai.py"
   workflow_dispatch:
 
 permissions:
