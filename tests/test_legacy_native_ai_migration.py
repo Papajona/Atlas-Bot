@@ -1313,7 +1313,7 @@ def _extract_json(text):
             with patch.object(migration, "ROOT", root), patch.object(
                 migration, "canonical_text", return_value=canonical
             ):
-                with self.assertRaisesRegex(migration.MigrationError, "branch-specific definition 'json' that collides"):
+                with self.assertRaisesRegex(migration.MigrationError, "branch-specific definition '_extract_json' that collides"):
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
@@ -2156,6 +2156,28 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
                     migration.transform_strategy_ai("fake-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_strategy_migration_rejects_deleted_try_binding_for_canonical_dependency(self):
+        retained = (
+            "try:\n"
+            "    from .ai_providers import evidence_for\n"
+            "finally:\n"
+            "    del evidence_for\n"
+        )
+        legacy = self._legacy_strategy_with_retained_code(retained)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "canonical strategy generator depends on missing module binding.*evidence_for"
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_strategy_migration_rejects_missing_canonical_generator_dependency(self):
         legacy = self._legacy_strategy_with_retained_code("AIStrategySpec: object\n")
         with tempfile.TemporaryDirectory() as tmp:
@@ -2780,9 +2802,7 @@ def retained_helper():
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
     def test_strategy_migration_accepts_dependency_bound_in_both_try_and_except_paths(self):
-        legacy = self._with_canonical_schema_context(
-            self._legacy_strategy_with_retained_code("")
-        )
+        legacy = self._legacy_strategy_with_retained_code("")
         legacy = legacy.replace(
             "from .strategy_evidence import evidence_for\n",
             "try:\n"

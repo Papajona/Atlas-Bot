@@ -2917,6 +2917,33 @@ def transform_strategy_ai(commit: str) -> None:
 
     removed_candidates = {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider"}
 
+    def deleted_names(node: ast.AST) -> set[str]:
+        """Names that are not guaranteed to survive execution of *node*."""
+        if isinstance(node, ast.Delete):
+            return {
+                part.id for target in node.targets for part in ast.walk(target)
+                if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Del)
+            }
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            # A function or class body is not executed while the module loads.
+            return set()
+        if isinstance(node, ast.If):
+            try:
+                condition = ast.literal_eval(node.test)
+            except (ValueError, TypeError):
+                condition = None
+            selected = node.body if condition is True else node.orelse if condition is False else [*node.body, *node.orelse]
+            return set().union(*(deleted_names(part) for part in selected)) if selected else set()
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+            # A loop may execute zero times, but if it does, its body can
+            # delete a binding that therefore cannot be considered guaranteed.
+            return set().union(*(deleted_names(part) for part in [*node.body, *node.orelse]))
+        if isinstance(node, (ast.Try, ast.TryStar)):
+            parts = [*node.body, *node.orelse, *node.finalbody]
+            parts.extend(part for handler in node.handlers for part in handler.body)
+            return set().union(*(deleted_names(part) for part in parts)) if parts else set()
+        return set().union(*(deleted_names(child) for child in ast.iter_child_nodes(node)))
+
     def guaranteed_bindings(node: ast.AST) -> set[str]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             return {node.name}
@@ -2941,14 +2968,17 @@ def transform_strategy_ai(commit: str) -> None:
         if isinstance(node, (ast.Try, ast.TryStar)):
             normal_parts = [*node.body, *node.orelse]
             normal = set().union(*(guaranteed_bindings(part) for part in normal_parts)) if normal_parts else set()
-            if not node.handlers:
-                return normal
-            handler_sets = [
-                set().union(*(guaranteed_bindings(part) for part in handler.body)) if handler.body else set()
-                for handler in node.handlers
-            ]
-            common_handlers = set.intersection(*handler_sets) if handler_sets else set()
-            return normal & common_handlers
+            if node.handlers:
+                handler_sets = [
+                    set().union(*(guaranteed_bindings(part) for part in handler.body)) if handler.body else set()
+                    for handler in node.handlers
+                ]
+                common_handlers = set.intersection(*handler_sets) if handler_sets else set()
+                normal &= common_handlers
+            # A finally suite runs on every successful path, and can delete a
+            # name imported or defined by the try body.
+            final = set().union(*(guaranteed_bindings(part) for part in node.finalbody)) if node.finalbody else set()
+            return (normal | final) - deleted_names(ast.Module(body=node.finalbody, type_ignores=[]))
         return _defined_names(node)
 
     def module_execution_loads(node: ast.AST) -> set[str]:
@@ -3008,6 +3038,7 @@ def transform_strategy_ai(commit: str) -> None:
                 "retained module code reads removed global(s) before a retained binding is available: "
                 + ", ".join(sorted(early_reads))
             )
+        retained_module_bindings.difference_update(deleted_names(retained_node))
         retained_module_bindings.update(guaranteed_bindings(retained_node))
 
     removed_local_dependencies = removed_candidates - retained_module_bindings
@@ -3124,6 +3155,9 @@ def transform_strategy_ai(commit: str) -> None:
     for retained_node in retained_nodes:
         if isinstance(retained_node, ast.AnnAssign) and retained_node.value is None:
             continue
+        # A later delete, including one nested in a finally suite, invalidates
+        # an otherwise guaranteed binding for the canonical generator.
+        available_names.difference_update(deleted_names(retained_node))
         available_names.update(guaranteed_bindings(retained_node))
     remappable_names = {"NativeAIError", "compose_strategy_spec"}
     missing_dependencies = sorted(canonical_global_loads - available_names - remappable_names)
