@@ -8,6 +8,7 @@ from scripts.binance_spot_testnet_acceptance import (
     _market_order_min_notional_rule,
     _market_order_reference_price,
     _net_filled_base,
+    _verified_net_filled_base,
     _reconcile_buy_order,
     active_spot_api_urls,
     cleanup_new_spot_base,
@@ -390,6 +391,46 @@ def test_net_filled_base_subtracts_fees_charged_in_base_asset():
     assert _net_filled_base(order, "BTC") == Decimal("0.2496")
 
 
+def test_verified_net_fill_uses_trade_commission_when_order_status_omits_fees():
+    class Client:
+        def fetch_my_trades(self, symbol, since=None, limit=None, params=None):
+            assert params == {"orderId": "buy-1"}
+            return [{
+                "id": "trade-1",
+                "order": "buy-1",
+                "amount": "0.25",
+                "info": {
+                    "orderId": "buy-1",
+                    "commission": "0.0004",
+                    "commissionAsset": "BTC",
+                },
+            }]
+
+    # Binance order-status payloads can omit fees; the order-specific trade ledger
+    # supplies the verified base-asset commission used for cleanup quantity.
+    order_status = {"id": "buy-1", "status": "closed", "filled": "0.25"}
+    assert _verified_net_filled_base(
+        Client(), "BTC/USDT", "buy-1", order_status, "BTC"
+    ) == Decimal("0.2496")
+
+
+def test_verified_net_fill_fails_closed_when_trade_commission_is_missing():
+    class Client:
+        def fetch_my_trades(self, symbol, since=None, limit=None, params=None):
+            return [{
+                "id": "trade-1",
+                "order": "buy-1",
+                "amount": "0.25",
+                "info": {"orderId": "buy-1"},
+            }]
+
+    with pytest.raises(RuntimeError, match="omits verifiable commission"):
+        _verified_net_filled_base(
+            Client(), "BTC/USDT", "buy-1",
+            {"id": "buy-1", "status": "closed", "filled": "0.25"}, "BTC"
+        )
+
+
 def test_cleanup_refuses_to_sell_when_balance_delta_exceeds_drill_fill():
     class FakeClient:
         def __init__(self):
@@ -708,6 +749,7 @@ def _configure_main_fake(monkeypatch, scenario):
         "buy_status": "open",
         "buy_filled": Decimal("0"),
         "buy_amount": Decimal("0"),
+        "base_fee": Decimal("0"),
         "sell_amount": Decimal("0"),
         "canceled": [],
         "stop_id": None,
@@ -726,6 +768,20 @@ def _configure_main_fake(monkeypatch, scenario):
 
         def fetch_balance(self):
             return {"free": {"BTC": str(state["balance"]), "USDT": "1000"}}
+
+        def fetch_my_trades(self, symbol, since=None, limit=None, params=None):
+            if not state["buy_filled"] or not params or str(params.get("orderId")) != "buy-1":
+                return []
+            return [{
+                "id": "trade-1",
+                "order": "buy-1",
+                "amount": str(state["buy_filled"]),
+                "info": {
+                    "orderId": "buy-1",
+                    "commission": str(state["base_fee"]),
+                    "commissionAsset": "BTC",
+                },
+            }]
 
         def fetch_order(self, order_id, symbol, params=None):
             # The ambiguous-submission path deliberately calls fetch_order(None, ...);
@@ -784,6 +840,13 @@ def _configure_main_fake(monkeypatch, scenario):
             qty = Decimal(str(amount))
             if side == "buy":
                 state["buy_client_id"] = client_order_id
+                if scenario == "base_fee":
+                    state["buy_status"] = "closed"
+                    state["buy_filled"] = qty
+                    state["buy_amount"] = qty
+                    state["base_fee"] = Decimal("0.0004")
+                    state["balance"] += qty - state["base_fee"]
+                    return {"id": "buy-1"}
                 if scenario == "lost_response":
                     state["buy_status"] = "closed"
                     state["buy_filled"] = qty
@@ -848,6 +911,16 @@ def test_main_reconciles_and_flattens_buy_accepted_before_submission_response_wa
     assert state["balance"] == Decimal("0")
     assert state["sell_amount"] == state["buy_amount"]
     assert state["canceled"] == []
+
+
+def test_main_cleans_up_verified_net_fill_when_order_status_omits_base_fee(monkeypatch):
+    drill, state = _configure_main_fake(monkeypatch, "base_fee")
+
+    assert drill.main() == 0
+    assert state["base_fee"] == Decimal("0.0004")
+    assert state["sell_amount"] == state["buy_amount"] - state["base_fee"]
+    assert state["balance"] == Decimal("0")
+    assert state["stop_cancelled"] is True
 
 
 def test_main_cancels_protective_stop_when_final_buy_reconciliation_fails(monkeypatch):
