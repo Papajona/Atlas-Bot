@@ -206,11 +206,13 @@ def _reconcile_buy_order(
     return order_id, state, _net_filled_base(state, base_asset)
 
 
-def _market_order_min_notional_rule(market: dict[str, Any]) -> tuple[Decimal, int | None]:
-    """Return the active market-order minimum and its required reference-price window."""
+def _market_order_min_notional_rule(
+    market: dict[str, Any],
+) -> list[tuple[Decimal, int | None]]:
+    """Return every active market-order minimum and its own reference-price window."""
     info = market.get("info") if isinstance(market.get("info"), dict) else {}
     filters = info.get("filters") if isinstance(info.get("filters"), list) else []
-    rules: list[tuple[Decimal, int]] = []
+    rules: list[tuple[Decimal, int | None]] = []
     for rule in filters:
         if not isinstance(rule, dict) or rule.get("filterType") not in {"MIN_NOTIONAL", "NOTIONAL"}:
             continue
@@ -221,18 +223,21 @@ def _market_order_min_notional_rule(market: dict[str, Any]) -> tuple[Decimal, in
         if minimum <= 0:
             continue
         try:
-            avg_price_mins = int(rule.get("avgPriceMins", 0))
+            avg_price_mins: int | None = int(rule.get("avgPriceMins", 0))
+            if avg_price_mins < 0:
+                avg_price_mins = None
         except (TypeError, ValueError):
-            return minimum, None
+            avg_price_mins = None
         rules.append((minimum, avg_price_mins))
     if rules:
-        highest_minimum = max(value for value, _ in rules)
-        reference_windows = {window for value, window in rules if value == highest_minimum}
-        return highest_minimum, next(iter(reference_windows)) if len(reference_windows) == 1 else None
+        # Do not collapse independent constraints: different filters can require
+        # reference prices from different windows, even when one nominal minimum
+        # is lower than another.
+        return sorted(set(rules), key=lambda item: (item[0], -1 if item[1] is None else item[1]))
     limits = market.get("limits") if isinstance(market.get("limits"), dict) else {}
     cost = limits.get("cost") if isinstance(limits.get("cost"), dict) else {}
     fallback = dec(cost.get("min") or "0")
-    return fallback, None if fallback > 0 else 0
+    return [(fallback, None if fallback > 0 else 0)]
 
 
 def _market_order_reference_price(
@@ -364,6 +369,7 @@ def cleanup_new_spot_base(
     min_amount: Decimal,
     min_cost: Decimal = Decimal("0"),
     min_cost_reference_mins: int | None = 0,
+    min_cost_rules: list[tuple[Decimal, int | None]] | None = None,
     stop_id: str | None,
     stop_client_id: str | None,
 ) -> dict[str, Any]:
@@ -409,16 +415,22 @@ def cleanup_new_spot_base(
         }
     new_base = min(free_delta, drill_cap)
 
-    cleanup_price: Decimal | None = None
-    if min_cost > 0:
+    notional_rules = min_cost_rules
+    if notional_rules is None:
+        notional_rules = [(min_cost, min_cost_reference_mins)] if min_cost > 0 else []
+    reference_prices: dict[int | None, Decimal | None] = {}
+    active_rules = [(minimum, window) for minimum, window in notional_rules if minimum > 0]
+    if active_rules:
         try:
             ticker = broker.ticker(symbol)
             last_price = dec(ticker.get("last") if isinstance(ticker, dict) else None)
             if last_price <= 0:
                 raise RuntimeError(f"exchange returned an invalid cleanup price: {last_price}")
-            cleanup_price = _market_order_reference_price(
-                client, symbol, min_cost_reference_mins, last_price
-            )
+            for _, window in active_rules:
+                if window not in reference_prices:
+                    reference_prices[window] = _market_order_reference_price(
+                        client, symbol, window, last_price
+                    )
         except Exception as exc:
             errors.append(f"could not verify minimum-notional rule for cleanup: {exc}")
 
@@ -427,12 +439,15 @@ def cleanup_new_spot_base(
             return False
         if min_amount > 0 and amount < min_amount:
             return False
-        if min_cost > 0:
-            if cleanup_price is None:
-                return None
-            if amount * cleanup_price < min_cost:
+        unknown_reference = False
+        for minimum, window in active_rules:
+            reference_price = reference_prices.get(window)
+            if reference_price is None:
+                unknown_reference = True
+                continue
+            if amount * reference_price < minimum:
                 return False
-        return True
+        return None if unknown_reference else True
 
     sold_amount = Decimal("0")
     try:
@@ -541,14 +556,37 @@ def main() -> int:
     if last <= 0:
         raise RuntimeError(f"Exchange returned an invalid last price: {last}")
     limits = market.get("limits") or {}
-    min_cost, min_cost_reference_mins = _market_order_min_notional_rule(market)
+    min_cost_rules = _market_order_min_notional_rule(market)
+    min_cost = max((minimum for minimum, _ in min_cost_rules), default=Decimal("0"))
+    min_cost_reference_mins = (
+        min_cost_rules[0][1] if len(min_cost_rules) == 1 else None
+    )
     min_amount = dec(((limits.get("amount") or {}).get("min")) or "0")
-    # Size above the boundary to tolerate small differences between last price and
-    # Binance's required average-price reference window.
-    budget = max(Decimal("15"), min_cost * Decimal("2"))
-    amount = dec(broker.normalize_amount(symbol, float(max(min_amount, budget / last))))
-    if amount <= 0 or amount * last < min_cost:
+    # Size the buy against every applicable filter's own reference window. Do not
+    # start a drill if an active window cannot be verified before placing the order.
+    required_budget = Decimal("15")
+    for minimum, window in min_cost_rules:
+        if minimum <= 0:
+            continue
+        reference_price = _market_order_reference_price(client, symbol, window, last)
+        if reference_price is None or reference_price <= 0:
+            raise RuntimeError(
+                f"Cannot verify Binance market-order reference price for avgPriceMins={window}; "
+                "refusing to start the testnet drill"
+            )
+        required_budget = max(required_budget, minimum * last / reference_price * Decimal("1.25"))
+    amount = dec(broker.normalize_amount(symbol, float(max(min_amount, required_budget / last))))
+    if amount <= 0:
         raise RuntimeError(f"Invalid test amount {amount}; price={last}; min_cost={min_cost}")
+    for minimum, window in min_cost_rules:
+        if minimum <= 0:
+            continue
+        reference_price = _market_order_reference_price(client, symbol, window, last)
+        if reference_price is None or amount * reference_price < minimum:
+            raise RuntimeError(
+                f"Test amount {amount} does not satisfy Binance market-order minimum {minimum} "
+                f"at avgPriceMins={window}"
+            )
 
     base_asset = symbol.split("/")[0].split(":")[0]
     initial_free_base = _free_balance(client, base_asset)
@@ -684,17 +722,27 @@ def main() -> int:
                     min_amount=min_amount,
                     min_cost=min_cost,
                     min_cost_reference_mins=min_cost_reference_mins,
+                    min_cost_rules=min_cost_rules,
                     stop_id=stop_id,
                     stop_client_id=stop_client_id,
                 )
             else:
+                # A stop may have been accepted even when the buy reconciliation
+                # endpoint is failing. Always try to cancel it by exchange/client ID,
+                # while keeping every cleanup sell gated on a confirmed terminal buy.
+                stop_cancel_errors: list[str] = []
+                stop_cancelled = _cancel_stop_if_present(
+                    client, symbol, stop_id, stop_client_id, stop_cancel_errors
+                )
                 cleanup = {
                     "ok": False,
                     "remaining_base": None,
                     "residual_dust": None,
+                    "stop_cancelled": stop_cancelled,
                     "errors": [
                         "buy order could not be proven terminal; no cleanup sell was attempted",
                         str(reconciliation_error) if reconciliation_error else "unknown buy-order reconciliation failure",
+                        *stop_cancel_errors,
                     ],
                 }
             report["steps"].append(
