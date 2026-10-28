@@ -763,6 +763,96 @@ def _assigned_names(target: ast.AST) -> set[str]:
 
 
 
+
+
+def _class_scope_global_mutations(node: ast.ClassDef) -> set[str]:
+    """Find module writes executed by a class body through explicit global declarations."""
+    declared: set[str] = set()
+
+    def collect_declarations(part: ast.AST) -> None:
+        if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return
+        if isinstance(part, ast.ClassDef) and part is not node:
+            # Nested class bodies are distinct scopes; collect their module writes
+            # separately when the nested class statement is actually executed.
+            return
+        if isinstance(part, ast.Global):
+            declared.update(part.names)
+            return
+        for child in ast.iter_child_nodes(part):
+            collect_declarations(child)
+
+    for statement in node.body:
+        collect_declarations(statement)
+    mutations: set[str] = set()
+
+    def visit(part: ast.AST) -> None:
+        if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            # Function bodies run later; only expressions evaluated while defining
+            # the callable can execute during class creation.
+            expressions: list[ast.AST] = []
+            if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                expressions.extend(part.decorator_list)
+                expressions.extend(part.args.defaults)
+                expressions.extend(v for v in part.args.kw_defaults if v is not None)
+            for expression in expressions:
+                visit(expression)
+            return
+        if isinstance(part, ast.ClassDef) and part is not node:
+            for expression in [*part.decorator_list, *part.bases, *(kw.value for kw in part.keywords)]:
+                visit(expression)
+            mutations.update(_class_scope_global_mutations(part))
+            return
+        if isinstance(part, ast.If):
+            visit(part.test)
+            try:
+                condition = ast.literal_eval(part.test)
+            except (ValueError, TypeError):
+                condition = None
+            selected = part.body if condition is True else part.orelse if condition is False else None
+            if selected is not None:
+                for statement in selected:
+                    visit(statement)
+            else:
+                for statement in [*part.body, *part.orelse]:
+                    visit(statement)
+            return
+        if isinstance(part, (ast.For, ast.AsyncFor)):
+            visit(part.iter)
+            try:
+                iterable = ast.literal_eval(part.iter)
+            except (ValueError, TypeError):
+                iterable = None
+            if isinstance(iterable, (list, tuple, dict, set, str, bytes)) and not iterable:
+                for statement in part.orelse:
+                    visit(statement)
+                return
+            visit(part.target)
+            for statement in [*part.body, *part.orelse]:
+                visit(statement)
+            return
+        if isinstance(part, ast.While):
+            visit(part.test)
+            try:
+                condition = ast.literal_eval(part.test)
+            except (ValueError, TypeError):
+                condition = None
+            statements = part.orelse if condition is False else [*part.body, *part.orelse]
+            for statement in statements:
+                visit(statement)
+            return
+        if isinstance(part, ast.Name) and part.id in declared and isinstance(part.ctx, (ast.Store, ast.Del)):
+            mutations.add(part.id)
+        elif isinstance(part, (ast.Import, ast.ImportFrom)):
+            mutations.update(_defined_names(part) & declared)
+        for child in ast.iter_child_nodes(part):
+            visit(child)
+
+    for statement in node.body:
+        visit(statement)
+    return mutations
+
+
 def _module_scope_maybe_binds(node: ast.AST) -> set[str]:
     """Return module names a statement may bind/delete without counting local scopes.
 
@@ -800,10 +890,11 @@ def _module_scope_maybe_binds(node: ast.AST) -> set[str]:
             return
         if isinstance(part, ast.ClassDef):
             names.add(part.name)
-            # Class attributes have their own namespace. Inspect only expressions
-            # executed in the containing module while creating the class.
+            # Class attributes have their own namespace, except explicit global
+            # writes/deletes in the executing class suite.
             for expression in [*part.decorator_list, *part.bases, *(kw.value for kw in part.keywords)]:
                 visit(expression)
+            names.update(_class_scope_global_mutations(part))
             return
         if isinstance(part, (ast.Import, ast.ImportFrom)):
             names.update(_defined_names(part))
