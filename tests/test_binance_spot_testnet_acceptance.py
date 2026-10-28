@@ -111,7 +111,7 @@ def test_cleanup_flattens_only_newly_received_base_and_tolerates_non_sellable_du
         client,
         symbol="BTC/USDT",
         base_asset="BTC",
-        initial_free_base=1.0,
+        initial_free_base=Decimal("1.0"),
         min_amount=0.001,
         drill_base_amount=Decimal("1.0"),
         min_cost=Decimal("0"),
@@ -166,7 +166,7 @@ def test_cleanup_reconciles_stop_when_creation_response_lost():
         client,
         symbol="BTC/USDT",
         base_asset="BTC",
-        initial_free_base=1.0,
+        initial_free_base=Decimal("1.0"),
         min_amount=0.001,
         drill_base_amount=Decimal("1.0"),
         min_cost=Decimal("0"),
@@ -277,7 +277,7 @@ def test_cleanup_respects_minimum_notional_and_reports_non_sellable_residual():
     assert result["residual_dust"] == "0.0005"
 
 
-def test_cleanup_never_sells_unrelated_balance_credit_above_this_drills_fill():
+def test_cleanup_refuses_ambiguous_balance_increase_instead_of_selling_unrelated_credit():
     class Client:
         def __init__(self):
             self.base_free = Decimal("1.5")
@@ -305,11 +305,11 @@ def test_cleanup_never_sells_unrelated_balance_credit_above_this_drills_fill():
         min_amount=Decimal("0.001"), min_cost=Decimal("0"),
         stop_id=None, stop_client_id=None,
     )
-    assert broker.sells == [Decimal("0.2")]
-    assert client.base_free == Decimal("1.3")
-    assert result["ok"] is True
-    # The extra 0.3 BTC credit belongs to neither the initial balance nor this drill.
-    assert result["remaining_base"] == "0"
+    # The delta includes 0.3 BTC that did not come from this drill; fail closed.
+    assert broker.sells == []
+    assert client.base_free == Decimal("1.5")
+    assert result["ok"] is False
+    assert any("refusing to sell potentially unrelated base" in error for error in result["errors"])
 
 
 def test_net_filled_base_subtracts_fees_charged_in_base_asset():
