@@ -1995,6 +1995,16 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
                             migration.transform_strategy_ai("fake-commit")
                     self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_qualified_provider_adapter_requires_a_proven_module_binding(self):
+        import_tree = ast.parse("import ai_providers")
+        qualified_call = ast.parse("await ai_providers._gemini_json(prompt)").body[0].value.value.func
+        self.assertEqual(
+            migration._provider_adapter_name(qualified_call, import_tree),
+            "_gemini_json",
+        )
+        shadowed_tree = ast.parse("import ai_providers\\nai_providers = object()")
+        self.assertIsNone(migration._provider_adapter_name(qualified_call, shadowed_tree))
+
     def test_strategy_migration_refuses_to_drop_import_used_by_retained_helper(self):
         legacy = (
             "from .ai_providers import AIProviderError, _gemini_json, _groq_json, custom_helper\n"
@@ -2247,6 +2257,14 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
         self.assertFalse(migration._metadata_has_active_provider_wiring(
             '{"description": "Historical Gemini and Groq review note"}'
         ))
+        self.assertTrue(migration._metadata_has_active_provider_wiring(
+            '{"env": [{"name": "OPENAI_API_KEY", "value": "example"}]}'
+        ))
+        structured = json.loads(migration.scrub_ancillary_text(
+            "metadata.json",
+            '{"env": [{"name": "OPENAI_API_KEY", "value": "example"}]}'
+        ))
+        self.assertEqual(structured, {"env": []})
 
     def test_shell_deployment_scrub_preserves_non_ai_settings_and_shell_syntax(self):
         source = r'''#!/usr/bin/env bash
