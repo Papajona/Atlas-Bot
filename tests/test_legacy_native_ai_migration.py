@@ -2997,6 +2997,54 @@ from .native_ai import AIProviderError
                     migration.transform_strategy_ai("fake-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_strategy_migration_rejects_top_level_deleted_generator_dependency(self):
+        legacy = _with_canonical_schema_context(
+            self._legacy_strategy_with_retained_code("")
+        )
+        legacy = legacy.replace(
+            "from .strategy_evidence import evidence_for\n",
+            "from .strategy_evidence import evidence_for\ndel evidence_for\n",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "canonical strategy generator depends on missing module binding.*evidence_for",
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_strategy_migration_rejects_conditionally_deleted_generator_dependency(self):
+        legacy = _with_canonical_schema_context(
+            self._legacy_strategy_with_retained_code("")
+        )
+        legacy = legacy.replace(
+            "from .strategy_evidence import evidence_for\n",
+            "from .strategy_evidence import evidence_for\n"
+            "if SHOULD_CLEAN_UP:\n"
+            "    del evidence_for\n",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "canonical strategy generator depends on missing module binding.*evidence_for",
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_strategy_migration_rejects_dependency_deleted_in_finally(self):
         legacy = _with_canonical_schema_context(
             self._legacy_strategy_with_retained_code("")
@@ -3251,6 +3299,38 @@ def _extract_json(text):
                 typing.get_type_hints(module.retained_helper),
                 {"value": typing.Any},
             )
+
+    def test_literalizing_annotations_preserves_comments_and_pragmas(self):
+        legacy = """from __future__ import annotations
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper(value: list[str]):  # keep signature comment
+    return value  # type: ignore[return-value]
+
+def retained_plain(value):  # keep plain helper comment
+    return value
+
+async def _gemini_json(prompt):
+    return {"prompt": prompt}
+"""
+        canonical = "from .native_ai import AIProviderError\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            ast.parse(result, filename=str(target))
+            self.assertIn("# keep signature comment", result)
+            self.assertIn("# type: ignore[return-value]", result)
+            self.assertIn("# keep plain helper comment", result)
+            self.assertIn("value: 'list[str]'", result)
 
     def test_literalizing_annotations_preserves_comments_and_pragmas(self):
         legacy = """from __future__ import annotations
