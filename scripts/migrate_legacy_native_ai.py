@@ -914,6 +914,15 @@ def _class_scope_global_mutations(
             for statement in statements:
                 visit(statement)
             return
+        if isinstance(part, ast.AnnAssign) and postponed_annotations:
+            # Postponed class/module annotations are strings, not executed AST.
+            # Still inspect a real value expression for annotated assignments.
+            if part.value is not None:
+                visit(part.target)
+                visit(part.value)
+            elif not isinstance(part.target, ast.Name):
+                visit(part.target)
+            return
         if isinstance(part, ast.Name) and part.id in declared and isinstance(part.ctx, (ast.Store, ast.Del)):
             mutations.add(part.id)
         elif isinstance(part, (ast.Import, ast.ImportFrom)):
@@ -1010,6 +1019,15 @@ def _module_scope_maybe_binds(node: ast.AST, *, postponed_annotations: bool = Fa
                 return
             for statement in [*part.body, *part.orelse]:
                 visit(statement)
+            return
+        if isinstance(part, ast.AnnAssign) and postponed_annotations:
+            # With postponed annotations an annotation-only name does not bind,
+            # and its annotation expression is never evaluated.
+            if part.value is not None:
+                visit(part.target)
+                visit(part.value)
+            elif not isinstance(part.target, ast.Name):
+                visit(part.target)
             return
         if isinstance(part, ast.MatchAs) and part.name:
             names.add(part.name)
@@ -3143,11 +3161,29 @@ def transform_strategy_ai(commit: str) -> None:
             finally_changes = set().union(
                 *(_module_scope_maybe_binds(part, postponed_annotations=postponed_annotations) for part in node.finalbody)
             ) if node.finalbody else set()
-            return normal - finally_changes
+            # An unconditional import in finally re-establishes its binding.
+            # Track statement order so a later assignment/delete still invalidates it.
+            finally_imports: set[str] = set()
+            for part in node.finalbody:
+                if isinstance(part, (ast.Import, ast.ImportFrom)):
+                    finally_imports.update(_defined_names(part))
+                else:
+                    finally_imports.difference_update(
+                        _module_scope_maybe_binds(part, postponed_annotations=postponed_annotations)
+                    )
+            return (normal - (finally_changes - finally_imports)) | finally_imports
         return _defined_names(node)
 
     def module_execution_loads(node: ast.AST) -> set[str]:
         loaded: set[str] = set()
+        if isinstance(node, ast.AnnAssign) and postponed_annotations:
+            # Do not count postponed annotation names as runtime reads.
+            if node.value is not None:
+                loaded.update(module_execution_loads(node.target))
+                loaded.update(module_execution_loads(node.value))
+            elif not isinstance(node.target, ast.Name):
+                loaded.update(module_execution_loads(node.target))
+            return loaded
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             executed = [
                 *node.decorator_list, *node.args.defaults,
