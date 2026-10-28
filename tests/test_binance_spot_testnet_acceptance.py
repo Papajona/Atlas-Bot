@@ -475,7 +475,7 @@ def test_ambiguous_buy_submission_can_be_reconciled_by_client_order_id():
 
         def fetch_order(self, order_id, symbol, params):
             self.calls.append((order_id, symbol, params))
-            return {"id": "buy-recovered", "status": "closed", "filled": "0.5"}
+            return {"id": "buy-recovered", "status": "closed", "filled": "0.5", "fee": {"currency": "BTC", "cost": "0.001"}}
 
     class FakeBroker:
         def fetch_order(self, order_id, symbol):
