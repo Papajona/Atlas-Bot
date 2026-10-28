@@ -376,7 +376,7 @@ def test_cleanup_refuses_ambiguous_balance_increase_instead_of_selling_unrelated
     assert broker.sells == []
     assert client.base_free == Decimal("1.5")
     assert result["ok"] is False
-    assert any("refusing to sell potentially unrelated base" in error for error in result["errors"])
+    assert any("asset provenance is unverified" in error for error in result["errors"])
 
 
 def test_net_filled_base_subtracts_fees_charged_in_base_asset():
@@ -430,7 +430,7 @@ def test_cleanup_refuses_to_sell_when_balance_delta_exceeds_drill_fill():
 
     assert result["ok"] is False
     assert broker.sells == []
-    assert any("above this drill's net filled amount" in e for e in result["errors"])
+    assert any("asset provenance is unverified" in e for e in result["errors"])
 
 
 def test_cleanup_requires_terminal_stop_state_not_just_missing_open_order():
