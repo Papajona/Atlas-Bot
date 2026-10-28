@@ -1278,7 +1278,7 @@ def _extract_json(text):
             with patch.object(migration, "ROOT", root), patch.object(
                 migration, "canonical_text", return_value=canonical
             ):
-                with self.assertRaisesRegex(migration.MigrationError, "branch-specific definition '_extract_json' that collides"):
+                with self.assertRaisesRegex(migration.MigrationError, "branch-specific definition 'json' that collides"):
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
