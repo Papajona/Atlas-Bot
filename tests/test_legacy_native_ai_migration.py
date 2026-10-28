@@ -1623,7 +1623,7 @@ async def _gemini_json(prompt):
                 "'entry_conditions':[{'type':'indicator','rule':'RSI is above threshold','timeframe':timeframe or '1h'}],"
                 "'exit_conditions':[{'type':'indicator','rule':'RSI is below threshold','timeframe':timeframe or '1h'}],"
                 "'risk_per_trade':0.01,'validation_warnings':[],'requires_backtest':True,'requires_walk_forward':True,"
-                "'execution_mode':'PAPER_SHADOW_ONLY','implementation_status':'ATLAS_SUPPORTED_FAMILY'}\\n",
+                "'execution_mode':'PAPER_SHADOW_ONLY','implementation_status':'ATLAS_SUPPORTED_FAMILY'}\n",
                 encoding="utf-8",
             )
             (package / "config.py").write_text(
