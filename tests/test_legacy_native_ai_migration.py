@@ -2897,5 +2897,155 @@ from .native_ai import AIProviderError
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
 
+
+    def test_class_global_function_and_nested_class_definitions_cannot_replace_canonical_helper(self):
+        canonical = """import json
+from .native_ai import AIProviderError
+def _extract_json(text):
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise AIProviderError("response object required")
+    return value
+"""
+        class_definitions = [
+            "    def _extract_json(self):\n        return None\n",
+            "    class _extract_json:\n        pass\n",
+        ]
+        for definition in class_definitions:
+            legacy = (
+                "import json\n\n"
+                "class LegacyNamespace:\n"
+                "    global _extract_json\n"
+                + definition
+                + "\nclass AIProviderError(RuntimeError):\n    pass\n\n"
+                "def _extract_json(text):\n"
+                "    return json.loads(text)\n"
+            )
+            with self.subTest(definition=definition.splitlines()[0]), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                target = root / "app" / "ai_providers.py"
+                target.parent.mkdir()
+                target.write_text(legacy, encoding="utf-8")
+                with patch.object(migration, "ROOT", root), patch.object(
+                    migration, "canonical_text", return_value=canonical
+                ):
+                    with self.assertRaisesRegex(
+                        migration.MigrationError,
+                        "branch-specific definition '_extract_json' that collides",
+                    ):
+                        migration.transform_ai_providers("canonical-commit")
+                self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
+    def test_class_global_exception_target_cannot_delete_canonical_json_import(self):
+        legacy = """import json
+
+class LegacyNamespace:
+    global json
+    try:
+        raise ValueError("fixture")
+    except ValueError as json:
+        pass
+
+class AIProviderError(RuntimeError):
+    pass
+
+def _extract_json(text):
+    return json.loads(text)
+"""
+        canonical = """import json
+from .native_ai import AIProviderError
+def _extract_json(text):
+    return json.loads(text)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "branch-specific definition 'json' that collides",
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
+    def test_class_global_walrus_in_lambda_defaults_and_function_annotations_fails_closed(self):
+        canonical = """import json
+from .native_ai import AIProviderError
+def _extract_json(text):
+    return json.loads(text)
+"""
+        class_payloads = [
+            "    helper = lambda arg=(json := object()): arg\n",
+            "    def helper(self, arg: (json := object())):\n        return arg\n",
+        ]
+        for payload in class_payloads:
+            legacy = (
+                "import json\n\n"
+                "class LegacyNamespace:\n"
+                "    global json\n"
+                + payload
+                + "\nclass AIProviderError(RuntimeError):\n    pass\n\n"
+                "def _extract_json(text):\n"
+                "    return json.loads(text)\n"
+            )
+            with self.subTest(payload=payload.splitlines()[0]), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                target = root / "app" / "ai_providers.py"
+                target.parent.mkdir()
+                target.write_text(legacy, encoding="utf-8")
+                with patch.object(migration, "ROOT", root), patch.object(
+                    migration, "canonical_text", return_value=canonical
+                ):
+                    with self.assertRaisesRegex(
+                        migration.MigrationError,
+                        "branch-specific definition 'json' that collides",
+                    ):
+                        migration.transform_ai_providers("canonical-commit")
+                self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
+    def test_class_global_comprehension_target_does_not_block_facade_migration(self):
+        legacy = """import json
+
+class LegacyNamespace:
+    global _extract_json
+    helpers = [_extract_json for _extract_json in ("shadow",)]
+
+class AIProviderError(RuntimeError):
+    pass
+
+def _extract_json(text):
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise AIProviderError("response object required")
+    return value
+"""
+        canonical = """import json
+from .native_ai import AIProviderError
+def _extract_json(text):
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise AIProviderError("response object required")
+    return value
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("def _extract_json", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
 if __name__ == "__main__":
     unittest.main()
