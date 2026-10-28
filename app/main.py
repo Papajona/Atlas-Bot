@@ -1053,7 +1053,9 @@ async def _adaptive_bot_controller_loop():
                         )
                     async with SessionLocal() as db:
                         row = await db.get(AdaptiveTradingBot, bot_id)
-                        if row:
+                        # A risk-gated cycle may already have committed STOPPED plus its
+                        # diagnostic. Never overwrite that durable stop or reschedule it.
+                        if row and str(row.status).upper() == "RUNNING":
                             row.last_run_at = now
                             row.consecutive_errors = int(row.consecutive_errors or 0) + 1
                             if row.consecutive_errors >= 3:

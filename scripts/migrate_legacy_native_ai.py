@@ -7,6 +7,8 @@ whose unrelated hunks collide with each branch. It deliberately refuses uncertai
 from __future__ import annotations
 
 import ast
+import builtins
+import symtable
 import json
 import re
 import subprocess
@@ -27,6 +29,12 @@ PROVIDER_FIELD_RE = re.compile(
     r"(?i)(?:gemini|groq|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
     r"api\.groq\.com|api\.cerebras\.ai|api\.openai\.com|"
     r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|_gemini_json|_groq_json)"
+)
+ATLAS_PROVIDER_SECRET_RE = re.compile(
+    r"(?i)\batlas[-_](?:openai|gemini|groq|cerebras|ai[-_]gateway)[-_][a-z0-9_-]*\b"
+)
+PROVIDER_SETTING_NAME_RE = re.compile(
+    r"(?i)^(?:SECRET_)?(?:GEMINI|GROQ|CEREBRAS|AI_GATEWAY|OPENAI)_[A-Z0-9_]+$"
 )
 KEY_ASSIGNMENT_RE = re.compile(
     r"""(?ix)\b(?:SECRET_)?(?:GEMINI|GROQ|CEREBRAS|AI_GATEWAY|OPENAI)[A-Z0-9_]*\b
@@ -799,7 +807,7 @@ def transform_ai_providers(commit: str) -> None:
             canonical_nodes_by_name.setdefault(defined_name, canonical_node)
     canonical_names = set(canonical_nodes_by_name)
     provider_adapter_names = {
-        "_gemini_json", "_groq_json", "_prompt",
+        "_gemini_json", "_groq_json", "_cerebras_json", "_prompt",
         "dual_ai_research_review", "dual_ai_trade_safety_review",
     }
     extras: list[str] = []
@@ -815,6 +823,10 @@ def transform_ai_providers(commit: str) -> None:
             continue
         name = _name(node)
         if name in provider_adapter_names:
+            if name == "_cerebras_json" and not _is_safe_legacy_cerebras_adapter(node):
+                raise MigrationError(
+                    "app/ai_providers.py contains an unrecognized provider-bearing helper _cerebras_json; refusing to overwrite it"
+                )
             continue
         start_line = min([node.lineno, *[decorator.lineno for decorator in getattr(node, "decorator_list", [])]])
         segment = "".join(source_lines[start_line - 1:node.end_lineno]).rstrip("\n")
@@ -1287,6 +1299,1363 @@ def transform_ai_providers(commit: str) -> None:
     path.write_text(result, encoding="utf-8")
 
 
+
+def _is_safe_legacy_hosted_strategy_generator(node: ast.AST) -> bool:
+    """Recognize only the known legacy Gemini/Groq[/Cerebras] fallback wrapper.
+
+    The wrapper's schema validation and market-context call are deliberately checked
+    before replacing it with the canonical Native AI draft builder. Any extra business
+    logic, side-effecting expression, decorator, or output field fails closed.
+    """
+    if not isinstance(node, ast.AsyncFunctionDef) or node.decorator_list:
+        return False
+    if node.name != "generate_strategy_draft":
+        return False
+    args = node.args
+    if (args.posonlyargs or args.args or args.vararg or args.kwarg
+            or [a.arg for a in args.kwonlyargs] != ["prompt", "name", "asset", "symbol", "timeframe"]
+            or len(args.kw_defaults) != 5
+            or args.kw_defaults[0] is not None or args.kw_defaults[1] is not None
+            or any(not isinstance(value, ast.Constant) or value.value is not None for value in args.kw_defaults[2:])):
+        return False
+
+    def inert_annotation(value: ast.AST | None) -> bool:
+        if value is None or isinstance(value, (ast.Name, ast.Constant)):
+            return True
+        if isinstance(value, ast.Attribute):
+            return inert_annotation(value.value)
+        if isinstance(value, ast.Subscript):
+            return inert_annotation(value.value) and inert_annotation(value.slice)
+        if isinstance(value, (ast.Tuple, ast.List)):
+            return all(inert_annotation(item) for item in value.elts)
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
+            return inert_annotation(value.left) and inert_annotation(value.right)
+        return False
+
+    if any(not inert_annotation(a.annotation) for a in args.kwonlyargs):
+        return False
+    if not inert_annotation(node.returns):
+        return False
+
+    body = list(node.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]
+
+    def is_name(value: ast.AST | None, expected: str) -> bool:
+        return isinstance(value, ast.Name) and value.id == expected
+
+    def is_string(value: ast.AST | None, expected: str) -> bool:
+        return isinstance(value, ast.Constant) and value.value == expected
+
+    provider_keys = {
+        "gemini": "gemini_api_key",
+        "groq": "groq_api_key",
+        "cerebras": "cerebras_api_key",
+    }
+
+    def is_setting(value: ast.AST | None, field: str) -> bool:
+        return isinstance(value, ast.Attribute) and value.attr == field and is_name(value.value, "settings")
+
+    def settings_flag_names(value: ast.AST) -> list[str] | None:
+        if not isinstance(value, ast.BoolOp) or not isinstance(value.op, ast.And) or len(value.values) < 2:
+            return None
+        result: list[str] = []
+        for term in value.values:
+            if (not isinstance(term, ast.UnaryOp) or not isinstance(term.op, ast.Not)
+                    or not isinstance(term.operand, ast.Attribute) or not is_name(term.operand.value, "settings")):
+                return None
+            key = term.operand.attr
+            if key not in set(provider_keys.values()) or key in result:
+                return None
+            result.append(key)
+        return result
+
+    def is_provider_list(value: ast.AST, expected: list[str]) -> bool:
+        return isinstance(value, ast.List) and all(is_string(item, item.value) for item in value.elts if isinstance(item, ast.Constant)) and [
+            item.value if isinstance(item, ast.Constant) else None for item in value.elts
+        ] == expected
+
+    def is_provider_append(statement: ast.stmt, provider: str) -> bool:
+        if not isinstance(statement, ast.If) or statement.orelse or len(statement.body) != 1:
+            return False
+        if not is_setting(statement.test, provider_keys[provider]):
+            return False
+        expr = statement.body[0]
+        return (
+            isinstance(expr, ast.Expr) and isinstance(expr.value, ast.Call)
+            and isinstance(expr.value.func, ast.Attribute) and expr.value.func.attr == "append"
+            and is_name(expr.value.func.value, "provider_order")
+            and len(expr.value.args) == 1 and is_string(expr.value.args[0], provider)
+            and not expr.value.keywords
+        )
+
+    def is_ai_provider_error_raise(statement: ast.stmt, message: str | None = None) -> bool:
+        if not isinstance(statement, ast.Raise) or not isinstance(statement.exc, ast.Call):
+            return False
+        call = statement.exc
+        if not is_name(call.func, "AIProviderError") or len(call.args) != 1 or call.keywords:
+            return False
+        if message is not None:
+            return is_string(call.args[0], message) and statement.cause is None
+        # The only nonconstant error message permitted is the known provider-error
+        # aggregation: prefix + "; ".join(f"{k}: {v}" for k, v in provider_errors.items()).
+        allowed_names = {"provider_errors", "k", "v"}
+        for item in ast.walk(call.args[0]):
+            if isinstance(item, ast.Name) and item.id not in allowed_names:
+                return False
+            if isinstance(item, ast.Call):
+                if isinstance(item.func, ast.Attribute):
+                    if item.func.attr not in {"join", "items"}:
+                        return False
+                else:
+                    return False
+            if isinstance(item, ast.Attribute) and item.attr not in {"join", "items"}:
+                return False
+        return statement.cause is None
+
+    if len(body) not in {11, 13}:
+        return False
+    guard = body[0]
+    if not isinstance(guard, ast.If) or guard.orelse or len(guard.body) != 1:
+        return False
+    missing = settings_flag_names(guard.test)
+    if not missing or len(missing) not in {2, 3}:
+        return False
+    if set(missing) not in (
+        {"gemini_api_key", "groq_api_key"},
+        {"gemini_api_key", "groq_api_key", "cerebras_api_key"},
+    ):
+        return False
+    if not is_ai_provider_error_raise(guard.body[0], "No AI strategy provider is configured"):
+        return False
+
+    errors = body[1]
+    if not isinstance(errors, ast.AnnAssign) or not is_name(errors.target, "provider_errors"):
+        return False
+    if not isinstance(errors.value, ast.Dict) or errors.value.keys or errors.value.values:
+        return False
+    if not inert_annotation(errors.annotation):
+        return False
+
+    if len(body) == 11:
+        order = body[2]
+        if not isinstance(order, ast.Assign) or len(order.targets) != 1 or not is_name(order.targets[0], "provider_order"):
+            return False
+        order_value = order.value
+        if not (
+            isinstance(order_value, ast.IfExp)
+            and is_setting(order_value.test, "gemini_api_key")
+            and is_provider_list(order_value.body, ["gemini", "groq"])
+            and is_provider_list(order_value.orelse, ["groq"])
+        ):
+            return False
+        enabled_both = body[3]
+        if (not isinstance(enabled_both, ast.If) or enabled_both.orelse or len(enabled_both.body) != 1
+                or not isinstance(enabled_both.test, ast.BoolOp) or not isinstance(enabled_both.test.op, ast.And)
+                or len(enabled_both.test.values) != 2
+                or not is_setting(enabled_both.test.values[0], "gemini_api_key")
+                or not is_setting(enabled_both.test.values[1], "groq_api_key")):
+            return False
+        assign_order = enabled_both.body[0]
+        if (not isinstance(assign_order, ast.Assign) or len(assign_order.targets) != 1
+                or not is_name(assign_order.targets[0], "provider_order")
+                or not is_provider_list(assign_order.value, ["gemini", "groq"])):
+            return False
+        position = 4
+    else:
+        order = body[2]
+        if (not isinstance(order, ast.Assign) or len(order.targets) != 1
+                or not is_name(order.targets[0], "provider_order")
+                or not isinstance(order.value, ast.List) or order.value.elts):
+            return False
+        if not all(is_provider_append(body[i], provider) for i, provider in zip(
+            (3, 4, 5), ("gemini", "groq", "cerebras")
+        )):
+            return False
+        position = 6
+
+    raw = body[position]
+    if (not isinstance(raw, ast.AnnAssign) or not is_name(raw.target, "raw")
+            or not is_string(raw.value, None) and not (isinstance(raw.value, ast.Constant) and raw.value.value is None)
+            or not inert_annotation(raw.annotation)):
+        return False
+    provider_used = body[position + 1]
+    if (not isinstance(provider_used, ast.Assign) or len(provider_used.targets) != 1
+            or not is_name(provider_used.targets[0], "provider_used") or not is_string(provider_used.value, "")):
+        return False
+
+    loop = body[position + 2]
+    if (not isinstance(loop, ast.For) or not is_name(loop.target, "provider")
+            or not is_name(loop.iter, "provider_order") or loop.orelse or len(loop.body) != 1
+            or not isinstance(loop.body[0], ast.Try)):
+        return False
+    loop_try = loop.body[0]
+    if loop_try.orelse or loop_try.finalbody or len(loop_try.body) != 3 or len(loop_try.handlers) != 1:
+        return False
+    parse_assign, provider_assign, break_stmt = loop_try.body
+    if (not isinstance(parse_assign, ast.Assign) or len(parse_assign.targets) != 1
+            or not is_name(parse_assign.targets[0], "raw") or not isinstance(parse_assign.value, ast.Await)
+            or not isinstance(parse_assign.value.value, ast.Call)
+            or not is_name(parse_assign.value.value.func, "_generate_with_provider")
+            or len(parse_assign.value.value.args) != 2
+            or not is_name(parse_assign.value.value.args[0], "provider")
+            or parse_assign.value.value.keywords):
+        return False
+    prompt_call = parse_assign.value.value.args[1]
+    if (not isinstance(prompt_call, ast.Call) or not is_name(prompt_call.func, "_strategy_prompt")
+            or len(prompt_call.args) != 2 or not is_name(prompt_call.args[0], "prompt")
+            or not is_name(prompt_call.args[1], "name") or prompt_call.keywords):
+        return False
+    if (not isinstance(provider_assign, ast.Assign) or len(provider_assign.targets) != 1
+            or not is_name(provider_assign.targets[0], "provider_used") or not is_name(provider_assign.value, "provider")
+            or not isinstance(break_stmt, ast.Break)):
+        return False
+    handler = loop_try.handlers[0]
+    if (not is_name(handler.type, "Exception") or handler.name != "exc" or len(handler.body) != 1
+            or not isinstance(handler.body[0], ast.Assign)):
+        return False
+    handler_assign = handler.body[0]
+    if (len(handler_assign.targets) != 1 or not isinstance(handler_assign.targets[0], ast.Subscript)
+            or not is_name(handler_assign.targets[0].value, "provider_errors")
+            or not is_name(handler_assign.targets[0].slice, "provider")
+            or not isinstance(handler_assign.value, ast.Call) or not is_name(handler_assign.value.func, "str")
+            or len(handler_assign.value.args) != 1 or not is_name(handler_assign.value.args[0], "exc")
+            or handler_assign.value.keywords):
+        return False
+
+    empty_raw = body[position + 3]
+    if (not isinstance(empty_raw, ast.If) or empty_raw.orelse or len(empty_raw.body) != 1
+            or not isinstance(empty_raw.test, ast.Compare) or not is_name(empty_raw.test.left, "raw")
+            or len(empty_raw.test.ops) != 1 or not isinstance(empty_raw.test.ops[0], ast.Is)
+            or len(empty_raw.test.comparators) != 1 or not isinstance(empty_raw.test.comparators[0], ast.Constant)
+            or empty_raw.test.comparators[0].value is not None
+            or not is_ai_provider_error_raise(empty_raw.body[0])):
+        return False
+
+    validation = body[position + 4]
+    if (not isinstance(validation, ast.Try) or validation.orelse or validation.finalbody
+            or len(validation.body) != 2 or len(validation.handlers) != 1):
+        return False
+    model_check, context_check = validation.body
+    if (not isinstance(model_check, ast.Assign) or len(model_check.targets) != 1
+            or not is_name(model_check.targets[0], "spec") or not isinstance(model_check.value, ast.Call)
+            or not isinstance(model_check.value.func, ast.Attribute) or model_check.value.func.attr != "model_validate"
+            or not is_name(model_check.value.func.value, "AIStrategySpec")
+            or len(model_check.value.args) != 1 or not is_name(model_check.value.args[0], "raw")
+            or model_check.value.keywords):
+        return False
+    if (not isinstance(context_check, ast.Assign) or len(context_check.targets) != 1
+            or not is_name(context_check.targets[0], "spec") or not isinstance(context_check.value, ast.Call)
+            or not is_name(context_check.value.func, "_apply_market_context")
+            or len(context_check.value.args) != 1 or not is_name(context_check.value.args[0], "spec")
+            or {keyword.arg for keyword in context_check.value.keywords} != {"asset", "symbol", "timeframe"}
+            or any(not is_name(next(k.value for k in context_check.value.keywords if k.arg == key), key)
+                   for key in ("asset", "symbol", "timeframe"))):
+        return False
+    validation_handler = validation.handlers[0]
+    if (not is_name(validation_handler.type, "Exception") or validation_handler.name != "exc"
+            or len(validation_handler.body) != 1 or not isinstance(validation_handler.body[0], ast.Raise)):
+        return False
+    raise_stmt = validation_handler.body[0]
+    if (not isinstance(raise_stmt.exc, ast.Call) or not is_name(raise_stmt.exc.func, "AIProviderError")
+            or len(raise_stmt.exc.args) != 1 or raise_stmt.exc.keywords
+            or not is_name(raise_stmt.cause, "exc")):
+        return False
+    validation_message = raise_stmt.exc.args[0]
+    if not (
+        isinstance(validation_message, ast.JoinedStr)
+        and len(validation_message.values) == 2
+        and isinstance(validation_message.values[0], ast.Constant)
+        and validation_message.values[0].value == "AI strategy failed schema validation: "
+        and isinstance(validation_message.values[1], ast.FormattedValue)
+        and is_name(validation_message.values[1].value, "exc")
+        and validation_message.values[1].conversion == -1
+        and validation_message.values[1].format_spec is None
+    ):
+        return False
+
+    family = body[position + 5]
+    if (not isinstance(family, ast.Assign) or len(family.targets) != 1
+            or not is_name(family.targets[0], "family_key") or not isinstance(family.value, ast.Subscript)
+            or not isinstance(family.value.value, ast.Dict)):
+        return False
+    family_subscript = family.value
+    if not (isinstance(family_subscript.slice, ast.Attribute) and family_subscript.slice.attr == "strategy_family"
+            and is_name(family_subscript.slice.value, "spec")):
+        return False
+    expected_families = {
+        "TREND": "trend", "MOMENTUM": "momentum", "BREAKOUT": "breakout",
+        "MEAN_REVERSION": "mean_reversion", "ENSEMBLE": "ensemble",
+    }
+    actual_families = {
+        key.value: value.value for key, value in zip(family_subscript.value.keys, family_subscript.value.values)
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        and isinstance(value, ast.Constant) and isinstance(value.value, str)
+    }
+    if actual_families != expected_families or len(family_subscript.value.keys) != len(expected_families):
+        return False
+
+    result = body[position + 6]
+    if not isinstance(result, ast.Return) or not isinstance(result.value, ast.Dict):
+        return False
+    outer = {
+        key.value: value for key, value in zip(result.value.keys, result.value.values)
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    if set(outer) != {"strategy", "evidence", "ai"} or len(result.value.keys) != 3:
+        return False
+    if not (isinstance(outer["strategy"], ast.Call) and isinstance(outer["strategy"].func, ast.Attribute)
+            and outer["strategy"].func.attr == "model_dump" and is_name(outer["strategy"].func.value, "spec")
+            and not outer["strategy"].args and not outer["strategy"].keywords):
+        return False
+    evidence = outer["evidence"]
+    if (not isinstance(evidence, ast.Call) or not is_name(evidence.func, "evidence_for")
+            or len(evidence.args) != 1 or not is_name(evidence.args[0], "family_key") or evidence.keywords):
+        return False
+    ai = outer["ai"]
+    if not isinstance(ai, ast.Dict):
+        return False
+    ai_values = {
+        key.value: value for key, value in zip(ai.keys, ai.values)
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    expected_keys = {"provider", "model", "fallback_used", "provider_errors", "execution_authority",
+                     "requires_backtest", "requires_walk_forward"}
+    if set(ai_values) != expected_keys or len(ai.keys) != len(expected_keys):
+        return False
+    if not is_name(ai_values["provider"], "provider_used") or not is_name(ai_values["provider_errors"], "provider_errors"):
+        return False
+    fallback = ai_values["fallback_used"]
+    if (not isinstance(fallback, ast.Compare) or not is_name(fallback.left, "provider_used")
+            or len(fallback.ops) != 1 or not isinstance(fallback.ops[0], ast.NotEq)
+            or len(fallback.comparators) != 1 or not is_string(fallback.comparators[0], "gemini")):
+        return False
+    if not (isinstance(ai_values["execution_authority"], ast.Constant) and ai_values["execution_authority"].value is False):
+        return False
+    if not (isinstance(ai_values["requires_backtest"], ast.Constant) and ai_values["requires_backtest"].value is True):
+        return False
+    if not (isinstance(ai_values["requires_walk_forward"], ast.Constant) and ai_values["requires_walk_forward"].value is True):
+        return False
+
+    def is_model_setting(value: ast.AST, provider: str) -> bool:
+        fields = {
+            "gemini": {"gemini_strategy_model", "gemini_model"},
+            "groq": {"groq_strategy_model", "groq_model"},
+            "cerebras": {"cerebras_model"},
+        }[provider]
+        return isinstance(value, ast.Attribute) and is_name(value.value, "settings") and value.attr in fields
+
+    def is_provider_test(value: ast.AST, provider: str) -> bool:
+        return (
+            isinstance(value, ast.Compare) and is_name(value.left, "provider_used")
+            and len(value.ops) == 1 and isinstance(value.ops[0], ast.Eq)
+            and len(value.comparators) == 1 and is_string(value.comparators[0], provider)
+        )
+
+    def is_audited_model_expression(value: ast.AST) -> bool:
+        if len(missing) == 2:
+            return (
+                isinstance(value, ast.IfExp) and is_provider_test(value.test, "gemini")
+                and is_model_setting(value.body, "gemini") and is_model_setting(value.orelse, "groq")
+            )
+        if not isinstance(value, ast.IfExp) or not is_provider_test(value.test, "gemini"):
+            return False
+        fallback = value.orelse
+        return (
+            is_model_setting(value.body, "gemini")
+            and isinstance(fallback, ast.IfExp) and is_provider_test(fallback.test, "groq")
+            and is_model_setting(fallback.body, "groq") and is_model_setting(fallback.orelse, "cerebras")
+        )
+
+    if not is_audited_model_expression(ai_values["model"]):
+        return False
+    return True
+
+
+def _dotted_ast_name(node: ast.AST) -> str | None:
+    """Return a dotted name only for a pure Name/Attribute expression."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _dotted_ast_name(node.value)
+        return f"{parent}.{node.attr}" if parent else None
+    return None
+
+
+def _provider_adapter_name(func: ast.AST, module_tree: ast.Module | None = None) -> str | None:
+    """Resolve only a known provider adapter function or an imported ai_providers module attribute."""
+    allowed = {"_gemini_json", "_groq_json", "_cerebras_json", "_openai_json"}
+    if isinstance(func, ast.Name):
+        return func.id if func.id in allowed else None
+    if not isinstance(func, ast.Attribute) or func.attr not in allowed or module_tree is None:
+        return None
+    receiver = _dotted_ast_name(func.value)
+    if not receiver:
+        return None
+    for imported in module_tree.body:
+        if not isinstance(imported, ast.Import):
+            continue
+        for alias in imported.names:
+            if alias.name not in {"ai_providers", "app.ai_providers"}:
+                continue
+            bound = alias.asname or alias.name.split(".", 1)[0]
+            # An explicit alias is the only name introduced by this import. The
+            # original module path is valid only for an unaliased import such as
+            # import app.ai_providers (which binds the root app).
+            permitted_receivers = {bound} if alias.asname else {bound, alias.name}
+            if receiver not in permitted_receivers:
+                continue
+            # A later top-level assignment/import/delete that can shadow the module
+            # prevents us from treating a same-named attribute as a trusted adapter.
+            shadowed = False
+            for other in module_tree.body:
+                if other is imported:
+                    continue
+                if isinstance(other, ast.Delete):
+                    deleted = {
+                        part.id for target in other.targets for part in ast.walk(target)
+                        if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Del)
+                    }
+                    if bound in deleted:
+                        shadowed = True
+                        break
+                if isinstance(other, ast.Import):
+                    for other_alias in other.names:
+                        if other_alias.asname == bound and other_alias.name not in {"ai_providers", "app.ai_providers"}:
+                            shadowed = True
+                            break
+                        if other_alias.asname is None and other_alias.name.split(".", 1)[0] == bound:
+                            # Re-importing a submodule of the same package does not
+                            # rebind the package root (e.g. import app.config).
+                            continue
+                    if shadowed:
+                        break
+                    continue
+                if bound in _defined_names(other):
+                    shadowed = True
+                    break
+            if not shadowed:
+                return func.attr
+    return None
+
+
+def _is_safe_legacy_provider_dispatcher(node: ast.AST, module_tree: ast.Module | None = None) -> bool:
+    """Recognize the known legacy adapter router without permitting extra behavior."""
+    if not isinstance(node, ast.AsyncFunctionDef) or node.name != "_generate_with_provider" or node.decorator_list:
+        return False
+    args = node.args
+    if (args.posonlyargs or [a.arg for a in args.args] != ["provider", "prompt"]
+            or args.vararg or args.kwarg or args.kwonlyargs or args.defaults):
+        return False
+
+    def is_name(value: ast.AST | None, expected: str) -> bool:
+        return isinstance(value, ast.Name) and value.id == expected
+
+    def is_setting(value: ast.AST | None, allowed: set[str]) -> bool:
+        return (isinstance(value, ast.Attribute) and is_name(value.value, "settings")
+                and value.attr in allowed)
+
+    def is_model_expr(value: ast.AST, provider: str) -> bool:
+        fields = {
+            "gemini": {"gemini_strategy_model", "gemini_model"},
+            "groq": {"groq_strategy_model", "groq_model"},
+            "cerebras": {"cerebras_model"},
+        }[provider]
+
+        def is_provider_setting(term: ast.AST) -> bool:
+            return is_setting(term, fields)
+
+        if is_provider_setting(value):
+            return True
+        return (
+            isinstance(value, ast.BoolOp) and isinstance(value.op, ast.Or) and len(value.values) == 2
+            and all(is_provider_setting(term) for term in value.values)
+        )
+
+    def safe_adapter_call(value: ast.AST, provider: str) -> bool:
+        adapter = {"gemini": "_gemini_json", "groq": "_groq_json", "cerebras": "_cerebras_json"}[provider]
+        return (
+            isinstance(value, ast.Await) and isinstance(value.value, ast.Call)
+            and _provider_adapter_name(value.value.func, module_tree) == adapter
+            and len(value.value.args) == 1 and is_name(value.value.args[0], "prompt")
+            and len(value.value.keywords) == 2
+            and {keyword.arg for keyword in value.value.keywords} == {"system_instruction", "model"}
+            and all(
+                (keyword.arg == "system_instruction" and is_name(keyword.value, "SYSTEM_PROMPT"))
+                or (keyword.arg == "model" and is_model_expr(keyword.value, provider))
+                for keyword in value.value.keywords
+            )
+        )
+
+    body = list(node.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]
+    # A one-provider direct adapter is handled separately by transform_strategy_ai,
+    # where it can be matched to the generator's literal provider argument. It must
+    # not satisfy the dispatcher check for a multi-provider fallback loop.
+    if len(body) == 1:
+        return False
+
+    if len(body) not in {2, 3}:
+        return False
+    branches: list[tuple[str, ast.If]] = []
+    for statement in body[:-1]:
+        if (not isinstance(statement, ast.If) or statement.orelse or len(statement.body) != 1
+                or not isinstance(statement.test, ast.Compare) or not is_name(statement.test.left, "provider")
+                or len(statement.test.ops) != 1 or not isinstance(statement.test.ops[0], ast.Eq)
+                or len(statement.test.comparators) != 1 or not isinstance(statement.test.comparators[0], ast.Constant)
+                or not isinstance(statement.test.comparators[0].value, str)
+                or statement.test.comparators[0].value not in {"gemini", "groq"}):
+            return False
+        provider = statement.test.comparators[0].value
+        if any(provider == previous for previous, _ in branches):
+            return False
+        if (not isinstance(statement.body[0], ast.Return)
+                or not safe_adapter_call(statement.body[0].value, provider)):
+            return False
+        branches.append((provider, statement))
+
+    last_return = body[-1]
+    if not isinstance(last_return, ast.Return) or not isinstance(last_return.value, ast.Await):
+        return False
+    last_call = last_return.value.value
+    if not isinstance(last_call, ast.Call):
+        return False
+    if len(body) == 2:
+        return (
+            branches[0][0] == "gemini"
+            and _provider_adapter_name(last_call.func, module_tree) == "_groq_json"
+            and len(last_call.args) == 1 and is_name(last_call.args[0], "prompt")
+            and len(last_call.keywords) == 2
+            and {k.arg for k in last_call.keywords} == {"system_instruction", "model"}
+            and all(
+                (k.arg == "system_instruction" and is_name(k.value, "SYSTEM_PROMPT"))
+                or (k.arg == "model" and is_model_expr(k.value, "groq"))
+                for k in last_call.keywords
+            )
+        )
+    return (
+        [name for name, _ in branches] == ["gemini", "groq"]
+        and _provider_adapter_name(last_call.func, module_tree) == "_cerebras_json"
+        and len(last_call.args) == 1 and is_name(last_call.args[0], "prompt")
+        and len(last_call.keywords) == 2
+        and {k.arg for k in last_call.keywords} == {"system_instruction", "model"}
+        and all(
+            (k.arg == "system_instruction" and is_name(k.value, "SYSTEM_PROMPT"))
+            or (k.arg == "model" and is_model_expr(k.value, "cerebras"))
+            for k in last_call.keywords
+        )
+    )
+
+
+
+def _module_path_for_import(source_path: Path, node: ast.ImportFrom, imported_name: str | None = None) -> Path | None:
+    """Resolve a statically named project import without importing application code."""
+    if node.level and node.module is None:
+        package_dir = source_path.parent
+        for _ in range(node.level - 1):
+            package_dir = package_dir.parent
+        return package_dir / "__init__.py"
+    if node.level:
+        base = source_path.parent
+        for _ in range(node.level - 1):
+            base = base.parent
+        module_name = node.module
+        if not module_name:
+            return None
+        base = base.joinpath(*module_name.split("."))
+    else:
+        if not node.module:
+            return None
+        base = ROOT.joinpath(*node.module.split("."))
+    candidates = (base / "__init__.py", base.with_suffix(".py"))
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def _resolve_class_definition(
+    source_path: Path,
+    module_tree: ast.Module,
+    symbol_name: str,
+    seen: set[tuple[str, str]] | None = None,
+) -> tuple[Path, ast.Module, ast.ClassDef] | None:
+    """Resolve a local or imported class, including package-level re-exports."""
+    seen = set() if seen is None else set(seen)
+    key = (str(source_path), symbol_name)
+    if key in seen:
+        return None
+    seen.add(key)
+    matches = [node for node in module_tree.body if isinstance(node, ast.ClassDef) and node.name == symbol_name]
+    if len(matches) == 1:
+        return source_path, module_tree, matches[0]
+    if matches:
+        return None
+    for import_node in module_tree.body:
+        if not isinstance(import_node, ast.ImportFrom):
+            continue
+        for alias in import_node.names:
+            if alias.name == "*" or (alias.asname or alias.name) != symbol_name:
+                continue
+            target_path = _module_path_for_import(source_path, import_node, alias.name)
+            if target_path is None or not target_path.is_file():
+                continue
+            try:
+                target_tree = ast.parse(target_path.read_text(encoding="utf-8"), filename=str(target_path))
+            except (OSError, SyntaxError):
+                return None
+            resolved = _resolve_class_definition(target_path, target_tree, alias.name, seen)
+            if resolved is not None:
+                return resolved
+    return None
+
+
+def _is_unshadowed_pydantic_v2_model(
+    schema: ast.ClassDef, schema_path: Path, schema_tree: ast.Module
+) -> bool:
+    """Prove that the model's BaseModel base is the real Pydantic v2 symbol."""
+    if schema.decorator_list or schema.keywords or len(schema.bases) != 1:
+        return False
+    base = schema.bases[0]
+    binding: str | None = None
+    allowed_import_ids: set[int] = set()
+    if isinstance(base, ast.Name):
+        binding = base.id
+        for statement in schema_tree.body:
+            if isinstance(statement, ast.ImportFrom) and statement.level == 0 and statement.module == "pydantic":
+                if any(alias.name == "BaseModel" and (alias.asname or alias.name) == binding for alias in statement.names):
+                    allowed_import_ids.add(id(statement))
+    elif isinstance(base, ast.Attribute) and base.attr == "BaseModel" and isinstance(base.value, ast.Name):
+        binding = base.value.id
+        for statement in schema_tree.body:
+            if isinstance(statement, ast.Import):
+                if any(alias.name == "pydantic" and (alias.asname or alias.name.split(".", 1)[0]) == binding
+                       for alias in statement.names):
+                    allowed_import_ids.add(id(statement))
+    if not binding or not allowed_import_ids:
+        return False
+
+    def rebinds(node: ast.AST) -> bool:
+        if id(node) in allowed_import_ids:
+            return False
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return node.name == binding
+        if isinstance(node, ast.ImportFrom):
+            return any((alias.asname or alias.name) == binding for alias in node.names)
+        if isinstance(node, ast.Import):
+            return any((alias.asname or alias.name.split(".", 1)[0]) == binding for alias in node.names)
+        if isinstance(node, ast.Name) and node.id == binding and isinstance(node.ctx, (ast.Store, ast.Del)):
+            return True
+        return any(rebinds(child) for child in ast.iter_child_nodes(node))
+
+    return not any(rebinds(statement) for statement in schema_tree.body)
+
+
+def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree: ast.Module) -> bool:
+    """Verify a legacy schema/context contract without requiring identical source syntax."""
+
+    canonical_schemas = [
+        node for node in canonical_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"
+    ]
+    source_path = ROOT / "app" / "strategy_ai.py"
+    resolved = _resolve_class_definition(source_path, tree, "AIStrategySpec")
+    if len(canonical_schemas) != 1 or resolved is None:
+        return False
+    schema_path, schema_tree, schema = resolved
+    canonical_schema = canonical_schemas[0]
+    if not _is_unshadowed_pydantic_v2_model(schema, schema_path, schema_tree):
+        return False
+    if not any(
+        isinstance(base, ast.Name) and base.id == "BaseModel"
+        for base in canonical_schema.bases
+    ):
+        return False
+
+    def body_without_docstring(node: ast.ClassDef) -> list[ast.stmt]:
+        body = list(node.body)
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+            body = body[1:]
+        return body
+
+    canonical_body = body_without_docstring(canonical_schema)
+    schema_body = body_without_docstring(schema)
+
+    def is_classvar(annotation: ast.AST) -> bool:
+        value = annotation.value if isinstance(annotation, ast.Subscript) else annotation
+        return (
+            isinstance(value, ast.Name) and value.id == "ClassVar"
+        ) or (
+            isinstance(value, ast.Attribute) and value.attr == "ClassVar"
+        )
+
+    def field_map(body: list[ast.stmt]) -> dict[str, ast.AnnAssign]:
+        return {
+            statement.target.id: statement
+            for statement in body
+            if isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and not is_classvar(statement.annotation)
+        }
+
+    canonical_fields = field_map(canonical_body)
+    fields = field_map(schema_body)
+    if not canonical_fields or not set(canonical_fields).issubset(fields):
+        return False
+
+    def expand_alias(node: ast.AST, aliases: dict[str, ast.AST], seen_aliases: set[str] | None = None) -> ast.AST:
+        seen_aliases = set() if seen_aliases is None else seen_aliases
+        if isinstance(node, ast.Name) and node.id in aliases and node.id not in seen_aliases:
+            return expand_alias(aliases[node.id], aliases, seen_aliases | {node.id})
+        if isinstance(node, ast.Subscript):
+            return ast.Subscript(
+                value=expand_alias(node.value, aliases, seen_aliases),
+                slice=expand_alias(node.slice, aliases, seen_aliases),
+                ctx=node.ctx,
+            )
+        if isinstance(node, ast.BinOp):
+            return ast.BinOp(
+                left=expand_alias(node.left, aliases, seen_aliases),
+                op=node.op,
+                right=expand_alias(node.right, aliases, seen_aliases),
+            )
+        if isinstance(node, ast.Tuple):
+            return ast.Tuple(elts=[expand_alias(item, aliases, seen_aliases) for item in node.elts], ctx=node.ctx)
+        return node
+
+    def simple_aliases(module: ast.Module) -> dict[str, ast.AST]:
+        return {
+            target.id: node.value
+            for node in module.body
+            if isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, (ast.Name, ast.Subscript, ast.BinOp, ast.Tuple))
+            for target in node.targets
+        }
+
+    canonical_aliases = simple_aliases(canonical_tree)
+    legacy_aliases = simple_aliases(schema_tree)
+
+    def annotation_compatible(legacy_annotation: ast.AST, canonical_annotation: ast.AST) -> bool:
+        legacy_norm = expand_alias(legacy_annotation, legacy_aliases)
+        canonical_norm = expand_alias(canonical_annotation, canonical_aliases)
+        if ast.dump(legacy_norm, include_attributes=False) == ast.dump(canonical_norm, include_attributes=False):
+            return True
+        if isinstance(legacy_norm, ast.Name) and legacy_norm.id in {"str", "bool", "int", "float"}:
+            if isinstance(canonical_norm, ast.Subscript) and isinstance(canonical_norm.value, ast.Name) and canonical_norm.value.id == "Literal":
+                return True
+        if isinstance(legacy_norm, ast.Subscript) and isinstance(canonical_norm, ast.Subscript):
+            if not annotation_compatible(legacy_norm.value, canonical_norm.value):
+                return False
+            return annotation_compatible(legacy_norm.slice, canonical_norm.slice)
+        if isinstance(legacy_norm, ast.BinOp) and isinstance(canonical_norm, ast.BinOp):
+            return (
+                type(legacy_norm.op) is type(canonical_norm.op)
+                and annotation_compatible(legacy_norm.left, canonical_norm.left)
+                and annotation_compatible(legacy_norm.right, canonical_norm.right)
+            )
+        if isinstance(legacy_norm, ast.Tuple) and isinstance(canonical_norm, ast.Tuple):
+            return len(legacy_norm.elts) == len(canonical_norm.elts) and all(
+                annotation_compatible(a, b) for a, b in zip(legacy_norm.elts, canonical_norm.elts)
+            )
+        return False
+
+    def field_is_required(statement: ast.AnnAssign) -> bool:
+        default = statement.value
+        if default is None:
+            return True
+        if isinstance(default, ast.Call) and isinstance(default.func, ast.Name) and default.func.id == "Field":
+            keywords = {keyword.arg: keyword.value for keyword in default.keywords}
+            if "default_factory" in keywords:
+                return False
+            if "default" in keywords:
+                value = keywords["default"]
+                return isinstance(value, ast.Constant) and value.value is Ellipsis
+            if default.args:
+                return isinstance(default.args[0], ast.Constant) and default.args[0].value is Ellipsis
+            return True
+        return False
+
+    def field_has_nondefault_constraints(statement: ast.AnnAssign) -> bool:
+        value = statement.value
+        if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name) or value.func.id != "Field":
+            return False
+        return bool(value.args) or any(keyword.arg not in {"default", "default_factory"} for keyword in value.keywords)
+
+    for name, canonical_field in canonical_fields.items():
+        legacy_field = fields[name]
+        if not annotation_compatible(legacy_field.annotation, canonical_field.annotation):
+            return False
+        # A weaker legacy declaration must not bypass canonical length/range constraints
+        # or make a required canonical field optional.
+        if field_has_nondefault_constraints(canonical_field) and ast.dump(
+            legacy_field, include_attributes=False
+        ) != ast.dump(canonical_field, include_attributes=False):
+            return False
+        if field_has_nondefault_constraints(legacy_field) and ast.dump(
+            legacy_field, include_attributes=False
+        ) != ast.dump(canonical_field, include_attributes=False):
+            return False
+        if field_is_required(canonical_field) and not field_is_required(legacy_field):
+            return False
+
+    for name, statement in fields.items():
+        if name not in canonical_fields and field_is_required(statement):
+            return False
+
+    canonical_methods = {
+        node.name: node for node in canonical_body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    methods = {
+        node.name: node for node in schema_body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    # Never retain a schema with a missing validator: checking only methods that
+    # happen to exist permits a branch to remove canonical symbol/timeframe/risk gates.
+    if any(
+        name not in methods
+        or ast.dump(methods[name], include_attributes=False)
+        != ast.dump(canonical_method, include_attributes=False)
+        for name, canonical_method in canonical_methods.items()
+    ):
+        return False
+    if any(
+        name not in canonical_methods
+        or ast.dump(method, include_attributes=False)
+        != ast.dump(canonical_methods[name], include_attributes=False)
+        for name, method in methods.items()
+    ):
+        return False
+
+    def model_config_node(body: list[ast.stmt]) -> ast.stmt | None:
+        matches = [
+            statement for statement in body
+            if isinstance(statement, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "model_config" for target in statement.targets)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    canonical_config = model_config_node(canonical_body)
+    config = model_config_node(schema_body)
+    if config is not None and (canonical_config is None or ast.dump(config, include_attributes=False) != ast.dump(canonical_config, include_attributes=False)):
+        return False
+
+    allowed_ids = {id(node) for node in fields.values()} | {id(node) for node in methods.values()}
+    if config is not None:
+        allowed_ids.add(id(config))
+    if any(id(statement) not in allowed_ids for statement in schema_body):
+        return False
+
+    contexts = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+    ]
+    canonical_contexts = [
+        node for node in canonical_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+    ]
+    if len(contexts) != 1 or len(canonical_contexts) != 1:
+        return False
+
+    def _rooted_name(node: ast.AST) -> str | None:
+        while isinstance(node, (ast.Attribute, ast.Subscript)):
+            node = node.value
+        return node.id if isinstance(node, ast.Name) else None
+
+    def _module_flow_rebinds_or_mutates(node: ast.AST, name: str) -> bool:
+        """Detect conditional stores, aliases, and expression-level mutations of a module binding."""
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == name:
+                return True
+            # A function with global declaration can rebind or mutate the module value later.
+            return any(isinstance(part, ast.Global) and name in part.names for part in ast.walk(node))
+        if isinstance(node, ast.ClassDef):
+            if node.name == name:
+                return True
+            if any(isinstance(part, ast.Global) and name in part.names for part in ast.walk(node)):
+                return True
+            # Class bodies execute at import time, unlike ordinary function bodies.
+            # Inspect bases, decorators, and every class-body statement for writes or
+            # calls that can alter a dependent module object (for example settings).
+            return any(_module_flow_rebinds_or_mutates(part, name) for part in ast.iter_child_nodes(node))
+        if isinstance(node, ast.Lambda):
+            return False
+        if isinstance(node, ast.Import):
+            return any((alias.asname or alias.name.split(".", 1)[0]) == name for alias in node.names)
+        if isinstance(node, ast.ImportFrom):
+            # A star import can overwrite any dependent global without naming it here.
+            # Reject it rather than claiming the previously inspected binding survives.
+            if any(alias.name == "*" for alias in node.names):
+                return True
+            return any((alias.asname or alias.name) == name for alias in node.names)
+        if isinstance(node, ast.Assign):
+            if any(name in _assigned_names(target) or _rooted_name(target) == name for target in node.targets):
+                return True
+            # A direct alias can expose a mutable dependent object to later code;
+            # a mere use as a call target (e.g. ConfigDict(...)) is not a mutation.
+            return (
+                isinstance(node.value, (ast.Name, ast.Attribute, ast.Subscript))
+                and _rooted_name(node.value) == name
+            )
+        if isinstance(node, ast.AnnAssign):
+            if name in _assigned_names(node.target) or _rooted_name(node.target) == name:
+                return True
+            # An annotation/default may legitimately *use* a dependency (e.g. Field(...)).
+            # Only a direct value alias exposes the original dependency object to later
+            # mutation; nested calls and validator declarations are reads, not rebinding.
+            return (
+                node.value is not None
+                and isinstance(node.value, (ast.Name, ast.Attribute, ast.Subscript))
+                and _rooted_name(node.value) == name
+            )
+        if isinstance(node, ast.AugAssign):
+            return name in _assigned_names(node.target) or _rooted_name(node.target) == name
+        if isinstance(node, ast.Delete):
+            return any(name in _assigned_names(target) or _rooted_name(target) == name for target in node.targets)
+        if isinstance(node, ast.NamedExpr):
+            return name in _assigned_names(node.target) or _rooted_name(node.target) == name
+        if isinstance(node, ast.Expr):
+            # A module-scope expression that touches the dependent object could mutate it
+            # (e.g. ALLOWED_TIMEFRAMES.clear()); conservatively refuse to infer it safe.
+            return any(isinstance(part, ast.Name) and part.id == name and isinstance(part.ctx, ast.Load)
+                       for part in ast.walk(node))
+        if isinstance(node, (ast.For, ast.AsyncFor)):
+            if name in _assigned_names(node.target) or _rooted_name(node.target) == name:
+                return True
+        if isinstance(node, (ast.With, ast.AsyncWith)):
+            if any(item.optional_vars is not None and
+                   (name in _assigned_names(item.optional_vars) or _rooted_name(item.optional_vars) == name)
+                   for item in node.items):
+                return True
+        if isinstance(node, ast.ExceptHandler) and node.name == name:
+            return True
+        if isinstance(node, ast.MatchAs) and node.name == name:
+            return True
+        if isinstance(node, ast.MatchStar) and node.name == name:
+            return True
+        if isinstance(node, ast.MatchMapping) and node.rest == name:
+            return True
+        return any(_module_flow_rebinds_or_mutates(child, name) for child in ast.iter_child_nodes(node))
+
+    def module_binding_signature(module: ast.Module, name: str) -> tuple[str, ...] | None:
+        """Return one statically proven module binding, rejecting aliases and conditional mutations."""
+        signatures: list[tuple[str, ...]] = []
+        binding_statement_ids: set[int] = set()
+        for statement in module.body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if statement.name == name:
+                    signatures.append((type(statement).__name__, ast.dump(statement, include_attributes=False)))
+                    binding_statement_ids.add(id(statement))
+            elif isinstance(statement, ast.ImportFrom):
+                for alias in statement.names:
+                    if alias.name != "*" and (alias.asname or alias.name) == name:
+                        signatures.append(("ImportFrom", str(statement.level), statement.module or "", alias.name, alias.asname or ""))
+                        binding_statement_ids.add(id(statement))
+            elif isinstance(statement, ast.Import):
+                for alias in statement.names:
+                    if (alias.asname or alias.name.split(".", 1)[0]) == name:
+                        signatures.append(("Import", alias.name, alias.asname or ""))
+                        binding_statement_ids.add(id(statement))
+            elif isinstance(statement, ast.Assign):
+                if any(name in _assigned_names(target) or _rooted_name(target) == name for target in statement.targets):
+                    signatures.append(("Assign", ast.dump(statement, include_attributes=False)))
+                    binding_statement_ids.add(id(statement))
+            elif isinstance(statement, ast.AnnAssign):
+                if name in _assigned_names(statement.target) or _rooted_name(statement.target) == name:
+                    signatures.append(("AnnAssign", ast.dump(statement, include_attributes=False)))
+                    binding_statement_ids.add(id(statement))
+            elif isinstance(statement, (ast.AugAssign, ast.Delete)):
+                targets = [statement.target] if isinstance(statement, ast.AugAssign) else statement.targets
+                if any(name in _assigned_names(target) or _rooted_name(target) == name for target in targets):
+                    signatures.append((type(statement).__name__, ast.dump(statement, include_attributes=False)))
+                    binding_statement_ids.add(id(statement))
+
+        if len(signatures) != 1:
+            return None
+        # A second assignment hidden inside if/try/loop/match or a module-level expression
+        # that mutates the object invalidates the otherwise direct binding.
+        for statement in module.body:
+            if id(statement) in binding_statement_ids:
+                continue
+            if _module_flow_rebinds_or_mutates(statement, name):
+                return None
+        return signatures[0]
+
+    def dependent_global_names(*nodes: ast.AST) -> set[str] | None:
+        try:
+            isolated = ast.Module(body=list(nodes), type_ignores=[])
+            table = symtable.symtable(ast.unparse(isolated), "<strategy-contract>", "exec")
+        except (SyntaxError, ValueError):
+            return None
+        names: set[str] = set()
+
+        def visit(symbol_table: symtable.SymbolTable) -> None:
+            for symbol in symbol_table.get_symbols():
+                if symbol.is_referenced() and symbol.is_global():
+                    names.add(symbol.get_name())
+            for child in symbol_table.get_children():
+                visit(child)
+
+        visit(table)
+        return names
+
+    # The schema class is resolved from its defining module, which may differ from the
+    # strategy module containing _apply_market_context. Resolve each set of globals in
+    # the module where its referencing code actually executes.
+    schema_dependencies = dependent_global_names(schema)
+    context_dependencies = dependent_global_names(contexts[0])
+    if schema_dependencies is None or context_dependencies is None:
+        return False
+
+    # The schema's base-class name may be a proven alias of pydantic.BaseModel.
+    # The helper above already proves its import origin and absence of shadowing; it
+    # must not then be rejected merely because canonical source uses another spelling.
+    proven_pydantic_base_aliases = {
+        schema.bases[0].id
+    } if isinstance(schema.bases[0], ast.Name) else set()
+    replacement_import_names = {"NativeAIError", "compose_strategy_spec"}
+    for source_module, dependent_names in (
+        (schema_tree, schema_dependencies),
+        (tree, context_dependencies),
+    ):
+        for dependency in dependent_names:
+            # transform_strategy_ai inserts both names before the retained schema;
+            # a BaseModel alias with either name would be overwritten at runtime.
+            if (
+                source_module is schema_tree
+                and dependency in proven_pydantic_base_aliases
+                and dependency not in replacement_import_names
+            ):
+                continue
+            legacy_binding = module_binding_signature(source_module, dependency)
+            canonical_binding = module_binding_signature(canonical_tree, dependency)
+            if dependency == "AIStrategySpec":
+                # The legacy schema may have optional extensions, and the context may
+                # import the class from its defining module. Require unambiguous bindings
+                # without requiring an imported class to have the canonical local AST.
+                if legacy_binding is None or module_binding_signature(tree, dependency) is None:
+                    return False
+                continue
+            if dependency in dir(builtins) and legacy_binding is None and canonical_binding is None:
+                # A built-in is safe only when neither source module shadows it.
+                continue
+            if legacy_binding is None or legacy_binding != canonical_binding:
+                return False
+
+    # The field/method/configuration checks above already validate a semantically
+    # compatible schema. If its context binder is byte-for-byte canonical, do not
+    # re-interpret that known-safe AST through the stricter legacy-shape fallback.
+    if ast.dump(contexts[0], include_attributes=False) == ast.dump(
+        canonical_contexts[0], include_attributes=False
+    ):
+        return True
+    context = contexts[0]
+    args = context.args
+    if (
+        context.decorator_list or args.posonlyargs or [arg.arg for arg in args.args] != ["spec"]
+        or args.vararg or args.kwarg or [arg.arg for arg in args.kwonlyargs] != ["asset", "symbol", "timeframe"]
+        or args.defaults or len(args.kw_defaults) != 3
+        or any(not isinstance(value, ast.Constant) or value.value is not None for value in args.kw_defaults)
+        or not context.body or not isinstance(context.body[-1], ast.Return)
+    ):
+        return False
+
+    returns = [node for node in ast.walk(context) if isinstance(node, ast.Return)]
+    if len(returns) != 1 or returns[0] is not context.body[-1]:
+        return False
+    result = returns[0].value
+    if (
+        not isinstance(result, ast.Call) or not isinstance(result.func, ast.Attribute)
+        or not isinstance(result.func.value, ast.Name) or result.func.value.id != "AIStrategySpec"
+        or result.func.attr != "model_validate" or len(result.args) != 1
+        or not isinstance(result.args[0], ast.Name) or result.args[0].id != "data" or result.keywords
+    ):
+        return False
+    assignments = [
+        statement for statement in context.body
+        if isinstance(statement, ast.Assign) and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name) and statement.targets[0].id == "data"
+        and isinstance(statement.value, ast.Call) and isinstance(statement.value.func, ast.Attribute)
+        and isinstance(statement.value.func.value, ast.Name) and statement.value.func.value.id == "spec"
+        and statement.value.func.attr == "model_dump" and not statement.value.args and not statement.value.keywords
+    ]
+    if len(assignments) != 1 or assignments[0].lineno >= returns[0].lineno:
+        return False
+    # The dump assignment must be the first executable statement: otherwise an
+    # accepted market guard may reference data before it exists.
+    executable_body = list(context.body)
+    if executable_body and isinstance(executable_body[0], ast.Expr) and isinstance(
+        executable_body[0].value, ast.Constant
+    ) and isinstance(executable_body[0].value.value, str):
+        executable_body = executable_body[1:]
+    if not executable_body or executable_body[0] is not assignments[0]:
+        return False
+
+    # All three user-selected market dimensions must be written into model data.
+    # Otherwise the rewritten generator can validate a draft for a different market.
+    bound_market_fields: set[str] = set()
+    for statement in context.body:
+        if statement is assignments[0] or statement is returns[0]:
+            continue
+        if not isinstance(statement, ast.If) or statement.orelse or len(statement.body) != 1:
+            return False
+        test = statement.test
+        if not (
+            isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.IsNot)
+            and len(test.comparators) == 1 and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value is None and isinstance(test.left, ast.Name)
+            and test.left.id in {"asset", "symbol", "timeframe"}
+        ):
+            return False
+        assignment = statement.body[0]
+        if not isinstance(assignment, ast.Assign) or len(assignment.targets) != 1 or not isinstance(assignment.targets[0], ast.Subscript):
+            return False
+        target = assignment.targets[0]
+        if not isinstance(target.value, ast.Name) or target.value.id != "data" or not isinstance(target.slice, ast.Constant):
+            return False
+        expected_key = {"asset": "asset", "symbol": "symbols", "timeframe": "timeframes"}[test.left.id]
+        if target.slice.value != expected_key:
+            return False
+        if test.left.id in {"asset", "timeframe"}:
+            if not isinstance(assignment.value, ast.Name) or assignment.value.id != test.left.id:
+                return False
+        else:
+            if not isinstance(assignment.value, ast.List) or len(assignment.value.elts) != 1 or not isinstance(assignment.value.elts[0], ast.Name) or assignment.value.elts[0].id != "symbol":
+                return False
+        bound_market_fields.add(test.left.id)
+    return bound_market_fields == {"asset", "symbol", "timeframe"}
+
+
+def _is_safe_legacy_cerebras_adapter(node: ast.AST) -> bool:
+    """Allow only the audited Cerebras HTTP/JSON adapter, never arbitrary same-named helpers."""
+    if not isinstance(node, ast.AsyncFunctionDef) or node.name != "_cerebras_json" or node.decorator_list:
+        return False
+    args = node.args
+    if (
+        args.posonlyargs or [arg.arg for arg in args.args] != ["prompt"]
+        or args.vararg or args.kwarg or [arg.arg for arg in args.kwonlyargs] != ["timeout", "system_instruction", "model"]
+        or len(args.kw_defaults) != 3
+        or not isinstance(args.kw_defaults[0], ast.Constant) or args.kw_defaults[0].value != 30.0
+        or not isinstance(args.kw_defaults[1], ast.Constant) or args.kw_defaults[1].value is not None
+        or not isinstance(args.kw_defaults[2], ast.Constant) or args.kw_defaults[2].value is not None
+    ):
+        return False
+
+    def inert_type_annotation(value: ast.AST | None) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, ast.Constant):
+            return value.value is None
+        if isinstance(value, ast.Name):
+            return value.id in {"str", "float", "dict", "Any"}
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
+            return inert_type_annotation(value.left) and inert_type_annotation(value.right)
+        if isinstance(value, ast.Subscript):
+            return inert_type_annotation(value.value) and inert_type_annotation(value.slice)
+        if isinstance(value, (ast.Tuple, ast.List)):
+            return all(inert_type_annotation(item) for item in value.elts)
+        return False
+
+    parameters = [*args.posonlyargs, *args.args, *args.kwonlyargs]
+    if args.vararg is not None:
+        parameters.append(args.vararg)
+    if args.kwarg is not None:
+        parameters.append(args.kwarg)
+    if any(not inert_type_annotation(parameter.annotation) for parameter in parameters):
+        return False
+    if not inert_type_annotation(node.returns):
+        return False
+
+    def is_name(value: ast.AST | None, expected: str) -> bool:
+        return isinstance(value, ast.Name) and value.id == expected
+
+    def is_string(value: ast.AST | None, expected: str) -> bool:
+        return isinstance(value, ast.Constant) and value.value == expected
+
+    def is_attr(value: ast.AST | None, base: str, attr: str) -> bool:
+        return isinstance(value, ast.Attribute) and value.attr == attr and is_name(value.value, base)
+
+    def dict_entries(value: ast.AST, expected_keys: set[str]) -> dict[str, ast.AST] | None:
+        if not isinstance(value, ast.Dict):
+            return None
+        entries = {
+            key.value: item for key, item in zip(value.keys, value.values)
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        if set(entries) != expected_keys or len(value.keys) != len(expected_keys):
+            return None
+        return entries
+
+    def is_provider_key_guard(statement: ast.stmt) -> bool:
+        if not isinstance(statement, ast.If) or statement.orelse or len(statement.body) != 1:
+            return False
+        test = statement.test
+        if not (
+            isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+            and is_attr(test.operand, "settings", "cerebras_api_key")
+        ):
+            return False
+        raised = statement.body[0]
+        return (
+            isinstance(raised, ast.Raise) and isinstance(raised.exc, ast.Call)
+            and is_name(raised.exc.func, "AIProviderError") and len(raised.exc.args) == 1
+            and is_string(raised.exc.args[0], "CEREBRAS_API_KEY is not configured")
+            and not raised.exc.keywords and raised.cause is None
+        )
+
+    body = list(node.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]
+    if len(body) != 7:
+        return False
+    if not is_provider_key_guard(body[0]):
+        return False
+    url_assign, payload_assign, headers_assign, request_context, extract_try, result_return = (
+        body[1], body[2], body[3], body[4], body[5], body[6]
+    )
+    if (
+        not isinstance(url_assign, ast.Assign) or len(url_assign.targets) != 1
+        or not is_name(url_assign.targets[0], "url")
+        or not is_string(url_assign.value, "https://api.cerebras.ai/v1/chat/completions")
+    ):
+        return False
+
+    if not isinstance(payload_assign, ast.Assign) or len(payload_assign.targets) != 1 or not is_name(payload_assign.targets[0], "payload"):
+        return False
+    payload = dict_entries(payload_assign.value, {"model", "messages", "temperature", "response_format"})
+    if payload is None:
+        return False
+    model_expr = payload["model"]
+    if not (
+        isinstance(model_expr, ast.BoolOp) and isinstance(model_expr.op, ast.Or) and len(model_expr.values) == 2
+        and is_name(model_expr.values[0], "model") and is_attr(model_expr.values[1], "settings", "cerebras_model")
+    ):
+        return False
+    messages = payload["messages"]
+    if not isinstance(messages, ast.List) or len(messages.elts) != 2:
+        return False
+    system_message = dict_entries(messages.elts[0], {"role", "content"})
+    user_message = dict_entries(messages.elts[1], {"role", "content"})
+    if system_message is None or user_message is None:
+        return False
+    if not is_string(system_message["role"], "system") or not is_string(user_message["role"], "user"):
+        return False
+    system_content = system_message["content"]
+    if (
+        not isinstance(system_content, ast.BoolOp) or not isinstance(system_content.op, ast.Or)
+        or len(system_content.values) != 2 or not is_name(system_content.values[0], "system_instruction")
+        or not is_string(
+            system_content.values[1],
+            "You are Atlas Trading OS's research assistant. Analyze supplied research only. "
+            "Do not place trades, invent market data, or give guaranteed outcomes. Return JSON only.",
+        )
+    ):
+        return False
+    if not is_name(user_message["content"], "prompt"):
+        return False
+    if not (isinstance(payload["temperature"], ast.Constant) and payload["temperature"].value == 0.1):
+        return False
+    response_format = dict_entries(payload["response_format"], {"type"})
+    if response_format is None or not is_string(response_format["type"], "json_object"):
+        return False
+
+    if not isinstance(headers_assign, ast.Assign) or len(headers_assign.targets) != 1 or not is_name(headers_assign.targets[0], "headers"):
+        return False
+    headers = dict_entries(headers_assign.value, {"Authorization", "Content-Type"})
+    if headers is None:
+        return False
+    authorization = headers["Authorization"]
+    if not (
+        isinstance(authorization, ast.JoinedStr) and len(authorization.values) == 2
+        and is_string(authorization.values[0], "Bearer ")
+        and isinstance(authorization.values[1], ast.FormattedValue)
+        and is_attr(authorization.values[1].value, "settings", "cerebras_api_key")
+        and authorization.values[1].format_spec is None
+    ):
+        return False
+    if not is_string(headers["Content-Type"], "application/json"):
+        return False
+
+    if not isinstance(request_context, ast.AsyncWith) or len(request_context.items) != 1:
+        return False
+    item = request_context.items[0]
+    client_call = item.context_expr
+    if (
+        not isinstance(client_call, ast.Call) or not is_attr(client_call.func, "httpx", "AsyncClient")
+        or client_call.args or len(client_call.keywords) != 1
+        or client_call.keywords[0].arg != "timeout" or not is_name(client_call.keywords[0].value, "timeout")
+        or not is_name(item.optional_vars, "client") or len(request_context.body) != 3
+    ):
+        return False
+    response_assign, status_check, body_assign = request_context.body
+    if (
+        not isinstance(response_assign, ast.Assign) or len(response_assign.targets) != 1
+        or not is_name(response_assign.targets[0], "response") or not isinstance(response_assign.value, ast.Await)
+        or not isinstance(response_assign.value.value, ast.Call)
+        or not is_attr(response_assign.value.value.func, "client", "post")
+        or len(response_assign.value.value.args) != 1 or not is_name(response_assign.value.value.args[0], "url")
+        or {keyword.arg for keyword in response_assign.value.value.keywords} != {"headers", "json"}
+        or not all(
+            (keyword.arg == "headers" and is_name(keyword.value, "headers"))
+            or (keyword.arg == "json" and is_name(keyword.value, "payload"))
+            for keyword in response_assign.value.value.keywords
+        )
+    ):
+        return False
+    if (
+        not isinstance(status_check, ast.Expr) or not isinstance(status_check.value, ast.Call)
+        or not is_attr(status_check.value.func, "response", "raise_for_status")
+        or status_check.value.args or status_check.value.keywords
+    ):
+        return False
+    if not isinstance(body_assign, ast.Assign) or len(body_assign.targets) != 1 or not is_name(body_assign.targets[0], "body"):
+        return False
+    body_parser = body_assign.value
+    if not (
+        (isinstance(body_parser, ast.Call) and is_attr(body_parser.func, "response", "json")
+         and not body_parser.args and not body_parser.keywords)
+        or (isinstance(body_parser, ast.Call) and is_name(body_parser.func, "_response_json_object")
+            and len(body_parser.args) == 2 and is_name(body_parser.args[0], "response")
+            and is_string(body_parser.args[1], "Cerebras") and not body_parser.keywords)
+    ):
+        return False
+
+    if not isinstance(extract_try, ast.Try) or extract_try.orelse or extract_try.finalbody or len(extract_try.body) != 1 or len(extract_try.handlers) != 1:
+        return False
+    extract_assign = extract_try.body[0]
+    if not isinstance(extract_assign, ast.Assign) or len(extract_assign.targets) != 1 or not is_name(extract_assign.targets[0], "text"):
+        return False
+    content = extract_assign.value
+    if not isinstance(content, ast.Subscript) or not is_string(content.slice, "content"):
+        return False
+    content = content.value
+    if not isinstance(content, ast.Subscript) or not is_string(content.slice, "message"):
+        return False
+    content = content.value
+    if not isinstance(content, ast.Subscript) or not isinstance(content.slice, ast.Constant) or content.slice.value != 0:
+        return False
+    content = content.value
+    if not isinstance(content, ast.Subscript) or not is_string(content.slice, "choices") or not is_name(content.value, "body"):
+        return False
+    handler = extract_try.handlers[0]
+    if not (
+        isinstance(handler.type, ast.Tuple) and [n.id for n in handler.type.elts if isinstance(n, ast.Name)] == ["KeyError", "IndexError", "TypeError"]
+        and len(handler.type.elts) == 3 and handler.name == "exc" and len(handler.body) == 1
+        and isinstance(handler.body[0], ast.Raise) and isinstance(handler.body[0].exc, ast.Call)
+        and is_name(handler.body[0].exc.func, "AIProviderError")
+        and len(handler.body[0].exc.args) == 1
+        and is_string(handler.body[0].exc.args[0], "Cerebras response did not contain generated text")
+        and not handler.body[0].exc.keywords and is_name(handler.body[0].cause, "exc")
+    ):
+        return False
+    return (
+        isinstance(result_return, ast.Return) and isinstance(result_return.value, ast.Call)
+        and is_name(result_return.value.func, "_extract_json")
+        and len(result_return.value.args) == 1 and is_name(result_return.value.args[0], "text")
+        and not result_return.value.keywords
+    )
+
+
+
 def transform_strategy_ai(commit: str) -> None:
     path = ROOT / "app/strategy_ai.py"
     if not path.is_file():
@@ -1328,22 +2697,24 @@ def transform_strategy_ai(commit: str) -> None:
         and isinstance(body[0].value.value.func, ast.Name)
         and body[0].value.value.func.id == "_generate_with_provider"
     )
-    if not safe_trampoline:
+    safe_legacy_flow = _is_safe_legacy_hosted_strategy_generator(legacy_generate)
+    if not safe_trampoline and not safe_legacy_flow:
         raise MigrationError(
-            "generate_strategy_draft contains branch-specific behavior beyond the recognized provider trampoline; refusing to overwrite it"
+            "generate_strategy_draft contains unrecognized branch-specific behavior; refusing to overwrite it"
         )
-    generator_call = body[0].value.value
-    if (
-        len(generator_call.args) != 2
-        or not isinstance(generator_call.args[0], ast.Constant)
-        or generator_call.args[0].value not in {"gemini", "groq", "cerebras", "openai"}
-        or not isinstance(generator_call.args[1], ast.Name)
-        or generator_call.args[1].id != "prompt"
-        or generator_call.keywords
-    ):
-        raise MigrationError(
-            "generate_strategy_draft trampoline arguments may contain branch-specific input handling; refusing to discard it"
-        )
+    if safe_trampoline:
+        generator_call = body[0].value.value
+        if (
+            len(generator_call.args) != 2
+            or not isinstance(generator_call.args[0], ast.Constant)
+            or generator_call.args[0].value not in {"gemini", "groq", "cerebras", "openai"}
+            or not isinstance(generator_call.args[1], ast.Name)
+            or generator_call.args[1].id != "prompt"
+            or generator_call.keywords
+        ):
+            raise MigrationError(
+                "generate_strategy_draft trampoline arguments may contain branch-specific input handling; refusing to discard it"
+            )
 
     provider_definitions = definitions_by_name["_generate_with_provider"]
     if len(provider_definitions) != 1 or not isinstance(provider_definitions[0], ast.AsyncFunctionDef):
@@ -1362,22 +2733,35 @@ def transform_strategy_ai(commit: str) -> None:
         and isinstance(provider_body[0], ast.Return)
         and isinstance(provider_body[0].value, ast.Await)
         and isinstance(provider_body[0].value.value, ast.Call)
-        and (
-            (isinstance(provider_body[0].value.value.func, ast.Name)
-             and provider_body[0].value.value.func.id in provider_delegations)
-            or (isinstance(provider_body[0].value.value.func, ast.Attribute)
-                and provider_body[0].value.value.func.attr in provider_delegations)
-        )
     )
+    provider_adapter: str | None = None
     if direct_provider_trampoline:
         provider_call = provider_body[0].value.value
+        provider_adapter = _provider_adapter_name(provider_call.func, old_tree)
         direct_provider_trampoline = (
-            len(provider_call.args) == 1
+            provider_adapter in provider_delegations
+            and len(provider_call.args) == 1
             and isinstance(provider_call.args[0], ast.Name)
             and provider_call.args[0].id == "prompt"
             and not provider_call.keywords
         )
-    if not direct_provider_trampoline:
+        if safe_legacy_flow:
+            # A multi-provider fallback loop requires a dispatcher that actually
+            # routes each provider name to its matching adapter.
+            direct_provider_trampoline = False
+        elif safe_trampoline and direct_provider_trampoline:
+            adapter_by_provider = {
+                "gemini": "_gemini_json",
+                "groq": "_groq_json",
+                "cerebras": "_cerebras_json",
+                "openai": "_openai_json",
+            }
+            direct_provider_trampoline = (
+                adapter_by_provider.get(generator_call.args[0].value)
+                == provider_adapter
+            )
+    safe_provider_dispatcher = _is_safe_legacy_provider_dispatcher(legacy_provider, old_tree)
+    if not direct_provider_trampoline and not safe_provider_dispatcher:
         raise MigrationError(
             "_generate_with_provider contains additional or unknown behavior or side-effecting arguments; refusing to discard its body"
         )
@@ -1414,6 +2798,173 @@ def transform_strategy_ai(commit: str) -> None:
             continue
         retained_nodes.append(node)
 
+    removed_candidates = {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider"}
+
+    def guaranteed_bindings(node: ast.AST) -> set[str]:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return {node.name}
+        if isinstance(node, ast.If):
+            try:
+                condition = ast.literal_eval(node.test)
+            except (ValueError, TypeError):
+                condition = None
+            if condition is True:
+                return set().union(*(guaranteed_bindings(part) for part in node.body)) if node.body else set()
+            if condition is False:
+                return set().union(*(guaranteed_bindings(part) for part in node.orelse)) if node.orelse else set()
+            if node.orelse:
+                left = set().union(*(guaranteed_bindings(part) for part in node.body)) if node.body else set()
+                right = set().union(*(guaranteed_bindings(part) for part in node.orelse)) if node.orelse else set()
+                return left & right
+            return set()
+        if isinstance(node, (ast.Try, ast.TryStar)):
+            normal_parts = [*node.body, *node.orelse]
+            normal = set().union(*(guaranteed_bindings(part) for part in normal_parts)) if normal_parts else set()
+            if not node.handlers:
+                return normal
+            handler_sets = [
+                set().union(*(guaranteed_bindings(part) for part in handler.body)) if handler.body else set()
+                for handler in node.handlers
+            ]
+            common_handlers = set.intersection(*handler_sets) if handler_sets else set()
+            return normal & common_handlers
+        return _defined_names(node)
+
+    def module_execution_loads(node: ast.AST) -> set[str]:
+        loaded: set[str] = set()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            executed = [
+                *node.decorator_list, *node.args.defaults,
+                *(value for value in node.args.kw_defaults if value is not None),
+                *(arg.annotation for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs] if arg.annotation is not None),
+                *([node.args.vararg.annotation] if node.args.vararg and node.args.vararg.annotation is not None else []),
+                *([node.args.kwarg.annotation] if node.args.kwarg and node.args.kwarg.annotation is not None else []),
+                *([node.returns] if node.returns is not None else []),
+            ]
+            for part in executed:
+                loaded.update(module_execution_loads(part))
+            return loaded
+        if isinstance(node, ast.ClassDef):
+            for part in [*node.decorator_list, *node.bases, *(kw.value for kw in node.keywords), *node.body]:
+                loaded.update(module_execution_loads(part))
+            return loaded
+        if isinstance(node, ast.Lambda):
+            for part in [*node.args.defaults, *(value for value in node.args.kw_defaults if value is not None)]:
+                loaded.update(module_execution_loads(part))
+            return loaded
+        if isinstance(node, ast.If):
+            loaded.update(module_execution_loads(node.test))
+            try:
+                condition = ast.literal_eval(node.test)
+            except (ValueError, TypeError):
+                condition = None
+            selected = node.body if condition is True else node.orelse if condition is False else [*node.body, *node.orelse]
+            for part in selected:
+                loaded.update(module_execution_loads(part))
+            return loaded
+        if isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Load):
+                loaded.add(node.id)
+            return loaded
+        for child in ast.iter_child_nodes(node):
+            loaded.update(module_execution_loads(child))
+        return loaded
+
+    retained_module_bindings: set[str] = set()
+    for retained_node in retained_nodes:
+        if isinstance(retained_node, ast.Delete):
+            deleted = {
+                part.id for target in retained_node.targets for part in ast.walk(target)
+                if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Del)
+            } & removed_candidates
+            if deleted:
+                raise MigrationError(
+                    "retained strategy module deletes a removed global definition: " + ", ".join(sorted(deleted))
+                )
+        early_reads = (module_execution_loads(retained_node) & removed_candidates) - retained_module_bindings
+        if early_reads:
+            raise MigrationError(
+                "retained module code reads removed global(s) before a retained binding is available: "
+                + ", ".join(sorted(early_reads))
+            )
+        retained_module_bindings.update(guaranteed_bindings(retained_node))
+
+    removed_local_dependencies = removed_candidates - retained_module_bindings
+    retained_module = ast.Module(body=retained_nodes, type_ignores=[])
+    try:
+        retained_symbols = symtable.symtable(ast.unparse(retained_module), str(path), "exec")
+    except (SyntaxError, ValueError) as exc:
+        raise MigrationError("unable to resolve retained strategy helper scopes safely") from exc
+    retained_removed_global_uses: set[str] = set()
+
+    def collect_removed_global_references(table: symtable.SymbolTable) -> None:
+        for removed_name in removed_local_dependencies:
+            try:
+                symbol = table.lookup(removed_name)
+            except KeyError:
+                continue
+            if symbol.is_referenced() and symbol.is_global():
+                retained_removed_global_uses.add(removed_name)
+        for child in table.get_children():
+            collect_removed_global_references(child)
+
+    collect_removed_global_references(retained_symbols)
+    if retained_removed_global_uses:
+        raise MigrationError(
+            "retained strategy helper depends on removed local definition(s) "
+            + ", ".join(sorted(retained_removed_global_uses))
+            + "; refusing to remove prompt or provider behavior"
+        )
+
+    for retained_node in retained_nodes:
+        targets = (
+            retained_node.targets if isinstance(retained_node, ast.Assign)
+            else [retained_node.target] if isinstance(retained_node, ast.AnnAssign)
+            else []
+        )
+        if any(isinstance(target, ast.Name) and target.id == "__all__" for target in targets):
+            try:
+                exports = ast.literal_eval(retained_node.value) if retained_node.value is not None else None
+            except (ValueError, TypeError):
+                exports = None
+            if not isinstance(exports, (list, tuple, set)) or not all(isinstance(item, str) for item in exports):
+                raise MigrationError("strategy module has dynamic __all__; refusing to remove names that may be exported")
+            lost = sorted(removed_local_dependencies & set(exports))
+            if lost:
+                raise MigrationError("strategy module __all__ exports definitions removed by migration: " + ", ".join(lost))
+        if isinstance(retained_node, ast.AugAssign) and isinstance(retained_node.target, ast.Name) and retained_node.target.id == "__all__":
+            if not isinstance(retained_node.op, ast.Add):
+                raise MigrationError("strategy module mutates __all__ dynamically; refusing to remove potentially exported names")
+            try:
+                values = ast.literal_eval(retained_node.value)
+            except (ValueError, TypeError):
+                values = None
+            if not isinstance(values, (list, tuple, set)) or not all(isinstance(item, str) for item in values):
+                raise MigrationError("strategy module mutates __all__ dynamically; refusing to remove potentially exported names")
+            lost = sorted(removed_local_dependencies & set(values))
+            if lost:
+                raise MigrationError("strategy module __all__ exports definitions removed by migration: " + ", ".join(lost))
+        if isinstance(retained_node, ast.Expr) and isinstance(retained_node.value, ast.Call):
+            call = retained_node.value
+            if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name) and call.func.value.id == "__all__":
+                if call.func.attr not in {"append", "extend", "insert"}:
+                    raise MigrationError("strategy module mutates __all__ dynamically; refusing to remove potentially exported names")
+                try:
+                    values = [ast.literal_eval(arg) for arg in call.args]
+                except (ValueError, TypeError):
+                    values = []
+                flattened: set[str] = set()
+                for value in values:
+                    if isinstance(value, str):
+                        flattened.add(value)
+                    elif isinstance(value, (list, tuple, set)) and all(isinstance(item, str) for item in value):
+                        flattened.update(value)
+                    else:
+                        raise MigrationError("strategy module mutates __all__ dynamically; refusing to remove potentially exported names")
+                lost = sorted(removed_local_dependencies & flattened)
+                if lost:
+                    raise MigrationError("strategy module __all__ exports definitions removed by migration: " + ", ".join(lost))
+
     retained_name_uses = {
         part.id
         for node in retained_nodes
@@ -1433,6 +2984,38 @@ def transform_strategy_ai(commit: str) -> None:
             "retained strategy helper depends on non-native or aliased .ai_providers import(s) "
             + ", ".join(unsafe_imports)
             + "; only imports whose original symbol matches NativeAIError or compose_strategy_spec can be remapped"
+        )
+    # Verify that every global read in the transplanted generator is still available.
+    local_names = {canonical_generate.name}
+    local_names.update(arg.arg for arg in ast.walk(canonical_generate.args) if isinstance(arg, ast.arg))
+    for part in ast.walk(canonical_generate):
+        if isinstance(part, ast.Name) and isinstance(part.ctx, (ast.Store, ast.Del)):
+            local_names.add(part.id)
+        elif isinstance(part, ast.ExceptHandler) and part.name:
+            local_names.add(part.name)
+        elif isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and part is not canonical_generate:
+            local_names.add(part.name)
+    canonical_global_loads = {
+        part.id for part in ast.walk(canonical_generate)
+        if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Load)
+    } - local_names - set(dir(builtins))
+    available_names: set[str] = set()
+    for retained_node in retained_nodes:
+        if isinstance(retained_node, ast.AnnAssign) and retained_node.value is None:
+            continue
+        available_names.update(_defined_names(retained_node))
+    remappable_names = {"NativeAIError", "compose_strategy_spec"}
+    missing_dependencies = sorted(canonical_global_loads - available_names - remappable_names)
+    if missing_dependencies:
+        raise MigrationError(
+            "canonical strategy generator depends on missing module binding(s): "
+            + ", ".join(missing_dependencies)
+            + "; refusing to publish a broken strategy module"
+        )
+
+    if not _is_compatible_strategy_schema_and_context(old_tree, new_tree):
+        raise MigrationError(
+            "strategy schema/context helpers do not satisfy the canonical Native AI draft contract; refusing to replace the hosted generator"
         )
 
     edits: list[tuple[int, int, str]] = []
@@ -1808,26 +3391,53 @@ def scrub_ancillary_text(path: str, text: str) -> str:
         except json.JSONDecodeError as exc:
             raise MigrationError(f"metadata.json is invalid JSON: {exc}") from exc
 
+        remove_sentinel = object()
+
         def scrub(value, key_context=""):
+            remove = remove_sentinel
             if isinstance(value, dict):
-                return {
-                    k: scrub(v, str(k))
-                    for k, v in value.items()
-                    if not PROVIDER_FIELD_RE.search(str(k))
-                }
+                named_setting = next(
+                    (item for key, item in value.items()
+                     if str(key).lower() in {"name", "key", "setting", "variable"} and isinstance(item, str)),
+                    None,
+                )
+                has_payload = any(
+                    str(key).lower() in {"value", "secretref", "secret_ref", "version", "endpoint"}
+                    for key in value
+                )
+                if isinstance(named_setting, str) and PROVIDER_SETTING_NAME_RE.fullmatch(named_setting) and has_payload:
+                    return remove
+                result = {}
+                for key, item in value.items():
+                    key_text = str(key)
+                    if PROVIDER_FIELD_RE.search(key_text):
+                        continue
+                    if key_text.lower() in {"secretref", "secret_ref"} and isinstance(item, str) and PROVIDER_SETTING_NAME_RE.fullmatch(item):
+                        continue
+                    cleaned_item = scrub(item, str(key))
+                    if cleaned_item is not remove:
+                        result[key] = cleaned_item
+                return result
             if isinstance(value, list):
-                return [scrub(item, key_context) for item in value]
-            if isinstance(value, str) and PROVIDER_RE.search(value):
+                return [cleaned for item in value if (cleaned := scrub(item, key_context)) is not remove]
+            if isinstance(value, str) and key_context.lower() in {"name", "key", "setting", "variable"} and PROVIDER_SETTING_NAME_RE.fullmatch(value):
+                return ""
+            if isinstance(value, str) and (PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value)):
                 if re.fullmatch(r"(?i)(?:[a-z0-9]+_)*model(?:_(?:id|name|version))?", key_context):
                     return "atlas-native-strategy-v1"
                 cleaned = SECRET_VERSION_RE.sub("", value)
                 cleaned = KEY_ASSIGNMENT_RE.sub("", cleaned)
                 cleaned = HOST_RE.sub("", cleaned)
+                cleaned = ATLAS_PROVIDER_SECRET_RE.sub("", cleaned)
                 cleaned = MODEL_RE.sub("atlas-native-strategy-v1", cleaned)
-                return PROVIDER_RE.sub("legacy provider", cleaned)
+                # Descriptive/audit prose may mention historical providers; preserve it.
+                return cleaned
             return value
 
-        return json.dumps(scrub(data), indent=2, ensure_ascii=False) + "\n"
+        scrubbed = scrub(data)
+        if scrubbed is remove_sentinel:
+            scrubbed = {}
+        return json.dumps(scrubbed, indent=2, ensure_ascii=False) + "\n"
 
     kept: list[str] = []
     for line in text.splitlines(keepends=True):
@@ -1886,6 +3496,52 @@ def apply_ancillary_patch(commit: str, path: str, extra_base: str, extra_commit:
             target.write_text(cleaned, encoding="utf-8")
 
 
+def _metadata_has_active_provider_wiring(text: str) -> bool:
+    """Permit inert descriptive prose, but reject real provider configuration and credentials."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return True
+
+    def visit(value, key_context: str = "") -> bool:
+        if isinstance(value, dict):
+            named_setting = next(
+                (item for key, item in value.items()
+                 if str(key).lower() in {"name", "key", "setting", "variable"} and isinstance(item, str)),
+                None,
+            )
+            has_payload = any(
+                str(key).lower() in {"value", "secretref", "secret_ref", "version", "endpoint"}
+                for key in value
+            )
+            if isinstance(named_setting, str) and PROVIDER_SETTING_NAME_RE.fullmatch(named_setting) and has_payload:
+                return True
+            for key, item in value.items():
+                key_text = str(key)
+                if PROVIDER_FIELD_RE.search(key_text):
+                    return True
+                if visit(item, key_text):
+                    return True
+            return False
+        if isinstance(value, list):
+            return any(visit(item, key_context) for item in value)
+        if isinstance(value, str):
+            if key_context.lower() in {"name", "key", "setting", "variable", "secretref", "secret_ref"} and PROVIDER_SETTING_NAME_RE.fullmatch(value):
+                return True
+            if (
+                ATLAS_PROVIDER_SECRET_RE.search(value)
+                or KEY_ASSIGNMENT_RE.search(value)
+                or SECRET_VERSION_RE.search(value)
+                or HOST_RE.search(value)
+            ):
+                return True
+            if re.search(r"(?i)(?:provider|gateway|model|api[_ -]?key|secret|endpoint)", key_context) and PROVIDER_RE.search(value):
+                return True
+        return False
+
+    return visit(data)
+
+
 def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:
     # Canonical Native AI source and the original provider-removal patch baseline are
     # independent pins: changing one must not widen the other per-path diff.
@@ -1908,7 +3564,13 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
     remaining = []
     for path in NATIVE_PATHS:
         target = ROOT / path
-        if target.is_file() and PROVIDER_RE.search(target.read_text(encoding="utf-8")):
+        if not target.is_file():
+            continue
+        contents = target.read_text(encoding="utf-8")
+        if path == "metadata.json":
+            if _metadata_has_active_provider_wiring(contents):
+                remaining.append(path)
+        elif PROVIDER_RE.search(contents):
             remaining.append(path)
     if remaining:
         raise MigrationError("provider references remain in: " + ", ".join(remaining))

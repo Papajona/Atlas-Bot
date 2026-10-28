@@ -17,17 +17,139 @@ SPEC.loader.exec_module(migration)
 
 CANONICAL_STRATEGY = """from .native_ai import NativeAIError, compose_strategy_spec
 from .strategy_evidence import evidence_for
+from .config import settings
+from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+ALLOWED_TIMEFRAMES = {"5m", "15m", "30m", "1h", "4h", "1d"}
+
+class StrategyCondition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: str = Field(min_length=2, max_length=60)
+    rule: str = Field(min_length=3, max_length=500)
+    timeframe: str | None = Field(default=None, max_length=10)
+
+    @field_validator("timeframe")
+    @classmethod
+    def validate_timeframe(cls, value: str | None) -> str | None:
+        if value is not None and value not in ALLOWED_TIMEFRAMES:
+            raise ValueError(f"Unsupported timeframe: {value}")
+        return value
+
+class AIStrategySpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: Literal["atlas-strategy-v1"] = "atlas-strategy-v1"
+    title: str = Field(min_length=2, max_length=120)
+    summary: str = Field(min_length=10, max_length=1000)
+    asset: Literal["crypto", "forex", "commodity"]
+    symbols: list[str] = Field(min_length=1, max_length=10)
+    timeframes: list[str] = Field(min_length=1, max_length=5)
+    direction: Literal["LONG", "SHORT", "BOTH", "AUTO"]
+    strategy_family: Literal["TREND", "MOMENTUM", "BREAKOUT", "MEAN_REVERSION", "ENSEMBLE"]
+    entry_conditions: list[StrategyCondition] = Field(min_length=1, max_length=12)
+    exit_conditions: list[StrategyCondition] = Field(min_length=1, max_length=8)
+    risk_per_trade: float = Field(gt=0, le=0.05)
+    stop_loss_atr: float | None = Field(default=None, gt=0, le=10)
+    take_profit_rr: float | None = Field(default=None, gt=0, le=10)
+    sessions: list[str] = Field(default_factory=list, max_length=8)
+    assumptions: list[str] = Field(default_factory=list, max_length=10)
+    validation_warnings: list[str] = Field(default_factory=list, max_length=12)
+    requires_backtest: Literal[True] = True
+    requires_walk_forward: Literal[True] = True
+    execution_mode: Literal["PAPER_SHADOW_ONLY"] = "PAPER_SHADOW_ONLY"
+    implementation_status: Literal["ATLAS_SUPPORTED_FAMILY"] = "ATLAS_SUPPORTED_FAMILY"
+
+    @field_validator("timeframes")
+    @classmethod
+    def validate_timeframes(cls, values: list[str]) -> list[str]:
+        if any(v not in ALLOWED_TIMEFRAMES for v in values):
+            raise ValueError(f"Unsupported timeframe; allowed: {sorted(ALLOWED_TIMEFRAMES)}")
+        return list(dict.fromkeys(values))
+
+    @field_validator("symbols")
+    @classmethod
+    def validate_symbols(cls, values: list[str]) -> list[str]:
+        cleaned = [str(v).strip() for v in values if str(v).strip()]
+        if not cleaned:
+            raise ValueError("At least one symbol is required")
+        return list(dict.fromkeys(cleaned))
+
+    @model_validator(mode="after")
+    def validate_risk_contract(self) -> "AIStrategySpec":
+        if self.risk_per_trade > settings.risk_per_trade:
+            self.validation_warnings.append(
+                f"Requested AI risk was capped at the platform maximum of {settings.risk_per_trade:.4f}."
+            )
+            self.risk_per_trade = settings.risk_per_trade
+        return self
+
+
+def _apply_market_context(spec: AIStrategySpec, *, asset: str | None = None, symbol: str | None = None, timeframe: str | None = None) -> AIStrategySpec:
+    data = spec.model_dump()
+    if asset is not None:
+        data["asset"] = asset
+    if symbol is not None:
+        data["symbols"] = [symbol]
+    if timeframe is not None:
+        data["timeframes"] = [timeframe]
+    return AIStrategySpec.model_validate(data)
+
 
 async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
     try:
         raw = compose_strategy_spec(prompt=prompt, name=name, asset=asset, symbol=symbol,
-                                   timeframe=timeframe, max_risk_per_trade=0.01)
+                                    timeframe=timeframe, max_risk_per_trade=settings.risk_per_trade)
+        spec = AIStrategySpec.model_validate(raw)
+        spec = _apply_market_context(spec, asset=asset, symbol=symbol, timeframe=timeframe)
     except Exception as exc:
-        raise NativeAIError(str(exc)) from exc
-    return {"strategy": raw, "evidence": evidence_for("trend"),
-            "ai": {"provider": "atlas_native", "model": "atlas-native-strategy-v1",
-                   "network_calls": 0}}
+        raise NativeAIError(f"Atlas Native AI could not create a valid strategy draft: {exc}") from exc
+    family = {"TREND":"trend", "MOMENTUM":"momentum", "BREAKOUT":"breakout",
+              "MEAN_REVERSION":"mean_reversion", "ENSEMBLE":"ensemble"}[spec.strategy_family]
+    return {
+        "strategy": spec.model_dump(),
+        "evidence": evidence_for(family),
+        "ai": {"provider":"atlas_native", "model":"atlas-native-strategy-v1",
+               "fallback_used":False, "provider_errors":{}, "execution_authority":False,
+               "requires_backtest":True, "requires_walk_forward":True, "network_calls":0},
+    }
 """
+
+
+def _with_canonical_schema_context(source: str) -> str:
+    """Give acceptance fixtures the real canonical validation and market-binding contract."""
+    canonical_tree = ast.parse(CANONICAL_STRATEGY)
+    old_tree = ast.parse(source)
+    canonical_lines = CANONICAL_STRATEGY.splitlines(keepends=True)
+    source_lines = source.splitlines(keepends=True)
+
+    canonical_condition = next(node for node in canonical_tree.body if isinstance(node, ast.ClassDef) and node.name == "StrategyCondition")
+    canonical_spec = next(node for node in canonical_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
+    canonical_context = next(node for node in canonical_tree.body if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context")
+    old_spec = next(node for node in old_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
+    old_context = next(node for node in old_tree.body if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context")
+    pydantic_import = next(
+        node for node in old_tree.body
+        if isinstance(node, ast.ImportFrom) and node.module == "pydantic"
+    )
+    condition_source = canonical_lines[canonical_condition.lineno - 1:canonical_condition.end_lineno]
+    spec_source = canonical_lines[canonical_spec.lineno - 1:canonical_spec.end_lineno]
+    context_source = canonical_lines[canonical_context.lineno - 1:canonical_context.end_lineno]
+    pydantic_block = [
+        "from typing import Literal\n",
+        "from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator\n",
+        'ALLOWED_TIMEFRAMES = {"5m", "15m", "30m", "1h", "4h", "1d"}\n',
+        "\n",
+        *condition_source,
+        "\n",
+    ]
+    edits = [
+        (old_spec.lineno, old_spec.end_lineno, spec_source),
+        (old_context.lineno, old_context.end_lineno, context_source),
+        (pydantic_import.lineno, pydantic_import.end_lineno, pydantic_block),
+    ]
+    for start, end, replacement in sorted(edits, reverse=True):
+        source_lines[start - 1:end] = replacement
+    return "".join(source_lines)
 
 
 class LegacyNativeAIMigrationTests(unittest.TestCase):
@@ -1424,19 +1546,47 @@ async def _gemini_json(prompt):
         legacy = (
             "from .config import settings\n"
             "from .ai_providers import AIProviderError, _gemini_json, _groq_json\n"
-            "from .strategy_evidence import evidence_for\n\n"
-            "class AIStrategySpec:\n"
-            "    pass\n\n"
+            "from .strategy_evidence import evidence_for\n"
+            "from pydantic import BaseModel, Field\n\n"
+            "class AIStrategySpec(BaseModel):\n"
+            "    version: str = 'atlas-strategy-v1'\n"
+            "    title: str = 'fixture'\n"
+            "    summary: str = 'fixture summary'\n"
+            "    asset: str = 'crypto'\n"
+            "    symbols: list[str] = Field(default_factory=list)\n"
+            "    timeframes: list[str] = Field(default_factory=list)\n"
+            "    direction: str = 'LONG'\n"
+            "    strategy_family: str = 'TREND'\n"
+            "    entry_conditions: list[dict] = Field(default_factory=list)\n"
+            "    exit_conditions: list[dict] = Field(default_factory=list)\n"
+            "    risk_per_trade: float = 0.005\n"
+            "    stop_loss_atr: float | None = None\n"
+            "    take_profit_rr: float | None = None\n"
+            "    sessions: list[str] = Field(default_factory=list)\n"
+            "    assumptions: list[str] = Field(default_factory=list)\n"
+            "    validation_warnings: list[str] = Field(default_factory=list)\n"
+            "    requires_backtest: bool = True\n"
+            "    requires_walk_forward: bool = True\n"
+            "    execution_mode: str = 'PAPER_SHADOW_ONLY'\n"
+            "    implementation_status: str = 'ATLAS_SUPPORTED_FAMILY'\n\n"
             "SYSTEM_PROMPT = '''Gemini strategy prompt'''\n\n"
             "def _strategy_prompt(prompt, name):\n"
             "    return prompt\n\n"
             "async def _generate_with_provider(provider, prompt):\n"
             "    return await _gemini_json(prompt)\n\n"
-            "def _apply_market_context(spec, asset=None, symbol=None, timeframe=None):\n"
-            "    return spec\n\n"
+            "def _apply_market_context(spec, *, asset=None, symbol=None, timeframe=None):\n"
+            "    data = spec.model_dump()\n"
+            "    if asset is not None:\n"
+            "        data['asset'] = asset\n"
+            "    if symbol is not None:\n"
+            "        data['symbols'] = [symbol]\n"
+            "    if timeframe is not None:\n"
+            "        data['timeframes'] = [timeframe]\n"
+            "    return AIStrategySpec.model_validate(data)\n\n"
             "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
             "    return await _generate_with_provider('gemini', prompt)\n"
         )
+        legacy = _with_canonical_schema_context(legacy)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             target = root / "app" / "strategy_ai.py"
@@ -1450,9 +1600,349 @@ async def _gemini_json(prompt):
             self.assertIn("class AIStrategySpec", result)
             self.assertIn("def _apply_market_context", result)
             self.assertIn("compose_strategy_spec", result)
-            self.assertIn('provider": "atlas_native"', result)
+            self.assertIn('"provider":"atlas_native"', result)
             self.assertNotRegex(result, migration.PROVIDER_RE)
             self.assertNotIn("_generate_with_provider", result)
+
+            # Execute the migrated function, not just its syntax, against a tiny
+            # package that exercises the retained Pydantic schema/context contract.
+            import asyncio
+            import importlib
+            import sys
+
+            package = root / "fixture_app"
+            package.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "strategy_ai.py").write_text(result, encoding="utf-8")
+            (package / "native_ai.py").write_text(
+                "class NativeAIError(RuntimeError): pass\n"
+                "def compose_strategy_spec(*, prompt, name, asset=None, symbol=None, timeframe=None, max_risk_per_trade=0.01):\n"
+                "    return {'version':'atlas-strategy-v1','title':'Fixture strategy','summary':'A test-only strategy fixture.',"
+                "'asset':asset or 'crypto','symbols':[symbol] if symbol else ['EUR_USD'],"
+                "'timeframes':[timeframe] if timeframe else ['1h'],'direction':'LONG','strategy_family':'TREND',"
+                "'entry_conditions':[{'type':'indicator','rule':'RSI is above threshold','timeframe':timeframe or '1h'}],"
+                "'exit_conditions':[{'type':'indicator','rule':'RSI is below threshold','timeframe':timeframe or '1h'}],"
+                "'risk_per_trade':max_risk_per_trade * 2,'validation_warnings':[],'requires_backtest':True,'requires_walk_forward':True,"
+                "'execution_mode':'PAPER_SHADOW_ONLY','implementation_status':'ATLAS_SUPPORTED_FAMILY'}\n",
+                encoding="utf-8",
+            )
+            (package / "config.py").write_text(
+                "class Settings: risk_per_trade = 0.01\nsettings = Settings()\n",
+                encoding="utf-8",
+            )
+            (package / "strategy_evidence.py").write_text(
+                "def evidence_for(family): return {'family': family}\n", encoding="utf-8"
+            )
+            sys.path.insert(0, str(root))
+            try:
+                module = importlib.import_module("fixture_app.strategy_ai")
+                outcome = asyncio.run(module.generate_strategy_draft(
+                    prompt="build a paper-only trend strategy", name="migration-test",
+                    asset="forex", symbol="EUR_USD", timeframe="1h",
+                ))
+                self.assertEqual(outcome["strategy"]["strategy_family"], "TREND")
+                self.assertEqual(outcome["strategy"]["risk_per_trade"], 0.01)
+                self.assertTrue(any("capped" in warning for warning in outcome["strategy"]["validation_warnings"]))
+                self.assertEqual(outcome["ai"]["provider"], "atlas_native")
+                self.assertEqual(outcome["ai"]["network_calls"], 0)
+            finally:
+                sys.modules.pop("fixture_app.strategy_ai", None)
+                sys.modules.pop("fixture_app", None)
+                sys.path.remove(str(root))
+
+    def test_strategy_migration_accepts_recognized_two_and_three_provider_flows(self):
+        legacy_two = """from .config import settings
+from .ai_providers import AIProviderError, _gemini_json, _groq_json
+from .strategy_evidence import evidence_for
+
+from pydantic import BaseModel, Field
+
+class AIStrategySpec(BaseModel):
+    version: str = "atlas-strategy-v1"
+    title: str = "fixture"
+    summary: str = "fixture summary"
+    asset: str = "crypto"
+    symbols: list[str] = Field(default_factory=list)
+    timeframes: list[str] = Field(default_factory=list)
+    direction: str = "LONG"
+    strategy_family: str = "TREND"
+    entry_conditions: list[dict] = Field(default_factory=list)
+    exit_conditions: list[dict] = Field(default_factory=list)
+    risk_per_trade: float = 0.005
+    stop_loss_atr: float | None = None
+    take_profit_rr: float | None = None
+    sessions: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    validation_warnings: list[str] = Field(default_factory=list)
+    requires_backtest: bool = True
+    requires_walk_forward: bool = True
+    execution_mode: str = "PAPER_SHADOW_ONLY"
+    implementation_status: str = "ATLAS_SUPPORTED_FAMILY"
+
+SYSTEM_PROMPT = "Legacy strategy prompt"
+
+def _strategy_prompt(prompt, name):
+    return prompt
+
+async def _generate_with_provider(provider: str, prompt: str) -> dict:
+    if provider == "gemini":
+        return await _gemini_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.gemini_strategy_model or settings.gemini_model)
+    return await _groq_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.groq_strategy_model or settings.groq_model)
+
+def _apply_market_context(spec, *, asset=None, symbol=None, timeframe=None):
+    data = spec.model_dump()
+    if asset is not None:
+        data["asset"] = asset
+    if symbol is not None:
+        data["symbols"] = [symbol]
+    if timeframe is not None:
+        data["timeframes"] = [timeframe]
+    return AIStrategySpec.model_validate(data)
+
+async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None = None, symbol: str | None = None, timeframe: str | None = None) -> dict:
+    \"\"\"Generate a real LLM strategy draft, validate it, and return an auditable result.\"\"\"
+    if not settings.gemini_api_key and not settings.groq_api_key:
+        raise AIProviderError("No AI strategy provider is configured")
+
+    provider_errors: dict[str, str] = {}
+    provider_order = ["gemini", "groq"] if settings.gemini_api_key else ["groq"]
+    if settings.gemini_api_key and settings.groq_api_key:
+        provider_order = ["gemini", "groq"]
+
+    raw: dict[str, object] | None = None
+    provider_used = ""
+    for provider in provider_order:
+        try:
+            raw = await _generate_with_provider(provider, _strategy_prompt(prompt, name))
+            provider_used = provider
+            break
+        except Exception as exc:
+            provider_errors[provider] = str(exc)
+
+    if raw is None:
+        raise AIProviderError("All configured AI strategy providers failed: " + "; ".join(
+            f"{k}: {v}" for k, v in provider_errors.items()
+        ))
+
+    try:
+        spec = AIStrategySpec.model_validate(raw)
+        spec = _apply_market_context(spec, asset=asset, symbol=symbol, timeframe=timeframe)
+    except Exception as exc:
+        raise AIProviderError(f"AI strategy failed schema validation: {exc}") from exc
+
+    family_key = {"TREND":"trend", "MOMENTUM":"momentum", "BREAKOUT":"breakout", "MEAN_REVERSION":"mean_reversion", "ENSEMBLE":"ensemble"}[spec.strategy_family]
+    return {
+        "strategy": spec.model_dump(),
+        "evidence": evidence_for(family_key),
+        "ai": {
+            "provider": provider_used,
+            "model": settings.gemini_strategy_model if provider_used == "gemini" else settings.groq_strategy_model,
+            "fallback_used": provider_used != "gemini",
+            "provider_errors": provider_errors,
+            "execution_authority": False,
+            "requires_backtest": True,
+            "requires_walk_forward": True,
+        },
+    }
+"""
+        legacy_three = legacy_two.replace(
+            "from .ai_providers import AIProviderError, _gemini_json, _groq_json",
+            "from .ai_providers import AIProviderError, _gemini_json, _groq_json, _cerebras_json",
+        ).replace(
+            "async def _generate_with_provider(provider: str, prompt: str) -> dict:\n"
+            "    if provider == \"gemini\":\n"
+            "        return await _gemini_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.gemini_strategy_model or settings.gemini_model)\n"
+            "    return await _groq_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.groq_strategy_model or settings.groq_model)\n",
+            "async def _generate_with_provider(provider: str, prompt: str) -> dict:\n"
+            "    if provider == \"gemini\":\n"
+            "        return await _gemini_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.gemini_strategy_model or settings.gemini_model)\n"
+            "    if provider == \"groq\":\n"
+            "        return await _groq_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.groq_strategy_model or settings.groq_model)\n"
+            "    return await _cerebras_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.cerebras_model)\n",
+        ).replace(
+            "if not settings.gemini_api_key and not settings.groq_api_key:",
+            "if not settings.gemini_api_key and not settings.groq_api_key and not settings.cerebras_api_key:",
+        ).replace(
+            'provider_order = ["gemini", "groq"] if settings.gemini_api_key else ["groq"]\n'
+            '    if settings.gemini_api_key and settings.groq_api_key:\n'
+            '        provider_order = ["gemini", "groq"]',
+            'provider_order = []\n'
+            '    if settings.gemini_api_key:\n'
+            '        provider_order.append("gemini")\n'
+            '    if settings.groq_api_key:\n'
+            '        provider_order.append("groq")\n'
+            '    if settings.cerebras_api_key:\n'
+            '        provider_order.append("cerebras")',
+        ).replace(
+            '"model": settings.gemini_strategy_model if provider_used == "gemini" else settings.groq_strategy_model,',
+            '"model": settings.gemini_model if provider_used == "gemini" else settings.groq_strategy_model if provider_used == "groq" else settings.cerebras_model,',
+        )
+
+        for label, legacy in (("two-provider", legacy_two), ("three-provider", legacy_three)):
+            legacy = _with_canonical_schema_context(legacy)
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                target = root / "app" / "strategy_ai.py"
+                target.parent.mkdir()
+                target.write_text(legacy, encoding="utf-8")
+                with patch.object(migration, "ROOT", root), patch.object(
+                    migration, "canonical_text", return_value=CANONICAL_STRATEGY
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+                result = target.read_text(encoding="utf-8")
+                ast.parse(result, filename="app/strategy_ai.py")
+                self.assertIn("compose_strategy_spec", result)
+                self.assertIn("def _apply_market_context", result)
+                self.assertNotIn("_generate_with_provider", result)
+                self.assertNotRegex(result, migration.PROVIDER_RE)
+
+        unsafe_cases = (
+            (
+                "cross-provider model routing",
+                "model=settings.gemini_strategy_model or settings.gemini_model)",
+                "model=settings.groq_strategy_model or settings.groq_model)",
+                "_generate_with_provider contains additional or unknown behavior",
+            ),
+            (
+                "custom provider output",
+                '"model": settings.gemini_strategy_model if provider_used == "gemini" else settings.groq_strategy_model,',
+                '"model": settings,',
+                "generate_strategy_draft contains unrecognized branch-specific behavior",
+            ),
+            (
+                "custom validation reporting",
+                'f"AI strategy failed schema validation: {exc}"',
+                'f"AI strategy failed schema validation: {exc}; provider={provider_used}"',
+                "generate_strategy_draft contains unrecognized branch-specific behavior",
+            ),
+            (
+                "incompatible retained context helper",
+                "return AIStrategySpec.model_validate(data)",
+                "return spec",
+                "strategy schema/context helpers do not satisfy",
+            ),
+            (
+                "uninitialized context data",
+                "    data = spec.model_dump()\n",
+                "",
+                "strategy schema/context helpers do not satisfy",
+            ),
+            (
+                "extra required hosted schema field",
+                '    strategy_family: str = "TREND"\n',
+                '    strategy_family: str = "TREND"\n    compliance_tag: str\n',
+                "strategy schema/context helpers do not satisfy",
+            ),
+        )
+        for label, old, new, message in unsafe_cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                altered = legacy_two.replace(old, new, 1)
+                self.assertNotEqual(altered, legacy_two, f"fixture did not alter {label}")
+                root = Path(tmp)
+                target = root / "app" / "strategy_ai.py"
+                target.parent.mkdir()
+                target.write_text(altered, encoding="utf-8")
+                with patch.object(migration, "ROOT", root), patch.object(
+                    migration, "canonical_text", return_value=CANONICAL_STRATEGY
+                ):
+                    with self.assertRaisesRegex(migration.MigrationError, message):
+                        migration.transform_strategy_ai("fake-commit")
+                self.assertEqual(target.read_text(encoding="utf-8"), altered)
+
+        direct_dispatch_old = (
+            "async def _generate_with_provider(provider: str, prompt: str) -> dict:\n"
+            "    if provider == \"gemini\":\n"
+            "        return await _gemini_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.gemini_strategy_model or settings.gemini_model)\n"
+            "    return await _groq_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.groq_strategy_model or settings.groq_model)\n"
+        )
+        direct_dispatch_new = (
+            "async def _generate_with_provider(provider: str, prompt: str) -> dict:\n"
+            "    return await _gemini_json(prompt)\n"
+        )
+        altered = legacy_two.replace(direct_dispatch_old, direct_dispatch_new, 1)
+        self.assertNotEqual(altered, legacy_two, "fixture did not replace the multi-provider router")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(altered, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "_generate_with_provider contains additional or unknown behavior"
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), altered)
+
+    def test_ai_providers_only_removes_audited_cerebras_adapter(self):
+        legacy = """import httpx
+from .config import settings
+
+class AIProviderError(RuntimeError):
+    pass
+
+async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instruction: str | None = None, model: str | None = None) -> dict[str, Any]:
+    \"\"\"Call Cerebras' OpenAI-compatible Chat Completions API; never grants execution authority.\"\"\"
+    if not settings.cerebras_api_key:
+        raise AIProviderError("CEREBRAS_API_KEY is not configured")
+    url = "https://api.cerebras.ai/v1/chat/completions"
+    payload = {
+        "model": model or settings.cerebras_model,
+        "messages": [
+            {"role": "system", "content": (
+                system_instruction or ("You are Atlas Trading OS's research assistant. Analyze supplied research only. "
+                "Do not place trades, invent market data, or give guaranteed outcomes. Return JSON only.")
+            )},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"},
+    }
+    headers = {"Authorization": f"Bearer {settings.cerebras_api_key}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        body = _response_json_object(response, "Cerebras")
+    try:
+        text = body["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise AIProviderError("Cerebras response did not contain generated text") from exc
+    return _extract_json(text)
+"""
+        custom = legacy.replace(
+            '        body = _response_json_object(response, "Cerebras")',
+            '        record_provider_metrics()\n        body = _response_json_object(response, "Cerebras")',
+        )
+        custom_annotation = legacy.replace("prompt: str", "prompt: audit()")
+        custom_prompt = legacy.replace(
+            "You are Atlas Trading OS's research assistant. Analyze supplied research only.",
+            "You are a branch-specific assistant with extra strategy obligations.",
+        )
+        for label, source, should_refuse in (
+            ("audited", legacy, False),
+            ("custom-side-effect", custom, True),
+            ("side-effecting-annotation", custom_annotation, True),
+            ("custom-system-prompt", custom_prompt, True),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                target = root / "app" / "ai_providers.py"
+                target.parent.mkdir()
+                target.write_text(source, encoding="utf-8")
+                with patch.object(migration, "ROOT", root), patch.object(
+                    migration, "canonical_text", return_value="from .native_ai import AIProviderError\n"
+                ):
+                    if should_refuse:
+                        with self.assertRaisesRegex(migration.MigrationError, "unrecognized provider-bearing helper _cerebras_json"):
+                            migration.transform_ai_providers("canonical-commit")
+                        self.assertEqual(target.read_text(encoding="utf-8"), source)
+                        continue
+                    migration.transform_ai_providers("canonical-commit")
+                result = target.read_text(encoding="utf-8")
+                self.assertNotIn("_cerebras_json", result)
+                self.assertNotRegex(result, migration.PROVIDER_RE)
+                ast.parse(result, filename="app/ai_providers.py")
 
     def test_strategy_migration_refuses_to_discard_generator_validation(self):
         legacy = (
@@ -1563,6 +2053,29 @@ async def _gemini_json(prompt):
                             migration.transform_strategy_ai("fake-commit")
                     self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_qualified_provider_adapter_requires_a_proven_module_binding(self):
+        import_tree = ast.parse("import ai_providers")
+        qualified_module = ast.parse(
+            "async def sample():\n    await ai_providers._gemini_json(prompt)\n"
+        )
+        qualified_call = qualified_module.body[0].body[0].value.value.func
+        self.assertEqual(
+            migration._provider_adapter_name(qualified_call, import_tree),
+            "_gemini_json",
+        )
+        shadowed_tree = ast.parse("import ai_providers\nai_providers = object()")
+        self.assertIsNone(migration._provider_adapter_name(qualified_call, shadowed_tree))
+        aliased_tree = ast.parse("import ai_providers as providers")
+        self.assertIsNone(migration._provider_adapter_name(qualified_call, aliased_tree))
+        aliased_call_tree = ast.parse(
+            "async def sample():\n    await providers._gemini_json(prompt)\n"
+        )
+        aliased_call = aliased_call_tree.body[0].body[0].value.value.func
+        self.assertEqual(
+            migration._provider_adapter_name(aliased_call, aliased_tree),
+            "_gemini_json",
+        )
+
     def test_strategy_migration_refuses_to_drop_import_used_by_retained_helper(self):
         legacy = (
             "from .ai_providers import AIProviderError, _gemini_json, _groq_json, custom_helper\n"
@@ -1583,6 +2096,79 @@ async def _gemini_json(prompt):
                 migration, "canonical_text", return_value=CANONICAL_STRATEGY
             ):
                 with self.assertRaisesRegex(migration.MigrationError, "retained strategy helper depends on"):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def _legacy_strategy_with_retained_code(self, retained_code: str) -> str:
+        return (
+            "from .config import settings\n"
+            "from .ai_providers import AIProviderError, _gemini_json, _groq_json\n"
+            "from .strategy_evidence import evidence_for\n"
+            'SYSTEM_PROMPT = "legacy provider prompt"\n'
+            + retained_code
+            + "\nasync def _generate_with_provider(provider, prompt):\n"
+            + "    return await _gemini_json(prompt)\n"
+            + "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+            + '    return await _generate_with_provider("gemini", prompt)\n'
+        )
+
+    def test_strategy_migration_refuses_deleted_removed_prompt(self):
+        legacy = self._legacy_strategy_with_retained_code("del SYSTEM_PROMPT\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "deletes a removed global"):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_strategy_migration_refuses_prompt_read_before_retained_binding(self):
+        retained = 'audit_value = consume(SYSTEM_PROMPT)\naudit_value = SYSTEM_PROMPT = "later audit text"\n'
+        legacy = self._legacy_strategy_with_retained_code(retained)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "before a retained binding is available"):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_strategy_migration_refuses_removed_prompt_added_to_all_later(self):
+        retained = '__all__ = []\n__all__.append("SYSTEM_PROMPT")\n'
+        legacy = self._legacy_strategy_with_retained_code(retained)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(migration.MigrationError, "__all__ exports definitions removed"):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_strategy_migration_rejects_missing_canonical_generator_dependency(self):
+        legacy = self._legacy_strategy_with_retained_code("AIStrategySpec: object\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "canonical strategy generator depends on missing module binding.*AIStrategySpec"
+                ):
                     migration.transform_strategy_ai("fake-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
@@ -1729,8 +2315,293 @@ async def _gemini_json(prompt):
         self.assertNotIn("gemini_api_key", parsed)
         self.assertEqual(parsed["app_version"], "3.10.47")
         self.assertIn("informational only", parsed["description"])
-        self.assertNotIn("Gemini", parsed["description"])
+        self.assertEqual(parsed["description"], "Gemini research is informational only and never enables live trading.")
 
+
+    def test_schema_checker_rejects_missing_canonical_title_constraints(self):
+        tree = ast.parse(CANONICAL_STRATEGY)
+        canonical_tree = ast.parse(CANONICAL_STRATEGY)
+        spec = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
+        title = next(node for node in spec.body if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "title")
+        title.value = None
+        with patch.object(migration, "ROOT", Path("/tmp/atlas-schema-contract-test")):
+            self.assertFalse(migration._is_compatible_strategy_schema_and_context(tree, canonical_tree))
+
+    def test_schema_checker_requires_asset_symbol_and_timeframe_binding(self):
+        tree = ast.parse(CANONICAL_STRATEGY)
+        canonical_tree = ast.parse(CANONICAL_STRATEGY)
+        context = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context")
+        context.body = [node for node in context.body if not isinstance(node, ast.If)]
+        with patch.object(migration, "ROOT", Path("/tmp/atlas-schema-context-test")):
+            self.assertFalse(migration._is_compatible_strategy_schema_and_context(tree, canonical_tree))
+
+    def test_exact_schema_contract_rejects_conditional_or_expression_mutation_of_timeframes(self):
+        canonical = ast.parse(CANONICAL_STRATEGY)
+        cases = (
+            "if override:\n    ALLOWED_TIMEFRAMES = {'1m'}\n",
+            "ALLOWED_TIMEFRAMES.add('1m')\n",
+            "other_timeframes = ALLOWED_TIMEFRAMES\n",
+        )
+        for mutation in cases:
+            with self.subTest(mutation=mutation):
+                legacy = ast.parse(CANONICAL_STRATEGY + mutation)
+                with patch.object(migration, "ROOT", Path("/tmp/atlas-timeframe-binding-test")):
+                    self.assertFalse(
+                        migration._is_compatible_strategy_schema_and_context(legacy, canonical)
+                    )
+
+    def test_exact_schema_contract_rejects_builtin_shadowing(self):
+        legacy = ast.parse("str = int\n" + CANONICAL_STRATEGY)
+        canonical = ast.parse(CANONICAL_STRATEGY)
+        with patch.object(migration, "ROOT", Path("/tmp/atlas-builtin-shadow-test")):
+            self.assertFalse(
+                migration._is_compatible_strategy_schema_and_context(legacy, canonical)
+            )
+
+    def test_semantically_compatible_optional_schema_extension_is_allowed(self):
+        legacy = ast.parse(CANONICAL_STRATEGY)
+        canonical = ast.parse(CANONICAL_STRATEGY)
+        schema = next(node for node in legacy.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
+        optional_field = ast.parse("branch_note: str | None = None").body[0]
+        validator_index = next(
+            index for index, node in enumerate(schema.body)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        )
+        schema.body.insert(validator_index, optional_field)
+        with patch.object(migration, "ROOT", Path("/tmp/atlas-optional-schema-test")):
+            self.assertTrue(
+                migration._is_compatible_strategy_schema_and_context(legacy, canonical)
+            )
+
+    def test_imported_schema_checks_context_globals_in_strategy_module(self):
+        legacy_tree = ast.parse(CANONICAL_STRATEGY)
+        canonical_tree = ast.parse(CANONICAL_STRATEGY)
+
+        def bind_context_annotation(tree):
+            context = next(
+                node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+            )
+            context.args.args[0].annotation = ast.Subscript(
+                value=ast.Name(id="Annotated", ctx=ast.Load()),
+                slice=ast.Tuple(
+                    elts=[
+                        ast.Name(id="AIStrategySpec", ctx=ast.Load()),
+                        ast.Name(id="ContextMarker", ctx=ast.Load()),
+                    ],
+                    ctx=ast.Load(),
+                ),
+                ctx=ast.Load(),
+            )
+            context_index = tree.body.index(context)
+            tree.body.insert(
+                context_index,
+                ast.ImportFrom(
+                    module="context_types",
+                    names=[ast.alias(name="ContextMarker")],
+                    level=1,
+                ),
+            )
+            tree.body.insert(
+                context_index,
+                ast.ImportFrom(
+                    module="typing",
+                    names=[ast.alias(name="Annotated")],
+                    level=0,
+                ),
+            )
+
+        bind_context_annotation(legacy_tree)
+        bind_context_annotation(canonical_tree)
+        legacy_tree.body = [
+            node for node in legacy_tree.body
+            if not (isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
+        ]
+        insert_at = next(
+            index for index, node in enumerate(legacy_tree.body)
+            if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+        )
+        legacy_tree.body.insert(
+            insert_at,
+            ast.ImportFrom(
+                module="schema_models",
+                names=[ast.alias(name="AIStrategySpec")],
+                level=1,
+            ),
+        )
+
+        source_tree = ast.parse(CANONICAL_STRATEGY)
+        schema_nodes = [
+            node for node in source_tree.body
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.module not in {"native_ai", "strategy_evidence"}
+            )
+            or (
+                isinstance(node, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name) and target.id == "ALLOWED_TIMEFRAMES"
+                    for target in node.targets
+                )
+            )
+            or (
+                isinstance(node, ast.ClassDef)
+                and node.name in {"StrategyCondition", "AIStrategySpec"}
+            )
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app_dir = root / "app"
+            app_dir.mkdir()
+            (app_dir / "strategy_ai.py").write_text(
+                ast.unparse(legacy_tree) + "\n", encoding="utf-8"
+            )
+            (app_dir / "schema_models.py").write_text(
+                ast.unparse(ast.Module(body=schema_nodes, type_ignores=[])) + "\n",
+                encoding="utf-8",
+            )
+            (app_dir / "context_types.py").write_text(
+                "class ContextMarker: pass\n", encoding="utf-8"
+            )
+            with patch.object(migration, "ROOT", root):
+                self.assertTrue(
+                    migration._is_compatible_strategy_schema_and_context(
+                        legacy_tree, canonical_tree
+                    )
+                )
+
+    def test_exact_schema_contract_rejects_missing_canonical_validator(self):
+        legacy = ast.parse(CANONICAL_STRATEGY)
+        canonical = ast.parse(CANONICAL_STRATEGY)
+        schema = next(
+            node for node in legacy.body
+            if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"
+        )
+        schema.body = [
+            node for node in schema.body
+            if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == "validate_timeframes")
+        ]
+        self.assertFalse(
+            migration._is_compatible_strategy_schema_and_context(legacy, canonical)
+        )
+
+    def test_exact_schema_contract_accepts_proven_pydantic_basemodel_alias(self):
+        legacy = ast.parse(CANONICAL_STRATEGY)
+        canonical = ast.parse(CANONICAL_STRATEGY)
+        pydantic_import = next(
+            node for node in legacy.body
+            if isinstance(node, ast.ImportFrom) and node.module == "pydantic"
+        )
+        pydantic_import.names.append(ast.alias(name="BaseModel", asname="Model"))
+        schema = next(
+            node for node in legacy.body
+            if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"
+        )
+        schema.bases[0] = ast.Name(id="Model", ctx=ast.Load())
+        self.assertTrue(
+            migration._is_compatible_strategy_schema_and_context(legacy, canonical)
+        )
+
+    def test_exact_schema_contract_rejects_basemodel_alias_shadowed_by_native_import(self):
+        legacy = ast.parse(CANONICAL_STRATEGY)
+        canonical = ast.parse(CANONICAL_STRATEGY)
+        pydantic_import = next(
+            node for node in legacy.body
+            if isinstance(node, ast.ImportFrom) and node.module == "pydantic"
+        )
+        pydantic_import.names.append(ast.alias(name="BaseModel", asname="NativeAIError"))
+        schema = next(
+            node for node in legacy.body
+            if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"
+        )
+        schema.bases[0] = ast.Name(id="NativeAIError", ctx=ast.Load())
+        self.assertFalse(
+            migration._is_compatible_strategy_schema_and_context(legacy, canonical)
+        )
+
+    def test_exact_schema_contract_rejects_market_binding_before_model_dump(self):
+        legacy = ast.parse(CANONICAL_STRATEGY)
+        canonical = ast.parse(CANONICAL_STRATEGY)
+        context = next(
+            node for node in legacy.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+        )
+        context.body[0], context.body[1] = context.body[1], context.body[0]
+        self.assertFalse(
+            migration._is_compatible_strategy_schema_and_context(legacy, canonical)
+        )
+
+    def test_exact_schema_contract_rejects_import_time_class_body_risk_mutation(self):
+        legacy = ast.parse(
+            CANONICAL_STRATEGY
+            + "\nclass BranchOverride:\n    settings.risk_per_trade = 0.04\n"
+        )
+        canonical = ast.parse(CANONICAL_STRATEGY)
+        with patch.object(migration, "ROOT", Path("/tmp/atlas-class-body-risk-test")):
+            self.assertFalse(
+                migration._is_compatible_strategy_schema_and_context(legacy, canonical)
+            )
+
+    def test_exact_schema_contract_rejects_wildcard_import_after_validated_class(self):
+        legacy = ast.parse(CANONICAL_STRATEGY + "\nfrom .branch_overrides import *\n")
+        canonical = ast.parse(CANONICAL_STRATEGY)
+        with patch.object(migration, "ROOT", Path("/tmp/atlas-wildcard-schema-test")):
+            self.assertFalse(
+                migration._is_compatible_strategy_schema_and_context(legacy, canonical)
+            )
+
+    def test_exact_schema_shortcut_rejects_rebound_strategy_condition(self):
+        legacy_tree = ast.parse(CANONICAL_STRATEGY)
+        canonical_tree = ast.parse(CANONICAL_STRATEGY)
+        condition_index = next(
+            index for index, node in enumerate(legacy_tree.body)
+            if isinstance(node, ast.ClassDef) and node.name == "StrategyCondition"
+        )
+        legacy_tree.body[condition_index] = ast.parse("StrategyCondition = dict").body[0]
+        with patch.object(migration, "ROOT", Path("/tmp/atlas-strategy-condition-test")):
+            self.assertFalse(
+                migration._is_compatible_strategy_schema_and_context(legacy_tree, canonical_tree)
+            )
+
+    def test_schema_checker_rejects_classvar_for_required_strategy_field(self):
+        legacy = CANONICAL_STRATEGY.replace(
+            '    asset: Literal["crypto", "forex", "commodity"]',
+            '    asset: ClassVar[Literal["crypto", "forex", "commodity"]]',
+        )
+        self.assertNotEqual(legacy, CANONICAL_STRATEGY)
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(migration, "ROOT", Path(tmp)):
+                self.assertFalse(migration._is_compatible_strategy_schema_and_context(
+                    ast.parse(legacy), ast.parse(CANONICAL_STRATEGY)
+                ))
+
+    def test_metadata_checker_rejects_provider_secret_refs_but_allows_descriptive_mentions(self):
+        self.assertTrue(migration._metadata_has_active_provider_wiring(
+            '{"secretRef": "atlas-openai-api-key"}'
+        ))
+        self.assertTrue(migration._metadata_has_active_provider_wiring(
+            '{"secretRef": "OPENAI_API_KEY"}'
+        ))
+        self.assertEqual(
+            json.loads(migration.scrub_ancillary_text("metadata.json", '{"secretRef": "OPENAI_API_KEY"}')),
+            {},
+        )
+        self.assertTrue(migration._metadata_has_active_provider_wiring(
+            '{"credentials": "OPENAI_API_KEY=example"}'
+        ))
+        self.assertFalse(migration._metadata_has_active_provider_wiring(
+            '{"description": "Historical Gemini and Groq review note"}'
+        ))
+        self.assertTrue(migration._metadata_has_active_provider_wiring(
+            '{"env": [{"name": "OPENAI_API_KEY", "value": "example"}]}'
+        ))
+        structured = json.loads(migration.scrub_ancillary_text(
+            "metadata.json",
+            '{"env": [{"name": "OPENAI_API_KEY", "value": "example"}]}'
+        ))
+        self.assertEqual(structured, {"env": []})
 
     def test_shell_deployment_scrub_preserves_non_ai_settings_and_shell_syntax(self):
         source = r'''#!/usr/bin/env bash
