@@ -2333,6 +2333,44 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
         with patch.object(migration, "ROOT", Path("/tmp/atlas-schema-context-test")):
             self.assertFalse(migration._is_compatible_strategy_schema_and_context(tree, canonical_tree))
 
+    def test_exact_schema_contract_rejects_conditional_or_expression_mutation_of_timeframes(self):
+        canonical = ast.parse(CANONICAL_STRATEGY)
+        cases = (
+            "if override:\\n    ALLOWED_TIMEFRAMES = {'1m'}\\n",
+            "ALLOWED_TIMEFRAMES.add('1m')\\n",
+            "other_timeframes = ALLOWED_TIMEFRAMES\\n",
+        )
+        for mutation in cases:
+            with self.subTest(mutation=mutation):
+                legacy = ast.parse(CANONICAL_STRATEGY + mutation)
+                with patch.object(migration, "ROOT", Path("/tmp/atlas-timeframe-binding-test")):
+                    self.assertFalse(
+                        migration._is_compatible_strategy_schema_and_context(legacy, canonical)
+                    )
+
+    def test_exact_schema_contract_rejects_builtin_shadowing(self):
+        legacy = ast.parse("str = int\\n" + CANONICAL_STRATEGY)
+        canonical = ast.parse(CANONICAL_STRATEGY)
+        with patch.object(migration, "ROOT", Path("/tmp/atlas-builtin-shadow-test")):
+            self.assertFalse(
+                migration._is_compatible_strategy_schema_and_context(legacy, canonical)
+            )
+
+    def test_semantically_compatible_optional_schema_extension_is_allowed(self):
+        legacy = ast.parse(CANONICAL_STRATEGY)
+        canonical = ast.parse(CANONICAL_STRATEGY)
+        schema = next(node for node in legacy.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
+        optional_field = ast.parse("branch_note: str | None = None").body[0]
+        validator_index = next(
+            index for index, node in enumerate(schema.body)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        )
+        schema.body.insert(validator_index, optional_field)
+        with patch.object(migration, "ROOT", Path("/tmp/atlas-optional-schema-test")):
+            self.assertTrue(
+                migration._is_compatible_strategy_schema_and_context(legacy, canonical)
+            )
+
     def test_exact_schema_shortcut_rejects_rebound_strategy_condition(self):
         legacy_tree = ast.parse(CANONICAL_STRATEGY)
         canonical_tree = ast.parse(CANONICAL_STRATEGY)
