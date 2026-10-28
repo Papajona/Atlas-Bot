@@ -20,6 +20,8 @@ Safety gates:
 
 The script does not claim custody funding. Binance documents that Spot Test Network balances are virtual and cannot be transferred in or out.
 
+Run only with a dedicated Binance Spot Testnet account that has **zero free base-asset balance** for the selected symbol before the drill. The harness refuses to begin if base assets already exist, and it refuses to sell if the observed balance increase cannot be bounded to the drill's net fill. Do not use the account concurrently for other trades or transfers.
+
 Run only with a dedicated Binance Spot Testnet account:
 
 ```bash
