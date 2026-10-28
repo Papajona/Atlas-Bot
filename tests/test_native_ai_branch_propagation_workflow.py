@@ -84,6 +84,16 @@ def test_provider_scan_filters_only_historical_pruning_proof_markers() -> None:
     assert "grep -F .def _check_groq." in workflow
 
 
+def test_metadata_secret_refs_are_checked_even_when_source_grep_has_no_matches() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    helper = MIGRATION.read_text(encoding="utf-8")
+    assert 'if (( rc == 1 )); then' in workflow
+    assert 'matches=""' in workflow
+    assert 'helper._metadata_has_active_provider_wiring(Path("metadata.json").read_text(encoding="utf-8"))' in workflow
+    assert "ATLAS_PROVIDER_SECRET_RE" in helper
+    assert "metadata.json: active provider configuration or secret reference" in workflow
+
+
 def test_provider_free_branch_skip_requires_native_error_alias_identity() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     assert "facade.AIProviderError is not native.NativeAIError" in workflow
