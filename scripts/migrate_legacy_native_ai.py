@@ -7,6 +7,8 @@ whose unrelated hunks collide with each branch. It deliberately refuses uncertai
 from __future__ import annotations
 
 import ast
+import builtins
+import symtable
 import json
 import re
 import subprocess
