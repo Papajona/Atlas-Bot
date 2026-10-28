@@ -116,40 +116,118 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
 
 
 def _with_canonical_schema_context(source: str) -> str:
-    """Give acceptance fixtures the real canonical validation and market-binding contract."""
+    """Give acceptance fixtures exactly one canonical schema/context contract."""
     canonical_tree = ast.parse(CANONICAL_STRATEGY)
     old_tree = ast.parse(source)
     canonical_lines = CANONICAL_STRATEGY.splitlines(keepends=True)
     source_lines = source.splitlines(keepends=True)
 
-    canonical_condition = next(node for node in canonical_tree.body if isinstance(node, ast.ClassDef) and node.name == "StrategyCondition")
-    canonical_spec = next(node for node in canonical_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
-    canonical_context = next(node for node in canonical_tree.body if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context")
-    old_spec = next(node for node in old_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
-    old_context = next(node for node in old_tree.body if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context")
-    pydantic_import = next(
-        node for node in old_tree.body
-        if isinstance(node, ast.ImportFrom) and node.module == "pydantic"
+    canonical_condition = next(
+        node for node in canonical_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "StrategyCondition"
+    )
+    canonical_spec = next(
+        node for node in canonical_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"
+    )
+    canonical_context = next(
+        node for node in canonical_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
     )
     condition_source = canonical_lines[canonical_condition.lineno - 1:canonical_condition.end_lineno]
     spec_source = canonical_lines[canonical_spec.lineno - 1:canonical_spec.end_lineno]
     context_source = canonical_lines[canonical_context.lineno - 1:canonical_context.end_lineno]
-    pydantic_block = [
+
+    canonical_assignments: list[str] = []
+    canonical_assignment_names: set[str] = set()
+    for node in canonical_tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        names = {
+            target.id for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        if names and all(name.startswith("ALLOWED_") for name in names):
+            canonical_assignment_names.update(names)
+            canonical_assignments.extend(canonical_lines[node.lineno - 1:node.end_lineno])
+
+    # Remove any fixture versions of the canonical contract before inserting
+    # the audited block. In particular, a fixture that has AIStrategySpec and
+    # _apply_market_context but lacks StrategyCondition must not receive a
+    # second AIStrategySpec merely because one dependency is missing.
+    remove_ranges: list[tuple[int, int]] = []
+    passthrough_imports: list[str] = []
+    canonical_import_names = {
+        "Literal", "BaseModel", "ConfigDict", "Field", "field_validator", "model_validator"
+    }
+    for node in old_tree.body:
+        if (
+            isinstance(node, ast.ClassDef)
+            and node.name in {"StrategyCondition", "AIStrategySpec"}
+        ) or (
+            isinstance(node, ast.FunctionDef)
+            and node.name == "_apply_market_context"
+        ):
+            remove_ranges.append((node.lineno, node.end_lineno))
+            continue
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module in {"pydantic", "typing"}:
+            # Rebuild fixture imports without duplicate canonical contract bindings.
+            # Duplicate BaseModel/Field imports make the static binding audit
+            # correctly fail closed, even when both imports originate in Pydantic.
+            remaining = [
+                alias for alias in node.names
+                if (alias.asname or alias.name) not in canonical_import_names
+            ]
+            if remaining:
+                passthrough_imports.append(
+                    ast.unparse(ast.ImportFrom(module=node.module, names=remaining, level=0))
+                )
+            remove_ranges.append((node.lineno, node.end_lineno))
+            continue
+        if isinstance(node, ast.Assign):
+            names = {
+                target.id for target in node.targets
+                if isinstance(target, ast.Name)
+            }
+            if names and names.issubset(canonical_assignment_names):
+                remove_ranges.append((node.lineno, node.end_lineno))
+
+    for first, last in sorted(remove_ranges, reverse=True):
+        del source_lines[first - 1:last]
+
+    cleaned_source = "".join(source_lines)
+    cleaned_tree = ast.parse(cleaned_source)
+    cleaned_lines = cleaned_source.splitlines(keepends=True)
+
+    # Keep the original fixture imports and unrelated behavior. The canonical
+    # Pydantic/typing imports are added once with the replacement contract.
+    insertion = 0
+    for node in cleaned_tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)) or (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            insertion = max(insertion, node.end_lineno)
+        else:
+            break
+
+    block = [
         "from typing import Literal\n",
         "from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator\n",
-        'ALLOWED_TIMEFRAMES = {"5m", "15m", "30m", "1h", "4h", "1d"}\n',
+        *[f"{statement}\n" for statement in passthrough_imports],
+        "\n",
+        *canonical_assignments,
         "\n",
         *condition_source,
         "\n",
+        *spec_source,
+        "\n",
+        *context_source,
+        "\n",
     ]
-    edits = [
-        (old_spec.lineno, old_spec.end_lineno, spec_source),
-        (old_context.lineno, old_context.end_lineno, context_source),
-        (pydantic_import.lineno, pydantic_import.end_lineno, pydantic_block),
-    ]
-    for start, end, replacement in sorted(edits, reverse=True):
-        source_lines[start - 1:end] = replacement
-    return "".join(source_lines)
+    cleaned_lines[insertion:insertion] = block
+    return "".join(cleaned_lines)
 
 
 class LegacyNativeAIMigrationTests(unittest.TestCase):
@@ -1278,7 +1356,7 @@ def _extract_json(text):
             with patch.object(migration, "ROOT", root), patch.object(
                 migration, "canonical_text", return_value=canonical
             ):
-                with self.assertRaisesRegex(migration.MigrationError, "branch-specific definition '_extract_json' that collides"):
+                with self.assertRaisesRegex(migration.MigrationError, "branch-specific definition 'json' that collides"):
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
@@ -1313,7 +1391,7 @@ def _extract_json(text):
             with patch.object(migration, "ROOT", root), patch.object(
                 migration, "canonical_text", return_value=canonical
             ):
-                with self.assertRaisesRegex(migration.MigrationError, "branch-specific definition '_extract_json' that collides"):
+                with self.assertRaisesRegex(migration.MigrationError, "branch-specific definition 'json' that collides"):
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
@@ -2141,6 +2219,38 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
                     migration.transform_strategy_ai("fake-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_strategy_migration_does_not_treat_annotation_only_prompt_as_binding(self):
+        legacy = (
+            "from __future__ import annotations\n"
+            "from .config import settings\n"
+            "from .ai_providers import AIProviderError, _gemini_json, _groq_json\n"
+            "from .strategy_evidence import evidence_for\n"
+            'SYSTEM_PROMPT = "legacy provider prompt"\n'
+            "if True:\n"
+            "    SYSTEM_PROMPT: SYSTEM_PROMPT\n"
+            "\n"
+            "def retained_helper():\n"
+            "    return SYSTEM_PROMPT\n"
+            "async def _generate_with_provider(provider, prompt):\n"
+            "    return await _gemini_json(prompt)\n"
+            "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+            "    return await _generate_with_provider('gemini', prompt)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "retained strategy helper depends on removed local definition.*SYSTEM_PROMPT",
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_strategy_migration_refuses_removed_prompt_added_to_all_later(self):
         retained = '__all__ = []\n__all__.append("SYSTEM_PROMPT")\n'
         legacy = self._legacy_strategy_with_retained_code(retained)
@@ -2697,6 +2807,478 @@ async def keep_customer_route():
         self.assertIn("async def keep_customer_route", result)
         ast.parse(result, filename="app/main.py")
 
+
+
+
+    def test_module_scope_binding_analysis_detects_starred_targets_but_not_lambda_local_walrus(self):
+        starred_loop = ast.parse("for *json, rest in [(1, 2)]:\n    pass\n").body[0]
+        self.assertIn("json", migration._module_scope_maybe_binds(starred_loop))
+        self.assertIn("rest", migration._module_scope_maybe_binds(starred_loop))
+
+        local_walrus = ast.parse(
+            "def retained_helper():\n"
+            "    return (lambda: (json := None))()\n"
+        ).body[0]
+        self.assertEqual(migration._module_scope_maybe_binds(local_walrus), {"retained_helper"})
+
+        empty_loop = ast.parse("for json in []:\n    pass\n").body[0]
+        self.assertNotIn("json", migration._module_scope_maybe_binds(empty_loop))
+
+    def test_provider_facade_refuses_starred_loop_rebinding_of_canonical_json_import(self):
+        legacy = (
+            "import json\n\n"
+            "class AIProviderError(RuntimeError):\n"
+            "    pass\n\n"
+            "for *json, rest in [(1, 2)]:\n"
+            "    pass\n"
+        )
+        canonical = (
+            "import json\n"
+            "from .native_ai import AIProviderError\n"
+            "def _extract_json(text):\n"
+            "    return json.loads(text)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "branch-specific definition 'json' that collides with a canonical name",
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_star_import_rejects_deleted_name_still_declared_in_all(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper.write_text(
+                "from .native_ai import NativeAIError\n"
+                "__all__ = ['NativeAIError', 'branch_helper']\n"
+                "def branch_helper():\n"
+                "    return True\n"
+                "del NativeAIError\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            canonical = (
+                "from .native_ai import AIProviderError, NativeAIError\n"
+            )
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "declares deleted name\\(s\\) in __all__",
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_strategy_migration_accepts_dependency_bound_in_both_try_and_except_paths(self):
+        legacy = _with_canonical_schema_context(
+            self._legacy_strategy_with_retained_code("")
+        )
+        legacy = legacy.replace(
+            "from .strategy_evidence import evidence_for\n",
+            "try:\n"
+            "    from .strategy_evidence import evidence_for\n"
+            "except ImportError:\n"
+            "    from .strategy_evidence import evidence_for\n",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                migration.transform_strategy_ai("fake-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("except ImportError:", result)
+            self.assertIn("from .native_ai import NativeAIError, compose_strategy_spec", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
+
+
+
+    def test_module_scope_binding_analysis_ignores_statically_unreachable_if_branches(self):
+        source = ast.parse("if False:\n    json = replacement\nelse:\n    keep = True\n")
+        bindings = migration._module_scope_maybe_binds(source.body[0])
+        self.assertNotIn("json", bindings)
+        self.assertIn("keep", bindings)
+
+    def test_provider_facade_allows_dead_branch_that_mentions_canonical_import(self):
+        legacy = """import json
+
+if False:
+    json = replacement
+
+class AIProviderError(RuntimeError):
+    pass
+"""
+        canonical = """import json
+from .native_ai import AIProviderError
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("import json", result)
+            self.assertIn("if False:", result)
+            self.assertNotIn("class AIProviderError(RuntimeError)", result)
+
+    def test_strategy_migration_rejects_dependency_deleted_in_finally(self):
+        legacy = _with_canonical_schema_context(
+            self._legacy_strategy_with_retained_code("")
+        )
+        legacy = legacy.replace(
+            "from .strategy_evidence import evidence_for\n",
+            "try:\n"
+            "    from .strategy_evidence import evidence_for\n"
+            "finally:\n"
+            "    del evidence_for\n",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "canonical strategy generator depends on missing module binding.*evidence_for",
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
+
+
+    def test_strategy_migration_rejects_dependency_deleted_by_global_in_finally_class(self):
+        legacy = _with_canonical_schema_context(
+            self._legacy_strategy_with_retained_code("")
+        )
+        legacy = legacy.replace(
+            "from .strategy_evidence import evidence_for\n",
+            "try:\n"
+            "    from .strategy_evidence import evidence_for\n"
+            "finally:\n"
+            "    class _Cleanup:\n"
+            "        global evidence_for\n"
+            "        del evidence_for\n",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "canonical strategy generator depends on missing module binding.*evidence_for",
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
+
+    def test_class_global_function_and_nested_class_definitions_cannot_replace_canonical_helper(self):
+        canonical = """import json
+from .native_ai import AIProviderError
+def _extract_json(text):
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise AIProviderError("response object required")
+    return value
+"""
+        class_definitions = [
+            "    def _extract_json(self):\n        return None\n",
+            "    class _extract_json:\n        pass\n",
+        ]
+        for definition in class_definitions:
+            legacy = (
+                "import json\n\n"
+                "class LegacyNamespace:\n"
+                "    global _extract_json\n"
+                + definition
+                + "\nclass AIProviderError(RuntimeError):\n    pass\n\n"
+                "def _extract_json(text):\n"
+                "    return json.loads(text)\n"
+            )
+            with self.subTest(definition=definition.splitlines()[0]), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                target = root / "app" / "ai_providers.py"
+                target.parent.mkdir()
+                target.write_text(legacy, encoding="utf-8")
+                with patch.object(migration, "ROOT", root), patch.object(
+                    migration, "canonical_text", return_value=canonical
+                ):
+                    with self.assertRaisesRegex(
+                        migration.MigrationError,
+                        "branch-specific definition '_extract_json' that collides",
+                    ):
+                        migration.transform_ai_providers("canonical-commit")
+                self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
+    def test_class_global_exception_target_cannot_delete_canonical_json_import(self):
+        legacy = """import json
+
+class LegacyNamespace:
+    global json
+    try:
+        raise ValueError("fixture")
+    except ValueError as json:
+        pass
+
+class AIProviderError(RuntimeError):
+    pass
+
+def _extract_json(text):
+    return json.loads(text)
+"""
+        canonical = """import json
+from .native_ai import AIProviderError
+def _extract_json(text):
+    return json.loads(text)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "branch-specific definition 'json' that collides",
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
+    def test_class_global_walrus_in_lambda_defaults_and_function_annotations_fails_closed(self):
+        canonical = """import json
+from .native_ai import AIProviderError
+def _extract_json(text):
+    return json.loads(text)
+"""
+        class_payloads = [
+            "    helper = lambda arg=(json := object()): arg\n",
+            "    def helper(self, arg=(json := object())):\n        return arg\n",
+        ]
+        for payload in class_payloads:
+            legacy = (
+                "import json\n\n"
+                "class LegacyNamespace:\n"
+                "    global json\n"
+                + payload
+                + "\nclass AIProviderError(RuntimeError):\n    pass\n\n"
+                "def _extract_json(text):\n"
+                "    return json.loads(text)\n"
+            )
+            with self.subTest(payload=payload.splitlines()[0]), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                target = root / "app" / "ai_providers.py"
+                target.parent.mkdir()
+                target.write_text(legacy, encoding="utf-8")
+                with patch.object(migration, "ROOT", root), patch.object(
+                    migration, "canonical_text", return_value=canonical
+                ):
+                    with self.assertRaisesRegex(
+                        migration.MigrationError,
+                        "branch-specific definition 'json' that collides",
+                    ):
+                        migration.transform_ai_providers("canonical-commit")
+                self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
+
+    def test_postponed_annotations_do_not_count_as_executed_class_global_mutations(self):
+        canonical = """from .native_ai import AIProviderError
+"""
+        legacy = """from __future__ import annotations
+import json
+
+class LegacyNamespace:
+    global json
+    def helper(self, arg: json):
+        return arg
+
+class AIProviderError(RuntimeError):
+    pass
+
+def _extract_json(text):
+    return json.loads(text)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            parsed_result = ast.parse(result, filename=str(target))
+            compile(result, str(target), "exec")
+            self.assertIn("class LegacyNamespace:", result)
+            self.assertNotIn("from __future__ import annotations", result)
+            retained_class = next(
+                node for node in parsed_result.body
+                if isinstance(node, ast.ClassDef) and node.name == "LegacyNamespace"
+            )
+            retained_method = next(
+                node for node in retained_class.body
+                if isinstance(node, ast.FunctionDef) and node.name == "helper"
+            )
+            self.assertIsInstance(retained_method.args.args[1].annotation, ast.Constant)
+            self.assertEqual(retained_method.args.args[1].annotation.value, "json")
+            self.assertNotIn("def _generate_with_provider", result)
+
+    def test_retained_postponed_annotations_keep_imports_for_get_type_hints(self):
+        import types
+        import typing
+
+        canonical = """import json
+"""
+        legacy = """from __future__ import annotations
+import json
+from typing import Any
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper(value: Any):
+    return value
+
+def _extract_json(text):
+    return json.loads(text)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package = root / "app"
+            package.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            target = package / "ai_providers.py"
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("from typing import Any", result)
+            module = types.ModuleType("app.ai_providers")
+            module.__package__ = "app"
+            exec(compile(result, str(target), "exec"), module.__dict__)
+            self.assertEqual(
+                typing.get_type_hints(module.retained_helper),
+                {"value": typing.Any},
+            )
+
+    def test_canonical_future_annotations_are_not_stringized_twice_in_retained_helpers(self):
+        canonical = """from __future__ import annotations
+from .native_ai import AIProviderError
+"""
+        legacy = """from __future__ import annotations
+import json
+
+class LegacyNamespace:
+    def helper(self, value: list[str]):
+        return value
+
+class AIProviderError(RuntimeError):
+    pass
+
+def _extract_json(text):
+    return json.loads(text)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            parsed = ast.parse(result, filename=str(target))
+            retained_class = next(
+                node for node in parsed.body
+                if isinstance(node, ast.ClassDef) and node.name == "LegacyNamespace"
+            )
+            helper = next(
+                node for node in retained_class.body
+                if isinstance(node, ast.FunctionDef) and node.name == "helper"
+            )
+            self.assertIsInstance(helper.args.args[1].annotation, ast.Subscript)
+            self.assertIn("from __future__ import annotations", result)
+
+    def test_class_global_comprehension_target_does_not_block_facade_migration(self):
+        legacy = """import json
+
+class LegacyNamespace:
+    global _extract_json
+    helpers = [_extract_json for _extract_json in ("shadow",)]
+
+class AIProviderError(RuntimeError):
+    pass
+
+def _extract_json(text):
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise AIProviderError("response object required")
+    return value
+"""
+        canonical = """import json
+from .native_ai import AIProviderError
+def _extract_json(text):
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise AIProviderError("response object required")
+    return value
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("def _extract_json", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
 
 if __name__ == "__main__":
     unittest.main()
