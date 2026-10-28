@@ -1,4 +1,5 @@
 from decimal import Decimal
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -76,6 +77,13 @@ def test_cleanup_flattens_only_newly_received_base_and_tolerates_non_sellable_du
 
         def cancel_order(self, order_id, symbol):
             self.cancelled.append(order_id)
+            return {"id": order_id, "status": "canceled"}
+
+        def fetch_open_orders(self, symbol):
+            return []
+
+        def fetch_order(self, order_id, symbol):
+            return {"id": order_id, "status": "canceled" if order_id in self.cancelled else "open"}
 
         def fetch_balance(self):
             return {"free": {"BTC": str(self.base_free)}}
@@ -134,6 +142,10 @@ def test_cleanup_reconciles_stop_when_creation_response_lost():
         def cancel_order(self, order_id, symbol):
             self.cancelled.append(order_id)
             self.open_orders = []
+            return {"id": order_id, "status": "canceled"}
+
+        def fetch_order(self, order_id, symbol):
+            return {"id": order_id, "status": "canceled" if order_id in self.cancelled else "open"}
 
         def fetch_balance(self):
             return {"free": {"BTC": str(self.base_free)}}
@@ -309,3 +321,145 @@ def test_net_filled_base_subtracts_fees_charged_in_base_asset():
         ],
     }
     assert _net_filled_base(order, "BTC") == Decimal("0.2496")
+
+
+def test_cleanup_refuses_to_sell_when_balance_delta_exceeds_drill_fill():
+    class FakeClient:
+        def __init__(self):
+            self.base_free = Decimal("1.2")
+            self.sells = []
+
+        def fetch_balance(self):
+            return {"free": {"BTC": str(self.base_free)}}
+
+        def fetch_open_orders(self, symbol):
+            return []
+
+    class FakeBroker:
+        def __init__(self, client):
+            self.client = client
+            self.sells = []
+
+        def normalize_amount(self, symbol, amount):
+            return str(amount)
+
+        def market_order(self, symbol, side, amount, client_order_id):
+            self.sells.append((side, Decimal(str(amount))))
+            return {"id": "should-not-sell"}
+
+    client = FakeClient()
+    broker = FakeBroker(client)
+    result = cleanup_new_spot_base(
+        broker,
+        client,
+        symbol="BTC/USDT",
+        base_asset="BTC",
+        initial_free_base=Decimal("0"),
+        drill_base_amount=Decimal("1.0"),
+        min_amount=Decimal("0.001"),
+        stop_id=None,
+        stop_client_id=None,
+    )
+
+    assert result["ok"] is False
+    assert broker.sells == []
+    assert any("above this drill's net filled amount" in e for e in result["errors"])
+
+
+def test_cleanup_requires_terminal_stop_state_not_just_missing_open_order():
+    class FakeClient:
+        def __init__(self):
+            self.base_free = Decimal("1")
+            self.cancelled = []
+
+        def cancel_order(self, order_id, symbol):
+            self.cancelled.append(order_id)
+            return {"id": order_id, "status": "open"}
+
+        def fetch_open_orders(self, symbol):
+            # A stale/lagging listing is not proof that the stop is gone.
+            return []
+
+        def fetch_order(self, order_id, symbol):
+            return {"id": order_id, "status": "open"}
+
+        def fetch_balance(self):
+            return {"free": {"BTC": str(self.base_free)}}
+
+    class FakeBroker:
+        def __init__(self):
+            self.sells = []
+
+        def normalize_amount(self, symbol, amount):
+            return str(amount)
+
+        def market_order(self, symbol, side, amount, client_order_id):
+            self.sells.append(amount)
+            return {"id": "should-not-sell"}
+
+    client = FakeClient()
+    broker = FakeBroker()
+    result = cleanup_new_spot_base(
+        broker,
+        client,
+        symbol="BTC/USDT",
+        base_asset="BTC",
+        initial_free_base=Decimal("0"),
+        drill_base_amount=Decimal("1"),
+        min_amount=Decimal("0.001"),
+        stop_id="stop-still-open",
+        stop_client_id="client-stop",
+    )
+    assert result["ok"] is False
+    assert broker.sells == []
+    assert "refusing to flatten while a stop may remain live" in " ".join(result["errors"])
+
+
+def test_cleanup_classifies_below_minimum_notional_as_dust():
+    class FakeClient:
+        def fetch_balance(self):
+            return {"free": {"BTC": "0.1"}}
+
+        def fetch_open_orders(self, symbol):
+            return []
+
+    class FakeBroker:
+        def __init__(self):
+            self.sells = []
+
+        def ticker(self, symbol):
+            return {"last": "100"}
+
+        def normalize_amount(self, symbol, amount):
+            return str(amount)
+
+        def market_order(self, symbol, side, amount, client_order_id):
+            self.sells.append(amount)
+            return {"id": "unexpected-sell"}
+
+    client = FakeClient()
+    broker = FakeBroker()
+    result = cleanup_new_spot_base(
+        broker,
+        client,
+        symbol="BTC/USDT",
+        base_asset="BTC",
+        initial_free_base=Decimal("0"),
+        drill_base_amount=Decimal("0.1"),
+        min_amount=Decimal("0.001"),
+        min_cost=Decimal("15"),
+        stop_id=None,
+        stop_client_id=None,
+    )
+    assert result["ok"] is True
+    assert broker.sells == []
+    assert result["remaining_base"] == "0.1"
+    assert result["residual_dust"] == "0.1"
+
+
+def test_dedicated_testnet_account_must_start_without_base_holdings():
+    from scripts.binance_spot_testnet_acceptance import require_empty_starting_base
+
+    require_empty_starting_base(Decimal("0"), "BTC")
+    with pytest.raises(RuntimeError, match="dedicated account with zero base balance"):
+        require_empty_starting_base(Decimal("0.001"), "BTC")
