@@ -311,13 +311,9 @@ def _cancel_stop_if_present(
                 if order_id in confirmed_terminal:
                     continue
                 try:
-                    result = client.cancel_order(order_id, symbol)
-                    result_status = (
-                        str(result.get("status", "")).lower()
-                        if isinstance(result, dict) else ""
-                    )
-                    if result_status in safe_terminal_states:
-                        confirmed_terminal.add(order_id)
+                    # A cancellation response is an acknowledgement, not proof that
+                    # the order is terminal. Only fetch_order below can confirm that.
+                    client.cancel_order(order_id, symbol)
                 except Exception as exc:
                     last_error = exc
         except Exception as exc:
@@ -337,13 +333,9 @@ def _cancel_stop_if_present(
                     confirmed_terminal.add(order_id)
                     continue
                 if status:
-                    result = client.cancel_order(order_id, symbol)
-                    result_status = (
-                        str(result.get("status", "")).lower()
-                        if isinstance(result, dict) else ""
-                    )
-                    if result_status in safe_terminal_states:
-                        confirmed_terminal.add(order_id)
+                    # A cancellation response is an acknowledgement, not proof that
+                    # the order is terminal. Only fetch_order below can confirm that.
+                    client.cancel_order(order_id, symbol)
             except Exception as exc:
                 last_error = exc
 
