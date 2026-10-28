@@ -22,7 +22,19 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ALLOWED_TIMEFRAMES = {"5m", "15m", "30m", "1h", "4h", "1d"}
-StrategyCondition = dict
+
+class StrategyCondition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: str = Field(min_length=2, max_length=60)
+    rule: str = Field(min_length=3, max_length=500)
+    timeframe: str | None = Field(default=None, max_length=10)
+
+    @field_validator("timeframe")
+    @classmethod
+    def validate_timeframe(cls, value: str | None) -> str | None:
+        if value is not None and value not in ALLOWED_TIMEFRAMES:
+            raise ValueError(f"Unsupported timeframe: {value}")
+        return value
 
 class AIStrategySpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -110,6 +122,7 @@ def _with_canonical_schema_context(source: str) -> str:
     canonical_lines = CANONICAL_STRATEGY.splitlines(keepends=True)
     source_lines = source.splitlines(keepends=True)
 
+    canonical_condition = next(node for node in canonical_tree.body if isinstance(node, ast.ClassDef) and node.name == "StrategyCondition")
     canonical_spec = next(node for node in canonical_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
     canonical_context = next(node for node in canonical_tree.body if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context")
     old_spec = next(node for node in old_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
@@ -118,13 +131,15 @@ def _with_canonical_schema_context(source: str) -> str:
         node for node in old_tree.body
         if isinstance(node, ast.ImportFrom) and node.module == "pydantic"
     )
+    condition_source = canonical_lines[canonical_condition.lineno - 1:canonical_condition.end_lineno]
     spec_source = canonical_lines[canonical_spec.lineno - 1:canonical_spec.end_lineno]
     context_source = canonical_lines[canonical_context.lineno - 1:canonical_context.end_lineno]
     pydantic_block = [
         "from typing import Literal\n",
         "from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator\n",
         'ALLOWED_TIMEFRAMES = {"5m", "15m", "30m", "1h", "4h", "1d"}\n',
-        "StrategyCondition = dict\n",
+        "\n",
+        *condition_source,
         "\n",
     ]
     edits = [
