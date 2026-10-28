@@ -123,6 +123,117 @@ def _net_filled_base(order: dict[str, Any] | None, base_asset: str) -> Decimal:
     return max(Decimal("0"), gross - base_fee)
 
 
+def _verified_net_filled_base(
+    client: Any, symbol: str, order_id: str, order: dict[str, Any], base_asset: str
+) -> Decimal:
+    """Reconcile gross fills and every commission from Binance's order-specific trade ledger.
+
+    Order-status responses may omit commissions. Cleanup quantity is therefore derived
+    only from matching per-trade records with verified commission fields.
+    """
+    if not order_id or not isinstance(order, dict):
+        raise RuntimeError("cannot verify buy commissions without a confirmed exchange order")
+    expected_gross = max(Decimal("0"), dec(order.get("filled") or "0"))
+    fetch_trades = getattr(client, "fetch_my_trades", None)
+    if not callable(fetch_trades):
+        raise RuntimeError("exchange adapter cannot fetch order-specific trade commissions")
+    try:
+        trades = fetch_trades(symbol, None, None, {"orderId": str(order_id)})
+    except Exception as exc:
+        raise RuntimeError(f"could not fetch trades for buy order {order_id}: {exc}") from exc
+    if not isinstance(trades, list):
+        raise RuntimeError(f"trade lookup for buy order {order_id} returned malformed data")
+    matched: list[dict[str, Any]] = []
+    for trade in trades:
+        if not isinstance(trade, dict):
+            raise RuntimeError(f"trade lookup for buy order {order_id} included malformed trade data")
+        info = trade.get("info") if isinstance(trade.get("info"), dict) else {}
+        trade_order_id = trade.get("order")
+        if trade_order_id is None:
+            trade_order_id = info.get("orderId")
+        if trade_order_id is None:
+            raise RuntimeError(
+                f"trade lookup for buy order {order_id} included a trade without a verifiable order ID"
+            )
+        if str(trade_order_id) == str(order_id):
+            matched.append(trade)
+
+    if expected_gross == 0:
+        if matched:
+            matched_gross = sum(
+                (max(Decimal("0"), dec(trade.get("amount"))) for trade in matched),
+                Decimal("0"),
+            )
+            if matched_gross != 0:
+                raise RuntimeError(
+                    f"trade fill total {matched_gross} conflicts with zero-filled buy order {order_id}"
+                )
+        return Decimal("0")
+    if not matched:
+        raise RuntimeError(f"no trade records could be verified for filled buy order {order_id}")
+
+    gross = Decimal("0")
+    base_commission = Decimal("0")
+    for trade in matched:
+        raw_amount = trade.get("amount")
+        if raw_amount is None:
+            raise RuntimeError(f"trade record for buy order {order_id} omits its filled amount")
+        amount = dec(raw_amount)
+        if amount <= 0:
+            raise RuntimeError(f"trade record for buy order {order_id} has an invalid filled amount")
+        gross += amount
+
+        info = trade.get("info") if isinstance(trade.get("info"), dict) else {}
+        raw_fees = trade.get("fees")
+        fee_entries: list[dict[str, Any]] = []
+        if isinstance(raw_fees, list) and raw_fees and all(
+            isinstance(fee, dict)
+            and (fee.get("currency") or fee.get("asset"))
+            and (fee.get("cost") is not None or fee.get("amount") is not None)
+            for fee in raw_fees
+        ):
+            fee_entries = raw_fees
+        else:
+            raw_fee = trade.get("fee")
+            if (
+                isinstance(raw_fee, dict)
+                and (raw_fee.get("currency") or raw_fee.get("asset"))
+                and (raw_fee.get("cost") is not None or raw_fee.get("amount") is not None)
+            ):
+                fee_entries = [raw_fee]
+            elif info.get("commission") is not None and info.get("commissionAsset"):
+                fee_entries = [{
+                    "cost": info["commission"],
+                    "currency": info["commissionAsset"],
+                }]
+            else:
+                raise RuntimeError(
+                    f"trade record for buy order {order_id} omits verifiable commission amount or asset"
+                )
+
+        for fee in fee_entries:
+            currency = str(fee.get("currency") or fee.get("asset") or "").strip().upper()
+            fee_value = fee.get("cost") if fee.get("cost") is not None else fee.get("amount")
+            if not currency or fee_value is None:
+                raise RuntimeError(
+                    f"trade record for buy order {order_id} contains an incomplete commission"
+                )
+            fee_amount = dec(fee_value)
+            if fee_amount < 0:
+                raise RuntimeError(
+                    f"trade record for buy order {order_id} contains a negative commission"
+                )
+            if currency == base_asset.upper():
+                base_commission += fee_amount
+
+    if gross != expected_gross:
+        raise RuntimeError(
+            f"order-status filled amount {expected_gross} does not match verified trade total {gross} "
+            f"for buy order {order_id}; refusing cleanup with incomplete trade data"
+        )
+    return max(Decimal("0"), gross - base_commission)
+
+
 def _wait_for_order(broker: Any, order_id: str, symbol: str, timeout_seconds: int = 30) -> dict:
     deadline = time.monotonic() + timeout_seconds
     last: dict = {}
@@ -673,8 +784,18 @@ def main() -> int:
             or dec(order.get("filled") or "0") <= 0
         ):
             raise RuntimeError(f"Testnet market order did not fill completely: {order!r}")
+        # Do not infer zero commissions from an order-status response. Use the
+        # complete, order-specific trade ledger before sizing either the stop or cleanup.
+        drill_base_amount = _verified_net_filled_base(
+            client, symbol, buy_order_id, order, base_asset
+        )
+        report["steps"].append({
+            "step": "buy_trade_fee_reconciliation",
+            "ok": True,
+            "net_filled_base": str(drill_base_amount),
+        })
         if drill_base_amount <= 0:
-            raise RuntimeError("Filled order did not establish a positive net base-asset quantity")
+            raise RuntimeError("Filled order did not establish a positive verified net base-asset quantity")
         report["steps"].append(
             {
                 "step": "spot_market_fill",
@@ -744,6 +865,24 @@ def main() -> int:
                     str(final_buy_state.get("status", "")).lower()
                     in SAFE_TERMINAL_ORDER_STATES
                 )
+                if buy_order_terminal:
+                    try:
+                        drill_base_amount = _verified_net_filled_base(
+                            client, symbol, buy_order_id, final_buy_state, base_asset
+                        )
+                        report["steps"].append({
+                            "step": "buy_trade_fee_reconciliation",
+                            "ok": True,
+                            "net_filled_base": str(drill_base_amount),
+                        })
+                    except Exception as exc:
+                        reconciliation_error = exc
+                        buy_order_terminal = False
+                        report["steps"].append({
+                            "step": "buy_trade_fee_reconciliation",
+                            "ok": False,
+                            "error": str(exc),
+                        })
             except Exception as exc:
                 reconciliation_error = exc
                 buy_order_terminal = False
