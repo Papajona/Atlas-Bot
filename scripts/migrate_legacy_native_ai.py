@@ -2158,13 +2158,22 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
         if isinstance(node, ast.ClassDef):
             if node.name == name:
                 return True
-            return any(isinstance(part, ast.Global) and name in part.names for part in ast.walk(node))
+            if any(isinstance(part, ast.Global) and name in part.names for part in ast.walk(node)):
+                return True
+            # Class bodies execute at import time, unlike ordinary function bodies.
+            # Inspect bases, decorators, and every class-body statement for writes or
+            # calls that can alter a dependent module object (for example settings).
+            return any(_module_flow_rebinds_or_mutates(part, name) for part in ast.iter_child_nodes(node))
         if isinstance(node, ast.Lambda):
             return False
         if isinstance(node, ast.Import):
             return any((alias.asname or alias.name.split(".", 1)[0]) == name for alias in node.names)
         if isinstance(node, ast.ImportFrom):
-            return any(alias.name != "*" and (alias.asname or alias.name) == name for alias in node.names)
+            # A star import can overwrite any dependent global without naming it here.
+            # Reject it rather than claiming the previously inspected binding survives.
+            if any(alias.name == "*" for alias in node.names):
+                return True
+            return any((alias.asname or alias.name) == name for alias in node.names)
         if isinstance(node, ast.Assign):
             if any(name in _assigned_names(target) or _rooted_name(target) == name for target in node.targets):
                 return True
