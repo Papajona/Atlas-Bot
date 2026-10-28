@@ -1119,6 +1119,29 @@ def transform_ai_providers(commit: str) -> None:
     extra_definition_lines: list[int] = []
     import_nodes: list[ast.AST] = []
     source_lines = source.splitlines(keepends=True)
+
+    def literalize_deferred_annotations(source_segment: str) -> str:
+        """Preserve future-annotation behavior for retained nodes without changing canonical code."""
+        try:
+            parsed_segment = ast.parse(source_segment, filename=str(path))
+        except SyntaxError as exc:
+            raise MigrationError(
+                "cannot preserve postponed annotations in retained provider helper"
+            ) from exc
+        if len(parsed_segment.body) != 1:
+            raise MigrationError(
+                "retained provider helper did not parse as one top-level statement"
+            )
+        retained_node = parsed_segment.body[0]
+        for part in ast.walk(retained_node):
+            if isinstance(part, ast.arg) and part.annotation is not None:
+                part.annotation = ast.Constant(value=ast.unparse(part.annotation))
+            elif isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef)) and part.returns is not None:
+                part.returns = ast.Constant(value=ast.unparse(part.returns))
+            elif isinstance(part, ast.AnnAssign):
+                part.annotation = ast.Constant(value=ast.unparse(part.annotation))
+        return ast.unparse(retained_node)
+
     for node in old_tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             import_nodes.append(node)
@@ -1235,7 +1258,10 @@ def transform_ai_providers(commit: str) -> None:
             raise MigrationError(
                 f"app/ai_providers.py contains an unrecognized provider-bearing helper {name or type(node).__name__}; refusing to overwrite it"
             )
-        extras.append(segment.rstrip())
+        extras.append(
+            literalize_deferred_annotations(segment).rstrip()
+            if postponed_annotations else segment.rstrip()
+        )
         extra_defined_names.append(defined_names)
         extra_definition_lines.append(node.lineno)
 
@@ -1605,19 +1631,7 @@ def transform_ai_providers(commit: str) -> None:
             break
     canonical_header = "".join(canonical_lines[:header_end_line]).rstrip()
     canonical_body = "".join(canonical_lines[header_end_line:]).lstrip("\n")
-    # A retained module may rely on postponed annotations for otherwise-valid
-    # annotation expressions. The canonical source can omit this future import,
-    # but dropping it changes execution semantics for retained helpers. Carry the
-    # future import into the generated module header (after a docstring, if present).
-    retain_future_annotations = (
-        postponed_annotations and not _uses_postponed_annotations(canonical_tree)
-    )
-    if retain_future_annotations:
-        future_import = "from __future__ import annotations"
-        canonical_header = (
-            f"{canonical_header}\n{future_import}" if canonical_header else future_import
-        )
-    if retained_star_imports or retain_future_annotations:
+    if retained_star_imports:
         canonical_pieces = [piece for piece in (canonical_header, *retained_star_imports, canonical_body.rstrip()) if piece.strip()]
         canonical_result = "\n\n".join(canonical_pieces) + "\n"
     else:
