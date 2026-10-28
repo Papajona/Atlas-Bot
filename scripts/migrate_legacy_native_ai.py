@@ -3363,7 +3363,15 @@ def transform_strategy_ai(commit: str) -> None:
             # A handler can run after any prefix of the try body. Analyze from
             # both the incoming state and completed body state to fail closed on
             # names which an exception path can leave unbound.
-            exceptional_inputs = {frozenset(available), frozenset(sequence(node.body, set(available), nested_class=in_class, nested_globals=class_globals))}
+            # Exceptions may occur after any completed top-level statement in
+            # the try suite, not just before it starts or after the entire suite.
+            exceptional_inputs: set[frozenset[str]] = {frozenset(available)}
+            prefix_state = set(available)
+            for try_statement in node.body:
+                prefix_state = module_statement_bindings(
+                    try_statement, prefix_state, in_class=in_class, class_globals=class_globals
+                )
+                exceptional_inputs.add(frozenset(prefix_state))
             for incoming in exceptional_inputs:
                 for handler in node.handlers:
                     handled = sequence(
@@ -3389,10 +3397,62 @@ def transform_strategy_ai(commit: str) -> None:
             return result
 
         if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
-            # A known-empty loop executes only its else suite. Otherwise consider
-            # zero iterations, a body iteration that exits via break, and normal
-            # completion through the else suite. Repeated iterations can only
-            # further remove uncertain bindings, so intersect a fixed point.
+            def loop_body_effect(
+                statements: list[ast.stmt], initial: set[str]
+            ) -> tuple[list[set[str]], list[set[str]], list[set[str]]]:
+                """Return normal, break, and continue states without walking past exits."""
+                active = [set(initial)]
+                break_states: list[set[str]] = []
+                continue_states: list[set[str]] = []
+                for statement in statements:
+                    next_active: list[set[str]] = []
+                    for state in active:
+                        if isinstance(statement, ast.Break):
+                            break_states.append(state)
+                            continue
+                        if isinstance(statement, ast.Continue):
+                            continue_states.append(state)
+                            continue
+                        if isinstance(statement, ast.If):
+                            condition_known = False
+                            try:
+                                condition = ast.literal_eval(statement.test)
+                                condition_known = True
+                            except (ValueError, TypeError):
+                                condition = None
+                            if condition_known:
+                                branches = [
+                                    statement.body if bool(condition) else statement.orelse
+                                ]
+                            else:
+                                branches = [statement.body, statement.orelse]
+                            for branch in branches:
+                                normal, broken, continued = loop_body_effect(branch, state)
+                                next_active.extend(normal)
+                                break_states.extend(broken)
+                                continue_states.extend(continued)
+                            continue
+                        # A break/continue hidden inside a compound form not modeled
+                        # above must not allow later statements to manufacture a
+                        # guaranteed binding. Fail closed for that branch.
+                        if isinstance(statement, (ast.Try, ast.TryStar, ast.With, ast.Match)) and any(
+                            isinstance(child, (ast.Break, ast.Continue))
+                            for child in ast.walk(statement)
+                            if child is not statement
+                            and not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda))
+                        ):
+                            break_states.append(set())
+                            continue
+                        next_active.append(
+                            module_statement_bindings(
+                                statement, state, in_class=in_class, class_globals=class_globals
+                            )
+                        )
+                    active = next_active
+                    if not active:
+                        break
+                return active, break_states, continue_states
+
             if isinstance(node, (ast.For, ast.AsyncFor)):
                 try:
                     iterable = ast.literal_eval(node.iter)
@@ -3410,21 +3470,37 @@ def transform_strategy_ai(commit: str) -> None:
                 if condition_known and not bool(condition):
                     return sequence(node.orelse, set(available), nested_class=in_class, nested_globals=class_globals)
 
-            body = sequence(node.body, set(available), nested_class=in_class, nested_globals=class_globals)
-            outcomes = [
-                sequence(node.orelse, set(available), nested_class=in_class, nested_globals=class_globals),
-                body,
-                sequence(node.orelse, body, nested_class=in_class, nested_globals=class_globals),
-            ]
-            seen = {frozenset(available), frozenset(body)}
-            current = body
-            for _ in range(len(available) + 2):
-                current = sequence(node.body, current, nested_class=in_class, nested_globals=class_globals)
-                marker = frozenset(current)
-                if marker in seen:
-                    break
-                seen.add(marker)
-                outcomes.append(current)
+            always_true_while = isinstance(node, ast.While) and condition_known and bool(condition)
+            outcomes: list[set[str]] = []
+            if not always_true_while:
+                # A for loop may be empty; a nonconstant while may exit before
+                # its body. A normal exit then executes the loop's else suite.
+                outcomes.append(
+                    sequence(node.orelse, set(available), nested_class=in_class, nested_globals=class_globals)
+                )
+
+            frontier = [set(available)]
+            seen_states = {frozenset(available)}
+            while frontier:
+                iteration_start = frontier.pop()
+                normal_states, break_states, continue_states = loop_body_effect(
+                    node.body, iteration_start
+                )
+                outcomes.extend(break_states)  # break skips the else suite
+                if not always_true_while:
+                    for completed in [*normal_states, *continue_states]:
+                        outcomes.append(
+                            sequence(node.orelse, completed, nested_class=in_class, nested_globals=class_globals)
+                        )
+                for next_iteration in [*normal_states, *continue_states]:
+                    marker = frozenset(next_iteration)
+                    if marker not in seen_states:
+                        seen_states.add(marker)
+                        frontier.append(next_iteration)
+            # A statically infinite loop with no reachable break never completes
+            # module import. Do not claim any binding survives such a construct.
+            if not outcomes:
+                return set()
             return set.intersection(*outcomes)
 
         if isinstance(node, ast.With):
