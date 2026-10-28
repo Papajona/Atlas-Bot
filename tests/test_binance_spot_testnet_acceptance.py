@@ -7,7 +7,6 @@ import pytest
 from scripts.binance_spot_testnet_acceptance import (
     _market_order_min_notional_rule,
     _market_order_reference_price,
-    _cancel_stop_if_present,
     _net_filled_base,
     _reconcile_buy_order,
     active_spot_api_urls,
