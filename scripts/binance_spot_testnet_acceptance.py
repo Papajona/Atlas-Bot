@@ -28,6 +28,7 @@ from app.customer_binance_execution import build_customer_binance_broker
 
 TESTNET_SPOT_HOST = "testnet.binance.vision"
 TERMINAL_ORDER_STATES = {"closed", "filled"}
+CANCELED_ORDER_STATES = {"canceled", "cancelled", "rejected", "expired"}
 
 
 def req(name: str) -> str:
@@ -142,71 +143,96 @@ def _cancel_stop_if_present(
     stop_client_id: str | None,
     errors: list[str],
 ) -> bool:
-    """Cancel a known stop or fail closed when an ambiguously-created stop cannot be ruled out."""
+    """Cancel a stop and verify a terminal order state before flattening base.
+
+    Absence from one open-orders response is not proof that a stop was never
+    accepted or has been canceled. In particular, an ambiguous create response
+    can leave us with only the client order ID. In that case we must find and
+    verify the order, or fail closed without selling any base.
+    """
     if not stop_id and not stop_client_id:
         return True
 
-    cancel_error: Exception | None = None
-    cancel_requested = False
-    if stop_id:
-        try:
-            client.cancel_order(stop_id, symbol)
-            cancel_requested = True
-            if not stop_client_id:
-                return True
-        except Exception as exc:
-            cancel_error = exc
-
-    if not stop_client_id:
-        if cancel_error is not None:
-            errors.append(f"could not cancel protective stop {stop_id}: {cancel_error}")
-            return False
-        return cancel_requested
-
+    candidate_ids: set[str] = {str(stop_id)} if stop_id else set()
+    confirmed_terminal: set[str] = set()
     last_error: Exception | None = None
+    safe_terminal_states = TERMINAL_ORDER_STATES | CANCELED_ORDER_STATES
+
     for attempt in range(3):
+        # Discover the order by client ID when the create response was lost.
         try:
             open_orders = client.fetch_open_orders(symbol)
             if not isinstance(open_orders, list):
                 raise RuntimeError("exchange returned malformed open-order data")
-            matched = []
             for order in open_orders:
+                if not isinstance(order, dict):
+                    continue
                 info = order.get("info") if isinstance(order.get("info"), dict) else {}
                 client_id = order.get("clientOrderId") or info.get("clientOrderId")
-                if str(client_id or "") == stop_client_id and order.get("id") is not None:
-                    matched.append(order)
-            if matched:
-                for order in matched:
-                    client.cancel_order(str(order["id"]), symbol)
-                cancel_requested = True
-                last_error = None
-            elif cancel_requested:
-                # A previously accepted cancellation plus a subsequent authoritative
-                # open-order read is sufficient to proceed with flattening.
-                return True
-            elif attempt == 2:
-                # The create/cancel response may have been lost before the exchange
-                # made an accepted order visible. Absence from one or more list reads
-                # is not proof that no live stop exists, so do not sell around it.
-                errors.append(
-                    f"could not verify protective stop {stop_client_id} is absent; "
-                    "refusing to flatten while a stop may remain open"
+                order_id = order.get("id")
+                matches_client = bool(
+                    stop_client_id and str(client_id or "") == stop_client_id
                 )
-                return False
+                matches_known_id = bool(order_id is not None and str(order_id) in candidate_ids)
+                if not (matches_client or matches_known_id):
+                    continue
+                if order_id is None:
+                    last_error = RuntimeError(
+                        f"matching protective stop {stop_client_id or stop_id} has no exchange order ID"
+                    )
+                    continue
+                order_id = str(order_id)
+                candidate_ids.add(order_id)
+                if order_id in confirmed_terminal:
+                    continue
+                try:
+                    result = client.cancel_order(order_id, symbol)
+                    result_status = (
+                        str(result.get("status", "")).lower()
+                        if isinstance(result, dict) else ""
+                    )
+                    if result_status in safe_terminal_states:
+                        confirmed_terminal.add(order_id)
+                except Exception as exc:
+                    last_error = exc
         except Exception as exc:
             last_error = exc
-            if attempt == 2:
-                if cancel_error is not None:
-                    errors.append(f"could not cancel protective stop {stop_id}: {cancel_error}")
-                errors.append(
-                    f"could not reconcile/cancel protective stop {stop_client_id}: {last_error}; "
-                    "refusing to flatten"
-                )
-                return False
+
+        # A cancellation request or a missing open-orders match is insufficient.
+        # Confirm every known order by ID; retry cancellation while it is active.
+        for order_id in list(candidate_ids):
+            if order_id in confirmed_terminal:
+                continue
+            try:
+                order_state = client.fetch_order(order_id, symbol)
+                if not isinstance(order_state, dict):
+                    raise RuntimeError(f"exchange returned malformed order state for {order_id}")
+                status = str(order_state.get("status", "")).lower()
+                if status in safe_terminal_states:
+                    confirmed_terminal.add(order_id)
+                    continue
+                if status:
+                    result = client.cancel_order(order_id, symbol)
+                    result_status = (
+                        str(result.get("status", "")).lower()
+                        if isinstance(result, dict) else ""
+                    )
+                    if result_status in safe_terminal_states:
+                        confirmed_terminal.add(order_id)
+            except Exception as exc:
+                last_error = exc
+
+        if candidate_ids and candidate_ids.issubset(confirmed_terminal):
+            return True
+
         if attempt < 2:
             time.sleep(0.5)
 
-    errors.append(f"could not verify protective stop {stop_client_id} is absent; refusing to flatten")
+    errors.append(
+        f"could not verify protective stop {stop_client_id or stop_id} is terminal; "
+        f"refusing to flatten while a stop may remain live"
+        + (f" ({last_error})" if last_error is not None else "")
+    )
     return False
 
 
@@ -242,14 +268,28 @@ def cleanup_new_spot_base(
     # Never sell more than this order's filled quantity, reduced by base-denominated fees.
     drill_cap = max(Decimal("0"), drill_base_amount)
     free_delta = max(Decimal("0"), current - initial_free_base)
-    new_base = min(free_delta, drill_cap)
     if not stop_safe:
         return {
             "ok": False,
-            "remaining_base": str(new_base),
+            "remaining_base": str(min(free_delta, drill_cap)),
             "residual_dust": None,
             "errors": errors,
         }
+    # A larger balance increase cannot be attributed to this drill's fill.
+    # Do not even sell the capped amount: a concurrent credit can make the
+    # balance delta misleading, so ambiguous balances must be reconciled manually.
+    if free_delta > drill_cap:
+        errors.append(
+            f"free {base_asset} balance increased by {free_delta}, above this drill's "
+            f"net filled amount {drill_cap}; refusing to sell potentially unrelated base"
+        )
+        return {
+            "ok": False,
+            "remaining_base": str(free_delta),
+            "residual_dust": None,
+            "errors": errors,
+        }
+    new_base = min(free_delta, drill_cap)
 
     cleanup_price: Decimal | None = None
     if min_cost > 0:
@@ -331,6 +371,16 @@ def cleanup_new_spot_base(
         }
 
 
+def require_empty_starting_base(initial_free_base: Decimal, base_asset: str) -> None:
+    """Require a dedicated Spot Testnet account with no pre-existing free base."""
+    if initial_free_base != 0:
+        raise RuntimeError(
+            f"Refusing Spot Testnet drill: starting free {base_asset} balance is "
+            f"{initial_free_base}. Use a dedicated account with zero base balance so "
+            "cleanup cannot sell pre-existing holdings."
+        )
+
+
 def main() -> int:
     if os.getenv("ATLAS_BINANCE_TESTNET", "").strip().lower() != "true":
         raise SystemExit("Set ATLAS_BINANCE_TESTNET=true to run the external testnet drill")
@@ -372,6 +422,7 @@ def main() -> int:
 
     base_asset = symbol.split("/")[0].split(":")[0]
     initial_free_base = _free_balance(client, base_asset)
+    require_empty_starting_base(initial_free_base, base_asset)
     report: dict[str, Any] = {
         "environment": "BINANCE_SPOT_TESTNET",
         "symbol": symbol,
