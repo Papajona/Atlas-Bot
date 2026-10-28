@@ -1,12 +1,15 @@
 from decimal import Decimal
-from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from scripts.binance_spot_testnet_acceptance import (
+    _fetch_order_by_client_id,
+    _market_order_min_notional_rule,
+    _market_order_reference_price,
     _net_filled_base,
+    _reconcile_buy_order,
     active_spot_api_urls,
     cleanup_new_spot_base,
     require_testnet_spot_endpoints,
@@ -463,3 +466,133 @@ def test_dedicated_testnet_account_must_start_without_base_holdings():
     require_empty_starting_base(Decimal("0"), "BTC")
     with pytest.raises(RuntimeError, match="dedicated account with zero base balance"):
         require_empty_starting_base(Decimal("0.001"), "BTC")
+
+
+def test_ambiguous_buy_submission_can_be_reconciled_by_client_order_id():
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def fetch_order(self, order_id, symbol, params):
+            self.calls.append((order_id, symbol, params))
+            return {"id": "buy-recovered", "status": "closed", "filled": "0.5"}
+
+    class FakeBroker:
+        def fetch_order(self, order_id, symbol):
+            assert order_id == "buy-recovered"
+            return {"id": order_id, "status": "closed", "filled": "0.5", "fee": {"currency": "BTC", "cost": "0.001"}}
+
+    client = FakeClient()
+    order_id, state, cap = _reconcile_buy_order(
+        FakeBroker(),
+        client,
+        symbol="BTC/USDT",
+        base_asset="BTC",
+        client_order_id="atlas-tn-ambiguous",
+        order_id=None,
+    )
+    assert client.calls == [(None, "BTC/USDT", {"origClientOrderId": "atlas-tn-ambiguous"})]
+    assert order_id == "buy-recovered"
+    assert state["status"] == "closed"
+    assert cap == Decimal("0.499")
+
+
+def test_partial_buy_is_canceled_and_final_fill_is_preserved(monkeypatch):
+    from scripts import binance_spot_testnet_acceptance as drill
+
+    monkeypatch.setattr(drill.time, "sleep", lambda _: None)
+
+    class FakeClient:
+        def __init__(self):
+            self.canceled = []
+
+        def cancel_order(self, order_id, symbol):
+            self.canceled.append(order_id)
+            return {"id": order_id, "status": "canceled"}
+
+    class FakeBroker:
+        def __init__(self):
+            self.calls = 0
+
+        def fetch_order(self, order_id, symbol):
+            self.calls += 1
+            if self.calls <= 2:
+                return {"id": order_id, "status": "open", "filled": "0.4"}
+            return {"id": order_id, "status": "canceled", "filled": "0.4", "fee": {"currency": "BTC", "cost": "0.01"}}
+
+    client, broker = FakeClient(), FakeBroker()
+    order_id, state, cap = _reconcile_buy_order(
+        broker,
+        client,
+        symbol="BTC/USDT",
+        base_asset="BTC",
+        client_order_id="atlas-tn-partial",
+        order_id="buy-partial",
+    )
+    assert order_id == "buy-partial"
+    assert client.canceled
+    assert state["status"] == "canceled"
+    assert cap == Decimal("0.39")
+
+
+def test_market_order_min_notional_uses_filter_reference_window():
+    market = {
+        "limits": {"cost": {"min": 5}},
+        "info": {"filters": [
+            {"filterType": "MIN_NOTIONAL", "minNotional": "10", "applyToMarket": True, "avgPriceMins": 5},
+            {"filterType": "NOTIONAL", "minNotional": "20", "applyMinToMarket": True, "avgPriceMins": 5},
+            {"filterType": "MIN_NOTIONAL", "minNotional": "100", "applyToMarket": False, "avgPriceMins": 0},
+        ]},
+    }
+    assert _market_order_min_notional_rule(market) == (Decimal("20"), 5)
+
+
+def test_market_order_reference_price_requires_matching_average_window():
+    class FakeClient:
+        def publicGetAvgPrice(self, params):
+            assert params == {"symbol": "BTCUSDT"}
+            return {"mins": 5, "price": "101.25"}
+
+        def market(self, symbol):
+            return {"id": "BTCUSDT"}
+
+    client = FakeClient()
+    assert _market_order_reference_price(client, "BTC/USDT", 5, Decimal("99")) == Decimal("101.25")
+    assert _market_order_reference_price(client, "BTC/USDT", 1, Decimal("99")) is None
+
+
+def test_unknown_market_reference_never_certifies_residual_as_dust():
+    class FakeClient:
+        def fetch_balance(self):
+            return {"free": {"BTC": "0.1"}}
+
+        def fetch_open_orders(self, symbol):
+            return []
+
+    class FakeBroker:
+        def ticker(self, symbol):
+            return {"last": "100"}
+
+        def normalize_amount(self, symbol, amount):
+            return str(amount)
+
+        def market_order(self, symbol, side, amount, client_order_id):
+            raise RuntimeError("exchange reference window could not be established")
+
+    result = cleanup_new_spot_base(
+        FakeBroker(),
+        FakeClient(),
+        symbol="BTC/USDT",
+        base_asset="BTC",
+        initial_free_base=Decimal("0"),
+        drill_base_amount=Decimal("0.1"),
+        min_amount=Decimal("0.001"),
+        min_cost=Decimal("15"),
+        min_cost_reference_mins=None,
+        stop_id=None,
+        stop_client_id=None,
+    )
+    assert result["ok"] is False
+    assert result["remaining_base"] == "0.1"
+    assert result["residual_dust"] is None
+    assert any("unverified" in e for e in result["errors"])
