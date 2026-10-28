@@ -2698,5 +2698,110 @@ async def keep_customer_route():
         ast.parse(result, filename="app/main.py")
 
 
+
+
+    def test_module_scope_binding_analysis_detects_starred_targets_but_not_lambda_local_walrus(self):
+        starred_loop = ast.parse("for *json, rest in [(1, 2)]:\n    pass\n").body[0]
+        self.assertIn("json", migration._module_scope_maybe_binds(starred_loop))
+        self.assertIn("rest", migration._module_scope_maybe_binds(starred_loop))
+
+        local_walrus = ast.parse(
+            "def retained_helper():\n"
+            "    return (lambda: (json := None))()\n"
+        ).body[0]
+        self.assertEqual(migration._module_scope_maybe_binds(local_walrus), {"retained_helper"})
+
+        empty_loop = ast.parse("for json in []:\n    pass\n").body[0]
+        self.assertNotIn("json", migration._module_scope_maybe_binds(empty_loop))
+
+    def test_provider_facade_refuses_starred_loop_rebinding_of_canonical_json_import(self):
+        legacy = (
+            "import json\n\n"
+            "class AIProviderError(RuntimeError):\n"
+            "    pass\n\n"
+            "for *json, rest in [(1, 2)]:\n"
+            "    pass\n"
+        )
+        canonical = (
+            "import json\n"
+            "from .native_ai import AIProviderError\n"
+            "def _extract_json(text):\n"
+            "    return json.loads(text)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "branch-specific definition 'json' that collides with a canonical name",
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_star_import_rejects_deleted_name_still_declared_in_all(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper.write_text(
+                "from .native_ai import NativeAIError\n"
+                "__all__ = ['NativeAIError', 'branch_helper']\n"
+                "def branch_helper():\n"
+                "    return True\n"
+                "del NativeAIError\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            canonical = (
+                "from .native_ai import AIProviderError, NativeAIError\n"
+            )
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "declares deleted name\\(s\\) in __all__",
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_strategy_migration_accepts_dependency_bound_in_both_try_and_except_paths(self):
+        legacy = self._legacy_strategy_with_retained_code("")
+        legacy = legacy.replace(
+            "from .strategy_evidence import evidence_for\n",
+            "try:\n"
+            "    from .strategy_evidence import evidence_for\n"
+            "except ImportError:\n"
+            "    from .strategy_evidence import evidence_for\n",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                migration.transform_strategy_ai("fake-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("except ImportError:", result)
+            self.assertIn("from .native_ai import NativeAIError, compose_strategy_spec", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
+
 if __name__ == "__main__":
     unittest.main()
