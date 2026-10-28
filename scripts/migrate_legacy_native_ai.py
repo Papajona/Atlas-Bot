@@ -3432,16 +3432,82 @@ def transform_strategy_ai(commit: str) -> None:
                                 break_states.extend(broken)
                                 continue_states.extend(continued)
                             continue
-                        # A break/continue hidden inside a compound form not modeled
-                        # above must not allow later statements to manufacture a
-                        # guaranteed binding. Fail closed for that branch.
-                        if isinstance(statement, (ast.Try, ast.TryStar, ast.With, ast.Match)) and any(
-                            isinstance(child, (ast.Break, ast.Continue))
-                            for child in ast.walk(statement)
-                            if child is not statement
-                            and not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda))
-                        ):
-                            break_states.append(set())
+                        if isinstance(statement, (ast.Try, ast.TryStar)):
+                            body_normal, body_breaks, body_continues = loop_body_effect(statement.body, state)
+                            current_flows: list[tuple[str, set[str]]] = [
+                                ("break", item) for item in body_breaks
+                            ] + [("continue", item) for item in body_continues]
+                            for normal_state in body_normal:
+                                if statement.orelse:
+                                    normal, broken, continued = loop_body_effect(statement.orelse, normal_state)
+                                else:
+                                    normal, broken, continued = [normal_state], [], []
+                                current_flows.extend(("normal", item) for item in normal)
+                                current_flows.extend(("break", item) for item in broken)
+                                current_flows.extend(("continue", item) for item in continued)
+
+                            # Except handlers can run after a completed statement in
+                            # the try suite. Keep each prefix state, but never treat
+                            # an unconditional break/continue itself as an exception.
+                            handler_inputs: list[set[str]] = []
+                            if statement.handlers:
+                                prefixes = [set(state)]
+                                prefix_active = [set(state)]
+                                for try_item in statement.body:
+                                    next_prefix_active: list[set[str]] = []
+                                    for prefix_state in prefix_active:
+                                        if not isinstance(try_item, (ast.Break, ast.Continue)):
+                                            handler_inputs.append(set(prefix_state))
+                                        normal, _, _ = loop_body_effect([try_item], prefix_state)
+                                        next_prefix_active.extend(normal)
+                                    prefix_active = next_prefix_active
+                                    prefixes.extend(set(item) for item in prefix_active)
+                                    if not prefix_active:
+                                        break
+                                handler_inputs.extend(prefixes[1:])
+                                for incoming in {frozenset(item) for item in handler_inputs}:
+                                    for handler in statement.handlers:
+                                        normal, broken, continued = loop_body_effect(handler.body, set(incoming))
+                                        handler_states = [
+                                            ("normal", item) for item in normal
+                                        ] + [("break", item) for item in broken] + [
+                                            ("continue", item) for item in continued
+                                        ]
+                                        if handler.name and handler.name in visible({handler.name}):
+                                            for _, item in handler_states:
+                                                item.discard(handler.name)
+                                        current_flows.extend(handler_states)
+
+                            if statement.finalbody:
+                                finalized: list[tuple[str, set[str]]] = []
+                                for previous_flow, flow_state in current_flows:
+                                    normal, broken, continued = loop_body_effect(statement.finalbody, flow_state)
+                                    finalized.extend((previous_flow, item) for item in normal)
+                                    finalized.extend(("break", item) for item in broken)
+                                    finalized.extend(("continue", item) for item in continued)
+                                current_flows = finalized
+                            next_active.extend(item for flow, item in current_flows if flow == "normal")
+                            break_states.extend(item for flow, item in current_flows if flow == "break")
+                            continue_states.extend(item for flow, item in current_flows if flow == "continue")
+                            continue
+
+                        if isinstance(statement, ast.With):
+                            with_state = set(state) | visible(_defined_names(statement))
+                            normal, broken, continued = loop_body_effect(statement.body, with_state)
+                            next_active.extend(normal)
+                            break_states.extend(broken)
+                            continue_states.extend(continued)
+                            continue
+
+                        if isinstance(statement, ast.Match):
+                            # If no case matches, execution continues unchanged.
+                            next_active.append(set(state))
+                            for case in statement.cases:
+                                case_state = set(state) | visible(_defined_names(case.pattern))
+                                normal, broken, continued = loop_body_effect(case.body, case_state)
+                                next_active.extend(normal)
+                                break_states.extend(broken)
+                                continue_states.extend(continued)
                             continue
                         next_active.append(
                             module_statement_bindings(
@@ -3453,13 +3519,16 @@ def transform_strategy_ai(commit: str) -> None:
                         break
                 return active, break_states, continue_states
 
+            guaranteed_nonempty_iterable = False
             if isinstance(node, (ast.For, ast.AsyncFor)):
                 try:
                     iterable = ast.literal_eval(node.iter)
                 except (ValueError, TypeError):
                     iterable = None
-                if isinstance(iterable, (list, tuple, dict, set, str, bytes)) and not iterable:
-                    return sequence(node.orelse, set(available), nested_class=in_class, nested_globals=class_globals)
+                if isinstance(iterable, (list, tuple, dict, set, str, bytes)):
+                    if not iterable:
+                        return sequence(node.orelse, set(available), nested_class=in_class, nested_globals=class_globals)
+                    guaranteed_nonempty_iterable = True
             else:
                 condition_known = False
                 try:
@@ -3472,9 +3541,9 @@ def transform_strategy_ai(commit: str) -> None:
 
             always_true_while = isinstance(node, ast.While) and condition_known and bool(condition)
             outcomes: list[set[str]] = []
-            if not always_true_while:
-                # A for loop may be empty; a nonconstant while may exit before
-                # its body. A normal exit then executes the loop's else suite.
+            if not always_true_while and not guaranteed_nonempty_iterable:
+                # Only include a zero-iteration exit when it is feasible: a
+                # literal non-empty iterable is guaranteed to enter the body.
                 outcomes.append(
                     sequence(node.orelse, set(available), nested_class=in_class, nested_globals=class_globals)
                 )
