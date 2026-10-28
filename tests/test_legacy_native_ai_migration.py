@@ -2866,5 +2866,36 @@ from .native_ai import AIProviderError
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
 
+
+
+    def test_strategy_migration_rejects_dependency_deleted_by_global_in_finally_class(self):
+        legacy = self._with_canonical_schema_context(
+            self._legacy_strategy_with_retained_code("")
+        )
+        legacy = legacy.replace(
+            "from .strategy_evidence import evidence_for\n",
+            "try:\n"
+            "    from .strategy_evidence import evidence_for\n"
+            "finally:\n"
+            "    class _Cleanup:\n"
+            "        global evidence_for\n"
+            "        del evidence_for\n",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "canonical strategy generator depends on missing module binding.*evidence_for",
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
 if __name__ == "__main__":
     unittest.main()
