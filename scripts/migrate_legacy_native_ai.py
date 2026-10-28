@@ -2138,6 +2138,15 @@ def _is_compatible_strategy_schema_and_context(tree: ast.Module, canonical_tree:
     ]
     if len(contexts) != 1 or len(canonical_contexts) != 1:
         return False
+    # A byte-for-byte canonical AST contract already proves the full field and market
+    # semantics. This also avoids reparsing equivalently canonical fixtures through
+    # the compatibility path intended for older but structurally recognizable models.
+    if (
+        ast.dump(schema, include_attributes=False) == ast.dump(canonical_schema, include_attributes=False)
+        and ast.dump(contexts[0], include_attributes=False)
+        == ast.dump(canonical_contexts[0], include_attributes=False)
+    ):
+        return True
     context = contexts[0]
     args = context.args
     if (
