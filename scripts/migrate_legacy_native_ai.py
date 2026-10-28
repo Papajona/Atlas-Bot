@@ -1705,6 +1705,18 @@ def _provider_adapter_name(func: ast.AST, module_tree: ast.Module | None = None)
                     if bound in deleted:
                         shadowed = True
                         break
+                if isinstance(other, ast.Import):
+                    for other_alias in other.names:
+                        if other_alias.asname == bound and other_alias.name not in {"ai_providers", "app.ai_providers"}:
+                            shadowed = True
+                            break
+                        if other_alias.asname is None and other_alias.name.split(".", 1)[0] == bound:
+                            # Re-importing a submodule of the same package does not
+                            # rebind the package root (e.g. import app.config).
+                            continue
+                    if shadowed:
+                        break
+                    continue
                 if bound in _defined_names(other):
                     shadowed = True
                     break
