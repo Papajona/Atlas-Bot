@@ -125,30 +125,64 @@ def _with_canonical_schema_context(source: str) -> str:
     canonical_condition = next(node for node in canonical_tree.body if isinstance(node, ast.ClassDef) and node.name == "StrategyCondition")
     canonical_spec = next(node for node in canonical_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
     canonical_context = next(node for node in canonical_tree.body if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context")
-    old_spec = next(node for node in old_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
-    old_context = next(node for node in old_tree.body if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context")
-    pydantic_import = next(
-        node for node in old_tree.body
-        if isinstance(node, ast.ImportFrom) and node.module == "pydantic"
-    )
     condition_source = canonical_lines[canonical_condition.lineno - 1:canonical_condition.end_lineno]
     spec_source = canonical_lines[canonical_spec.lineno - 1:canonical_spec.end_lineno]
     context_source = canonical_lines[canonical_context.lineno - 1:canonical_context.end_lineno]
-    pydantic_block = [
+
+    old_condition = next((node for node in old_tree.body if isinstance(node, ast.ClassDef) and node.name == "StrategyCondition"), None)
+    old_spec = next((node for node in old_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"), None)
+    old_context = next((node for node in old_tree.body if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"), None)
+    pydantic_import = next(
+        (node for node in old_tree.body if isinstance(node, ast.ImportFrom) and node.module == "pydantic"),
+        None,
+    )
+
+    if old_spec is not None and old_condition is not None and old_context is not None and pydantic_import is not None:
+        pydantic_block = [
+            "from typing import Literal\n",
+            "from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator\n",
+        ]
+        edits = [
+            (old_condition.lineno, old_condition.end_lineno, condition_source),
+            (old_spec.lineno, old_spec.end_lineno, spec_source),
+            (old_context.lineno, old_context.end_lineno, context_source),
+            (pydantic_import.lineno, pydantic_import.end_lineno, pydantic_block),
+        ]
+        for start, end, replacement in sorted(edits, reverse=True):
+            source_lines[start - 1:end] = replacement
+        return "".join(source_lines)
+
+    # Minimal fixtures intentionally omit the schema/context block. Inject the
+    # canonical block so these tests exercise binding analysis, not fixture shape.
+    canonical_assignments = []
+    for node in canonical_tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+        if any(name.startswith("ALLOWED_") for name in names):
+            canonical_assignments.extend(canonical_lines[node.lineno - 1:node.end_lineno])
+    insertion = 0
+    for node in old_tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)) or (
+            isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+        ):
+            insertion = max(insertion, node.end_lineno)
+        else:
+            break
+    block = [
         "from typing import Literal\n",
         "from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator\n",
-        'ALLOWED_TIMEFRAMES = {"5m", "15m", "30m", "1h", "4h", "1d"}\n',
+        "\n",
+        *canonical_assignments,
         "\n",
         *condition_source,
         "\n",
+        *spec_source,
+        "\n",
+        *context_source,
+        "\n",
     ]
-    edits = [
-        (old_spec.lineno, old_spec.end_lineno, spec_source),
-        (old_context.lineno, old_context.end_lineno, context_source),
-        (pydantic_import.lineno, pydantic_import.end_lineno, pydantic_block),
-    ]
-    for start, end, replacement in sorted(edits, reverse=True):
-        source_lines[start - 1:end] = replacement
+    source_lines[insertion:insertion] = block
     return "".join(source_lines)
 
 
