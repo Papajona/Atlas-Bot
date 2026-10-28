@@ -765,7 +765,19 @@ def _assigned_names(target: ast.AST) -> set[str]:
 
 
 
-def _class_scope_global_mutations(node: ast.ClassDef) -> set[str]:
+def _uses_postponed_annotations(tree: ast.Module) -> bool:
+    """Return whether the module defers annotation evaluation via __future__."""
+    return any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "__future__"
+        and any(alias.name == "annotations" for alias in node.names)
+        for node in tree.body
+    )
+
+
+def _class_scope_global_mutations(
+    node: ast.ClassDef, *, postponed_annotations: bool = False
+) -> set[str]:
     """Find module writes executed by a class suite through explicit global declarations."""
     declared: set[str] = set()
 
@@ -787,11 +799,16 @@ def _class_scope_global_mutations(node: ast.ClassDef) -> set[str]:
     mutations: set[str] = set()
 
     def visit_definition_time_expressions(part: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        # Decorators and defaults always execute when the class body defines a
+        # function. With postponed annotations, annotations are stringized and
+        # must not be treated as module mutations.
         expressions: list[ast.AST] = [
             *part.decorator_list,
             *part.args.defaults,
             *(value for value in part.args.kw_defaults if value is not None),
-            *(
+        ]
+        if not postponed_annotations:
+            expressions.extend(
                 arg.annotation
                 for arg in [
                     *part.args.posonlyargs,
@@ -799,19 +816,13 @@ def _class_scope_global_mutations(node: ast.ClassDef) -> set[str]:
                     *part.args.kwonlyargs,
                 ]
                 if arg.annotation is not None
-            ),
-            *(
-                [part.args.vararg.annotation]
-                if part.args.vararg and part.args.vararg.annotation is not None
-                else []
-            ),
-            *(
-                [part.args.kwarg.annotation]
-                if part.args.kwarg and part.args.kwarg.annotation is not None
-                else []
-            ),
-            *([part.returns] if part.returns is not None else []),
-        ]
+            )
+            if part.args.vararg and part.args.vararg.annotation is not None:
+                expressions.append(part.args.vararg.annotation)
+            if part.args.kwarg and part.args.kwarg.annotation is not None:
+                expressions.append(part.args.kwarg.annotation)
+            if part.returns is not None:
+                expressions.append(part.returns)
         for expression in expressions:
             visit(expression)
 
@@ -842,7 +853,7 @@ def _class_scope_global_mutations(node: ast.ClassDef) -> set[str]:
                 *(keyword.value for keyword in part.keywords),
             ]:
                 visit(expression)
-            mutations.update(_class_scope_global_mutations(part))
+            mutations.update(_class_scope_global_mutations(part, postponed_annotations=postponed_annotations))
             return
         if isinstance(part, ast.ExceptHandler):
             # The exception target is string-valued in the AST and is implicitly
@@ -914,7 +925,7 @@ def _class_scope_global_mutations(node: ast.ClassDef) -> set[str]:
         visit(statement)
     return mutations
 
-def _module_scope_maybe_binds(node: ast.AST) -> set[str]:
+def _module_scope_maybe_binds(node: ast.AST, *, postponed_annotations: bool = False) -> set[str]:
     """Return module names a statement may bind/delete without counting local scopes.
 
     This is deliberately conservative for module-level control flow: a loop
@@ -939,13 +950,21 @@ def _module_scope_maybe_binds(node: ast.AST) -> set[str]:
                 *part.decorator_list,
                 *part.args.defaults,
                 *(value for value in part.args.kw_defaults if value is not None),
-                *(arg.annotation for arg in [
-                    *part.args.posonlyargs, *part.args.args, *part.args.kwonlyargs
-                ] if arg.annotation is not None),
-                *([part.args.vararg.annotation] if part.args.vararg and part.args.vararg.annotation is not None else []),
-                *([part.args.kwarg.annotation] if part.args.kwarg and part.args.kwarg.annotation is not None else []),
-                *([part.returns] if part.returns is not None else []),
             ]
+            if not postponed_annotations:
+                expressions.extend(
+                    arg.annotation
+                    for arg in [
+                        *part.args.posonlyargs, *part.args.args, *part.args.kwonlyargs
+                    ]
+                    if arg.annotation is not None
+                )
+                if part.args.vararg and part.args.vararg.annotation is not None:
+                    expressions.append(part.args.vararg.annotation)
+                if part.args.kwarg and part.args.kwarg.annotation is not None:
+                    expressions.append(part.args.kwarg.annotation)
+                if part.returns is not None:
+                    expressions.append(part.returns)
             for expression in expressions:
                 visit(expression)
             return
@@ -955,7 +974,7 @@ def _module_scope_maybe_binds(node: ast.AST) -> set[str]:
             # writes/deletes in the executing class suite.
             for expression in [*part.decorator_list, *part.bases, *(kw.value for kw in part.keywords)]:
                 visit(expression)
-            names.update(_class_scope_global_mutations(part))
+            names.update(_class_scope_global_mutations(part, postponed_annotations=postponed_annotations))
             return
         if isinstance(part, (ast.Import, ast.ImportFrom)):
             names.update(_defined_names(part))
@@ -1065,6 +1084,7 @@ def transform_ai_providers(commit: str) -> None:
             return
 
     old_tree = ast.parse(source, filename=str(path))
+    postponed_annotations = _uses_postponed_annotations(old_tree)
     canonical = canonical_text(commit, "app/ai_providers.py")
     canonical_tree = ast.parse(canonical, filename="canonical app/ai_providers.py")
     canonical_nodes_by_name: dict[str, ast.AST] = {}
@@ -1157,7 +1177,7 @@ def transform_ai_providers(commit: str) -> None:
                     "legacy AIProviderError base RuntimeError is imported or rebound in this facade; refusing to replace a possibly custom exception"
                 )
             continue
-        defined_names = _defined_names(node) | _module_scope_maybe_binds(node)
+        defined_names = _defined_names(node) | _module_scope_maybe_binds(node, postponed_annotations=postponed_annotations)
         collisions = defined_names & canonical_names
         if collisions:
             equivalent = all(
@@ -2017,7 +2037,7 @@ def _provider_adapter_name(func: ast.AST, module_tree: ast.Module | None = None)
                     if shadowed:
                         break
                     continue
-                if bound in (_defined_names(other) | _module_scope_maybe_binds(other)):
+                if bound in (_defined_names(other) | _module_scope_maybe_binds(other, postponed_annotations=_uses_postponed_annotations(module_tree))):
                     shadowed = True
                     break
             if not shadowed:
@@ -2951,6 +2971,7 @@ def transform_strategy_ai(commit: str) -> None:
         return
     canonical = canonical_text(commit, "app/strategy_ai.py")
     old_tree = ast.parse(source, filename=str(path))
+    postponed_annotations = _uses_postponed_annotations(old_tree)
     new_tree = ast.parse(canonical, filename="canonical app/strategy_ai.py")
 
     removed_names = {"SYSTEM_PROMPT", "_strategy_prompt", "_generate_with_provider", "generate_strategy_draft"}
@@ -3120,7 +3141,7 @@ def transform_strategy_ai(commit: str) -> None:
             # finally executes after every normal/handled exit, so a deletion
             # or rebind there invalidates evidence from the try/except paths.
             finally_changes = set().union(
-                *(_module_scope_maybe_binds(part) for part in node.finalbody)
+                *(_module_scope_maybe_binds(part, postponed_annotations=postponed_annotations) for part in node.finalbody)
             ) if node.finalbody else set()
             return normal - finally_changes
         return _defined_names(node)
@@ -3131,11 +3152,21 @@ def transform_strategy_ai(commit: str) -> None:
             executed = [
                 *node.decorator_list, *node.args.defaults,
                 *(value for value in node.args.kw_defaults if value is not None),
-                *(arg.annotation for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs] if arg.annotation is not None),
-                *([node.args.vararg.annotation] if node.args.vararg and node.args.vararg.annotation is not None else []),
-                *([node.args.kwarg.annotation] if node.args.kwarg and node.args.kwarg.annotation is not None else []),
-                *([node.returns] if node.returns is not None else []),
             ]
+            if not postponed_annotations:
+                executed.extend(
+                    arg.annotation
+                    for arg in [
+                        *node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs
+                    ]
+                    if arg.annotation is not None
+                )
+                if node.args.vararg and node.args.vararg.annotation is not None:
+                    executed.append(node.args.vararg.annotation)
+                if node.args.kwarg and node.args.kwarg.annotation is not None:
+                    executed.append(node.args.kwarg.annotation)
+                if node.returns is not None:
+                    executed.append(node.returns)
             for part in executed:
                 loaded.update(module_execution_loads(part))
             return loaded
