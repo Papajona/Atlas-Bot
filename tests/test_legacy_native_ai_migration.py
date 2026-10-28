@@ -103,6 +103,40 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
 """
 
 
+def _with_canonical_schema_context(source: str) -> str:
+    """Give acceptance fixtures the real canonical validation and market-binding contract."""
+    canonical_tree = ast.parse(CANONICAL_STRATEGY)
+    old_tree = ast.parse(source)
+    canonical_lines = CANONICAL_STRATEGY.splitlines(keepends=True)
+    source_lines = source.splitlines(keepends=True)
+
+    canonical_spec = next(node for node in canonical_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
+    canonical_context = next(node for node in canonical_tree.body if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context")
+    old_spec = next(node for node in old_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
+    old_context = next(node for node in old_tree.body if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context")
+    pydantic_import = next(
+        node for node in old_tree.body
+        if isinstance(node, ast.ImportFrom) and node.module == "pydantic"
+    )
+    spec_source = canonical_lines[canonical_spec.lineno - 1:canonical_spec.end_lineno]
+    context_source = canonical_lines[canonical_context.lineno - 1:canonical_context.end_lineno]
+    pydantic_block = [
+        "from typing import Literal\\n",
+        "from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator\\n",
+        'ALLOWED_TIMEFRAMES = {"5m", "15m", "30m", "1h", "4h", "1d"}\\n',
+        "StrategyCondition = dict\\n",
+        "\\n",
+    ]
+    edits = [
+        (old_spec.lineno, old_spec.end_lineno, spec_source),
+        (old_context.lineno, old_context.end_lineno, context_source),
+        (pydantic_import.lineno, pydantic_import.end_lineno, pydantic_block),
+    ]
+    for start, end, replacement in sorted(edits, reverse=True):
+        source_lines[start - 1:end] = replacement
+    return "".join(source_lines)
+
+
 class LegacyNativeAIMigrationTests(unittest.TestCase):
     def test_ai_provider_error_stub_is_replaced_by_native_compatibility_alias(self):
         legacy = """class AIProviderError(RuntimeError):
@@ -1998,14 +2032,14 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
     def test_qualified_provider_adapter_requires_a_proven_module_binding(self):
         import_tree = ast.parse("import ai_providers")
         qualified_module = ast.parse(
-            "async def sample():\\n    await ai_providers._gemini_json(prompt)\\n"
+            "async def sample():\n    await ai_providers._gemini_json(prompt)\n"
         )
         qualified_call = qualified_module.body[0].body[0].value.value.func
         self.assertEqual(
             migration._provider_adapter_name(qualified_call, import_tree),
             "_gemini_json",
         )
-        shadowed_tree = ast.parse("import ai_providers\\nai_providers = object()")
+        shadowed_tree = ast.parse("import ai_providers\nai_providers = object()")
         self.assertIsNone(migration._provider_adapter_name(qualified_call, shadowed_tree))
 
     def test_strategy_migration_refuses_to_drop_import_used_by_retained_helper(self):
@@ -2252,8 +2286,8 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
 
     def test_schema_checker_rejects_classvar_for_required_strategy_field(self):
         legacy = CANONICAL_STRATEGY.replace(
-            '    asset: Literal["crypto", "forex", "commodity"]\\n',
-            '    asset: ClassVar[Literal["crypto", "forex", "commodity"]]\\n',
+            '    asset: Literal["crypto", "forex", "commodity"]',
+            '    asset: ClassVar[Literal["crypto", "forex", "commodity"]]',
         )
         self.assertNotEqual(legacy, CANONICAL_STRATEGY)
         with tempfile.TemporaryDirectory() as tmp:
