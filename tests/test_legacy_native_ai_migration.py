@@ -2373,6 +2373,104 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
                 migration._is_compatible_strategy_schema_and_context(legacy, canonical, _debug=True)
             )
 
+    def test_imported_schema_checks_context_globals_in_strategy_module(self):
+        legacy_tree = ast.parse(CANONICAL_STRATEGY)
+        canonical_tree = ast.parse(CANONICAL_STRATEGY)
+
+        def bind_context_annotation(tree):
+            context = next(
+                node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+            )
+            context.args.args[0].annotation = ast.Subscript(
+                value=ast.Name(id="Annotated", ctx=ast.Load()),
+                slice=ast.Tuple(
+                    elts=[
+                        ast.Name(id="AIStrategySpec", ctx=ast.Load()),
+                        ast.Name(id="ContextMarker", ctx=ast.Load()),
+                    ],
+                    ctx=ast.Load(),
+                ),
+                ctx=ast.Load(),
+            )
+            context_index = tree.body.index(context)
+            tree.body.insert(
+                context_index,
+                ast.ImportFrom(
+                    module="context_types",
+                    names=[ast.alias(name="ContextMarker")],
+                    level=1,
+                ),
+            )
+            tree.body.insert(
+                context_index,
+                ast.ImportFrom(
+                    module="typing",
+                    names=[ast.alias(name="Annotated")],
+                    level=0,
+                ),
+            )
+
+        bind_context_annotation(legacy_tree)
+        bind_context_annotation(canonical_tree)
+        legacy_tree.body = [
+            node for node in legacy_tree.body
+            if not (isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
+        ]
+        insert_at = next(
+            index for index, node in enumerate(legacy_tree.body)
+            if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+        )
+        legacy_tree.body.insert(
+            insert_at,
+            ast.ImportFrom(
+                module="schema_models",
+                names=[ast.alias(name="AIStrategySpec")],
+                level=1,
+            ),
+        )
+
+        source_tree = ast.parse(CANONICAL_STRATEGY)
+        schema_nodes = [
+            node for node in source_tree.body
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.module not in {"native_ai", "strategy_evidence"}
+            )
+            or (
+                isinstance(node, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name) and target.id == "ALLOWED_TIMEFRAMES"
+                    for target in node.targets
+                )
+            )
+            or (
+                isinstance(node, ast.ClassDef)
+                and node.name in {"StrategyCondition", "AIStrategySpec"}
+            )
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app_dir = root / "app"
+            app_dir.mkdir()
+            (app_dir / "strategy_ai.py").write_text(
+                ast.unparse(legacy_tree) + "\n", encoding="utf-8"
+            )
+            (app_dir / "schema_models.py").write_text(
+                ast.unparse(ast.Module(body=schema_nodes, type_ignores=[])) + "\n",
+                encoding="utf-8",
+            )
+            (app_dir / "context_types.py").write_text(
+                "class ContextMarker: pass\n", encoding="utf-8"
+            )
+            with patch.object(migration, "ROOT", root):
+                self.assertTrue(
+                    migration._is_compatible_strategy_schema_and_context(
+                        legacy_tree, canonical_tree
+                    )
+                )
+
     def test_exact_schema_contract_rejects_import_time_class_body_risk_mutation(self):
         legacy = ast.parse(
             CANONICAL_STRATEGY
