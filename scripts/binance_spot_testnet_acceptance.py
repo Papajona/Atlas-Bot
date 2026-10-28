@@ -110,7 +110,7 @@ def _net_filled_base(order: dict[str, Any] | None, base_asset: str) -> Decimal:
         return Decimal("0")
     gross = max(Decimal("0"), dec(order.get("filled") or "0"))
     raw_fees = order.get("fees")
-    fees = raw_fees if isinstance(raw_fees, list) else [order.get("fee")]
+    fees = raw_fees if isinstance(raw_fees, list) and raw_fees else [order.get("fee")]
     base_fee = Decimal("0")
     for fee in fees:
         if not isinstance(fee, dict):
