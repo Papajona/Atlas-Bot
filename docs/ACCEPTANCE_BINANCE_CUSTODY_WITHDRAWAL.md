@@ -23,10 +23,10 @@ The script does not claim custody funding. Binance documents that Spot Test Netw
 Run only with a dedicated Binance Spot Testnet account:
 
 ```bash
-ATLAS_BINANCE_TESTNET=true \\
-ATLAS_TESTNET_BINANCE_API_KEY='...' \\
-ATLAS_TESTNET_BINANCE_API_SECRET='...' \\
-ATLAS_TESTNET_SYMBOL='BTC/USDT' \\
+ATLAS_BINANCE_TESTNET=true  \
+ATLAS_TESTNET_BINANCE_API_KEY='...'  \
+ATLAS_TESTNET_BINANCE_API_SECRET='...'  \
+ATLAS_TESTNET_SYMBOL='BTC/USDT'  \
 python scripts/binance_spot_testnet_acceptance.py
 ```
 
