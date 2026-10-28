@@ -633,6 +633,10 @@ def _configure_main_fake(monkeypatch, scenario):
         "buy_amount": Decimal("0"),
         "sell_amount": Decimal("0"),
         "canceled": [],
+        "stop_id": None,
+        "stop_client_id": None,
+        "stop_cancelled": False,
+        "buy_fetch_calls": 0,
     }
 
     class FakeClient:
@@ -647,17 +651,28 @@ def _configure_main_fake(monkeypatch, scenario):
             return {"free": {"BTC": str(state["balance"]), "USDT": "1000"}}
 
         def fetch_order(self, order_id, symbol, params=None):
+            if order_id == state["stop_id"]:
+                return {"id": order_id, "status": "canceled" if state["stop_cancelled"] else "open"}
             if params and params.get("origClientOrderId") == state["buy_client_id"]:
-                return {
-                    "id": "buy-1",
-                    "status": state["buy_status"],
-                    "filled": str(state["buy_filled"]),
-                }
+                return {"id": "buy-1", "status": state["buy_status"], "filled": str(state["buy_filled"])}
             raise AssertionError(f"unexpected raw client order lookup: {order_id!r}, {params!r}")
 
+        def fetch_open_orders(self, symbol):
+            if state["stop_id"] and not state["stop_cancelled"]:
+                return [{"id": state["stop_id"], "clientOrderId": state["stop_client_id"], "info": {}}]
+            return []
+
+        def create_order(self, symbol, order_type, side, amount, price, params):
+            state["stop_id"] = "stop-1"
+            state["stop_client_id"] = params["clientOrderId"]
+            return {"id": state["stop_id"]}
+
         def cancel_order(self, order_id, symbol):
-            assert order_id == "buy-1"
             state["canceled"].append(order_id)
+            if order_id == state["stop_id"]:
+                state["stop_cancelled"] = True
+                return {"id": order_id, "status": "canceled"}
+            assert order_id == "buy-1"
             state["buy_status"] = "canceled"
             return {"id": order_id, "status": "canceled"}
 
@@ -694,6 +709,12 @@ def _configure_main_fake(monkeypatch, scenario):
                     state["buy_amount"] = qty
                     state["balance"] += qty
                     raise RuntimeError("simulated lost submission response")
+                if scenario == "stop_then_reconcile_error":
+                    state["buy_status"] = "closed"
+                    state["buy_filled"] = qty
+                    state["buy_amount"] = qty
+                    state["balance"] += qty
+                    return {"id": "buy-1"}
                 state["buy_status"] = "open"
                 state["buy_filled"] = Decimal("0.04")
                 state["buy_amount"] = qty
@@ -706,6 +727,9 @@ def _configure_main_fake(monkeypatch, scenario):
 
         def fetch_order(self, order_id, symbol):
             if order_id == "buy-1":
+                state["buy_fetch_calls"] += 1
+                if scenario == "stop_then_reconcile_error" and state["buy_fetch_calls"] >= 2:
+                    raise RuntimeError("simulated reconciliation endpoint outage after stop creation")
                 return {
                     "id": "buy-1",
                     "status": state["buy_status"],
@@ -743,6 +767,20 @@ def test_main_reconciles_and_flattens_buy_accepted_before_submission_response_wa
     assert state["balance"] == Decimal("0")
     assert state["sell_amount"] == state["buy_amount"]
     assert state["canceled"] == []
+
+
+def test_main_cancels_protective_stop_when_final_buy_reconciliation_fails(monkeypatch):
+    drill, state = _configure_main_fake(monkeypatch, "stop_then_reconcile_error")
+
+    with pytest.raises(RuntimeError, match="could not be verified"):
+        drill.main()
+
+    assert state["stop_id"] == "stop-1"
+    assert state["stop_cancelled"] is True
+    assert "stop-1" in state["canceled"]
+    # The buy state was not verified at cleanup time, so no sell may be submitted.
+    assert state["sell_amount"] == Decimal("0")
+    assert state["balance"] > Decimal("0")
 
 
 def test_main_cancels_partial_buy_then_flattens_its_confirmed_final_fill(monkeypatch):
