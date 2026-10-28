@@ -1617,8 +1617,13 @@ async def _gemini_json(prompt):
             (package / "native_ai.py").write_text(
                 "class NativeAIError(RuntimeError): pass\n"
                 "def compose_strategy_spec(*, prompt, name, asset=None, symbol=None, timeframe=None, max_risk_per_trade=0.01):\n"
-                "    return {'strategy_family':'TREND','validation_warnings':[],'asset':asset or 'crypto',"
-                "'symbols':[symbol] if symbol else ['EUR_USD'],'timeframes':[timeframe] if timeframe else ['1h']}\n",
+                "    return {'version':'atlas-strategy-v1','title':'Fixture strategy','summary':'A test-only strategy fixture.',"
+                "'asset':asset or 'crypto','symbols':[symbol] if symbol else ['EUR_USD'],"
+                "'timeframes':[timeframe] if timeframe else ['1h'],'direction':'LONG','strategy_family':'TREND',"
+                "'entry_conditions':[{'type':'indicator','rule':'RSI is above threshold','timeframe':timeframe or '1h'}],"
+                "'exit_conditions':[{'type':'indicator','rule':'RSI is below threshold','timeframe':timeframe or '1h'}],"
+                "'risk_per_trade':0.01,'validation_warnings':[],'requires_backtest':True,'requires_walk_forward':True,"
+                "'execution_mode':'PAPER_SHADOW_ONLY','implementation_status':'ATLAS_SUPPORTED_FAMILY'}\\n",
                 encoding="utf-8",
             )
             (package / "config.py").write_text(
