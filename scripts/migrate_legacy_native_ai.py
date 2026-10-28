@@ -1672,7 +1672,48 @@ def _is_safe_legacy_hosted_strategy_generator(node: ast.AST) -> bool:
     return True
 
 
-def _is_safe_legacy_provider_dispatcher(node: ast.AST) -> bool:
+def _provider_adapter_name(func: ast.AST, module_tree: ast.Module | None = None) -> str | None:
+    """Resolve only a known provider adapter function or an imported ai_providers module attribute."""
+    allowed = {"_gemini_json", "_groq_json", "_cerebras_json", "_openai_json"}
+    if isinstance(func, ast.Name):
+        return func.id if func.id in allowed else None
+    if not isinstance(func, ast.Attribute) or func.attr not in allowed or module_tree is None:
+        return None
+    receiver = _dotted_ast_name(func.value)
+    if not receiver:
+        return None
+    for imported in module_tree.body:
+        if not isinstance(imported, ast.Import):
+            continue
+        for alias in imported.names:
+            if alias.name not in {"ai_providers", "app.ai_providers"}:
+                continue
+            bound = alias.asname or alias.name.split(".", 1)[0]
+            if receiver not in {bound, alias.name}:
+                continue
+            # A later top-level assignment/import/delete that can shadow the module
+            # prevents us from treating a same-named attribute as a trusted adapter.
+            shadowed = False
+            for other in module_tree.body:
+                if other is imported:
+                    continue
+                if isinstance(other, ast.Delete):
+                    deleted = {
+                        part.id for target in other.targets for part in ast.walk(target)
+                        if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Del)
+                    }
+                    if bound in deleted:
+                        shadowed = True
+                        break
+                if bound in _defined_names(other):
+                    shadowed = True
+                    break
+            if not shadowed:
+                return func.attr
+    return None
+
+
+def _is_safe_legacy_provider_dispatcher(node: ast.AST, module_tree: ast.Module | None = None) -> bool:
     """Recognize the known legacy adapter router without permitting extra behavior."""
     if not isinstance(node, ast.AsyncFunctionDef) or node.name != "_generate_with_provider" or node.decorator_list:
         return False
@@ -1709,7 +1750,7 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST) -> bool:
         adapter = {"gemini": "_gemini_json", "groq": "_groq_json", "cerebras": "_cerebras_json"}[provider]
         return (
             isinstance(value, ast.Await) and isinstance(value.value, ast.Call)
-            and is_name(value.value.func, adapter)
+            and _provider_adapter_name(value.value.func, module_tree) == adapter
             and len(value.value.args) == 1 and is_name(value.value.args[0], "prompt")
             and len(value.value.keywords) == 2
             and {keyword.arg for keyword in value.value.keywords} == {"system_instruction", "model"}
@@ -1757,7 +1798,7 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST) -> bool:
     if len(body) == 2:
         return (
             branches[0][0] == "gemini"
-            and is_name(last_call.func, "_groq_json")
+            and _provider_adapter_name(last_call.func, module_tree) == "_groq_json"
             and len(last_call.args) == 1 and is_name(last_call.args[0], "prompt")
             and len(last_call.keywords) == 2
             and {k.arg for k in last_call.keywords} == {"system_instruction", "model"}
@@ -1769,7 +1810,7 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST) -> bool:
         )
     return (
         [name for name, _ in branches] == ["gemini", "groq"]
-        and is_name(last_call.func, "_cerebras_json")
+        and _provider_adapter_name(last_call.func, module_tree) == "_cerebras_json"
         and len(last_call.args) == 1 and is_name(last_call.args[0], "prompt")
         and len(last_call.keywords) == 2
         and {k.arg for k in last_call.keywords} == {"system_instruction", "model"}
@@ -2442,17 +2483,13 @@ def transform_strategy_ai(commit: str) -> None:
         and isinstance(provider_body[0], ast.Return)
         and isinstance(provider_body[0].value, ast.Await)
         and isinstance(provider_body[0].value.value, ast.Call)
-        and (
-            (isinstance(provider_body[0].value.value.func, ast.Name)
-             and provider_body[0].value.value.func.id in provider_delegations)
-            or (isinstance(provider_body[0].value.value.func, ast.Attribute)
-                and provider_body[0].value.value.func.attr in provider_delegations)
-        )
     )
+    provider_adapter: str | None = None
     if direct_provider_trampoline:
         provider_call = provider_body[0].value.value
+        provider_adapter = _provider_adapter_name(provider_call.func, old_tree)
         direct_provider_trampoline = (
-            isinstance(provider_call.func, ast.Name)
+            provider_adapter in provider_delegations
             and len(provider_call.args) == 1
             and isinstance(provider_call.args[0], ast.Name)
             and provider_call.args[0].id == "prompt"
@@ -2471,9 +2508,9 @@ def transform_strategy_ai(commit: str) -> None:
             }
             direct_provider_trampoline = (
                 adapter_by_provider.get(generator_call.args[0].value)
-                == provider_call.func.id
+                == provider_adapter
             )
-    safe_provider_dispatcher = _is_safe_legacy_provider_dispatcher(legacy_provider)
+    safe_provider_dispatcher = _is_safe_legacy_provider_dispatcher(legacy_provider, old_tree)
     if not direct_provider_trampoline and not safe_provider_dispatcher:
         raise MigrationError(
             "_generate_with_provider contains additional or unknown behavior or side-effecting arguments; refusing to discard its body"
