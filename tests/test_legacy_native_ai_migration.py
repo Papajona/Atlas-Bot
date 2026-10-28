@@ -2200,6 +2200,38 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
                     migration.transform_strategy_ai("fake-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_strategy_migration_does_not_treat_annotation_only_prompt_as_binding(self):
+        legacy = (
+            "from __future__ import annotations\n"
+            "from .config import settings\n"
+            "from .ai_providers import AIProviderError, _gemini_json, _groq_json\n"
+            "from .strategy_evidence import evidence_for\n"
+            'SYSTEM_PROMPT = "legacy provider prompt"\n'
+            "if True:\n"
+            "    SYSTEM_PROMPT: SYSTEM_PROMPT\n"
+            "\n"
+            "def retained_helper():\n"
+            "    return SYSTEM_PROMPT\n"
+            "async def _generate_with_provider(provider, prompt):\n"
+            "    return await _gemini_json(prompt)\n"
+            "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+            "    return await _generate_with_provider('gemini', prompt)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "retained strategy helper depends on removed local definition.*SYSTEM_PROMPT",
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_strategy_migration_refuses_removed_prompt_added_to_all_later(self):
         retained = '__all__ = []\n__all__.append("SYSTEM_PROMPT")\n'
         legacy = self._legacy_strategy_with_retained_code(retained)
