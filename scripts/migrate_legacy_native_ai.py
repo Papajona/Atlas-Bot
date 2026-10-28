@@ -3530,11 +3530,13 @@ def transform_strategy_ai(commit: str) -> None:
                 if isinstance(iterable, (list, tuple, dict, set, str, bytes)) and not iterable:
                     return sequence(node.orelse, set(available), nested_class=in_class, nested_globals=class_globals)
             else:
+                condition_known = False
                 try:
                     condition = ast.literal_eval(node.test)
+                    condition_known = True
                 except (ValueError, TypeError):
                     condition = None
-                if condition is not None and not bool(condition):
+                if condition_known and not bool(condition):
                     return sequence(node.orelse, set(available), nested_class=in_class, nested_globals=class_globals)
 
             body = sequence(node.body, set(available), nested_class=in_class, nested_globals=class_globals)
