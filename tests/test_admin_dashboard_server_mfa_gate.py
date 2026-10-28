@@ -53,6 +53,42 @@ def test_admin_dashboard_discards_stale_requests_after_session_changes():
     assert "if(attemptEpoch!==adminSessionEpoch)return;" in script
 
 
+
+def test_admin_dashboard_keeps_every_dispatched_handler_and_resumes_saved_session():
+    script = (ROOT / "app/static/admin-dashboard.js").read_text(encoding="utf-8")
+
+    for name in (
+        "req",
+        "loadWithdrawals",
+        "approveWithdrawal",
+        "executeWithdrawal",
+        "prepareWithdrawalProposal",
+        "reconcileWithdrawal",
+        "rejectWithdrawal",
+        "loadRoles",
+        "saveRole",
+        "loadMargin",
+        "refresh",
+        "run",
+        "train",
+        "backtest",
+        "strategyBacktest",
+        "backtestAll",
+        "metaLabelAudit",
+        "aiReview",
+        "paperSignals",
+        "signal",
+        "strategySignal",
+        "paperStep",
+        "reconcile",
+        "halt",
+        "resetRisk",
+        "disableLive",
+    ):
+        assert f"function {name}(" in script or f"async function {name}(" in script
+
+    assert script.rstrip().endswith("resumeAdminSession();")
+
 def test_admin_lock_clears_authenticator_secrets_and_preserves_sign_out_access():
     script = (ROOT / "app/static/admin-dashboard.js").read_text(encoding="utf-8")
     lock = script.split("function lockAdminDashboard(message,clearTokens=true){", 1)[1].split(
