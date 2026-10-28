@@ -95,8 +95,11 @@ jobs:
             else
               rc=$?
             fi
-            if (( rc == 1 )); then return 0; fi
-            if (( rc != 0 )); then return "$rc"; fi
+            if (( rc == 1 )); then
+              matches=""
+            elif (( rc != 0 )); then
+              return "$rc"
+            fi
             # These are historical proof-marker literals, not active provider wiring.
             # Filter only those exact marker lines; scan every other line in this workflow.
             filtered="$(printf '%s\n' "$matches" | awk '!($0 ~ /^\.github\/workflows\/prune-contained-branches-once\.yml:[0-9]+:/ && $0 ~ /grep -F .def _check_groq. >\/dev\/null/)')"
