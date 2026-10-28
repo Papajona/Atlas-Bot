@@ -213,9 +213,11 @@ def _market_order_min_notional_rule(
     info = market.get("info") if isinstance(market.get("info"), dict) else {}
     filters = info.get("filters") if isinstance(info.get("filters"), list) else []
     rules: list[tuple[Decimal, int | None]] = []
+    saw_notional_filter = False
     for rule in filters:
         if not isinstance(rule, dict) or rule.get("filterType") not in {"MIN_NOTIONAL", "NOTIONAL"}:
             continue
+        saw_notional_filter = True
         applies = rule.get("applyToMarket", rule.get("applyMinToMarket", True))
         if str(applies).strip().lower() in {"false", "0", "no"}:
             continue
@@ -234,6 +236,11 @@ def _market_order_min_notional_rule(
         # reference prices from different windows, even when one nominal minimum
         # is lower than another.
         return sorted(set(rules), key=lambda item: (item[0], -1 if item[1] is None else item[1]))
+    if saw_notional_filter:
+        # Exchange metadata explicitly provided notional filters and all of them
+        # said the minimum does not apply to market orders. Do not resurrect an
+        # inactive filter through CCXT's generic cost.min summary.
+        return []
     limits = market.get("limits") if isinstance(market.get("limits"), dict) else {}
     cost = limits.get("cost") if isinstance(limits.get("cost"), dict) else {}
     fallback = dec(cost.get("min") or "0")
@@ -289,7 +296,26 @@ def _cancel_stop_if_present(
     safe_terminal_states = TERMINAL_ORDER_STATES | CANCELED_ORDER_STATES
 
     for attempt in range(3):
-        # Discover the order by client ID when the create response was lost.
+        # An ambiguously accepted stop may already be terminal or absent from a
+        # lagging open-orders response. Resolve its retained client order ID
+        # directly first, then verify the returned exchange ID's terminal state.
+        if stop_client_id and not stop_id:
+            try:
+                discovered = client.fetch_order(
+                    None, symbol, {"origClientOrderId": stop_client_id}
+                )
+                if not isinstance(discovered, dict) or not discovered.get("id"):
+                    raise RuntimeError(
+                        f"protective stop lookup by client ID {stop_client_id} returned no exchange order ID"
+                    )
+                discovered_id = str(discovered["id"])
+                candidate_ids.add(discovered_id)
+                if str(discovered.get("status", "")).lower() in safe_terminal_states:
+                    confirmed_terminal.add(discovered_id)
+            except Exception as exc:
+                # Keep trying the open-order listing and known IDs. If neither
+                # route establishes the order's identity/state, cleanup fails closed.
+                last_error = exc
         try:
             open_orders = client.fetch_open_orders(symbol)
             if not isinstance(open_orders, list):
@@ -388,8 +414,9 @@ def cleanup_new_spot_base(
             "errors": errors,
         }
 
-    # A wallet balance delta may include unrelated deposits or concurrent trades.
-    # Never sell more than this order's filled quantity, reduced by base-denominated fees.
+    # The fill cap is only a quantity ceiling; a balance delta cannot prove
+    # provenance when multiple actors use the same account. main() requires an
+    # exclusive-account attestation and a clean open-order preflight before trading.
     drill_cap = max(Decimal("0"), drill_base_amount)
     free_delta = max(Decimal("0"), current - initial_free_base)
     if not stop_safe:
@@ -399,13 +426,13 @@ def cleanup_new_spot_base(
             "residual_dust": None,
             "errors": errors,
         }
-    # A larger balance increase cannot be attributed to this drill's fill.
-    # Do not even sell the capped amount: a concurrent credit can make the
-    # balance delta misleading, so ambiguous balances must be reconciled manually.
-    if free_delta > drill_cap:
+    # After canceling this drill's stop, any balance delta different from the
+    # confirmed net fill means provenance is uncertain (concurrent debit/credit,
+    # fee discrepancy, or external activity). Do not sell a capped approximation.
+    if free_delta != drill_cap:
         errors.append(
-            f"free {base_asset} balance increased by {free_delta}, above this drill's "
-            f"net filled amount {drill_cap}; refusing to sell potentially unrelated base"
+            f"free {base_asset} balance delta {free_delta} does not exactly match this drill's "
+            f"confirmed net fill {drill_cap}; refusing cleanup because asset provenance is unverified"
         )
         return {
             "ok": False,
@@ -413,7 +440,7 @@ def cleanup_new_spot_base(
             "residual_dust": None,
             "errors": errors,
         }
-    new_base = min(free_delta, drill_cap)
+    new_base = drill_cap
 
     notional_rules = min_cost_rules
     if notional_rules is None:
@@ -527,6 +554,11 @@ def require_empty_starting_base(initial_free_base: Decimal, base_asset: str) -> 
 def main() -> int:
     if os.getenv("ATLAS_BINANCE_TESTNET", "").strip().lower() != "true":
         raise SystemExit("Set ATLAS_BINANCE_TESTNET=true to run the external testnet drill")
+    if os.getenv("ATLAS_TESTNET_ACCOUNT_EXCLUSIVE", "").strip().lower() != "true":
+        raise SystemExit(
+            "Set ATLAS_TESTNET_ACCOUNT_EXCLUSIVE=true only after confirming this dedicated "
+            "Spot Testnet account will not be used by another actor/process during the drill"
+        )
     key = req("ATLAS_TESTNET_BINANCE_API_KEY")
     secret = req("ATLAS_TESTNET_BINANCE_API_SECRET")
     symbol = os.getenv("ATLAS_TESTNET_SYMBOL", "BTC/USDT").strip()
@@ -591,10 +623,18 @@ def main() -> int:
     base_asset = symbol.split("/")[0].split(":")[0]
     initial_free_base = _free_balance(client, base_asset)
     require_empty_starting_base(initial_free_base, base_asset)
+    # Existing open orders make it impossible to attribute subsequent balances and
+    # stop activity solely to this drill. Fail closed before any market order.
+    open_orders = client.fetch_open_orders(symbol)
+    if not isinstance(open_orders, list) or open_orders:
+        raise RuntimeError(
+            "Refusing Spot Testnet drill: could not verify an empty starting open-order set"
+        )
     report: dict[str, Any] = {
         "environment": "BINANCE_SPOT_TESTNET",
         "symbol": symbol,
         "active_spot_api_endpoints": active_endpoints,
+        "account_exclusivity_attested": True,
         "steps": [],
     }
     report["steps"].append({"step": "authenticated_balance", "ok": True})
