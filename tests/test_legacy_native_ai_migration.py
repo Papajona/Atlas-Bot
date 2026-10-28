@@ -116,59 +116,84 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
 
 
 def _with_canonical_schema_context(source: str) -> str:
-    """Give acceptance fixtures the real canonical validation and market-binding contract."""
+    """Give acceptance fixtures exactly one canonical schema/context contract."""
     canonical_tree = ast.parse(CANONICAL_STRATEGY)
     old_tree = ast.parse(source)
     canonical_lines = CANONICAL_STRATEGY.splitlines(keepends=True)
     source_lines = source.splitlines(keepends=True)
 
-    canonical_condition = next(node for node in canonical_tree.body if isinstance(node, ast.ClassDef) and node.name == "StrategyCondition")
-    canonical_spec = next(node for node in canonical_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec")
-    canonical_context = next(node for node in canonical_tree.body if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context")
+    canonical_condition = next(
+        node for node in canonical_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "StrategyCondition"
+    )
+    canonical_spec = next(
+        node for node in canonical_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"
+    )
+    canonical_context = next(
+        node for node in canonical_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+    )
     condition_source = canonical_lines[canonical_condition.lineno - 1:canonical_condition.end_lineno]
     spec_source = canonical_lines[canonical_spec.lineno - 1:canonical_spec.end_lineno]
     context_source = canonical_lines[canonical_context.lineno - 1:canonical_context.end_lineno]
 
-    old_condition = next((node for node in old_tree.body if isinstance(node, ast.ClassDef) and node.name == "StrategyCondition"), None)
-    old_spec = next((node for node in old_tree.body if isinstance(node, ast.ClassDef) and node.name == "AIStrategySpec"), None)
-    old_context = next((node for node in old_tree.body if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"), None)
-    pydantic_import = next(
-        (node for node in old_tree.body if isinstance(node, ast.ImportFrom) and node.module == "pydantic"),
-        None,
-    )
-
-    if old_spec is not None and old_condition is not None and old_context is not None and pydantic_import is not None:
-        pydantic_block = [
-            "from typing import Literal\n",
-            "from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator\n",
-        ]
-        edits = [
-            (old_condition.lineno, old_condition.end_lineno, condition_source),
-            (old_spec.lineno, old_spec.end_lineno, spec_source),
-            (old_context.lineno, old_context.end_lineno, context_source),
-            (pydantic_import.lineno, pydantic_import.end_lineno, pydantic_block),
-        ]
-        for start, end, replacement in sorted(edits, reverse=True):
-            source_lines[start - 1:end] = replacement
-        return "".join(source_lines)
-
-    # Minimal fixtures intentionally omit the schema/context block. Inject the
-    # canonical block so these tests exercise binding analysis, not fixture shape.
-    canonical_assignments = []
+    canonical_assignments: list[str] = []
+    canonical_assignment_names: set[str] = set()
     for node in canonical_tree.body:
         if not isinstance(node, ast.Assign):
             continue
-        names = [target.id for target in node.targets if isinstance(target, ast.Name)]
-        if any(name.startswith("ALLOWED_") for name in names):
+        names = {
+            target.id for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        if names and all(name.startswith("ALLOWED_") for name in names):
+            canonical_assignment_names.update(names)
             canonical_assignments.extend(canonical_lines[node.lineno - 1:node.end_lineno])
-    insertion = 0
+
+    # Remove any fixture versions of the canonical contract before inserting
+    # the audited block. In particular, a fixture that has AIStrategySpec and
+    # _apply_market_context but lacks StrategyCondition must not receive a
+    # second AIStrategySpec merely because one dependency is missing.
+    remove_ranges: list[tuple[int, int]] = []
     for node in old_tree.body:
+        if (
+            isinstance(node, ast.ClassDef)
+            and node.name in {"StrategyCondition", "AIStrategySpec"}
+        ) or (
+            isinstance(node, ast.FunctionDef)
+            and node.name == "_apply_market_context"
+        ):
+            remove_ranges.append((node.lineno, node.end_lineno))
+            continue
+        if isinstance(node, ast.Assign):
+            names = {
+                target.id for target in node.targets
+                if isinstance(target, ast.Name)
+            }
+            if names and names.issubset(canonical_assignment_names):
+                remove_ranges.append((node.lineno, node.end_lineno))
+
+    for first, last in sorted(remove_ranges, reverse=True):
+        del source_lines[first - 1:last]
+
+    cleaned_source = "".join(source_lines)
+    cleaned_tree = ast.parse(cleaned_source)
+    cleaned_lines = cleaned_source.splitlines(keepends=True)
+
+    # Keep the original fixture imports and unrelated behavior. The canonical
+    # Pydantic/typing imports are added once with the replacement contract.
+    insertion = 0
+    for node in cleaned_tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom)) or (
-            isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
         ):
             insertion = max(insertion, node.end_lineno)
         else:
             break
+
     block = [
         "from typing import Literal\n",
         "from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator\n",
@@ -182,8 +207,8 @@ def _with_canonical_schema_context(source: str) -> str:
         *context_source,
         "\n",
     ]
-    source_lines[insertion:insertion] = block
-    return "".join(source_lines)
+    cleaned_lines[insertion:insertion] = block
+    return "".join(cleaned_lines)
 
 
 class LegacyNativeAIMigrationTests(unittest.TestCase):
