@@ -596,3 +596,141 @@ def test_unknown_market_reference_never_certifies_residual_as_dust():
     assert result["remaining_base"] == "0.1"
     assert result["residual_dust"] is None
     assert any("unverified" in e for e in result["errors"])
+
+
+
+def _configure_main_fake(monkeypatch, scenario):
+    from scripts import binance_spot_testnet_acceptance as drill
+
+    monkeypatch.setenv("ATLAS_BINANCE_TESTNET", "true")
+    monkeypatch.setenv("ATLAS_TESTNET_BINANCE_API_KEY", "test-key")
+    monkeypatch.setenv("ATLAS_TESTNET_BINANCE_API_SECRET", "test-secret")
+    state = {
+        "balance": Decimal("0"),
+        "buy_client_id": None,
+        "buy_status": "open",
+        "buy_filled": Decimal("0"),
+        "buy_amount": Decimal("0"),
+        "sell_amount": Decimal("0"),
+        "canceled": [],
+    }
+
+    class FakeClient:
+        urls = {
+            "api": {
+                "public": "https://testnet.binance.vision/api/v3",
+                "private": "https://testnet.binance.vision/api/v3",
+            }
+        }
+
+        def fetch_balance(self):
+            return {"free": {"BTC": str(state["balance"]), "USDT": "1000"}}
+
+        def fetch_order(self, order_id, symbol, params=None):
+            if params and params.get("origClientOrderId") == state["buy_client_id"]:
+                return {
+                    "id": "buy-1",
+                    "status": state["buy_status"],
+                    "filled": str(state["buy_filled"]),
+                }
+            raise AssertionError(f"unexpected raw client order lookup: {order_id!r}, {params!r}")
+
+        def cancel_order(self, order_id, symbol):
+            assert order_id == "buy-1"
+            state["canceled"].append(order_id)
+            state["buy_status"] = "canceled"
+            return {"id": order_id, "status": "canceled"}
+
+    client = FakeClient()
+
+    class FakeBroker:
+        config = SimpleNamespace(sandbox=True)
+
+        def connect(self):
+            return client
+
+        def market_info(self, symbol):
+            return {
+                "limits": {"cost": {"min": "0"}, "amount": {"min": "0.001"}},
+                "info": {"orderTypes": ["STOP_LOSS"], "filters": []},
+            }
+
+        def ticker(self, symbol):
+            return {"last": "100"}
+
+        def normalize_amount(self, symbol, amount):
+            return str(Decimal(str(amount)).quantize(Decimal("0.000001")))
+
+        def normalize_price(self, symbol, price):
+            return str(Decimal(str(price)).quantize(Decimal("0.01")))
+
+        def market_order(self, symbol, side, amount, client_order_id):
+            qty = Decimal(str(amount))
+            if side == "buy":
+                state["buy_client_id"] = client_order_id
+                if scenario == "lost_response":
+                    state["buy_status"] = "closed"
+                    state["buy_filled"] = qty
+                    state["buy_amount"] = qty
+                    state["balance"] += qty
+                    raise RuntimeError("simulated lost submission response")
+                state["buy_status"] = "open"
+                state["buy_filled"] = Decimal("0.04")
+                state["buy_amount"] = qty
+                state["balance"] += Decimal("0.04")
+                return {"id": "buy-1"}
+            assert side == "sell"
+            state["sell_amount"] = qty
+            state["balance"] -= qty
+            return {"id": "sell-1"}
+
+        def fetch_order(self, order_id, symbol):
+            if order_id == "buy-1":
+                return {
+                    "id": "buy-1",
+                    "status": state["buy_status"],
+                    "filled": str(state["buy_filled"]),
+                }
+            if order_id == "sell-1":
+                return {"id": "sell-1", "status": "closed", "filled": str(state["sell_amount"])}
+            raise AssertionError(f"unexpected broker order lookup: {order_id!r}")
+
+    broker = FakeBroker()
+    monkeypatch.setattr(
+        drill, "build_customer_binance_broker", lambda *args, **kwargs: broker
+    )
+    if scenario == "partial":
+        original_wait = drill._wait_for_order
+
+        def wait_for_partial_then_cleanup(active_broker, order_id, symbol, timeout_seconds=30):
+            if order_id == "buy-1":
+                return active_broker.fetch_order(order_id, symbol)
+            return original_wait(active_broker, order_id, symbol, timeout_seconds)
+
+        monkeypatch.setattr(drill, "_wait_for_order", wait_for_partial_then_cleanup)
+        monkeypatch.setattr(drill.time, "sleep", lambda _: None)
+
+    return drill, state
+
+
+def test_main_reconciles_and_flattens_buy_accepted_before_submission_response_was_lost(monkeypatch):
+    drill, state = _configure_main_fake(monkeypatch, "lost_response")
+
+    with pytest.raises(RuntimeError, match="simulated lost submission response"):
+        drill.main()
+
+    assert state["buy_client_id"].startswith("atlas-tn-")
+    assert state["balance"] == Decimal("0")
+    assert state["sell_amount"] == state["buy_amount"]
+    assert state["canceled"] == []
+
+
+def test_main_cancels_partial_buy_then_flattens_its_confirmed_final_fill(monkeypatch):
+    drill, state = _configure_main_fake(monkeypatch, "partial")
+
+    with pytest.raises(RuntimeError, match="did not fill completely"):
+        drill.main()
+
+    assert state["canceled"] == ["buy-1"]
+    assert state["sell_amount"] == Decimal("0.04")
+    assert state["balance"] == Decimal("0")
