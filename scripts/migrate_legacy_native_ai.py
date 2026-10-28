@@ -3458,47 +3458,193 @@ def transform_strategy_ai(commit: str) -> None:
         part.id for part in ast.walk(canonical_generate)
         if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Load)
     } - local_names - set(dir(builtins))
-    def possibly_deleted_module_names(statement: ast.AST) -> set[str]:
-        """Find names a retained module-level statement may delete at import time."""
-        deleted: set[str] = set()
+    def module_statement_bindings(
+        node: ast.AST,
+        available: set[str],
+        *,
+        in_class: bool = False,
+        class_globals: set[str] | None = None,
+    ) -> set[str]:
+        """Return names guaranteed available after a module-executed statement.
+
+        Alternatives are merged by intersection, so any path that can delete a
+        dependency removes it from the guaranteed set. Statements inside static
+        branches are analyzed in execution order; exception targets are deleted
+        when the handler exits, matching Python's runtime semantics.
+        """
+        visible = (lambda names: names & (class_globals or set())) if in_class else (lambda names: names)
+
+        def sequence(
+            statements: list[ast.stmt],
+            initial: set[str],
+            *,
+            nested_class: bool = False,
+            nested_globals: set[str] | None = None,
+        ) -> set[str]:
+            state = set(initial)
+            for item in statements:
+                state = module_statement_bindings(
+                    item, state, in_class=nested_class, class_globals=nested_globals
+                )
+            return state
 
         def class_global_names(class_node: ast.ClassDef) -> set[str]:
-            declared: set[str] = set()
+            names: set[str] = set()
             pending = list(class_node.body)
             while pending:
-                part = pending.pop()
-                if isinstance(part, ast.Global):
-                    declared.update(part.names)
+                item = pending.pop()
+                if isinstance(item, ast.Global):
+                    names.update(item.names)
                     continue
-                if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
                     continue
-                pending.extend(ast.iter_child_nodes(part))
-            return declared
+                pending.extend(ast.iter_child_nodes(item))
+            return names
 
-        def visit(part: ast.AST, *, in_class: bool = False, class_globals: set[str] | None = None) -> None:
-            if isinstance(part, ast.Delete):
-                names = {name for target in part.targets for name in _assigned_names(target)}
-                deleted.update(names & (class_globals or set()) if in_class else names)
-                return
-            if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                return
-            if isinstance(part, ast.ClassDef):
-                globals_in_class = class_global_names(part)
-                for child in part.body:
-                    visit(child, in_class=True, class_globals=globals_in_class)
-                return
-            for child in ast.iter_child_nodes(part):
-                visit(child, in_class=in_class, class_globals=class_globals)
+        if isinstance(node, ast.Delete):
+            result = set(available)
+            result.difference_update(
+                name for target in node.targets for name in visible(_assigned_names(target))
+            )
+            return result
 
-        visit(statement)
-        return deleted
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return set(available) | visible({node.name})
+
+        if isinstance(node, ast.ClassDef):
+            globals_in_class = class_global_names(node)
+            after_body = sequence(
+                node.body,
+                set(available),
+                nested_class=True,
+                nested_globals=globals_in_class,
+            )
+            return after_body | visible({node.name})
+
+        if isinstance(node, ast.If):
+            try:
+                condition = ast.literal_eval(node.test)
+                condition_known = True
+            except (ValueError, TypeError):
+                condition = None
+                condition_known = False
+            if condition_known:
+                selected = node.body if bool(condition) else node.orelse
+                return sequence(selected, set(available), nested_class=in_class, nested_globals=class_globals)
+            left = sequence(node.body, set(available), nested_class=in_class, nested_globals=class_globals)
+            right = sequence(node.orelse, set(available), nested_class=in_class, nested_globals=class_globals)
+            return left & right
+
+        if isinstance(node, (ast.Try, ast.TryStar)):
+            normal = sequence(
+                [*node.body, *node.orelse],
+                set(available),
+                nested_class=in_class,
+                nested_globals=class_globals,
+            )
+            outcomes = [normal]
+            # A handler can run after any prefix of the try body. Analyze from
+            # both the incoming state and completed body state to fail closed on
+            # names which an exception path can leave unbound.
+            exceptional_inputs = {frozenset(available), frozenset(sequence(node.body, set(available), nested_class=in_class, nested_globals=class_globals))}
+            for incoming in exceptional_inputs:
+                for handler in node.handlers:
+                    handled = sequence(
+                        handler.body,
+                        set(incoming),
+                        nested_class=in_class,
+                        nested_globals=class_globals,
+                    )
+                    if handler.name and handler.name in visible({handler.name}):
+                        handled.discard(handler.name)
+                    outcomes.append(handled)
+            if node.finalbody:
+                outcomes = [
+                    sequence(
+                        node.finalbody,
+                        outcome,
+                        nested_class=in_class,
+                        nested_globals=class_globals,
+                    )
+                    for outcome in outcomes
+                ]
+            result = set.intersection(*outcomes) if outcomes else set(available)
+            return result
+
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+            # A known-empty loop executes only its else suite. Otherwise consider
+            # zero iterations, a body iteration that exits via break, and normal
+            # completion through the else suite. Repeated iterations can only
+            # further remove uncertain bindings, so intersect a fixed point.
+            if isinstance(node, (ast.For, ast.AsyncFor)):
+                try:
+                    iterable = ast.literal_eval(node.iter)
+                except (ValueError, TypeError):
+                    iterable = None
+                if isinstance(iterable, (list, tuple, dict, set, str, bytes)) and not iterable:
+                    return sequence(node.orelse, set(available), nested_class=in_class, nested_globals=class_globals)
+            else:
+                try:
+                    condition = ast.literal_eval(node.test)
+                except (ValueError, TypeError):
+                    condition = None
+                if condition is not None and not bool(condition):
+                    return sequence(node.orelse, set(available), nested_class=in_class, nested_globals=class_globals)
+
+            body = sequence(node.body, set(available), nested_class=in_class, nested_globals=class_globals)
+            outcomes = [
+                sequence(node.orelse, set(available), nested_class=in_class, nested_globals=class_globals),
+                body,
+                sequence(node.orelse, body, nested_class=in_class, nested_globals=class_globals),
+            ]
+            seen = {frozenset(available), frozenset(body)}
+            current = body
+            for _ in range(len(available) + 2):
+                current = sequence(node.body, current, nested_class=in_class, nested_globals=class_globals)
+                marker = frozenset(current)
+                if marker in seen:
+                    break
+                seen.add(marker)
+                outcomes.append(current)
+            return set.intersection(*outcomes)
+
+        if isinstance(node, ast.With):
+            # Module-level with bodies execute if the context is entered. Analyze
+            # the body, then conservatively intersect with the untouched state
+            # because __enter__ may fail before the body starts.
+            body = sequence(node.body, set(available), nested_class=in_class, nested_globals=class_globals)
+            return body & set(available)
+
+        if isinstance(node, ast.Match):
+            outcomes = [set(available)]
+            for case in node.cases:
+                outcomes.append(
+                    sequence(case.body, set(available), nested_class=in_class, nested_globals=class_globals)
+                )
+            return set.intersection(*outcomes)
+
+        if isinstance(node, ast.ExceptHandler):
+            handled = sequence(node.body, set(available), nested_class=in_class, nested_globals=class_globals)
+            if node.name and node.name in visible({node.name}):
+                handled.discard(node.name)
+            return handled
+
+        if isinstance(node, ast.AnnAssign) and node.value is None:
+            # Annotation-only targets do not create a runtime value binding.
+            return set(available)
+
+        names_bound = visible(_defined_names(node))
+        return set(available) | names_bound
+
+    def class_scope_available_names(statements: list[ast.stmt]) -> set[str]:
+        state: set[str] = set()
+        for item in statements:
+            state = module_statement_bindings(item, state)
+        return state
 
     available_names: set[str] = set()
     for retained_node in retained_nodes:
-        available_names.difference_update(possibly_deleted_module_names(retained_node))
-        if isinstance(retained_node, ast.AnnAssign) and retained_node.value is None:
-            continue
-        available_names.update(guaranteed_bindings(retained_node))
+        available_names = module_statement_bindings(retained_node, available_names)
     remappable_names = {"NativeAIError", "compose_strategy_spec"}
     missing_dependencies = sorted(canonical_global_loads - available_names - remappable_names)
     if missing_dependencies:
