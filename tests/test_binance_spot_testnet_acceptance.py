@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.binance_spot_testnet_acceptance import (
-    _fetch_order_by_client_id,
     _market_order_min_notional_rule,
     _market_order_reference_price,
     _net_filled_base,
@@ -451,6 +450,7 @@ def test_cleanup_classifies_below_minimum_notional_as_dust():
         drill_base_amount=Decimal("0.1"),
         min_amount=Decimal("0.001"),
         min_cost=Decimal("15"),
+        min_cost_reference_mins=0,
         stop_id=None,
         stop_client_id=None,
     )
@@ -544,7 +544,27 @@ def test_market_order_min_notional_uses_filter_reference_window():
             {"filterType": "MIN_NOTIONAL", "minNotional": "100", "applyToMarket": False, "avgPriceMins": 0},
         ]},
     }
-    assert _market_order_min_notional_rule(market) == (Decimal("20"), 5)
+    assert _market_order_min_notional_rule(market) == [
+        (Decimal("10"), 5),
+        (Decimal("20"), 5),
+    ]
+
+
+def test_market_order_min_notional_preserves_distinct_reference_windows():
+    market = {
+        "limits": {"cost": {"min": 5}},
+        "info": {
+            "filters": [
+                {"filterType": "MIN_NOTIONAL", "minNotional": "10", "applyToMarket": True, "avgPriceMins": 0},
+                {"filterType": "NOTIONAL", "minNotional": "20", "applyMinToMarket": True, "avgPriceMins": 5},
+                {"filterType": "NOTIONAL", "minNotional": "99", "applyMinToMarket": False, "avgPriceMins": 1},
+            ]
+        },
+    }
+    assert _market_order_min_notional_rule(market) == [
+        (Decimal("10"), 0),
+        (Decimal("20"), 5),
+    ]
 
 
 def test_market_order_reference_price_requires_matching_average_window():
