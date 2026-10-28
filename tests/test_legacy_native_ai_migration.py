@@ -2373,20 +2373,20 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
 
     def test_model_contract_rejects_pydantic_v1_and_shadowed_base_and_ignores_uninitialized_fields(self):
         pydantic_v1 = ast.parse(
-            "from pydantic.v1 import BaseModel\\nclass Schema(BaseModel):\\n    value: str"
+            "from pydantic.v1 import BaseModel\nclass Schema(BaseModel):\n    value: str"
         )
         self.assertFalse(migration._is_pydantic_base(
             pydantic_v1.body[1].bases[0], Path("schema.py"), pydantic_v1
         ))
 
         shadowed = ast.parse(
-            "from pydantic import BaseModel\\nBaseModel = object\\nclass Schema(BaseModel):\\n    value: str"
+            "from pydantic import BaseModel\nBaseModel = object\nclass Schema(BaseModel):\n    value: str"
         )
         self.assertFalse(migration._is_pydantic_base(
             shadowed.body[2].bases[0], Path("schema.py"), shadowed
         ))
 
-        ordinary = ast.parse("class Settings:\\n    risk_per_trade: float")
+        ordinary = ast.parse("class Settings:\n    risk_per_trade: float")
         is_model, fields = migration._class_contract_info(
             Path("config.py"), ordinary, ordinary.body[0]
         )
@@ -2398,9 +2398,9 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
             root = Path(tmp)
             app = root / "app"
             app.mkdir()
-            (app / "__init__.py").write_text("class SharedSpec:\\n    pass\\n", encoding="utf-8")
+            (app / "__init__.py").write_text("class SharedSpec:\n    pass\n", encoding="utf-8")
             strategy = app / "strategy_ai.py"
-            tree = ast.parse("from . import SharedSpec as AIStrategySpec\\n")
+            tree = ast.parse("from . import SharedSpec as AIStrategySpec\n")
             with patch.object(migration, "ROOT", root):
                 resolved = migration._resolve_class_symbol(strategy, tree, "AIStrategySpec")
             self.assertIsNotNone(resolved)
@@ -2408,9 +2408,9 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
             self.assertEqual(resolved[0], app / "__init__.py")
 
             shared = app / "shared_models.py"
-            shared.write_text("class SharedSpec:\\n    pass\\n", encoding="utf-8")
+            shared.write_text("class SharedSpec:\n    pass\n", encoding="utf-8")
             dotted_tree = ast.parse(
-                "import app.shared_models\\nclass AIStrategySpec(app.shared_models.SharedSpec):\\n    pass"
+                "import app.shared_models\nclass AIStrategySpec(app.shared_models.SharedSpec):\n    pass"
             )
             with patch.object(migration, "ROOT", root):
                 resolved_base = migration._resolve_base_class(
@@ -2422,15 +2422,15 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
 
     def _strategy_fixture_with_retained_code(self, retained_code: str) -> str:
         return (
-            "from .config import settings\\n"
-            "from .ai_providers import AIProviderError, _gemini_json, _groq_json\\n"
-            "from .strategy_evidence import evidence_for\\n"
-            'SYSTEM_PROMPT = "legacy provider prompt"\\n'
+            "from .config import settings\n"
+            "from .ai_providers import AIProviderError, _gemini_json, _groq_json\n"
+            "from .strategy_evidence import evidence_for\n"
+            'SYSTEM_PROMPT = "legacy provider prompt"\n'
             + retained_code
-            + "\\nasync def _generate_with_provider(provider, prompt):\\n"
-            + "    return await _gemini_json(prompt)\\n"
-            + "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\\n"
-            + '    return await _generate_with_provider("gemini", prompt)\\n'
+            + "\nasync def _generate_with_provider(provider, prompt):\n"
+            + "    return await _gemini_json(prompt)\n"
+            + "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+            + '    return await _generate_with_provider("gemini", prompt)\n'
         )
 
     def _transform_strategy_fixture(self, retained_code: str) -> str:
@@ -2440,7 +2440,7 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
             target.parent.mkdir()
             target.write_text(self._strategy_fixture_with_retained_code(retained_code), encoding="utf-8")
             (root / "app" / "config.py").write_text(
-                "class Settings:\\n    risk_per_trade: float = 0.01\\n", encoding="utf-8"
+                "class Settings:\n    risk_per_trade: float = 0.01\n", encoding="utf-8"
             )
             with patch.object(migration, "ROOT", root), patch.object(
                 migration, "canonical_text", return_value=CANONICAL_STRATEGY
@@ -2449,7 +2449,7 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
             return target.read_text(encoding="utf-8")
 
     def test_strategy_migration_refuses_deleted_removed_prompt(self):
-        legacy = self._strategy_fixture_with_retained_code("del SYSTEM_PROMPT\\n")
+        legacy = self._strategy_fixture_with_retained_code("del SYSTEM_PROMPT\n")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             target = root / "app" / "strategy_ai.py"
@@ -2463,7 +2463,7 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
     def test_strategy_migration_refuses_early_prompt_read_before_retained_binding(self):
-        retained = 'audit_value = consume(SYSTEM_PROMPT)\\naudit_value = SYSTEM_PROMPT = "late audit text"\\n'
+        retained = 'audit_value = consume(SYSTEM_PROMPT)\naudit_value = SYSTEM_PROMPT = "late audit text"\n'
         legacy = self._strategy_fixture_with_retained_code(retained)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2478,7 +2478,7 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
     def test_strategy_migration_rejects_mutated_all_export_for_removed_prompt(self):
-        retained = '__all__ = []\\n__all__.append("SYSTEM_PROMPT")\\n'
+        retained = '__all__ = []\n__all__.append("SYSTEM_PROMPT")\n'
         legacy = self._strategy_fixture_with_retained_code(retained)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2493,7 +2493,7 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
     def test_strategy_migration_keeps_deterministic_module_binding_inside_if_true(self):
-        retained = 'if True:\\n    SYSTEM_PROMPT = "preserved audit prompt"\\n\\ndef audit_prompt():\\n    return SYSTEM_PROMPT\\n'
+        retained = 'if True:\n    SYSTEM_PROMPT = "preserved audit prompt"\n\ndef audit_prompt():\n    return SYSTEM_PROMPT\n'
         result = self._transform_strategy_fixture(retained)
         self.assertIn('SYSTEM_PROMPT = "preserved audit prompt"', result)
         self.assertIn("def audit_prompt():", result)
