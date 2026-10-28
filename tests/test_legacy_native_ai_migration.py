@@ -2328,6 +2328,19 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
         with patch.object(migration, "ROOT", Path("/tmp/atlas-schema-context-test")):
             self.assertFalse(migration._is_compatible_strategy_schema_and_context(tree, canonical_tree))
 
+    def test_exact_schema_shortcut_rejects_rebound_strategy_condition(self):
+        legacy_tree = ast.parse(CANONICAL_STRATEGY)
+        canonical_tree = ast.parse(CANONICAL_STRATEGY)
+        condition_index = next(
+            index for index, node in enumerate(legacy_tree.body)
+            if isinstance(node, ast.ClassDef) and node.name == "StrategyCondition"
+        )
+        legacy_tree.body[condition_index] = ast.parse("StrategyCondition = dict").body[0]
+        with patch.object(migration, "ROOT", Path("/tmp/atlas-strategy-condition-test")):
+            self.assertFalse(
+                migration._is_compatible_strategy_schema_and_context(legacy_tree, canonical_tree)
+            )
+
     def test_schema_checker_rejects_classvar_for_required_strategy_field(self):
         legacy = CANONICAL_STRATEGY.replace(
             '    asset: Literal["crypto", "forex", "commodity"]',
