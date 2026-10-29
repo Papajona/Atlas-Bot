@@ -5108,10 +5108,15 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 continue
             if RETIRED_PROVIDER_RE.search(key):
                 raise MigrationError(f"{path} has an unrecognized provider key in a deployment list: {key}")
-            if preserve_groq_tokens and "${AI_SECRET_ARGS}" in entry:
-                # Some legacy deploy scripts concatenate the expansion directly to
-                # the preceding Secret Manager reference. Insert the delimiter only
-                # when the normalized shared list is non-empty.
+            if (
+                preserve_groq_tokens
+                and "${AI_SECRET_ARGS}" in entry
+                and "${AI_SECRET_ARGS:+,${AI_SECRET_ARGS}}" not in entry
+                and "${AI_SECRET_ARGS}${AI_SECRET_ARGS:+,}" not in entry
+            ):
+                # Normalize only a bare shared expansion attached to an item.
+                # Already-conditional list expressions and incremental assignments
+                # are valid shell syntax and must remain unchanged (idempotence).
                 entry = entry.replace(
                     "${AI_SECRET_ARGS}",
                     "${AI_SECRET_ARGS:+,${AI_SECRET_ARGS}}",
