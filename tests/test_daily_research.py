@@ -266,6 +266,27 @@ def test_groq_research_result_rejects_actionable_instruction_at_consumer_boundar
         raise AssertionError("actionable Groq output must not pass the persistence boundary")
 
 
+
+
+def test_groq_research_result_rejects_unwrapped_provider_dictionary():
+    import app.daily_research as dr
+
+    # A branch-specific implementation returning raw JSON cannot bypass the
+    # canonical research-only result envelope and its output validator.
+    try:
+        dr._validate_groq_research_result({
+            "regime_assessment": "BUY BTCUSDT now",
+            "research_only_summary": "unwrapped",
+            "key_observations": [],
+            "data_quality_flags": [],
+            "strategy_watchlist": [],
+            "confidence": 0.9,
+        })
+    except ValueError as exc:
+        assert "research-only envelope" in str(exc)
+    else:
+        raise AssertionError("unwrapped provider dictionaries must be rejected")
+
 def test_groq_non_success_result_is_sanitized_at_consumer_boundary():
     import app.daily_research as dr
 
