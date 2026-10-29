@@ -1768,6 +1768,32 @@ async def _gemini_json(prompt):
                     "custom decorator bindings must not be erased",
                 )
 
+    def test_config_annotation_only_builtin_declaration_does_not_block_validator_removal(self):
+        source = (
+            "str: int\n"
+            "from pydantic import field_validator\n"
+            "class Settings:\n"
+            "    gemini_model: str = 'gemini-3.8-flash'\n"
+            "    @field_validator('gemini_model')\n"
+            "    @classmethod\n"
+            "    def _validate_gemini_model(cls, value: str) -> str:\n"
+            "        normalized = str(value or '').strip().removeprefix('models/')\n"
+            "        if normalized != 'gemini-3.8-flash':\n"
+            "            raise ValueError('Gemini model must be exactly gemini-3.8-flash; alternative Gemini IDs are not permitted.')\n"
+            "        return normalized\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_config()
+            result = config.read_text(encoding="utf-8")
+            ast.parse(result, filename="app/config.py")
+            self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
+            self.assertIn("str: int", result)
+
     def test_config_removes_provider_fields_but_preserves_unrelated_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -4779,7 +4805,34 @@ def retained_helper():
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_star_import_ignores_eval_in_uninvoked_helper_body(self):
+        legacy = """from .branch_helpers import *
 
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                "def branch_helper():\n    return eval('1')\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration,
+                "canonical_text",
+                return_value="from .native_ai import AIProviderError, NativeAIError\n",
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            rewritten = target.read_text(encoding="utf-8")
+            self.assertIn("from .branch_helpers import *", rewritten)
+            self.assertIn("def retained_helper", rewritten)
 
     def test_groq_guard_refuses_printf_v_with_quoted_separator_but_allows_echo(self):
         unsafe = (
