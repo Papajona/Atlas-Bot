@@ -5082,10 +5082,13 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if not match:
             raise MigrationError(f"{path} has an unparseable shared AI_SECRET_ARGS assignment")
         prefix, quote, value, suffix = match.groups()
-        leading_comma = value.startswith(",")
         cleaned = scrub_key_value_list(value.lstrip(","), preserve_groq_tokens=True)
-        if leading_comma and cleaned and not cleaned.startswith("^@^"):
-            cleaned = "," + cleaned
+        # Incremental lists must not introduce a leading/empty item when their first
+        # optional Groq secret is the only surviving entry. Use the existing list
+        # only when non-empty, inserting its separator conditionally.
+        shared = "${AI_SECRET_ARGS}"
+        if cleaned.startswith(shared + ","):
+            cleaned = shared + "${AI_SECRET_ARGS:+,}" + cleaned[len(shared) + 1:]
         return prefix + quote + cleaned + suffix
 
     for original in text.splitlines(keepends=True):
