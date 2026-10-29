@@ -100,6 +100,39 @@ jobs:
         self.assertIn("GROQ_API_KEY", cleaned)
         self.assertIn("steps:", cleaned)
 
+    def test_workflow_sequence_labels_and_commented_run_blocks_survive_cleanup(self):
+        workflow = """name: paper deployment
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove Gemini fallback
+        run: | # deployment script entry
+          export GEMINI_API_KEY=retired
+          echo deployment ready
+"""
+        cleaned = migration.scrub_workflow_ancillary(
+            ".github/workflows/production-deploy.yml", workflow
+        )
+        self.assertIn("- name: Remove Gemini fallback", cleaned)
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+        self.assertIn("echo deployment ready", cleaned)
+        self.assertFalse(migration._workflow_has_active_provider_wiring(cleaned))
+
+    def test_groq_shell_parameter_guard_is_preserved_and_mixed_deploy_command_refused(self):
+        guard = """if [[ -n "$GROQ_API_KEY" ]]; then
+  : "${GROQ_API_KEY:?required}"
+fi
+"""
+        self.assertEqual(
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", guard), guard
+        )
+        for unsafe in (
+            'if [[ -n "$GROQ_API_KEY" ]]; then gcloud run deploy atlas; fi\n',
+            'if [[ -n "$GROQ_API_KEY" ]]; then\n  GROQ_MODEL="openai/gpt-oss-20b"\nelse gcloud run deploy atlas\nfi\n',
+        ):
+            with self.subTest(unsafe=unsafe), self.assertRaises(migration.MigrationError):
+                migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe)
     def test_optional_groq_secret_creation_block_is_preserved(self):
         shell = """if [[ -n "$GROQ_API_KEY" ]]; then
   create_secret atlas-groq-api-key "$GROQ_API_KEY"
