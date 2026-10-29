@@ -1717,29 +1717,29 @@ async def _gemini_json(prompt):
             (
                 "module field_validator rebind",
                 safe.replace(
-                    "from pydantic import field_validator\\n",
-                    "from pydantic import field_validator\\nfield_validator = custom_field_validator\\n",
+                    "from pydantic import field_validator\n",
+                    "from pydantic import field_validator\nfield_validator = custom_field_validator\n",
                 ),
             ),
             (
                 "class-local field_validator rebind",
                 safe.replace(
-                    "class Settings:\\n",
-                    "class Settings:\\n    field_validator = custom_field_validator\\n",
+                    "class Settings:\n",
+                    "class Settings:\n    field_validator = custom_field_validator\n",
                 ),
             ),
             (
                 "module classmethod rebind",
                 safe.replace(
-                    "class Settings:\\n",
-                    "classmethod = custom_classmethod\\nclass Settings:\\n",
+                    "class Settings:\n",
+                    "classmethod = custom_classmethod\nclass Settings:\n",
                 ),
             ),
             (
                 "class-local classmethod rebind",
                 safe.replace(
-                    "class Settings:\\n",
-                    "class Settings:\\n    classmethod = custom_classmethod\\n",
+                    "class Settings:\n",
+                    "class Settings:\n    classmethod = custom_classmethod\n",
                 ),
             ),
         )
