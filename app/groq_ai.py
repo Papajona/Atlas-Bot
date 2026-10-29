@@ -220,12 +220,14 @@ def _research_prompt(
     if "paper_candidates" in research and not isinstance(raw_candidates, list):
         state["truncated"] = True
     candidate_summaries = []
+    candidate_omission_counts: list[int] = []
     candidate_keys = {"strategy", "status", "score", "confidence", "reason", "data_quality_flags"}
     paper_candidate_fields_omitted = 0
     for candidate in candidates[:15]:
         if isinstance(candidate, dict):
             omitted_keys = [key for key in candidate if key not in candidate_keys]
             paper_candidate_fields_omitted += len(omitted_keys)
+            candidate_omission_counts.append(len(omitted_keys))
             if omitted_keys:
                 state["truncated"] = True
             summary = {key: _bounded_prompt_value(candidate[key], state)
@@ -293,6 +295,20 @@ def _research_prompt(
     hits = suspicious_instruction_markers(external_json)
     if hits:
         _LOGGER.warning("possible prompt-injection markers in external research inputs: %s", hits[:5])
+    omission_audit = {
+        "research_fields_omitted": research_fields_omitted,
+        "validation_fields_omitted": validation_fields_omitted,
+        "regime_fields_omitted": regime_fields_omitted,
+        "strategy_metrics_omitted": max(0, len(names) - len(selected)),
+        "strategy_metric_fields_omitted": strategy_metric_fields_omitted,
+        "paper_candidates_omitted": max(0, len(candidates) - len(candidate_summaries)),
+        "paper_candidate_fields_omitted": paper_candidate_fields_omitted,
+        "external_fields_omitted": external_fields_omitted,
+        "candidate_omitted_fields": [
+            {"omitted_field_count": count} for count in candidate_omission_counts if count
+        ],
+    }
+    omission_audit_json = json.dumps(omission_audit, separators=(",", ":"))
     research_block = wrap_untrusted("atlas_computed_research", bounded_research, max_chars=80_000)
     external_block = wrap_untrusted("external_news_and_source_status", bounded_external, max_chars=35_000)
     prompt = (
@@ -300,6 +316,7 @@ def _research_prompt(
         "key_observations, data_quality_flags, strategy_watchlist, confidence, and research_only_summary. "
         "Do not return buy/sell instructions or order parameters. The supplied values are a bounded structured "
         "summary of computed evidence; omitted rows and fields are disclosed. Do not infer omitted facts.\n\n"
+        + "INPUT_OMISSION_AUDIT=" + omission_audit_json + "\n\n"
         + UNTRUSTED_PREAMBLE + "\n\n"
         + research_block + "\n\n"
         + external_block
