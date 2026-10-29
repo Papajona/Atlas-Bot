@@ -5562,7 +5562,8 @@ def scrub_ancillary_text(path: str, text: str) -> str:
             continue
         if is_markdown and markdown_fence_open and re.search(
             r"(?i)(?:\b(?:gcloud|docker|curl|python|bash|export|printf|echo)\b|"
-            r"\$\{?[A-Z][A-Z0-9_]*(?:API_KEY|SECRET|TOKEN)[A-Z0-9_]*\}?)",
+            r"\$\{?[A-Z][A-Z0-9_]*(?:API_KEY|SECRET|TOKEN)[A-Z0-9_]*\}?|"
+            r"^\s*[A-Z][A-Z0-9_]*(?:API_KEY|SECRET|MODEL)\s*(?:=|:))",
             line,
         ):
             raise MigrationError(
