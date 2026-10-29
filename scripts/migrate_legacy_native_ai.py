@@ -2344,7 +2344,7 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST, module_tree: ast.Module |
                 or len(statement.test.ops) != 1 or not isinstance(statement.test.ops[0], ast.Eq)
                 or len(statement.test.comparators) != 1 or not isinstance(statement.test.comparators[0], ast.Constant)
                 or not isinstance(statement.test.comparators[0].value, str)
-                or statement.test.comparators[0].value not in {"gemini", "groq"}):
+                or statement.test.comparators[0].value not in {"gemini", "groq", "cerebras"}):
             return False
         provider = statement.test.comparators[0].value
         if any(provider == previous for previous, _ in branches):
@@ -2373,15 +2373,26 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST, module_tree: ast.Module |
                 for k in last_call.keywords
             )
         )
+    branch_names = [name for name, _ in branches]
+    if branch_names == ["gemini", "groq"]:
+        fallback_provider = "cerebras"
+    elif branch_names == ["gemini", "cerebras"]:
+        fallback_provider = "groq"
+    else:
+        return False
+    fallback_adapter = {
+        "gemini": "_gemini_json",
+        "groq": "_groq_json",
+        "cerebras": "_cerebras_json",
+    }[fallback_provider]
     return (
-        [name for name, _ in branches] == ["gemini", "groq"]
-        and _provider_adapter_name(last_call.func, module_tree) == "_cerebras_json"
+        _provider_adapter_name(last_call.func, module_tree) == fallback_adapter
         and len(last_call.args) == 1 and is_name(last_call.args[0], "prompt")
         and len(last_call.keywords) == 2
         and {k.arg for k in last_call.keywords} == {"system_instruction", "model"}
         and all(
             (k.arg == "system_instruction" and is_name(k.value, "SYSTEM_PROMPT"))
-            or (k.arg == "model" and is_model_expr(k.value, "cerebras"))
+            or (k.arg == "model" and is_model_expr(k.value, fallback_provider))
             for k in last_call.keywords
         )
     )
