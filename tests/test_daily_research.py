@@ -257,6 +257,23 @@ def test_groq_research_result_rejects_non_boolean_input_truncation_flag():
         })
 
 
+def test_groq_error_result_preserves_boolean_input_truncation_audit():
+    import app.daily_research as dr
+
+    validated = dr._validate_groq_research_result({
+        "status": "ERROR",
+        "provider": "groq",
+        "error": "GroqAIError",
+        "cause": "HTTPStatusError",
+        "http_status": 429,
+        "input_truncated": True,
+        "execution_authority": False,
+    })
+    assert validated["status"] == "ERROR"
+    assert validated["input_truncated"] is True
+    assert validated["http_status"] == 429
+
+
 def test_groq_research_result_rejects_actionable_instruction_at_consumer_boundary():
     import app.daily_research as dr
 
