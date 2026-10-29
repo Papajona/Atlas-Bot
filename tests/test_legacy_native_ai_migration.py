@@ -1606,6 +1606,7 @@ async def _gemini_json(prompt):
             "    validate_strategy_prompt(prompt)\n"
             "    return await _gemini_json(prompt)\n\n"
             "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
+            "    _apply_market_context(AIStrategySpec(title='Legacy fixture', summary='Legacy fixture strategy context.', asset='crypto', symbols=['BTC_USDT'], timeframes=['1h'], direction='LONG', strategy_family='TREND', entry_conditions=[{'type': 'indicator', 'rule': 'RSI is above threshold'}], exit_conditions=[{'type': 'indicator', 'rule': 'RSI is below threshold'}], risk_per_trade=0.005), asset=asset, symbol=symbol, timeframe=timeframe)\n"
             "    return await _generate_with_provider('gemini', prompt)\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
