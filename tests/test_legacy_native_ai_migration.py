@@ -3414,6 +3414,44 @@ gcloud run deploy atlas --set-secrets="DATABASE_URL=atlas-db:latest,${GROQ_SECRE
         # The no-secret and configured forms must not create empty list items.
         self.assertIn('GROQ_SECRET_ARGS=""', cleaned)
         self.assertIn('GROQ_SECRET_ARGS=",GROQ_API_KEY=atlas-groq-api-key:${SECRET_GROQ_API_KEY_VERSION}"', cleaned)
+    def test_shell_scrub_separates_direct_secret_expansion_from_database_reference(self):
+        source = """AI_SECRET_ARGS=""
+AI_SECRET_ARGS="${AI_SECRET_ARGS},GEMINI_API_KEY=atlas-gemini:1"
+AI_SECRET_ARGS="${AI_SECRET_ARGS},GROQ_API_KEY=atlas-groq:1"
+gcloud run deploy atlas --set-secrets="DATABASE_URL=atlas-db:latest${AI_SECRET_ARGS}"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertIn('DATABASE_URL=atlas-db:latest${AI_SECRET_ARGS:+,${AI_SECRET_ARGS}}', cleaned)
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+        self.assertNotIn("DATABASE_URL=atlas-db:latestGROQ_API_KEY", cleaned)
+        ast.parse("pass")
+
+    def test_review_projection_with_trailing_tuple_comma_and_inline_comment_is_preserved(self):
+        source = """import json
+
+def persist(review):
+    return ResearchRun(review_json=json.dumps({k: review.get(k) for k in (
+        "ai_brain_mode",
+        "native_ai_review", # keep the explanation
+    )}, default=str))
+"""
+        updated = migration._ensure_groq_review_persisted(source, "app/daily_research.py")
+        self.assertIn('"native_ai_review", # keep the explanation\\n        "groq_research_review"', updated)
+        self.assertEqual(updated, migration._ensure_groq_review_persisted(updated, "app/daily_research.py"))
+        ast.parse(updated, filename="app/daily_research.py")
+
+    def test_review_mapping_trailing_comma_and_inline_comment_is_preserved(self):
+        source = """import json
+
+def persist(review):
+    return ResearchRun(review_json=json.dumps({
+        "native_ai_review": review.get("native_ai_review"), # keep the explanation
+    }, default=str))
+"""
+        updated = migration._ensure_groq_review_persisted(source, "app/daily_research.py")
+        self.assertIn('"native_ai_review": review.get("native_ai_review"), # keep the explanation\\n        "groq_research_review": review.get("groq_research_review")', updated)
+        self.assertEqual(updated, migration._ensure_groq_review_persisted(updated, "app/daily_research.py"))
+        ast.parse(updated, filename="app/daily_research.py")
     def test_shell_scrub_avoids_empty_secret_entry_when_only_groq_survives(self):
         source = """AI_SECRET_ARGS=""
 AI_SECRET_ARGS="${AI_SECRET_ARGS},GEMINI_API_KEY=atlas-gemini:1"
