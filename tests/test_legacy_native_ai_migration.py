@@ -1551,6 +1551,30 @@ async def _gemini_json(prompt):
                     migration.transform_config()
             self.assertEqual(config.read_text(encoding="utf-8"), source)
 
+    def test_daily_research_accepts_exact_legacy_unconfigured_fallback_payload(self):
+        legacy = (
+            "from .ai_providers import dual_ai_research_review\\n"
+            "async def run_daily_research():\\n"
+            "    review = {}\\n"
+            "    if settings.gemini_api_key or settings.groq_api_key:\\n"
+            "        review['external_ai'] = await dual_ai_research_review(research, intelligence)\\n"
+            "    else:\\n"
+            "        review['external_ai'] = {'status': 'NOT_CONFIGURED', 'providers': {}, 'execution_authority': False}\\n"
+            "    review['run_drift'] = await persist_run()\\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "daily_research.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_daily_research()
+            result = target.read_text(encoding="utf-8")
+            ast.parse(result, filename="app/daily_research.py")
+            self.assertIn("review['run_drift'] = await persist_run()", result)
+            self.assertIn("native_research_review(native_research_input, intelligence)", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
     def test_daily_research_refuses_to_replace_early_return(self):
         legacy = (
             "from .ai_providers import dual_ai_research_review\n"
