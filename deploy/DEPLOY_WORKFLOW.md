@@ -69,8 +69,9 @@ anything on the API, while the worker pool is always-on by design.
 | `atlas-model-signing-public-key` | yes | yes | no |
 | `atlas-model-signing-private-key` | **no** | yes (to sign trained models) | no |
 | `atlas-supabase-anon-key`, `atlas-funding-webhook-secret` | yes | no | no |
+| `atlas-groq-api-key` (optional research reviewer only; created by bootstrap only when `GROQ_API_KEY` is supplied) | optional | optional | no |
 
-Atlas Native AI's local review is not a language-model opinion and has no execution authority. It fails closed when market data, price geometry, adaptive-model evidence, or directional signal is missing or inconsistent. Existing deterministic risk, paper-ledger, and execution gates remain authoritative.
+Atlas Native AI remains the local strategy composer and deterministic safety authority. An optional Groq call can add research commentary only; it cannot compose the strategy, alter risk/order parameters, or authorize execution. If no Groq key is configured, no Groq request is sent. Existing deterministic risk, paper-ledger, and execution gates remain authoritative.
 
 ### 3.2 Service accounts
 `SERVICE_ACCOUNT` (API, e.g. `atlas-trading-api`), `WORKER_SERVICE_ACCOUNT` (e.g. `atlas-trading-worker`), `MIGRATION_SERVICE_ACCOUNT` (default `atlas-migrator`).
@@ -101,7 +102,7 @@ Abort and investigate on the first failed check; do not skip forward.
 Required environment: `GCP_PROJECT_ID GCP_REGION AR_REPOSITORY MODEL_BUCKET MODEL_STAGING_BUCKET SERVICE_ACCOUNT WORKER_SERVICE_ACCOUNT DATABASE_URL
 USDT_TRON_ACCOUNT_XPUB TRONGRID_API_KEY APP_ENCRYPTION_KEY REDIS_URL SUPABASE_URL SUPABASE_ANON_KEY FUNDING_WEBHOOK_SECRET ADMIN_SUPABASE_USER_IDS
 BACKUP_RECOVERY_URL FORWARDED_ALLOW_IPS MODEL_SIGNING_PUBLIC_KEY MODEL_SIGNING_PRIVATE_KEY`; optional `MIGRATION_SERVICE_ACCOUNT`.
-It enables the required APIs, creates the Artifact Registry repo, the three service accounts, the two buckets, every secret, and the per-secret IAM bindings.
+It enables the required APIs, creates the Artifact Registry repo, the three service accounts, the two buckets, required secrets, and per-secret IAM bindings. The Groq secret is optional: supply `GROQ_API_KEY` to bootstrap it, or leave that variable unset to run Native AI without Groq.
 **Check:** `gcloud secrets list`, `gcloud iam service-accounts list`; confirm `atlas-model-signing-private-key` is readable by the **worker only**.
 
 ### Step 2: Audit-log retention -- `deploy/gcp-security-audit-retention.sh`, then `deploy/verify-cloud-audit.sh`
@@ -133,7 +134,7 @@ bash deploy/cloud-run-migration-job.sh        # deploys the job as atlas-migrato
 ### Step 6: Deploy the API -- `deploy/cloud-run-deploy.sh`
 Required: all Step-1 variables plus `CLOUD_RUN_SERVICE` and explicit secret versions `SECRET_DATABASE_VERSION SECRET_KEY_VERSION SECRET_TRON_XPUB_VERSION
 SECRET_APP_ENCRYPTION_VERSION SECRET_REDIS_URL_VERSION SECRET_TRONGRID_VERSION SECRET_MODEL_SIGNING_PUBLIC_VERSION SECRET_SUPABASE_ANON_KEY_VERSION
-SECRET_FUNDING_WEBHOOK_VERSION`.
+SECRET_FUNDING_WEBHOOK_VERSION`. Optional: set `SECRET_GROQ_API_KEY_VERSION` to the positive numeric version of `atlas-groq-api-key` to enable advisory research review; omit it to keep Groq disabled. The Native AI safety path does not require this key.
 It deploys with `--execution-environment gen2`, the read-only models volume, ingress `internal-and-cloud-load-balancing`, and `--allow-unauthenticated`
 (authentication is enforced by the app; the ingress setting restricts who can reach it).
 **Check:** `GET /healthz` (liveness) then `GET /readyz` (database, migrations current, Redis, recovery config, admin auth). `/docs` must be off
@@ -146,12 +147,13 @@ export WORKER_POOL=atlas-trading-worker IMAGE=<same image> WORKER_SERVICE_ACCOUN
   SECRET_APP_ENCRYPTION_REF=atlas-app-encryption-key:<v> SECRET_TRON_XPUB_REF=atlas-usdt-tron-account-xpub:<v> SECRET_TRONGRID_REF=atlas-trongrid-api-key:<v> \
   SECRET_MODEL_SIGNING_PUBLIC_REF=atlas-model-signing-public-key:<v> SECRET_MODEL_SIGNING_PRIVATE_REF=atlas-model-signing-private-key:<v> \
   BACKUP_RECOVERY_URL=... \
+  SECRET_GROQ_REF=atlas-groq-api-key:<v> \
   RESEARCH_FEE_SOURCE="${RESEARCH_FEE_SOURCE:?set to actual fee source}" \\
   RESEARCH_FEE_EVIDENCE_ID="${RESEARCH_FEE_EVIDENCE_ID:?set to immutable evidence ID}" \\
   RESEARCH_MIN_DEFLATED_SHARPE="${RESEARCH_MIN_DEFLATED_SHARPE:-0.95}"
 bash deploy/cloud-run-worker-deploy.sh
 ```
-The three `RESEARCH_*` values are mandatory for production worker startup. Use the actual fee source and immutable evidence identifier consumed by the research process; placeholders or CI fixtures are not operational evidence. The deployment validator rejects nonnumeric/nonfinite thresholds and values containing the active environment-variable delimiter before the deploy command runs. It verifies input shape only, not evidence authenticity.
+The three `RESEARCH_*` values are mandatory for production worker startup. `SECRET_GROQ_REF` is optional and must be an exact `atlas-groq-api-key:<positive-version>` reference; the legacy `GROQ_STRATEGY_MODEL` is not used. Use the actual fee source and immutable evidence identifier consumed by the research process; placeholders or CI fixtures are not operational evidence. The deployment validator rejects nonnumeric/nonfinite thresholds and values containing the active environment-variable delimiter before the deploy command runs. It verifies input shape only, not evidence authenticity.
 **Check:** `ServiceHeartbeat` rows appear for role `worker`; logs show the loops starting; the single-writer execution lease is held (only one worker may hold it).
 **Rollout caveat:** a worker-pool update can briefly run old and new instances together. Safety then rests on the distributed lease with fencing; keep live
 trading off until a rollout drill proves it.
@@ -227,7 +229,7 @@ and before each release (the verify script does).
 |---|---|---|
 | Migration job had no `--service-account` | ran as the default compute identity, which bootstrap never granted the DB secret (or ran over-privileged) | dedicated `atlas-migrator`, DB-secret-only, `--max-retries 0 --task-timeout 900s` |
 | Worker script never set `BACKUP_RECOVERY_URL` | production startup refused to boot: the worker pool crash-looped | variable now required and passed |
-| API deployment previously injected hosted AI model secrets | provider keys and quota could block deployment despite healthy core code | Hosted model wiring removed; deployment supplies only required application secrets |
+| API deployment previously injected Gemini strategy-provider secrets | Gemini quotas and credentials could block strategy generation despite healthy core code | Gemini strategy calls removed; Native AI is local, while an optional Groq research-only secret can be injected separately |
 | Worker previously depended on a dual-hosted-provider veto | missing API keys forced every worker cycle to NO_TRADE | Native AI uses local evidence checks and fails closed on missing or inconsistent trade packets |
 | Hosted model availability and quota | provider status, API keys, rate limits and core-code correctness are separate concerns | Local Native AI health check is deterministic and offline; no external provider attestation is required |
 | `DEPLOYMENT_ACCEPTANCE.md` stated `max=1, concurrency=1` and listed migrations after deploy | wrong numbers and order | corrected |
@@ -244,8 +246,8 @@ remain very large; docker-compose is for local use only (`redis:8-alpine`, `post
 |---|---|---|
 | Worker pool restarts immediately | missing `BACKUP_RECOVERY_URL`, xpub, signing private key, or Redis | `gcloud run worker-pools logs`/Cloud Logging; config validation names the missing setting |
 | API `readyz` fails | migrations behind, DB unreachable (`?ssl=require`), Redis down | run the migration job; check secrets and VPC egress |
-| Native AI returns `NO_TRADE` | trade packet is incomplete or fails safety validation | inspect the returned fail-closed reasons and correct data/risk evidence; do not add provider credentials |
-| `ai_safety_gate` vetoes | provider disagreed or returned invalid JSON | see `ADAPTIVE_BOT_AI_VETO` audit events; retry later |
+| Native AI returns `NO_TRADE` | trade packet is incomplete or fails local safety validation | inspect fail-closed reasons and correct data/risk evidence; a Groq key only enables advisory research and never bypasses the local veto |
+| Native AI safety gate rejects a packet | market data, price geometry, directional evidence, or another safety invariant is incomplete or inconsistent | inspect fail-closed reasons and the `ADAPTIVE_BOT_AI_VETO` audit event; Groq review remains advisory |
 | Entries blocked "Edge-decay halt" | recent realized net returns significantly negative | review the strategy; the halt lifts as the window recovers; closes are never blocked |
 | Customer account `SUSPENDED` | key audit found extra permissions | the customer must re-issue a trade-only, no-withdraw key; incident `KEY_PERMISSIONS:<id>` |
 | Promotions stopped | cost-stress gate on (`RESEARCH_REQUIRE_COST_STRESS`) and no strategy clears 2x costs | read `cost_analysis` in the research output; do not simply disable it |

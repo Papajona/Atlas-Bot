@@ -40,14 +40,29 @@ def test_current_strategy_ui_describes_local_native_ai():
     assert "uses a real AI model" not in customer
 
 
-def test_deployment_scripts_do_not_require_hosted_ai_provider_keys():
+def test_deployment_removes_gemini_and_keeps_only_optional_groq_research_key():
     paths = ["deploy/cloud-run-deploy.sh", "deploy/cloud-run-worker-deploy.sh",
              "deploy/gcp-bootstrap.sh", "deploy/cloud-run.env.example",
              ".github/workflows/production-deploy.yml"]
     for path in paths:
         text = (ROOT / path).read_text()
-        for token in ("GEMINI_API_KEY", "GEMINI_MODEL", "GROQ_API_KEY", "CEREBRAS_API_KEY", "atlas-gemini-api-key"):
+        for token in ("GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_STRATEGY_MODEL",
+                      "GROQ_STRATEGY_MODEL", "CEREBRAS_API_KEY", "atlas-gemini-api-key"):
             assert token not in text, path
+        if path in {"deploy/cloud-run-deploy.sh", "deploy/cloud-run-worker-deploy.sh"}:
+            assert "GROQ_API_KEY" in text, path
+            assert "GROQ_RESEARCH_REVIEW_ENABLED" in text, path
+            assert "GROQ_STRATEGY_MODEL" not in text, path
+        elif path == ".github/workflows/production-deploy.yml":
+            assert "SECRET_GROQ_API_KEY_VERSION" in text
+            assert "GROQ_API_KEY=" not in text
+        elif path == "deploy/gcp-bootstrap.sh":
+            assert 'if [[ -n "${GROQ_API_KEY:-}" ]]; then' in text
+            assert 'create_secret atlas-groq-api-key "$GROQ_API_KEY"' in text
+            assert 'grant_secret_access atlas-groq-api-key "$SERVICE_ACCOUNT"' in text
+            assert 'grant_secret_access atlas-groq-api-key "$WORKER_SERVICE_ACCOUNT"' in text
+        else:
+            assert "GROQ_API_KEY" not in text, path
 
 
 

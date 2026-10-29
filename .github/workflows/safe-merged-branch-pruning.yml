@@ -5,16 +5,8 @@ on:
     branches:
       - main
   workflow_dispatch:
-  workflow_run:
-    workflows:
-      - Propagate Atlas Native AI across branches
-    types:
-      - completed
-    branches:
-      - main
 
 permissions:
-  actions: read
   contents: write
   pull-requests: read
 
@@ -24,11 +16,6 @@ jobs:
       github.ref == 'refs/heads/main' &&
       (
         github.event_name == 'workflow_dispatch' ||
-        (
-          github.event_name == 'workflow_run' &&
-          github.event.workflow_run.head_branch == 'main' &&
-          github.event.workflow_run.conclusion == 'success'
-        ) ||
         (
           github.event_name == 'push' &&
           !startsWith(github.event.head_commit.message, '[atlas-branch-prune-once-20261020]') &&
@@ -49,96 +36,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - name: Verify Native AI propagation is successful before pruning
-        id: pruning_guard
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          EVENT_NAME: ${{ github.event_name }}
-          BEFORE_SHA: ${{ github.event.before }}
-          AFTER_SHA: ${{ github.sha }}
-        shell: bash
-        run: |
-          skip_pruning=false
-
-          # A main push that changes either watched file starts propagation and must wait.
-          if [[ "$EVENT_NAME" == "push" ]]; then
-            if ! changed_paths="$(git diff --no-renames --name-only "$BEFORE_SHA" "$AFTER_SHA")"; then
-              skip_pruning=true
-              echo "Unable to verify the push diff; preserving every branch."
-            else
-              while IFS= read -r changed_path; do
-                case "$changed_path" in
-                  scripts/migrate_legacy_native_ai.py|.github/workflows/propagate-native-ai-all-branches.yml)
-                    skip_pruning=true
-                    break
-                    ;;
-                esac
-              done <<< "$changed_paths"
-            fi
-          fi
-
-          # Query every non-completed status with API pagination; never infer that a
-          # busy history window is idle. This guard runs for push, manual, and completion events.
-          if [[ "$skip_pruning" != true ]]; then
-            for propagation_status in queued in_progress waiting requested pending action_required stale; do
-              if ! active_ids="$(gh api --paginate "/repos/$GITHUB_REPOSITORY/actions/workflows/propagate-native-ai-all-branches.yml/runs?branch=main&status=$propagation_status&per_page=100" --jq '.workflow_runs[].id')"; then
-                skip_pruning=true
-                echo "Unable to enumerate Native AI propagation status; preserving every branch."
-                break
-              elif [[ -n "$active_ids" ]]; then
-                skip_pruning=true
-                echo "A Native AI propagation run is $propagation_status; preserving branch refs."
-                break
-              fi
-            done
-          fi
-
-          # Also require the newest run itself to have succeeded and to cover the main
-          # commit being cleaned. A failed/cancelled latest run never authorizes pruning.
-          if [[ "$skip_pruning" != true ]]; then
-            if ! latest_run="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/propagate-native-ai-all-branches.yml/runs?branch=main&per_page=1" --jq '.workflow_runs[0] | [.status, (.conclusion // ""), .head_sha] | @tsv')"; then
-              skip_pruning=true
-              echo "Unable to verify the latest Native AI propagation; preserving every branch."
-            elif [[ -z "$latest_run" ]]; then
-              skip_pruning=true
-              echo "No Native AI propagation run is available as proof; preserving every branch."
-            else
-              IFS=$'\t' read -r latest_status latest_conclusion latest_success_sha <<< "$latest_run"
-              if [[ "$latest_status" != "completed" || "$latest_conclusion" != "success" || -z "$latest_success_sha" ]]; then
-                skip_pruning=true
-                echo "Latest Native AI propagation did not succeed; preserving every branch."
-              elif git merge-base --is-ancestor "$latest_success_sha" "$AFTER_SHA"; then
-                if ! post_propagation_paths="$(git diff --no-renames --name-only "$latest_success_sha" "$AFTER_SHA")"; then
-                  skip_pruning=true
-                  echo "Unable to verify changes since successful propagation; preserving every branch."
-                else
-                  while IFS= read -r changed_path; do
-                    case "$changed_path" in
-                      scripts/migrate_legacy_native_ai.py|.github/workflows/propagate-native-ai-all-branches.yml)
-                        skip_pruning=true
-                        break
-                        ;;
-                    esac
-                  done <<< "$post_propagation_paths"
-                fi
-              elif ! git merge-base --is-ancestor "$AFTER_SHA" "$latest_success_sha"; then
-                skip_pruning=true
-                echo "Cannot prove the successful propagation covers this main commit; preserving every branch."
-              fi
-            fi
-          fi
-
-          if [[ "$skip_pruning" == true ]]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Branch refs will be pruned only after Native AI propagation is verified successful."
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Delete only refs proven integrated into main
-        if: steps.pruning_guard.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
