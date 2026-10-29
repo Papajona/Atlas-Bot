@@ -5017,6 +5017,10 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         stripped = statement.strip()
         if not re.match(r"^\s*(?:echo|printf)\b", stripped, re.I):
             return False
+        # Bash printf -v assigns a variable; it is not output-only. Reject it
+        # before classifying any provider-bearing literal as removable commentary.
+        if re.match(r"^\s*printf\s+-v(?:\s|$)", stripped, re.I):
+            return False
         if not RETIRED_PROVIDER_RE.search(stripped):
             return False
         # Only discard literal output text. Never rewrite dynamic expansions,
