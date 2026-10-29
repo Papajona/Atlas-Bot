@@ -57,11 +57,12 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert "tests/" not in runtime_path_list
     assert 'git show "$GITHUB_SHA:scripts/migrate_legacy_native_ai.py"' in workflow
     assert 'python "$RUNNER_TEMP/migrate_legacy_native_ai.py" --canonical-commit "$NATIVE_AI_CANONICAL_COMMIT" --cleanup-commit "$NATIVE_AI_CLEANUP_COMMIT" --extra-base-commit "$NATIVE_AI_EXTRA_BASE_COMMIT" --extra-commit "$NATIVE_AI_EXTRA_COMMIT"' in workflow
-    assert 'NATIVE_AI_CANONICAL_COMMIT="f8bb968198ec909e66cc04b888716f87ded6c0fa"' in workflow
+    assert 'NATIVE_AI_CANONICAL_COMMIT="$GITHUB_SHA"' in workflow
     assert 'NATIVE_AI_CLEANUP_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"' in workflow
     assert 'NATIVE_AI_EXTRA_COMMIT="2317ccc4c3293e8bbd7043970876eceb509d2d1d"' in workflow
     assert 'extra_parent="$(git rev-parse "$NATIVE_AI_EXTRA_COMMIT^")"' in workflow
     assert 'if [[ "$extra_parent" != "$NATIVE_AI_EXTRA_BASE_COMMIT" ]]; then' in workflow
+    assert '"app/groq_ai.py"' in runtime_path_list
     assert '"app/main.py"' in runtime_path_list
     assert '"ENTRY_EXIT_3_9_0.md"' in runtime_path_list
     assert '"app/src/main/java/com/atlas/trading/network/ReleaseAdvisorClient.kt"' in runtime_path_list
@@ -81,6 +82,10 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert "ACTIVE PROVIDER REFERENCES REMAIN after semantic migration" in workflow
     assert r"generativelanguage\.googleapis\.com" in workflow
     assert r"api\.groq\.com" in workflow
+    global_scan = next(line for line in workflow.splitlines() if "if matches=\"$(git grep -nIEi" in line)
+    assert "groq" not in global_scan.lower()
+    assert "legacy_groq_refs" in workflow
+    assert "settings\\.groq_(strategy_model|model)" in workflow
     assert r"api\.cerebras\.ai" in workflow
 
 
