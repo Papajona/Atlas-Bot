@@ -91,6 +91,11 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert "groq" not in global_scan.lower()
     assert "legacy_groq_refs" in workflow
     assert r"settings\.groq_(strategy_model|model)" in workflow
+    legacy_groq_scan = next(line for line in workflow.splitlines() if "if legacy_groq_refs=" in line)
+    assert "-- app " in legacy_groq_scan
+    assert "':!app/groq_ai.py'" in legacy_groq_scan
+    assert "':!app/daily_research.py'" in legacy_groq_scan
+    assert "':!app/config.py'" in legacy_groq_scan
     assert r"api\.cerebras\.ai" in workflow
 
 
