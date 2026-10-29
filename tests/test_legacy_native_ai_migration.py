@@ -1574,6 +1574,11 @@ async def _gemini_json(prompt):
             ast.parse(result, filename="app/daily_research.py")
             self.assertIn("review['run_drift'] = await persist_run()", result)
             self.assertIn("native_research_review(native_research_input, intelligence)", result)
+            self.assertIn("from .groq_ai import groq_research_review", result)
+            self.assertIn('review["groq_research_review"] = await groq_research_review(research, intelligence)', result)
+            self.assertNotIn("dual_ai_research_review", result)
+            self.assertNotIn("settings.groq_api_key", result)
+            self.assertNotIn("settings.groq_strategy_model", result)
             self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
     def test_daily_research_refuses_dynamic_or_extended_unconfigured_fallback_payloads(self):
@@ -1781,6 +1786,10 @@ async def _gemini_json(prompt):
             result = config.read_text(encoding="utf-8")
             self.assertIn("database_url", result)
             self.assertIn("withdrawals_enabled", result)
+            self.assertIn("groq_api_key", result)
+            self.assertIn("groq_model", result)
+            self.assertIn("groq_research_review_enabled", result)
+            self.assertNotIn("groq_strategy_model", result)
             self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
     def test_config_refuses_a_provider_field_sharing_a_line_with_an_unrelated_setting(self):
@@ -2884,6 +2893,11 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
                 result,
             )
             ast.parse(result, filename="app/daily_research.py")
+            self.assertIn("from .groq_ai import groq_research_review", result)
+            self.assertIn('review["groq_research_review"] = await groq_research_review(research, intelligence)', result)
+            self.assertNotIn("dual_ai_research_review", result)
+            self.assertNotIn("_groq_json", result)
+            self.assertNotIn("settings.groq_strategy_model", result)
             self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
     def test_daily_research_refuses_setup_call_inside_provider_arguments(self):
