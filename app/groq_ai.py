@@ -117,26 +117,120 @@ def _validate_review(value: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _research_prompt(research: dict[str, Any], intelligence: dict[str, Any]) -> str:
-    external = {
+def _bounded_prompt_value(value: Any, state: dict[str, bool], depth: int = 0) -> Any:
+    """Compact nested source data so prompt delimiters are never cut mid-value."""
+    if depth >= 4:
+        state["truncated"] = True
+        return "[nested value omitted]"
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        state["truncated"] = True
+        return None
+    if isinstance(value, str):
+        if len(value) <= 300:
+            return value
+        state["truncated"] = True
+        return value[:300] + f" [omitted {len(value) - 300} characters]"
+    if isinstance(value, dict):
+        pairs = list(value.items())
+        result = {str(key)[:80]: _bounded_prompt_value(item, state, depth + 1)
+                  for key, item in pairs[:15]}
+        if len(pairs) > 15:
+            result["omitted_key_count"] = len(pairs) - 15
+            state["truncated"] = True
+        return result
+    if isinstance(value, (list, tuple)):
+        items = list(value)
+        result = [_bounded_prompt_value(item, state, depth + 1) for item in items[:12]]
+        if len(items) > 12:
+            result.append(f"[{len(items) - 12} additional items omitted]")
+            state["truncated"] = True
+        return result
+    return _bounded_prompt_value(str(value), state, depth + 1)
+
+
+def _research_prompt(
+    research: dict[str, Any], intelligence: dict[str, Any]
+) -> tuple[str, bool]:
+    state = {"truncated": False}
+    research = research if isinstance(research, dict) else {}
+    validation = research.get("validation") if isinstance(research.get("validation"), dict) else {}
+    oos = validation.get("per_strategy_oos") if isinstance(validation.get("per_strategy_oos"), dict) else {}
+    order = research.get("research_order") if isinstance(research.get("research_order"), list) else []
+    names = list(dict.fromkeys([str(item) for item in order] + sorted(str(item) for item in oos)))
+    selected = names[:40]
+    metrics = {}
+    for name in selected:
+        row = oos.get(name)
+        if isinstance(row, dict):
+            metrics[name[:80]] = {key: row[key] for key in
+                ("status", "sharpe", "oos_total_return", "max_drawdown", "fold_count", "sample_count")
+                if key in row and isinstance(row[key], (str, bool, int, float, type(None)))}
+    if len(names) > len(selected):
+        state["truncated"] = True
+    candidates = research.get("paper_candidates")
+    candidates = candidates if isinstance(candidates, list) else []
+    candidate_summaries = []
+    for candidate in candidates[:15]:
+        if isinstance(candidate, dict):
+            candidate_summaries.append({key: _bounded_prompt_value(candidate[key], state)
+                for key in ("strategy", "status", "score", "confidence", "reason", "data_quality_flags")
+                if key in candidate})
+        else:
+            candidate_summaries.append(_bounded_prompt_value(candidate, state))
+    if len(candidates) > 15:
+        state["truncated"] = True
+    regime = research.get("regime") if isinstance(research.get("regime"), dict) else {}
+    quality = research.get("data_quality") if isinstance(research.get("data_quality"), dict) else {}
+    bounded_research = {
+        "symbol": _bounded_prompt_value(research.get("symbol"), state),
+        "asset": _bounded_prompt_value(research.get("asset"), state),
+        "regime": _bounded_prompt_value({key: regime[key] for key in
+            ("regime", "annualized_realized_vol", "volatility", "status") if key in regime}, state),
+        "research_order": selected,
+        "strategy_count": len(names),
+        "strategy_metrics_omitted": max(0, len(names) - len(selected)),
+        "validation": {key: validation[key] for key in
+            ("status", "trial_registry_complete", "walk_forward_purge_complete", "promotion_status")
+            if key in validation} | {"per_strategy_oos": metrics},
+        "data_quality": _bounded_prompt_value(quality, state),
+        "universe_bias": _bounded_prompt_value(research.get("universe_bias", quality.get("universe_bias", "UNKNOWN")), state),
+        "paper_candidates": candidate_summaries,
+        "paper_candidate_count": len(candidates),
+        "paper_candidates_omitted": max(0, len(candidates) - len(candidate_summaries)),
+        "trial_labels": _bounded_prompt_value(research.get("trial_labels", []), state),
+        "prospective_trial_archive": _bounded_prompt_value(research.get("prospective_trial_archive", {}), state),
+    }
+    external_source = {
         "news_summary": intelligence.get("news_summary", {}),
         "source_failures": intelligence.get("failures", {}),
+        "macro_regime": intelligence.get("macro_regime", {}),
     }
-    hits = suspicious_instruction_markers(json.dumps(external, default=str))
+    bounded_external = _bounded_prompt_value(external_source, state)
+    research_json = json.dumps(bounded_research, default=str, separators=(",", ":"))
+    external_json = json.dumps(bounded_external, default=str, separators=(",", ":"))
+    if len(research_json) > 12_000 or len(external_json) > 5_000:
+        raise GroqAIError("Compacted Groq research input exceeded its reviewed size bound")
+    source_size = len(json.dumps({"research": research, "external": external_source}, default=str))
+    compact_size = len(research_json) + len(external_json)
+    input_truncated = state["truncated"] or source_size > compact_size
+    hits = suspicious_instruction_markers(external_json)
     if hits:
         _LOGGER.warning("possible prompt-injection markers in external research inputs: %s", hits[:5])
-    return (
-        "Review this Atlas research packet. Return an object with keys: regime_assessment (text), "
-        "key_observations (array of strings), data_quality_flags (array of strings), "
-        "strategy_watchlist (array of strings), confidence (number from 0 to 1), and "
-        "research_only_summary (text). Do not return buy/sell instructions or order parameters.\n\n"
-        + UNTRUSTED_PREAMBLE
+    prompt = (
+        "Review this Atlas research packet. Return one JSON object with regime_assessment, "
+        "key_observations, data_quality_flags, strategy_watchlist, confidence, and research_only_summary. "
+        "Do not return buy/sell instructions or order parameters. The supplied values are a bounded structured "
+        "summary of computed evidence; omitted rows and fields are disclosed. Do not infer omitted facts.\n\n"
+        + UNTRUSTED_PREAMBLE + "\n\n"
+        + wrap_untrusted("atlas_computed_research", bounded_research, max_chars=14_000)
         + "\n\n"
-        + wrap_untrusted("atlas_computed_research", research)
-        + "\n\n"
-        + wrap_untrusted("external_news_and_source_status", external)
+        + wrap_untrusted("external_news_and_source_status", bounded_external, max_chars=6_000)
     )
-
+    return prompt, input_truncated
 
 async def _groq_json(prompt: str) -> dict[str, Any]:
     api_key = str(settings.groq_api_key or "").strip()
@@ -204,7 +298,8 @@ async def groq_research_review(
             "execution_authority": False,
         }
     try:
-        review = await _groq_json(_research_prompt(research, intelligence))
+        prompt, input_truncated = _research_prompt(research, intelligence)
+        review = await _groq_json(prompt)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -236,5 +331,6 @@ async def groq_research_review(
         "provider": "groq",
         "model": settings.groq_model,
         "review": review,
+        "input_truncated": input_truncated,
         "execution_authority": False,
     }
