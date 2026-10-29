@@ -260,6 +260,7 @@ def test_groq_prompt_discloses_nested_fields_omitted_from_compacted_research():
             "unmodeled_regime_detail": "must be disclosed as omitted",
         },
         "validation": {
+            "trial_labels": ["trial-label-nested-under-validation"],
             "per_strategy_oos": {
                 "TREND": {
                     "status": "OK",
@@ -280,10 +281,46 @@ def test_groq_prompt_discloses_nested_fields_omitted_from_compacted_research():
     prompt, input_truncated = groq_ai._research_prompt(research, {})
 
     assert input_truncated is True
+    assert "trial-label-nested-under-validation" in prompt
     assert "CANDIDATE_EVIDENCE_SENTINEL" in prompt
     assert '"regime_fields_omitted":1' in prompt
     assert '"strategy_metric_fields_omitted":1' in prompt
     assert '"paper_candidate_fields_omitted":1' in prompt
     assert '"omitted_field_count":1' in prompt
     assert "must not be sent" not in prompt
+
+
+def test_groq_prompt_compacts_many_symbol_failures_without_failing_review_input():
+    intelligence = {
+        "news_summary": {"article_count": 300, "headlines": [f"headline-{i}-" + "x" * 350 for i in range(80)]},
+        "failures": {
+            f"SYMBOL_{i:03d}": {"source": "market-data", "reason": "temporarily unavailable " * 12}
+            for i in range(100)
+        },
+        "macro_regime": {
+            f"SYMBOL_{i:03d}": {"regime": "HIGH_VOLATILITY", "details": "y" * 450}
+            for i in range(100)
+        },
+    }
+    research = {
+        "symbol": "EUR_USD",
+        "research_order": [f"STRATEGY_{i:02d}" for i in range(45)],
+        "validation": {
+            "per_strategy_oos": {
+                f"STRATEGY_{i:02d}": {"status": "OK", "sharpe": 0.4}
+                for i in range(45)
+            },
+            "trial_labels": [f"trial-label-{i}" for i in range(20)],
+        },
+        "paper_candidates": [{"strategy": f"STRATEGY_{i:02d}", "score": 0.5} for i in range(45)],
+    }
+
+    prompt, input_truncated = groq_ai._research_prompt(research, intelligence)
+
+    assert input_truncated is True
+    assert len(prompt) < 24_000
+    assert "EUR_USD" in prompt
+    assert "trial-label-0" in prompt
+    assert "size_budget_compaction" in prompt
+    assert "temporarily unavailable" in prompt
 
