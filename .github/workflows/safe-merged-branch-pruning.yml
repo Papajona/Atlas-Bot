@@ -64,7 +64,7 @@ jobs:
 
           # A main push that changes either watched file starts propagation and must wait.
           if [[ "$EVENT_NAME" == "push" ]]; then
-            if ! changed_paths="$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA")"; then
+            if ! changed_paths="$(git diff --no-renames --name-only "$BEFORE_SHA" "$AFTER_SHA")"; then
               skip_pruning=true
               echo "Unable to verify the push diff; preserving every branch."
             else
@@ -110,7 +110,7 @@ jobs:
                 skip_pruning=true
                 echo "Latest Native AI propagation did not succeed; preserving every branch."
               elif git merge-base --is-ancestor "$latest_success_sha" "$AFTER_SHA"; then
-                if ! post_propagation_paths="$(git diff --name-only "$latest_success_sha" "$AFTER_SHA")"; then
+                if ! post_propagation_paths="$(git diff --no-renames --name-only "$latest_success_sha" "$AFTER_SHA")"; then
                   skip_pruning=true
                   echo "Unable to verify changes since successful propagation; preserving every branch."
                 else
