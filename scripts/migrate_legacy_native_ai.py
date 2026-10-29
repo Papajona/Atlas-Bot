@@ -4896,6 +4896,11 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             skip_provider_block = True
             continue
 
+        # The old Groq strategy generator is retired; keep the separate Groq research
+        # review settings below, but remove legacy strategy-selector assignments.
+        if re.match(r"^\s*(?:export\s+)?GROQ_STRATEGY_[A-Z0-9_]+\s*=", line, re.I):
+            continue
+
         # Legacy AI_SECRET_ARGS may be removed only when its assignment is proven to
         # contain retired-provider entries and no supported Groq binding.
         if re.match(r"^\s*(?:export\s+)?AI_SECRET_ARGS\s*=", line, re.I):
@@ -4925,7 +4930,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         # Rewrite list arguments structurally so removing the first element cannot
         # leave an invalid leading comma. Never alter non-provider entries.
         provider_env_key = re.compile(
-            r"(?i)^(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
+            r"(?i)^(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|GROQ_STRATEGY_[A-Z0-9_]+|"
             r"CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)$"
         )
         provider_secret_key = re.compile(
