@@ -43,6 +43,10 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git cat-file -e "$NATIVE_AI_CLEANUP_COMMIT^{commit}"
           git cat-file -e "$NATIVE_AI_CANONICAL_COMMIT^{commit}"
+          if ! git merge-base --is-ancestor "$NATIVE_AI_CANONICAL_COMMIT" "$GITHUB_SHA"; then
+            echo "Pinned Native AI canonical source is not an ancestor of this reviewed main commit; refusing propagation." >&2
+            exit 1
+          fi
           git cat-file -e "$NATIVE_AI_EXTRA_BASE_COMMIT^{commit}"
           if [[ -z "$NATIVE_AI_EXTRA_COMMIT" ]]; then
             echo "Could not locate the reviewed release-diagnostics cleanup commit." >&2
@@ -97,7 +101,7 @@ jobs:
 
           scan_active_provider_refs() {
             local rc=0 matches filtered
-            if matches="$(git grep -nIEi 'gemini|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py')"; then
+            if matches="$(git grep -nIEi 'gemini|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/production-deploy.yml' ':!.github/workflows/production-verification.yml' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py')"; then
               rc=0
             else
               rc=$?
@@ -109,7 +113,7 @@ jobs:
             fi
             # Groq remains supported in app/groq_ai.py; only its legacy strategy adapters are migration targets.
             local legacy_groq_refs=""
-            if legacy_groq_refs="$(git grep -nIEi '_groq_json|settings\.groq_(strategy_model|model|api_key)|GROQ_API_KEY|SECRET_GROQ|api\.groq\.com' -- app ':!app/groq_ai.py' ':!app/daily_research.py' ':!app/config.py')"; then
+            if legacy_groq_refs="$(git grep -nIEi '_groq_json|groq_research_review|from[[:space:]]+\.groq_ai|settings\.groq_(strategy_model|model|api_key)|GROQ_API_KEY|SECRET_GROQ|api\.groq\.com' -- app ':!app/groq_ai.py' ':!app/daily_research.py' ':!app/config.py')"; then
               matches+=$'\n'"$legacy_groq_refs"
             else
               rc=$?
@@ -362,7 +366,7 @@ jobs:
             git clean -fd >/dev/null 2>&1 || true; failed+=("$branch: post-migration provider scan errored; branch left unchanged"); continue; }
           if [[ -n "$after_refs" ]]; then
             echo "ACTIVE PROVIDER REFERENCES REMAIN after semantic migration on $branch:" >&2
-            git grep -nIEi 'gemini|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' >&2 || true
+            git grep -nIEi 'gemini|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/production-deploy.yml' ':!.github/workflows/production-verification.yml' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' >&2 || true
             git grep -nIEi '_groq_json|settings\.groq_(strategy_model|model)|settings\.groq_api_key|GROQ_API_KEY|SECRET_GROQ|api\.groq\.com' -- app/strategy_ai.py app/daily_research.py app/ai_providers.py >&2 || true
             git reset --hard "$start_sha" >/dev/null 2>&1 || true
             git clean -fd >/dev/null 2>&1 || true
