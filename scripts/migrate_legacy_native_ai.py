@@ -4701,8 +4701,8 @@ def scrub_shell_deployment(path: str, text: str) -> str:
     output: list[str] = []
     skip_provider_block = False
     variable_pattern = re.compile(
-        r"(?i)\b(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_GROQ[A-Z0-9_]*|"
-        r"GEMINI_API_KEY|GROQ_API_KEY|GROQ_SECRET_ARG|AI_SECRET_ARGS|"
+        r"(?i)\b(?:SECRET_GEMINI[A-Z0-9_]*|"
+        r"GEMINI_API_KEY|AI_SECRET_ARGS|"
         r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\b"
     )
     for original in text.splitlines(keepends=True):
@@ -4716,8 +4716,8 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                     or re.match(r"^(?:else|elif\b|then\b)", stripped, re.I)):
                 continue
             provider_assignment = re.match(
-                r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_GROQ[A-Z0-9_]*|"
-                r"GEMINI_API_KEY|GROQ_API_KEY|GROQ_SECRET_ARG|AI_SECRET_ARGS|"
+                r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
+                r"GEMINI_API_KEY|AI_SECRET_ARGS|"
                 r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
                 line, re.I,
             )
@@ -4739,16 +4739,16 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             continue
 
         # Provider-only shell declarations/guards/secret commands have no unrelated payload.
-        if re.match(r"^\s*(?::\s*)?['\"]?\$\{?(?:SECRET_GEMINI|GEMINI_API_KEY|GROQ_API_KEY)", line, re.I):
+        if re.match(r"^\s*(?::\s*)?['\"]?\$\{?(?:SECRET_GEMINI|GEMINI_API_KEY)", line, re.I):
             continue
         if re.match(
-            r"^\s*(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_GROQ[A-Z0-9_]*|"
-            r"GEMINI_API_KEY|GROQ_API_KEY|GROQ_SECRET_ARG|AI_SECRET_ARGS|"
+            r"^\s*(?:SECRET_GEMINI[A-Z0-9_]*|"
+            r"GEMINI_API_KEY|AI_SECRET_ARGS|"
             r"CEREBRAS_API_KEY|AI_GATEWAY_API_KEY)\s*=",
             line, re.I,
         ):
             continue
-        if re.search(r"(?i)\b(?:create_secret|grant_secret_access)\s+atlas-(?:gemini|groq|cerebras|ai-gateway|openai)\b", line):
+        if re.search(r"(?i)\b(?:create_secret|grant_secret_access)\s+atlas-(?:gemini|cerebras|ai-gateway|openai)\b", line):
             continue
         if stripped.startswith("#") and PROVIDER_RE.search(line):
             continue
@@ -4756,7 +4756,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         # Remove provider entries from combined Cloud Run env-var lists.
         if "ENV_VARS=" in line:
             line = re.sub(
-                r"@(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|GROQ_MODEL|GROQ_STRATEGY_MODEL|"
+                r"@(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
                 r"GROQ_MAX_COMPLETION_TOKENS|CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^@\"]*",
                 "",
                 line,
@@ -4764,7 +4764,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             )
         if "--set-env-vars" in line:
             line = re.sub(
-                r",?(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|GROQ_MODEL|GROQ_STRATEGY_MODEL|"
+                r",?(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
                 r"GROQ_MAX_COMPLETION_TOKENS|CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^,\"]*",
                 "",
                 line,
@@ -4772,28 +4772,28 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             )
         if "--set-secrets" in line:
             line = re.sub(
-                r",?(?:GEMINI_API_KEY|GROQ_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|OPENAI_API_KEY)=[^,\"]*",
+                r",?(?:GEMINI_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|OPENAI_API_KEY)=[^,\"]*",
                 "",
                 line,
                 flags=re.I,
             )
-            line = re.sub(r",?\$\{(?:AI_SECRET_ARGS|GROQ_SECRET_ARG)\}", "", line)
+            line = re.sub(r",?\$\{(?:AI_SECRET_ARGS)\}", "", line)
         # Provider secret names in bootstrap allowlists are independent list items.
         if "for secret in" in line:
             line = re.sub(
-                r"\s+atlas-(?:gemini|groq|cerebras|ai-gateway|openai)[-a-z0-9]*",
+                r"\s+atlas-(?:gemini|cerebras|ai-gateway|openai)[-a-z0-9]*",
                 "",
                 line,
                 flags=re.I,
             )
         # Strip any remaining provider-only executable line. If a mixed executable line
         # still contains a provider token, refuse the branch rather than damage its command.
-        if PROVIDER_RE.search(line):
+        if RETIRED_PROVIDER_RE.search(line):
             if stripped.startswith("#"):
                 continue
             warning_only = (
                 re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
-                and re.search(r"(?i)\b(?:gemini|groq|cerebras|ai.?gateway|openai)\b", stripped)
+                and re.search(r"(?i)\b(?:gemini|cerebras|ai.?gateway|openai)\b", stripped)
                 and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", stripped)
             )
             if warning_only:
@@ -4803,14 +4803,14 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 commands = [part.strip() for part in inline_if.group(1).split(";") if part.strip()]
                 safe_inline = all(
                     re.match(
-                        r"^(?::|(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_GROQ[A-Z0-9_]*|"
-                        r"GEMINI_API_KEY|GROQ_API_KEY|GROQ_SECRET_ARG|AI_SECRET_ARGS|"
+                        r"^(?::|(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
+                        r"GEMINI_API_KEY|AI_SECRET_ARGS|"
                         r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=)",
                         command, re.I,
                     )
                     or (
                         re.match(r"^(?:echo|printf)\b", command, re.I)
-                        and re.search(r"(?i)\b(?:gemini|groq|cerebras|ai.?gateway|openai)\b", command)
+                        and re.search(r"(?i)\b(?:gemini|cerebras|ai.?gateway|openai)\b", command)
                         and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", command)
                     )
                     for command in commands
