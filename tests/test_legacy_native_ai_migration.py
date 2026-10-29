@@ -1928,6 +1928,37 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
                     + [legacy_context + "\n"]
                     + legacy_lines_for_context[context_node.end_lineno:]
                 )
+            if label == "two-provider":
+                # Put the import after the short legacy context helper. Replacing the
+                # helper lengthens source before that import, so stale AST locations
+                # would edit the wrong lines unless the import nodes are reparsed.
+                provider_import_line = "from .ai_providers import AIProviderError, _gemini_json, _groq_json"
+                legacy_without_provider_import = "".join(
+                    line for line in legacy.splitlines(keepends=True)
+                    if line.strip() != provider_import_line
+                )
+                layout_tree = ast.parse(legacy_without_provider_import)
+                context_node = next(
+                    node for node in layout_tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+                )
+                layout_lines = legacy_without_provider_import.splitlines(keepends=True)
+                layout_lines.insert(context_node.end_lineno, provider_import_line + "\n")
+                legacy_import_after_context = "".join(layout_lines)
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    target = root / "app" / "strategy_ai.py"
+                    target.parent.mkdir()
+                    target.write_text(legacy_import_after_context, encoding="utf-8")
+                    with patch.object(migration, "ROOT", root), patch.object(
+                        migration, "canonical_text", return_value=CANONICAL_STRATEGY
+                    ):
+                        migration.transform_strategy_ai("fake-commit")
+                    transformed = target.read_text(encoding="utf-8")
+                    ast.parse(transformed, filename="app/strategy_ai.py")
+                    self.assertNotRegex(transformed, migration.PROVIDER_RE)
+                    self.assertIn("from .native_ai import NativeAIError, compose_strategy_spec", transformed)
+
             with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 target = root / "app" / "strategy_ai.py"
@@ -2147,6 +2178,17 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
         self.assertTrue(migration._safe_canonical_trade_safety_validator(
             wording_tree.body[0], canonical_validator, wording_variant
         ))
+        side_effect_message = legacy_validator.replace(
+            'AIProviderError("Trade-safety response must be a JSON object")',
+            "AIProviderError(audit_error_message())",
+        )
+        side_effect_tree = ast.parse(side_effect_message)
+        self.assertFalse(
+            migration._safe_canonical_trade_safety_validator(
+                side_effect_tree.body[0], canonical_validator, side_effect_message
+            ),
+            "message expressions with calls must not be erased as harmless wording",
+        )
         changed_behavior = legacy_validator.replace(
             "    return value\n",
             '    value["validated_by_legacy"] = True\n    return value\n',
@@ -2221,6 +2263,65 @@ def _validate_trade_safety_payload(value: dict[str, Any]) -> dict[str, Any]:
                 ):
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), altered)
+
+        side_effect_message = legacy.replace(
+            'AIProviderError("Trade-safety response must be a JSON object")',
+            "AIProviderError(audit_error_message())",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(side_effect_message, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "branch-specific definition '_validate_trade_safety_payload'",
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), side_effect_message)
+
+    def test_legacy_market_context_rejects_rebinding_and_dynamic_lookups(self):
+        safe_source = """class AIStrategySpec:
+    pass
+
+def _apply_market_context(spec, *, asset=None, symbol=None, timeframe=None):
+    return spec
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    _apply_market_context(spec, asset=asset, symbol=symbol, timeframe=timeframe)
+    return await _generate_with_provider("gemini", prompt)
+"""
+        def replaceable(source):
+            tree = ast.parse(source)
+            generator = next(
+                node for node in tree.body
+                if isinstance(node, ast.AsyncFunctionDef)
+                and node.name == "generate_strategy_draft"
+            )
+            return migration._is_replaceable_legacy_market_context(tree, generator)
+
+        self.assertIsNotNone(replaceable(safe_source))
+
+        rebound = safe_source + "\n_apply_market_context = replacement\n"
+        self.assertIsNone(
+            replaceable(rebound),
+            "later stores to the helper name must prevent canonical replacement",
+        )
+
+        dynamic_lookup = safe_source + '\n_context = globals()["_apply_market_context"]\n'
+        self.assertIsNone(
+            replaceable(dynamic_lookup),
+            "literal-name reflection must prevent canonical replacement",
+        )
+
+        reflective_lookup = safe_source + '\n_context = getattr(module, "_apply_market_context")\n'
+        self.assertIsNone(
+            replaceable(reflective_lookup),
+            "dynamic attribute lookups must prevent canonical replacement",
+        )
 
     def test_strategy_migration_refuses_to_discard_generator_validation(self):
         legacy = (
