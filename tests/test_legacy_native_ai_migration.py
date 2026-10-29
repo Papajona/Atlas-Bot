@@ -3384,6 +3384,38 @@ for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-ope
         self.assertIn('OTHER_KEY=atlas-other:latest,${AI_SECRET_ARGS}', cleaned)
         self.assertNotIn("GEMINI_API_KEY", cleaned)
 
+    def test_shell_scrub_produces_valid_secret_argument_with_groq_enabled_or_disabled(self):
+        source = """AI_SECRET_ARGS=""
+AI_SECRET_ARGS="${AI_SECRET_ARGS},GEMINI_API_KEY=atlas-gemini-api-key:latest"
+if [[ -n "${GROQ_ENABLED:-}" ]]; then
+  AI_SECRET_ARGS="${AI_SECRET_ARGS},GROQ_API_KEY=atlas-groq-api-key:1"
+fi
+gcloud run services update atlas-api --set-secrets="DATABASE_URL=atlas-db:latest,${AI_SECRET_ARGS}"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        for enabled, expected in (
+            ("1", "DATABASE_URL=atlas-db:latest,GROQ_API_KEY=atlas-groq-api-key:1"),
+            ("", "DATABASE_URL=atlas-db:latest"),
+        ):
+            command = (
+                "gcloud() {\n"
+                "  for arg in \"$@\"; do\n"
+                "    case \"$arg\" in --set-secrets=*) printf '%s\\n' \"${arg#--set-secrets=}\" ;; esac\n"
+                "  done\n"
+                "}\n"
+                + cleaned
+            )
+            result = subprocess.run(
+                ["bash", "-c", command],
+                capture_output=True,
+                text=True,
+                check=True,
+                env={**__import__("os").environ, "GROQ_ENABLED": enabled},
+            )
+            self.assertEqual(result.stdout.strip(), expected)
+            self.assertNotIn(",,", result.stdout)
+            self.assertFalse(result.stdout.strip().endswith(","))
+
     def test_shell_scrub_handles_equals_style_cloud_run_flags(self):
         source = (
             'gcloud run deploy atlas --set-env-vars="ENVIRONMENT=paper,GEMINI_MODEL=gemini-3.5-flash,GROQ_MODEL=openai/gpt-oss-20b" '
