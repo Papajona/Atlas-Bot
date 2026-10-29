@@ -111,7 +111,7 @@ def _validate_groq_research_result(value: Any) -> dict[str, Any]:
     if status != "OK" or value.get("provider") != "groq" or value.get("execution_authority") is not False:
         raise ValueError("Groq result does not have the reviewed research-only envelope")
     model = value.get("model")
-    if not isinstance(model, str) or not model.strip() or len(model) > 200:
+    if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", model):
         raise ValueError("Groq result model is invalid")
 
     review = value.get("review")
