@@ -25,8 +25,8 @@ def test_propagation_uses_ancestral_pinned_source_and_semantic_workflow_validati
     migration = MIGRATION.read_text(encoding="utf-8")
 
     assert 'git merge-base --is-ancestor "$NATIVE_AI_CANONICAL_COMMIT" "$GITHUB_SHA"' in workflow
-    assert workflow.count("':!.github/workflows/production-deploy.yml'") == 1
-    assert workflow.count("':!.github/workflows/production-verification.yml'") == 1
+    assert workflow.count("':!.github/workflows/production-deploy.yml'") == 2
+    assert workflow.count("':!.github/workflows/production-verification.yml'") == 2
     assert "groq_research_review" in workflow
     assert "app/prompt_safety.py" in workflow
     # Workflow labels can mention retired providers without being active wiring. The
