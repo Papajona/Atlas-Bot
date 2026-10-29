@@ -4709,21 +4709,21 @@ def scrub_shell_deployment(path: str, text: str) -> str:
     # conditionals verbatim, but fail closed if they wrap unrelated deployment commands.
     source_lines = text.splitlines(keepends=True)
     groq_condition = re.compile(
-        r"(?i)\\b(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
-        r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED)\\b"
+        r"(?i)\b(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
+        r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED)\b"
     )
     groq_allowed = re.compile(
-        r"(?i)^\\s*(?:(?:export\\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|"
+        r"(?i)^\s*(?:(?:export\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|"
         r"GROQ_SECRET_ARG|GROQ_SECRET_ARGS|GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|"
-        r"GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\\s*=|"
-        r"(?:echo|printf)\\b.*\\b(?:groq|warning|not configured|optional|disabled)\\b|"
-        r"(?:if|then|else|fi)\\b|#|$)"
+        r"GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\s*=|"
+        r"(?:echo|printf)\b.*\b(?:groq|warning|not configured|optional|disabled)\b|"
+        r"(?:if|then|else|fi)\b|#|$)"
     )
     block_start = 0
     while block_start < len(source_lines):
         source_line = source_lines[block_start]
-        if re.match(r"^\\s*if\\b", source_line, re.I) and groq_condition.search(source_line):
-            inline = re.match(r"^\\s*if\\b.*?\\bthen\\s*(.*?);\\s*fi\\s*$", source_line, re.I)
+        if re.match(r"^\s*if\b", source_line, re.I) and groq_condition.search(source_line):
+            inline = re.match(r"^\s*if\b.*?\bthen\s*(.*?);\s*fi\s*$", source_line, re.I)
             if inline:
                 inline_commands = [chunk.strip() for chunk in inline.group(1).split(";") if chunk.strip()]
                 if any(not groq_allowed.match(command) for command in inline_commands):
@@ -4735,12 +4735,12 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             indent = len(source_line) - len(source_line.lstrip())
             end = block_start + 1
             while end < len(source_lines):
-                if re.match(r"^\\s*fi\\b", source_lines[end], re.I):
+                if re.match(r"^\s*fi\b", source_lines[end], re.I):
                     break
                 if source_lines[end].strip() and len(source_lines[end]) - len(source_lines[end].lstrip()) < indent:
                     break
                 end += 1
-            if end >= len(source_lines) or not re.match(r"^\\s*fi\\b", source_lines[end], re.I):
+            if end >= len(source_lines) or not re.match(r"^\s*fi\b", source_lines[end], re.I):
                 raise MigrationError(f"{path} has an unterminated Groq-conditioned block")
             for block_line in source_lines[block_start + 1:end]:
                 if not block_line.strip() or block_line.lstrip().startswith("#"):
