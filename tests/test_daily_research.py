@@ -214,16 +214,13 @@ def test_refresh_lock_logs_redis_renewal_exception(monkeypatch, caplog):
 
 
 
-def test_review_update_skips_when_research_run_insert_did_not_succeed(monkeypatch):
+def test_review_update_skips_when_research_run_insert_did_not_succeed():
     import app.daily_research as dr
 
-    def unexpected_session():
-        raise AssertionError("must not query or update any pre-existing audit without the inserted row ID")
-
-    monkeypatch.setattr(dr, "_update_persisted_research_review", dr._update_persisted_research_review)
-    from app.db import ResearchRun  # noqa: F401 -- import guards model availability
-    monkeypatch.setattr(dr, "settings", dr.settings)
-
-    # The guard runs before SessionLocal is imported/accessed, so a missing inserted ID
+    # The guard runs before SessionLocal is accessed, so a missing inserted ID
     # cannot fall through and overwrite an earlier run for the same symbol.
-    assert asyncio.run(dr._update_persisted_research_review(None, {"groq_research_review": {"status": "OK"}})) is False
+    assert asyncio.run(
+        dr._update_persisted_research_review(
+            None, {"groq_research_review": {"status": "OK"}}
+        )
+    ) is False

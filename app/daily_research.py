@@ -247,8 +247,8 @@ async def _update_persisted_research_review(
         raise
     except Exception as exc:
         logging.getLogger(__name__).warning(
-            "research_review_audit_update_failed symbol=%s error_type=%s",
-            symbol,
+            "research_review_audit_update_failed research_run_id=%s error_type=%s",
+            research_run_id,
             type(exc).__name__,
             exc_info=True,
         )
