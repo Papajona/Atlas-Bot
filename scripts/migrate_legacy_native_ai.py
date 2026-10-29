@@ -815,7 +815,8 @@ def transform_config() -> None:
     removable_lines: set[int] = set()
 
     def is_provider_field(name: str) -> bool:
-        return bool(PROVIDER_FIELD_RE.search(name))
+        # Groq is supported through a separate research-only adapter.
+        return bool(PROVIDER_FIELD_RE.search(name)) and not bool(re.search(r"(?i)groq", name))
 
     postponed_annotations = _uses_postponed_annotations(tree)
 
@@ -1094,11 +1095,55 @@ def transform_config() -> None:
     result = "".join(line for number, line in enumerate(lines, start=1) if number not in removable_lines)
     result = "".join(
         line for line in result.splitlines(keepends=True)
-        if not (line.lstrip().startswith("#") and PROVIDER_RE.search(line))
+        if not (line.lstrip().startswith("#") and RETIRED_PROVIDER_RE.search(line))
     )
-    if PROVIDER_RE.search(result):
+    # Supply the separate Groq research-review settings on legacy branches that
+    # predate them, without overwriting settings already present on a branch.
+    post_cleanup_tree = ast.parse(result, filename=str(path))
+    settings_class = next(
+        (node for node in post_cleanup_tree.body
+         if isinstance(node, ast.ClassDef)
+         and node.name.lower() in {"settings", "appsettings", "atlassettings"}),
+        None,
+    )
+    if settings_class is None:
+        raise MigrationError("app/config.py has no recognized Settings class; cannot retain Groq")
+    existing_groq_fields = {
+        name
+        for node in settings_class.body
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        for name in target_names(target)
+    }
+    groq_field_definitions = [
+        ("groq_api_key", '    groq_api_key: str = ""'),
+        ("groq_model", '    groq_model: str = "openai/gpt-oss-20b"'),
+        ("groq_max_completion_tokens", "    groq_max_completion_tokens: int = 2048"),
+        ("groq_timeout_seconds", "    groq_timeout_seconds: float = 20.0"),
+        ("groq_research_review_enabled", "    groq_research_review_enabled: bool = True"),
+    ]
+    missing_groq_fields = [
+        source_line for field_name, source_line in groq_field_definitions
+        if field_name not in existing_groq_fields
+    ]
+    if missing_groq_fields:
+        class_methods = [
+            node for node in settings_class.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        first_method_line = min(
+            [min([node.lineno, *[decorator.lineno for decorator in node.decorator_list]])
+             for node in class_methods]
+            or [settings_class.end_lineno or settings_class.lineno + 1]
+        )
+        result_lines = result.splitlines(keepends=True)
+        result_lines[first_method_line - 1:first_method_line - 1] = [
+            source_line + "\n" for source_line in missing_groq_fields
+        ]
+        result = "".join(result_lines)
+    if RETIRED_PROVIDER_RE.search(result):
         raise MigrationError(
-            "app/config.py still contains provider text outside isolated Settings fields; refusing lossy cleanup"
+            "app/config.py still contains retired-provider text outside isolated Settings fields; refusing lossy cleanup"
         )
     ast.parse(result, filename=str(path))
     path.write_text(result, encoding="utf-8")
@@ -2086,8 +2131,8 @@ def transform_ai_providers(commit: str) -> None:
         pieces.extend(extras)
     result = "\n\n".join(piece for piece in pieces if piece.strip()) + "\n"
     ast.parse(result, filename=str(path))
-    if PROVIDER_RE.search(result):
-        raise MigrationError("app/ai_providers.py still contains hosted-provider wiring after facade migration")
+    if RETIRED_PROVIDER_RE.search(result):
+        raise MigrationError("app/ai_providers.py still contains retired-provider wiring after facade migration")
     path.write_text(result, encoding="utf-8")
 
 
@@ -4428,8 +4473,8 @@ def transform_strategy_ai(commit: str) -> None:
     if not found_generate or not ai_provider_imports:
         raise MigrationError("strategy module layout is unexpected; refusing lossy rewrite")
     result = _apply_line_edits(source, edits)
-    if PROVIDER_RE.search(result):
-        raise MigrationError("strategy module still contains provider references")
+    if RETIRED_PROVIDER_RE.search(result):
+        raise MigrationError("strategy module still contains retired-provider references")
     ast.parse(result, filename=str(path))
     path.write_text(result, encoding="utf-8")
 
@@ -4557,18 +4602,19 @@ def transform_daily_research() -> None:
             indent + "native_research_input = dict(research)",
             indent + 'native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))',
             indent + 'review["native_ai_review"] = native_research_review(native_research_input, intelligence)',
+            indent + 'review["groq_research_review"] = await groq_research_review(research, intelligence)',
         )) + "\n"
         edits.append((node.lineno, node.end_lineno, replacement))
         found_callsite = True
         break
     for index, line in enumerate(lines, start=1):
         if re.search(r"^\s*from\s+\.ai_providers\s+import\s+dual_ai_research_review\b", line):
-            edits.append((index, index, "from .native_ai import native_research_review\n"))
+            edits.append((index, index, "from .native_ai import native_research_review\nfrom .groq_ai import groq_research_review\n"))
     if not found_callsite:
         raise MigrationError("daily-research provider callsite is unexpected; refusing lossy rewrite")
     result = _apply_line_edits(source, edits)
-    if PROVIDER_RE.search(result):
-        raise MigrationError("daily research still contains provider references")
+    if RETIRED_PROVIDER_RE.search(result):
+        raise MigrationError("daily research still contains retired-provider references")
     ast.parse(result, filename=str(path))
     path.write_text(result, encoding="utf-8")
 
@@ -4789,8 +4835,8 @@ def scrub_shell_deployment(path: str, text: str) -> str:
     if skip_provider_block:
         raise MigrationError(f"{path} has an unterminated provider-specific shell block")
     cleaned = "".join(output)
-    if PROVIDER_RE.search(cleaned):
-        raise MigrationError(f"{path} still contains hosted-provider wiring after shell cleanup")
+    if RETIRED_PROVIDER_RE.search(cleaned):
+        raise MigrationError(f"{path} still contains retired-provider wiring after shell cleanup")
     return cleaned
 
 
@@ -4986,7 +5032,7 @@ def scrub_ancillary_text(path: str, text: str) -> str:
 
     kept: list[str] = []
     for line in text.splitlines(keepends=True):
-        if not PROVIDER_RE.search(line):
+        if not RETIRED_PROVIDER_RE.search(line):
             kept.append(line)
             continue
         candidate = SECRET_VERSION_RE.sub("", line)
@@ -4994,15 +5040,15 @@ def scrub_ancillary_text(path: str, text: str) -> str:
         candidate = HOST_RE.sub("", candidate)
         candidate = MODEL_RE.sub("atlas-native-strategy-v1", candidate)
         candidate = re.sub(r"(?i)\b(?:Gemini|Groq|Cerebras|AI Gateway)\b", "", candidate)
-        if PROVIDER_RE.search(candidate):
+        if RETIRED_PROVIDER_RE.search(candidate):
             if re.search(r"(?i)\b(?:gcloud|docker|curl|python|bash|run:)\b", candidate):
                 raise MigrationError(f"{path} has provider wiring inside an executable line; refusing automatic deletion")
             candidate = PROVIDER_RE.sub("legacy provider", candidate)
         if candidate.strip():
             kept.append(candidate)
     cleaned = "".join(_remove_empty_env(kept))
-    if PROVIDER_RE.search(cleaned):
-        raise MigrationError(f"{path} still contains provider references")
+    if RETIRED_PROVIDER_RE.search(cleaned):
+        raise MigrationError(f"{path} still contains retired-provider references")
     if path == "metadata.json":
         json.loads(cleaned)
     return cleaned
@@ -5128,7 +5174,7 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
         elif path in {".github/workflows/production-deploy.yml", ".github/workflows/production-verification.yml"}:
             if _workflow_has_active_provider_wiring(contents):
                 remaining.append(path)
-        elif PROVIDER_RE.search(contents):
+        elif RETIRED_PROVIDER_RE.search(contents):
             remaining.append(path)
     if remaining:
         raise MigrationError("provider references remain in: " + ", ".join(remaining))
