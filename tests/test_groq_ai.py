@@ -324,3 +324,21 @@ def test_groq_prompt_compacts_many_symbol_failures_without_failing_review_input(
     assert "size_budget_compaction" in prompt
     assert "temporarily unavailable" in prompt
 
+
+def test_groq_prompt_build_failure_records_unknown_truncation_status():
+    with _settings(
+        groq_api_key="test-key-not-a-real-secret",
+        groq_model="openai/gpt-oss-20b",
+        groq_max_completion_tokens=2048,
+        groq_timeout_seconds=20.0,
+        groq_research_review_enabled=True,
+    ), patch.object(
+        groq_ai, "_research_prompt", side_effect=groq_ai.GroqAIError("compaction unavailable")
+    ):
+        result = asyncio.run(groq_ai.groq_research_review({"symbol": "EUR_USD"}, {}))
+
+    assert result["status"] == "ERROR"
+    assert result["input_truncated"] is None
+    assert result["input_truncation_status"] == "UNKNOWN"
+    assert result["execution_authority"] is False
+
