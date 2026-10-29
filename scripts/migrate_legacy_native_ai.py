@@ -176,6 +176,29 @@ def _safe_canonical_trade_safety_validator(
     if not eligible_signature(node) or not eligible_signature(canonical_node):
         return False
 
+    def inert_error_message(expression: ast.AST) -> bool:
+        # The canonical validator uses literal messages and f-strings interpolating
+        # the local loop variable only. Never normalize away calls, attributes, or
+        # other expressions whose evaluation could have side effects or raise.
+        if isinstance(expression, ast.Constant):
+            return isinstance(expression.value, str)
+        if not isinstance(expression, ast.JoinedStr):
+            return False
+        for part in expression.values:
+            if isinstance(part, ast.Constant):
+                if not isinstance(part.value, str):
+                    return False
+                continue
+            if not (
+                isinstance(part, ast.FormattedValue)
+                and isinstance(part.value, ast.Name)
+                and part.value.id == "field"
+                and part.conversion == -1
+                and part.format_spec is None
+            ):
+                return False
+        return True
+
     def normalized(function: ast.FunctionDef) -> str | None:
         try:
             clone = ast.parse(ast.unparse(function)).body[0]
@@ -202,6 +225,7 @@ def _safe_canonical_trade_safety_validator(
                 or error.func.id != "AIProviderError"
                 or len(error.args) != 1
                 or error.keywords
+                or not inert_error_message(error.args[0])
             ):
                 return None
             error.args[0] = ast.Constant(value="__CANONICAL_VALIDATION_ERROR__")
@@ -3223,7 +3247,23 @@ def _is_replaceable_legacy_market_context(
         return None
 
     # This helper is removed from runtime use together with generate_strategy_draft.
-    # Reject aliases, additional callers, and dynamic lookups elsewhere in the module.
+    # Reject rebinding, deletion, reflection, and literal-name lookups anywhere in the
+    # module; one direct call does not prove the helper has no dynamic/hidden callers.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "_apply_market_context":
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                return None
+        if isinstance(node, ast.Constant) and node.value == "_apply_market_context":
+            return None
+        if isinstance(node, (ast.Global, ast.Nonlocal)) and "_apply_market_context" in node.names:
+            return None
+        if isinstance(node, ast.Call):
+            function = node.func
+            if isinstance(function, ast.Name) and function.id in {
+                "globals", "locals", "vars", "getattr", "setattr", "delattr", "eval", "exec"
+            }:
+                return None
+
     references = [
         node for node in ast.walk(tree)
         if isinstance(node, ast.Name) and node.id == "_apply_market_context"
@@ -3991,6 +4031,15 @@ def transform_strategy_ai(commit: str) -> None:
             raise MigrationError(
                 "strategy schema/context helpers do not satisfy the canonical Native AI draft contract; refusing to replace the hosted generator"
             )
+
+    # Context replacement changes source line positions. Always derive import nodes
+    # from the current reparsed tree rather than retaining pre-replacement AST locations.
+    ai_provider_imports = [
+        node for node in old_tree.body
+        if isinstance(node, ast.ImportFrom)
+        and node.level == 1
+        and node.module == "ai_providers"
+    ]
 
     edits: list[tuple[int, int, str]] = []
     found_generate = False
