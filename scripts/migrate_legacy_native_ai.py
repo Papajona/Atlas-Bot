@@ -4593,7 +4593,12 @@ def _ensure_groq_review_persisted(source: str, filename: str) -> str:
             offset = sum(len(line) for line in source_lines[:projection.end_lineno - 1]) + column
             if offset < 1 or source[offset - 1:offset] != "}":
                 raise MigrationError(f"{filename} has an unexpected ResearchRun.review_json mapping")
-            insertions.append((offset - 1, ', "groq_research_review": review.get("groq_research_review")'))
+            addition = (
+                '"groq_research_review": review.get("groq_research_review")'
+                if source[:offset - 1].rstrip().endswith(",")
+                else ', "groq_research_review": review.get("groq_research_review")'
+            )
+            insertions.append((offset - 1, addition))
             continue
         if not isinstance(projection, ast.DictComp):
             continue
