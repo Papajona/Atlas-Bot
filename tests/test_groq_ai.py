@@ -182,3 +182,37 @@ def test_groq_review_can_be_disabled_even_when_a_key_exists():
 
     assert result["status"] == "DISABLED"
     assert result["execution_authority"] is False
+
+
+def test_groq_prompt_compacts_large_research_without_arbitrary_json_prefix():
+    names = [f"STRATEGY_{index:02d}" for index in range(45)]
+    research = {
+        "symbol": "EUR_USD",
+        "research_order": names,
+        "regime": {"regime": "HIGH_VOLATILITY", "annualized_realized_vol": 0.28},
+        "validation": {
+            "trial_registry_complete": True,
+            "walk_forward_purge_complete": True,
+            "per_strategy_oos": {
+                name: {"status": "OK", "sharpe": 0.4, "oos_total_return": 0.05,
+                       "max_drawdown": -0.1, "large_fold_dump": "X" * 5_000}
+                for name in names
+            },
+        },
+        "paper_candidates": [{"strategy": name, "score": 0.5} for name in names],
+        "raw_walk_forward_dump": "UNNECESSARY_RAW_DETAIL" * 20_000,
+    }
+    intelligence = {
+        "news_summary": {"article_count": 60, "headlines": ["market headline " + str(i) for i in range(60)]},
+        "failures": {},
+    }
+
+    prompt, input_truncated = groq_ai._research_prompt(research, intelligence)
+
+    assert input_truncated is True
+    assert len(prompt) < 24_000
+    assert "EUR_USD" in prompt
+    assert "strategy_metrics_omitted" in prompt
+    assert "paper_candidates_omitted" in prompt
+    assert "UNNECESSARY_RAW_DETAIL" not in prompt
+    assert '"[truncated]"' not in prompt
