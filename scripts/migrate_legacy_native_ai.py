@@ -5113,6 +5113,10 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if stripped.startswith("#") and RETIRED_PROVIDER_RE.search(line):
             continue
 
+        if re.match(r"^\s*(?:export\s+)?AI_SECRET_ARGS\s*=", line, re.I):
+            output.append(scrub_ai_secret_args(line))
+            continue
+
         # Remove retired pairs and normalize commas after deletion, while retaining Groq expansions.
         if "ENV_VARS=" in line:
             env_match = re.search(r"(ENV_VARS\\s*=\\s*)(['\\"])(.*?)\\2", line)
@@ -5225,15 +5229,17 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
         line = lines[index]
         stripped = line.lstrip()
         if not stripped or stripped.startswith("#"):
+            kept.append(line)
             index += 1
             continue
 
-        run_match = re.match(r"^([ \t]*)run:[ \t]*(.*?)[ \t]*(?:\r?\n)?$", line)
+        run_match = re.match(r"^([ \t]*)(-[ \t]+)?run:[ \t]*(.*?)[ \t]*(?:\r?\n)?$", line)
         if run_match:
-            indent_text, value = run_match.groups()
+            indent_text, list_marker, value = run_match.groups()
             indent = len(indent_text)
             value = value.strip()
-            if value in {"|", "|-", "|+", ">", ">-"} or not value:
+            block_indicator = re.sub(r"\s+#.*$", "", value).strip()
+            if block_indicator in {"|", "|-", "|+", ">", ">-"} or not value:
                 end = index + 1
                 while end < len(lines):
                     candidate = lines[end]
@@ -5254,7 +5260,7 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                     for item in block
                 )
                 if RETIRED_PROVIDER_RE.search(body) or ATLAS_PROVIDER_SECRET_RE.search(body):
-                    cleaned = scrub_shell_deployment("deploy/cloud-run-deploy.sh", body)
+                    cleaned = scrub_shell_deployment(path, body)
                     if not cleaned.strip():
                         raise MigrationError(
                             f"{path} contains a provider-only run block; refusing to leave an invalid workflow step"
@@ -5267,13 +5273,13 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                 index = end
                 continue
             if RETIRED_PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value):
-                cleaned = scrub_shell_deployment("deploy/cloud-run-deploy.sh", value)
+                cleaned = scrub_shell_deployment(path, value)
                 if not cleaned.strip():
                     raise MigrationError(
                         f"{path} contains a provider-only inline run; refusing to leave an invalid workflow step"
                     )
                 newline = "\n" if line.endswith("\n") else ""
-                kept.append(f"{indent_text}run: {cleaned.strip()}{newline}")
+                kept.append(f"{indent_text}{list_marker or ''}run: {cleaned.strip()}{newline}")
                 index += 1
                 continue
 
