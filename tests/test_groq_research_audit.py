@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
+
 import pytest
 from fastapi import HTTPException
-from datetime import datetime, timezone
 
 from app import admin_rbac, main
 
