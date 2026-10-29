@@ -10,6 +10,8 @@ from scripts.binance_spot_testnet_acceptance import (
     _net_filled_base,
     _verified_net_filled_base,
     _reconcile_buy_order,
+    _protective_stop_minimum_buy_budget,
+    _validate_protective_stop_min_notional,
     active_spot_api_urls,
     cleanup_new_spot_base,
     require_testnet_spot_endpoints,
@@ -641,6 +643,51 @@ def test_partial_buy_is_canceled_and_final_fill_is_preserved(monkeypatch):
     assert cap == Decimal("0.39")
 
 
+def test_known_buy_order_read_failure_cancels_and_waits_for_terminal_confirmation(monkeypatch):
+    from scripts import binance_spot_testnet_acceptance as drill
+
+    monkeypatch.setattr(drill.time, "sleep", lambda _: None)
+
+    class FakeClient:
+        def __init__(self):
+            self.canceled = []
+
+        def cancel_order(self, order_id, symbol):
+            self.canceled.append((order_id, symbol))
+            return {"id": order_id, "status": "canceled"}
+
+    class FakeBroker:
+        def __init__(self):
+            self.reads = 0
+
+        def fetch_order(self, order_id, symbol):
+            self.reads += 1
+            if self.reads <= 2:
+                raise RuntimeError("temporary exchange order-read outage")
+            return {
+                "id": order_id,
+                "status": "canceled",
+                "filled": "0.4",
+                "fee": {"currency": "BTC", "cost": "0.01"},
+            }
+
+    client, broker = FakeClient(), FakeBroker()
+    order_id, state, net_fill = _reconcile_buy_order(
+        broker,
+        client,
+        symbol="BTC/USDT",
+        base_asset="BTC",
+        client_order_id="atlas-tn-known-id-read-failure",
+        order_id="buy-known",
+    )
+
+    assert client.canceled == [("buy-known", "BTC/USDT")]
+    assert broker.reads >= 3
+    assert order_id == "buy-known"
+    assert state["status"] == "canceled"
+    assert net_fill == Decimal("0.39")
+
+
 def test_market_order_min_notional_uses_filter_reference_window():
     market = {
         "limits": {"cost": {"min": 5}},
@@ -682,6 +729,31 @@ def test_market_order_min_notional_preserves_distinct_reference_windows():
         (Decimal("10"), 0),
         (Decimal("20"), 5),
     ]
+
+
+def test_protective_stop_budget_covers_trigger_drop_and_fee_rounding_headroom():
+    rules = [(Decimal("10"), 0), (Decimal("20"), 5)]
+    budget = _protective_stop_minimum_buy_budget(
+        rules, last_price=Decimal("100"), stop_price=Decimal("80")
+    )
+
+    # The stricter $20 minimum needs a $37.50 buy budget so its 80%-price stop
+    # still carries 1.5x notional before base fees and quantity rounding.
+    assert budget == Decimal("37.5")
+    assert budget / Decimal("100") * Decimal("80") == Decimal("30")
+
+
+def test_protective_stop_validation_checks_each_minimum_after_quantity_normalization():
+    rules = [(Decimal("10"), 0), (Decimal("20"), 5)]
+
+    with pytest.raises(RuntimeError, match="minimum 20.*avgPriceMins=5"):
+        _validate_protective_stop_min_notional(
+            Decimal("0.30"), Decimal("80"), rules
+        )
+
+    _validate_protective_stop_min_notional(
+        Decimal("0.3125"), Decimal("80"), rules
+    )
 
 
 def test_market_order_reference_price_requires_matching_average_window():
@@ -824,7 +896,14 @@ def _configure_main_fake(monkeypatch, scenario):
         def market_info(self, symbol):
             return {
                 "limits": {"cost": {"min": "0"}, "amount": {"min": "0.001"}},
-                "info": {"orderTypes": ["STOP_LOSS"], "filters": []},
+                "info": {
+                    "orderTypes": ["STOP_LOSS"],
+                    "filters": (
+                        [{"filterType": "MIN_NOTIONAL", "minNotional": "10",
+                          "applyToMarket": True, "avgPriceMins": 0}]
+                        if scenario == "stop_minimum" else []
+                    ),
+                },
             }
 
         def ticker(self, symbol):
@@ -840,7 +919,7 @@ def _configure_main_fake(monkeypatch, scenario):
             qty = Decimal(str(amount))
             if side == "buy":
                 state["buy_client_id"] = client_order_id
-                if scenario == "base_fee":
+                if scenario in {"base_fee", "stop_minimum"}:
                     state["buy_status"] = "closed"
                     state["buy_filled"] = qty
                     state["buy_amount"] = qty
@@ -921,6 +1000,16 @@ def test_main_cleans_up_verified_net_fill_when_order_status_omits_base_fee(monke
     assert state["sell_amount"] == state["buy_amount"] - state["base_fee"]
     assert state["balance"] == Decimal("0")
     assert state["stop_cancelled"] is True
+
+
+def test_main_sizes_stop_minimum_buy_for_trigger_drop_fees_and_rounding(monkeypatch):
+    drill, state = _configure_main_fake(monkeypatch, "stop_minimum")
+
+    assert drill.main() == 0
+    assert state["buy_amount"] == Decimal("0.1875")
+    assert state["stop_id"] == "stop-1"
+    assert state["sell_amount"] == state["buy_amount"] - Decimal("0.0004")
+    assert state["balance"] == Decimal("0")
 
 
 def test_main_cancels_protective_stop_when_final_buy_reconciliation_fails(monkeypatch):

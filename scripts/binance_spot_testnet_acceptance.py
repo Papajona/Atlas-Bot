@@ -30,6 +30,10 @@ TESTNET_SPOT_HOST = "testnet.binance.vision"
 TERMINAL_ORDER_STATES = {"closed", "filled"}
 CANCELED_ORDER_STATES = {"canceled", "cancelled", "rejected", "expired", "expired_in_match"}
 SAFE_TERMINAL_ORDER_STATES = TERMINAL_ORDER_STATES | CANCELED_ORDER_STATES
+STOP_TRIGGER_PRICE_RATIO = Decimal("0.80")
+BUY_MARKET_MIN_NOTIONAL_HEADROOM = Decimal("1.25")
+STOP_MIN_NOTIONAL_SIZING_HEADROOM = Decimal("1.50")
+STOP_MIN_NOTIONAL_VALIDATION_HEADROOM = Decimal("1.25")
 
 
 def req(name: str) -> str:
@@ -266,25 +270,39 @@ def _cancel_and_wait_for_order_terminal(
     symbol: str,
     timeout_seconds: int = 10,
 ) -> dict[str, Any]:
-    """Cancel an active buy and keep polling until no further fill can occur."""
+    """Cancel an active/uncertain buy and verify its terminal state before cleanup."""
     deadline = time.monotonic() + timeout_seconds
     last: dict[str, Any] = {}
-    last_error: Exception | None = None
+    last_fetch_error: Exception | None = None
+    last_cancel_error: Exception | None = None
     while True:
-        last = broker.fetch_order(order_id, symbol)
-        if not isinstance(last, dict):
-            raise RuntimeError(f"exchange returned malformed order state for {order_id}")
-        if str(last.get("status", "")).lower() in SAFE_TERMINAL_ORDER_STATES:
-            return last
+        # A fetch failure must not suppress cancellation when the exchange order ID
+        # is already known. Continue trying both operations until terminal state is
+        # positively identified or the bounded reconciliation deadline expires.
+        try:
+            state = broker.fetch_order(order_id, symbol)
+            if not isinstance(state, dict) or str(state.get("id") or "") != str(order_id):
+                raise RuntimeError(
+                    f"exchange returned malformed or mismatched order state for {order_id}: {state!r}"
+                )
+            last = state
+            if str(state.get("status", "")).lower() in SAFE_TERMINAL_ORDER_STATES:
+                return state
+            last_fetch_error = None
+        except Exception as exc:
+            last_fetch_error = exc
+
         try:
             client.cancel_order(order_id, symbol)
-            last_error = None
+            last_cancel_error = None
         except Exception as exc:
-            last_error = exc
+            last_cancel_error = exc
+
         if time.monotonic() >= deadline:
             raise RuntimeError(
                 f"could not verify buy order {order_id} is terminal after cancellation; "
-                f"last state={last!r}; cancel error={last_error!r}"
+                f"last state={last!r}; fetch error={last_fetch_error!r}; "
+                f"cancel error={last_cancel_error!r}"
             )
         time.sleep(0.5)
 
@@ -298,14 +316,35 @@ def _reconcile_buy_order(
     client_order_id: str,
     order_id: str | None,
 ) -> tuple[str, dict[str, Any], Decimal]:
-    """Resolve ambiguous submissions, stop any still-open buy, and retain partial fills."""
+    """Resolve ambiguous submissions, stop open buys, and retain verified partial fills."""
     if order_id:
-        state = broker.fetch_order(order_id, symbol)
+        try:
+            state = broker.fetch_order(order_id, symbol)
+            if not isinstance(state, dict) or str(state.get("id") or "") != str(order_id):
+                raise RuntimeError(
+                    f"exchange returned malformed or mismatched order state for {order_id}: {state!r}"
+                )
+        except Exception as initial_read_error:
+            try:
+                state = _cancel_and_wait_for_order_terminal(broker, client, order_id, symbol)
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    f"known buy order {order_id} could not be read and terminal state could not "
+                    f"be confirmed after cancellation; initial read error={initial_read_error!r}; "
+                    f"reconciliation error={cleanup_error}"
+                ) from cleanup_error
     else:
         state = _fetch_order_by_client_id(client, symbol, client_order_id)
+        if not isinstance(state, dict) or not state.get("id"):
+            raise RuntimeError(
+                f"buy order lookup by client ID {client_order_id} returned no exchange order ID"
+            )
         order_id = str(state["id"])
+
     if not isinstance(state, dict):
-        raise RuntimeError(f"exchange returned malformed buy order state for {order_id}")
+        raise RuntimeError(f"exchange returned malformed order state for {order_id}")
+    if str(state.get("id") or "") != str(order_id):
+        raise RuntimeError(f"exchange returned mismatched order state for {order_id}: {state!r}")
     if str(state.get("status", "")).lower() not in SAFE_TERMINAL_ORDER_STATES:
         state = _cancel_and_wait_for_order_terminal(broker, client, order_id, symbol)
     status = str(state.get("status", "")).lower()
@@ -382,6 +421,53 @@ def _market_order_reference_price(
         return price if price > 0 else None
     except Exception:
         return None
+
+
+def _protective_stop_minimum_buy_budget(
+    min_cost_rules: list[tuple[Decimal, int | None]],
+    last_price: Decimal,
+    stop_price: Decimal,
+) -> Decimal:
+    """Return quote budget that leaves margin for a stop sell at its trigger price."""
+    if not min_cost_rules:
+        return Decimal("0")
+    if last_price <= 0 or stop_price <= 0 or stop_price >= last_price:
+        raise RuntimeError(
+            f"invalid protective-stop sizing prices: last={last_price}, trigger={stop_price}"
+        )
+    return max(
+        (
+            minimum * STOP_MIN_NOTIONAL_SIZING_HEADROOM * last_price / stop_price
+            for minimum, _window in min_cost_rules
+            if minimum > 0
+        ),
+        default=Decimal("0"),
+    )
+
+
+def _validate_protective_stop_min_notional(
+    stop_amount: Decimal,
+    stop_price: Decimal,
+    min_cost_rules: list[tuple[Decimal, int | None]],
+) -> None:
+    """Fail closed unless the rounded stop quantity preserves headroom at its trigger."""
+    if not min_cost_rules:
+        return
+    if stop_amount <= 0 or stop_price <= 0:
+        raise RuntimeError(
+            f"invalid protective-stop quantity/trigger: amount={stop_amount}, trigger={stop_price}"
+        )
+    trigger_notional = stop_amount * stop_price
+    for minimum, window in min_cost_rules:
+        required = minimum * STOP_MIN_NOTIONAL_VALIDATION_HEADROOM
+        if minimum > 0 and trigger_notional < required:
+            raise RuntimeError(
+                f"normalized protective-stop market-sell notional {trigger_notional} at trigger "
+                f"price {stop_price} is below the {STOP_MIN_NOTIONAL_VALIDATION_HEADROOM}x "
+                f"minimum {minimum} for avgPriceMins={window}; refusing to place an "
+                "undersized protective stop"
+            )
+
 
 
 def _cancel_stop_if_present(
@@ -705,8 +791,13 @@ def main() -> int:
         min_cost_rules[0][1] if len(min_cost_rules) == 1 else None
     )
     min_amount = dec(((limits.get("amount") or {}).get("min")) or "0")
-    # Size the buy against every applicable filter's own reference window. Do not
-    # start a drill if an active window cannot be verified before placing the order.
+    stop_price = dec(broker.normalize_price(symbol, float(last * STOP_TRIGGER_PRICE_RATIO)))
+    if stop_price <= 0 or stop_price >= last:
+        raise RuntimeError(
+            f"exchange price normalization produced an invalid protective-stop trigger: {stop_price}"
+        )
+    # Size the buy against the buy-market reference windows and leave extra net-base
+    # headroom for base-asset fees, quantity rounding and the 20% stop-trigger drop.
     required_budget = Decimal("15")
     for minimum, window in min_cost_rules:
         if minimum <= 0:
@@ -717,7 +808,14 @@ def main() -> int:
                 f"Cannot verify Binance market-order reference price for avgPriceMins={window}; "
                 "refusing to start the testnet drill"
             )
-        required_budget = max(required_budget, minimum * last / reference_price * Decimal("1.25"))
+        required_budget = max(
+            required_budget,
+            minimum * last / reference_price * BUY_MARKET_MIN_NOTIONAL_HEADROOM,
+        )
+    required_budget = max(
+        required_budget,
+        _protective_stop_minimum_buy_budget(min_cost_rules, last, stop_price),
+    )
     amount = dec(broker.normalize_amount(symbol, float(max(min_amount, required_budget / last))))
     if amount <= 0:
         raise RuntimeError(f"Invalid test amount {amount}; price={last}; min_cost={min_cost}")
@@ -725,10 +823,13 @@ def main() -> int:
         if minimum <= 0:
             continue
         reference_price = _market_order_reference_price(client, symbol, window, last)
-        if reference_price is None or amount * reference_price < minimum:
+        if (
+            reference_price is None
+            or amount * reference_price < minimum * BUY_MARKET_MIN_NOTIONAL_HEADROOM
+        ):
             raise RuntimeError(
-                f"Test amount {amount} does not satisfy Binance market-order minimum {minimum} "
-                f"at avgPriceMins={window}"
+                f"Test amount {amount} does not preserve buy-market notional headroom for "
+                f"minimum {minimum} at avgPriceMins={window}"
             )
 
     base_asset = symbol.split("/")[0].split(":")[0]
@@ -827,7 +928,7 @@ def main() -> int:
                 f"Received base amount is not sellable for protective-stop drill: {new_free_base}"
             )
 
-        stop_price = dec(broker.normalize_price(symbol, float(last * Decimal("0.80"))))
+        _validate_protective_stop_min_notional(stop_amount, stop_price, min_cost_rules)
         stop_client_id = "atlas-sl-" + uuid.uuid4().hex[:20]
         stop = client.create_order(
             symbol,
