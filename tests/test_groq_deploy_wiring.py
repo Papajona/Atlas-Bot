@@ -76,7 +76,7 @@ def test_daily_research_runs_bounded_optional_groq_reviews_concurrently():
     assert source.index('review["run_drift"] = await _persist_research_run(') < source.index(
         "groq_task = asyncio.create_task("
     )
-    assert "await _update_persisted_research_review(symbol, item[\"research\"], review)" in source
+    assert 'await _update_persisted_research_review(item.get("research_run_id"), review)' in source
     assert "task.cancel()" in source
 
 
