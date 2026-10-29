@@ -1,5 +1,6 @@
 import asyncio
 import pandas as pd
+import pytest
 
 
 def test_yahoo_normalization():
