@@ -4723,7 +4723,8 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if re.match(r"^\s*(?:echo|printf)\b", statement, re.I):
             # Printing a fixed validation/warning message is safe; reject shell
             # chaining, redirection, pipelines, or command substitution.
-            return not re.search(r"&&|\|\||[;|<>]|\$\(", statement)
+            normalized = re.sub(r"\s+>&2\s*$", "", statement)
+            return not re.search(r"&&|\|\||[;|<>]|\$\(", normalized)
         if re.match(r"^\s*exit\s+[0-9]+\s*(?:#.*)?$", statement, re.I):
             return True
         return bool(groq_allowed.match(statement))
