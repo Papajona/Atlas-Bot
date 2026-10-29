@@ -814,7 +814,15 @@ def transform_config() -> None:
             bindings = _defined_names(statement) | _module_scope_maybe_binds(
                 statement, postponed_annotations=postponed_annotations
             )
-            if name in bindings:
+            if (
+                name in bindings
+                or (
+                    isinstance(statement, ast.ImportFrom)
+                    and any(alias.name == "*" for alias in statement.names)
+                )
+            ):
+                # A star import may overwrite any name; only a later explicit,
+                # reviewed binding can re-establish a trusted decorator import.
                 last = statement
         return last
 
@@ -823,6 +831,10 @@ def transform_config() -> None:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             return statement.name == name
         if name in _defined_names(statement):
+            return True
+        if isinstance(statement, ast.ImportFrom) and any(
+            alias.name == "*" for alias in statement.names
+        ):
             return True
         stack = list(ast.iter_child_nodes(statement))
         while stack:
@@ -836,7 +848,13 @@ def transform_config() -> None:
                 return True
             if isinstance(item, ast.Nonlocal) and name in item.names:
                 return True
-            if isinstance(item, (ast.Import, ast.ImportFrom)) and name in _defined_names(item):
+            if isinstance(item, (ast.Import, ast.ImportFrom)) and (
+                name in _defined_names(item)
+                or (
+                    isinstance(item, ast.ImportFrom)
+                    and any(alias.name == "*" for alias in item.names)
+                )
+            ):
                 return True
             stack.extend(ast.iter_child_nodes(item))
         return False
