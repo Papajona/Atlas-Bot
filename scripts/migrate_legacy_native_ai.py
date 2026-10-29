@@ -5018,7 +5018,6 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         )
         dynamic_pattern = re.escape("$") + r"\{(AI_SECRET_ARGS|GROQ_SECRET_ARG|GROQ_SECRET_ARGS)\}"
         retained: list[str] = []
-        shared_tokens: list[str] = []
         for raw_entry in value.split(delimiter):
             entry = raw_entry.strip()
             if not entry:
@@ -5026,23 +5025,18 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             dynamic = re.fullmatch(dynamic_pattern, entry)
             if dynamic:
                 if preserve_groq_tokens:
-                    shared_tokens.append(dynamic.group(1))
+                    # Keep shared expansions in their original list position.
+                    retained.append("$" + "{" + dynamic.group(1) + "}")
                 continue
             key = entry.split("=", 1)[0].strip()
             if retired_assignment.fullmatch(key):
                 if preserve_groq_tokens:
-                    shared_tokens.extend(re.findall(dynamic_pattern, entry))
+                    # Preserve any shared expansion carried by the retired key's value.
+                    retained.extend("$" + "{" + token + "}" for token in re.findall(dynamic_pattern, entry))
                 continue
             if RETIRED_PROVIDER_RE.search(key):
                 raise MigrationError(f"{path} has an unrecognized provider key in a deployment list: {key}")
             retained.append(entry)
-        if shared_tokens:
-            if retained:
-                retained[-1] += delimiter + delimiter.join("$" + "{" + token + "}" for token in shared_tokens)
-            else:
-                # An incremental AI_SECRET_ARGS assignment may contain only a shared
-                # expansion plus retired entries. Keep the shared expansion by itself.
-                retained.extend("$" + "{" + token + "}" for token in shared_tokens)
         return prefix + delimiter.join(retained)
 
     def scrub_cloud_run_flag(line: str, flag: str, *, preserve_groq_tokens: bool = False) -> str:
@@ -5106,7 +5100,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             continue
         if re.match(
             r"^\s*(?:SECRET_GEMINI[A-Z0-9_]*|"
-            r"GEMINI_API_KEY|AI_SECRET_ARGS|"
+            r"GEMINI_API_KEY|"
             r"CEREBRAS_API_KEY|AI_GATEWAY_API_KEY)\s*=",
             line, re.I,
         ):
