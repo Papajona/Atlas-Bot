@@ -250,3 +250,40 @@ def test_groq_review_records_truncation_and_preserves_computed_candidate_context
     assert "paper_candidates_omitted" in user_prompt
     assert "omitted-raw-research-detail" not in user_prompt
 
+
+def test_groq_prompt_discloses_nested_fields_omitted_from_compacted_research():
+    research = {
+        "symbol": "EUR_USD",
+        "regime": {
+            "regime": "HIGH_VOLATILITY",
+            "annualized_realized_vol": 0.28,
+            "unmodeled_regime_detail": "must be disclosed as omitted",
+        },
+        "validation": {
+            "per_strategy_oos": {
+                "TREND": {
+                    "status": "OK",
+                    "sharpe": 0.4,
+                    "fold_diagnostics": {"sensitive_detail": "must not be sent"},
+                },
+            },
+        },
+        "paper_candidates": [
+            {
+                "strategy": "CANDIDATE_EVIDENCE_SENTINEL",
+                "score": 0.71,
+                "feature_attribution": "must not be sent",
+            },
+        ],
+    }
+
+    prompt, input_truncated = groq_ai._research_prompt(research, {})
+
+    assert input_truncated is True
+    assert "CANDIDATE_EVIDENCE_SENTINEL" in prompt
+    assert '"regime_fields_omitted":1' in prompt
+    assert '"strategy_metric_fields_omitted":1' in prompt
+    assert '"paper_candidate_fields_omitted":1' in prompt
+    assert '"omitted_field_count":1' in prompt
+    assert "must not be sent" not in prompt
+
