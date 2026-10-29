@@ -4690,5 +4690,95 @@ async def groq_research_review(research, intelligence):
             migration.scrub_ancillary_text("deploy/DEPLOY_WORKFLOW.md", source)
 
 
+    def test_config_does_not_remove_validator_when_module_rebinds_str(self):
+        unsafe = (
+            "from pydantic import field_validator\\n"
+            "str = audited_stringifier\\n"
+            "class Settings:\\n"
+            "    database_url: str = ''\\n"
+            "    gemini_model: str = 'gemini-3.8-flash'\\n"
+            "    @field_validator('gemini_model')\\n"
+            "    @classmethod\\n"
+            "    def _validate_gemini_model(cls, value: str) -> str:\\n"
+            "        normalized = str(value or '').strip().removeprefix('models/')\\n"
+            "        if normalized != 'gemini-3.8-flash':\\n"
+            "            raise ValueError('Gemini model must be exactly gemini-3.8-flash; alternative Gemini IDs are not permitted.')\\n"
+            "        return normalized\\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(unsafe, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "provider text outside isolated Settings fields",
+                ):
+                    migration.transform_config()
+            self.assertEqual(config.read_text(encoding="utf-8"), unsafe)
+
+    def test_star_import_refuses_relative_level_above_app_package(self):
+        legacy = """from ..shared import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            (root / "shared.py").write_text(
+                "def branch_helper():\\n    return True\\n", encoding="utf-8"
+            )
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration,
+                "canonical_text",
+                return_value="from .native_ai import AIProviderError, NativeAIError\\n",
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "relative star import .* escapes the app package",
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_star_import_refuses_indirect_exec_alias(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                'run = exec\\nrun("def branch_helper():\\\\n    return True")\\n',
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration,
+                "canonical_text",
+                return_value="from .native_ai import AIProviderError, NativeAIError\\n",
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "dynamic exports or mutates __all__",
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
+
 if __name__ == "__main__":
     unittest.main()
