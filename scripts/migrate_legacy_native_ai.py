@@ -5013,6 +5013,16 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             stripped,
         ) is not None
 
+    def inert_provider_message(statement: str) -> bool:
+        stripped = statement.strip()
+        if not re.match(r"^\s*(?:echo|printf)\b", stripped, re.I):
+            return False
+        if not RETIRED_PROVIDER_RE.search(stripped):
+            return False
+        # Only discard literal output text. Never rewrite dynamic expansions,
+        # command substitutions, redirections, pipes, or composed commands.
+        return not re.search(r"\$|\x60|[;&|<>]", stripped)
+
     block_start = 0
     while block_start < len(source_lines):
         source_line = source_lines[block_start]
@@ -5180,7 +5190,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
                 line, re.I,
             )
-            warning_only = (
+            warning_only = inert_provider_message(stripped) or (
                 re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
                 and RETIRED_PROVIDER_RE.search(stripped)
                 and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", stripped)
@@ -5239,7 +5249,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if RETIRED_PROVIDER_RE.search(line):
             if stripped.startswith("#"):
                 continue
-            warning_only = (
+            warning_only = inert_provider_message(stripped) or (
                 re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
                 and re.search(r"(?i)\b(?:gemini|cerebras|ai.?gateway|openai)\b", stripped)
                 and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", stripped)
@@ -5523,7 +5533,10 @@ def scrub_ancillary_text(path: str, text: str) -> str:
         candidate = MODEL_RE.sub("atlas-native-strategy-v1", candidate)
         candidate = re.sub(r"(?i)\b(?:Gemini|Cerebras|AI Gateway)\b", "", candidate)
         if RETIRED_PROVIDER_RE.search(candidate):
-            if re.search(r"(?i)\b(?:gcloud|docker|curl|python|bash|run:)\b", candidate):
+            if (
+                re.search(r"(?i)\b(?:gcloud|docker|curl|python|bash|run:)\b", candidate)
+                and not path.lower().endswith(".md")
+            ):
                 raise MigrationError(f"{path} has provider wiring inside an executable line; refusing automatic deletion")
             candidate = RETIRED_PROVIDER_RE.sub("legacy provider", candidate)
         if candidate.strip():
@@ -5634,7 +5647,22 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
         target = ROOT / path
         if not target.exists():
             write_text(path, canonical_text(canonical_commit, path))
-        elif path in {"app/groq_ai.py", "app/prompt_safety.py"}:
+        elif path == "app/groq_ai.py":
+            groq_source = target.read_text(encoding="utf-8")
+            try:
+                groq_tree = ast.parse(groq_source, filename=path)
+            except SyntaxError as exc:
+                raise MigrationError(f"{path} is not valid Python; preserving the branch") from exc
+            if RETIRED_PROVIDER_RE.search(groq_source):
+                raise MigrationError(f"{path} contains retired-provider wiring; preserving the branch")
+            if not any(
+                isinstance(node, ast.AsyncFunctionDef) and node.name == "groq_research_review"
+                for node in groq_tree.body
+            ):
+                raise MigrationError(f"{path} is missing the reviewed async groq_research_review API")
+            # Preserve compatible branch-specific Groq diagnostics while still rejecting
+            # stale hosted-provider wiring; do not overwrite divergent unrelated logic.
+        elif path == "app/prompt_safety.py":
             if target.read_text(encoding="utf-8") != canonical_text(canonical_commit, path):
                 raise MigrationError(f"{path} differs from its reviewed canonical implementation; preserving the branch")
         elif PROVIDER_RE.search(target.read_text(encoding="utf-8")):
