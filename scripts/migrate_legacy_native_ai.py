@@ -4142,13 +4142,39 @@ def transform_daily_research() -> None:
                     return False
             else:
                 return False
+
+            # Historical provider facades use either the minimal status marker or
+            # this exact inert payload. Accept both, but do not erase dynamic values,
+            # unknown fields, or sibling audit assignments from a legacy branch.
             value = statement.value
-            if not isinstance(value, ast.Dict) or len(value.keys) != 1 or len(value.values) != 1:
+            if not isinstance(value, ast.Dict) or len(value.keys) != len(value.values):
                 return False
-            key, item = value.keys[0], value.values[0]
+            fields: dict[str, ast.AST] = {}
+            for key, item in zip(value.keys, value.values):
+                if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                    return False
+                if key.value in fields:
+                    return False
+                fields[key.value] = item
+
+            status = fields.get("status")
+            if not (
+                isinstance(status, ast.Constant)
+                and status.value == "NOT_CONFIGURED"
+            ):
+                return False
+            if set(fields) == {"status"}:
+                return True
+            if set(fields) != {"status", "providers", "execution_authority"}:
+                return False
+            providers = fields["providers"]
+            authority = fields["execution_authority"]
             return (
-                isinstance(key, ast.Constant) and key.value == "status"
-                and isinstance(item, ast.Constant) and item.value == "NOT_CONFIGURED"
+                isinstance(providers, ast.Dict)
+                and not providers.keys
+                and not providers.values
+                and isinstance(authority, ast.Constant)
+                and authority.value is False
             )
 
         body_is_provider_only = bool(node.body) and all(
