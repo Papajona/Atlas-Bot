@@ -97,6 +97,11 @@ def _validate_groq_research_result(value: Any) -> dict[str, Any]:
             # Do not reflect arbitrary provider-controlled strings as commentary.
             result["reason"] = "Optional research review is disabled or not configured"
         else:
+            input_truncated = value.get("input_truncated")
+            if isinstance(input_truncated, bool):
+                result["input_truncated"] = input_truncated
+            elif input_truncated is not None:
+                raise ValueError("Groq error input_truncated flag must be boolean")
             for field in ("error", "cause"):
                 item = value.get(field)
                 if isinstance(item, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,80}", item):
