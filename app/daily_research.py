@@ -93,10 +93,16 @@ def _validate_groq_research_result(value: Any) -> dict[str, Any]:
             "provider": "groq",
             "execution_authority": False,
         }
-        for field in ("reason", "error", "cause"):
-            item = value.get(field)
-            if isinstance(item, str) and item.strip():
-                result[field] = item.strip()[:240]
+        if status == "DISABLED":
+            # Do not reflect arbitrary provider-controlled strings as commentary.
+            result["reason"] = "Optional research review is disabled or not configured"
+        else:
+            for field in ("error", "cause"):
+                item = value.get(field)
+                if isinstance(item, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,80}", item):
+                    result[field] = item
+            if "error" not in result:
+                result["error"] = "GroqReviewFailed"
         http_status = value.get("http_status")
         if isinstance(http_status, int) and not isinstance(http_status, bool) and 100 <= http_status <= 599:
             result["http_status"] = http_status
