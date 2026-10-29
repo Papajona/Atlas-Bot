@@ -1002,6 +1002,19 @@ def transform_config() -> None:
             and stripped.func.attr == "strip"
         ):
             return False
+        # The validator calls str(value) at runtime. A module-level binding can
+        # shadow the builtin even when it appears after the class definition, so
+        # removal is safe only when every module-scope statement leaves str unbound.
+        for module_statement in tree.body:
+            module_bindings = _defined_names(module_statement) | _module_scope_maybe_binds(
+                module_statement, postponed_annotations=postponed_annotations
+            )
+            has_star_import = (
+                isinstance(module_statement, ast.ImportFrom)
+                and any(alias.name == "*" for alias in module_statement.names)
+            )
+            if "str" in module_bindings or has_star_import:
+                return False
         stringified = stripped.func.value
         if not (
             isinstance(stringified, ast.Call)
@@ -1818,6 +1831,13 @@ def transform_ai_providers(commit: str) -> None:
     ) -> tuple[set[str], dict[str, tuple[str, int, str, str, str] | None]]:
         """Statically enumerate star exports and identify simple import-backed bindings."""
         if star_node.level:
+            # app.ai_providers is a module in the top-level app package. A
+            # relative level above one escapes that package and is invalid here;
+            # never resolve it against a parent directory and guess its exports.
+            if star_node.level > 1:
+                raise MigrationError(
+                    f"relative star import {star_node.module!r} escapes the app package; refusing to guess its exports"
+                )
             module_base = ROOT / "app"
             for _ in range(star_node.level - 1):
                 module_base = module_base.parent
@@ -1937,6 +1957,15 @@ def transform_ai_providers(commit: str) -> None:
                     and isinstance(nested.ctx, ast.Load)
                 ):
                     dynamic_all = True
+
+                if (
+                    isinstance(nested, ast.Name)
+                    and nested.id in {"exec", "eval"}
+                    and isinstance(nested.ctx, ast.Load)
+                ):
+                    # A builtin can be aliased (run = exec; run(...)); looking only
+                    # for calls whose spelling is exec/eval would miss that mutation.
+                    dynamic_exports = True
 
                 if isinstance(nested, ast.Call):
                     # Any globals() access can create or mutate module exports through
