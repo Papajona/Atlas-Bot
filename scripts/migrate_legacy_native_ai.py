@@ -1938,6 +1938,106 @@ def transform_ai_providers(commit: str) -> None:
         if any(isinstance(node, unsafe_module_statements) for node in module_tree.body):
             dynamic_exports = True
 
+        postponed_annotations = _uses_postponed_annotations(module_tree)
+
+        def contains_exec_eval(node: ast.AST, root: bool = True) -> bool:
+            if not root and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                return False
+            if isinstance(node, ast.Name) and node.id in {"exec", "eval"} and isinstance(node.ctx, ast.Load):
+                return True
+            return any(contains_exec_eval(child, root=False) for child in ast.iter_child_nodes(node))
+
+        def import_time_calls(node: ast.AST, calls: set[str]) -> None:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                expressions: list[ast.AST] = [
+                    *node.decorator_list, *node.args.defaults,
+                    *(value for value in node.args.kw_defaults if value is not None),
+                ]
+                if not postponed_annotations:
+                    expressions.extend(
+                        arg.annotation for arg in [
+                            *node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs
+                        ] if arg.annotation is not None
+                    )
+                    if node.args.vararg and node.args.vararg.annotation is not None:
+                        expressions.append(node.args.vararg.annotation)
+                    if node.args.kwarg and node.args.kwarg.annotation is not None:
+                        expressions.append(node.args.kwarg.annotation)
+                    if node.returns is not None:
+                        expressions.append(node.returns)
+                for expression in expressions:
+                    import_time_calls(expression, calls)
+                return
+            if isinstance(node, ast.Lambda):
+                for expression in [*node.args.defaults, *(v for v in node.args.kw_defaults if v is not None)]:
+                    import_time_calls(expression, calls)
+                return
+            if isinstance(node, ast.ClassDef):
+                for expression in [*node.decorator_list, *node.bases, *(kw.value for kw in node.keywords)]:
+                    import_time_calls(expression, calls)
+                for statement in node.body:
+                    import_time_calls(statement, calls)
+                return
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                calls.add(node.func.id)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Lambda) and contains_exec_eval(node.func.body):
+                calls.add("__atlas_dynamic_lambda__")
+            for child in ast.iter_child_nodes(node):
+                import_time_calls(child, calls)
+
+        dangerous_functions: set[str] = set()
+        function_calls: dict[str, set[str]] = {}
+        aliases: dict[str, str] = {}
+        for statement in module_tree.body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if any(contains_exec_eval(body) for body in statement.body):
+                    dangerous_functions.add(statement.name)
+                calls: set[str] = set()
+                for body in statement.body:
+                    # Function bodies execute only if called; this call graph is
+                    # used below only to determine whether a called helper is dangerous.
+                    for item in ast.walk(body):
+                        if isinstance(item, ast.Call) and isinstance(item.func, ast.Name):
+                            calls.add(item.func.id)
+                function_calls[statement.name] = calls
+            elif isinstance(statement, ast.Assign) and isinstance(statement.value, (ast.Name, ast.Lambda)):
+                for target in statement.targets:
+                    if isinstance(target, ast.Name):
+                        if isinstance(statement.value, ast.Name):
+                            aliases[target.id] = statement.value.id
+                        elif contains_exec_eval(statement.value.body):
+                            dangerous_functions.add(target.id)
+            elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+                if isinstance(statement.value, ast.Name):
+                    aliases[statement.target.id] = statement.value.id
+                elif isinstance(statement.value, ast.Lambda) and contains_exec_eval(statement.value.body):
+                    dangerous_functions.add(statement.target.id)
+
+        changed = True
+        while changed:
+            changed = False
+            for function_name, called_names in function_calls.items():
+                if function_name not in dangerous_functions and any(
+                    called in dangerous_functions or aliases.get(called, called) in dangerous_functions
+                    for called in called_names
+                ):
+                    dangerous_functions.add(function_name)
+                    changed = True
+
+        module_calls: set[str] = set()
+        for statement in module_tree.body:
+            import_time_calls(statement, module_calls)
+        if "__atlas_dynamic_lambda__" in module_calls:
+            dynamic_exports = True
+        for called in module_calls:
+            resolved = called
+            seen: set[str] = set()
+            while resolved in aliases and resolved not in seen:
+                seen.add(resolved)
+                resolved = aliases[resolved]
+            if resolved in dangerous_functions or called in dangerous_functions:
+                dynamic_exports = True
+
         for module_node in module_tree.body:
             if isinstance(module_node, ast.ImportFrom) and any(alias.name == "*" for alias in module_node.names):
                 has_nested_star = True
@@ -1983,6 +2083,25 @@ def transform_ai_providers(commit: str) -> None:
             ):
                 dynamic_all = True
 
+            annotation_node_ids: set[int] = set()
+            for candidate in ast.walk(module_node):
+                if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    annotations = [
+                        arg.annotation for arg in [
+                            *candidate.args.posonlyargs, *candidate.args.args, *candidate.args.kwonlyargs
+                        ] if arg.annotation is not None
+                    ]
+                    if candidate.args.vararg and candidate.args.vararg.annotation is not None:
+                        annotations.append(candidate.args.vararg.annotation)
+                    if candidate.args.kwarg and candidate.args.kwarg.annotation is not None:
+                        annotations.append(candidate.args.kwarg.annotation)
+                    if candidate.returns is not None:
+                        annotations.append(candidate.returns)
+                    for annotation in annotations:
+                        annotation_node_ids.update(id(item) for item in ast.walk(annotation))
+                elif isinstance(candidate, ast.AnnAssign):
+                    annotation_node_ids.update(id(item) for item in ast.walk(candidate.annotation))
+
             deferred_body_nodes: set[int] = set()
             for candidate in ast.walk(module_node):
                 if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -2011,6 +2130,7 @@ def transform_ai_providers(commit: str) -> None:
                     and nested.id in {"exec", "eval"}
                     and isinstance(nested.ctx, ast.Load)
                     and id(nested) not in deferred_body_nodes
+                    and id(nested) not in annotation_node_ids
                 ):
                     # A builtin can be aliased (run = exec; run(...)); looking only
                     # for calls whose spelling is exec/eval would miss that mutation.
@@ -2026,6 +2146,7 @@ def transform_ai_providers(commit: str) -> None:
                         isinstance(nested.func, ast.Name)
                         and nested.func.id in {"exec", "eval"}
                         and id(nested) not in deferred_body_nodes
+                        and (not postponed_annotations or id(nested) not in annotation_node_ids)
                     ):
                         dynamic_exports = True
                     elif (
