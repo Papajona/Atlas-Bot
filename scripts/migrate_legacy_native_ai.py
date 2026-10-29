@@ -36,13 +36,14 @@ RETIRED_PROVIDER_RE = re.compile(
     r"(?i)(?:gemini|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
     r"api\.cerebras\.ai|api\.openai\.com|"
     r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|"
-    r"GEMINI_API_KEY|SECRET_GEMINI|_gemini_json|"
-    r"settings\.(?:gemini|cerebras|ai_gateway)_)"
+    r"GEMINI_API_KEY|SECRET_GEMINI|_gemini_json|GROQ_STRATEGY_[A-Z0-9_]+|"
+    r"settings\.(?:gemini|cerebras|ai_gateway)_|settings\.groq_strategy_[a-z0-9_]+)"
 )
 RETIRED_PROVIDER_FIELD_RE = re.compile(
     r"(?i)(?:gemini|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
     r"api\.cerebras\.ai|api\.openai\.com|"
-    r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|_gemini_json)"
+    r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|"
+    r"_gemini_json|GROQ_STRATEGY_[A-Z0-9_]+|settings\.groq_strategy_[a-z0-9_]+)"
 )
 ATLAS_PROVIDER_SECRET_RE = re.compile(
     r"(?i)\batlas[-_](?:openai|gemini|cerebras|ai[-_]gateway)[-_][a-z0-9_-]*\b"
@@ -1066,13 +1067,23 @@ def transform_config() -> None:
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         names = {name for target in targets for name in target_names(target)}
         provider_names = {name for name in names if is_provider_field(name)}
-        if not provider_names:
+        provider_related_names = {name for name in names if PROVIDER_FIELD_RE.search(name)}
+        if not provider_related_names:
             continue
         if id(node) not in direct_setting_assignment_ids:
             raise MigrationError(
                 "app/config.py contains a provider-named assignment outside the Settings class; refusing to drop helper behavior"
             )
-        if names != provider_names:
+        # Keep only the explicitly supported Groq research-review settings. Still
+        # validate their scope before allowing them through unchanged.
+        retired_provider_names = {name for name in provider_related_names if is_provider_field(name)}
+        if not retired_provider_names:
+            if names != provider_related_names:
+                raise MigrationError(
+                    "app/config.py has a mixed supported-Groq/unrelated assignment; refusing ambiguous settings"
+                )
+            continue
+        if names != retired_provider_names:
             raise MigrationError(
                 "app/config.py has a mixed provider/unrelated assignment; refusing to remove unrelated settings"
             )
@@ -1136,13 +1147,19 @@ def transform_config() -> None:
             node for node in settings_class.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         ]
-        first_method_line = min(
-            [min([node.lineno, *[decorator.lineno for decorator in node.decorator_list]])
-             for node in class_methods]
-            or [settings_class.end_lineno or settings_class.lineno + 1]
-        )
+        if class_methods:
+            insert_line = min(
+                min([node.lineno, *[decorator.lineno for decorator in node.decorator_list]])
+                for node in class_methods
+            )
+        else:
+            if not settings_class.body:
+                raise MigrationError("Settings class has no executable body; cannot safely insert Groq fields")
+            if any(node.lineno == settings_class.lineno for node in settings_class.body):
+                raise MigrationError("single-line Settings class cannot safely accept Groq fields")
+            insert_line = max(node.end_lineno or node.lineno for node in settings_class.body) + 1
         result_lines = result.splitlines(keepends=True)
-        result_lines[first_method_line - 1:first_method_line - 1] = [
+        result_lines[insert_line - 1:insert_line - 1] = [
             source_line + "\n" for source_line in missing_groq_fields
         ]
         result = "".join(result_lines)
@@ -4496,9 +4513,16 @@ def transform_daily_research() -> None:
         r"(?i)(?:dual_ai_research_review|_gemini_json|_groq_json|_cerebras_json|"
         r"gemini_api_key|groq_api_key|cerebras_api_key|ai_gateway_)"
     )
+    old_review_projection = '("ai_brain_mode", "paper_candidates", "native_ai_review")'
+    new_review_projection = '("ai_brain_mode", "paper_candidates", "native_ai_review", "groq_research_review")'
     if not legacy_daily_provider_re.search(source):
+        if old_review_projection in source:
+            path.write_text(source.replace(old_review_projection, new_review_projection), encoding="utf-8")
         return
     tree = ast.parse(source, filename=str(path))
+    parent_nodes = {
+        child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
+    }
     lines = source.splitlines(keepends=True)
     edits: list[tuple[int, int, str]] = []
     found_callsite = False
@@ -4597,6 +4621,16 @@ def transform_daily_research() -> None:
                 and authority.value is False
             )
 
+        enclosing: ast.AST = node
+        while enclosing in parent_nodes and not isinstance(
+            enclosing, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+        ):
+            enclosing = parent_nodes[enclosing]
+        if not isinstance(enclosing, ast.AsyncFunctionDef):
+            raise MigrationError(
+                "daily-research provider callsite is not inside an async function; refusing to emit await"
+            )
+
         body_is_provider_only = bool(node.body) and all(
             is_provider_only_statement(statement) for statement in node.body
         )
@@ -4614,7 +4648,7 @@ def transform_daily_research() -> None:
             indent + "native_research_input = dict(research)",
             indent + 'native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))',
             indent + 'review["native_ai_review"] = native_research_review(native_research_input, intelligence)',
-            indent + 'review["groq_research_review"] = await groq_research_review(research, intelligence)',
+            indent + 'review["groq_research_review"] = await groq_research_review(native_research_input, intelligence, review.get("paper_candidates", research.get("paper_candidates", [])))',
         )) + "\n"
         edits.append((node.lineno, node.end_lineno, replacement))
         found_callsite = True
@@ -4625,6 +4659,31 @@ def transform_daily_research() -> None:
     if not found_callsite:
         raise MigrationError("daily-research provider callsite is unexpected; refusing lossy rewrite")
     result = _apply_line_edits(source, edits)
+    needed_imports = []
+    if not re.search(r"(?m)^\s*from\s+\.native_ai\s+import\s+[^\n]*\bnative_research_review\b", result):
+        needed_imports.append("from .native_ai import native_research_review\n")
+    if not re.search(r"(?m)^\s*from\s+\.groq_ai\s+import\s+[^\n]*\bgroq_research_review\b", result):
+        needed_imports.append("from .groq_ai import groq_research_review\n")
+    if needed_imports:
+        result_lines = result.splitlines(keepends=True)
+        future_import_lines = [
+            index for index, line in enumerate(result_lines)
+            if re.match(r"^\s*from\s+__future__\s+import\b", line)
+        ]
+        ordinary_import_lines = [
+            index for index, line in enumerate(result_lines)
+            if re.match(r"^\s*(?:import|from)\s+", line)
+        ]
+        if future_import_lines:
+            insert_at = future_import_lines[-1] + 1
+        elif ordinary_import_lines:
+            insert_at = ordinary_import_lines[0]
+        else:
+            raise MigrationError("daily research has no safe module import insertion point")
+        result_lines[insert_at:insert_at] = needed_imports
+        result = "".join(result_lines)
+    if old_review_projection in result:
+        result = result.replace(old_review_projection, new_review_projection)
     if RETIRED_PROVIDER_RE.search(result):
         raise MigrationError("daily research still contains retired-provider references")
     ast.parse(result, filename=str(path))
