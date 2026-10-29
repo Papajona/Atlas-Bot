@@ -1650,6 +1650,51 @@ async def _gemini_json(prompt):
                     migration.transform_daily_research()
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_config_removes_only_exact_pure_provider_model_validator(self):
+        safe = (
+            "from pydantic import field_validator\\n"
+            "class Settings:\\n"
+            "    database_url: str = ''\\n"
+            "    gemini_model: str = 'gemini-3.8-flash'\\n"
+            "    @field_validator('gemini_model')\\n"
+            "    @classmethod\\n"
+            "    def _validate_gemini_model(cls, value: str) -> str:\\n"
+            "        normalized = str(value or '').strip().removeprefix('models/')\\n"
+            "        if normalized != 'gemini-3.8-flash':\\n"
+            "            raise ValueError('Gemini model must be exactly gemini-3.8-flash; alternative Gemini IDs are not permitted.')\\n"
+            "        return normalized\\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(safe, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_config()
+            result = config.read_text(encoding="utf-8")
+            ast.parse(result, filename="app/config.py")
+            self.assertIn("database_url", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
+        unsafe = safe.replace(
+            "        normalized = str(value or '').strip().removeprefix('models/')\\n",
+            "        record_gemini_validation()\\n"
+            "        normalized = str(value or '').strip().removeprefix('models/')\\n",
+        )
+        self.assertNotEqual(unsafe, safe)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(unsafe, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "provider text outside isolated Settings fields",
+                ):
+                    migration.transform_config()
+            self.assertEqual(config.read_text(encoding="utf-8"), unsafe)
+
     def test_config_removes_provider_fields_but_preserves_unrelated_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
