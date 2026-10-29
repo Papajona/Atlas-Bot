@@ -6,6 +6,8 @@ on:
     paths:
       - ".github/workflows/propagate-native-ai-all-branches.yml"
       - "scripts/migrate_legacy_native_ai.py"
+      - "app/groq_ai.py"
+      - "app/prompt_safety.py"
   workflow_dispatch:
 
 permissions:
@@ -35,12 +37,16 @@ jobs:
         run: |
           set -euo pipefail
           NATIVE_AI_CLEANUP_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
-          NATIVE_AI_CANONICAL_COMMIT="f8bb968198ec909e66cc04b888716f87ded6c0fa"
+          NATIVE_AI_CANONICAL_COMMIT="bafcc5bc3e5f025ce59c53555a622c9cb46a2f22"
           NATIVE_AI_EXTRA_BASE_COMMIT="0d38f95079833804713fcba080caee38a6ddfb4c"
           NATIVE_AI_EXTRA_COMMIT="2317ccc4c3293e8bbd7043970876eceb509d2d1d"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git cat-file -e "$NATIVE_AI_CLEANUP_COMMIT^{commit}"
           git cat-file -e "$NATIVE_AI_CANONICAL_COMMIT^{commit}"
+          if ! git merge-base --is-ancestor "$NATIVE_AI_CANONICAL_COMMIT" "$GITHUB_SHA"; then
+            echo "Pinned Native AI canonical source is not an ancestor of this reviewed main commit; refusing propagation." >&2
+            exit 1
+          fi
           git cat-file -e "$NATIVE_AI_EXTRA_BASE_COMMIT^{commit}"
           if [[ -z "$NATIVE_AI_EXTRA_COMMIT" ]]; then
             echo "Could not locate the reviewed release-diagnostics cleanup commit." >&2
@@ -65,6 +71,8 @@ jobs:
             ".github/workflows/production-verification.yml"
             "ENTRY_EXIT_3_9_0.md"
             "app/ai_providers.py"
+            "app/groq_ai.py"
+            "app/prompt_safety.py"
             "app/config.py"
             "app/daily_research.py"
             "app/main.py"
@@ -93,7 +101,7 @@ jobs:
 
           scan_active_provider_refs() {
             local rc=0 matches filtered
-            if matches="$(git grep -nIEi 'gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py')"; then
+            if matches="$(git grep -nIEi 'gemini|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/production-deploy.yml' ':!.github/workflows/production-verification.yml' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py')"; then
               rc=0
             else
               rc=$?
@@ -103,13 +111,30 @@ jobs:
             elif (( rc != 0 )); then
               return "$rc"
             fi
-            # These are historical proof-marker literals, not active provider wiring.
+            # Groq remains supported in app/groq_ai.py; only its legacy strategy adapters are migration targets.
+            local legacy_groq_refs=""
+            if legacy_groq_refs="$(git grep -nIEi '_groq_json|settings\.groq_(strategy_model|model|api_key)|GROQ_API_KEY|SECRET_GROQ|api\.groq\.com' -- app ':!app/groq_ai.py' ':!app/config.py')"; then
+              matches+=$'\n'"$legacy_groq_refs"
+            else
+              rc=$?
+              if (( rc != 1 )); then return "$rc"; fi
+            fi
+            # Config defines supported Groq research fields; scan it separately so
+            # valid groq_api_key/groq_model fields are not treated as retired wiring.
+            # The obsolete strategy selector remains forbidden.
+            local legacy_groq_config_refs=""
+            if legacy_groq_config_refs="$(git grep -nIEi 'groq_strategy_model' -- app/config.py)"; then
+              matches+=$'\n'"$legacy_groq_config_refs"
+            else
+              rc=$?
+              if (( rc != 1 )); then return "$rc"; fi
+            fi
             # Filter only those exact marker lines; scan every other line in this workflow.
             filtered="$(printf '%s\n' "$matches" | awk '!($0 ~ /^\.github\/workflows\/prune-contained-branches-once\.yml:[0-9]+:/ && $0 ~ /grep -F .def _check_groq. >\/dev\/null/)')"
             # Check metadata with the semantic helper so a generic secretRef
             # containing an Atlas provider secret cannot bypass this skip gate.
             local metadata_matches=""
-            if [[ -f metadata.json ]]; then
+            if [[ -f metadata.json || -f .github/workflows/production-deploy.yml || -f .github/workflows/production-verification.yml ]]; then
               metadata_matches="$(MIGRATION_HELPER="$RUNNER_TEMP/migrate_legacy_native_ai.py" python - <<'PY'
           import importlib.util
           import os
@@ -121,8 +146,24 @@ jobs:
               raise SystemExit("Could not load Native AI metadata checker")
           helper = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(helper)
-          if helper._metadata_has_active_provider_wiring(Path("metadata.json").read_text(encoding="utf-8")):
+          metadata_path = Path("metadata.json")
+          if metadata_path.is_file() and helper._metadata_has_active_provider_wiring(metadata_path.read_text(encoding="utf-8")):
               print("metadata.json: active provider configuration or secret reference")
+
+          for workflow_path in (
+              Path(".github/workflows/production-deploy.yml"),
+              Path(".github/workflows/production-verification.yml"),
+          ):
+              if not workflow_path.is_file():
+                  continue
+              workflow_source = workflow_path.read_text(encoding="utf-8")
+              try:
+                  cleaned = helper.scrub_workflow_ancillary(workflow_path.as_posix(), workflow_source)
+              except helper.MigrationError as exc:
+                  print(f"{workflow_path}: {exc}")
+              else:
+                  if cleaned != workflow_source:
+                      print(f"{workflow_path}: retired-provider workflow wiring requires migration")
           PY
               )" || return $?
             fi
@@ -143,6 +184,7 @@ jobs:
           app_dir = Path("app")
           module_paths = {
               "native_ai": app_dir / "native_ai.py",
+              "groq_ai": app_dir / "groq_ai.py",
               "ai_providers": app_dir / "ai_providers.py",
           }
           trees = {}
@@ -208,6 +250,7 @@ jobs:
           # transitive exports, including missing native_trade_safety_review.
           native = importlib.import_module("app.native_ai")
           facade = importlib.import_module("app.ai_providers")
+          groq = importlib.import_module("app.groq_ai")
           for name in ("NativeAIError", "compose_strategy_spec", "native_research_review"):
               if not hasattr(native, name):
                   raise SystemExit(f"app.native_ai is missing required symbol: {name}")
@@ -218,6 +261,8 @@ jobs:
           ):
               if not hasattr(facade, name):
                   raise SystemExit(f"app.ai_providers is missing required symbol: {name}")
+          if not hasattr(groq, "groq_research_review"):
+              raise SystemExit("app.groq_ai is missing required symbol: groq_research_review")
           if facade.AIProviderError is not native.NativeAIError:
               raise SystemExit(
                   "app.ai_providers.AIProviderError must be the app.native_ai.NativeAIError compatibility alias"
@@ -346,7 +391,8 @@ jobs:
             git clean -fd >/dev/null 2>&1 || true; failed+=("$branch: post-migration provider scan errored; branch left unchanged"); continue; }
           if [[ -n "$after_refs" ]]; then
             echo "ACTIVE PROVIDER REFERENCES REMAIN after semantic migration on $branch:" >&2
-            git grep -nIEi 'gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' >&2 || true
+            git grep -nIEi 'gemini|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/production-deploy.yml' ':!.github/workflows/production-verification.yml' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' >&2 || true
+            git grep -nIEi '_groq_json|settings\.groq_(strategy_model|model)|settings\.groq_api_key|GROQ_API_KEY|SECRET_GROQ|api\.groq\.com' -- app/strategy_ai.py app/daily_research.py app/ai_providers.py >&2 || true
             git reset --hard "$start_sha" >/dev/null 2>&1 || true
             git clean -fd >/dev/null 2>&1 || true
             failed+=("$branch: provider references remain after semantic migration; branch left unchanged")

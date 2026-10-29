@@ -8,11 +8,12 @@ from typing import Any
 from types import SimpleNamespace
 
 from .config import settings
-from .distributed import acquire_lock, release_lock
+from .distributed import acquire_lock, refresh_lock, release_lock
 from .market_intelligence import gather_market_intelligence
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates
 from .strategy_engine import StrategyConfig
 from .native_ai import native_research_review
+from .groq_ai import groq_research_review
 from .research_trial_archive import archive_research_trials
 
 
@@ -192,19 +193,66 @@ async def _persist_research_run(symbol: str, research: dict[str, Any], review: d
                 previous = {"regime": prev_row.regime_assessment, "top_strategy": prev_row.top_strategy,
                             "sharpe": prev_row.sharpe, "max_drawdown": prev_row.max_drawdown, "total_return": prev_row.total_return}
             drift = compute_run_drift(previous, current)
-            db.add(ResearchRun(
+            row = ResearchRun(
                 symbol=symbol[:80], regime_assessment=current["regime"][:60], top_strategy=current["top_strategy"][:40],
                 sharpe=current["sharpe"], max_drawdown=current["max_drawdown"], total_return=current["total_return"],
                 macro_risk_state=str(macro_regime.get("risk_state") or "")[:20],
                 macro_risk_score=float((macro_regime.get("headline_risk") or {}).get("risk_score") or 0.0),
                 regime_drift_json=json.dumps(drift, default=str),
                 research_json=json.dumps(current, default=str),
-                review_json=json.dumps({k: review.get(k) for k in ("ai_brain_mode", "paper_candidates", "native_ai_review")}, default=str),
-            ))
+                review_json=json.dumps({k: review.get(k) for k in ("ai_brain_mode", "paper_candidates", "native_ai_review", "groq_research_review")}, default=str),
+            )
+            db.add(row)
             await db.commit()
-        return drift
+            research_run_id = row.id
+        if research_run_id is None:
+            return {"status": "PERSIST_FAILED", "error": "inserted research run has no database ID", "flags": []}
+        return {**drift, "_research_run_id": research_run_id}
     except Exception as exc:
         return {"status": "PERSIST_FAILED", "error": str(exc), "flags": []}
+
+
+async def _update_persisted_research_review(
+    research_run_id: int | None, review: dict[str, Any]
+) -> bool:
+    """Attach the optional reviewer only to the exact ResearchRun inserted for this analysis."""
+    if research_run_id is None:
+        # _persist_research_run reports failures without an ID; never fall back to another row.
+        return False
+    try:
+        from sqlalchemy import select
+        from .db import SessionLocal, ResearchRun
+
+        async with SessionLocal() as db:
+            row = (await db.execute(
+                select(ResearchRun).where(ResearchRun.id == research_run_id).limit(1)
+            )).scalar_one_or_none()
+            if row is None:
+                return False
+            row.review_json = json.dumps(
+                {
+                    key: review.get(key)
+                    for key in (
+                        "ai_brain_mode",
+                        "paper_candidates",
+                        "native_ai_review",
+                        "groq_research_review",
+                    )
+                },
+                default=str,
+            )
+            await db.commit()
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "research_review_audit_update_failed research_run_id=%s error_type=%s",
+            research_run_id,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return False
 
 
 async def latest_macro_context(max_age_hours: float = 48.0) -> dict[str, Any]:
@@ -245,44 +293,111 @@ def _aware(dt) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
+class _ResearchLeaseLost(RuntimeError):
+    """Raised when the daily-research task no longer owns its distributed lease."""
+
+
+async def _refresh_research_lease(
+    lock_key: str, ttl_seconds: int, *, interval_seconds: float | None = None
+) -> None:
+    interval = interval_seconds
+    if interval is None:
+        interval = max(5.0, min(float(ttl_seconds) / 3.0, 60.0))
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            renewed = await refresh_lock(lock_key, ttl_seconds=ttl_seconds)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "daily_research_lock_refresh_failed error_type=%s", type(exc).__name__
+            )
+            renewed = False
+        if not renewed:
+            raise _ResearchLeaseLost("Daily research lock lease was lost; cancelling the run.")
+
+
+async def _run_with_research_lease(
+    operation, lock_key: str, ttl_seconds: int, *, refresh_interval_seconds: float | None = None
+):
+    """Cancel research immediately when the owner-token-checked Redis lease is lost."""
+    work_task = asyncio.create_task(operation())
+    heartbeat_task = asyncio.create_task(
+        _refresh_research_lease(lock_key, ttl_seconds, interval_seconds=refresh_interval_seconds)
+    )
+    try:
+        done, _ = await asyncio.wait((work_task, heartbeat_task), return_when=asyncio.FIRST_COMPLETED)
+        if heartbeat_task in done:
+            error = heartbeat_task.exception()
+            work_task.cancel()
+            await asyncio.gather(work_task, return_exceptions=True)
+            if error is not None:
+                raise error
+            raise _ResearchLeaseLost("Daily research lock heartbeat stopped unexpectedly.")
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        return await work_task
+    except BaseException:
+        for task in (work_task, heartbeat_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(work_task, heartbeat_task, return_exceptions=True)
+        raise
+
+
 async def run_daily_research() -> dict[str, Any]:
     lock_key = "atlas:daily-research:global"
-    # Distinguish two very different reasons a lock can fail to be acquired, so callers
-    # (and the audit trail) don't lump a benign "another instance already ran today" in
-    # with "this deployment has no distributed-lock backend configured, so the daily
-    # research/backtest job has never actually executed" -- the latter is a silent,
-    # indefinite no-op in production without REDIS_URL and needs to stand out, not blend
-    # into the normal success event.
     if settings.environment.lower() == "production" and not settings.redis_url:
         return {"status": "SKIPPED_NO_DISTRIBUTED_LOCK_BACKEND", "run_at": datetime.now(timezone.utc).isoformat()}
-    acquired = await acquire_lock(lock_key, ttl_seconds=max(300, settings.daily_research_lock_seconds))
+    lease_ttl_seconds = max(300, int(settings.daily_research_lock_seconds))
+    acquired = await acquire_lock(lock_key, ttl_seconds=lease_ttl_seconds)
     if not acquired:
         return {"status": "ALREADY_RUNNING", "run_at": datetime.now(timezone.utc).isoformat()}
     try:
-        symbols = [s.strip() for s in settings.research_symbols.split(",") if s.strip()]
-        try:
-            intelligence = await _retry_async(
-                lambda: gather_market_intelligence(
-                    symbols=symbols,
-                    yahoo_period=settings.research_yahoo_period,
-                    alpha_vantage_api_key=settings.alpha_vantage_api_key,
-                ),
-                attempts=3,
-                base_delay_seconds=1.0,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            return {
-                "status": "FAILED",
-                "stage": "market_intelligence",
-                "attempts": 3,
-                "error": f"{type(exc).__name__}: {exc}",
-                "run_at": datetime.now(timezone.utc).isoformat(),
-                "real_money_execution": False,
-            }
-        runs = []
-        cfg = _cfg()
+        return await _run_with_research_lease(_run_daily_research_work, lock_key, lease_ttl_seconds)
+    except _ResearchLeaseLost:
+        return {
+            "status": "FAILED", "stage": "distributed_lock", "error": "LOCK_LEASE_LOST",
+            "run_at": datetime.now(timezone.utc).isoformat(), "real_money_execution": False,
+        }
+    finally:
+        await release_lock(lock_key)
+
+
+async def _run_daily_research_work() -> dict[str, Any]:
+    symbols = [s.strip() for s in settings.research_symbols.split(",") if s.strip()]
+    try:
+        intelligence = await _retry_async(
+            lambda: gather_market_intelligence(
+                symbols=symbols,
+                yahoo_period=settings.research_yahoo_period,
+                alpha_vantage_api_key=settings.alpha_vantage_api_key,
+            ),
+            attempts=3,
+            base_delay_seconds=1.0,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        return {
+            "status": "FAILED",
+            "stage": "market_intelligence",
+            "attempts": 3,
+            "error": f"{type(exc).__name__}: {exc}",
+            "run_at": datetime.now(timezone.utc).isoformat(),
+            "real_money_execution": False,
+        }
+    cfg = _cfg()
+    run_records: dict[str, dict[str, Any]] = {}
+    pending: list[dict[str, Any]] = []
+    groq_semaphore = asyncio.Semaphore(max(1, min(3, len(intelligence["histories"]))))
+
+    async def bounded_groq_review(research_input: dict[str, Any]) -> dict[str, Any]:
+        # Keep external advisory traffic bounded while allowing reviews for different
+        # symbols to run alongside the remaining local backtests.
+        async with groq_semaphore:
+            return await groq_research_review(research_input, intelligence)
+
+    try:
         for symbol, df in intelligence["histories"].items():
             try:
                 research = await asyncio.to_thread(
@@ -300,29 +415,103 @@ async def run_daily_research() -> dict[str, Any]:
                 # code/data/venue fingerprints exist; they cannot satisfy promotion.
                 research["prospective_trial_archive"] = trial_archive
                 review = _ai_research_brief(research, intelligence)
-                # The candidate list is created by _ai_research_brief, not by the raw research object.
-                # Feed that computed list to the local review so eligible paper candidates are visible.
+                # Local Native AI remains canonical and receives the computed candidates.
                 native_research_input = dict(research)
-                native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))
+                native_research_input["paper_candidates"] = review.get(
+                    "paper_candidates", research.get("paper_candidates", [])
+                )
                 review["native_ai_review"] = native_research_review(native_research_input, intelligence)
-                review["run_drift"] = await _persist_research_run(symbol, research, review, intelligence.get("macro_regime"))
+
+                # Commit the local result and native review before any optional external
+                # request can block or be cancelled. A lost lease must not erase completed
+                # research evidence from the audit database.
+                persistence_result = await _persist_research_run(
+                    symbol, research, review, intelligence.get("macro_regime")
+                )
+                research_run_id = (
+                    persistence_result.pop("_research_run_id", None)
+                    if isinstance(persistence_result, dict)
+                    else None
+                )
+                review["run_drift"] = persistence_result
                 run_record = {
-                    "symbol": symbol, "research": research, "review": review,
+                    "symbol": symbol,
+                    "research": research,
+                    "review": review,
                     "trial_archive": trial_archive,
                 }
                 if trial_archive.get("status") == "FAILED":
                     run_record["status"] = "FAILED"
                     run_record["error"] = f"trial_archive:{trial_archive.get('reason', 'UNKNOWN')}"
-                runs.append(run_record)
+                run_records[symbol] = run_record
+
+                # Launch each optional Groq review as soon as its local analysis is ready.
+                # At most three external requests run at once; failures stay advisory-only.
+                groq_task = asyncio.create_task(
+                    bounded_groq_review(native_research_input),
+                    name=f"atlas-groq-research-review-{symbol}",
+                )
+                pending.append({
+                    "symbol": symbol,
+                    "research": research,
+                    "review": review,
+                    "trial_archive": trial_archive,
+                    "research_run_id": research_run_id,
+                    "groq_task": groq_task,
+                })
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
-                runs.append({"symbol": symbol, "status": "FAILED", "error": str(exc)})
-        return {
-            "status": ("PARTIAL_FAILURE" if any(r.get("status") == "FAILED" for r in runs) else ("COMPLETE" if runs else "NO_DATA")),
-            "run_at": datetime.now(timezone.utc).isoformat(),
-            "symbols_requested": symbols,
-            "source_intelligence": {k: v for k, v in intelligence.items() if k != "histories"},
-            "runs": runs,
-            "real_money_execution": False,
-        }
-    finally:
-        await release_lock(lock_key)
+                run_records[symbol] = {"symbol": symbol, "status": "FAILED", "error": str(exc)}
+
+        # Await all advisory reviews together after local per-symbol work has progressed.
+        # gather(return_exceptions=True) prevents a provider failure from hiding other results.
+        results = await asyncio.gather(
+            *(item["groq_task"] for item in pending),
+            return_exceptions=True,
+        )
+        for item, groq_result in zip(pending, results):
+            symbol = item["symbol"]
+            review = item["review"]
+            if isinstance(groq_result, Exception):
+                review["groq_research_review"] = {
+                    "status": "ERROR",
+                    "provider": "groq",
+                    "error": type(groq_result).__name__,
+                    "execution_authority": False,
+                }
+            elif isinstance(groq_result, BaseException):
+                raise groq_result
+            elif isinstance(groq_result, dict):
+                review["groq_research_review"] = groq_result
+            else:
+                review["groq_research_review"] = {
+                    "status": "ERROR",
+                    "provider": "groq",
+                    "error": "InvalidReviewResult",
+                    "execution_authority": False,
+                }
+
+            # Research was committed before this optional task was launched. Update its
+            # review payload in place; never create a second run record for the same work.
+            await _update_persisted_research_review(item.get("research_run_id"), review)
+    except BaseException:
+        # A lost lease cancels this operation. Do not leave detached provider tasks
+        # running after the lease owner has stopped.
+        tasks = [item["groq_task"] for item in pending]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+    runs = [run_records[symbol] for symbol in intelligence["histories"] if symbol in run_records]
+    return {
+        "status": ("PARTIAL_FAILURE" if any(r.get("status") == "FAILED" for r in runs) else ("COMPLETE" if runs else "NO_DATA")),
+        "run_at": datetime.now(timezone.utc).isoformat(),
+        "symbols_requested": symbols,
+        "source_intelligence": {k: v for k, v in intelligence.items() if k != "histories"},
+        "runs": runs,
+        "real_money_execution": False,
+    }

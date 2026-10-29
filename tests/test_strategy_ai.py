@@ -40,14 +40,29 @@ def test_current_strategy_ui_describes_local_native_ai():
     assert "uses a real AI model" not in customer
 
 
-def test_deployment_scripts_do_not_require_hosted_ai_provider_keys():
+def test_deployment_removes_gemini_and_keeps_only_optional_groq_research_key():
     paths = ["deploy/cloud-run-deploy.sh", "deploy/cloud-run-worker-deploy.sh",
              "deploy/gcp-bootstrap.sh", "deploy/cloud-run.env.example",
              ".github/workflows/production-deploy.yml"]
     for path in paths:
         text = (ROOT / path).read_text()
-        for token in ("GEMINI_API_KEY", "GEMINI_MODEL", "GROQ_API_KEY", "CEREBRAS_API_KEY", "atlas-gemini-api-key"):
+        for token in ("GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_STRATEGY_MODEL",
+                      "GROQ_STRATEGY_MODEL", "CEREBRAS_API_KEY", "atlas-gemini-api-key"):
             assert token not in text, path
+        if path in {"deploy/cloud-run-deploy.sh", "deploy/cloud-run-worker-deploy.sh"}:
+            assert "GROQ_API_KEY" in text, path
+            assert "GROQ_RESEARCH_REVIEW_ENABLED" in text, path
+            assert "GROQ_STRATEGY_MODEL" not in text, path
+        elif path == ".github/workflows/production-deploy.yml":
+            assert "SECRET_GROQ_API_KEY_VERSION" in text
+            assert "GROQ_API_KEY=" not in text
+        elif path == "deploy/gcp-bootstrap.sh":
+            assert 'if [[ -n "${GROQ_API_KEY:-}" ]]; then' in text
+            assert 'create_secret atlas-groq-api-key "$GROQ_API_KEY"' in text
+            assert 'grant_secret_access atlas-groq-api-key "$SERVICE_ACCOUNT"' in text
+            assert 'grant_secret_access atlas-groq-api-key "$WORKER_SERVICE_ACCOUNT"' in text
+        else:
+            assert "GROQ_API_KEY" not in text, path
 
 
 
@@ -138,3 +153,32 @@ def test_selected_market_timeframe_constrains_multitimeframe_strategy_conditions
         for warning in spec["validation_warnings"]
     )
 
+def test_active_app_and_deployment_surface_has_no_gemini_provider_references():
+    """Keep the retired provider out of runtime, deployment and release sources."""
+    source_suffixes = {
+        ".py", ".kt", ".kts", ".js", ".mjs", ".cjs", ".html", ".css",
+        ".json", ".yml", ".yaml", ".toml", ".properties", ".xml", ".pro",
+        ".sh", ".sql", ".env", ".conf", ".txt",
+    }
+    roots = [ROOT / "app", ROOT / "deploy"]
+    paths = {
+        path
+        for root in roots
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() in source_suffixes
+    }
+    paths.update(
+        ROOT / path
+        for path in (
+            ".env.example",
+            "metadata.json",
+            ".github/workflows/production-deploy.yml",
+            ".github/workflows/production-verification.yml",
+            "scripts/check_ai_models.py",
+            "scripts/check_native_ai.py",
+        )
+    )
+    for path in sorted(paths):
+        assert "gemini" not in path.read_text(encoding="utf-8").casefold(), (
+            f"Retired Gemini provider reference remains in active source: {path.relative_to(ROOT)}"
+        )

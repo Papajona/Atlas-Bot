@@ -264,7 +264,13 @@ class Settings(BaseSettings):
     market_intelligence_enabled: bool = True
     market_intelligence_timeout_seconds: float = 8.0
     market_intelligence_max_news_items: int = 60
-    # Atlas Native AI is local and requires no hosted-model credentials.
+    # Strategy drafts remain local to Atlas Native AI. Groq is an optional research-only reviewer;
+    # its output is advisory, cannot alter a trade plan, and never has execution authority.
+    groq_api_key: str = ""
+    groq_model: str = "openai/gpt-oss-20b"
+    groq_max_completion_tokens: int = 2048
+    groq_timeout_seconds: float = 20.0
+    groq_research_review_enabled: bool = True
 
     # Withdrawal approval/execution controls. Fund release is fail-closed unless explicitly configured.
     withdrawals_enabled: bool = False

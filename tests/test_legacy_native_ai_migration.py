@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -1573,7 +1575,12 @@ async def _gemini_json(prompt):
             ast.parse(result, filename="app/daily_research.py")
             self.assertIn("review['run_drift'] = await persist_run()", result)
             self.assertIn("native_research_review(native_research_input, intelligence)", result)
-            self.assertNotRegex(result, migration.PROVIDER_RE)
+            self.assertIn("from .groq_ai import groq_research_review", result)
+            self.assertIn('review["groq_research_review"] = await groq_research_review(research, intelligence)', result)
+            self.assertNotIn("dual_ai_research_review", result)
+            self.assertNotIn("settings.groq_api_key", result)
+            self.assertNotIn("settings.groq_strategy_model", result)
+            self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
     def test_daily_research_refuses_dynamic_or_extended_unconfigured_fallback_payloads(self):
         invalid_payloads = (
@@ -1674,7 +1681,7 @@ async def _gemini_json(prompt):
             result = config.read_text(encoding="utf-8")
             ast.parse(result, filename="app/config.py")
             self.assertIn("database_url", result)
-            self.assertNotRegex(result, migration.PROVIDER_RE)
+            self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
         unsafe = safe.replace(
             "        normalized = str(value or '').strip().removeprefix('models/')\n",
@@ -1780,7 +1787,11 @@ async def _gemini_json(prompt):
             result = config.read_text(encoding="utf-8")
             self.assertIn("database_url", result)
             self.assertIn("withdrawals_enabled", result)
-            self.assertNotRegex(result, migration.PROVIDER_RE)
+            self.assertIn("groq_api_key", result)
+            self.assertIn("groq_model", result)
+            self.assertIn("groq_research_review_enabled", result)
+            self.assertNotIn("groq_strategy_model", result)
+            self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
     def test_config_refuses_a_provider_field_sharing_a_line_with_an_unrelated_setting(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2883,7 +2894,34 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
                 result,
             )
             ast.parse(result, filename="app/daily_research.py")
-            self.assertNotRegex(result, migration.PROVIDER_RE)
+            self.assertIn("from .groq_ai import groq_research_review", result)
+            self.assertIn('review["groq_research_review"] = await groq_research_review(research, intelligence)', result)
+            self.assertNotIn("dual_ai_research_review", result)
+            self.assertNotIn("_groq_json", result)
+            self.assertNotIn("settings.groq_strategy_model", result)
+            self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
+
+    def test_daily_research_migration_is_idempotent_with_native_groq_review_only(self):
+        source = """from .native_ai import native_research_review
+from .groq_ai import groq_research_review
+
+async def update_research(research, intelligence, review):
+    review["native_ai_review"] = native_research_review(research, intelligence)
+    review["groq_research_review"] = await groq_research_review(research, intelligence)
+    return review
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "daily_research.py"
+            target.parent.mkdir()
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_daily_research()
+                once = target.read_text(encoding="utf-8")
+                migration.transform_daily_research()
+            twice = target.read_text(encoding="utf-8")
+            self.assertEqual(once, source)
+            self.assertEqual(twice, once)
 
     def test_daily_research_refuses_setup_call_inside_provider_arguments(self):
         legacy = (
@@ -2980,6 +3018,22 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
         )
         self.assertIn("DATABASE_URL", result)
         self.assertIn("SECRET_KEY_VERSION", result)
+        self.assertNotRegex(result, migration.PROVIDER_RE)
+
+
+    def test_scrub_workflow_removes_quoted_provider_keys(self):
+        source = (
+            "env:\n"
+            '  "SECRET_GEMINI_API_KEY_VERSION": ${{ secrets.SECRET_GEMINI_API_KEY_VERSION }}\n'
+            "  'GEMINI_MODEL': ${{ vars.GEMINI_MODEL }}\n"
+            "  DATABASE_URL: ${{ secrets.DATABASE_URL }}\n"
+        )
+        result = migration.scrub_ancillary_text(
+            ".github/workflows/production-deploy.yml", source
+        )
+        self.assertIn("DATABASE_URL", result)
+        self.assertNotIn("SECRET_GEMINI_API_KEY_VERSION", result)
+        self.assertNotIn("GEMINI_MODEL", result)
         self.assertNotRegex(result, migration.PROVIDER_RE)
 
     def test_metadata_scrub_returns_valid_json_without_provider_keys(self):
@@ -3317,7 +3371,7 @@ for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-ope
         self.assertIn("DATABASE_SECRET_REF", cleaned)
         self.assertNotIn("OPENAI_ORGANIZATION", cleaned)
         self.assertNotIn("atlas-openai-api-key", cleaned)
-        self.assertNotRegex(cleaned, migration.PROVIDER_RE)
+        self.assertNotRegex(cleaned, migration.RETIRED_PROVIDER_RE)
 
 
     def test_shell_scrub_refuses_provider_block_containing_unrelated_deployment_command(self):
@@ -3329,6 +3383,185 @@ for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-ope
         )
         with self.assertRaisesRegex(migration.MigrationError, "mixed provider-conditioned shell block"):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+
+    def test_shell_scrub_rejects_backtick_command_substitution_in_groq_block(self):
+        source = (
+            'if [[ -n "$GROQ_API_KEY" ]]; then\n'
+            '  echo "Groq configured: `touch /tmp/atlas-qodo-sentinel`"\n'
+            'fi\n'
+        )
+        with self.assertRaisesRegex(migration.MigrationError, "mixed provider-conditioned shell block"):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+
+    def test_shell_scrub_preserves_shared_secret_expansion_when_retired_entry_is_only_other_item(self):
+        source = 'export AI_SECRET_ARGS="${AI_SECRET_ARGS},GEMINI_API_KEY=atlas-gemini-api-key:1"\n'
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertIn('export AI_SECRET_ARGS="${AI_SECRET_ARGS}"', cleaned)
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+
+    def test_shell_scrub_preserves_comma_prefixed_groq_secret_fragments(self):
+        source = """GROQ_SECRET_ARGS=""
+if [[ -n "$SECRET_GROQ_API_KEY_VERSION" ]]; then
+  GROQ_SECRET_ARGS=",GROQ_API_KEY=atlas-groq-api-key:${SECRET_GROQ_API_KEY_VERSION}"
+fi
+gcloud run deploy atlas --set-secrets="DATABASE_URL=atlas-db:latest,${GROQ_SECRET_ARGS}"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertIn('--set-secrets="DATABASE_URL=atlas-db:latest${GROQ_SECRET_ARGS}"', cleaned)
+        self.assertNotIn('${GROQ_SECRET_ARGS:+,${GROQ_SECRET_ARGS}}', cleaned)
+        self.assertNotIn(",,", cleaned)
+
+        # The no-secret and configured forms must not create empty list items.
+        self.assertIn('GROQ_SECRET_ARGS=""', cleaned)
+        self.assertIn('GROQ_SECRET_ARGS=",GROQ_API_KEY=atlas-groq-api-key:${SECRET_GROQ_API_KEY_VERSION}"', cleaned)
+    def test_shell_scrub_separates_direct_secret_expansion_from_database_reference(self):
+        source = """AI_SECRET_ARGS=""
+AI_SECRET_ARGS="${AI_SECRET_ARGS},GEMINI_API_KEY=atlas-gemini:1"
+AI_SECRET_ARGS="${AI_SECRET_ARGS},GROQ_API_KEY=atlas-groq:1"
+gcloud run deploy atlas --set-secrets="DATABASE_URL=atlas-db:latest${AI_SECRET_ARGS}"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertIn('DATABASE_URL=atlas-db:latest${AI_SECRET_ARGS:+,${AI_SECRET_ARGS}}', cleaned)
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+        self.assertNotIn("DATABASE_URL=atlas-db:latestGROQ_API_KEY", cleaned)
+        ast.parse("pass")
+
+    def test_review_projection_with_trailing_tuple_comma_and_inline_comment_is_preserved(self):
+        source = """import json
+
+def persist(review):
+    return ResearchRun(review_json=json.dumps({k: review.get(k) for k in (
+        "ai_brain_mode",
+        "native_ai_review", # keep the explanation
+    )}, default=str))
+"""
+        updated = migration._ensure_groq_review_persisted(source, "app/daily_research.py")
+        self.assertRegex(updated, r'"native_ai_review", # keep the explanation\s+"groq_research_review"')
+        self.assertEqual(updated, migration._ensure_groq_review_persisted(updated, "app/daily_research.py"))
+        ast.parse(updated, filename="app/daily_research.py")
+
+    def test_review_mapping_trailing_comma_and_inline_comment_is_preserved(self):
+        source = """import json
+
+def persist(review):
+    return ResearchRun(review_json=json.dumps({
+        "native_ai_review": review.get("native_ai_review"), # keep the explanation
+    }, default=str))
+"""
+        updated = migration._ensure_groq_review_persisted(source, "app/daily_research.py")
+        self.assertRegex(updated, r'"native_ai_review": review\.get\("native_ai_review"\), # keep the explanation\s+"groq_research_review": review\.get\("groq_research_review"\)')
+        self.assertEqual(updated, migration._ensure_groq_review_persisted(updated, "app/daily_research.py"))
+        ast.parse(updated, filename="app/daily_research.py")
+    def test_shell_scrub_avoids_empty_secret_entry_when_only_groq_survives(self):
+        source = """AI_SECRET_ARGS=""
+AI_SECRET_ARGS="${AI_SECRET_ARGS},GEMINI_API_KEY=atlas-gemini:1"
+AI_SECRET_ARGS="${AI_SECRET_ARGS},GROQ_API_KEY=atlas-groq:1"
+gcloud run deploy atlas --set-secrets="DATABASE_URL=atlas-db:latest,${AI_SECRET_ARGS}"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertIn('AI_SECRET_ARGS="${AI_SECRET_ARGS}${AI_SECRET_ARGS:+,}GROQ_API_KEY=atlas-groq:1"', cleaned)
+        self.assertIn('--set-secrets="DATABASE_URL=atlas-db:latest${AI_SECRET_ARGS:+,${AI_SECRET_ARGS}}"', cleaned)
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+        self.assertNotIn(",,", cleaned)
+        self.assertNotIn('DATABASE_URL=atlas-db:latest,,', cleaned)
+    def test_shell_scrub_separates_shared_secret_from_retained_entries(self):
+        source = 'export AI_SECRET_ARGS="OTHER_KEY=atlas-other:latest,${AI_SECRET_ARGS},GEMINI_API_KEY=atlas-gemini-api-key:1"\n'
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertIn('OTHER_KEY=atlas-other:latest,${AI_SECRET_ARGS}', cleaned)
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+
+    def test_shell_scrub_produces_valid_secret_argument_with_groq_enabled_or_disabled(self):
+        source = """AI_SECRET_ARGS=""
+AI_SECRET_ARGS="${AI_SECRET_ARGS},GEMINI_API_KEY=atlas-gemini-api-key:latest"
+if [[ -n "${GROQ_ENABLED:-}" ]]; then
+  AI_SECRET_ARGS="${AI_SECRET_ARGS},GROQ_API_KEY=atlas-groq-api-key:1"
+fi
+gcloud run services update atlas-api --set-secrets="DATABASE_URL=atlas-db:latest,${AI_SECRET_ARGS}"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        for enabled, expected in (
+            ("1", "DATABASE_URL=atlas-db:latest,GROQ_API_KEY=atlas-groq-api-key:1"),
+            ("", "DATABASE_URL=atlas-db:latest"),
+        ):
+            command = (
+                "gcloud() {\n"
+                "  for arg in \"$@\"; do\n"
+                "    case \"$arg\" in --set-secrets=*) printf '%s\\n' \"${arg#--set-secrets=}\" ;; esac\n"
+                "  done\n"
+                "}\n"
+                + cleaned
+            )
+            result = subprocess.run(
+                ["bash", "-c", command],
+                capture_output=True,
+                text=True,
+                check=True,
+                env={**os.environ, "GROQ_ENABLED": enabled},
+            )
+            self.assertEqual(result.stdout.strip(), expected)
+            self.assertNotIn(",,", result.stdout)
+            self.assertFalse(result.stdout.strip().endswith(","))
+
+    def test_shell_scrub_handles_equals_style_cloud_run_flags(self):
+        source = (
+            'gcloud run deploy atlas --set-env-vars="ENVIRONMENT=paper,GEMINI_MODEL=gemini-3.5-flash,GROQ_MODEL=openai/gpt-oss-20b" '
+            '--set-secrets="DATABASE_URL=atlas-db:1,GEMINI_API_KEY=atlas-gemini-api-key:1,GROQ_API_KEY=atlas-groq-api-key:1"\n'
+        )
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertNotIn("GEMINI_MODEL", cleaned)
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+        self.assertIn("GROQ_MODEL=openai/gpt-oss-20b", cleaned)
+        self.assertIn("GROQ_API_KEY=atlas-groq-api-key:1", cleaned)
+
+    def test_ancillary_patch_conflict_still_runs_guarded_deployment_scrub(self):
+        source = r'''#!/usr/bin/env bash
+set -euo pipefail
+DATABASE_URL="${DATABASE_URL:?required}"
+: "${SECRET_GEMINI_API_KEY_VERSION:?Set SECRET_GEMINI_API_KEY_VERSION}"
+SECRET_GROQ_API_KEY_VERSION="${SECRET_GROQ_API_KEY_VERSION:-}"
+AI_SECRET_ARGS=",GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}"
+ENV_VARS="^@^ENVIRONMENT=production@DATABASE_URL=${DATABASE_URL}@GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}@GROQ_MODEL=openai/gpt-oss-20b@OPENAI_ORGANIZATION=org-id"
+gcloud run deploy atlas --set-env-vars "ENVIRONMENT=production,DATABASE_URL=${DATABASE_URL},GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash},GROQ_MODEL=openai/gpt-oss-20b,OPENAI_ORGANIZATION=org-id" --set-secrets "DATABASE_URL=${DATABASE_SECRET_REF},GEMINI_API_KEY=${SECRET_GEMINI_API_KEY_VERSION}${AI_SECRET_ARGS}"
+grant_secret_access atlas-openai-api-key atlas-runtime
+for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-openai-api-key; do echo "$secret"; done
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "deploy" / "cloud-run-deploy.sh"
+            target.parent.mkdir(parents=True)
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "_apply_path_patch", return_value=False
+            ):
+                migration.apply_ancillary_patch(
+                    "cleanup-commit", "deploy/cloud-run-deploy.sh",
+                    "extra-base", "extra-commit",
+                )
+            cleaned = target.read_text(encoding="utf-8")
+            self.assertIn("DATABASE_URL", cleaned)
+            self.assertIn("DATABASE_SECRET_REF", cleaned)
+            self.assertNotRegex(cleaned, migration.RETIRED_PROVIDER_RE)
+            check = subprocess.run(
+                ["bash", "-n", str(target)], text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_ancillary_patch_conflict_preserves_special_android_extra(self):
+        path = "app/src/main/java/com/atlas/trading/network/ReleaseAdvisorClient.kt"
+        source = "const legacyProvider = \"gemini\"\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / path
+            target.parent.mkdir(parents=True)
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "_apply_path_patch", return_value=False
+            ):
+                migration.apply_ancillary_patch(
+                    "cleanup-commit", path, "extra-base", "extra-commit"
+                )
+            self.assertEqual(target.read_text(encoding="utf-8"), source)
 
     def test_release_diagnostics_replaces_only_hosted_route_and_preserves_neighbor_routes(self):
         legacy = """# Authorized release diagnostics. The gateway key is read only from server configuration.
@@ -4167,6 +4400,164 @@ def _extract_json(text):
             result = target.read_text(encoding="utf-8")
             self.assertIn("def _extract_json", result)
             self.assertNotRegex(result, migration.PROVIDER_RE)
+
+class GroqLegacyMigrationRegressionTests(unittest.TestCase):
+    def test_existing_review_projection_is_extended_with_groq_result_idempotently(self):
+        source = """import json
+from .native_ai import native_research_review
+from .groq_ai import groq_research_review
+
+async def _persist_research_run(review):
+    return ResearchRun(review_json=json.dumps({k: review.get(k) for k in ("ai_brain_mode", "paper_candidates", "native_ai_review")}, default=str))
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "daily_research.py"
+            target.parent.mkdir()
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_daily_research()
+                once = target.read_text(encoding="utf-8")
+                migration.transform_daily_research()
+            twice = target.read_text(encoding="utf-8")
+        self.assertIn('"groq_research_review"', once)
+        self.assertEqual(once, twice)
+        ast.parse(twice, filename="app/daily_research.py")
+
+    def test_direct_retired_provider_import_is_replaced_without_facade_import(self):
+        source = """from .ai_providers import _gemini_json
+
+async def update_research(research, intelligence, review):
+    if settings.gemini_api_key:
+        review['external_ai'] = await _gemini_json(research)
+    else:
+        review['external_ai'] = {'status': 'NOT_CONFIGURED'}
+    return review
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "daily_research.py"
+            target.parent.mkdir()
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_daily_research()
+            result = target.read_text(encoding="utf-8")
+        self.assertNotIn("_gemini_json", result)
+        self.assertIn("from .native_ai import native_research_review", result)
+        self.assertIn("from .groq_ai import groq_research_review", result)
+        ast.parse(result, filename="app/daily_research.py")
+
+    def test_existing_review_literal_mapping_is_extended_with_groq_result_idempotently(self):
+        source = """import json
+
+def persist(review):
+    return ResearchRun(review_json=json.dumps({
+        "ai_brain_mode": review.get("ai_brain_mode"),
+        "native_ai_review": review.get("native_ai_review"),
+    }, default=str))
+"""
+        once = migration._ensure_groq_review_persisted(source, "app/daily_research.py")
+        twice = migration._ensure_groq_review_persisted(once, "app/daily_research.py")
+        self.assertIn('"groq_research_review": review.get("groq_research_review")', once)
+        self.assertEqual(once, twice)
+        ast.parse(once, filename="app/daily_research.py")
+
+    def test_config_refuses_supported_groq_setting_outside_settings_class(self):
+        source = """from pydantic import BaseModel
+
+class Settings(BaseModel):
+    pass
+
+groq_api_key = "must-not-become-a-helper-setting"
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app_dir = root / "app"
+            app_dir.mkdir()
+            path = app_dir / "config.py"
+            path.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "outside the Settings class"):
+                    migration.transform_config()
+            self.assertEqual(path.read_text(encoding="utf-8"), source)
+
+    def test_config_groq_fields_follow_multiline_final_settings_statement(self):
+        source = """from pydantic import BaseModel
+
+class Settings(BaseModel):
+  model_config = dict(
+    env_file=".env",
+  )
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app_dir = root / "app"
+            app_dir.mkdir()
+            path = app_dir / "config.py"
+            path.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_config()
+            result = path.read_text(encoding="utf-8")
+        self.assertIn('    env_file=".env",\n  )\n  groq_api_key: str = ""', result)
+        ast.parse(result, filename="app/config.py")
+    def test_already_native_branch_receives_groq_review_call_and_import(self):
+        source = """from .native_ai import native_research_review
+
+async def run_daily_research(research, intelligence):
+    review = {}
+    review["native_ai_review"] = native_research_review(research, intelligence)
+    return review
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "daily_research.py"
+            target.parent.mkdir()
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_daily_research()
+                once = target.read_text(encoding="utf-8")
+                migration.transform_daily_research()
+            twice = target.read_text(encoding="utf-8")
+        self.assertIn("from .groq_ai import groq_research_review", once)
+        self.assertIn('review["groq_research_review"] = await groq_research_review(research, intelligence)', once)
+        self.assertEqual(once, twice)
+        ast.parse(twice, filename="app/daily_research.py")
+
+    def test_sync_provider_conditional_is_refused_before_await_rewrite(self):
+        source = """from .ai_providers import dual_ai_research_review
+
+def update_research(research, intelligence, review):
+    if settings.gemini_api_key:
+        review['external_ai'] = dual_ai_research_review(research, intelligence)
+    else:
+        review['external_ai'] = {'status': 'NOT_CONFIGURED'}
+    return review
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "daily_research.py"
+            target.parent.mkdir()
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "outside an async function"):
+                    migration.transform_daily_research()
+            self.assertEqual(target.read_text(encoding="utf-8"), source)
+
+    def test_shell_scrub_removes_retired_groq_strategy_settings_only(self):
+        source = '''export GROQ_STRATEGY_MODEL="legacy-strategy"
+GROQ_STRATEGY_API_KEY="legacy-secret"
+if [[ -n "${GROQ_STRATEGY_MODEL:-}" ]]; then
+  export GROQ_STRATEGY_MODEL="legacy-strategy"
+fi
+GROQ_API_KEY="supported-review-key"
+GROQ_MODEL="openai/gpt-oss-20b"
+'''
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertNotRegex(cleaned, migration.RETIRED_PROVIDER_RE)
+        self.assertNotIn("GROQ_STRATEGY_MODEL", cleaned)
+        self.assertNotIn("GROQ_STRATEGY_API_KEY", cleaned)
+        self.assertIn('GROQ_API_KEY="supported-review-key"', cleaned)
+        self.assertIn('GROQ_MODEL="openai/gpt-oss-20b"', cleaned)
 
 if __name__ == "__main__":
     unittest.main()

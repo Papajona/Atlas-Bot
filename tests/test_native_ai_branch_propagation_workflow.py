@@ -1,5 +1,6 @@
 """Regression tests for the repository-wide native-AI propagation workflow."""
 
+import ast
 from pathlib import Path
 
 
@@ -14,6 +15,24 @@ def test_propagation_reruns_when_migration_engine_changes() -> None:
 
     assert '".github/workflows/propagate-native-ai-all-branches.yml"' in push_trigger
     assert '"scripts/migrate_legacy_native_ai.py"' in push_trigger
+    assert '"app/prompt_safety.py"' in push_trigger
+    assert '"app/groq_ai.py"' in push_trigger
+
+
+
+def test_propagation_uses_ancestral_pinned_source_and_semantic_workflow_validation() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    migration = MIGRATION.read_text(encoding="utf-8")
+
+    assert 'git merge-base --is-ancestor "$NATIVE_AI_CANONICAL_COMMIT" "$GITHUB_SHA"' in workflow
+    assert workflow.count("':!.github/workflows/production-deploy.yml'") == 2
+    assert workflow.count("':!.github/workflows/production-verification.yml'") == 2
+    assert "groq_research_review" in workflow
+    assert "app/prompt_safety.py" in workflow
+    # Workflow labels can mention retired providers without being active wiring. The
+    # excluded YAML files are still parsed, scrubbed, and rejected if wiring remains.
+    assert "if _workflow_has_active_provider_wiring(cleaned):" in migration
+    assert "def scrub_workflow_ancillary(path: str, text: str) -> str:" in migration
 
 
 def test_update_refs_uses_supported_graphql_fields_and_compare_and_swap() -> None:
@@ -57,11 +76,14 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert "tests/" not in runtime_path_list
     assert 'git show "$GITHUB_SHA:scripts/migrate_legacy_native_ai.py"' in workflow
     assert 'python "$RUNNER_TEMP/migrate_legacy_native_ai.py" --canonical-commit "$NATIVE_AI_CANONICAL_COMMIT" --cleanup-commit "$NATIVE_AI_CLEANUP_COMMIT" --extra-base-commit "$NATIVE_AI_EXTRA_BASE_COMMIT" --extra-commit "$NATIVE_AI_EXTRA_COMMIT"' in workflow
-    assert 'NATIVE_AI_CANONICAL_COMMIT="f8bb968198ec909e66cc04b888716f87ded6c0fa"' in workflow
+    assert 'NATIVE_AI_CANONICAL_COMMIT="bafcc5bc3e5f025ce59c53555a622c9cb46a2f22"' in workflow
+    assert 'NATIVE_AI_CANONICAL_COMMIT="$GITHUB_SHA"' not in workflow
     assert 'NATIVE_AI_CLEANUP_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"' in workflow
     assert 'NATIVE_AI_EXTRA_COMMIT="2317ccc4c3293e8bbd7043970876eceb509d2d1d"' in workflow
     assert 'extra_parent="$(git rev-parse "$NATIVE_AI_EXTRA_COMMIT^")"' in workflow
     assert 'if [[ "$extra_parent" != "$NATIVE_AI_EXTRA_BASE_COMMIT" ]]; then' in workflow
+    assert '"app/groq_ai.py"' in runtime_path_list
+    assert '"app/prompt_safety.py"' in runtime_path_list
     assert '"app/main.py"' in runtime_path_list
     assert '"ENTRY_EXIT_3_9_0.md"' in runtime_path_list
     assert '"app/src/main/java/com/atlas/trading/network/ReleaseAdvisorClient.kt"' in runtime_path_list
@@ -81,6 +103,23 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert "ACTIVE PROVIDER REFERENCES REMAIN after semantic migration" in workflow
     assert r"generativelanguage\.googleapis\.com" in workflow
     assert r"api\.groq\.com" in workflow
+    global_scan = next(line for line in workflow.splitlines() if "if matches=\"$(git grep -nIEi" in line)
+    assert "groq" not in global_scan.lower()
+    assert "':!.github/workflows/production-deploy.yml'" in global_scan
+    assert "':!.github/workflows/production-verification.yml'" in global_scan
+    assert "scrub_workflow_ancillary(workflow_path.as_posix(), workflow_source)" in workflow
+    assert "retired-provider workflow wiring requires migration" in workflow
+    assert "if [[ -f metadata.json || -f .github/workflows/production-deploy.yml" in workflow
+    assert "legacy_groq_refs" in workflow
+    assert r"settings\.groq_(strategy_model|model|api_key)" in workflow
+    legacy_groq_scan = next(line for line in workflow.splitlines() if "if legacy_groq_refs=" in line)
+    assert "-- app " in legacy_groq_scan
+    assert "':!app/groq_ai.py'" in legacy_groq_scan
+    assert "':!app/daily_research.py'" not in legacy_groq_scan
+    assert "':!app/config.py'" in legacy_groq_scan
+    assert "groq_strategy_model" not in legacy_groq_scan
+    assert "legacy_groq_config_refs" in workflow
+    assert "git grep -nIEi 'groq_strategy_model' -- app/config.py" in workflow
     assert r"api\.cerebras\.ai" in workflow
 
 
@@ -97,7 +136,7 @@ def test_metadata_secret_refs_are_checked_even_when_source_grep_has_no_matches()
     helper = MIGRATION.read_text(encoding="utf-8")
     assert 'if (( rc == 1 )); then' in workflow
     assert 'matches=""' in workflow
-    assert 'helper._metadata_has_active_provider_wiring(Path("metadata.json").read_text(encoding="utf-8"))' in workflow
+    assert 'metadata_path.is_file() and helper._metadata_has_active_provider_wiring(metadata_path.read_text(encoding="utf-8"))' in workflow
     assert 'helper_path = Path(os.environ["MIGRATION_HELPER"])' in workflow
     assert "ATLAS_PROVIDER_SECRET_RE" in helper
     assert "metadata.json: active provider configuration or secret reference" in workflow
@@ -122,3 +161,28 @@ def test_migration_script_preserves_unrelated_branch_logic_and_fails_closed() ->
     assert "provider references remain in:" in helper
     assert '_git("add", "-A")' in helper
     assert '_git("diff", "--cached", "--check")' in helper
+
+
+def test_workflow_has_no_duplicated_or_unreachable_tail() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    lines = workflow.splitlines()
+    success = '          echo "PASS: all enumerated branches were updated or passed explicit implementation and provider checks."'
+    assert lines.count("name: Propagate Atlas Native AI across branches") == 1
+    assert lines.count(success) == 1
+    assert lines[-1] == success
+    assert not any(line.startswith("\\n'") for line in lines)
+
+def test_embedded_native_ai_verifier_script_is_valid_python() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    function_start = workflow.index("verify_native_ai_impl() {")
+    heredoc_marker = "python - <<'PY'\n"
+    heredoc_start = workflow.index(heredoc_marker, function_start) + len(heredoc_marker)
+    heredoc_end = workflow.index("\n          PY\n", heredoc_start)
+    embedded_lines = workflow[heredoc_start:heredoc_end].splitlines()
+    # Remove the common indentation contributed by the YAML block scalar so this
+    # checks the exact Python source the shell heredoc executes.
+    source = "\n".join(
+        line[10:] if line.startswith("          ") else line
+        for line in embedded_lines
+    )
+    ast.parse(source, filename=f"{WORKFLOW.name}:verify_native_ai_impl")

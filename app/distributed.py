@@ -87,7 +87,12 @@ async def refresh_lock(key: str, ttl_seconds: int = 900) -> bool:
             1, f"atlas:lock:{key}", token, max(30, ttl_seconds),
         )
         return bool(result)
-    except Exception:
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "redis_lock_refresh_failed error_type=%s",
+            type(exc).__name__,
+            exc_info=True,
+        )
         return False
 
 
