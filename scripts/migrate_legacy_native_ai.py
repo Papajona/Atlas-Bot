@@ -1128,11 +1128,43 @@ def transform_config() -> None:
                 )
 
     lines = source.splitlines(keepends=True)
-    result = "".join(line for number, line in enumerate(lines, start=1) if number not in removable_lines)
-    result = "".join(
-        line for line in result.splitlines(keepends=True)
-        if not (line.lstrip().startswith("#") and RETIRED_PROVIDER_RE.search(line))
-    )
+    retained_lines: list[str] = []
+    retained_original_lines: list[int | None] = []
+    for number, line in enumerate(lines, start=1):
+        if number in removable_lines:
+            continue
+        if line.lstrip().startswith("#") and RETIRED_PROVIDER_RE.search(line):
+            continue
+        retained_lines.append(line)
+        retained_original_lines.append(number)
+
+    # If all original Settings members were retired provider fields/validators,
+    # the class still needs a valid body before the Groq defaults are appended
+    # below. Seed the first canonical Groq field at the former body position;
+    # later field insertion recognizes it instead of duplicating it.
+    for original_class in reversed(settings_classes):
+        if not original_class.body:
+            continue
+        body_was_fully_removed = all(
+            all(
+                line_number in removable_lines
+                for line_number in range(member.lineno, (member.end_lineno or member.lineno) + 1)
+            )
+            for member in original_class.body
+        )
+        if not body_was_fully_removed:
+            continue
+        first_body_line = min(member.lineno for member in original_class.body)
+        insertion_index = sum(
+            1 for original_line in retained_original_lines
+            if original_line is not None and original_line < first_body_line
+        )
+        class_indent = re.match(r"^[ \\t]*", lines[original_class.lineno - 1]).group(0)
+        body_indent = class_indent + ("\\t" if "\\t" in class_indent else "    ")
+        retained_lines.insert(insertion_index, body_indent + 'groq_api_key: str = ""\\n')
+        retained_original_lines.insert(insertion_index, None)
+
+    result = "".join(retained_lines)
     # Supply the separate Groq research-review settings on legacy branches that
     # predate them, without overwriting settings already present on a branch.
     post_cleanup_tree = ast.parse(result, filename=str(path))
