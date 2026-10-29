@@ -1652,17 +1652,17 @@ async def _gemini_json(prompt):
 
     def test_config_removes_only_exact_pure_provider_model_validator(self):
         safe = (
-            "from pydantic import field_validator\\n"
-            "class Settings:\\n"
-            "    database_url: str = ''\\n"
-            "    gemini_model: str = 'gemini-3.8-flash'\\n"
-            "    @field_validator('gemini_model')\\n"
-            "    @classmethod\\n"
-            "    def _validate_gemini_model(cls, value: str) -> str:\\n"
-            "        normalized = str(value or '').strip().removeprefix('models/')\\n"
-            "        if normalized != 'gemini-3.8-flash':\\n"
-            "            raise ValueError('Gemini model must be exactly gemini-3.8-flash; alternative Gemini IDs are not permitted.')\\n"
-            "        return normalized\\n"
+            "from pydantic import field_validator\n"
+            "class Settings:\n"
+            "    database_url: str = ''\n"
+            "    gemini_model: str = 'gemini-3.8-flash'\n"
+            "    @field_validator('gemini_model')\n"
+            "    @classmethod\n"
+            "    def _validate_gemini_model(cls, value: str) -> str:\n"
+            "        normalized = str(value or '').strip().removeprefix('models/')\n"
+            "        if normalized != 'gemini-3.8-flash':\n"
+            "            raise ValueError('Gemini model must be exactly gemini-3.8-flash; alternative Gemini IDs are not permitted.')\n"
+            "        return normalized\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1677,9 +1677,9 @@ async def _gemini_json(prompt):
             self.assertNotRegex(result, migration.PROVIDER_RE)
 
         unsafe = safe.replace(
-            "        normalized = str(value or '').strip().removeprefix('models/')\\n",
-            "        record_gemini_validation()\\n"
-            "        normalized = str(value or '').strip().removeprefix('models/')\\n",
+            "        normalized = str(value or '').strip().removeprefix('models/')\n",
+            "        record_gemini_validation()\n"
+            "        normalized = str(value or '').strip().removeprefix('models/')\n",
         )
         self.assertNotEqual(unsafe, safe)
         with tempfile.TemporaryDirectory() as tmp:
