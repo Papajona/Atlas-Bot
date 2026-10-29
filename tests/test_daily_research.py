@@ -155,3 +155,38 @@ def test_async_retry_does_not_swallow_cancellation():
         pass
     else:
         raise AssertionError("cancellation must propagate immediately")
+
+
+def test_daily_research_cancels_work_when_lock_lease_is_lost():
+    import app.daily_research as dr
+
+    cancelled = []
+
+    async def failed_refresh(_key, *, ttl_seconds):
+        return False
+
+    async def slow_work():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    try:
+        dr.refresh_lock = failed_refresh
+        try:
+            asyncio.run(
+                dr._run_with_research_lease(
+                    slow_work, "atlas:daily-research:test", 300,
+                    refresh_interval_seconds=0.001,
+                )
+            )
+        except dr._ResearchLeaseLost:
+            pass
+        else:
+            raise AssertionError("lost lock lease must abort daily research")
+    finally:
+        from app.distributed import refresh_lock
+        dr.refresh_lock = refresh_lock
+
+    assert cancelled == [True]
