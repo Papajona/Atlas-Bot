@@ -5206,7 +5206,7 @@ def _workflow_has_active_provider_wiring(text: str) -> bool:
         stripped = line.lstrip()
         if not stripped or stripped.startswith("#"):
             continue
-        match = re.match(r"^\s*(?:-\s+)?([A-Za-z_[A-Za-z0-9_-]*):\s*(.*)$", line)
+        match = re.match(r"^\s*(?:-\s+)?([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$", line)
         if match:
             key, value = match.groups()
             if key.lower() in {"environment", "name", "run-name", "description"}:
@@ -5297,7 +5297,7 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
         # GitHub Actions sequence-item labels are inert metadata just like mapping labels.
         # Preserve them verbatim even when their display text names a retired provider.
         label_match = re.match(
-            r"^([ \\t]*-[ \\t]+)(name|run-name|description):(?:[ \\t]*(.*?))?(\\r?\\n)?$",
+            r"^([ \t]*-[ \t]+)(name|run-name|description):(?:[ \t]*(.*?))?(\r?\n)?$",
             line, re.I,
         )
         if label_match:
