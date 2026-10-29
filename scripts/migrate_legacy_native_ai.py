@@ -2535,6 +2535,22 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST, module_tree: ast.Module |
     }
     builtin_generic_names = {"dict", "list", "tuple", "set", "frozenset", "type"}
 
+    def runtime_module_bindings(statement: ast.stmt, postponed: bool) -> set[str]:
+        bound = _defined_names(statement) | _module_scope_maybe_binds(
+            statement, postponed_annotations=postponed
+        )
+        # A module-level annotation-only declaration such as list: int records an
+        # __annotations__ entry but does not assign or rebind the target name.
+        # Keep names bound by the annotation expression itself.
+        if isinstance(statement, ast.AnnAssign) and statement.value is None:
+            target_names = _assigned_names(statement.target)
+            annotation_effects = _module_scope_maybe_binds(
+                statement.annotation, postponed_annotations=postponed
+            )
+            bound.difference_update(target_names)
+            bound.update(annotation_effects)
+        return bound
+
     def module_binds_before(name: str) -> bool:
         if module_tree is None:
             return True
@@ -2546,10 +2562,7 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST, module_tree: ast.Module |
             return True
         postponed = _uses_postponed_annotations(module_tree)
         for statement in module_tree.body[:target_index]:
-            bound = _defined_names(statement) | _module_scope_maybe_binds(
-                statement, postponed_annotations=postponed
-            )
-            if name in bound:
+            if name in runtime_module_bindings(statement, postponed):
                 return True
         return False
 
@@ -2565,9 +2578,7 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST, module_tree: ast.Module |
         last_binding: ast.stmt | None = None
         postponed = _uses_postponed_annotations(module_tree)
         for statement in module_tree.body[:target_index]:
-            bound = _defined_names(statement) | _module_scope_maybe_binds(
-                statement, postponed_annotations=postponed
-            )
+            bound = runtime_module_bindings(statement, postponed)
             if "Any" in bound:
                 last_binding = statement
         return (
