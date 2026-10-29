@@ -88,9 +88,9 @@ def _validate_review(value: dict[str, Any]) -> dict[str, Any]:
     if not math.isfinite(float(confidence)) or not 0.0 <= float(confidence) <= 1.0:
         raise GroqAIError("Groq review confidence must be a finite number between 0 and 1")
     result["confidence"] = float(confidence)
-    rendered_text = [
-        *result[key] for key in required_text
-    ] + [item for key in required_arrays for item in result[key]]
+    rendered_text = [result[key] for key in required_text] + [
+        item for key in required_arrays for item in result[key]
+    ]
     if any(_ACTIONABLE_TRADE_INSTRUCTION_RE.search(item) for item in rendered_text):
         raise GroqAIError("Groq review contains actionable trading instructions")
     return result
