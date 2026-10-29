@@ -3399,6 +3399,21 @@ for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-ope
         self.assertIn('export AI_SECRET_ARGS="${AI_SECRET_ARGS}"', cleaned)
         self.assertNotIn("GEMINI_API_KEY", cleaned)
 
+    def test_shell_scrub_preserves_comma_prefixed_groq_secret_fragments(self):
+        source = """GROQ_SECRET_ARGS=""
+if [[ -n "$SECRET_GROQ_API_KEY_VERSION" ]]; then
+  GROQ_SECRET_ARGS=",GROQ_API_KEY=atlas-groq-api-key:${SECRET_GROQ_API_KEY_VERSION}"
+fi
+gcloud run deploy atlas --set-secrets="DATABASE_URL=atlas-db:latest,${GROQ_SECRET_ARGS}"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertIn('--set-secrets="DATABASE_URL=atlas-db:latest${GROQ_SECRET_ARGS}"', cleaned)
+        self.assertNotIn('${GROQ_SECRET_ARGS:+,${GROQ_SECRET_ARGS}}', cleaned)
+        self.assertNotIn(",,", cleaned)
+
+        # The no-secret and configured forms must not create empty list items.
+        self.assertIn('GROQ_SECRET_ARGS=""', cleaned)
+        self.assertIn('GROQ_SECRET_ARGS=",GROQ_API_KEY=atlas-groq-api-key:${SECRET_GROQ_API_KEY_VERSION}"', cleaned)
     def test_shell_scrub_avoids_empty_secret_entry_when_only_groq_survives(self):
         source = """AI_SECRET_ARGS=""
 AI_SECRET_ARGS="${AI_SECRET_ARGS},GEMINI_API_KEY=atlas-gemini:1"
