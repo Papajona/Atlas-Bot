@@ -568,6 +568,7 @@ async def groq_research_review(
             "cause": cause_type,
             "http_status": http_status,
             "input_truncated": input_truncated,
+            "input_truncation_status": "UNKNOWN" if input_truncated is None else "KNOWN",
             "execution_authority": False,
         }
     return {
