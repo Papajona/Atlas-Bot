@@ -2509,24 +2509,81 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST, module_tree: ast.Module |
         return False
 
     # Removing this helper also removes annotation evaluation at module import.
-    # Accept only inert built-in names and literal annotations; reject calls,
-    # attribute lookups, subscripts, and other expressions with hidden behavior.
-    inert_annotation_names = {
+    # Resolve builtin names against module-scope writes before allowing subscription:
+    # a rebound "list" or "dict" can run custom __class_getitem__ code.
+    builtin_annotation_names = {
         "str", "dict", "int", "float", "bool", "list", "tuple",
-        "set", "frozenset", "bytes", "object", "type", "Any",
+        "set", "frozenset", "bytes", "object", "type",
     }
+    builtin_generic_names = {"dict", "list", "tuple", "set", "frozenset", "type"}
+
+    def module_binds_before(name: str) -> bool:
+        if module_tree is None:
+            return True
+        target_index = next(
+            (index for index, statement in enumerate(module_tree.body) if statement is node),
+            None,
+        )
+        if target_index is None:
+            return True
+        postponed = _uses_postponed_annotations(module_tree)
+        for statement in module_tree.body[:target_index]:
+            bound = _defined_names(statement) | _module_scope_maybe_binds(
+                statement, postponed_annotations=postponed
+            )
+            if name in bound:
+                return True
+        return False
+
+    def typing_any_is_imported_before() -> bool:
+        if module_tree is None:
+            return False
+        target_index = next(
+            (index for index, statement in enumerate(module_tree.body) if statement is node),
+            None,
+        )
+        if target_index is None:
+            return False
+        last_binding: ast.stmt | None = None
+        postponed = _uses_postponed_annotations(module_tree)
+        for statement in module_tree.body[:target_index]:
+            bound = _defined_names(statement) | _module_scope_maybe_binds(
+                statement, postponed_annotations=postponed
+            )
+            if "Any" in bound:
+                last_binding = statement
+        return (
+            isinstance(last_binding, ast.ImportFrom)
+            and last_binding.module in {"typing", "typing_extensions"}
+            and any(
+                alias.name == "Any" and (alias.asname or alias.name) == "Any"
+                for alias in last_binding.names
+            )
+        )
 
     def is_inert_dispatcher_annotation(annotation: ast.AST | None) -> bool:
         if annotation is None:
             return True
         if isinstance(annotation, ast.Name):
-            return annotation.id in inert_annotation_names
+            if annotation.id in builtin_annotation_names:
+                return not module_binds_before(annotation.id)
+            return annotation.id == "Any" and typing_any_is_imported_before()
         if isinstance(annotation, ast.Constant):
             return annotation.value is None or isinstance(annotation.value, str)
         if isinstance(annotation, ast.Subscript):
+            if (
+                not isinstance(annotation.value, ast.Name)
+                or annotation.value.id not in builtin_generic_names
+                or module_binds_before(annotation.value.id)
+            ):
+                return False
+            return is_inert_dispatcher_annotation(annotation.slice)
+        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+            # PEP 604 unions are inert only when both sides independently resolve
+            # to trusted builtin/imported types or None, never dynamic expressions.
             return (
-                is_inert_dispatcher_annotation(annotation.value)
-                and is_inert_dispatcher_annotation(annotation.slice)
+                is_inert_dispatcher_annotation(annotation.left)
+                and is_inert_dispatcher_annotation(annotation.right)
             )
         if isinstance(annotation, (ast.Tuple, ast.List)):
             return all(is_inert_dispatcher_annotation(item) for item in annotation.elts)
