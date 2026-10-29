@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -47,3 +48,24 @@ def test_startup_guards_are_not_duplicated_in_main():
     assert "def _assert_multidict_safe_backend" not in main
     assert "async def _assert_database_migrations_current" not in main
     assert "from .startup_guards import" in main
+
+
+
+def test_final_fixes_script_requires_explicit_patch_path(tmp_path):
+    script = ROOT / "scripts" / "apply_final_fixes.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "pass the patch file explicitly" in result.stderr
+
+
+def test_final_fixes_script_checks_a_distinct_legacy_android_tree():
+    script = (ROOT / "scripts" / "apply_final_fixes.sh").read_text(encoding="utf-8")
+    assert 'if [[ -d android ]]; then' in script
+    assert 'diff -r app/src/main/java android/app/src/main/java' in script
+    assert 'diff -r app/src/main/java app/src/main/java' not in script

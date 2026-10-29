@@ -67,6 +67,69 @@ jobs:
           echo "Verified pinned Python base-image digest: $digest"
       - name: Build application container image
         run: docker build --tag atlas-bot-ci:repair .
+      - name: Smoke-test paper-only container startup and liveness
+        shell: bash
+        run: |
+          set -euo pipefail
+          container="atlas-paper-startup-smoke-$GITHUB_RUN_ID"
+          body="$RUNNER_TEMP/atlas-paper-smoke-health.json"
+          cleanup() {
+            status=$?
+            if (( status != 0 )); then
+              echo "Paper-only container startup/liveness failed; container logs follow:"
+              docker logs "$container" 2>&1 || true
+            fi
+            docker rm -f "$container" >/dev/null 2>&1 || true
+            return "$status"
+          }
+          trap cleanup EXIT
+
+          docker run --detach --name "$container" \
+            --publish 127.0.0.1:18080:8000 \
+            --env ENVIRONMENT=staging \
+            --env PROCESS_ROLE=paper \
+            --env ATLAS_ASGI_APP=app.paper_staging:app \
+            --env PORT=8000 \
+            --env DATABASE_URL=sqlite+aiosqlite:////tmp/atlas-paper-smoke.db \
+            --env CUSTOMER_PAPER_DATABASE_URL=postgresql+asyncpg://smoke:smoke@127.0.0.1:5432/smoke \
+            --env SUPABASE_URL=https://wauaelzyugjuepmrewaw.supabase.co \
+            --env SUPABASE_ANON_KEY=ci-paper-smoke-key \
+            --env PAPER_TRADING=true \
+            --env LIVE_TRADING_ENABLED=false \
+            --env CUSTOMER_LIVE_TRADING_ENABLED=false \
+            --env PAYOUT_LIVE_ENABLED=false \
+            --env BROKER_SANDBOX=true \
+            --env USDT_TRON_ENABLED=false \
+            --env USDT_TRON_SWEEP_ENABLED=false \
+            --env DERIV_LIVE_ENABLED=false \
+            --env CUSTOMER_PAPER_LEDGER_ENABLED=true \
+            --env CUSTOMER_PAPER_SHARED_DATABASE_ENABLED=true \
+            --env CUSTOMER_TOTP_REQUIRED=true \
+            --env ADAPTIVE_AI_ENABLED=false \
+            --env FORWARDED_ALLOW_IPS=127.0.0.1 \
+            --env SECRET_KEY=ci-paper-smoke-placeholder \
+            atlas-bot-ci:repair
+
+          for attempt in $(seq 1 30); do
+            if curl --silent --show-error --fail --max-time 2 \
+              --output "$body" http://127.0.0.1:18080/livez; then
+              python - "$body" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          if data.get("status") != "ok" or data.get("mode") != "paper-only":
+              raise SystemExit(f"unexpected paper-only liveness payload: {data!r}")
+          print("PASS: exact paper-only ASGI entrypoint started and returned the expected liveness payload")
+          PY
+              exit 0
+            fi
+            if [[ "$(docker inspect --format='{{.State.Running}}' "$container" 2>/dev/null || echo false)" != "true" ]]; then
+              echo "Container exited before liveness succeeded."
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "Timed out waiting for the paper-only container to bind port 8000 and serve /livez."
+          exit 1
       - name: Compile source
         run: python -m compileall -q app alembic
       - name: Create Supabase API roles for migration verification

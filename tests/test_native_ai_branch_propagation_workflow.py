@@ -8,6 +8,14 @@ WORKFLOW = ROOT / ".github" / "workflows" / "propagate-native-ai-all-branches.ym
 MIGRATION = ROOT / "scripts" / "migrate_legacy_native_ai.py"
 
 
+def test_propagation_reruns_when_migration_engine_changes() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    push_trigger = workflow.split("  push:", 1)[1].split("  workflow_dispatch:", 1)[0]
+
+    assert '".github/workflows/propagate-native-ai-all-branches.yml"' in push_trigger
+    assert '"scripts/migrate_legacy_native_ai.py"' in push_trigger
+
+
 def test_update_refs_uses_supported_graphql_fields_and_compare_and_swap() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     assert "refUpdates: [{name: $name, beforeOid: $before, afterOid: $after, force: false}]" in workflow
