@@ -3379,6 +3379,18 @@ for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-ope
         self.assertIn('export AI_SECRET_ARGS="${AI_SECRET_ARGS}"', cleaned)
         self.assertNotIn("GEMINI_API_KEY", cleaned)
 
+    def test_shell_scrub_avoids_empty_secret_entry_when_only_groq_survives(self):
+        source = """AI_SECRET_ARGS=""
+AI_SECRET_ARGS="${AI_SECRET_ARGS},GEMINI_API_KEY=atlas-gemini:1"
+AI_SECRET_ARGS="${AI_SECRET_ARGS},GROQ_API_KEY=atlas-groq:1"
+gcloud run deploy atlas --set-secrets="DATABASE_URL=atlas-db:latest,${AI_SECRET_ARGS}"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertIn('AI_SECRET_ARGS="${AI_SECRET_ARGS}${AI_SECRET_ARGS:+,}GROQ_API_KEY=atlas-groq:1"', cleaned)
+        self.assertIn('--set-secrets="DATABASE_URL=atlas-db:latest,${AI_SECRET_ARGS}"', cleaned)
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+        self.assertNotIn(",,", cleaned)
+        self.assertNotIn(",}", cleaned)
     def test_shell_scrub_separates_shared_secret_from_retained_entries(self):
         source = 'export AI_SECRET_ARGS="OTHER_KEY=atlas-other:latest,${AI_SECRET_ARGS},GEMINI_API_KEY=atlas-gemini-api-key:1"\n'
         cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
