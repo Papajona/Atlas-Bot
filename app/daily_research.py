@@ -1,5 +1,6 @@
 from __future__ import annotations
 import math
+import re
 import logging
 import asyncio
 import json
@@ -48,6 +49,107 @@ def _cfg() -> StrategyConfig:
         take_profit_atr=settings.strategy_take_profit_atr,
     )
 
+
+
+
+_GROQ_ACTIONABLE_PATTERNS = (
+    re.compile(
+        r"(?i:\b(?:buy|sell|go long|go short|enter|exit|open|close))\s+"
+        r"(?:\d+(?:\.\d+)?\s+)?"
+        r"(?:[A-Za-z0-9]{2,}(?:[/_][A-Za-z0-9]{2,}){1,2}|"
+        r"[A-Z]{3,}[A-Z0-9]*|[A-Za-z][A-Za-z0-9]*\d[A-Za-z0-9]*)"
+        r"(?:\s+(?i:now|immediately|at market|market price|at)\b)?"
+    ),
+    re.compile(r"(?i:\b(?:place|submit|execute)\s+(?:a\s+)?(?:(?:buy|sell)\s+)?order\b)"),
+    re.compile(
+        r"(?i:\b(?:entry|stop[- ]loss|take[- ]profit|limit|trigger)"
+        r"(?:\s+price)?\s*(?:=|:|at)\s*[$€£]?\d+(?:[.,]\d+)?)"
+    ),
+    re.compile(r"(?i:\b(?:buy|sell)\s+(?:now|immediately|at market)\b)"),
+)
+_GROQ_NEGATED_PREFIX = re.compile(
+    r"(?i)(?:\bdo\s+not|\bdon['’]?t|\bdont|\bnever|\bshould\s+not|\bmust\s+not|\bnot\s+to|\bavoid)"
+    r"(?:\s+(?:recommend|instruct|suggest|tell)(?:\s+to)?)?\s*$"
+)
+
+
+def _contains_actionable_groq_text(text: str) -> bool:
+    for pattern in _GROQ_ACTIONABLE_PATTERNS:
+        for match in pattern.finditer(text):
+            prefix = text[max(0, match.start() - 80):match.start()]
+            if not _GROQ_NEGATED_PREFIX.search(prefix):
+                return True
+    return False
+
+
+def _validate_groq_research_result(value: Any) -> dict[str, Any]:
+    """Validate untrusted Groq adapter output again at the persistence boundary."""
+    if not isinstance(value, dict):
+        raise ValueError("Groq result must be an object")
+    status = value.get("status")
+    if status in {"DISABLED", "ERROR"}:
+        result: dict[str, Any] = {
+            "status": status,
+            "provider": "groq",
+            "execution_authority": False,
+        }
+        for field in ("reason", "error", "cause"):
+            item = value.get(field)
+            if isinstance(item, str) and item.strip():
+                result[field] = item.strip()[:240]
+        http_status = value.get("http_status")
+        if isinstance(http_status, int) and not isinstance(http_status, bool) and 100 <= http_status <= 599:
+            result["http_status"] = http_status
+        return result
+
+    if status != "OK" or value.get("provider") != "groq" or value.get("execution_authority") is not False:
+        raise ValueError("Groq result does not have the reviewed research-only envelope")
+    model = value.get("model")
+    if not isinstance(model, str) or not model.strip() or len(model) > 200:
+        raise ValueError("Groq result model is invalid")
+
+    review = value.get("review")
+    if not isinstance(review, dict):
+        raise ValueError("Groq result must contain a validated review object")
+    safe_review: dict[str, Any] = {}
+    for field in ("regime_assessment", "research_only_summary"):
+        item = review.get(field)
+        if not isinstance(item, str) or not item.strip() or len(item) > 4000:
+            raise ValueError(f"Groq review field {field} must be non-empty bounded text")
+        cleaned = item.strip()
+        if _contains_actionable_groq_text(cleaned):
+            raise ValueError(f"Groq review field {field} contains an actionable trading instruction")
+        safe_review[field] = cleaned
+
+    for field in ("key_observations", "data_quality_flags", "strategy_watchlist"):
+        items = review.get(field)
+        if (
+            not isinstance(items, list)
+            or len(items) > 20
+            or any(not isinstance(item, str) or len(item) > 1000 for item in items)
+        ):
+            raise ValueError(f"Groq review field {field} must be a bounded array of text")
+        cleaned_items = [item.strip() for item in items if item.strip()]
+        if any(_contains_actionable_groq_text(item) for item in cleaned_items):
+            raise ValueError(f"Groq review field {field} contains an actionable trading instruction")
+        safe_review[field] = cleaned_items
+
+    confidence = review.get("confidence")
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not math.isfinite(float(confidence))
+        or not 0.0 <= float(confidence) <= 1.0
+    ):
+        raise ValueError("Groq review confidence must be finite and between 0 and 1")
+    safe_review["confidence"] = float(confidence)
+    return {
+        "status": "OK",
+        "provider": "groq",
+        "model": model.strip(),
+        "review": safe_review,
+        "execution_authority": False,
+    }
 
 def _ai_research_brief(research: dict[str, Any], intelligence: dict[str, Any]) -> dict[str, Any]:
     """Deterministic research brain; optional external LLM can consume this structured brief.
@@ -483,7 +585,17 @@ async def _run_daily_research_work() -> dict[str, Any]:
             elif isinstance(groq_result, BaseException):
                 raise groq_result
             elif isinstance(groq_result, dict):
-                review["groq_research_review"] = groq_result
+                try:
+                    # Validate even branch-specific adapters at the trusted consumer
+                    # boundary. Never persist arbitrary provider output as commentary.
+                    review["groq_research_review"] = _validate_groq_research_result(groq_result)
+                except (TypeError, ValueError, OverflowError):
+                    review["groq_research_review"] = {
+                        "status": "ERROR",
+                        "provider": "groq",
+                        "error": "InvalidOrUnsafeReviewResult",
+                        "execution_authority": False,
+                    }
             else:
                 review["groq_research_review"] = {
                     "status": "ERROR",
