@@ -5042,7 +5042,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 continue
             if character in ";&|<>":
                 return False
-        return quote is None
+        return quote is None and not escaped
 
     block_start = 0
     while block_start < len(source_lines):
