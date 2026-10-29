@@ -69,7 +69,7 @@ anything on the API, while the worker pool is always-on by design.
 | `atlas-model-signing-public-key` | yes | yes | no |
 | `atlas-model-signing-private-key` | **no** | yes (to sign trained models) | no |
 | `atlas-supabase-anon-key`, `atlas-funding-webhook-secret` | yes | no | no |
-| `atlas-groq-api-key` (optional research reviewer only) | optional | optional | no |
+| `atlas-groq-api-key` (optional research reviewer only; created by bootstrap only when `GROQ_API_KEY` is supplied) | optional | optional | no |
 
 Atlas Native AI remains the local strategy composer and deterministic safety authority. An optional Groq call can add research commentary only; it cannot compose the strategy, alter risk/order parameters, or authorize execution. If no Groq key is configured, no Groq request is sent. Existing deterministic risk, paper-ledger, and execution gates remain authoritative.
 
@@ -102,7 +102,7 @@ Abort and investigate on the first failed check; do not skip forward.
 Required environment: `GCP_PROJECT_ID GCP_REGION AR_REPOSITORY MODEL_BUCKET MODEL_STAGING_BUCKET SERVICE_ACCOUNT WORKER_SERVICE_ACCOUNT DATABASE_URL
 USDT_TRON_ACCOUNT_XPUB TRONGRID_API_KEY APP_ENCRYPTION_KEY REDIS_URL SUPABASE_URL SUPABASE_ANON_KEY FUNDING_WEBHOOK_SECRET ADMIN_SUPABASE_USER_IDS
 BACKUP_RECOVERY_URL FORWARDED_ALLOW_IPS MODEL_SIGNING_PUBLIC_KEY MODEL_SIGNING_PRIVATE_KEY`; optional `MIGRATION_SERVICE_ACCOUNT`.
-It enables the required APIs, creates the Artifact Registry repo, the three service accounts, the two buckets, every secret, and the per-secret IAM bindings.
+It enables the required APIs, creates the Artifact Registry repo, the three service accounts, the two buckets, required secrets, and per-secret IAM bindings. The Groq secret is optional: supply `GROQ_API_KEY` to bootstrap it, or leave that variable unset to run Native AI without Groq.
 **Check:** `gcloud secrets list`, `gcloud iam service-accounts list`; confirm `atlas-model-signing-private-key` is readable by the **worker only**.
 
 ### Step 2: Audit-log retention -- `deploy/gcp-security-audit-retention.sh`, then `deploy/verify-cloud-audit.sh`
