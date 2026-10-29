@@ -130,7 +130,7 @@ jobs:
             # Check metadata with the semantic helper so a generic secretRef
             # containing an Atlas provider secret cannot bypass this skip gate.
             local metadata_matches=""
-            if [[ -f metadata.json ]]; then
+            if [[ -f metadata.json || -f .github/workflows/production-deploy.yml || -f .github/workflows/production-verification.yml ]]; then
               metadata_matches="$(MIGRATION_HELPER="$RUNNER_TEMP/migrate_legacy_native_ai.py" python - <<'PY'
           import importlib.util
           import os
@@ -142,8 +142,24 @@ jobs:
               raise SystemExit("Could not load Native AI metadata checker")
           helper = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(helper)
-          if helper._metadata_has_active_provider_wiring(Path("metadata.json").read_text(encoding="utf-8")):
+          metadata_path = Path("metadata.json")
+          if metadata_path.is_file() and helper._metadata_has_active_provider_wiring(metadata_path.read_text(encoding="utf-8")):
               print("metadata.json: active provider configuration or secret reference")
+
+          for workflow_path in (
+              Path(".github/workflows/production-deploy.yml"),
+              Path(".github/workflows/production-verification.yml"),
+          ):
+              if not workflow_path.is_file():
+                  continue
+              workflow_source = workflow_path.read_text(encoding="utf-8")
+              try:
+                  cleaned = helper.scrub_workflow_ancillary(workflow_path.as_posix(), workflow_source)
+              except helper.MigrationError as exc:
+                  print(f"{workflow_path}: {exc}")
+              else:
+                  if cleaned != workflow_source:
+                      print(f"{workflow_path}: retired-provider workflow wiring requires migration")
           PY
               )" || return $?
             fi
@@ -449,7 +465,7 @@ jobs:
             # Check metadata with the semantic helper so a generic secretRef
             # containing an Atlas provider secret cannot bypass this skip gate.
             local metadata_matches=""
-            if [[ -f metadata.json ]]; then
+            if [[ -f metadata.json || -f .github/workflows/production-deploy.yml || -f .github/workflows/production-verification.yml ]]; then
               metadata_matches="$(MIGRATION_HELPER="$RUNNER_TEMP/migrate_legacy_native_ai.py" python - <<'PY'
           import importlib.util
           import os
@@ -461,8 +477,24 @@ jobs:
               raise SystemExit("Could not load Native AI metadata checker")
           helper = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(helper)
-          if helper._metadata_has_active_provider_wiring(Path("metadata.json").read_text(encoding="utf-8")):
+          metadata_path = Path("metadata.json")
+          if metadata_path.is_file() and helper._metadata_has_active_provider_wiring(metadata_path.read_text(encoding="utf-8")):
               print("metadata.json: active provider configuration or secret reference")
+
+          for workflow_path in (
+              Path(".github/workflows/production-deploy.yml"),
+              Path(".github/workflows/production-verification.yml"),
+          ):
+              if not workflow_path.is_file():
+                  continue
+              workflow_source = workflow_path.read_text(encoding="utf-8")
+              try:
+                  cleaned = helper.scrub_workflow_ancillary(workflow_path.as_posix(), workflow_source)
+              except helper.MigrationError as exc:
+                  print(f"{workflow_path}: {exc}")
+              else:
+                  if cleaned != workflow_source:
+                      print(f"{workflow_path}: retired-provider workflow wiring requires migration")
           PY
               )" || return $?
             fi
