@@ -339,45 +339,120 @@ async def _run_daily_research_work() -> dict[str, Any]:
             "run_at": datetime.now(timezone.utc).isoformat(),
             "real_money_execution": False,
         }
-    runs = []
     cfg = _cfg()
-    for symbol, df in intelligence["histories"].items():
-        try:
-            research = await asyncio.to_thread(
-                backtest_all_strategies,
-                df, cfg, settings.research_taker_bps, settings.research_slippage_bps,
-                True, settings.default_asset, settings.research_folds, settings.research_min_train,
-                settings.research_ai_threshold,
-                await _prior_trial_labels(symbol),
-            )
-            trial_archive = await archive_research_trials(
-                research,
-                SimpleNamespace(symbol=symbol, asset=settings.default_asset),
-            )
-            # Prospective records are explicitly UNVERIFIED until complete
-            # code/data/venue fingerprints exist; they cannot satisfy promotion.
-            research["prospective_trial_archive"] = trial_archive
-            review = _ai_research_brief(research, intelligence)
-            # The candidate list is created by _ai_research_brief, not by the raw research object.
-            # Feed that computed list to the local review so eligible paper candidates are visible.
-            native_research_input = dict(research)
-            native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))
-            review["native_ai_review"] = native_research_review(native_research_input, intelligence)
-            # Optional external review is advisory only; local Native AI remains canonical.
-            review["groq_research_review"] = await groq_research_review(
-                native_research_input, intelligence
-            )
-            review["run_drift"] = await _persist_research_run(symbol, research, review, intelligence.get("macro_regime"))
-            run_record = {
-                "symbol": symbol, "research": research, "review": review,
-                "trial_archive": trial_archive,
-            }
-            if trial_archive.get("status") == "FAILED":
-                run_record["status"] = "FAILED"
-                run_record["error"] = f"trial_archive:{trial_archive.get('reason', 'UNKNOWN')}"
-            runs.append(run_record)
-        except Exception as exc:
-            runs.append({"symbol": symbol, "status": "FAILED", "error": str(exc)})
+    run_records: dict[str, dict[str, Any]] = {}
+    pending: list[dict[str, Any]] = []
+    groq_semaphore = asyncio.Semaphore(max(1, min(3, len(intelligence["histories"]))))
+
+    async def bounded_groq_review(research_input: dict[str, Any]) -> dict[str, Any]:
+        # Keep external advisory traffic bounded while allowing reviews for different
+        # symbols to run alongside the remaining local backtests.
+        async with groq_semaphore:
+            return await groq_research_review(research_input, intelligence)
+
+    try:
+        for symbol, df in intelligence["histories"].items():
+            try:
+                research = await asyncio.to_thread(
+                    backtest_all_strategies,
+                    df, cfg, settings.research_taker_bps, settings.research_slippage_bps,
+                    True, settings.default_asset, settings.research_folds, settings.research_min_train,
+                    settings.research_ai_threshold,
+                    await _prior_trial_labels(symbol),
+                )
+                trial_archive = await archive_research_trials(
+                    research,
+                    SimpleNamespace(symbol=symbol, asset=settings.default_asset),
+                )
+                # Prospective records are explicitly UNVERIFIED until complete
+                # code/data/venue fingerprints exist; they cannot satisfy promotion.
+                research["prospective_trial_archive"] = trial_archive
+                review = _ai_research_brief(research, intelligence)
+                # Local Native AI remains canonical and receives the computed candidates.
+                native_research_input = dict(research)
+                native_research_input["paper_candidates"] = review.get(
+                    "paper_candidates", research.get("paper_candidates", [])
+                )
+                review["native_ai_review"] = native_research_review(native_research_input, intelligence)
+
+                # Launch each optional Groq review as soon as its local analysis is ready.
+                # At most three external requests run at once; failures stay advisory-only.
+                groq_task = asyncio.create_task(
+                    bounded_groq_review(native_research_input),
+                    name=f"atlas-groq-research-review-{symbol}",
+                )
+                pending.append({
+                    "symbol": symbol,
+                    "research": research,
+                    "review": review,
+                    "trial_archive": trial_archive,
+                    "groq_task": groq_task,
+                })
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                run_records[symbol] = {"symbol": symbol, "status": "FAILED", "error": str(exc)}
+
+        # Await all advisory reviews together after local per-symbol work has progressed.
+        # gather(return_exceptions=True) prevents a provider failure from hiding other results.
+        results = await asyncio.gather(
+            *(item["groq_task"] for item in pending),
+            return_exceptions=True,
+        )
+        for item, groq_result in zip(pending, results):
+            symbol = item["symbol"]
+            review = item["review"]
+            if isinstance(groq_result, Exception):
+                review["groq_research_review"] = {
+                    "status": "ERROR",
+                    "provider": "groq",
+                    "error": type(groq_result).__name__,
+                    "execution_authority": False,
+                }
+            elif isinstance(groq_result, BaseException):
+                raise groq_result
+            elif isinstance(groq_result, dict):
+                review["groq_research_review"] = groq_result
+            else:
+                review["groq_research_review"] = {
+                    "status": "ERROR",
+                    "provider": "groq",
+                    "error": "InvalidReviewResult",
+                    "execution_authority": False,
+                }
+
+            try:
+                review["run_drift"] = await _persist_research_run(
+                    symbol, item["research"], review, intelligence.get("macro_regime")
+                )
+                run_record = {
+                    "symbol": symbol,
+                    "research": item["research"],
+                    "review": review,
+                    "trial_archive": item["trial_archive"],
+                }
+                if item["trial_archive"].get("status") == "FAILED":
+                    run_record["status"] = "FAILED"
+                    run_record["error"] = (
+                        f"trial_archive:{item['trial_archive'].get('reason', 'UNKNOWN')}"
+                    )
+                run_records[symbol] = run_record
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                run_records[symbol] = {"symbol": symbol, "status": "FAILED", "error": str(exc)}
+    except BaseException:
+        # A lost lease cancels this operation. Do not leave detached provider tasks
+        # running after the lease owner has stopped.
+        tasks = [item["groq_task"] for item in pending]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+    runs = [run_records[symbol] for symbol in intelligence["histories"] if symbol in run_records]
     return {
         "status": ("PARTIAL_FAILURE" if any(r.get("status") == "FAILED" for r in runs) else ("COMPLETE" if runs else "NO_DATA")),
         "run_at": datetime.now(timezone.utc).isoformat(),
@@ -386,4 +461,3 @@ async def _run_daily_research_work() -> dict[str, Any]:
         "runs": runs,
         "real_money_execution": False,
     }
-
