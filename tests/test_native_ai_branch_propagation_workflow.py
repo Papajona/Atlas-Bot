@@ -133,13 +133,13 @@ def test_migration_script_preserves_unrelated_branch_logic_and_fails_closed() ->
 def test_embedded_native_ai_verifier_script_is_valid_python() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     function_start = workflow.index("verify_native_ai_impl() {")
-    heredoc_marker = "python - <<'PY'\\n"
+    heredoc_marker = "python - <<'PY'\n"
     heredoc_start = workflow.index(heredoc_marker, function_start) + len(heredoc_marker)
-    heredoc_end = workflow.index("\\n          PY\\n", heredoc_start)
+    heredoc_end = workflow.index("\n          PY\n", heredoc_start)
     embedded_lines = workflow[heredoc_start:heredoc_end].splitlines()
     # Remove the common indentation contributed by the YAML block scalar so this
     # checks the exact Python source the shell heredoc executes.
-    source = "\\n".join(
+    source = "\n".join(
         line[10:] if line.startswith("          ") else line
         for line in embedded_lines
     )
