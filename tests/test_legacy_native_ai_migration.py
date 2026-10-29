@@ -2900,6 +2900,24 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
             self.assertNotIn("settings.groq_strategy_model", result)
             self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
+    def test_daily_research_migration_is_idempotent_with_native_groq_review_only(self):
+        source = """from .native_ai import native_research_review
+from .groq_ai import groq_research_review
+
+async def update_research(research, intelligence, review):
+    review["native_ai_review"] = native_research_review(research, intelligence)
+    review["groq_research_review"] = await groq_research_review(research, intelligence)
+    return review
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "daily_research.py"
+            target.parent.mkdir()
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_daily_research()
+            self.assertEqual(target.read_text(encoding="utf-8"), source)
+
     def test_daily_research_refuses_setup_call_inside_provider_arguments(self):
         legacy = (
             "from .ai_providers import dual_ai_research_review\n"
