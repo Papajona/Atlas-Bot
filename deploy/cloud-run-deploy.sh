@@ -21,7 +21,7 @@ set -euo pipefail
 : "${SECRET_MODEL_SIGNING_PUBLIC_VERSION:?Set SECRET_MODEL_SIGNING_PUBLIC_VERSION}"
 : "${SECRET_SUPABASE_ANON_KEY_VERSION:?Set SECRET_SUPABASE_ANON_KEY_VERSION}"
 : "${SECRET_FUNDING_WEBHOOK_VERSION:?Set SECRET_FUNDING_WEBHOOK_VERSION}"
-: # Groq is optional: Native AI remains local if no Groq API key is configured.
+# Groq is optional: Native AI remains local if no Groq API key is configured.
 SECRET_GROQ_API_KEY_VERSION="${SECRET_GROQ_API_KEY_VERSION:-}"
 if [[ -n "$SECRET_GROQ_API_KEY_VERSION" && ! "$SECRET_GROQ_API_KEY_VERSION" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: SECRET_GROQ_API_KEY_VERSION must be a positive numeric Secret Manager version." >&2
