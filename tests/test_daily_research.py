@@ -348,3 +348,22 @@ def test_review_update_skips_when_research_run_insert_did_not_succeed():
             None, {"groq_research_review": {"status": "OK"}}
         )
     ) is False
+
+
+def test_groq_error_result_persists_unknown_input_truncation_status():
+    import app.daily_research as dr
+
+    result = dr._validate_groq_research_result({
+        "status": "ERROR",
+        "provider": "groq",
+        "error": "GroqReviewFailed",
+        "input_truncated": None,
+        "input_truncation_status": "UNKNOWN",
+        "execution_authority": False,
+    })
+
+    assert result["status"] == "ERROR"
+    assert result["input_truncated"] is None
+    assert result["input_truncation_status"] == "UNKNOWN"
+    assert result["execution_authority"] is False
+
