@@ -3485,6 +3485,49 @@ def transform_strategy_ai(commit: str) -> None:
                                     finalized.extend((previous_flow, item) for item in normal)
                                     finalized.extend(("break", item) for item in broken)
                                     finalized.extend(("continue", item) for item in continued)
+
+                                # An exception that is not caught by any handler can
+                                # still be converted into loop control by finally.
+                                # Capture each reachable pre-statement state, so a
+                                # failed import/assignment before a finally-break does
+                                # not make a later binding appear guaranteed.
+                                exceptional_prefixes: list[set[str]] = []
+                                exceptional_active = [set(state)]
+                                for try_item in statement.body:
+                                    next_exceptional_active: list[set[str]] = []
+                                    for prefix_state in exceptional_active:
+                                        if not isinstance(try_item, (ast.Break, ast.Continue)):
+                                            exceptional_prefixes.append(set(prefix_state))
+                                        normal, _, _ = loop_body_effect([try_item], prefix_state)
+                                        next_exceptional_active.extend(normal)
+                                    exceptional_active = next_exceptional_active
+                                    if not exceptional_active:
+                                        break
+                                exceptional_prefixes.extend(exceptional_active)
+                                if statement.orelse:
+                                    else_active = exceptional_active
+                                    for else_item in statement.orelse:
+                                        next_else_active: list[set[str]] = []
+                                        for prefix_state in else_active:
+                                            if not isinstance(else_item, (ast.Break, ast.Continue)):
+                                                exceptional_prefixes.append(set(prefix_state))
+                                            normal, _, _ = loop_body_effect([else_item], prefix_state)
+                                            next_else_active.extend(normal)
+                                        else_active = next_else_active
+                                        if not else_active:
+                                            break
+                                    exceptional_prefixes.extend(else_active)
+
+                                # Normal finalizer exits preserve the unhandled
+                                # exception and therefore do not rejoin module flow.
+                                # Only a finalizer break/continue makes that path
+                                # a reachable loop exit.
+                                for exceptional_state in exceptional_prefixes:
+                                    _, broken, continued = loop_body_effect(
+                                        statement.finalbody, exceptional_state
+                                    )
+                                    finalized.extend(("break", item) for item in broken)
+                                    finalized.extend(("continue", item) for item in continued)
                                 current_flows = finalized
                             next_active.extend(item for flow, item in current_flows if flow == "normal")
                             break_states.extend(item for flow, item in current_flows if flow == "break")
@@ -3492,9 +3535,14 @@ def transform_strategy_ai(commit: str) -> None:
                             continue
 
                         if isinstance(statement, ast.With):
-                            with_state = set(state) | visible(_defined_names(statement))
+                            # Names assigned in the body are not automatically
+                            # guaranteed: a context manager may suppress an exception
+                            # raised before an assignment finishes, then execution
+                            # continues after the with statement without that binding.
+                            with_state = set(state)
                             normal, broken, continued = loop_body_effect(statement.body, with_state)
                             next_active.extend(normal)
+                            next_active.append(set(state))
                             break_states.extend(broken)
                             continue_states.extend(continued)
                             continue
