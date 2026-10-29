@@ -36,13 +36,13 @@ RETIRED_PROVIDER_RE = re.compile(
     r"(?i)(?:gemini|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
     r"api\.cerebras\.ai|api\.openai\.com|"
     r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|"
-    r"GEMINI_API_KEY|SECRET_GEMINI|_gemini_json|"
+    r"GEMINI_API_KEY|SECRET_GEMINI|_gemini_json|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|groq_strategy_model|"
     r"settings\.(?:gemini|cerebras|ai_gateway)_)"
 )
 RETIRED_PROVIDER_FIELD_RE = re.compile(
     r"(?i)(?:gemini|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
     r"api\.cerebras\.ai|api\.openai\.com|"
-    r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|_gemini_json)"
+    r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|_gemini_json|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|groq_strategy_model)"
 )
 ATLAS_PROVIDER_SECRET_RE = re.compile(
     r"(?i)\batlas[-_](?:openai|gemini|cerebras|ai[-_]gateway)[-_][a-z0-9_-]*\b"
@@ -71,6 +71,7 @@ NATIVE_PATHS = (
     "ENTRY_EXIT_3_9_0.md",
     "app/ai_providers.py",
     "app/groq_ai.py",
+    "app/prompt_safety.py",
     "app/config.py",
     "app/daily_research.py",
     "app/main.py",
@@ -90,7 +91,7 @@ NATIVE_PATHS = (
     "scripts/verify_release.sh",
 )
 ANCILLARY_PATHS = tuple(p for p in NATIVE_PATHS if p not in {
-    "app/ai_providers.py", "app/groq_ai.py", "app/config.py", "app/daily_research.py",
+    "app/ai_providers.py", "app/groq_ai.py", "app/prompt_safety.py", "app/config.py", "app/daily_research.py",
     "app/main.py", "app/native_ai.py", "app/strategy_ai.py", "scripts/check_ai_models.py",
     "scripts/check_native_ai.py",
 })
@@ -1065,7 +1066,19 @@ def transform_config() -> None:
     for node in assignments:
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         names = {name for target in targets for name in target_names(target)}
+        supported_groq_fields = {
+            "groq_api_key", "groq_model", "groq_max_completion_tokens",
+            "groq_timeout_seconds", "groq_research_review_enabled",
+        }
+        supported_groq_names = {
+            name for name in names
+            if name.lower() in supported_groq_fields and PROVIDER_FIELD_RE.search(name)
+        }
         provider_names = {name for name in names if is_provider_field(name)}
+        if supported_groq_names and id(node) not in direct_setting_assignment_ids:
+            raise MigrationError(
+                "app/config.py contains a supported Groq setting outside the Settings class; refusing helper behavior"
+            )
         if not provider_names:
             continue
         if id(node) not in direct_setting_assignment_ids:
@@ -1136,13 +1149,17 @@ def transform_config() -> None:
             node for node in settings_class.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         ]
-        first_method_line = min(
-            [min([node.lineno, *[decorator.lineno for decorator in node.decorator_list]])
-             for node in class_methods]
-            or [settings_class.end_lineno or settings_class.lineno + 1]
-        )
         result_lines = result.splitlines(keepends=True)
-        result_lines[first_method_line - 1:first_method_line - 1] = [
+        if class_methods:
+            first_method_line = min(
+                min([node.lineno, *[decorator.lineno for decorator in node.decorator_list]])
+                for node in class_methods
+            )
+            insertion_index = first_method_line - 1
+        else:
+            # Insert after the full final statement, not inside a multiline field.
+            insertion_index = settings_class.end_lineno or settings_class.lineno
+        result_lines[insertion_index:insertion_index] = [
             source_line + "\n" for source_line in missing_groq_fields
         ]
         result = "".join(result_lines)
@@ -4484,19 +4501,198 @@ def transform_strategy_ai(commit: str) -> None:
     path.write_text(result, encoding="utf-8")
 
 
+def _ensure_native_research_import(source: str, filename: str) -> str:
+    tree = ast.parse(source, filename=filename)
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "native_ai":
+            if any(alias.name == "native_research_review" and (alias.asname is None or alias.asname == alias.name)
+                   for alias in node.names):
+                return source
+    prefix_end = 0
+    for index, node in enumerate(tree.body):
+        if index == 0 and isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            prefix_end = node.end_lineno
+            continue
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            prefix_end = node.end_lineno
+            continue
+        break
+    return _apply_line_edits(source, [
+        (prefix_end + 1, prefix_end, "from .native_ai import native_research_review\n")
+    ])
+
+
+def _ensure_groq_research_import(source: str, filename: str) -> str:
+    tree = ast.parse(source, filename=filename)
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "groq_ai":
+            if any(alias.name == "groq_research_review" and (alias.asname is None or alias.asname == alias.name)
+                   for alias in node.names):
+                return source
+    prefix_end = 0
+    for index, node in enumerate(tree.body):
+        if index == 0 and isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            prefix_end = node.end_lineno
+            continue
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            prefix_end = node.end_lineno
+            continue
+        break
+    return _apply_line_edits(source, [
+        (prefix_end + 1, prefix_end, "from .groq_ai import groq_research_review\n")
+    ])
+
+
+def _ensure_groq_review_persisted(source: str, filename: str) -> str:
+    """Repair only ResearchRun.review_json projections; ignore unrelated JSON diagnostics."""
+    tree = ast.parse(source, filename=filename)
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    def is_research_run_projection(call: ast.Call) -> bool:
+        parent = parents.get(call)
+        while parent is not None:
+            if isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name) and parent.func.id == "ResearchRun":
+                return any(keyword.arg == "review_json" for keyword in parent.keywords)
+            parent = parents.get(parent)
+        return False
+
+    insertions: list[int] = []
+    complete_projection = False
+    projection_seen = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not is_research_run_projection(node):
+            continue
+        if not (
+            isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "json" and node.func.attr == "dumps" and node.args
+        ):
+            continue
+        projection = node.args[0]
+        if isinstance(projection, ast.Name) and projection.id == "review":
+            complete_projection = True
+            continue
+        if not isinstance(projection, ast.DictComp):
+            continue
+        if not (
+            isinstance(projection.key, ast.Name)
+            and isinstance(projection.value, ast.Call)
+            and isinstance(projection.value.func, ast.Attribute)
+            and isinstance(projection.value.func.value, ast.Name)
+            and projection.value.func.value.id == "review"
+            and projection.value.func.attr == "get"
+            and len(projection.value.args) == 1
+            and isinstance(projection.value.args[0], ast.Name)
+            and projection.value.args[0].id == projection.key.id
+            and len(projection.generators) == 1
+            and isinstance(projection.generators[0].target, ast.Name)
+            and projection.generators[0].target.id == projection.key.id
+            and isinstance(projection.generators[0].iter, ast.Tuple)
+        ):
+            continue
+        field_tuple = projection.generators[0].iter
+        if not all(isinstance(item, ast.Constant) and isinstance(item.value, str) for item in field_tuple.elts):
+            continue
+        projection_seen = True
+        fields = [item.value for item in field_tuple.elts]
+        if "groq_research_review" in fields:
+            continue
+        if not any(name in fields for name in ("ai_brain_mode", "paper_candidates", "native_ai_review", "external_ai_review")):
+            continue
+        source_lines = source.splitlines(keepends=True)
+        line_bytes = source_lines[field_tuple.end_lineno - 1].encode("utf-8")
+        try:
+            column = len(line_bytes[:field_tuple.end_col_offset].decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise MigrationError(f"{filename} review projection has an invalid source position") from exc
+        offset = sum(len(line) for line in source_lines[:field_tuple.end_lineno - 1]) + column
+        if offset < 1 or source[offset - 1:offset] != ")":
+            raise MigrationError(f"{filename} has an unexpected ResearchRun.review_json projection")
+        insertions.append(offset - 1)
+
+    if complete_projection and not projection_seen:
+        return source
+    for offset in sorted(set(insertions), reverse=True):
+        source = source[:offset] + ', "groq_research_review"' + source[offset:]
+    ast.parse(source, filename=filename)
+    return source
+
+
+def _ensure_groq_research_call(source: str, filename: str) -> str:
+    """Repair already-Native-AI branches or refuse an unrecognized async code shape."""
+    tree = ast.parse(source, filename=filename)
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    def enclosing_function(node: ast.AST) -> ast.AST | None:
+        parent = parents.get(node)
+        while parent is not None:
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                return parent
+            parent = parents.get(parent)
+        return None
+
+    native_assignment = None
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if any(
+            isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
+            and target.value.id == "review" and isinstance(target.slice, ast.Constant)
+            and target.slice.value == "native_ai_review"
+            for target in targets
+        ):
+            native_assignment = node
+            break
+    if native_assignment is None:
+        return source
+
+    owner = enclosing_function(native_assignment)
+    if not isinstance(owner, ast.AsyncFunctionDef):
+        raise MigrationError(f"{filename} has a Native AI review outside an async function; refusing an unsafe Groq await")
+    owner_names = [node for node in ast.walk(owner) if isinstance(node, ast.Name)]
+    if not any(node.id == "research" for node in owner_names) or not any(node.id == "intelligence" for node in owner_names):
+        raise MigrationError(f"{filename} lacks the recognized research/intelligence scope for the optional Groq reviewer")
+    for node in ast.walk(owner):
+        if isinstance(node, ast.Call) and (
+            (isinstance(node.func, ast.Name) and node.func.id == "groq_research_review")
+            or (isinstance(node.func, ast.Attribute) and node.func.attr == "groq_research_review")
+        ):
+            return _ensure_native_research_import(_ensure_groq_research_import(source, filename), filename)
+
+    lines = source.splitlines(keepends=True)
+    current = lines[native_assignment.lineno - 1]
+    indent = current[:len(current) - len(current.lstrip())]
+    lines.insert(
+        native_assignment.end_lineno,
+        indent + 'review["groq_research_review"] = await groq_research_review(research, intelligence)\n',
+    )
+    return _ensure_native_research_import(_ensure_groq_research_import("".join(lines), filename), filename)
+
+
 def transform_daily_research() -> None:
     path = ROOT / "app/daily_research.py"
     if not path.is_file():
         raise MigrationError("app/daily_research.py is absent")
-    source = path.read_text(encoding="utf-8")
-    # The new Groq research reviewer is supported, canonical wiring—not a legacy
-    # strategy provider. Only invoke this AST migration when an old callsite or
-    # provider-key conditional remains, making reruns idempotent after migration.
+    original = path.read_text(encoding="utf-8")
+    source = _ensure_groq_review_persisted(original, str(path))
+    # Repair already-Native-AI branches too; they must call and persist the optional
+    # reviewer rather than merely receive an unused module during propagation.
     legacy_daily_provider_re = re.compile(
         r"(?i)(?:dual_ai_research_review|_gemini_json|_groq_json|_cerebras_json|"
         r"gemini_api_key|groq_api_key|cerebras_api_key|ai_gateway_)"
     )
     if not legacy_daily_provider_re.search(source):
+        source = _ensure_groq_research_call(source, str(path))
+        source = _ensure_groq_review_persisted(source, str(path))
+        if source != original:
+            ast.parse(source, filename=str(path))
+            path.write_text(source, encoding="utf-8")
         return
     tree = ast.parse(source, filename=str(path))
     lines = source.splitlines(keepends=True)
@@ -4619,12 +4815,25 @@ def transform_daily_research() -> None:
         edits.append((node.lineno, node.end_lineno, replacement))
         found_callsite = True
         break
-    for index, line in enumerate(lines, start=1):
-        if re.search(r"^\s*from\s+\.ai_providers\s+import\s+dual_ai_research_review\b", line):
-            edits.append((index, index, "from .native_ai import native_research_review\nfrom .groq_ai import groq_research_review\n"))
+    for imported in tree.body:
+        if not (isinstance(imported, ast.ImportFrom) and imported.level == 1 and imported.module == "ai_providers"):
+            continue
+        if not any(alias.name in provider_delegations for alias in imported.names):
+            continue
+        retained_aliases = [alias for alias in imported.names if alias.name not in provider_delegations]
+        replacement_lines = [
+            "from .native_ai import native_research_review\n",
+            "from .groq_ai import groq_research_review\n",
+        ]
+        if retained_aliases:
+            retained = ", ".join(alias.name + (f" as {alias.asname}" if alias.asname else "") for alias in retained_aliases)
+            replacement_lines.append(f"from .ai_providers import {retained}\n")
+        edits.append((imported.lineno, imported.end_lineno, "".join(replacement_lines)))
     if not found_callsite:
         raise MigrationError("daily-research provider callsite is unexpected; refusing lossy rewrite")
     result = _apply_line_edits(source, edits)
+    result = _ensure_groq_research_call(result, str(path))
+    result = _ensure_groq_review_persisted(result, str(path))
     if RETIRED_PROVIDER_RE.search(result):
         raise MigrationError("daily research still contains retired-provider references")
     ast.parse(result, filename=str(path))
@@ -5239,13 +5448,13 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
     # independent pins: changing one must not widen the other per-path diff.
     transform_ai_providers(canonical_commit)
     write_text("scripts/check_ai_models.py", canonical_text(canonical_commit, "scripts/check_ai_models.py"))
-    for path in ("app/native_ai.py", "scripts/check_native_ai.py", "app/groq_ai.py"):
+    for path in ("app/native_ai.py", "scripts/check_native_ai.py", "app/groq_ai.py", "app/prompt_safety.py"):
         target = ROOT / path
         if not target.exists():
             write_text(path, canonical_text(canonical_commit, path))
-        elif path == "app/groq_ai.py":
+        elif path in {"app/groq_ai.py", "app/prompt_safety.py"}:
             if target.read_text(encoding="utf-8") != canonical_text(canonical_commit, path):
-                raise MigrationError("app/groq_ai.py differs from the reviewed Groq-only adapter; preserving the branch")
+                raise MigrationError(f"{path} differs from its reviewed canonical implementation; preserving the branch")
         elif PROVIDER_RE.search(target.read_text(encoding="utf-8")):
             raise MigrationError(f"{path} has a divergent provider-bearing implementation; refusing overwrite")
 
