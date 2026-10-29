@@ -4780,7 +4780,140 @@ def scrub_shell_deployment(path: str, text: str) -> str:
     return cleaned
 
 
+def _workflow_has_active_provider_wiring(text: str) -> bool:
+    """Check workflow semantics while permitting inert names and protected environments."""
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$", line)
+        if match:
+            key, value = match.groups()
+            if key.lower() in {"environment", "name", "run-name", "description"}:
+                # Environment names can intentionally select protected approval gates;
+                # labels/descriptions are not executable provider configuration.
+                continue
+            if PROVIDER_SETTING_NAME_RE.fullmatch(key) or PROVIDER_FIELD_RE.search(key):
+                return True
+            # Remove YAML comments before considering scalar values; quoted values
+            # remain conservatively checked when the provider token is in the value.
+            value = value.split(" #", 1)[0]
+            if PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value):
+                return True
+            continue
+        if PROVIDER_RE.search(line) or ATLAS_PROVIDER_SECRET_RE.search(line):
+            return True
+    return False
+
+
+def scrub_workflow_ancillary(path: str, text: str) -> str:
+    """Remove provider configuration from workflows without rewriting environment gates or commands.
+
+    Provider env keys are removed as whole YAML entries. Shell run blocks go through the
+    strict shell scrubber, which refuses mixed commands; it never strips a provider URL
+    from an otherwise unrelated executable line.
+    """
+    lines = text.splitlines(keepends=True)
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            index += 1
+            continue
+
+        run_match = re.match(r"^(\s*)run:\s*(.*?)\s*(?:\r?\n)?$", line)
+        if run_match:
+            indent_text, value = run_match.groups()
+            indent = len(indent_text)
+            value = value.strip()
+            if value in {"|", "|-", "|+", ">", ">-"} or not value:
+                end = index + 1
+                while end < len(lines):
+                    candidate = lines[end]
+                    if not candidate.strip():
+                        end += 1
+                        continue
+                    candidate_indent = len(candidate) - len(candidate.lstrip())
+                    if candidate_indent <= indent:
+                        break
+                    end += 1
+                block = lines[index + 1:end]
+                nonblank_indents = [
+                    len(item) - len(item.lstrip()) for item in block if item.strip()
+                ]
+                body_indent = min(nonblank_indents) if nonblank_indents else indent + 2
+                body = "".join(
+                    (item[body_indent:] if item.strip() else "")
+                    for item in block
+                )
+                if PROVIDER_RE.search(body) or ATLAS_PROVIDER_SECRET_RE.search(body):
+                    cleaned = scrub_shell_deployment("deploy/cloud-run-deploy.sh", body)
+                    if not cleaned.strip():
+                        raise MigrationError(
+                            f"{path} contains a provider-only run block; refusing to leave an invalid workflow step"
+                        )
+                    kept.append(line)
+                    for item in cleaned.splitlines(keepends=True):
+                        kept.append((" " * body_indent + item) if item.strip() else item)
+                else:
+                    kept.extend(lines[index:end])
+                index = end
+                continue
+            if PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value):
+                cleaned = scrub_shell_deployment("deploy/cloud-run-deploy.sh", value)
+                if not cleaned.strip():
+                    raise MigrationError(
+                        f"{path} contains a provider-only inline run; refusing to leave an invalid workflow step"
+                    )
+                newline = "\n" if line.endswith("\n") else ""
+                kept.append(f"{indent_text}run: {cleaned.strip()}{newline}")
+                index += 1
+                continue
+
+        key_match = re.match(r"^(\s*)([A-Za-z_][A-Za-z0-9_-]*):(?:\s*(.*?))?(\r?\n)?$", line)
+        if key_match:
+            _indent, key, value, _newline = key_match.groups()
+            if key.lower() == "environment":
+                # Keep the exact environment name; it may be a protected GitHub
+                # environment such as production-gemini with required approvers.
+                kept.append(line)
+                index += 1
+                continue
+            if key.lower() in {"name", "run-name", "description"}:
+                kept.append(line)
+                index += 1
+                continue
+            if PROVIDER_SETTING_NAME_RE.fullmatch(key) or PROVIDER_FIELD_RE.search(key):
+                index += 1
+                continue
+            if value and (PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value)):
+                # Do not run generic token substitution on a YAML value: it can alter
+                # an environment, URL, shell command, or approval/resource identifier.
+                raise MigrationError(
+                    f"{path} has provider-bearing YAML scalar {key!r}; refusing unsafe text substitution"
+                )
+            kept.append(line)
+            index += 1
+            continue
+
+        # Unstructured provider-bearing lines are not safe to edit generically.
+        raise MigrationError(
+            f"{path} has provider wiring outside a recognized YAML field; refusing unsafe text substitution: {stripped[:100]}"
+        ) if PROVIDER_RE.search(line) or ATLAS_PROVIDER_SECRET_RE.search(line) else None
+        kept.append(line)
+        index += 1
+
+    cleaned = "".join(_remove_empty_env(kept))
+    if _workflow_has_active_provider_wiring(cleaned):
+        raise MigrationError(f"{path} still contains active hosted-provider wiring after workflow cleanup")
+    return cleaned
+
+
 def scrub_ancillary_text(path: str, text: str) -> str:
+    if path in {".github/workflows/production-deploy.yml", ".github/workflows/production-verification.yml"}:
+        return scrub_workflow_ancillary(path, text)
     if path in {"deploy/cloud-run-deploy.sh", "deploy/cloud-run-worker-deploy.sh", "deploy/gcp-bootstrap.sh"}:
         return scrub_shell_deployment(path, text)
     if path == "metadata.json":
@@ -4977,6 +5110,9 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
         contents = target.read_text(encoding="utf-8")
         if path == "metadata.json":
             if _metadata_has_active_provider_wiring(contents):
+                remaining.append(path)
+        elif path in {".github/workflows/production-deploy.yml", ".github/workflows/production-verification.yml"}:
+            if _workflow_has_active_provider_wiring(contents):
                 remaining.append(path)
         elif PROVIDER_RE.search(contents):
             remaining.append(path)
