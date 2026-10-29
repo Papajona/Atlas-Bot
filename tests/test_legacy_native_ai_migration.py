@@ -1662,43 +1662,9 @@ async def _gemini_json(prompt):
             "        data['timeframes'] = [timeframe]\n"
             "    return AIStrategySpec.model_validate(data)\n\n"
             "async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):\n"
-            "    _apply_market_context(AIStrategySpec(title='Legacy fixture', summary='Legacy fixture strategy context.', asset='crypto', symbols=['BTC_USDT'], timeframes=['1h'], direction='LONG', strategy_family='TREND', entry_conditions=[{'type': 'indicator', 'rule': 'RSI is above threshold'}], exit_conditions=[{'type': 'indicator', 'rule': 'RSI is below threshold'}], risk_per_trade=0.005), asset=asset, symbol=symbol, timeframe=timeframe)\n"
             "    return await _generate_with_provider('gemini', prompt)\n"
         )
         legacy = _with_canonical_schema_context(legacy)
-        # Recreate the older binder found on long-lived branches. It collects
-        # warnings before model_dump and does not normalize nested condition
-        # timeframes; migration must replace it with the canonical implementation.
-        legacy_context = """def _apply_market_context(spec: AIStrategySpec, *, asset: str | None = None, symbol: str | None = None, timeframe: str | None = None) -> AIStrategySpec:
-    warnings = list(spec.validation_warnings)
-    data = spec.model_dump()
-    if asset and spec.asset != asset:
-        warnings.append(f"AI asset overridden to the selected market asset: {asset}.")
-        data["asset"] = asset
-    if symbol and (not spec.symbols or symbol not in spec.symbols):
-        warnings.append(f"AI symbol overridden to the selected market symbol: {symbol}.")
-        data["symbols"] = [symbol]
-    elif symbol:
-        data["symbols"] = [symbol]
-    if timeframe and (not spec.timeframes or timeframe not in spec.timeframes):
-        warnings.append(f"AI timeframe overridden to the selected market timeframe: {timeframe}.")
-        data["timeframes"] = [timeframe]
-    elif timeframe:
-        data["timeframes"] = [timeframe]
-    data["validation_warnings"] = warnings[:12]
-    return AIStrategySpec.model_validate(data)
-"""
-        legacy_tree_for_context = ast.parse(legacy)
-        context_node = next(
-            node for node in legacy_tree_for_context.body
-            if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
-        )
-        legacy_lines_for_context = legacy.splitlines(keepends=True)
-        legacy = "".join(
-            legacy_lines_for_context[:context_node.lineno - 1]
-            + [legacy_context + "\n"]
-            + legacy_lines_for_context[context_node.end_lineno:]
-        )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             target = root / "app" / "strategy_ai.py"
@@ -1711,20 +1677,6 @@ async def _gemini_json(prompt):
             result = target.read_text(encoding="utf-8")
             self.assertIn("class AIStrategySpec", result)
             self.assertIn("def _apply_market_context", result)
-            result_tree = ast.parse(result, filename="app/strategy_ai.py")
-            result_context = next(
-                node for node in result_tree.body
-                if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
-            )
-            canonical_tree = ast.parse(CANONICAL_STRATEGY)
-            canonical_context = next(
-                node for node in canonical_tree.body
-                if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
-            )
-            self.assertEqual(
-                ast.dump(result_context, include_attributes=False),
-                ast.dump(canonical_context, include_attributes=False),
-            )
             self.assertIn("compose_strategy_spec", result)
             self.assertIn('"provider":"atlas_native"', result)
             self.assertNotRegex(result, migration.PROVIDER_RE)
@@ -1915,6 +1867,39 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
 
         for label, legacy in (("two-provider", legacy_two), ("three-provider", legacy_three)):
             legacy = _with_canonical_schema_context(legacy)
+            if label == "two-provider":
+                # Exercise the real legacy control flow with the older binder that
+                # failed to normalize nested condition timeframes.
+                legacy_context = """def _apply_market_context(spec: AIStrategySpec, *, asset: str | None = None, symbol: str | None = None, timeframe: str | None = None) -> AIStrategySpec:
+    warnings = list(spec.validation_warnings)
+    data = spec.model_dump()
+    if asset and spec.asset != asset:
+        warnings.append(f"AI asset overridden to the selected market asset: {asset}.")
+        data["asset"] = asset
+    if symbol and (not spec.symbols or symbol not in spec.symbols):
+        warnings.append(f"AI symbol overridden to the selected market symbol: {symbol}.")
+        data["symbols"] = [symbol]
+    elif symbol:
+        data["symbols"] = [symbol]
+    if timeframe and (not spec.timeframes or timeframe not in spec.timeframes):
+        warnings.append(f"AI timeframe overridden to the selected market timeframe: {timeframe}.")
+        data["timeframes"] = [timeframe]
+    elif timeframe:
+        data["timeframes"] = [timeframe]
+    data["validation_warnings"] = warnings[:12]
+    return AIStrategySpec.model_validate(data)
+"""
+                legacy_tree_for_context = ast.parse(legacy)
+                context_node = next(
+                    node for node in legacy_tree_for_context.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+                )
+                legacy_lines_for_context = legacy.splitlines(keepends=True)
+                legacy = "".join(
+                    legacy_lines_for_context[:context_node.lineno - 1]
+                    + [legacy_context + "\n"]
+                    + legacy_lines_for_context[context_node.end_lineno:]
+                )
             with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 target = root / "app" / "strategy_ai.py"
@@ -1928,6 +1913,20 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
                 ast.parse(result, filename="app/strategy_ai.py")
                 self.assertIn("compose_strategy_spec", result)
                 self.assertIn("def _apply_market_context", result)
+                result_tree = ast.parse(result, filename="app/strategy_ai.py")
+                result_context = next(
+                    node for node in result_tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+                )
+                canonical_tree = ast.parse(CANONICAL_STRATEGY)
+                canonical_context = next(
+                    node for node in canonical_tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+                )
+                self.assertEqual(
+                    ast.dump(result_context, include_attributes=False),
+                    ast.dump(canonical_context, include_attributes=False),
+                )
                 self.assertNotIn("_generate_with_provider", result)
                 self.assertNotRegex(result, migration.PROVIDER_RE)
 
