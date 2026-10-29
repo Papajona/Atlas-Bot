@@ -5032,9 +5032,10 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
             continue
 
         # Unstructured provider-bearing lines are not safe to edit generically.
-        raise MigrationError(
-            f"{path} has provider wiring outside a recognized YAML field; refusing unsafe text substitution: {stripped[:100]}"
-        ) if RETIRED_PROVIDER_RE.search(line) or ATLAS_PROVIDER_SECRET_RE.search(line) else None
+        if RETIRED_PROVIDER_RE.search(line) or ATLAS_PROVIDER_SECRET_RE.search(line):
+            raise MigrationError(
+                f"{path} has provider wiring outside a recognized YAML field; refusing unsafe text substitution: {stripped[:100]}"
+            )
         kept.append(line)
         index += 1
 
