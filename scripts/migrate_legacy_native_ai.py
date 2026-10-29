@@ -121,6 +121,98 @@ def _name(node: ast.AST) -> str | None:
     return None
 
 
+def _safe_canonical_trade_safety_validator(
+    node: ast.AST, canonical_node: ast.AST, source_segment: str
+) -> bool:
+    """Accept only the canonical local safety-payload validator contract.
+
+    Several old provider facades carry this validator alongside hosted safety
+    calls. Its typed payload checks are also present in the Native AI facade.
+    Remove the duplicate only when the complete executable AST matches that
+    canonical validator after ignoring inert annotations, docstrings, and
+    validation error wording. Any extra check or side effect remains a refusal.
+    """
+    if (
+        not isinstance(node, ast.FunctionDef)
+        or not isinstance(canonical_node, ast.FunctionDef)
+        or node.name != "_validate_trade_safety_payload"
+        or canonical_node.name != node.name
+        or node.decorator_list
+        or canonical_node.decorator_list
+        or PROVIDER_RE.search(source_segment)
+    ):
+        return False
+
+    def safe_annotation(annotation: ast.AST | None) -> bool:
+        if annotation is None:
+            return True
+        if isinstance(annotation, ast.Name):
+            return annotation.id in {"Any", "dict", "str", "int", "float", "bool", "list", "tuple"}
+        if isinstance(annotation, ast.Constant):
+            return annotation.value is None or isinstance(annotation.value, str)
+        if isinstance(annotation, ast.Subscript):
+            return safe_annotation(annotation.value) and safe_annotation(annotation.slice)
+        if isinstance(annotation, (ast.Tuple, ast.List)):
+            return all(safe_annotation(item) for item in annotation.elts)
+        return False
+
+    def eligible_signature(function: ast.FunctionDef) -> bool:
+        args = function.args
+        if (
+            args.posonlyargs
+            or [arg.arg for arg in args.args] != ["value"]
+            or args.vararg
+            or args.kwarg
+            or args.kwonlyargs
+            or args.defaults
+            or args.kw_defaults
+        ):
+            return False
+        return (
+            all(safe_annotation(arg.annotation) for arg in args.args)
+            and safe_annotation(function.returns)
+        )
+
+    if not eligible_signature(node) or not eligible_signature(canonical_node):
+        return False
+
+    def normalized(function: ast.FunctionDef) -> str | None:
+        try:
+            clone = ast.parse(ast.unparse(function)).body[0]
+        except (SyntaxError, ValueError):
+            return None
+        if not isinstance(clone, ast.FunctionDef):
+            return None
+        clone.args.args[0].annotation = None
+        clone.returns = None
+        if (
+            clone.body
+            and isinstance(clone.body[0], ast.Expr)
+            and isinstance(clone.body[0].value, ast.Constant)
+            and isinstance(clone.body[0].value.value, str)
+        ):
+            clone.body.pop(0)
+        for part in ast.walk(clone):
+            if not isinstance(part, ast.Raise) or part.exc is None:
+                continue
+            error = part.exc
+            if (
+                not isinstance(error, ast.Call)
+                or not isinstance(error.func, ast.Name)
+                or error.func.id != "AIProviderError"
+                or len(error.args) != 1
+                or error.keywords
+            ):
+                return None
+            error.args[0] = ast.Constant(value="__CANONICAL_VALIDATION_ERROR__")
+        ast.fix_missing_locations(clone)
+        return ast.dump(clone, include_attributes=False)
+
+    legacy_contract = normalized(node)
+    canonical_contract = normalized(canonical_node)
+    return legacy_contract is not None and legacy_contract == canonical_contract
+
+
 def _safe_canonical_json_helper(
     node: ast.AST, name: str, source_segment: str, legacy_tree: ast.Module
 ) -> bool:
@@ -1294,6 +1386,17 @@ def transform_ai_providers(commit: str) -> None:
                     raise MigrationError(
                         f"app/ai_providers.py has branch-specific definition {collision!r} that collides with a canonical name; refusing to discard or shadow it"
                     )
+                continue
+            # The provider-era facade may also carry an exact duplicate of the
+            # canonical local safety-payload validator. Accept only its proven AST
+            # equivalent; additional checks or side effects still fail closed.
+            if (
+                len(collisions) == 1
+                and next(iter(collisions)) == name == "_validate_trade_safety_payload"
+                and _safe_canonical_trade_safety_validator(
+                    node, canonical_nodes_by_name[name], segment
+                )
+            ):
                 continue
             # The canonical facade deliberately provides safer implementations of these
             # generic parsers (same callable contract, broader malformed-input handling).
