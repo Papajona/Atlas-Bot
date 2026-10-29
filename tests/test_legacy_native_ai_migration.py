@@ -4432,9 +4432,9 @@ groq_api_key = "must-not-become-a-helper-setting"
         source = """from pydantic import BaseModel
 
 class Settings(BaseModel):
-    model_config = dict(
-        env_file=".env",
-    )
+  model_config = dict(
+    env_file=".env",
+  )
 """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -4445,7 +4445,7 @@ class Settings(BaseModel):
             with patch.object(migration, "ROOT", root):
                 migration.transform_config()
             result = path.read_text(encoding="utf-8")
-        self.assertIn('        env_file=".env",\n    )\n    groq_api_key: str = ""', result)
+        self.assertIn('    env_file=".env",\n  )\n  groq_api_key: str = ""', result)
         ast.parse(result, filename="app/config.py")
     def test_already_native_branch_receives_groq_review_call_and_import(self):
         source = """from .native_ai import native_research_review
