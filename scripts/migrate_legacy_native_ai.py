@@ -4994,7 +4994,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             if escaped:
                 escaped = False
                 continue
-            if character == "\\\\" and quote != "'":
+            if character == "\\" and quote != "'":
                 escaped = True
                 continue
             if quote == "'":
@@ -5024,24 +5024,24 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             return True
         if re.fullmatch(r"(?i)(?:then|else|fi)", stripped):
             return True
-        if re.fullmatch(r"(?i)elif\\s+\\[\\[.*\\]\\]\\s*;?\\s*then", stripped):
+        if re.fullmatch(r"(?i)elif\s+\[\[.*\]\]\s*;?\s*then", stripped):
             return True
         groq_guard = re.compile(
-            r"^:\\s*['\"]?" + re.escape("$") + r"\\{(?:GROQ_API_KEY|SECRET_GROQ[A-Z0-9_]*)(?::\\?[^}]*)?\\}['\"]?$",
+            r"^:\s*['\"]?" + re.escape("$") + r"\{(?:GROQ_API_KEY|SECRET_GROQ[A-Z0-9_]*)(?::\?[^}]*)?\}['\"]?$",
             re.I,
         )
         if groq_guard.fullmatch(stripped):
             return True
-        if re.fullmatch(r'(?i)create_secret\\s+atlas-groq-api-key\\s+"\\$GROQ_API_KEY"', stripped):
+        if re.fullmatch(r'(?i)create_secret\s+atlas-groq-api-key\s+"\$GROQ_API_KEY"', stripped):
             return True
-        if re.fullmatch(r"(?i)exit\\s+[0-9]+", stripped):
+        if re.fullmatch(r"(?i)exit\s+[0-9]+", stripped):
             return True
-        if re.match(r"(?i)^(?:echo|printf)\\b", stripped):
-            normalized = re.sub(r"\\s+>&2\\s*$", "", stripped)
+        if re.match(r"(?i)^(?:echo|printf)\b", stripped):
+            normalized = re.sub(r"\s+>&2\s*$", "", stripped)
             return not has_unsafe_shell_operators(normalized)
         return re.fullmatch(
-            r"(?i)(?:export\\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
-            r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\\s*=\\s*[^;|<>]*",
+            r"(?i)(?:export\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
+            r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\s*=\s*[^;|<>]*",
             stripped,
         ) is not None
 
