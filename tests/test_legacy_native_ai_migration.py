@@ -4587,8 +4587,9 @@ printf "Optional Gemini review is not configured"
     def test_groq_reviewer_ast_validator_preserves_compatible_branch_specific_code(self):
         source = '''from __future__ import annotations
 import httpx
+from .config import settings as config_settings
 
-async def groq_research_review(research, intelligence):
+async def groq_research_review(research, intelligence, paper_candidates=None):
     response = await httpx.AsyncClient().post("https://api.groq.com/openai/v1/chat/completions")
     return {"status": "OK", "response": response.status_code}
 
@@ -4619,6 +4620,20 @@ def branch_specific_diagnostic():
         with self.assertRaisesRegex(migration.MigrationError, "two positional arguments"):
             migration.validate_groq_research_module(source)
 
+    def test_groq_reviewer_ast_validator_rejects_third_required_positional_argument(self):
+        source = '''async def groq_research_review(research, intelligence, required_extra):
+    return {"status": "DISABLED", "provider": "groq", "execution_authority": False}
+'''
+        with self.assertRaisesRegex(migration.MigrationError, "more than two required positional"):
+            migration.validate_groq_research_module(source)
+
+    def test_groq_reviewer_ast_validator_rejects_required_keyword_only_argument(self):
+        source = '''async def groq_research_review(research, intelligence, *, required_extra):
+    return {"status": "DISABLED", "provider": "groq", "execution_authority": False}
+'''
+        with self.assertRaisesRegex(migration.MigrationError, "requires keyword-only parameters"):
+            migration.validate_groq_research_module(source)
+
     def test_groq_reviewer_ast_validator_allows_varargs_signature(self):
         source = '''import httpx
 async def groq_research_review(research, *args):
@@ -4639,9 +4654,14 @@ async def groq_research_review(research, intelligence):
         with self.assertRaises(migration.MigrationError):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
 
+    def test_markdown_scrub_refuses_provider_bearing_assignment_inside_long_fence(self):
+        source = "\x60\x60\x60\x60python\n\x60\x60\x60\nclient = GeminiClient()\n\x60\x60\x60\x60\n"
+        with self.assertRaisesRegex(migration.MigrationError, "provider-bearing code inside a Markdown code fence"):
+            migration.scrub_ancillary_text("deploy/DEPLOY_WORKFLOW.md", source)
+
     def test_markdown_scrub_refuses_provider_bearing_command_in_fenced_code(self):
         source = "\x60\x60\x60bash\ncurl https://example.invalid/v1 -H 'Authorization: Bearer $OPENAI_API_KEY'\n\x60\x60\x60\n"
-        with self.assertRaisesRegex(migration.MigrationError, "executable example in a Markdown code fence"):
+        with self.assertRaisesRegex(migration.MigrationError, "provider-bearing code inside a Markdown code fence"):
             migration.scrub_ancillary_text("deploy/DEPLOY_WORKFLOW.md", source)
 
 

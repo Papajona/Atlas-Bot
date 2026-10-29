@@ -268,9 +268,20 @@ jobs:
           if len(groq_reviewers) != 1:
               raise SystemExit("app.groq_ai must define exactly one async groq_research_review API")
           groq_reviewer = groq_reviewers[0]
-          positional_args = len(groq_reviewer.args.posonlyargs) + len(groq_reviewer.args.args)
+          positional_parameters = groq_reviewer.args.posonlyargs + groq_reviewer.args.args
+          positional_args = len(positional_parameters)
+          required_positional = positional_args - len(groq_reviewer.args.defaults)
+          required_keyword_only = [
+              argument.arg
+              for argument, default in zip(groq_reviewer.args.kwonlyargs, groq_reviewer.args.kw_defaults)
+              if default is None
+          ]
           if positional_args < 2 and groq_reviewer.args.vararg is None:
               raise SystemExit("app.groq_ai reviewer must accept research and intelligence positional arguments")
+          if required_positional > 2:
+              raise SystemExit("app.groq_ai reviewer cannot require more than two positional arguments")
+          if required_keyword_only:
+              raise SystemExit(f"app.groq_ai reviewer has required keyword-only arguments: {required_keyword_only}")
 
           # Keep branch-specific diagnostics only when their imports are within the
           # reviewed adapter contract and are known to resolve in the application.
@@ -291,7 +302,9 @@ jobs:
               elif isinstance(node, ast.ImportFrom):
                   allowed_names = allowed_from_imports.get((node.level, node.module or ""))
                   if allowed_names is None or any(
-                      alias.name == "*" or alias.name not in allowed_names or alias.asname is not None
+                      alias.name == "*"
+                      or alias.name not in allowed_names
+                      or ((node.level, node.module or "") == (0, "__future__") and alias.asname is not None)
                       for alias in node.names
                   ):
                       raise SystemExit(f"app.groq_ai has an unreviewed import from: {node.module}")

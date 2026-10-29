@@ -222,7 +222,7 @@ def test_groq_research_result_is_validated_and_normalized_at_consumer_boundary()
     result = {
         "status": "OK",
         "provider": "groq",
-        "model": "review-model",
+        "model": " review-model ",
         "execution_authority": False,
         "untrusted_extra_field": "must not be stored",
         "review": {
@@ -239,6 +239,7 @@ def test_groq_research_result_is_validated_and_normalized_at_consumer_boundary()
     assert validated["execution_authority"] is False
     assert "untrusted_extra_field" not in validated
     assert validated["review"]["confidence"] == 0.7
+    assert validated["model"] == "review-model"
 
 
 def test_groq_research_result_rejects_actionable_instruction_at_consumer_boundary():

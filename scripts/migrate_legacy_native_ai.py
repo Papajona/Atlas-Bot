@@ -5551,26 +5551,35 @@ def scrub_ancillary_text(path: str, text: str) -> str:
 
     kept: list[str] = []
     is_markdown = path.lower().endswith(".md")
-    markdown_fence_open = False
+    markdown_fence_char: str | None = None
+    markdown_fence_length = 0
     for line in text.splitlines(keepends=True):
-        if is_markdown and re.match(r"^\s*(?:\x60{3,}|~{3,})", line):
-            # Preserve fence delimiters verbatim and track executable examples
-            # separately from surrounding descriptive prose.
-            markdown_fence_open = not markdown_fence_open
-            kept.append(line)
-            continue
+        fence_match = re.match(r"^\s*(\x60{3,}|~{3,})(.*?)(?:\r?\n)?$", line)
+        if is_markdown and fence_match:
+            marker, suffix = fence_match.groups()
+            if markdown_fence_char is None:
+                markdown_fence_char = marker[0]
+                markdown_fence_length = len(marker)
+                kept.append(line)
+                continue
+            if (
+                marker[0] == markdown_fence_char
+                and len(marker) >= markdown_fence_length
+                and not suffix.strip()
+            ):
+                markdown_fence_char = None
+                markdown_fence_length = 0
+                kept.append(line)
+                continue
+            # A shorter marker (e.g. three backticks inside a four-backtick
+            # fence) is content rather than a closing delimiter.
         if not RETIRED_PROVIDER_RE.search(line):
             kept.append(line)
             continue
-        if is_markdown and markdown_fence_open and re.search(
-            r"(?i)(?:\b(?:gcloud|docker|curl|python|bash|export|printf|echo)\b|"
-            r"\$\{?[A-Z][A-Z0-9_]*(?:API_KEY|SECRET|TOKEN)[A-Z0-9_]*\}?|"
-            r"^\s*[A-Z][A-Z0-9_]*(?:API_KEY|SECRET|MODEL)\s*(?:=|:))",
-            line,
-        ):
+        if is_markdown and markdown_fence_char is not None:
             raise MigrationError(
-                f"{path} contains a provider-bearing executable example in a Markdown code fence; "
-                "refusing to rewrite runnable documentation"
+                f"{path} contains provider-bearing code inside a Markdown code fence; "
+                "refusing to rewrite an executable example"
             )
         candidate = SECRET_VERSION_RE.sub("", line)
         candidate = KEY_ASSIGNMENT_RE.sub("", candidate)
@@ -5699,12 +5708,27 @@ def validate_groq_research_module(source: str, path: str = "app/groq_ai.py") -> 
     if len(reviewers) != 1:
         raise MigrationError(f"{path} must define exactly one async groq_research_review API")
     reviewer = reviewers[0]
-    positional = len(reviewer.args.posonlyargs) + len(reviewer.args.args)
-    # The consumer always calls reviewer(research, intelligence). Defaults do not
-    # change positional arity; *args is compatible, keyword-only parameters are not.
+    positional_parameters = reviewer.args.posonlyargs + reviewer.args.args
+    positional = len(positional_parameters)
+    required_positional = positional - len(reviewer.args.defaults)
+    required_keyword_only = [
+        argument.arg
+        for argument, default in zip(reviewer.args.kwonlyargs, reviewer.args.kw_defaults)
+        if default is None
+    ]
+    # The consumer supplies exactly two positional values. Optional extra positional
+    # parameters and *args are safe; extra required positional or keyword-only values are not.
     if positional < 2 and reviewer.args.vararg is None:
         raise MigrationError(
             f"{path} groq_research_review must accept two positional arguments (research, intelligence)"
+        )
+    if required_positional > 2:
+        raise MigrationError(
+            f"{path} groq_research_review has more than two required positional parameters"
+        )
+    if required_keyword_only:
+        raise MigrationError(
+            f"{path} groq_research_review requires keyword-only parameters: {required_keyword_only}"
         )
 
     # This adapter runs at app startup. Do not preserve arbitrary imports that could
@@ -5732,7 +5756,9 @@ def validate_groq_research_module(source: str, path: str = "app/groq_ai.py") -> 
             key = (node.level, node.module or "")
             allowed_names = allowed_from_imports.get(key)
             if allowed_names is None or any(
-                alias.name == "*" or alias.name not in allowed_names or alias.asname is not None
+                alias.name == "*"
+                or alias.name not in allowed_names
+                or (key == (0, "__future__") and alias.asname is not None)
                 for alias in node.names
             ):
                 raise MigrationError(
