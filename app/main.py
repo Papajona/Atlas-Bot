@@ -7190,7 +7190,11 @@ async def research_run_detail(
     authorization: str | None = Header(default=None),
 ):
     """Return one authenticated research run with its bounded review and audit record."""
-    await auth(x_admin_token, authorization)
+    claims = await auth(x_admin_token, authorization)
+    # Full stored research and reviewer commentary is limited to roles that need
+    # research/audit access. Finance and Treasury do not get broad strategy research
+    # access merely because they are authenticated administrators.
+    await require_role(claims, "READ_ONLY", "OPERATIONS", "RISK_OFFICER", "COMPLIANCE")
     async with SessionLocal() as db:
         row = (await db.execute(select(ResearchRun).where(ResearchRun.id == run_id))).scalar_one_or_none()
     if row is None:
