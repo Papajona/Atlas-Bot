@@ -5638,6 +5638,21 @@ def _metadata_has_active_provider_wiring(text: str) -> bool:
     return visit(data)
 
 
+def validate_groq_research_module(source: str, path: str = "app/groq_ai.py") -> None:
+    """Validate the optional Groq research-review API without importing third-party HTTP code."""
+    try:
+        tree = ast.parse(source, filename=path)
+    except SyntaxError as exc:
+        raise MigrationError(f"{path} is not valid Python; preserving the branch") from exc
+    if RETIRED_PROVIDER_RE.search(source):
+        raise MigrationError(f"{path} contains retired-provider wiring; preserving the branch")
+    if not any(
+        isinstance(node, ast.AsyncFunctionDef) and node.name == "groq_research_review"
+        for node in tree.body
+    ):
+        raise MigrationError(f"{path} is missing the reviewed async groq_research_review API")
+
+
 def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:
     # Canonical Native AI source and the original provider-removal patch baseline are
     # independent pins: changing one must not widen the other per-path diff.
@@ -5648,18 +5663,7 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
         if not target.exists():
             write_text(path, canonical_text(canonical_commit, path))
         elif path == "app/groq_ai.py":
-            groq_source = target.read_text(encoding="utf-8")
-            try:
-                groq_tree = ast.parse(groq_source, filename=path)
-            except SyntaxError as exc:
-                raise MigrationError(f"{path} is not valid Python; preserving the branch") from exc
-            if RETIRED_PROVIDER_RE.search(groq_source):
-                raise MigrationError(f"{path} contains retired-provider wiring; preserving the branch")
-            if not any(
-                isinstance(node, ast.AsyncFunctionDef) and node.name == "groq_research_review"
-                for node in groq_tree.body
-            ):
-                raise MigrationError(f"{path} is missing the reviewed async groq_research_review API")
+            validate_groq_research_module(target.read_text(encoding="utf-8"), path)
             # Preserve compatible branch-specific Groq diagnostics while still rejecting
             # stale hosted-provider wiring; do not overwrite divergent unrelated logic.
         elif path == "app/prompt_safety.py":
