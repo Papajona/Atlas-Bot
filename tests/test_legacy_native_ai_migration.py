@@ -4368,7 +4368,7 @@ def update_research(research, intelligence, review):
             target.parent.mkdir()
             target.write_text(source, encoding="utf-8")
             with patch.object(migration, "ROOT", root):
-                with self.assertRaisesRegex(migration.MigrationError, "not inside an async function"):
+                with self.assertRaisesRegex(migration.MigrationError, "outside an async function"):
                     migration.transform_daily_research()
             self.assertEqual(target.read_text(encoding="utf-8"), source)
 
