@@ -5277,6 +5277,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 continue
             warning_only = inert_provider_message(stripped) or (
                 re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
+                and not re.match(r"^\s*printf\s+-v(?:\s|$)", stripped, re.I)
                 and re.search(r"(?i)\b(?:gemini|cerebras|ai.?gateway|openai)\b", stripped)
                 and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", stripped)
             )
