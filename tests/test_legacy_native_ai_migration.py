@@ -4543,5 +4543,21 @@ def update_research(research, intelligence, review):
                     migration.transform_daily_research()
             self.assertEqual(target.read_text(encoding="utf-8"), source)
 
+    def test_shell_scrub_removes_retired_groq_strategy_settings_only(self):
+        source = '''export GROQ_STRATEGY_MODEL="legacy-strategy"
+GROQ_STRATEGY_API_KEY="legacy-secret"
+if [[ -n "${GROQ_STRATEGY_MODEL:-}" ]]; then
+  export GROQ_STRATEGY_MODEL="legacy-strategy"
+fi
+GROQ_API_KEY="supported-review-key"
+GROQ_MODEL="openai/gpt-oss-20b"
+'''
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertNotRegex(cleaned, migration.RETIRED_PROVIDER_RE)
+        self.assertNotIn("GROQ_STRATEGY_MODEL", cleaned)
+        self.assertNotIn("GROQ_STRATEGY_API_KEY", cleaned)
+        self.assertIn('GROQ_API_KEY="supported-review-key"', cleaned)
+        self.assertIn('GROQ_MODEL="openai/gpt-oss-20b"', cleaned)
+
 if __name__ == "__main__":
     unittest.main()
