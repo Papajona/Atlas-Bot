@@ -3363,6 +3363,32 @@ for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-ope
         with self.assertRaisesRegex(migration.MigrationError, "mixed provider-conditioned shell block"):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
 
+    def test_shell_scrub_rejects_backtick_command_substitution_in_groq_block(self):
+        source = (
+            'if [[ -n "$GROQ_API_KEY" ]]; then\n'
+            '  echo "Groq configured: `touch /tmp/atlas-qodo-sentinel`"\n'
+            'fi\n'
+        )
+        with self.assertRaisesRegex(migration.MigrationError, "mixed provider-conditioned shell block"):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+
+    def test_shell_scrub_preserves_shared_secret_expansion_when_retired_entry_is_only_other_item(self):
+        source = 'export AI_SECRET_ARGS="${AI_SECRET_ARGS},GEMINI_API_KEY=atlas-gemini-api-key:1"\n'
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertIn('export AI_SECRET_ARGS="${AI_SECRET_ARGS}"', cleaned)
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+
+    def test_shell_scrub_handles_equals_style_cloud_run_flags(self):
+        source = (
+            'gcloud run deploy atlas --set-env-vars="ENVIRONMENT=paper,GEMINI_MODEL=gemini-3.5-flash,GROQ_MODEL=openai/gpt-oss-20b" '
+            '--set-secrets="DATABASE_URL=atlas-db:1,GEMINI_API_KEY=atlas-gemini-api-key:1,GROQ_API_KEY=atlas-groq-api-key:1"\n'
+        )
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertNotIn("GEMINI_MODEL", cleaned)
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+        self.assertIn("GROQ_MODEL=openai/gpt-oss-20b", cleaned)
+        self.assertIn("GROQ_API_KEY=atlas-groq-api-key:1", cleaned)
+
     def test_ancillary_patch_conflict_still_runs_guarded_deployment_scrub(self):
         source = r'''#!/usr/bin/env bash
 set -euo pipefail
