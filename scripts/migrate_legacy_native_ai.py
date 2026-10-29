@@ -1491,13 +1491,12 @@ def _module_scope_maybe_binds(node: ast.AST, *, postponed_annotations: bool = Fa
             for statement in [*part.body, *part.orelse]:
                 visit(statement)
             return
-        if isinstance(part, ast.AnnAssign) and postponed_annotations:
-            # With postponed annotations an annotation-only name does not bind,
-            # and its annotation expression is never evaluated.
-            if part.value is not None:
-                visit(part.target)
-                visit(part.value)
-            elif not isinstance(part.target, ast.Name):
+        if isinstance(part, ast.AnnAssign) and part.value is None:
+            # A value-less annotation stores metadata but does not assign the
+            # target name at module scope, regardless of annotation postponement.
+            if not postponed_annotations:
+                visit(part.annotation)
+            if not isinstance(part.target, ast.Name):
                 visit(part.target)
             return
         if isinstance(part, ast.MatchAs) and part.name:
@@ -1960,6 +1959,9 @@ def transform_ai_providers(commit: str) -> None:
                     # dynamic export mutation.
                     for body_statement in candidate.body:
                         deferred_body_nodes.update(id(item) for item in ast.walk(body_statement))
+                elif isinstance(candidate, ast.Lambda):
+                    # Lambda bodies are deferred; default expressions remain checked.
+                    deferred_body_nodes.update(id(item) for item in ast.walk(candidate.body))
 
             for nested in ast.walk(module_node):
                 # Reading __all__ can leak its mutable list through an alias
@@ -2034,13 +2036,6 @@ def transform_ai_providers(commit: str) -> None:
             if has_nested_star or dynamic_exports:
                 raise MigrationError(
                     f"star-import module {module_file} has dynamic exports; refusing to guess its bindings"
-                )
-            if any(
-                isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "exec"
-                for node in ast.walk(module_tree)
-            ):
-                raise MigrationError(
-                    f"star-import module {module_file} uses exec; refusing to guess its exports"
                 )
             exports = {
                 name
