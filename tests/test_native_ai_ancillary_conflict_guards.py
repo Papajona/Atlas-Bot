@@ -195,6 +195,10 @@ gcloud run services update atlas-api --set-secrets="DATABASE_URL=atlas-db:latest
         self.assertNotIn("atlas-gemini-api-key", cleaned)
         self.assertIn('AI_SECRET_ARGS="${AI_SECRET_ARGS}${AI_SECRET_ARGS:+,}GROQ_API_KEY=atlas-groq-api-key:latest"', cleaned)
         self.assertIn('--set-secrets="DATABASE_URL=atlas-db:latest${AI_SECRET_ARGS:+,${AI_SECRET_ARGS}}"', cleaned)
+        self.assertEqual(
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", cleaned),
+            cleaned,
+        )
 
 
 
