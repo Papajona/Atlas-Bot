@@ -1553,14 +1553,14 @@ async def _gemini_json(prompt):
 
     def test_daily_research_accepts_exact_legacy_unconfigured_fallback_payload(self):
         legacy = (
-            "from .ai_providers import dual_ai_research_review\\n"
-            "async def run_daily_research():\\n"
-            "    review = {}\\n"
-            "    if settings.gemini_api_key or settings.groq_api_key:\\n"
-            "        review['external_ai'] = await dual_ai_research_review(research, intelligence)\\n"
-            "    else:\\n"
-            "        review['external_ai'] = {'status': 'NOT_CONFIGURED', 'providers': {}, 'execution_authority': False}\\n"
-            "    review['run_drift'] = await persist_run()\\n"
+            "from .ai_providers import dual_ai_research_review\n"
+            "async def run_daily_research():\n"
+            "    review = {}\n"
+            "    if settings.gemini_api_key or settings.groq_api_key:\n"
+            "        review['external_ai'] = await dual_ai_research_review(research, intelligence)\n"
+            "    else:\n"
+            "        review['external_ai'] = {'status': 'NOT_CONFIGURED', 'providers': {}, 'execution_authority': False}\n"
+            "    review['run_drift'] = await persist_run()\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
