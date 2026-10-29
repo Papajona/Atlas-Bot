@@ -145,3 +145,41 @@ def test_admin_mfa_retries_expired_challenges_and_recovers_partial_enrollment():
     assert "window.adminMfaChallengeId=null;" in verification
     assert "if(!window.adminMfaChallengeId){" in verification
     assert "You can retry; a fresh challenge will be requested." in verification
+
+
+
+def test_admin_dashboard_loaders_keep_numeric_formatting_and_single_dispatcher():
+    script = (ROOT / "app/static/admin-dashboard.js").read_text(encoding="utf-8")
+
+    expected_assignments = (
+        "$('wdPendingAmount').textContent='$'+Number(summary.pending_amount||0).toLocaleString(undefined,{maximumFractionDigits:2});",
+        "$('wdApprovedAmount').textContent=Number(summary.approved_amount||0).toLocaleString(undefined,{maximumFractionDigits:2})+' USDT reserved';",
+        "$('marginRevenue').textContent='$'+Number(m.gross_subscription_revenue||0).toLocaleString(undefined,{maximumFractionDigits:2});",
+        "$('marginCosts').textContent='$'+Number(m.operating_costs||0).toLocaleString(undefined,{maximumFractionDigits:2});",
+        "$('marginRef').textContent='$'+Number(m.referral_commissions||0).toLocaleString(undefined,{maximumFractionDigits:2});",
+        "$('marginPct').textContent=Number(m.contribution_margin_pct||0).toFixed(1)+'%';",
+        "$('marginProfit').textContent='Contribution $'+Number(m.contribution_profit||0).toLocaleString(undefined,{maximumFractionDigits:2});",
+        "$('equity').textContent='$'+Number(s.equity).toLocaleString(undefined,{maximumFractionDigits:2});",
+        "$('dd').textContent=(s.drawdown*100).toFixed(2)+'%';",
+        "$('daily').textContent='Daily loss '+(s.daily_loss*100).toFixed(2)+'%';",
+    )
+    for assignment in expected_assignments:
+        assert assignment in script
+
+    withdrawal_loader = script.split("async function loadWithdrawals(){", 1)[1].split(
+        "async function approveWithdrawal(", 1
+    )[0]
+    margin_loader = script.split("async function loadMargin(){", 1)[1].split(
+        "async function refresh(", 1
+    )[0]
+    refresh_loader = script.split("async function refresh(){", 1)[1].split(
+        "async function run(", 1
+    )[0]
+    for loader in (withdrawal_loader, margin_loader, refresh_loader):
+        assert "function adminLogout(" not in loader
+        assert "document.addEventListener(" not in loader
+
+    assert script.count("function adminLogout(){") == 1
+    assert script.count("document.addEventListener('click'") == 1
+    assert script.count("document.addEventListener('change'") == 1
+    assert script.rstrip().endswith("resumeAdminSession();")
