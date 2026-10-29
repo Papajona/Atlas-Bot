@@ -2882,7 +2882,14 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
             target.write_text(legacy, encoding="utf-8")
             with patch.object(migration, "ROOT", root):
                 migration.transform_daily_research()
-            result = target.read_text(encoding="utf-8")
+                result = target.read_text(encoding="utf-8")
+                # Re-run the migrated legacy fixture, not just an already-canonical no-op.
+                migration.transform_daily_research()
+                self.assertEqual(
+                    target.read_text(encoding="utf-8"),
+                    result,
+                    "daily research migration must be idempotent after rewriting legacy provider wiring",
+                )
             self.assertIn("keep_this = True", result)
             self.assertIn("review['run_drift']", result)
             self.assertIn('native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))', result)
