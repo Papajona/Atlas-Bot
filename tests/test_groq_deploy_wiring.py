@@ -17,6 +17,10 @@ def test_api_keeps_groq_secret_optional_and_gemini_removed():
     assert "GROQ_MODEL=${GROQ_MODEL}" in script
     assert "GROQ_MAX_COMPLETION_TOKENS=${GROQ_MAX_COMPLETION_TOKENS}" in script
     assert "GROQ_RESEARCH_REVIEW_ENABLED=${GROQ_RESEARCH_REVIEW_ENABLED}" in script
+    assert 'GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"' in script
+    assert 'GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"' in script
+    assert 'GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"' in script
+    assert "validate_groq_deploy_env.py" in script
     assert "GEMINI_API_KEY" not in script
     assert "GEMINI_MODEL" not in script
     assert "GEMINI_STRATEGY_MODEL" not in script
@@ -41,6 +45,9 @@ def test_worker_keeps_groq_secret_optional_and_gemini_removed():
 def test_production_workflow_passes_optional_groq_secret_without_gemini():
     workflow = PRODUCTION_WORKFLOW.read_text(encoding="utf-8")
     assert "SECRET_GROQ_API_KEY_VERSION: ${{ secrets.SECRET_GROQ_API_KEY_VERSION }}" in workflow
+    assert "GROQ_MODEL: ${{ vars.GROQ_MODEL }}" in workflow
+    assert "GROQ_MAX_COMPLETION_TOKENS: ${{ vars.GROQ_MAX_COMPLETION_TOKENS }}" in workflow
+    assert "GROQ_RESEARCH_REVIEW_ENABLED: ${{ vars.GROQ_RESEARCH_REVIEW_ENABLED }}" in workflow
     assert "SECRET_GEMINI_API_KEY_VERSION" not in workflow
     assert "GEMINI_MODEL" not in workflow
     assert "GEMINI_STRATEGY_MODEL" not in workflow
