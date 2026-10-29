@@ -261,11 +261,40 @@ jobs:
           ):
               if name not in facade_names:
                   raise SystemExit(f"app.ai_providers is missing required symbol: {name}")
-          if not any(
-              isinstance(node, ast.AsyncFunctionDef) and node.name == "groq_research_review"
-              for node in trees["groq_ai"].body
-          ):
-              raise SystemExit("app.groq_ai is missing required async API: groq_research_review")
+          groq_reviewers = [
+              node for node in trees["groq_ai"].body
+              if isinstance(node, ast.AsyncFunctionDef) and node.name == "groq_research_review"
+          ]
+          if len(groq_reviewers) != 1:
+              raise SystemExit("app.groq_ai must define exactly one async groq_research_review API")
+          groq_reviewer = groq_reviewers[0]
+          positional_args = len(groq_reviewer.args.posonlyargs) + len(groq_reviewer.args.args)
+          if positional_args < 2 and groq_reviewer.args.vararg is None:
+              raise SystemExit("app.groq_ai reviewer must accept research and intelligence positional arguments")
+
+          # Keep branch-specific diagnostics only when their imports are within the
+          # reviewed adapter contract and are known to resolve in the application.
+          allowed_plain_imports = {"asyncio", "httpx", "json", "logging", "math", "re"}
+          allowed_from_imports = {
+              (0, "__future__"): {"annotations"},
+              (0, "typing"): {"Any"},
+              (1, "config"): {"settings"},
+              (1, "prompt_safety"): {
+                  "UNTRUSTED_PREAMBLE", "suspicious_instruction_markers", "wrap_untrusted",
+              },
+          }
+          for node in trees["groq_ai"].body:
+              if isinstance(node, ast.Import):
+                  for alias in node.names:
+                      if alias.name not in allowed_plain_imports:
+                          raise SystemExit(f"app.groq_ai imports an unreviewed module: {alias.name}")
+              elif isinstance(node, ast.ImportFrom):
+                  allowed_names = allowed_from_imports.get((node.level, node.module or ""))
+                  if allowed_names is None or any(
+                      alias.name == "*" or alias.name not in allowed_names or alias.asname is not None
+                      for alias in node.names
+                  ):
+                      raise SystemExit(f"app.groq_ai has an unreviewed import from: {node.module}")
           def top_level_bound_names(node):
               names = set()
               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
