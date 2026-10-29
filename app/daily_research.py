@@ -12,7 +12,7 @@ from .distributed import acquire_lock, release_lock
 from .market_intelligence import gather_market_intelligence
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates
 from .strategy_engine import StrategyConfig
-from .ai_providers import dual_ai_research_review
+from .native_ai import native_research_review
 from .research_trial_archive import archive_research_trials
 
 
@@ -300,14 +300,9 @@ async def run_daily_research() -> dict[str, Any]:
                 # code/data/venue fingerprints exist; they cannot satisfy promotion.
                 research["prospective_trial_archive"] = trial_archive
                 review = _ai_research_brief(research, intelligence)
-                if settings.gemini_api_key or settings.groq_api_key:
-                    review["external_ai"] = await dual_ai_research_review(research, intelligence)
-                else:
-                    review["external_ai"] = {
-                        "status": "NOT_CONFIGURED",
-                        "providers": {},
-                        "execution_authority": False,
-                    }
+                native_research_input = dict(research)
+                native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))
+                review["native_ai_review"] = native_research_review(native_research_input, intelligence)
                 review["run_drift"] = await _persist_research_run(symbol, research, review, intelligence.get("macro_regime"))
                 run_record = {
                     "symbol": symbol, "research": research, "review": review,

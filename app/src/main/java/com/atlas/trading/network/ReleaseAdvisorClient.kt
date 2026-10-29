@@ -45,7 +45,7 @@ class ReleaseAdvisorClient(
                 if (!response.isSuccessful) {
                     val detail = json.optString("detail").takeIf { it.isNotBlank() }
                         ?: when (response.code) {
-                            402 -> "AI gateway has insufficient credits."
+                            402 -> " has insufficient credits."
                             403 -> "Release advisor access is blocked for this account."
                             429 -> "Release advisor rate limit reached. Try again later."
                             else -> "Release advisor request failed (HTTP ${response.code})."
