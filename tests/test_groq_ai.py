@@ -19,11 +19,17 @@ VALID_REVIEW = {
 
 
 class _FakeResponse:
-    def __init__(self, content: str):
+    def __init__(self, content: str, status_code: int = 200):
         self.content = content
+        self.status_code = status_code
 
     def raise_for_status(self):
-        return None
+        if self.status_code >= 400:
+            request = groq_ai.httpx.Request("POST", groq_ai._GROQ_CHAT_COMPLETIONS_URL)
+            response = groq_ai.httpx.Response(self.status_code, request=request)
+            raise groq_ai.httpx.HTTPStatusError(
+                f"HTTP {self.status_code}", request=request, response=response
+            )
 
     def json(self):
         return {"choices": [{"message": {"content": self.content}}]}
@@ -116,3 +122,45 @@ def test_groq_review_can_be_disabled_even_when_a_key_exists():
 
     assert result["status"] == "DISABLED"
     assert result["execution_authority"] is False
+
+
+def test_groq_prompt_summarizes_large_research_without_mid_json_truncation():
+    research = {
+        "symbol": "BTC-USD",
+        "status": "OK",
+        "asset_class": "crypto",
+        "data_quality": {"valid": True, "issues": ["coverage checked"]},
+        "strategies": [{"strategy": "TREND", "status": "OK", "sharpe": 0.8, "oos_total_return": 0.12}],
+        "huge_unneeded_field": "x" * 50_000,
+    }
+    candidates = [{"symbol": "BTC-USD", "strategy": "TREND", "status": "PAPER_ONLY_CANDIDATE", "score": 0.7}]
+    prompt, metadata = groq_ai._research_prompt_details(
+        research, {"news_summary": {}, "failures": {}}, candidates
+    )
+
+    assert len(prompt) < 16_000
+    assert "PAPER_ONLY_CANDIDATE" in prompt
+    assert '"strategy":"TREND"' in prompt
+    assert "huge_unneeded_field" not in prompt
+    assert metadata["input_chars"] > 50_000
+    assert metadata["input_truncated"] is True
+    assert metadata["input_summary_chars"] < 12_000
+
+
+def test_groq_rate_limit_diagnostic_preserves_status_without_secret_or_body():
+    client = _FakeAsyncClient(_FakeResponse("do not expose this body", status_code=429))
+    with _settings(
+        groq_api_key="test-key-not-a-real-secret",
+        groq_model="openai/gpt-oss-20b",
+        groq_max_completion_tokens=2048,
+        groq_timeout_seconds=20.0,
+        groq_research_review_enabled=True,
+    ), patch.object(groq_ai.httpx, "AsyncClient", return_value=client):
+        result = asyncio.run(groq_ai.groq_research_review({"symbol": "BTC-USD"}, {}))
+
+    assert result["status"] == "ERROR"
+    assert result["failure_category"] == "RATE_LIMIT"
+    assert result["status_code"] == 429
+    assert result["error_detail"] == "Groq upstream returned HTTP 429"
+    assert "test-key-not-a-real-secret" not in str(result)
+    assert "do not expose this body" not in str(result)
