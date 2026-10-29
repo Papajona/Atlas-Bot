@@ -4880,15 +4880,25 @@ def _apply_path_patch(base_commit: str, tip_commit: str, path: str) -> bool:
 
 
 def apply_ancillary_patch(commit: str, path: str, extra_base: str, extra_commit: str) -> None:
-    if not _apply_path_patch(f"{commit}^", commit, path):
+    cleanup_patch_applied = _apply_path_patch(f"{commit}^", commit, path)
+    if not cleanup_patch_applied and path in EXTRA_PATHS:
+        # The Android/document extras need their separately reviewed patch. Preserve
+        # their exact branch content when that patch conflicts; never use a broad text
+        # scrub as a substitute for those path-specific reviews.
         return
     if path in EXTRA_PATHS and not _apply_path_patch(extra_base, extra_commit, path):
         # Preserve the exact conflicting Android/document path. If it still contains
         # active provider wiring, the final scan will reject this branch instead.
         return
+
     target = ROOT / path
     if target.exists():
         current = target.read_text(encoding="utf-8")
+        # A failed patch against a divergent legacy deployment file is not proof that
+        # the file is unsafe to migrate. The scrubber below is deliberately narrow:
+        # it removes recognized provider wiring and raises MigrationError for mixed
+        # commands/unknown constructs instead of silently discarding them. Always run
+        # that semantic cleanup after patch conflicts on the ordinary ancillary paths.
         cleaned = scrub_ancillary_text(path, current)
         if cleaned != current:
             target.write_text(cleaned, encoding="utf-8")
