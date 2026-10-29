@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -1573,7 +1574,12 @@ async def _gemini_json(prompt):
             ast.parse(result, filename="app/daily_research.py")
             self.assertIn("review['run_drift'] = await persist_run()", result)
             self.assertIn("native_research_review(native_research_input, intelligence)", result)
-            self.assertNotRegex(result, migration.PROVIDER_RE)
+            self.assertIn("from .groq_ai import groq_research_review", result)
+            self.assertIn('review["groq_research_review"] = await groq_research_review(research, intelligence)', result)
+            self.assertNotIn("dual_ai_research_review", result)
+            self.assertNotIn("settings.groq_api_key", result)
+            self.assertNotIn("settings.groq_strategy_model", result)
+            self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
     def test_daily_research_refuses_dynamic_or_extended_unconfigured_fallback_payloads(self):
         invalid_payloads = (
@@ -1674,7 +1680,7 @@ async def _gemini_json(prompt):
             result = config.read_text(encoding="utf-8")
             ast.parse(result, filename="app/config.py")
             self.assertIn("database_url", result)
-            self.assertNotRegex(result, migration.PROVIDER_RE)
+            self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
         unsafe = safe.replace(
             "        normalized = str(value or '').strip().removeprefix('models/')\n",
@@ -1780,7 +1786,11 @@ async def _gemini_json(prompt):
             result = config.read_text(encoding="utf-8")
             self.assertIn("database_url", result)
             self.assertIn("withdrawals_enabled", result)
-            self.assertNotRegex(result, migration.PROVIDER_RE)
+            self.assertIn("groq_api_key", result)
+            self.assertIn("groq_model", result)
+            self.assertIn("groq_research_review_enabled", result)
+            self.assertNotIn("groq_strategy_model", result)
+            self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
     def test_config_refuses_a_provider_field_sharing_a_line_with_an_unrelated_setting(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2883,7 +2893,30 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
                 result,
             )
             ast.parse(result, filename="app/daily_research.py")
-            self.assertNotRegex(result, migration.PROVIDER_RE)
+            self.assertIn("from .groq_ai import groq_research_review", result)
+            self.assertIn('review["groq_research_review"] = await groq_research_review(research, intelligence)', result)
+            self.assertNotIn("dual_ai_research_review", result)
+            self.assertNotIn("_groq_json", result)
+            self.assertNotIn("settings.groq_strategy_model", result)
+            self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
+
+    def test_daily_research_migration_is_idempotent_with_native_groq_review_only(self):
+        source = """from .native_ai import native_research_review
+from .groq_ai import groq_research_review
+
+async def update_research(research, intelligence, review):
+    review["native_ai_review"] = native_research_review(research, intelligence)
+    review["groq_research_review"] = await groq_research_review(research, intelligence)
+    return review
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "daily_research.py"
+            target.parent.mkdir()
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_daily_research()
+            self.assertEqual(target.read_text(encoding="utf-8"), source)
 
     def test_daily_research_refuses_setup_call_inside_provider_arguments(self):
         legacy = (
@@ -3317,7 +3350,7 @@ for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-ope
         self.assertIn("DATABASE_SECRET_REF", cleaned)
         self.assertNotIn("OPENAI_ORGANIZATION", cleaned)
         self.assertNotIn("atlas-openai-api-key", cleaned)
-        self.assertNotRegex(cleaned, migration.PROVIDER_RE)
+        self.assertNotRegex(cleaned, migration.RETIRED_PROVIDER_RE)
 
 
     def test_shell_scrub_refuses_provider_block_containing_unrelated_deployment_command(self):
@@ -3329,6 +3362,56 @@ for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-ope
         )
         with self.assertRaisesRegex(migration.MigrationError, "mixed provider-conditioned shell block"):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+
+    def test_ancillary_patch_conflict_still_runs_guarded_deployment_scrub(self):
+        source = r'''#!/usr/bin/env bash
+set -euo pipefail
+DATABASE_URL="${DATABASE_URL:?required}"
+: "${SECRET_GEMINI_API_KEY_VERSION:?Set SECRET_GEMINI_API_KEY_VERSION}"
+SECRET_GROQ_API_KEY_VERSION="${SECRET_GROQ_API_KEY_VERSION:-}"
+AI_SECRET_ARGS=",GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}"
+ENV_VARS="^@^ENVIRONMENT=production@DATABASE_URL=${DATABASE_URL}@GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}@GROQ_MODEL=openai/gpt-oss-20b@OPENAI_ORGANIZATION=org-id"
+gcloud run deploy atlas --set-env-vars "ENVIRONMENT=production,DATABASE_URL=${DATABASE_URL},GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash},GROQ_MODEL=openai/gpt-oss-20b,OPENAI_ORGANIZATION=org-id" --set-secrets "DATABASE_URL=${DATABASE_SECRET_REF},GEMINI_API_KEY=${SECRET_GEMINI_API_KEY_VERSION}${AI_SECRET_ARGS}"
+grant_secret_access atlas-openai-api-key atlas-runtime
+for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-openai-api-key; do echo "$secret"; done
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "deploy" / "cloud-run-deploy.sh"
+            target.parent.mkdir(parents=True)
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "_apply_path_patch", return_value=False
+            ):
+                migration.apply_ancillary_patch(
+                    "cleanup-commit", "deploy/cloud-run-deploy.sh",
+                    "extra-base", "extra-commit",
+                )
+            cleaned = target.read_text(encoding="utf-8")
+            self.assertIn("DATABASE_URL", cleaned)
+            self.assertIn("DATABASE_SECRET_REF", cleaned)
+            self.assertNotRegex(cleaned, migration.RETIRED_PROVIDER_RE)
+            check = subprocess.run(
+                ["bash", "-n", str(target)], text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_ancillary_patch_conflict_preserves_special_android_extra(self):
+        path = "app/src/main/java/com/atlas/trading/network/ReleaseAdvisorClient.kt"
+        source = "const legacyProvider = \"gemini\"\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / path
+            target.parent.mkdir(parents=True)
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "_apply_path_patch", return_value=False
+            ):
+                migration.apply_ancillary_patch(
+                    "cleanup-commit", path, "extra-base", "extra-commit"
+                )
+            self.assertEqual(target.read_text(encoding="utf-8"), source)
 
     def test_release_diagnostics_replaces_only_hosted_route_and_preserves_neighbor_routes(self):
         legacy = """# Authorized release diagnostics. The gateway key is read only from server configuration.
@@ -4167,6 +4250,95 @@ def _extract_json(text):
             result = target.read_text(encoding="utf-8")
             self.assertIn("def _extract_json", result)
             self.assertNotRegex(result, migration.PROVIDER_RE)
+
+class GroqLegacyMigrationRegressionTests(unittest.TestCase):
+    def test_existing_review_projection_is_extended_with_groq_result_idempotently(self):
+        source = """import json
+from .native_ai import native_research_review
+from .groq_ai import groq_research_review
+
+async def _persist_research_run(review):
+    return ResearchRun(review_json=json.dumps({k: review.get(k) for k in ("ai_brain_mode", "paper_candidates", "native_ai_review")}, default=str))
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "daily_research.py"
+            target.parent.mkdir()
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_daily_research()
+                once = target.read_text(encoding="utf-8")
+                migration.transform_daily_research()
+            twice = target.read_text(encoding="utf-8")
+        self.assertIn('"groq_research_review"', once)
+        self.assertEqual(once, twice)
+        ast.parse(twice, filename="app/daily_research.py")
+
+    def test_direct_retired_provider_import_is_replaced_without_facade_import(self):
+        source = """from .ai_providers import _gemini_json
+
+async def update_research(research, intelligence, review):
+    if settings.gemini_api_key:
+        review['external_ai'] = await _gemini_json(research)
+    else:
+        review['external_ai'] = {'status': 'NOT_CONFIGURED'}
+    return review
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "daily_research.py"
+            target.parent.mkdir()
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_daily_research()
+            result = target.read_text(encoding="utf-8")
+        self.assertNotIn("_gemini_json", result)
+        self.assertIn("from .native_ai import native_research_review", result)
+        self.assertIn("from .groq_ai import groq_research_review", result)
+        ast.parse(result, filename="app/daily_research.py")
+
+    def test_already_native_branch_receives_groq_review_call_and_import(self):
+        source = """from .native_ai import native_research_review
+
+async def run_daily_research(research, intelligence):
+    review = {}
+    review["native_ai_review"] = native_research_review(research, intelligence)
+    return review
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "daily_research.py"
+            target.parent.mkdir()
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_daily_research()
+                once = target.read_text(encoding="utf-8")
+                migration.transform_daily_research()
+            twice = target.read_text(encoding="utf-8")
+        self.assertIn("from .groq_ai import groq_research_review", once)
+        self.assertIn('review["groq_research_review"] = await groq_research_review(research, intelligence)', once)
+        self.assertEqual(once, twice)
+        ast.parse(twice, filename="app/daily_research.py")
+
+    def test_sync_provider_conditional_is_refused_before_await_rewrite(self):
+        source = """from .ai_providers import dual_ai_research_review
+
+def update_research(research, intelligence, review):
+    if settings.gemini_api_key:
+        review['external_ai'] = dual_ai_research_review(research, intelligence)
+    else:
+        review['external_ai'] = {'status': 'NOT_CONFIGURED'}
+    return review
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "daily_research.py"
+            target.parent.mkdir()
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "not inside an async function"):
+                    migration.transform_daily_research()
+            self.assertEqual(target.read_text(encoding="utf-8"), source)
 
 if __name__ == "__main__":
     unittest.main()

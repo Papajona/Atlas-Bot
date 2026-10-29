@@ -63,3 +63,16 @@ def test_bootstrap_creates_and_grants_groq_secret_only_when_configured():
     assert 'grant_secret_access atlas-groq-api-key "$SERVICE_ACCOUNT"' in bootstrap
     assert 'grant_secret_access atlas-groq-api-key "$WORKER_SERVICE_ACCOUNT"' in bootstrap
     assert 'GROQ_API_KEY:?' not in bootstrap
+
+def test_daily_research_runs_optional_groq_reviews_concurrently():
+    source = (ROOT / "app" / "daily_research.py").read_text(encoding="utf-8")
+    assert "asyncio.create_task(groq_research_review(research, intelligence))" in source
+    assert "await asyncio.gather(" in source
+    assert 'review["groq_research_review"] = await groq_research_review' not in source
+    assert 'review["run_drift"] = await _persist_research_run(' in source
+
+
+def test_worker_runbook_does_not_require_a_groq_secret_placeholder():
+    runbook = (ROOT / "deploy" / "DEPLOY_WORKFLOW.md").read_text(encoding="utf-8")
+    assert "SECRET_GROQ_REF=atlas-groq-api-key:<v>" not in runbook
+    assert "Optional and must be an exact" in runbook

@@ -19,11 +19,13 @@ VALID_REVIEW = {
 
 
 class _FakeResponse:
-    def __init__(self, content: str):
+    def __init__(self, content: str, error: Exception | None = None):
         self.content = content
+        self.error = error
 
     def raise_for_status(self):
-        return None
+        if self.error is not None:
+            raise self.error
 
     def json(self):
         return {"choices": [{"message": {"content": self.content}}]}
@@ -105,6 +107,28 @@ def test_groq_invalid_review_fails_closed_to_advisory_error():
     assert result["status"] == "ERROR"
     assert result["provider"] == "groq"
     assert result["error"] == "GroqAIError"
+    assert result["execution_authority"] is False
+
+
+
+def test_groq_http_failures_keep_sanitized_cause_and_status_diagnostics():
+    request = groq_ai.httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    response = groq_ai.httpx.Response(429, request=request)
+    error = groq_ai.httpx.HTTPStatusError("429 Too Many Requests", request=request, response=response)
+    client = _FakeAsyncClient(_FakeResponse("", error=error))
+    with _settings(
+        groq_api_key="test-key-not-a-real-secret",
+        groq_model="openai/gpt-oss-20b",
+        groq_max_completion_tokens=2048,
+        groq_timeout_seconds=20.0,
+        groq_research_review_enabled=True,
+    ), patch.object(groq_ai.httpx, "AsyncClient", return_value=client):
+        result = asyncio.run(groq_ai.groq_research_review({"symbol": "EUR_USD"}, {}))
+
+    assert result["status"] == "ERROR"
+    assert result["error"] == "GroqAIError"
+    assert result["cause"] == "HTTPStatusError"
+    assert result["http_status"] == 429
     assert result["execution_authority"] is False
 
 
