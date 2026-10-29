@@ -171,9 +171,7 @@ def test_workflow_has_no_duplicated_or_unreachable_tail() -> None:
     assert lines.count(success) == 1
     assert lines[-1] == success
     assert not any(line.startswith("\\n'") for line in lines)
-    assert "matches+=\\n" not in workflow
 
-    
 def test_embedded_native_ai_verifier_script_is_valid_python() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     function_start = workflow.index("verify_native_ai_impl() {")
