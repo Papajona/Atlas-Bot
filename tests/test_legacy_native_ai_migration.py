@@ -1695,6 +1695,24 @@ async def _gemini_json(prompt):
                     migration.transform_config()
             self.assertEqual(config.read_text(encoding="utf-8"), unsafe)
 
+        unsafe_annotation = safe.replace(
+            "def _validate_gemini_model(cls, value: str) -> str:",
+            "def _validate_gemini_model(cls, value: record_config_load()) -> str:",
+        )
+        self.assertNotEqual(unsafe_annotation, safe)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(unsafe_annotation, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "provider text outside isolated Settings fields",
+                ):
+                    migration.transform_config()
+            self.assertEqual(config.read_text(encoding="utf-8"), unsafe_annotation)
+
     def test_config_removes_provider_fields_but_preserves_unrelated_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
