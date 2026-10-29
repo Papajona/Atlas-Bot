@@ -1575,6 +1575,42 @@ async def _gemini_json(prompt):
             self.assertIn("native_research_review(native_research_input, intelligence)", result)
             self.assertNotRegex(result, migration.PROVIDER_RE)
 
+    def test_daily_research_refuses_dynamic_or_extended_unconfigured_fallback_payloads(self):
+        invalid_payloads = (
+            "{'status': 'NOT_CONFIGURED', 'providers': build_provider_state(), 'execution_authority': False}",
+            "{'status': 'NOT_CONFIGURED', 'providers': {'gemini': True}, 'execution_authority': False}",
+            "{'status': 'NOT_CONFIGURED', 'providers': {}, 'execution_authority': True}",
+            "{'status': 'NOT_CONFIGURED', 'providers': {}, 'execution_authority': False, 'audit': audit_fallback()}",
+            "{'status': 'NOT_CONFIGURED', 'status': 'NOT_CONFIGURED'}",
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                target = root / "app" / "daily_research.py"
+                target.parent.mkdir()
+                source = (
+                    "from .ai_providers import dual_ai_research_review\n"
+                    "async def run_daily_research():\n"
+                    "    review = {}\n"
+                    "    if settings.gemini_api_key or settings.groq_api_key:\n"
+                    "        review['external_ai'] = await dual_ai_research_review(research, intelligence)\n"
+                    "    else:\n"
+                    f"        review['external_ai'] = {payload}\n"
+                    "    review['run_drift'] = await persist_run()\n"
+                )
+                target.write_text(source, encoding="utf-8")
+                with patch.object(migration, "ROOT", root):
+                    with self.assertRaisesRegex(
+                        migration.MigrationError,
+                        "daily-research provider conditional contains unrelated or unknown logic",
+                    ):
+                        migration.transform_daily_research()
+                self.assertEqual(
+                    target.read_text(encoding="utf-8"),
+                    source,
+                    "refusing the fallback must leave the original module untouched",
+                )
+
     def test_daily_research_refuses_to_replace_early_return(self):
         legacy = (
             "from .ai_providers import dual_ai_research_review\n"
