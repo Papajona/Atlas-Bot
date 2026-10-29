@@ -894,11 +894,14 @@ def test_branch_pruning_runs_after_propagation_without_racing_its_push():
     assert "actions: read" in workflow
     assert "if: always()" in workflow
     assert 'if [[ "$EVENT_NAME" == "push" ]]; then' in workflow
-    assert "gh run list --repo \"$GITHUB_REPOSITORY\" --workflow propagate-native-ai-all-branches.yml" in workflow
+    assert "gh api --paginate" in workflow
+    assert "for propagation_status in queued in_progress waiting requested pending action_required stale;" in workflow
+    assert "status=$propagation_status&per_page=100" in workflow
+    assert "/actions/workflows/propagate-native-ai-all-branches.yml/runs?branch=main&per_page=1" in workflow
     assert "Latest Native AI propagation did not succeed; preserving every branch." in workflow
     assert "No Native AI propagation run is available as proof; preserving every branch." in workflow
     assert "Cannot prove the successful propagation covers this main commit; preserving every branch." in workflow
-    assert 'any(.[]; .status == "queued" or .status == "in_progress" or .status == "waiting" or .status == "requested")' in workflow
+    assert "gh run list" not in workflow
     assert "Verify Native AI propagation is successful before pruning" in workflow
     assert "github.event_name == 'push'" in workflow
     assert "scripts/migrate_legacy_native_ai.py" in workflow
