@@ -3387,7 +3387,7 @@ gcloud run deploy atlas --set-secrets="DATABASE_URL=atlas-db:latest,${AI_SECRET_
 """
         cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
         self.assertIn('AI_SECRET_ARGS="${AI_SECRET_ARGS}${AI_SECRET_ARGS:+,}GROQ_API_KEY=atlas-groq:1"', cleaned)
-        self.assertIn('--set-secrets="DATABASE_URL=atlas-db:latest,${AI_SECRET_ARGS}"', cleaned)
+        self.assertIn('--set-secrets="DATABASE_URL=atlas-db:latest${AI_SECRET_ARGS:+,${AI_SECRET_ARGS}}"', cleaned)
         self.assertNotIn("GEMINI_API_KEY", cleaned)
         self.assertNotIn(",,", cleaned)
         self.assertNotIn('DATABASE_URL=atlas-db:latest,,', cleaned)
