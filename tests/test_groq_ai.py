@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from unittest.mock import patch
 
 import pytest
-
-from unittest.mock import patch
 
 
 from app import groq_ai
