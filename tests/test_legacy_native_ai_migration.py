@@ -1574,7 +1574,7 @@ async def _gemini_json(prompt):
             ast.parse(result, filename="app/daily_research.py")
             self.assertIn("review['run_drift'] = await persist_run()", result)
             self.assertIn("native_research_review(native_research_input, intelligence)", result)
-            self.assertNotRegex(result, migration.PROVIDER_RE)
+            self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
     def test_daily_research_refuses_dynamic_or_extended_unconfigured_fallback_payloads(self):
         invalid_payloads = (
@@ -1675,7 +1675,7 @@ async def _gemini_json(prompt):
             result = config.read_text(encoding="utf-8")
             ast.parse(result, filename="app/config.py")
             self.assertIn("database_url", result)
-            self.assertNotRegex(result, migration.PROVIDER_RE)
+            self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
         unsafe = safe.replace(
             "        normalized = str(value or '').strip().removeprefix('models/')\n",
@@ -1781,7 +1781,7 @@ async def _gemini_json(prompt):
             result = config.read_text(encoding="utf-8")
             self.assertIn("database_url", result)
             self.assertIn("withdrawals_enabled", result)
-            self.assertNotRegex(result, migration.PROVIDER_RE)
+            self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
     def test_config_refuses_a_provider_field_sharing_a_line_with_an_unrelated_setting(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2884,7 +2884,7 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
                 result,
             )
             ast.parse(result, filename="app/daily_research.py")
-            self.assertNotRegex(result, migration.PROVIDER_RE)
+            self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
     def test_daily_research_refuses_setup_call_inside_provider_arguments(self):
         legacy = (
@@ -3318,7 +3318,7 @@ for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-ope
         self.assertIn("DATABASE_SECRET_REF", cleaned)
         self.assertNotIn("OPENAI_ORGANIZATION", cleaned)
         self.assertNotIn("atlas-openai-api-key", cleaned)
-        self.assertNotRegex(cleaned, migration.PROVIDER_RE)
+        self.assertNotRegex(cleaned, migration.RETIRED_PROVIDER_RE)
 
 
     def test_shell_scrub_refuses_provider_block_containing_unrelated_deployment_command(self):
@@ -3358,7 +3358,7 @@ for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-ope
             cleaned = target.read_text(encoding="utf-8")
             self.assertIn("DATABASE_URL", cleaned)
             self.assertIn("DATABASE_SECRET_REF", cleaned)
-            self.assertNotRegex(cleaned, migration.PROVIDER_RE)
+            self.assertNotRegex(cleaned, migration.RETIRED_PROVIDER_RE)
             check = subprocess.run(
                 ["bash", "-n", str(target)], text=True,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
