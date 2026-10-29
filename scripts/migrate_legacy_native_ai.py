@@ -5134,7 +5134,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 return "${" + name + "}"
 
             cleaned = re.sub(
-                r",\$\{(AI_SECRET_ARGS|GROQ_SECRET_ARG|GROQ_SECRET_ARGS)\}",
+                r"(?<!\+),\$\{(AI_SECRET_ARGS|GROQ_SECRET_ARG|GROQ_SECRET_ARGS)\}",
                 conditional_shared_expansion,
                 cleaned,
             )
