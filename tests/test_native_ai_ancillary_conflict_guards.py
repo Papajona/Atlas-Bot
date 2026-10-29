@@ -1,6 +1,7 @@
 """Regression coverage for guarded workflow fallback during Native AI migration."""
 from __future__ import annotations
 
+import ast
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -144,3 +145,112 @@ jobs:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_shell_list_removal_handles_first_entry_without_leading_commas(self):
+        shell = """#!/usr/bin/env bash
+ENV_VARS="^@^GEMINI_MODEL=gemini-3.5-flash@DATABASE_URL=postgres://example/db"
+gcloud run deploy atlas --set-env-vars "GEMINI_MODEL=gemini-3.5-flash,DATABASE_URL=postgres://example/db" --set-secrets "GEMINI_API_KEY=atlas-gemini-api-key:3,DATABASE_URL=atlas-database-url:3"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertIn('ENV_VARS="^@^DATABASE_URL=postgres://example/db"', cleaned)
+        self.assertIn('--set-env-vars "DATABASE_URL=postgres://example/db"', cleaned)
+        self.assertIn('--set-secrets "DATABASE_URL=atlas-database-url:3"', cleaned)
+        self.assertNotIn('",DATABASE_URL=', cleaned)
+        self.assertNotIn("GEMINI_MODEL", cleaned)
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+
+    def test_supported_groq_binding_in_ai_secret_args_is_preserved(self):
+        shell = """#!/usr/bin/env bash
+AI_SECRET_ARGS=",GROQ_API_KEY=atlas-groq-api-key:\${GROQ_SECRET_VERSION}"
+gcloud run deploy atlas --set-secrets "DATABASE_URL=atlas-database-url:3\${AI_SECRET_ARGS}"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertIn("AI_SECRET_ARGS", cleaned)
+        self.assertIn("GROQ_API_KEY=atlas-groq-api-key", cleaned)
+        self.assertIn("\${AI_SECRET_ARGS}", cleaned)
+
+    def test_mixed_groq_and_retired_provider_ai_secret_args_fail_closed(self):
+        shell = """#!/usr/bin/env bash
+AI_SECRET_ARGS=",GEMINI_API_KEY=atlas-gemini-api-key:3,GROQ_API_KEY=atlas-groq-api-key:3"
+"""
+        with self.assertRaisesRegex(migration.MigrationError, "mixes supported Groq and retired provider"):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_groq_condition_cannot_carry_a_deploy_command_after_then(self):
+        shell = """if [[ -n "$GROQ_API_KEY" ]]; then gcloud run deploy atlas
+fi
+"""
+        with self.assertRaisesRegex(migration.MigrationError, "executable command on a Groq-conditioned if line"):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_sequence_run_with_indicator_comment_is_scrubbed_and_surrounding_comments_survive(self):
+        workflow = """name: deployed job
+# keep this review comment
+jobs:
+  deploy:
+    environment: paper
+    runs-on: ubuntu-latest
+    steps:
+      - run: | # shell entry point
+          gcloud run deploy atlas --set-env-vars "GEMINI_MODEL=gemini-3.5-flash,DATABASE_URL=postgres://example/db"
+# preserve final note
+"""
+        cleaned = migration.scrub_workflow_ancillary(".github/workflows/production-deploy.yml", workflow)
+        self.assertIn("# keep this review comment", cleaned)
+        self.assertIn("# preserve final note", cleaned)
+        self.assertIn("- run: | # shell entry point", cleaned)
+        self.assertNotIn("GEMINI_MODEL", cleaned)
+        self.assertIn('DATABASE_URL=postgres://example/db', cleaned)
+
+    def test_supported_workflow_label_is_not_active_provider_wiring(self):
+        workflow = """name: Legacy Gemini migration note
+run-name: Old OpenAI build
+description: Previous Cerebras backend
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: deploy
+        run: echo "paper only"
+"""
+        cleaned = migration.scrub_workflow_ancillary(".github/workflows/production-deploy.yml", workflow)
+        self.assertEqual(cleaned, workflow)
+        self.assertFalse(migration._workflow_has_active_provider_wiring(cleaned))
+
+    def test_config_migration_rejects_supported_groq_assignment_outside_settings(self):
+        source = """from pydantic import BaseModel
+
+groq_api_key = "external"
+
+class Settings(BaseModel):
+    gemini_api_key: str = ""
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            path = root / "app" / "config.py"
+            path.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), self.assertRaisesRegex(
+                migration.MigrationError, "provider-named assignment outside the Settings class"
+            ):
+                migration.transform_config()
+
+    def test_config_groq_fields_are_inserted_after_settings_body_when_class_has_no_methods(self):
+        source = """from pydantic import BaseModel
+
+class Settings(BaseModel):
+    gemini_api_key: str = ""
+    timeout: int = 30
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            path = root / "app" / "config.py"
+            path.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_config()
+            migrated = path.read_text(encoding="utf-8")
+        self.assertLess(migrated.index("timeout:"), migrated.index("groq_api_key:"))
+        self.assertIn("groq_research_review_enabled: bool = True", migrated)
+        ast.parse(migrated)
