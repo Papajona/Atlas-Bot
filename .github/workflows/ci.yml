@@ -31,6 +31,8 @@ jobs:
       PYTEST_TEST_TIMEOUT_SECONDS: "120"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate admin dashboard JavaScript syntax
+        run: node --check app/static/admin-dashboard.js
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with: {python-version: "3.13"}
       - name: Install hash-locked dependencies
