@@ -4329,6 +4329,59 @@ async def update_research(research, intelligence, review):
         self.assertIn("from .groq_ai import groq_research_review", result)
         ast.parse(result, filename="app/daily_research.py")
 
+    def test_existing_review_literal_mapping_is_extended_with_groq_result_idempotently(self):
+        source = """import json
+
+def persist(review):
+    return ResearchRun(review_json=json.dumps({
+        "ai_brain_mode": review.get("ai_brain_mode"),
+        "native_ai_review": review.get("native_ai_review"),
+    }, default=str))
+"""
+        once = migration._ensure_groq_review_persisted(source, "app/daily_research.py")
+        twice = migration._ensure_groq_review_persisted(once, "app/daily_research.py")
+        self.assertIn('"groq_research_review": review.get("groq_research_review")', once)
+        self.assertEqual(once, twice)
+        ast.parse(once, filename="app/daily_research.py")
+
+    def test_config_refuses_supported_groq_setting_outside_settings_class(self):
+        source = """from pydantic import BaseModel
+
+class Settings(BaseModel):
+    pass
+
+groq_api_key = "must-not-become-a-helper-setting"
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app_dir = root / "app"
+            app_dir.mkdir()
+            path = app_dir / "config.py"
+            path.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "outside the Settings class"):
+                    migration.transform_config()
+            self.assertEqual(path.read_text(encoding="utf-8"), source)
+
+    def test_config_groq_fields_follow_multiline_final_settings_statement(self):
+        source = """from pydantic import BaseModel
+
+class Settings(BaseModel):
+    model_config = dict(
+        env_file=".env",
+    )
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app_dir = root / "app"
+            app_dir.mkdir()
+            path = app_dir / "config.py"
+            path.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_config()
+            result = path.read_text(encoding="utf-8")
+        self.assertIn('        env_file=".env",\n    )\n    groq_api_key: str = ""', result)
+        ast.parse(result, filename="app/config.py")
     def test_already_native_branch_receives_groq_review_call_and_import(self):
         source = """from .native_ai import native_research_review
 
