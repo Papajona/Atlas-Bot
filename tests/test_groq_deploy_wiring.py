@@ -53,3 +53,13 @@ def test_example_documents_optional_groq_research_review_only():
     assert "GROQ_MAX_COMPLETION_TOKENS=2048" in env
     assert "GROQ_RESEARCH_REVIEW_ENABLED=true" in env
     assert "GEMINI_API_KEY" not in env
+
+
+def test_bootstrap_creates_and_grants_groq_secret_only_when_configured():
+    bootstrap = (ROOT / "deploy" / "gcp-bootstrap.sh").read_text(encoding="utf-8")
+    assert 'if [[ -n "${GROQ_API_KEY:-}" ]]; then' in bootstrap
+    assert 'create_secret atlas-groq-api-key "$GROQ_API_KEY"' in bootstrap
+    assert 'if gcloud secrets describe atlas-groq-api-key' in bootstrap
+    assert 'grant_secret_access atlas-groq-api-key "$SERVICE_ACCOUNT"' in bootstrap
+    assert 'grant_secret_access atlas-groq-api-key "$WORKER_SERVICE_ACCOUNT"' in bootstrap
+    assert 'GROQ_API_KEY:?' not in bootstrap
