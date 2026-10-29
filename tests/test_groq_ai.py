@@ -4,7 +4,6 @@ import asyncio
 import json
 from unittest.mock import patch
 
-import pytest
 
 from app import groq_ai
 
