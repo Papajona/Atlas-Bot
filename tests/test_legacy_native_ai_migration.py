@@ -2064,6 +2064,27 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
             self.assertNotIn("_generate_with_provider", result)
             self.assertNotRegex(result, migration.PROVIDER_RE)
 
+        # Removing the helper must not erase side-effecting annotation evaluation.
+        legacy_with_side_effect_annotation = legacy_three.replace(
+            "async def _generate_with_provider(provider: str, prompt: str) -> dict:",
+            "async def _generate_with_provider(provider: audit(), prompt: str) -> dict:",
+        )
+        self.assertNotEqual(legacy_with_side_effect_annotation, legacy_three)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy_with_side_effect_annotation, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "_generate_with_provider contains additional or unknown behavior",
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy_with_side_effect_annotation)
+
         for label, legacy in (("two-provider", legacy_two), ("three-provider", legacy_three)):
             legacy = _with_canonical_schema_context(legacy)
             if label == "two-provider":
