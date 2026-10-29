@@ -803,6 +803,73 @@ def transform_config() -> None:
     def is_provider_field(name: str) -> bool:
         return bool(PROVIDER_FIELD_RE.search(name))
 
+    postponed_annotations = _uses_postponed_annotations(tree)
+
+    def module_binding_before(name: str, line: int) -> ast.stmt | None:
+        """Return the last top-level statement that can bind name before line."""
+        last: ast.stmt | None = None
+        for statement in tree.body:
+            if statement.lineno >= line:
+                break
+            bindings = _defined_names(statement) | _module_scope_maybe_binds(
+                statement, postponed_annotations=postponed_annotations
+            )
+            if name in bindings:
+                last = statement
+        return last
+
+    def class_statement_binds_name(statement: ast.stmt, name: str) -> bool:
+        """Conservatively detect a class-suite rebinding, but not method-local stores."""
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return statement.name == name
+        if name in _defined_names(statement):
+            return True
+        stack = list(ast.iter_child_nodes(statement))
+        while stack:
+            item = stack.pop()
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                # Nested scopes do not bind the surrounding class namespace.
+                continue
+            if isinstance(item, ast.Name) and item.id == name and isinstance(item.ctx, (ast.Store, ast.Del)):
+                return True
+            if isinstance(item, ast.Global) and name in item.names:
+                return True
+            if isinstance(item, ast.Nonlocal) and name in item.names:
+                return True
+            if isinstance(item, (ast.Import, ast.ImportFrom)) and name in _defined_names(item):
+                return True
+            stack.extend(ast.iter_child_nodes(item))
+        return False
+
+    def decorators_resolve_to_reviewed_implementations(
+        settings_class: ast.ClassDef, validator: ast.FunctionDef
+    ) -> bool:
+        # A bare decorator identifier is executable at class-definition time.
+        # Require the final module binding to be the explicit Pydantic import and
+        # prohibit class-local shadows before this validator is defined.
+        field_import = module_binding_before("field_validator", settings_class.lineno)
+        if not (
+            isinstance(field_import, ast.ImportFrom)
+            and field_import.module == "pydantic"
+            and any(
+                alias.name == "field_validator"
+                and (alias.asname or alias.name) == "field_validator"
+                for alias in field_import.names
+            )
+        ):
+            return False
+        if module_binding_before("classmethod", settings_class.lineno) is not None:
+            return False
+        for statement in settings_class.body:
+            if statement is validator:
+                break
+            if (
+                class_statement_binds_name(statement, "field_validator")
+                or class_statement_binds_name(statement, "classmethod")
+            ):
+                return False
+        return True
+
     def is_safe_gemini_model_validator(node: ast.AST) -> bool:
         """Recognize only the known pure validator for a setting being removed."""
         if not isinstance(node, ast.FunctionDef) or node.name != "_validate_gemini_model":
@@ -947,7 +1014,11 @@ def transform_config() -> None:
     # behavior, side effect, or different validator shape remains a hard refusal.
     for settings_class in settings_classes:
         for member in settings_class.body:
-            if is_safe_gemini_model_validator(member):
+            if (
+                isinstance(member, ast.FunctionDef)
+                and is_safe_gemini_model_validator(member)
+                and decorators_resolve_to_reviewed_implementations(settings_class, member)
+            ):
                 first_line = min(
                     [member.lineno, *[decorator.lineno for decorator in member.decorator_list]]
                 )
