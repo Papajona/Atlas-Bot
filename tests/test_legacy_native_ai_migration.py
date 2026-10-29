@@ -3016,6 +3016,22 @@ async def update_research(research, intelligence, review):
         self.assertIn("SECRET_KEY_VERSION", result)
         self.assertNotRegex(result, migration.PROVIDER_RE)
 
+
+    def test_scrub_workflow_removes_quoted_provider_keys(self):
+        source = (
+            "env:\n"
+            '  "SECRET_GEMINI_API_KEY_VERSION": ${{ secrets.SECRET_GEMINI_API_KEY_VERSION }}\n'
+            "  'GEMINI_MODEL': ${{ vars.GEMINI_MODEL }}\n"
+            "  DATABASE_URL: ${{ secrets.DATABASE_URL }}\n"
+        )
+        result = migration.scrub_ancillary_text(
+            ".github/workflows/production-deploy.yml", source
+        )
+        self.assertIn("DATABASE_URL", result)
+        self.assertNotIn("SECRET_GEMINI_API_KEY_VERSION", result)
+        self.assertNotIn("GEMINI_MODEL", result)
+        self.assertNotRegex(result, migration.PROVIDER_RE)
+
     def test_metadata_scrub_returns_valid_json_without_provider_keys(self):
         source = json.dumps({
             "ai_model": "gemini-3.5-flash",
