@@ -1159,9 +1159,9 @@ def transform_config() -> None:
             1 for original_line in retained_original_lines
             if original_line is not None and original_line < first_body_line
         )
-        class_indent = re.match(r"^[ \\t]*", lines[original_class.lineno - 1]).group(0)
-        body_indent = class_indent + ("\\t" if "\\t" in class_indent else "    ")
-        retained_lines.insert(insertion_index, body_indent + 'groq_api_key: str = ""\\n')
+        class_indent = re.match(r"^[ \t]*", lines[original_class.lineno - 1]).group(0)
+        body_indent = class_indent + ("\t" if "\t" in class_indent else "    ")
+        retained_lines.insert(insertion_index, body_indent + 'groq_api_key: str = ""\n')
         retained_original_lines.insert(insertion_index, None)
 
     result = "".join(retained_lines)
