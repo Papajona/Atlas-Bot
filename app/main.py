@@ -7142,8 +7142,11 @@ async def research_run_daily(x_admin_token: str | None = Header(default=None), a
 
 
 @app.get("/api/research/runs")
-async def research_runs_history(symbol: str | None = None, limit: int = 30, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
-    """Stored daily research runs with their drift-vs-previous-run comparison, newest first."""
+async def research_runs_history(
+    symbol: str | None = None, limit: int = 30,
+    x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None),
+):
+    """Bounded daily research history with Groq review status; full commentary is on the detail route."""
     await auth(x_admin_token, authorization)
     limit = max(1, min(int(limit), 200))
     async with SessionLocal() as db:
@@ -7151,9 +7154,66 @@ async def research_runs_history(symbol: str | None = None, limit: int = 30, x_ad
         if symbol:
             q = select(ResearchRun).where(ResearchRun.symbol == symbol).order_by(desc(ResearchRun.created_at)).limit(limit)
         rows = (await db.execute(q)).scalars().all()
-        return [{"id": r.id, "symbol": r.symbol, "run_at": r.run_at.isoformat(), "regime": r.regime_assessment,
-                 "top_strategy": r.top_strategy, "sharpe": r.sharpe, "max_drawdown": r.max_drawdown,
-                 "total_return": r.total_return, "drift": json.loads(r.regime_drift_json or "{}")} for r in rows]
+        result = []
+        for row in rows:
+            try:
+                stored_review = json.loads(row.review_json or "{}")
+            except (TypeError, ValueError):
+                stored_review = {}
+            if not isinstance(stored_review, dict):
+                stored_review = {}
+            groq = stored_review.get("groq_research_review")
+            if not isinstance(groq, dict):
+                groq = {"status": "NOT_RECORDED"}
+            groq_review = groq.get("review") if isinstance(groq.get("review"), dict) else {}
+            try:
+                drift = json.loads(row.regime_drift_json or "{}")
+            except (TypeError, ValueError):
+                drift = {}
+            if not isinstance(drift, dict):
+                drift = {}
+            result.append({
+                "id": row.id, "symbol": row.symbol, "run_at": row.run_at.isoformat(),
+                "regime": row.regime_assessment, "top_strategy": row.top_strategy,
+                "sharpe": row.sharpe, "max_drawdown": row.max_drawdown,
+                "total_return": row.total_return, "drift": drift,
+                "groq_review_status": groq.get("status", "NOT_RECORDED"),
+                "groq_review_confidence": groq_review.get("confidence"),
+                "groq_input_truncated": groq.get("input_truncated"),
+            })
+        return result
+
+
+@app.get("/api/research/runs/{run_id}")
+async def research_run_detail(
+    run_id: int, x_admin_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    """Return one authenticated research run with its bounded review and audit record."""
+    await auth(x_admin_token, authorization)
+    async with SessionLocal() as db:
+        row = (await db.execute(select(ResearchRun).where(ResearchRun.id == run_id))).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Research run not found")
+    try:
+        stored_review = json.loads(row.review_json or "{}")
+        stored_research = json.loads(row.research_json or "{}")
+        drift = json.loads(row.regime_drift_json or "{}")
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail="Stored research audit record is malformed") from exc
+    if not isinstance(stored_review, dict) or not isinstance(stored_research, dict) or not isinstance(drift, dict):
+        raise HTTPException(status_code=500, detail="Stored research audit record has an invalid shape")
+    groq = stored_review.get("groq_research_review")
+    if not isinstance(groq, dict):
+        groq = {"status": "NOT_RECORDED", "execution_authority": False}
+    return {
+        "id": row.id, "symbol": row.symbol, "run_at": row.run_at.isoformat(),
+        "regime": row.regime_assessment, "top_strategy": row.top_strategy,
+        "sharpe": row.sharpe, "max_drawdown": row.max_drawdown,
+        "total_return": row.total_return, "drift": drift,
+        "research": stored_research, "review": stored_review,
+        "groq_research_review": groq,
+    }
 
 
 @app.get("/api/admin/model-experiments")
