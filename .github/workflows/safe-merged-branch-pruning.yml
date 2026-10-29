@@ -14,6 +14,7 @@ on:
       - main
 
 permissions:
+  actions: read
   contents: write
   pull-requests: read
 
@@ -52,6 +53,8 @@ jobs:
         id: pruning_guard
         if: github.event_name == 'push'
         env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
         shell: bash
@@ -66,9 +69,22 @@ jobs:
                 ;;
             esac
           done <<< "$changed_paths"
+
+          # A later, unrelated main push can arrive while an earlier Native AI
+          # propagation run is still updating refs. Never prune concurrently.
+          if [[ "$skip_pruning" != true ]]; then
+            if ! active_propagations="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow propagate-native-ai-all-branches.yml --branch main --json status --limit 50)"; then
+              skip_pruning=true
+              echo "Unable to verify Native AI propagation status; preserving every branch."
+            elif jq -e 'any(.[]; .status == "queued" or .status == "in_progress" or .status == "waiting" or .status == "requested")' <<< "$active_propagations" >/dev/null; then
+              skip_pruning=true
+              echo "Native AI propagation is queued or running; preserving branch refs until it completes."
+            fi
+          fi
+
           if [[ "$skip_pruning" == true ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Branch refs will be pruned only after Native AI propagation completes."
+            echo "Branch refs will be pruned only after Native AI propagation completes successfully."
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
