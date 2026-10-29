@@ -56,6 +56,11 @@ def test_deployment_removes_gemini_and_keeps_only_optional_groq_research_key():
         elif path == ".github/workflows/production-deploy.yml":
             assert "SECRET_GROQ_API_KEY_VERSION" in text
             assert "GROQ_API_KEY=" not in text
+        elif path == "deploy/gcp-bootstrap.sh":
+            assert 'if [[ -n "${GROQ_API_KEY:-}" ]]; then' in text
+            assert 'create_secret atlas-groq-api-key "$GROQ_API_KEY"' in text
+            assert 'grant_secret_access atlas-groq-api-key "$SERVICE_ACCOUNT"' in text
+            assert 'grant_secret_access atlas-groq-api-key "$WORKER_SERVICE_ACCOUNT"' in text
         else:
             assert "GROQ_API_KEY" not in text, path
 
