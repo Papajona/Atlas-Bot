@@ -336,7 +336,7 @@ jobs:
           facade_error_bindings = [(i,n) for i,n in enumerate(ft.body) if 'AIProviderError' in top_level_bound_names(n)]
           facade_imports_native_error = (len(facade_imports) == 1 and facade_imports[0][2].asname is None and len(facade_error_bindings) == 1 and facade_error_bindings[0][1] is facade_imports[0][1])
           if not native_error_alias or not facade_imports_native_error:
-              raise SystemExit('Native AI error alias is renamed or rebound; preserving the branch')
+              raise SystemExit('NativeAI error alias is renamed or rebound; preserving the branch')
 
           print("PASS: Native AI AST exports and compatibility aliases resolve.")
           PY
