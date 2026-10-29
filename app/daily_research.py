@@ -13,6 +13,7 @@ from .market_intelligence import gather_market_intelligence
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates
 from .strategy_engine import StrategyConfig
 from .native_ai import native_research_review
+from .groq_ai import groq_research_review
 from .research_trial_archive import archive_research_trials
 
 
@@ -199,7 +200,7 @@ async def _persist_research_run(symbol: str, research: dict[str, Any], review: d
                 macro_risk_score=float((macro_regime.get("headline_risk") or {}).get("risk_score") or 0.0),
                 regime_drift_json=json.dumps(drift, default=str),
                 research_json=json.dumps(current, default=str),
-                review_json=json.dumps({k: review.get(k) for k in ("ai_brain_mode", "paper_candidates", "native_ai_review")}, default=str),
+                review_json=json.dumps({k: review.get(k) for k in ("ai_brain_mode", "paper_candidates", "native_ai_review", "groq_research_review")}, default=str),
             ))
             await db.commit()
         return drift
@@ -305,6 +306,8 @@ async def run_daily_research() -> dict[str, Any]:
                 native_research_input = dict(research)
                 native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))
                 review["native_ai_review"] = native_research_review(native_research_input, intelligence)
+                # Optional external review is advisory only; local Native AI remains canonical.
+                review["groq_research_review"] = await groq_research_review(research, intelligence)
                 review["run_drift"] = await _persist_research_run(symbol, research, review, intelligence.get("macro_regime"))
                 run_record = {
                     "symbol": symbol, "research": research, "review": review,

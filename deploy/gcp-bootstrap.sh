@@ -87,6 +87,12 @@ create_secret atlas-trongrid-api-key "$TRONGRID_API_KEY"
 create_secret atlas-supabase-anon-key "$SUPABASE_ANON_KEY"
 create_secret atlas-funding-webhook-secret "$FUNDING_WEBHOOK_SECRET"
 
+# Groq is an optional, research-only reviewer. Do not require its key for Native AI.
+# When supplied through the deployment operator's environment, store it only in Secret Manager.
+if [[ -n "${GROQ_API_KEY:-}" ]]; then
+  create_secret atlas-groq-api-key "$GROQ_API_KEY"
+fi
+
 # Least-privilege split: both API and worker need runtime/database/market-data secrets,
 # but only the API needs Supabase and funding-webhook credentials.
 for secret in atlas-database-url atlas-secret-key atlas-app-encryption-key atlas-redis-url atlas-usdt-tron-account-xpub atlas-trongrid-api-key; do
@@ -97,6 +103,12 @@ done
 grant_secret_access atlas-database-url "$MIGRATION_SERVICE_ACCOUNT"
 grant_secret_access atlas-supabase-anon-key "$SERVICE_ACCOUNT"
 grant_secret_access atlas-funding-webhook-secret "$SERVICE_ACCOUNT"
+
+# Only grant Groq access if the optional secret already exists; never create an empty key.
+if gcloud secrets describe atlas-groq-api-key >/dev/null 2>&1; then
+  grant_secret_access atlas-groq-api-key "$SERVICE_ACCOUNT"
+  grant_secret_access atlas-groq-api-key "$WORKER_SERVICE_ACCOUNT"
+fi
 grant_secret_access atlas-model-signing-public-key "$SERVICE_ACCOUNT"
 grant_secret_access atlas-model-signing-public-key "$WORKER_SERVICE_ACCOUNT"
 grant_secret_access atlas-model-signing-private-key "$WORKER_SERVICE_ACCOUNT"

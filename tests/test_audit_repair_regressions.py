@@ -92,10 +92,17 @@ def test_production_gate_requires_native_ai_offline_check_not_provider_attestati
     assert "Atlas Native AI offline verification (no provider calls)" in verify
     assert "python -m scripts.check_native_ai" in verify
     assert "require_native_ai_verification" in deploy
-    for content in (verify, deploy):
-        assert "GEMINI_API_KEY" not in content
-        assert "GROQ_API_KEY" not in content
-        assert "CEREBRAS_API_KEY" not in content
+    assert "GEMINI_API_KEY" not in verify
+    assert "GROQ_API_KEY" not in verify
+    assert "CEREBRAS_API_KEY" not in verify
+    # The deployment can inject an optional Groq review credential, but does not
+    # use Groq as a strategy generator or allow a Gemini credential back in.
+    assert "GEMINI_API_KEY" not in deploy
+    assert "GEMINI_STRATEGY_MODEL" not in deploy
+    assert "GROQ_STRATEGY_MODEL" not in deploy
+    assert "CEREBRAS_API_KEY" not in deploy
+    assert "SECRET_GROQ_API_KEY_VERSION" in deploy
+    assert "GROQ_API_KEY=" not in deploy
 
 
 def test_paper_candidate_archive_evidence_and_trial_count_fail_closed():
