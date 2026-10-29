@@ -4613,7 +4613,7 @@ def _ensure_groq_review_persisted(source: str, filename: str) -> str:
                 )
                 last_offset = sum(len(line) for line in source_lines[:last_value.end_lineno - 1]) + end_column
                 trailing_segment = source[last_offset:offset - 1]
-            trailing_segment = re.sub(r"#[\n]*", "", trailing_segment)
+            trailing_segment = re.sub(r"#[^\n]*", "", trailing_segment)
             addition = (
                 '"groq_research_review": review.get("groq_research_review")'
                 if "," in trailing_segment
@@ -4666,7 +4666,7 @@ def _ensure_groq_review_persisted(source: str, filename: str) -> str:
             )
             last_offset = sum(len(line) for line in source_lines[:last_element.end_lineno - 1]) + end_column
             trailing_segment = source[last_offset:offset - 1]
-        trailing_segment = re.sub(r"#[\n]*", "", trailing_segment)
+        trailing_segment = re.sub(r"#[^\n]*", "", trailing_segment)
         addition = '"groq_research_review"' if "," in trailing_segment else ', "groq_research_review"'
         insertions.append((offset - 1, addition))
 
