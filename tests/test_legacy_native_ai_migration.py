@@ -1970,10 +1970,10 @@ async def _gemini_json(prompt):
         )
 
         shadowed_generic = (
-            "class list:\\n"
-            "    def __class_getitem__(cls, item):\\n"
-            "        record_annotation_hook()\\n"
-            "        return object\\n\\n"
+            "class list:\n"
+            "    def __class_getitem__(cls, item):\n"
+            "        record_annotation_hook()\n"
+            "        return object\n\n"
             + safe_dispatcher.replace("-> dict:", "-> list[str]:")
         )
         shadowed_tree = ast.parse(shadowed_generic)
