@@ -5105,7 +5105,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 return "${" + name + ":+," + expansion + "}"
 
             cleaned = re.sub(
-                r",\$\{(AI_SECRET_ARGS|GROQ_SECRET_ARG|GROQ_SECRET_ARGS)\}",
+                r"(?<!\+),\$\{(AI_SECRET_ARGS|GROQ_SECRET_ARG|GROQ_SECRET_ARGS)\}",
                 conditional_shared_expansion,
                 cleaned,
             )
@@ -5167,7 +5167,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if re.match(r"^\s*(?::\s*)?['\"]?\$\{?(?:SECRET_GEMINI|GEMINI_API_KEY)", line, re.I):
             continue
         if re.match(
-            r"^\s*(?:SECRET_GEMINI[A-Z0-9_]*|"
+            r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
             r"GEMINI_API_KEY|"
             r"CEREBRAS_API_KEY|AI_GATEWAY_API_KEY)\s*=",
             line, re.I,
