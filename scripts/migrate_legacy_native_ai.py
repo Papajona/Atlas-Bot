@@ -5063,6 +5063,16 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if not match:
             return line
         cleaned = scrub_key_value_list(match.group(3), preserve_groq_tokens=preserve_groq_tokens)
+        if preserve_groq_tokens:
+            # These shared arguments are built as comma-prefixed fragments (or empty).
+            # The surrounding static list already has its own separators, so putting a
+            # comma before the expansion creates ",," when enabled and a trailing comma
+            # when disabled. Let the fragment supply its own delimiter.
+            cleaned = re.sub(
+                r",(?=\\$\\{(?:AI_SECRET_ARGS|GROQ_SECRET_ARG|GROQ_SECRET_ARGS)\\})",
+                "",
+                cleaned,
+            )
         if not cleaned:
             return line[:match.start()] + line[match.end():]
         return line[:match.start(3)] + cleaned + line[match.end(3):]
