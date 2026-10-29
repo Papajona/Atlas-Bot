@@ -5719,7 +5719,7 @@ def validate_groq_research_module(source: str, path: str = "app/groq_ai.py") -> 
             "UNTRUSTED_PREAMBLE", "suspicious_instruction_markers", "wrap_untrusted",
         },
     }
-    for node in tree.body:
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name not in allowed_plain_imports:
