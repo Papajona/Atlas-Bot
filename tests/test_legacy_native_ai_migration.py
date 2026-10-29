@@ -2917,7 +2917,11 @@ async def update_research(research, intelligence, review):
             target.write_text(source, encoding="utf-8")
             with patch.object(migration, "ROOT", root):
                 migration.transform_daily_research()
-            self.assertEqual(target.read_text(encoding="utf-8"), source)
+                once = target.read_text(encoding="utf-8")
+                migration.transform_daily_research()
+            twice = target.read_text(encoding="utf-8")
+            self.assertEqual(once, source)
+            self.assertEqual(twice, once)
 
     def test_daily_research_refuses_setup_call_inside_provider_arguments(self):
         legacy = (
