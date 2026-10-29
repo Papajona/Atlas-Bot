@@ -1941,6 +1941,30 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
             self.assertNotIn("_generate_with_provider", result)
             self.assertNotRegex(result, migration.PROVIDER_RE)
 
+        legacy_three_cerebras_priority = legacy_three.replace(
+            "    if provider == \"groq\":\n"
+            "        return await _groq_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.groq_strategy_model or settings.groq_model)\n"
+            "    return await _cerebras_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.cerebras_model)\n",
+            "    if provider == \"cerebras\":\n"
+            "        return await _cerebras_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.cerebras_model)\n"
+            "    return await _groq_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.groq_strategy_model or settings.groq_model)\n",
+        )
+        self.assertNotEqual(legacy_three_cerebras_priority, legacy_three)
+        legacy_three_cerebras_priority = _with_canonical_schema_context(legacy_three_cerebras_priority)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy_three_cerebras_priority, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                migration.transform_strategy_ai("fake-commit")
+            result = target.read_text(encoding="utf-8")
+            ast.parse(result, filename="app/strategy_ai.py")
+            self.assertNotIn("_generate_with_provider", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
         for label, legacy in (("two-provider", legacy_two), ("three-provider", legacy_three)):
             legacy = _with_canonical_schema_context(legacy)
             if label == "two-provider":
