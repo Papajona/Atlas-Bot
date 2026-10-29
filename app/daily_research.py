@@ -100,8 +100,20 @@ def _validate_groq_research_result(value: Any) -> dict[str, Any]:
             input_truncated = value.get("input_truncated")
             if isinstance(input_truncated, bool):
                 result["input_truncated"] = input_truncated
-            elif input_truncated is not None:
-                raise ValueError("Groq error input_truncated flag must be boolean")
+                default_truncation_status = "KNOWN"
+            elif input_truncated is None:
+                # Preserve an explicit unknown state: a compaction failure means
+                # we cannot claim that the review input was complete.
+                result["input_truncated"] = None
+                default_truncation_status = "UNKNOWN"
+            else:
+                raise ValueError("Groq error input_truncated flag must be boolean or null")
+            truncation_status = value.get("input_truncation_status", default_truncation_status)
+            if truncation_status not in {"KNOWN", "UNKNOWN"}:
+                raise ValueError("Groq error input_truncation_status must be KNOWN or UNKNOWN")
+            if truncation_status == "UNKNOWN":
+                result["input_truncated"] = None
+            result["input_truncation_status"] = truncation_status
             for field in ("error", "cause"):
                 item = value.get(field)
                 if isinstance(item, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,80}", item):
@@ -598,6 +610,8 @@ async def _run_daily_research_work() -> dict[str, Any]:
                     "status": "ERROR",
                     "provider": "groq",
                     "error": type(groq_result).__name__,
+                    "input_truncated": None,
+                    "input_truncation_status": "UNKNOWN",
                     "execution_authority": False,
                 }
             elif isinstance(groq_result, BaseException):
