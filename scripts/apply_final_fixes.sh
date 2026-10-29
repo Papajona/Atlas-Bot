@@ -4,7 +4,11 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$ROOT"
 
-PATCH_FILE="${1:-atlas_final_fixes.patch}"
+PATCH_FILE="${1:-}"
+if [[ -z "$PATCH_FILE" ]]; then
+  echo "ERROR: pass the patch file explicitly: $0 /path/to/fixes.patch" >&2
+  exit 2
+fi
 if [[ ! -f "$PATCH_FILE" ]]; then
   echo "ERROR: patch file not found: $PATCH_FILE" >&2
   exit 2
@@ -31,5 +35,12 @@ echo "  python -m pip install -r requirements-dev.txt"
 echo "  python -m pytest -q"
 echo "  ATLAS_POSTGRES_URL=... python -m pytest -q -m postgres"
 echo
-echo "Android source comparison (the duplicate tree is app/src/main/java):"
-echo "  diff -r app/src/main/java app/src/main/java"
+if [[ -d android ]]; then
+  if [[ -d android/app/src/main/java ]]; then
+    echo "Comparing canonical and legacy Android source trees:"
+    diff -r app/src/main/java android/app/src/main/java || true
+  fi
+  echo "ERROR: legacy android/ tree exists; app/src/main/java is the only supported Android source tree." >&2
+  exit 4
+fi
+echo "PASS: only the canonical app/src/main/java Android source tree exists."

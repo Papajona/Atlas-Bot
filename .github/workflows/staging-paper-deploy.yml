@@ -179,6 +179,33 @@ jobs:
           print("PASS: paper-only staging service is live. Full readiness remains separately gated by the read-only identity and isolated-ledger preflight.")
           PY
 
+      - name: Capture Cloud Run startup diagnostics after deployment failure
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          echo "Collecting bounded Cloud Run startup diagnostics for $STAGING_SERVICE in $GCP_PROJECT_ID/$GCP_REGION."
+          revision="$(gcloud run services describe "$STAGING_SERVICE" \
+            --project="$GCP_PROJECT_ID" --region="$GCP_REGION" \
+            --format='value(status.latestCreatedRevisionName)' 2>&1)"
+          describe_rc=$?
+          if [[ "$describe_rc" -eq 0 && -n "$revision" ]]; then
+            echo "Latest created revision: $revision"
+            gcloud run revisions describe "$revision" \
+              --project="$GCP_PROJECT_ID" --region="$GCP_REGION" \
+              --format='yaml(status.conditions,status.containerStatuses)' 2>&1 || true
+            filter="resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"$STAGING_SERVICE\" AND resource.labels.revision_name=\"$revision\""
+          else
+            echo "Could not resolve latest created revision: $revision"
+            filter="resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"$STAGING_SERVICE\""
+          fi
+          echo "Recent Cloud Run logs (last 45 minutes, bounded to 100 entries):"
+          gcloud logging read "$filter" --project="$GCP_PROJECT_ID" \
+            --freshness=45m --limit=100 --order=desc \
+            --format='value(timestamp,severity,resource.labels.revision_name,textPayload,jsonPayload.message)' 2>&1 || true
+          echo "Diagnostic collection finished; it does not convert a failed deployment into success."
+          exit 0
+
       - name: Dispatch and require read-only staging identity preflight on this exact commit
         env:
           GH_TOKEN: ${{ github.token }}
