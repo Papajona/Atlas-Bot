@@ -20,7 +20,8 @@ def test_api_keeps_groq_secret_optional_and_gemini_removed():
     assert 'GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"' in script
     assert 'GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"' in script
     assert 'GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"' in script
-    assert "validate_groq_deploy_env.py" in script
+    assert 'python "${REPO_ROOT}/scripts/validate_groq_deploy_env.py"' in script
+    assert 'dirname -- "${BASH_SOURCE[0]}") && pwd)/validate_groq_deploy_env.py' not in script
     assert "GEMINI_API_KEY" not in script
     assert "GEMINI_MODEL" not in script
     assert "GEMINI_STRATEGY_MODEL" not in script
@@ -32,6 +33,8 @@ def test_worker_keeps_groq_secret_optional_and_gemini_removed():
     assert "GROQ_API_KEY=${SECRET_GROQ_REF}" in script
     assert "${GROQ_SECRET_ARG}" in script
     assert "GROQ_RESEARCH_REVIEW_ENABLED=${GROQ_RESEARCH_REVIEW_ENABLED}" in script
+    assert 'python "${REPO_ROOT}/scripts/validate_groq_deploy_env.py"' in script
+    assert 'dirname -- "${BASH_SOURCE[0]}") && pwd)/validate_groq_deploy_env.py' not in script
     assert "GEMINI_API_KEY" not in script
     assert "GEMINI_MODEL" not in script
     assert "GEMINI_STRATEGY_MODEL" not in script
