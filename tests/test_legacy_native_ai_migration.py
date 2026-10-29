@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -3410,7 +3411,7 @@ gcloud run services update atlas-api --set-secrets="DATABASE_URL=atlas-db:latest
                 capture_output=True,
                 text=True,
                 check=True,
-                env={**__import__("os").environ, "GROQ_ENABLED": enabled},
+                env={**os.environ, "GROQ_ENABLED": enabled},
             )
             self.assertEqual(result.stdout.strip(), expected)
             self.assertNotIn(",,", result.stdout)
