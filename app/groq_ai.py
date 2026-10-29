@@ -29,14 +29,14 @@ _SYSTEM_PROMPT = (
 
 
 _ACTIONABLE_TRADE_INSTRUCTION_RE = re.compile(
-    r"(?i)\\b(?:"
-    r"(?:buy|sell)\\s+(?:now|immediately|[A-Z0-9][A-Z0-9./:_-]{0,30}\\s+(?:now|immediately|at\\s+(?:\\$?\\d)))|"
-    r"go\\s+(?:long|short)|"
-    r"open\\s+(?:a\\s+)?(?:long|short)\\s+(?:position|trade)|"
-    r"enter\\s+(?:a\\s+)?(?:long|short)\\s+(?:position|trade)|"
-    r"place\\s+(?:an?\\s+)?order|execute\\s+(?:a\\s+)?trade|"
-    r"set\\s+(?:the\\s+)?(?:stop[- ]loss|take[- ]profit|entry|target)"
-    r")\\b"
+    r"(?i)\b(?:"
+    r"(?:buy|sell)\s+(?:now|immediately|[A-Z0-9][A-Z0-9./:_-]{0,30}\s+(?:now|immediately|at\s+(?:\$?\d)))|"
+    r"go\s+(?:long|short)|"
+    r"open\s+(?:a\s+)?(?:long|short)\s+(?:position|trade)|"
+    r"enter\s+(?:a\s+)?(?:long|short)\s+(?:position|trade)|"
+    r"place\s+(?:an?\s+)?order|execute\s+(?:a\s+)?trade|"
+    r"set\s+(?:the\s+)?(?:stop[- ]loss|take[- ]profit|entry|target)"
+    r")\b"
 )
 
 
