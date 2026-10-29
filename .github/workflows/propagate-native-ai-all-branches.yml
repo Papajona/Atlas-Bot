@@ -266,24 +266,35 @@ jobs:
               for node in trees["groq_ai"].body
           ):
               raise SystemExit("app.groq_ai is missing required async API: groq_research_review")
-          native_error_alias = any(
-              isinstance(node, ast.Assign)
-              and any(isinstance(target, ast.Name) and target.id == "AIProviderError" for target in node.targets)
-              and isinstance(node.value, ast.Name)
-              and node.value.id == "NativeAIError"
-              for node in trees["native_ai"].body
-          )
-          facade_imports_native_error = any(
-              isinstance(node, ast.ImportFrom)
-              and node.level == 1 and node.module == "native_ai"
-              and any(alias.name == "AIProviderError" for alias in node.names)
-              for node in trees["ai_providers"].body
-          )
+          def top_level_bound_names(node):
+              names = set()
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                  names.add(node.name)
+              elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                  names.update((alias.asname or alias.name.split('.')[0] if isinstance(node, ast.Import) else alias.asname or alias.name) for alias in node.names if alias.name != '*')
+              elif isinstance(node, ast.Assign):
+                  for target in node.targets:
+                      names.update(assigned_names(target))
+              elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                  names.update(assigned_names(node.target))
+              elif isinstance(node, ast.Delete):
+                  for target in node.targets:
+                      names.update(assigned_names(target))
+              return names
+
+          nt = trees['native_ai']
+          error_classes = [(i,n) for i,n in enumerate(nt.body) if isinstance(n, ast.ClassDef) and n.name == 'NativeAIError']
+          alias_assignments = [(i,n) for i,n in enumerate(nt.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'AIProviderError' for t in n.targets) and isinstance(n.value, ast.Name) and n.value.id == 'NativeAIError']
+          native_error_bindings = [(i,n) for i,n in enumerate(nt.body) if 'NativeAIError' in top_level_bound_names(n)]
+          native_alias_bindings = [(i,n) for i,n in enumerate(nt.body) if 'AIProviderError' in top_level_bound_names(n)]
+          native_error_alias = (len(error_classes) == 1 and len(alias_assignments) == 1 and error_classes[0][0] < alias_assignments[0][0] and len(native_error_bindings) == 1 and native_error_bindings[0][1] is error_classes[0][1] and len(native_alias_bindings) == 1 and native_alias_bindings[0][1] is alias_assignments[0][1])
+
+          ft = trees['ai_providers']
+          facade_imports = [(i,n,a) for i,n in enumerate(ft.body) if isinstance(n, ast.ImportFrom) and n.level == 1 and n.module == 'native_ai' for a in n.names if a.name == 'AIProviderError']
+          facade_error_bindings = [(i,n) for i,n in enumerate(ft.body) if 'AIProviderError' in top_level_bound_names(n)]
+          facade_imports_native_error = (len(facade_imports) == 1 and facade_imports[0][2].asname is None and len(facade_error_bindings) == 1 and facade_error_bindings[0][1] is facade_imports[0][1])
           if not native_error_alias or not facade_imports_native_error:
-              raise SystemExit(
-                  "app.ai_providers.AIProviderError must statically resolve to "
-                  "app.native_ai.NativeAIError"
-              )
+              raise SystemExit('Native AI error alias is renamed or rebound; preserving the branch')
 
           print("PASS: Native AI AST exports and compatibility aliases resolve.")
           PY
