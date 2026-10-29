@@ -5069,7 +5069,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             # comma before the expansion creates ",," when enabled and a trailing comma
             # when disabled. Let the fragment supply its own delimiter.
             cleaned = re.sub(
-                r",(?=\\$\\{(?:AI_SECRET_ARGS|GROQ_SECRET_ARG|GROQ_SECRET_ARGS)\\})",
+                r",(?=\$\{(?:AI_SECRET_ARGS|GROQ_SECRET_ARG|GROQ_SECRET_ARGS)\})",(?=\\$\\{(?:AI_SECRET_ARGS|GROQ_SECRET_ARG|GROQ_SECRET_ARGS)\\})",
                 "",
                 cleaned,
             )
