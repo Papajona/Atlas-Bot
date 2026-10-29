@@ -3177,6 +3177,58 @@ from .native_ai import AIProviderError
                     self.assertIn("async def generate_strategy_draft", result)
                     self.assertNotRegex(result, migration.PROVIDER_RE)
 
+    def test_strategy_migration_rejects_unhandled_error_converted_to_finally_break(self):
+        retained = (
+            "for _ in [1]:\n"
+            "    try:\n"
+            "        raise RuntimeError('fail before generator import')\n"
+            "        from .strategy_evidence import evidence_for\n"
+            "    finally:\n"
+            "        break\n"
+        )
+        legacy = self._legacy_strategy_with_retained_code(retained).replace(
+            "from .strategy_evidence import evidence_for\n", "", 1
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "canonical strategy generator depends on missing module binding.*evidence_for",
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_strategy_migration_rejects_binding_only_in_suppressible_with_assignment(self):
+        retained = (
+            "import contextlib\n"
+            "for _ in [1]:\n"
+            "    with contextlib.suppress(ZeroDivisionError):\n"
+            "        evidence_for = 1 / 0\n"
+        )
+        legacy = self._legacy_strategy_with_retained_code(retained).replace(
+            "from .strategy_evidence import evidence_for\n", "", 1
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "canonical strategy generator depends on missing module binding.*evidence_for",
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_strategy_migration_rejects_dependency_deleted_in_finally(self):
         legacy = _with_canonical_schema_context(
             self._legacy_strategy_with_retained_code("")
