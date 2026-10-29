@@ -13,7 +13,7 @@ SPEC.loader.exec_module(migration)
 
 
 class AncillaryWorkflowConflictGuardTests(unittest.TestCase):
-    def test_protected_deployment_environment_name_is_preserved_exactly(self):
+    def test_retired_gemini_deployment_environment_is_refused_not_renamed(self):
         workflow = """name: paper deployment
 jobs:
   deploy:
@@ -22,11 +22,21 @@ jobs:
       - name: deploy
         run: echo deploy
 """
-        cleaned = migration.scrub_workflow_ancillary(
-            ".github/workflows/production-deploy.yml", workflow
-        )
-        self.assertEqual(cleaned, workflow)
-        self.assertIn("environment: production-gemini\n", cleaned)
+        with self.assertRaisesRegex(migration.MigrationError, "deployment environment"):
+            migration.scrub_workflow_ancillary(
+                ".github/workflows/production-deploy.yml", workflow
+            )
+
+    def test_supported_groq_deployment_setting_is_preserved(self):
+        shell = """#!/usr/bin/env bash
+GROQ_API_KEY="${GROQ_API_KEY:-}"
+GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"
+echo "Optional Groq research review only"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertEqual(cleaned, shell)
+        self.assertIn("GROQ_API_KEY", cleaned)
+        self.assertIn("GROQ_MODEL", cleaned)
 
     def test_mixed_provider_url_and_database_migration_command_fails_closed(self):
         workflow = """name: database deployment
@@ -42,6 +52,32 @@ jobs:
             migration.scrub_workflow_ancillary(
                 ".github/workflows/production-deploy.yml", workflow
             )
+
+    def test_provider_named_job_mapping_with_children_fails_closed(self):
+        workflow = """name: legacy workflow
+jobs:
+  gemini:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo no-op
+"""
+        with self.assertRaisesRegex(
+            migration.MigrationError, "provider-named YAML mapping"
+        ):
+            migration.scrub_workflow_ancillary(
+                ".github/workflows/production-deploy.yml", workflow
+            )
+
+    def test_groq_secret_metadata_is_not_classified_as_retired_provider_wiring(self):
+        metadata = """{
+  "env": [{
+    "name": "GROQ_API_KEY",
+    "secretRef": "atlas-groq-api-key",
+    "version": "latest"
+  }]
+}
+"""
+        self.assertFalse(migration._metadata_has_active_provider_wiring(metadata))
 
 
 if __name__ == "__main__":
