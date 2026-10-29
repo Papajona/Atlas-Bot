@@ -4928,13 +4928,6 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         r"(?i)\b(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
         r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED)\b"
     )
-    groq_allowed = re.compile(
-        r"(?i)^\s*(?:(?:export\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|"
-        r"GROQ_SECRET_ARG|GROQ_SECRET_ARGS|GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|"
-        r"GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\s*=|"
-        r"(?:if|then|else|fi)\b|#|$)"
-    )
-
     def safe_groq_statement(statement: str) -> bool:
         stripped = statement.strip()
         if not stripped or stripped.startswith("#"):
