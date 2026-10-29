@@ -20,6 +20,8 @@ on:
       - 'alembic/**'
       - '.github/workflows/ci.yml'
       - '.github/workflows/ledger-concurrency-check.yml'
+      - 'scripts/migrate_legacy_native_ai.py'
+      - 'tests/test_legacy_native_ai_migration.py'
   push:
     branches:
       - main
