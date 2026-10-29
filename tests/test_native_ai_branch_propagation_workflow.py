@@ -58,7 +58,10 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert "tests/" not in runtime_path_list
     assert 'git show "$GITHUB_SHA:scripts/migrate_legacy_native_ai.py"' in workflow
     assert 'python "$RUNNER_TEMP/migrate_legacy_native_ai.py" --canonical-commit "$NATIVE_AI_CANONICAL_COMMIT" --cleanup-commit "$NATIVE_AI_CLEANUP_COMMIT" --extra-base-commit "$NATIVE_AI_EXTRA_BASE_COMMIT" --extra-commit "$NATIVE_AI_EXTRA_COMMIT"' in workflow
-    assert 'NATIVE_AI_CANONICAL_COMMIT="$GITHUB_SHA"' in workflow
+    assert 'NATIVE_AI_CANONICAL_COMMIT="78a1fc896eb2b906a069467194008e464107279d"' in workflow
+    assert 'NATIVE_AI_CANONICAL_COMMIT="$GITHUB_SHA"' not in workflow
+    assert "filter inert workflow labels" not in workflow
+    assert "run-name|description" in workflow
     assert 'NATIVE_AI_CLEANUP_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"' in workflow
     assert 'NATIVE_AI_EXTRA_COMMIT="2317ccc4c3293e8bbd7043970876eceb509d2d1d"' in workflow
     assert 'extra_parent="$(git rev-parse "$NATIVE_AI_EXTRA_COMMIT^")"' in workflow
@@ -144,3 +147,12 @@ def test_embedded_native_ai_verifier_script_is_valid_python() -> None:
         for line in embedded_lines
     )
     ast.parse(source, filename=f"{WORKFLOW.name}:verify_native_ai_impl")
+
+
+def test_embedded_verifier_and_canonical_source_are_pinned_independently() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert 'NATIVE_AI_CANONICAL_COMMIT="78a1fc896eb2b906a069467194008e464107279d"' in workflow
+    assert 'NATIVE_AI_CANONICAL_COMMIT="$GITHUB_SHA"' not in workflow
+    assert 'NATIVE_AI_CANONICAL_COMMIT="$GITHUB_SHA"' not in workflow
+    assert "run-name|description" in workflow
+    assert "NATIVE_AI_CANONICAL_COMMIT" in workflow
