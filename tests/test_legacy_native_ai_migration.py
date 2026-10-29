@@ -4851,6 +4851,94 @@ def retained_helper():
             self.assertIn("from .branch_helpers import *", rewritten)
             self.assertIn("def retained_helper", rewritten)
 
+    def test_star_import_allows_exec_name_in_postponed_annotation(self):
+        legacy = """from __future__ import annotations
+from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper(value: exec) -> eval:
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text("def branch_helper():\n    return True\n", encoding="utf-8")
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text",
+                return_value="from .native_ai import AIProviderError, NativeAIError\n",
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            rewritten = target.read_text(encoding="utf-8")
+            ast.parse(rewritten, filename="app/ai_providers.py")
+            self.assertIn("value: exec", rewritten)
+            self.assertIn("-> eval", rewritten)
+
+    def test_star_import_refuses_import_time_call_to_exec_helper(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                'def configure():\n    exec("global hidden_export; hidden_export = 1")\n'
+                'configure()\n\n'
+                'def branch_helper():\n    return True\n',
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text",
+                return_value="from .native_ai import AIProviderError, NativeAIError\n",
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "dynamic exports or mutates __all__"
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_star_import_refuses_immediately_invoked_exec_lambda(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                '((lambda: exec("global hidden_export; hidden_export = 1"))())\n'
+                'def branch_helper():\n    return True\n',
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text",
+                return_value="from .native_ai import AIProviderError, NativeAIError\n",
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "dynamic exports or mutates __all__"
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_groq_guard_refuses_printf_v_with_quoted_separator_but_allows_echo(self):
         unsafe = (
             'if [[ -n "$GROQ_API_KEY" ]]; then\n'
