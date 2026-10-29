@@ -24,28 +24,41 @@ PROVIDER_RE = re.compile(
     r"api\.groq\.com|api\.cerebras\.ai|api\.openai\.com|"
     r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|"
     r"GEMINI_API_KEY|GROQ_API_KEY|SECRET_GEMINI|SECRET_GROQ|_gemini_json|_groq_json|"
-    r"settings\.(?:gemini|groq|cerebras|ai_gateway)_)")
+    r"settings\.(?:gemini|groq|cerebras|ai_gateway)_")
 PROVIDER_FIELD_RE = re.compile(
     r"(?i)(?:gemini|groq|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
     r"api\.groq\.com|api\.cerebras\.ai|api\.openai\.com|"
     r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|_gemini_json|_groq_json)"
 )
+# Final checks intentionally distinguish retired providers from Groq, which remains
+# supported as a separate research-only integration.
+RETIRED_PROVIDER_RE = re.compile(
+    r"(?i)(?:gemini|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
+    r"api\.cerebras\.ai|api\.openai\.com|"
+    r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|"
+    r"GEMINI_API_KEY|SECRET_GEMINI|_gemini_json|"
+    r"settings\.(?:gemini|cerebras|ai_gateway)_)"
+)
+RETIRED_PROVIDER_FIELD_RE = re.compile(
+    r"(?i)(?:gemini|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
+    r"api\.cerebras\.ai|api\.openai\.com|"
+    r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|_gemini_json)"
+)
 ATLAS_PROVIDER_SECRET_RE = re.compile(
-    r"(?i)\batlas[-_](?:openai|gemini|groq|cerebras|ai[-_]gateway)[-_][a-z0-9_-]*\b"
+    r"(?i)\batlas[-_](?:openai|gemini|cerebras|ai[-_]gateway)[-_][a-z0-9_-]*\b"
 )
 PROVIDER_SETTING_NAME_RE = re.compile(
-    r"(?i)^(?:SECRET_)?(?:GEMINI|GROQ|CEREBRAS|AI_GATEWAY|OPENAI)_[A-Z0-9_]+$"
+    r"(?i)^(?:SECRET_)?(?:GEMINI|CEREBRAS|AI_GATEWAY|OPENAI)_[A-Z0-9_]+$"
 )
 KEY_ASSIGNMENT_RE = re.compile(
-    r"""(?ix)\b(?:SECRET_)?(?:GEMINI|GROQ|CEREBRAS|AI_GATEWAY|OPENAI)[A-Z0-9_]*\b
+    r"""(?ix)\b(?:SECRET_)?(?:GEMINI|CEREBRAS|AI_GATEWAY|OPENAI)[A-Z0-9_]*\b
     \s*[:=]\s*(?:\$\{\{[^}]+\}\}|"[^"]*"|'[^']*'|[^,\s"']+)"""
 )
 SECRET_VERSION_RE = re.compile(
-    r"(?i)\bSECRET_(?:GEMINI|GROQ|CEREBRAS|AI_GATEWAY|OPENAI)[A-Z0-9_]*\s*:\s*\$\{\{[^}]+\}\}"
+    r"(?i)\bSECRET_(?:GEMINI|CEREBRAS|AI_GATEWAY|OPENAI)[A-Z0-9_]*\s*:\s*\$\{\{[^}]+\}\}"
 )
-HOST_RE = re.compile(r"""(?i)https?://(?:generativelanguage\.googleapis\.com|api\.groq\.com|api\.cerebras\.ai|api\.openai\.com)[^\s"']*""")
+HOST_RE = re.compile(r"""(?i)https?://(?:generativelanguage\.googleapis\.com|api\.cerebras\.ai|api\.openai\.com)[^\s"']*""")
 MODEL_RE = re.compile(r"(?i)\bgemini-[A-Za-z0-9_.-]+\b")
-
 EXTRA_PATHS = (
     "ENTRY_EXIT_3_9_0.md",
     "app/src/main/java/com/atlas/trading/network/ReleaseAdvisorClient.kt",
@@ -57,6 +70,7 @@ NATIVE_PATHS = (
     ".github/workflows/production-verification.yml",
     "ENTRY_EXIT_3_9_0.md",
     "app/ai_providers.py",
+    "app/groq_ai.py",
     "app/config.py",
     "app/daily_research.py",
     "app/main.py",
@@ -77,7 +91,7 @@ NATIVE_PATHS = (
 )
 ANCILLARY_PATHS = tuple(p for p in NATIVE_PATHS if p not in {
     "app/ai_providers.py", "app/config.py", "app/daily_research.py",
-    "app/main.py", "app/native_ai.py", "app/strategy_ai.py", "scripts/check_ai_models.py",
+    "app/main.py", "app/native_ai.py", "app/groq_ai.py", "app/strategy_ai.py", "scripts/check_ai_models.py",
     "scripts/check_native_ai.py",
 })
 
