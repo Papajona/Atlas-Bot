@@ -4489,7 +4489,14 @@ def transform_daily_research() -> None:
     if not path.is_file():
         raise MigrationError("app/daily_research.py is absent")
     source = path.read_text(encoding="utf-8")
-    if not PROVIDER_RE.search(source):
+    # The new Groq research reviewer is supported, canonical wiring—not a legacy
+    # strategy provider. Only invoke this AST migration when an old callsite or
+    # provider-key conditional remains, making reruns idempotent after migration.
+    legacy_daily_provider_re = re.compile(
+        r"(?i)(?:dual_ai_research_review|_gemini_json|_groq_json|_cerebras_json|"
+        r"gemini_api_key|groq_api_key|cerebras_api_key|ai_gateway_)"
+    )
+    if not legacy_daily_provider_re.search(source):
         return
     tree = ast.parse(source, filename=str(path))
     lines = source.splitlines(keepends=True)
