@@ -111,7 +111,7 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert "retired-provider workflow wiring requires migration" in workflow
     assert "if [[ -f metadata.json || -f .github/workflows/production-deploy.yml" in workflow
     assert "legacy_groq_refs" in workflow
-    assert r"settings\.groq_(strategy_model|model)" in workflow
+    assert r"settings\.groq_(strategy_model|model|api_key)" in workflow
     legacy_groq_scan = next(line for line in workflow.splitlines() if "if legacy_groq_refs=" in line)
     assert "-- app " in legacy_groq_scan
     assert "':!app/groq_ai.py'" in legacy_groq_scan

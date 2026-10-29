@@ -124,7 +124,339 @@ jobs:
             # The obsolete strategy selector remains forbidden.
             local legacy_groq_config_refs=""
             if legacy_groq_config_refs="$(git grep -nIEi 'groq_strategy_model' -- app/config.py)"; then
-              matches+=$'\n'"$legacy_groq_config_refs"
+              matches+=
+            filtered="$(printf '%s\n' "$matches" | awk '!($0 ~ /^\.github\/workflows\/prune-contained-branches-once\.yml:[0-9]+:/ && $0 ~ /grep -F .def _check_groq. >\/dev\/null/)')"
+            # Check metadata with the semantic helper so a generic secretRef
+            # containing an Atlas provider secret cannot bypass this skip gate.
+            local metadata_matches=""
+            if [[ -f metadata.json || -f .github/workflows/production-deploy.yml || -f .github/workflows/production-verification.yml ]]; then
+              metadata_matches="$(MIGRATION_HELPER="$RUNNER_TEMP/migrate_legacy_native_ai.py" python - <<'PY'
+          import importlib.util
+          import os
+          from pathlib import Path
+
+          helper_path = Path(os.environ["MIGRATION_HELPER"])
+          spec = importlib.util.spec_from_file_location("atlas_native_ai_metadata_check", helper_path)
+          if spec is None or spec.loader is None:
+              raise SystemExit("Could not load Native AI metadata checker")
+          helper = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(helper)
+          metadata_path = Path("metadata.json")
+          if metadata_path.is_file() and helper._metadata_has_active_provider_wiring(metadata_path.read_text(encoding="utf-8")):
+              print("metadata.json: active provider configuration or secret reference")
+
+          for workflow_path in (
+              Path(".github/workflows/production-deploy.yml"),
+              Path(".github/workflows/production-verification.yml"),
+          ):
+              if not workflow_path.is_file():
+                  continue
+              workflow_source = workflow_path.read_text(encoding="utf-8")
+              try:
+                  cleaned = helper.scrub_workflow_ancillary(workflow_path.as_posix(), workflow_source)
+              except helper.MigrationError as exc:
+                  print(f"{workflow_path}: {exc}")
+              else:
+                  if cleaned != workflow_source:
+                      print(f"{workflow_path}: retired-provider workflow wiring requires migration")
+          PY
+              )" || return $?
+            fi
+            if [[ -n "$filtered" ]]; then
+              printf '%s\n' "$filtered"
+            fi
+            if [[ -n "$metadata_matches" ]]; then
+              printf '%s\n' "$metadata_matches"
+            fi
+          }
+
+          verify_native_ai_impl() {
+            python - <<'PY'
+          import ast
+          import importlib
+          from pathlib import Path
+
+          app_dir = Path("app")
+          module_paths = {
+              "native_ai": app_dir / "native_ai.py",
+              "groq_ai": app_dir / "groq_ai.py",
+              "ai_providers": app_dir / "ai_providers.py",
+          }
+          trees = {}
+          for module_name, path in module_paths.items():
+              if not path.is_file():
+                  raise SystemExit(f"Missing required Native AI module: {path}")
+              trees[module_name] = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+          def assigned_names(target):
+              if isinstance(target, ast.Name):
+                  return {target.id}
+              if isinstance(target, (ast.Tuple, ast.List)):
+                  names = set()
+                  for item in target.elts:
+                      names.update(assigned_names(item))
+                  return names
+              return set()
+
+          def module_names(tree):
+              names = set()
+              for node in tree.body:
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                      names.add(node.name)
+                  elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                      for alias in node.names:
+                          if alias.name != "*":
+                              names.add(alias.asname or alias.name.rsplit(".", 1)[-1])
+                  elif isinstance(node, ast.Assign):
+                      for target in node.targets:
+                          names.update(assigned_names(target))
+                  elif isinstance(node, ast.AnnAssign):
+                      names.update(assigned_names(node.target))
+              return names
+
+          available = {name: module_names(tree) for name, tree in trees.items()}
+          problems = []
+          for path in sorted(app_dir.rglob("*.py")):
+              try:
+                  tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+              except (OSError, SyntaxError) as exc:
+                  problems.append(f"{path}: cannot parse Python module ({exc})")
+                  continue
+              for node in ast.walk(tree):
+                  if not isinstance(node, ast.ImportFrom):
+                      continue
+                  if node.level == 1 and node.module in available:
+                      target_module = node.module
+                  elif node.level == 0 and node.module in ("app.native_ai", "app.ai_providers"):
+                      target_module = node.module.rsplit(".", 1)[-1]
+                  else:
+                      continue
+                  for alias in node.names:
+                      if alias.name != "*" and alias.name not in available[target_module]:
+                          problems.append(
+                              f"{path}: imports missing symbol {alias.name} from {target_module}"
+                          )
+
+          if problems:
+              print("\n".join(problems))
+              raise SystemExit(1)
+
+          # Execute the compatibility facade import as well: this catches broken
+          # transitive exports, including missing native_trade_safety_review.
+          native = importlib.import_module("app.native_ai")
+          facade = importlib.import_module("app.ai_providers")
+          groq = importlib.import_module("app.groq_ai")
+          for name in ("NativeAIError", "compose_strategy_spec", "native_research_review"):
+              if not hasattr(native, name):
+                  raise SystemExit(f"app.native_ai is missing required symbol: {name}")
+          for name in (
+              "AIProviderError", "dual_ai_research_review", "dual_ai_trade_safety_review",
+              "evaluate_native_trade_packet", "native_ai_health_check", "native_research_review",
+              "native_trade_safety_review",
+          ):
+              if not hasattr(facade, name):
+                  raise SystemExit(f"app.ai_providers is missing required symbol: {name}")
+          if not hasattr(groq, "groq_research_review"):
+              raise SystemExit("app.groq_ai is missing required symbol: groq_research_review")
+          if facade.AIProviderError is not native.NativeAIError:
+              raise SystemExit(
+                  "app.ai_providers.AIProviderError must be the app.native_ai.NativeAIError compatibility alias"
+              )
+
+          print("PASS: Native AI imports and compatibility exports resolve.")
+          PY
+          }
+          declare -a cleanup_warnings=()
+          update_existing_branch_ref() {
+            local branch="$1" expected_sha="$2" new_sha="$3"
+            local remote_sha branch_hash temp_ref update_rc ref_payload repository_id current_sha update_payload updated_sha updated_ref_payload read_back_sha
+            remote_sha="$(git ls-remote --heads origin "refs/heads/$branch" | awk 'NR == 1 {print $1}')"
+            if [[ "$remote_sha" != "$expected_sha" ]]; then
+              echo "Ref refs/heads/$branch changed or disappeared after enumeration; refusing to update it." >&2
+              return 1
+            fi
+            # Upload the candidate commit under a temporary ref. Update the target with
+            # GraphQL updateRefs and beforeOid=expected_sha: the expected-tip check and
+            # non-force fast-forward update are one atomic server-side operation.
+            branch_hash="$(printf '%s' "$branch" | sha256sum | cut -c1-12)"
+            temp_ref="atlas-native-ai-propagation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${branch_hash}"
+            if ! git push origin "HEAD:refs/heads/$temp_ref" >/dev/null; then
+              echo "Could not upload temporary commit ref for $branch; target branch unchanged." >&2
+              return 1
+            fi
+            update_rc=1
+            if ref_payload="$(gh api graphql \
+                -f query='query($owner: String!, $name: String!, $qualifiedName: String!) { repository(owner: $owner, name: $name) { id ref(qualifiedName: $qualifiedName) { id target { oid } } } }' \
+                -F owner="$GITHUB_REPOSITORY_OWNER" \
+                -F name="${GITHUB_REPOSITORY#*/}" \
+                -F qualifiedName="refs/heads/$branch")"; then
+              repository_id="$(jq -r '.data.repository.id // empty' <<<"$ref_payload")"
+              current_sha="$(jq -r '.data.repository.ref.target.oid // empty' <<<"$ref_payload")"
+              if [[ -z "$repository_id" || "$current_sha" != "$expected_sha" ]]; then
+                echo "Ref refs/heads/$branch changed or disappeared before atomic update; refusing to overwrite it." >&2
+                echo "Observed target SHA: ${current_sha:-unavailable}; expected starting SHA: $expected_sha" >&2
+              else
+                # Once updateRefs has been sent, a lost response or failed read-back
+                # cannot prove that the remote mutation did not apply. Read the ref
+                # after every mutation attempt and classify the observed final state.
+                update_rc=2
+                if update_payload="$(gh api graphql \
+                    -f query='mutation($repoId: ID!, $name: GitRefname!, $before: GitObjectID!, $after: GitObjectID!) { updateRefs(input: {repositoryId: $repoId, refUpdates: [{name: $name, beforeOid: $before, afterOid: $after, force: false}], clientMutationId: "atlas-native-ai-propagation"}) { clientMutationId } }' \
+                    -F repoId="$repository_id" \
+                    -F name="refs/heads/$branch" \
+                    -F before="$expected_sha" \
+                    -F after="$new_sha")"; then
+                  updated_sha="$(jq -r '.data.updateRefs.clientMutationId // empty' <<<"$update_payload")"
+                  if [[ "$(jq -r '((.errors // []) | length) == 0' <<<"$update_payload")" == "true" && "$updated_sha" == "atlas-native-ai-propagation" ]]; then
+                    echo "UpdateRefs acknowledged for refs/heads/$branch; checking the actual branch tip." >&2
+                  else
+                    echo "UpdateRefs response was not conclusive for refs/heads/$branch; checking the actual branch tip before classifying the result." >&2
+                    echo "$update_payload" >&2
+                  fi
+                else
+                  echo "UpdateRefs request returned no verifiable response for refs/heads/$branch; the mutation outcome may be ambiguous. Checking the actual branch tip." >&2
+                  echo "${update_payload:-No GraphQL response was captured.}" >&2
+                fi
+
+                if updated_ref_payload="$(gh api graphql \
+                    -f query='query($owner: String!, $name: String!, $qualifiedName: String!) { repository(owner: $owner, name: $name) { ref(qualifiedName: $qualifiedName) { target { oid } } } }' \
+                    -F owner="$GITHUB_REPOSITORY_OWNER" \
+                    -F name="${GITHUB_REPOSITORY#*/}" \
+                    -F qualifiedName="refs/heads/$branch")"; then
+                  read_back_sha="$(jq -r '.data.repository.ref.target.oid // empty' <<<"$updated_ref_payload")"
+                  if [[ "$(jq -r '((.errors // []) | length) == 0' <<<"$updated_ref_payload")" == "true" && "$read_back_sha" == "$new_sha" ]]; then
+                    update_rc=0
+                    echo "Confirmed refs/heads/$branch now points to $new_sha." >&2
+                  elif [[ "$(jq -r '((.errors // []) | length) == 0' <<<"$updated_ref_payload")" == "true" && "$read_back_sha" == "$expected_sha" ]]; then
+                    update_rc=1
+                    echo "Final read-back shows refs/heads/$branch still at its starting SHA; requested update was not confirmed." >&2
+                  else
+                    update_rc=2
+                    echo "REMOTE STATE UNRESOLVED for refs/heads/$branch: read-back did not match either expected SHA." >&2
+                    echo "Expected old SHA: $expected_sha; intended new SHA: $new_sha; observed SHA: ${read_back_sha:-unavailable}" >&2
+                    echo "$updated_ref_payload" >&2
+                  fi
+                else
+                  update_rc=2
+                  echo "REMOTE STATE UNRESOLVED for refs/heads/$branch: mutation was attempted but read-back failed." >&2
+                  echo "$updated_ref_payload" >&2
+                fi
+              fi
+            else
+              echo "Unable to read current ref state for $branch before mutation; no updateRefs mutation was sent." >&2
+              echo "$ref_payload" >&2
+            fi
+            # Cleanup is independent of target-ref success. A cleanup failure is a
+            # warning, not evidence that an already-updated target branch failed.
+            if ! git push origin --delete "$temp_ref" >/dev/null; then
+              cleanup_warnings+=("$branch: temporary ref refs/heads/$temp_ref remains; target update exit code=$update_rc")
+              echo "::warning title=Temporary ref cleanup failed::refs/heads/$temp_ref could not be deleted; target update result remains exit code $update_rc."
+            fi
+            return "$update_rc"
+          }
+
+          declare -a updated=() skipped=() failed=()
+          while IFS= read -r remote_ref; do
+            [[ -n "$remote_ref" ]] || continue
+            branch="${remote_ref#refs/remotes/origin/}"
+            [[ "$branch" == "main" ]] && continue
+            start_sha="$(git rev-parse "$remote_ref")"
+            git checkout --detach "$start_sha" >/dev/null 2>&1
+
+            before_refs="$(scan_active_provider_refs)" || { failed+=("$branch: provider scan errored; branch left unchanged"); continue; }
+          if [[ -z "$before_refs" ]] && verify_native_ai_impl; then
+            skipped+=("$branch (Native AI implementation verified; active provider scan clean)")
+            continue
+          fi
+          if [[ -n "$before_refs" ]]; then
+            echo "ACTIVE PROVIDER REFERENCES before semantic migration on $branch:" >&2
+            printf '%s\n' "$before_refs" >&2
+          fi
+
+          # Do not replay the broad canonical commit. Apply only the AI settings/callsites
+          # and provider-bearing deployment entries; the helper refuses unknown layouts.
+          if ! python "$RUNNER_TEMP/migrate_legacy_native_ai.py" --canonical-commit "$NATIVE_AI_CANONICAL_COMMIT" --cleanup-commit "$NATIVE_AI_CLEANUP_COMMIT" --extra-base-commit "$NATIVE_AI_EXTRA_BASE_COMMIT" --extra-commit "$NATIVE_AI_EXTRA_COMMIT"; then
+            git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true
+            failed+=("$branch: semantic Native AI migration refused or failed; branch left unchanged")
+            continue
+          fi
+
+          after_refs="$(scan_active_provider_refs)" || { git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true; failed+=("$branch: post-migration provider scan errored; branch left unchanged"); continue; }
+          if [[ -n "$after_refs" ]]; then
+            echo "ACTIVE PROVIDER REFERENCES REMAIN after semantic migration on $branch:" >&2
+            git grep -nIEi 'gemini|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/production-deploy.yml' ':!.github/workflows/production-verification.yml' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' >&2 || true
+            git grep -nIEi '_groq_json|settings\.groq_(strategy_model|model)|settings\.groq_api_key|GROQ_API_KEY|SECRET_GROQ|api\.groq\.com' -- app/strategy_ai.py app/daily_research.py app/ai_providers.py >&2 || true
+            git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true
+            failed+=("$branch: provider references remain after semantic migration; branch left unchanged")
+            continue
+          fi
+          if ! verify_native_ai_impl; then
+            git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true
+            failed+=("$branch: Native AI implementation/import verification failed; branch left unchanged")
+            continue
+          fi
+          if ! git diff --check; then
+            git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true
+            failed+=("$branch: whitespace validation failed; branch left unchanged")
+            continue
+          fi
+          if [[ -z "$(git status --porcelain)" ]]; then
+            skipped+=("$branch (already provider-free after verification)")
+            continue
+          fi
+          git add -A
+          git diff --cached --check
+          git commit -m "Remove hosted AI wiring with targeted Native AI migration" >/dev/null
+          new_sha="$(git rev-parse HEAD)"
+          if update_existing_branch_ref "$branch" "$start_sha" "$new_sha"; then
+            updated+=("$branch ($start_sha -> $new_sha)")
+          else
+            update_status=$?
+            git reset --hard "$start_sha" >/dev/null 2>&1 || true
+            git clean -fd >/dev/null 2>&1 || true
+            if [[ "$update_status" -eq 2 ]]; then
+              failure_reason="remote branch state unresolved after update attempt; intended commit was not confirmed and remote state may have changed"
+            else
+              failure_reason="requested update was not confirmed; workflow did not verify the intended commit on the remote"
+            fi
+            failed+=("$branch: $failure_reason")
+            echo "FAILED branch reconciliation: $branch: $failure_reason" >&2
+          fi
+          done < <(git for-each-ref --format='%(refname)' refs/remotes/origin/ | grep -v '^refs/remotes/origin/HEAD$' | sort)
+
+          {
+            echo "## Atlas Native AI branch propagation"
+            echo
+            echo "- Native AI cleanup commit: $NATIVE_AI_CLEANUP_COMMIT"
+            echo "- Canonical Native AI source commit: $NATIVE_AI_CANONICAL_COMMIT"
+            echo "- Branches updated: ${#updated[@]}"
+            printf '  - %s\n' "${updated[@]:-none}"
+            echo "- Branches skipped after implementation and provider checks: ${#skipped[@]}"
+            printf '  - %s\n' "${skipped[@]:-none}"
+            echo "- Temporary-ref cleanup warnings: ${#cleanup_warnings[@]}"
+            printf '  - %s\n' "${cleanup_warnings[@]:-none}"
+            echo "- Unresolved branches: ${#failed[@]}"
+            printf '  - %s\n' "${failed[@]:-none}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Mirror unresolved branches into normal job logs as well as the step summary.
+          for failure in "${failed[@]}"; do
+            echo "UNRESOLVED BRANCH: $failure" >&2
+          done
+          if (( ${#failed[@]} > 0 )); then
+            echo "::error title=Repository-wide Native AI cleanup incomplete::${#failed[@]} branch(es) need reconciliation; see UNRESOLVED BRANCH log lines and step summary."
+            exit 1
+          fi
+          echo "PASS: all enumerated branches were updated or passed explicit implementation and provider checks."
+\n'"$legacy_groq_config_refs"
+            else
+              rc=$?
+              if (( rc != 1 )); then return "$rc"; fi
+            fi
             # Filter only those exact marker lines; scan every other line in this workflow.
             filtered="$(printf '%s\n' "$matches" | awk '!($0 ~ /^\.github\/workflows\/prune-contained-branches-once\.yml:[0-9]+:/ && $0 ~ /grep -F .def _check_groq. >\/dev\/null/)')"
             # Check metadata with the semantic helper so a generic secretRef
