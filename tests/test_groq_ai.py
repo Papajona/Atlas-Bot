@@ -171,6 +171,7 @@ def test_groq_http_failures_keep_sanitized_cause_and_status_diagnostics():
     assert result["error"] == "GroqAIError"
     assert result["cause"] == "HTTPStatusError"
     assert result["http_status"] == 429
+    assert result["input_truncated"] is False
     assert result["execution_authority"] is False
 
 
@@ -216,3 +217,36 @@ def test_groq_prompt_compacts_large_research_without_arbitrary_json_prefix():
     assert "paper_candidates_omitted" in prompt
     assert "UNNECESSARY_RAW_DETAIL" not in prompt
     assert '"[truncated]"' not in prompt
+
+
+def test_groq_review_records_truncation_and_preserves_computed_candidate_context():
+    client = _FakeAsyncClient(_FakeResponse(json.dumps(VALID_REVIEW)))
+    research = {
+        "symbol": "EUR_USD",
+        "paper_candidates": [
+            {"strategy": "CANDIDATE_EVIDENCE_SENTINEL", "score": 0.71, "status": "UNVERIFIED"}
+        ],
+        "raw_walk_forward_dump": "omitted-raw-research-detail " * 20_000,
+    }
+    intelligence = {
+        "news_summary": {"headlines": [f"headline-{index}" for index in range(100)]},
+        "failures": {},
+    }
+    with _settings(
+        groq_api_key="test-key-not-a-real-secret",
+        groq_model="openai/gpt-oss-20b",
+        groq_max_completion_tokens=2048,
+        groq_timeout_seconds=20.0,
+        groq_research_review_enabled=True,
+    ), patch.object(groq_ai.httpx, "AsyncClient", return_value=client):
+        result = asyncio.run(groq_ai.groq_research_review(research, intelligence))
+
+    assert result["status"] == "OK"
+    assert result["input_truncated"] is True
+    assert result["execution_authority"] is False
+    assert client.request is not None
+    user_prompt = client.request["json"]["messages"][1]["content"]
+    assert "CANDIDATE_EVIDENCE_SENTINEL" in user_prompt
+    assert "paper_candidates_omitted" in user_prompt
+    assert "omitted-raw-research-detail" not in user_prompt
+
