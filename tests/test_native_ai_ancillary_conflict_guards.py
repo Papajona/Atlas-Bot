@@ -157,6 +157,62 @@ jobs:
                 ".github/workflows/production-deploy.yml", workflow
             )
 
+    def test_quoted_provider_key_is_removed_without_leaving_invalid_yaml(self):
+        workflow = """name: legacy deployment
+jobs:
+  deploy:
+    steps:
+      - name: deploy
+        env:
+          \"GEMINI_API_KEY\": ${{ secrets.GEMINI_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: echo deploy
+\"\"\"
+        cleaned = migration.scrub_workflow_ancillary(
+            ".github/workflows/production-deploy.yml", workflow
+        )
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+        self.assertIn("DATABASE_URL:", cleaned)
+        self.assertIn("run: echo deploy", cleaned)
+        self.assertFalse(migration._workflow_has_active_provider_wiring(cleaned))
+
+    def test_workflow_shell_error_names_the_workflow_file(self):
+        workflow = """name: database deployment
+jobs:
+  deploy:
+    steps:
+      - name: migrate
+        run: curl https://api.openai.com/v1 && python -m alembic upgrade head
+\"\"\"
+        with self.assertRaisesRegex(
+            migration.MigrationError, r"\\.github/workflows/production-deploy\\.yml.*mixed shell command"
+        ) as caught:
+            migration.scrub_workflow_ancillary(
+                ".github/workflows/production-deploy.yml", workflow
+            )
+        self.assertNotIn("deploy/cloud-run-deploy.sh", str(caught.exception))
+
+    def test_config_groq_fields_follow_two_space_settings_indentation(self):
+        source = """from pydantic import BaseModel
+
+class Settings(BaseModel):
+  model_config = dict(
+    env_file=".env",
+  )
+\"\"\"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app_dir = root / "app"
+            app_dir.mkdir()
+            config = app_dir / "config.py"
+            config.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_config()
+            result = config.read_text(encoding="utf-8")
+        self.assertIn("  )\\n  groq_api_key: str = \"\"", result)
+        self.assertNotIn("    groq_api_key: str = \"\"", result)
+        import ast
+        ast.parse(result, filename="app/config.py")
     def test_provider_named_job_mapping_with_children_fails_closed(self):
         workflow = """name: legacy workflow
 jobs:
