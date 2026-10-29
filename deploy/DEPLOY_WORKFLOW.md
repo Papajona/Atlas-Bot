@@ -147,13 +147,12 @@ export WORKER_POOL=atlas-trading-worker IMAGE=<same image> WORKER_SERVICE_ACCOUN
   SECRET_APP_ENCRYPTION_REF=atlas-app-encryption-key:<v> SECRET_TRON_XPUB_REF=atlas-usdt-tron-account-xpub:<v> SECRET_TRONGRID_REF=atlas-trongrid-api-key:<v> \
   SECRET_MODEL_SIGNING_PUBLIC_REF=atlas-model-signing-public-key:<v> SECRET_MODEL_SIGNING_PRIVATE_REF=atlas-model-signing-private-key:<v> \
   BACKUP_RECOVERY_URL=... \
-  SECRET_GROQ_REF=atlas-groq-api-key:<v> \
   RESEARCH_FEE_SOURCE="${RESEARCH_FEE_SOURCE:?set to actual fee source}" \\
   RESEARCH_FEE_EVIDENCE_ID="${RESEARCH_FEE_EVIDENCE_ID:?set to immutable evidence ID}" \\
   RESEARCH_MIN_DEFLATED_SHARPE="${RESEARCH_MIN_DEFLATED_SHARPE:-0.95}"
 bash deploy/cloud-run-worker-deploy.sh
 ```
-The three `RESEARCH_*` values are mandatory for production worker startup. `SECRET_GROQ_REF` is optional and must be an exact `atlas-groq-api-key:<positive-version>` reference; the legacy `GROQ_STRATEGY_MODEL` is not used. Use the actual fee source and immutable evidence identifier consumed by the research process; placeholders or CI fixtures are not operational evidence. The deployment validator rejects nonnumeric/nonfinite thresholds and values containing the active environment-variable delimiter before the deploy command runs. It verifies input shape only, not evidence authenticity.
+The three `RESEARCH_*` values are mandatory for production worker startup. `SECRET_GROQ_REF` is optional; omit it when no Groq secret is configured. Only set it when a real positive Secret Manager version exists, for example: `export SECRET_GROQ_REF="atlas-groq-api-key:${GROQ_SECRET_VERSION:?set the real positive version}"`. The legacy `GROQ_STRATEGY_MODEL` is not used. Use the actual fee source and immutable evidence identifier consumed by the research process; placeholders or CI fixtures are not operational evidence. The deployment validator rejects nonnumeric/nonfinite thresholds and values containing the active environment-variable delimiter before the deploy command runs. It verifies input shape only, not evidence authenticity.
 **Check:** `ServiceHeartbeat` rows appear for role `worker`; logs show the loops starting; the single-writer execution lease is held (only one worker may hold it).
 **Rollout caveat:** a worker-pool update can briefly run old and new instances together. Safety then rests on the distributed lease with fencing; keep live
 trading off until a rollout drill proves it.
