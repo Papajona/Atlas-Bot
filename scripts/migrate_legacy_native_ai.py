@@ -4705,6 +4705,54 @@ def scrub_shell_deployment(path: str, text: str) -> str:
     """Remove provider-specific shell wiring without corrupting bundled env/secret lists."""
     output: list[str] = []
     skip_provider_block = False
+    # Groq remains a supported research-only reviewer. Preserve pure Groq secret/config
+    # conditionals verbatim, but fail closed if they wrap unrelated deployment commands.
+    source_lines = text.splitlines(keepends=True)
+    groq_condition = re.compile(
+        r"(?i)\\b(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
+        r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED)\\b"
+    )
+    groq_allowed = re.compile(
+        r"(?i)^\\s*(?:(?:export\\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|"
+        r"GROQ_SECRET_ARG|GROQ_SECRET_ARGS|GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|"
+        r"GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\\s*=|"
+        r"(?:echo|printf)\\b.*\\b(?:groq|warning|not configured|optional|disabled)\\b|"
+        r"(?:if|then|else|fi)\\b|#|$)"
+    )
+    block_start = 0
+    while block_start < len(source_lines):
+        source_line = source_lines[block_start]
+        if re.match(r"^\\s*if\\b", source_line, re.I) and groq_condition.search(source_line):
+            inline = re.match(r"^\\s*if\\b.*?\\bthen\\s*(.*?);\\s*fi\\s*$", source_line, re.I)
+            if inline:
+                inline_commands = [chunk.strip() for chunk in inline.group(1).split(";") if chunk.strip()]
+                if any(not groq_allowed.match(command) for command in inline_commands):
+                    raise MigrationError(
+                        f"{path} has a mixed provider-conditioned shell block; refusing unrelated inline command"
+                    )
+                block_start += 1
+                continue
+            indent = len(source_line) - len(source_line.lstrip())
+            end = block_start + 1
+            while end < len(source_lines):
+                if re.match(r"^\\s*fi\\b", source_lines[end], re.I):
+                    break
+                if source_lines[end].strip() and len(source_lines[end]) - len(source_lines[end].lstrip()) < indent:
+                    break
+                end += 1
+            if end >= len(source_lines) or not re.match(r"^\\s*fi\\b", source_lines[end], re.I):
+                raise MigrationError(f"{path} has an unterminated Groq-conditioned block")
+            for block_line in source_lines[block_start + 1:end]:
+                if not block_line.strip() or block_line.lstrip().startswith("#"):
+                    continue
+                if not groq_allowed.match(block_line):
+                    raise MigrationError(
+                        f"{path} has a mixed provider-conditioned shell block; refusing to discard unrelated statement: {block_line.strip()[:100]}"
+                    )
+            block_start = end + 1
+            continue
+        block_start += 1
+
     variable_pattern = re.compile(
         r"(?i)\b(?:SECRET_GEMINI[A-Z0-9_]*|"
         r"GEMINI_API_KEY|AI_SECRET_ARGS|"
@@ -4888,7 +4936,7 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
             index += 1
             continue
 
-        run_match = re.match(r"^(\s*)run:\s*(.*?)\s*(?:\r?\n)?$", line)
+        run_match = re.match(r"^([ \t]*)run:[ \t]*(.*?)[ \t]*(?:\r?\n)?$", line)
         if run_match:
             indent_text, value = run_match.groups()
             indent = len(indent_text)
