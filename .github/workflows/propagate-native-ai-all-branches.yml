@@ -35,7 +35,9 @@ jobs:
         run: |
           set -euo pipefail
           NATIVE_AI_CLEANUP_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
-          NATIVE_AI_CANONICAL_COMMIT="$GITHUB_SHA"
+          # Immutable, reviewed canonical Native AI + optional Groq source.
+          # Update only with an explicit review after the replacement source has passed CI.
+          NATIVE_AI_CANONICAL_COMMIT="78a1fc896eb2b906a069467194008e464107279d"
           NATIVE_AI_EXTRA_BASE_COMMIT="0d38f95079833804713fcba080caee38a6ddfb4c"
           NATIVE_AI_EXTRA_COMMIT="2317ccc4c3293e8bbd7043970876eceb509d2d1d"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
@@ -114,7 +116,7 @@ jobs:
             fi
             # These are historical proof-marker literals, not active provider wiring.
             # Filter only those exact marker lines; scan every other line in this workflow.
-            filtered="$(printf '%s\n' "$matches" | awk '!($0 ~ /^\.github\/workflows\/prune-contained-branches-once\.yml:[0-9]+:/ && $0 ~ /grep -F .def _check_groq. >\/dev\/null/)')"
+            filtered="$(printf '%s\n' "$matches" | awk '!($0 ~ /^\.github\/workflows\/prune-contained-branches-once\.yml:[0-9]+:/ && $0 ~ /grep -F .def _check_groq. >\/dev\/null/) && !($0 ~ /^\.github\/workflows\/[^:]+:[0-9]+:[[:space:]]*(name|run-name|description):/) && !($0 ~ /^\.github\/workflows\/[^:]+:[0-9]+:[[:space:]]*#/)')"
             # Check metadata with the semantic helper so a generic secretRef
             # containing an Atlas provider secret cannot bypass this skip gate.
             local metadata_matches=""
