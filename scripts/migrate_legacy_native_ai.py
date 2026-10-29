@@ -5080,6 +5080,9 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         # it look like an output-only command.
         if re.match(r"(?i)^printf\s+-v(?:\s|$)", stripped):
             return False
+        # printf -v mutates shell state even when its format string is inert text.
+        if re.match(r"(?i)^printf\s+-v(?:\s|$)", stripped):
+            return False
         if re.match(r"(?i)^(?:echo|printf)\b", stripped):
             normalized = re.sub(r"\s+>&2\s*$", "", stripped)
             return not has_unsafe_shell_operators(normalized)
