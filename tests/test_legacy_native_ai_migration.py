@@ -3,7 +3,6 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -3364,6 +3363,25 @@ for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-ope
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
             )
             self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_ancillary_patch_conflict_refuses_provider_deployment_environment(self):
+        source = "jobs:\n  deploy:\n    environment: production-gemini\n    steps: []\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / ".github" / "workflows" / "production-deploy.yml"
+            target.parent.mkdir(parents=True)
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "_apply_path_patch", return_value=False
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "provider-bearing deployment environment"
+                ):
+                    migration.apply_ancillary_patch(
+                        "cleanup-commit", ".github/workflows/production-deploy.yml",
+                        "extra-base", "extra-commit",
+                    )
+            self.assertEqual(target.read_text(encoding="utf-8"), source)
 
     def test_ancillary_patch_conflict_preserves_special_android_extra(self):
         path = "app/src/main/java/com/atlas/trading/network/ReleaseAdvisorClient.kt"
