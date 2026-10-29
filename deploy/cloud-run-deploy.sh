@@ -31,9 +31,21 @@ GROQ_SECRET_ARGS=""
 if [[ -n "$SECRET_GROQ_API_KEY_VERSION" ]]; then
   GROQ_SECRET_ARGS=",GROQ_API_KEY=atlas-groq-api-key:${SECRET_GROQ_API_KEY_VERSION}"
 fi
-GROQ_MODEL="openai/gpt-oss-20b"
-GROQ_MAX_COMPLETION_TOKENS="2048"
-GROQ_RESEARCH_REVIEW_ENABLED="true"
+GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"
+GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"
+GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"
+if [[ "$GROQ_RESEARCH_REVIEW_ENABLED" != "true" && "$GROQ_RESEARCH_REVIEW_ENABLED" != "false" ]]; then
+  echo "ERROR: GROQ_RESEARCH_REVIEW_ENABLED must be true or false." >&2
+  exit 2
+fi
+if [[ ! "$GROQ_MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ ]]; then
+  echo "ERROR: GROQ_MODEL must be a non-empty model identifier without shell/env delimiters." >&2
+  exit 2
+fi
+if [[ ! "$GROQ_MAX_COMPLETION_TOKENS" =~ ^[1-9][0-9]{0,3}$ ]] || (( GROQ_MAX_COMPLETION_TOKENS > 8192 )); then
+  echo "ERROR: GROQ_MAX_COMPLETION_TOKENS must be an integer between 1 and 8192." >&2
+  exit 2
+fi
 : "${FORWARDED_ALLOW_IPS:?Set FORWARDED_ALLOW_IPS to trusted proxy IP/CIDR; never *}"
 : "${RESEARCH_FEE_SOURCE:?Set RESEARCH_FEE_SOURCE to a traceable research-fee source}"
 : "${RESEARCH_FEE_EVIDENCE_ID:?Set RESEARCH_FEE_EVIDENCE_ID to an immutable evidence identifier}"
