@@ -56,6 +56,21 @@ class Settings(BaseModel):
         self.assertIn("groq_timeout_seconds: float = 20.0", migrated)
         self.assertIn("groq_research_review_enabled: bool = True", migrated)
 
+    def test_groq_secret_version_validation_and_assignment_blocks_are_preserved(self):
+        shell = """if [[ -n "$SECRET_GROQ_API_KEY_VERSION" && ! "$SECRET_GROQ_API_KEY_VERSION" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: SECRET_GROQ_API_KEY_VERSION must be a positive numeric Secret Manager version." >&2
+  exit 2
+fi
+GROQ_SECRET_ARGS=""
+if [[ -n "$SECRET_GROQ_API_KEY_VERSION" ]]; then
+  GROQ_SECRET_ARGS=",GROQ_API_KEY=atlas-groq-api-key:${SECRET_GROQ_API_KEY_VERSION}"
+fi
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertEqual(cleaned, shell)
+        self.assertIn("exit 2", cleaned)
+        self.assertIn("GROQ_API_KEY=atlas-groq-api-key", cleaned)
+
     def test_supported_groq_deployment_setting_is_preserved(self):
         shell = """#!/usr/bin/env bash
 GROQ_API_KEY="${GROQ_API_KEY:-}"
