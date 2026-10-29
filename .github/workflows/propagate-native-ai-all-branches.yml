@@ -178,7 +178,7 @@ jobs:
           verify_native_ai_impl() {
             python - <<'PY'
           import ast
-                    from pathlib import Path
+          from pathlib import Path
 
           app_dir = Path("app")
           module_paths = {
