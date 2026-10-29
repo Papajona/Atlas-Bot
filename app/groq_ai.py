@@ -312,6 +312,7 @@ async def groq_research_review(
             "reason": "Groq API key is not configured",
             "execution_authority": False,
         }
+    input_truncated: bool | None = None
     try:
         prompt, input_truncated = _research_prompt(research, intelligence)
         review = await _groq_json(prompt)
@@ -339,6 +340,7 @@ async def groq_research_review(
             "error": type(exc).__name__,
             "cause": cause_type,
             "http_status": http_status,
+            "input_truncated": input_truncated,
             "execution_authority": False,
         }
     return {
