@@ -803,6 +803,245 @@ def transform_config() -> None:
     def is_provider_field(name: str) -> bool:
         return bool(PROVIDER_FIELD_RE.search(name))
 
+    postponed_annotations = _uses_postponed_annotations(tree)
+
+    def module_binding_before(name: str, line: int) -> ast.stmt | None:
+        """Return the last top-level statement that can bind name before line."""
+        last: ast.stmt | None = None
+        for statement in tree.body:
+            if statement.lineno >= line:
+                break
+            bindings = _defined_names(statement) | _module_scope_maybe_binds(
+                statement, postponed_annotations=postponed_annotations
+            )
+            if (
+                name in bindings
+                or (
+                    isinstance(statement, ast.ImportFrom)
+                    and any(alias.name == "*" for alias in statement.names)
+                )
+            ):
+                # A star import may overwrite any name; only a later explicit,
+                # reviewed binding can re-establish a trusted decorator import.
+                last = statement
+        return last
+
+    def class_statement_binds_name(statement: ast.stmt, name: str) -> bool:
+        """Conservatively detect a class-suite rebinding, but not method-local stores."""
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return statement.name == name
+        if name in _defined_names(statement):
+            return True
+        if isinstance(statement, ast.ImportFrom) and any(
+            alias.name == "*" for alias in statement.names
+        ):
+            return True
+        stack = list(ast.iter_child_nodes(statement))
+        while stack:
+            item = stack.pop()
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                # Nested scopes do not bind the surrounding class namespace.
+                continue
+            if isinstance(item, ast.Name) and item.id == name and isinstance(item.ctx, (ast.Store, ast.Del)):
+                return True
+            if isinstance(item, ast.Global) and name in item.names:
+                return True
+            if isinstance(item, ast.Nonlocal) and name in item.names:
+                return True
+            if isinstance(item, (ast.Import, ast.ImportFrom)) and (
+                name in _defined_names(item)
+                or (
+                    isinstance(item, ast.ImportFrom)
+                    and any(alias.name == "*" for alias in item.names)
+                )
+            ):
+                return True
+            stack.extend(ast.iter_child_nodes(item))
+        return False
+
+    def decorators_resolve_to_reviewed_implementations(
+        settings_class: ast.ClassDef, validator: ast.FunctionDef
+    ) -> bool:
+        # A bare decorator identifier is executable at class-definition time.
+        # Require the final module binding to be the explicit Pydantic import and
+        # prohibit class-local shadows before this validator is defined.
+        field_import = module_binding_before("field_validator", settings_class.lineno)
+        if not (
+            isinstance(field_import, ast.ImportFrom)
+            and field_import.module == "pydantic"
+            and any(
+                alias.name == "field_validator"
+                and (alias.asname or alias.name) == "field_validator"
+                for alias in field_import.names
+            )
+        ):
+            return False
+        if module_binding_before("classmethod", settings_class.lineno) is not None:
+            return False
+        for statement in settings_class.body:
+            if statement is validator:
+                break
+            if (
+                class_statement_binds_name(statement, "field_validator")
+                or class_statement_binds_name(statement, "classmethod")
+            ):
+                return False
+        return True
+
+    def is_safe_gemini_model_validator(node: ast.AST) -> bool:
+        """Recognize only the known pure validator for a setting being removed."""
+        if not isinstance(node, ast.FunctionDef) or node.name != "_validate_gemini_model":
+            return False
+        args = node.args
+        if (
+            args.posonlyargs
+            or [argument.arg for argument in args.args] != ["cls", "value"]
+            or args.vararg
+            or args.kwarg
+            or args.kwonlyargs
+            or args.defaults
+            or args.kw_defaults
+        ):
+            return False
+
+        # Annotation expressions run when the Settings class is created. Retire
+        # this validator only when its annotations are inert type names.
+        def safe_annotation(annotation: ast.AST | None) -> bool:
+            return annotation is None or (
+                isinstance(annotation, ast.Name) and annotation.id == "str"
+            )
+
+        if (
+            any(not safe_annotation(argument.annotation) for argument in args.args)
+            or not safe_annotation(node.returns)
+        ):
+            return False
+        if len(node.decorator_list) != 2:
+            return False
+        field_decorators = [
+            decorator for decorator in node.decorator_list
+            if isinstance(decorator, ast.Call)
+            and isinstance(decorator.func, ast.Name)
+            and decorator.func.id == "field_validator"
+        ]
+        classmethod_decorators = [
+            decorator for decorator in node.decorator_list
+            if isinstance(decorator, ast.Name) and decorator.id == "classmethod"
+        ]
+        if len(field_decorators) != 1 or len(classmethod_decorators) != 1:
+            return False
+        field_decorator = field_decorators[0]
+        if (
+            field_decorator.keywords
+            or not field_decorator.args
+            or any(
+                not isinstance(argument, ast.Constant)
+                or not isinstance(argument.value, str)
+                or not is_provider_field(argument.value)
+                for argument in field_decorator.args
+            )
+        ):
+            return False
+
+        body = list(node.body)
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            body = body[1:]
+        if len(body) != 3:
+            return False
+
+        assignment, condition, returned = body
+        if not isinstance(assignment, ast.Assign) or (
+            len(assignment.targets) != 1
+            or not isinstance(assignment.targets[0], ast.Name)
+            or assignment.targets[0].id != "normalized"
+        ):
+            return False
+        outer = assignment.value
+        if not (
+            isinstance(outer, ast.Call)
+            and not outer.keywords
+            and len(outer.args) == 1
+            and isinstance(outer.args[0], ast.Constant)
+            and outer.args[0].value == "models/"
+            and isinstance(outer.func, ast.Attribute)
+            and outer.func.attr == "removeprefix"
+        ):
+            return False
+        stripped = outer.func.value
+        if not (
+            isinstance(stripped, ast.Call)
+            and not stripped.args
+            and not stripped.keywords
+            and isinstance(stripped.func, ast.Attribute)
+            and stripped.func.attr == "strip"
+        ):
+            return False
+        stringified = stripped.func.value
+        if not (
+            isinstance(stringified, ast.Call)
+            and isinstance(stringified.func, ast.Name)
+            and stringified.func.id == "str"
+            and len(stringified.args) == 1
+            and not stringified.keywords
+            and isinstance(stringified.args[0], ast.BoolOp)
+            and isinstance(stringified.args[0].op, ast.Or)
+            and len(stringified.args[0].values) == 2
+            and isinstance(stringified.args[0].values[0], ast.Name)
+            and stringified.args[0].values[0].id == "value"
+            and isinstance(stringified.args[0].values[1], ast.Constant)
+            and stringified.args[0].values[1].value == ""
+        ):
+            return False
+        if not (
+            isinstance(condition, ast.If)
+            and not condition.orelse
+            and isinstance(condition.test, ast.Compare)
+            and isinstance(condition.test.left, ast.Name)
+            and condition.test.left.id == "normalized"
+            and len(condition.test.ops) == 1
+            and isinstance(condition.test.ops[0], ast.NotEq)
+            and len(condition.test.comparators) == 1
+            and isinstance(condition.test.comparators[0], ast.Constant)
+            and isinstance(condition.test.comparators[0].value, str)
+            and re.fullmatch(r"gemini-[A-Za-z0-9_.-]+", condition.test.comparators[0].value)
+            and len(condition.body) == 1
+            and isinstance(condition.body[0], ast.Raise)
+            and isinstance(condition.body[0].exc, ast.Call)
+            and isinstance(condition.body[0].exc.func, ast.Name)
+            and condition.body[0].exc.func.id == "ValueError"
+            and len(condition.body[0].exc.args) == 1
+            and not condition.body[0].exc.keywords
+            and isinstance(condition.body[0].exc.args[0], ast.Constant)
+            and condition.body[0].exc.args[0].value
+                == f"Gemini model must be exactly {condition.test.comparators[0].value}; alternative Gemini IDs are not permitted."
+        ):
+            return False
+        return (
+            isinstance(returned, ast.Return)
+            and isinstance(returned.value, ast.Name)
+            and returned.value.id == "normalized"
+        )
+
+    # A removed provider model field may have one exact, pure field validator.
+    # Remove only the recognized normalization/constant-ID check; any custom branch
+    # behavior, side effect, or different validator shape remains a hard refusal.
+    for settings_class in settings_classes:
+        for member in settings_class.body:
+            if (
+                isinstance(member, ast.FunctionDef)
+                and is_safe_gemini_model_validator(member)
+                and decorators_resolve_to_reviewed_implementations(settings_class, member)
+            ):
+                first_line = min(
+                    [member.lineno, *[decorator.lineno for decorator in member.decorator_list]]
+                )
+                removable_lines.update(range(first_line, (member.end_lineno or member.lineno) + 1))
+
     for node in assignments:
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         names = {name for target in targets for name in target_names(target)}
@@ -2287,6 +2526,105 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST, module_tree: ast.Module |
             or args.vararg or args.kwarg or args.kwonlyargs or args.defaults):
         return False
 
+    # Removing this helper also removes annotation evaluation at module import.
+    # Resolve builtin names against module-scope writes before allowing subscription:
+    # a rebound "list" or "dict" can run custom __class_getitem__ code.
+    builtin_annotation_names = {
+        "str", "dict", "int", "float", "bool", "list", "tuple",
+        "set", "frozenset", "bytes", "object", "type",
+    }
+    builtin_generic_names = {"dict", "list", "tuple", "set", "frozenset", "type"}
+
+    def runtime_module_bindings(statement: ast.stmt, postponed: bool) -> set[str]:
+        bound = _defined_names(statement) | _module_scope_maybe_binds(
+            statement, postponed_annotations=postponed
+        )
+        # A module-level annotation-only declaration such as list: int records an
+        # __annotations__ entry but does not assign or rebind the target name.
+        # Keep names bound by the annotation expression itself.
+        if isinstance(statement, ast.AnnAssign) and statement.value is None:
+            target_names = _assigned_names(statement.target)
+            annotation_effects = _module_scope_maybe_binds(
+                statement.annotation, postponed_annotations=postponed
+            )
+            bound.difference_update(target_names)
+            bound.update(annotation_effects)
+        return bound
+
+    def module_binds_before(name: str) -> bool:
+        if module_tree is None:
+            return True
+        target_index = next(
+            (index for index, statement in enumerate(module_tree.body) if statement is node),
+            None,
+        )
+        if target_index is None:
+            return True
+        postponed = _uses_postponed_annotations(module_tree)
+        for statement in module_tree.body[:target_index]:
+            if name in runtime_module_bindings(statement, postponed):
+                return True
+        return False
+
+    def typing_any_is_imported_before() -> bool:
+        if module_tree is None:
+            return False
+        target_index = next(
+            (index for index, statement in enumerate(module_tree.body) if statement is node),
+            None,
+        )
+        if target_index is None:
+            return False
+        last_binding: ast.stmt | None = None
+        postponed = _uses_postponed_annotations(module_tree)
+        for statement in module_tree.body[:target_index]:
+            bound = runtime_module_bindings(statement, postponed)
+            if "Any" in bound:
+                last_binding = statement
+        return (
+            isinstance(last_binding, ast.ImportFrom)
+            and last_binding.module in {"typing", "typing_extensions"}
+            and any(
+                alias.name == "Any" and (alias.asname or alias.name) == "Any"
+                for alias in last_binding.names
+            )
+        )
+
+    def is_inert_dispatcher_annotation(annotation: ast.AST | None) -> bool:
+        if annotation is None:
+            return True
+        if isinstance(annotation, ast.Name):
+            if annotation.id in builtin_annotation_names:
+                return not module_binds_before(annotation.id)
+            return annotation.id == "Any" and typing_any_is_imported_before()
+        if isinstance(annotation, ast.Constant):
+            return annotation.value is None or isinstance(annotation.value, str)
+        if isinstance(annotation, ast.Subscript):
+            if (
+                not isinstance(annotation.value, ast.Name)
+                or annotation.value.id not in builtin_generic_names
+                or module_binds_before(annotation.value.id)
+            ):
+                return False
+            return is_inert_dispatcher_annotation(annotation.slice)
+        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+            # PEP 604 unions are inert only when both sides independently resolve
+            # to trusted builtin/imported types or None, never dynamic expressions.
+            return (
+                is_inert_dispatcher_annotation(annotation.left)
+                and is_inert_dispatcher_annotation(annotation.right)
+            )
+        if isinstance(annotation, (ast.Tuple, ast.List)):
+            return all(is_inert_dispatcher_annotation(item) for item in annotation.elts)
+        return False
+
+    if (
+        any(not is_inert_dispatcher_annotation(argument.annotation)
+            for argument in [*args.posonlyargs, *args.args, *args.kwonlyargs])
+        or not is_inert_dispatcher_annotation(node.returns)
+    ):
+        return False
+
     def is_name(value: ast.AST | None, expected: str) -> bool:
         return isinstance(value, ast.Name) and value.id == expected
 
@@ -2344,7 +2682,7 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST, module_tree: ast.Module |
                 or len(statement.test.ops) != 1 or not isinstance(statement.test.ops[0], ast.Eq)
                 or len(statement.test.comparators) != 1 or not isinstance(statement.test.comparators[0], ast.Constant)
                 or not isinstance(statement.test.comparators[0].value, str)
-                or statement.test.comparators[0].value not in {"gemini", "groq"}):
+                or statement.test.comparators[0].value not in {"gemini", "groq", "cerebras"}):
             return False
         provider = statement.test.comparators[0].value
         if any(provider == previous for previous, _ in branches):
@@ -2373,15 +2711,26 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST, module_tree: ast.Module |
                 for k in last_call.keywords
             )
         )
+    branch_names = [name for name, _ in branches]
+    if branch_names == ["gemini", "groq"]:
+        fallback_provider = "cerebras"
+    elif branch_names == ["gemini", "cerebras"]:
+        fallback_provider = "groq"
+    else:
+        return False
+    fallback_adapter = {
+        "gemini": "_gemini_json",
+        "groq": "_groq_json",
+        "cerebras": "_cerebras_json",
+    }[fallback_provider]
     return (
-        [name for name, _ in branches] == ["gemini", "groq"]
-        and _provider_adapter_name(last_call.func, module_tree) == "_cerebras_json"
+        _provider_adapter_name(last_call.func, module_tree) == fallback_adapter
         and len(last_call.args) == 1 and is_name(last_call.args[0], "prompt")
         and len(last_call.keywords) == 2
         and {k.arg for k in last_call.keywords} == {"system_instruction", "model"}
         and all(
             (k.arg == "system_instruction" and is_name(k.value, "SYSTEM_PROMPT"))
-            or (k.arg == "model" and is_model_expr(k.value, "cerebras"))
+            or (k.arg == "model" and is_model_expr(k.value, fallback_provider))
             for k in last_call.keywords
         )
     )
@@ -4142,13 +4491,39 @@ def transform_daily_research() -> None:
                     return False
             else:
                 return False
+
+            # Historical provider facades use either the minimal status marker or
+            # this exact inert payload. Accept both, but do not erase dynamic values,
+            # unknown fields, or sibling audit assignments from a legacy branch.
             value = statement.value
-            if not isinstance(value, ast.Dict) or len(value.keys) != 1 or len(value.values) != 1:
+            if not isinstance(value, ast.Dict) or len(value.keys) != len(value.values):
                 return False
-            key, item = value.keys[0], value.values[0]
+            fields: dict[str, ast.AST] = {}
+            for key, item in zip(value.keys, value.values):
+                if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                    return False
+                if key.value in fields:
+                    return False
+                fields[key.value] = item
+
+            status = fields.get("status")
+            if not (
+                isinstance(status, ast.Constant)
+                and status.value == "NOT_CONFIGURED"
+            ):
+                return False
+            if set(fields) == {"status"}:
+                return True
+            if set(fields) != {"status", "providers", "execution_authority"}:
+                return False
+            providers = fields["providers"]
+            authority = fields["execution_authority"]
             return (
-                isinstance(key, ast.Constant) and key.value == "status"
-                and isinstance(item, ast.Constant) and item.value == "NOT_CONFIGURED"
+                isinstance(providers, ast.Dict)
+                and not providers.keys
+                and not providers.values
+                and isinstance(authority, ast.Constant)
+                and authority.value is False
             )
 
         body_is_provider_only = bool(node.body) and all(

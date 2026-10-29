@@ -1551,6 +1551,66 @@ async def _gemini_json(prompt):
                     migration.transform_config()
             self.assertEqual(config.read_text(encoding="utf-8"), source)
 
+    def test_daily_research_accepts_exact_legacy_unconfigured_fallback_payload(self):
+        legacy = (
+            "from .ai_providers import dual_ai_research_review\n"
+            "async def run_daily_research():\n"
+            "    review = {}\n"
+            "    if settings.gemini_api_key or settings.groq_api_key:\n"
+            "        review['external_ai'] = await dual_ai_research_review(research, intelligence)\n"
+            "    else:\n"
+            "        review['external_ai'] = {'status': 'NOT_CONFIGURED', 'providers': {}, 'execution_authority': False}\n"
+            "    review['run_drift'] = await persist_run()\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "daily_research.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_daily_research()
+            result = target.read_text(encoding="utf-8")
+            ast.parse(result, filename="app/daily_research.py")
+            self.assertIn("review['run_drift'] = await persist_run()", result)
+            self.assertIn("native_research_review(native_research_input, intelligence)", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
+    def test_daily_research_refuses_dynamic_or_extended_unconfigured_fallback_payloads(self):
+        invalid_payloads = (
+            "{'status': 'NOT_CONFIGURED', 'providers': build_provider_state(), 'execution_authority': False}",
+            "{'status': 'NOT_CONFIGURED', 'providers': {'gemini': True}, 'execution_authority': False}",
+            "{'status': 'NOT_CONFIGURED', 'providers': {}, 'execution_authority': True}",
+            "{'status': 'NOT_CONFIGURED', 'providers': {}, 'execution_authority': False, 'audit': audit_fallback()}",
+            "{'status': 'NOT_CONFIGURED', 'status': 'NOT_CONFIGURED'}",
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                target = root / "app" / "daily_research.py"
+                target.parent.mkdir()
+                source = (
+                    "from .ai_providers import dual_ai_research_review\n"
+                    "async def run_daily_research():\n"
+                    "    review = {}\n"
+                    "    if settings.gemini_api_key or settings.groq_api_key:\n"
+                    "        review['external_ai'] = await dual_ai_research_review(research, intelligence)\n"
+                    "    else:\n"
+                    f"        review['external_ai'] = {payload}\n"
+                    "    review['run_drift'] = await persist_run()\n"
+                )
+                target.write_text(source, encoding="utf-8")
+                with patch.object(migration, "ROOT", root):
+                    with self.assertRaisesRegex(
+                        migration.MigrationError,
+                        "daily-research provider conditional contains unrelated or unknown logic",
+                    ):
+                        migration.transform_daily_research()
+                self.assertEqual(
+                    target.read_text(encoding="utf-8"),
+                    source,
+                    "refusing the fallback must leave the original module untouched",
+                )
+
     def test_daily_research_refuses_to_replace_early_return(self):
         legacy = (
             "from .ai_providers import dual_ai_research_review\n"
@@ -1589,6 +1649,117 @@ async def _gemini_json(prompt):
                 with self.assertRaisesRegex(migration.MigrationError, "contains unrelated or unknown logic"):
                     migration.transform_daily_research()
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_config_removes_only_exact_pure_provider_model_validator(self):
+        safe = (
+            "from pydantic import field_validator\n"
+            "class Settings:\n"
+            "    database_url: str = ''\n"
+            "    gemini_model: str = 'gemini-3.8-flash'\n"
+            "    @field_validator('gemini_model')\n"
+            "    @classmethod\n"
+            "    def _validate_gemini_model(cls, value: str) -> str:\n"
+            "        normalized = str(value or '').strip().removeprefix('models/')\n"
+            "        if normalized != 'gemini-3.8-flash':\n"
+            "            raise ValueError('Gemini model must be exactly gemini-3.8-flash; alternative Gemini IDs are not permitted.')\n"
+            "        return normalized\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(safe, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_config()
+            result = config.read_text(encoding="utf-8")
+            ast.parse(result, filename="app/config.py")
+            self.assertIn("database_url", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
+        unsafe = safe.replace(
+            "        normalized = str(value or '').strip().removeprefix('models/')\n",
+            "        record_gemini_validation()\n"
+            "        normalized = str(value or '').strip().removeprefix('models/')\n",
+        )
+        self.assertNotEqual(unsafe, safe)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(unsafe, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "provider text outside isolated Settings fields",
+                ):
+                    migration.transform_config()
+            self.assertEqual(config.read_text(encoding="utf-8"), unsafe)
+
+        unsafe_annotation = safe.replace(
+            "def _validate_gemini_model(cls, value: str) -> str:",
+            "def _validate_gemini_model(cls, value: record_config_load()) -> str:",
+        )
+        self.assertNotEqual(unsafe_annotation, safe)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(unsafe_annotation, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "provider text outside isolated Settings fields",
+                ):
+                    migration.transform_config()
+            self.assertEqual(config.read_text(encoding="utf-8"), unsafe_annotation)
+
+        rebound_decorators = (
+            (
+                "module field_validator rebind",
+                safe.replace(
+                    "from pydantic import field_validator\n",
+                    "from pydantic import field_validator\nfield_validator = custom_field_validator\n",
+                ),
+            ),
+            (
+                "class-local field_validator rebind",
+                safe.replace(
+                    "class Settings:\n",
+                    "class Settings:\n    field_validator = custom_field_validator\n",
+                ),
+            ),
+            (
+                "module classmethod rebind",
+                safe.replace(
+                    "class Settings:\n",
+                    "classmethod = custom_classmethod\nclass Settings:\n",
+                ),
+            ),
+            (
+                "class-local classmethod rebind",
+                safe.replace(
+                    "class Settings:\n",
+                    "class Settings:\n    classmethod = custom_classmethod\n",
+                ),
+            ),
+        )
+        for label, rebound_source in rebound_decorators:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                config = root / "app" / "config.py"
+                config.parent.mkdir()
+                config.write_text(rebound_source, encoding="utf-8")
+                with patch.object(migration, "ROOT", root):
+                    with self.assertRaisesRegex(
+                        migration.MigrationError,
+                        "provider text outside isolated Settings fields",
+                    ):
+                        migration.transform_config()
+                self.assertEqual(
+                    config.read_text(encoding="utf-8"),
+                    rebound_source,
+                    "custom decorator bindings must not be erased",
+                )
 
     def test_config_removes_provider_fields_but_preserves_unrelated_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1765,6 +1936,59 @@ async def _gemini_json(prompt):
                 sys.modules.pop("fixture_app", None)
                 sys.path.remove(str(root))
 
+
+    def test_strategy_migration_rejects_side_effecting_dispatcher_annotations(self):
+        safe_dispatcher = """async def _generate_with_provider(provider: str, prompt: str) -> dict:
+    if provider == "gemini":
+        return await _gemini_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.gemini_strategy_model or settings.gemini_model)
+    return await _groq_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.groq_strategy_model or settings.groq_model)
+"""
+        safe_tree = ast.parse(safe_dispatcher)
+        self.assertTrue(
+            migration._is_safe_legacy_provider_dispatcher(safe_tree.body[0], safe_tree),
+            "the reviewed built-in annotation signature must remain accepted",
+        )
+        variants = (
+            safe_dispatcher.replace("provider: str", "provider: record_annotation()"),
+            safe_dispatcher.replace("-> dict:", "-> record_return_annotation():"),
+        )
+        for source in variants:
+            with self.subTest(source=source):
+                tree = ast.parse(source)
+                self.assertFalse(
+                    migration._is_safe_legacy_provider_dispatcher(tree.body[0], tree),
+                    "discarding a dispatcher must not suppress call-expression annotation effects",
+                )
+
+        union_dispatcher = safe_dispatcher.replace(
+            "-> dict:", "-> dict[str, object] | None:"
+        )
+        union_tree = ast.parse(union_dispatcher)
+        self.assertTrue(
+            migration._is_safe_legacy_provider_dispatcher(union_tree.body[0], union_tree),
+            "inert PEP 604 unions of unshadowed builtin generic types should remain eligible",
+        )
+
+        annotation_only = "list: int\n\n" + safe_dispatcher.replace("-> dict:", "-> list[str]:")
+        annotation_only_tree = ast.parse(annotation_only)
+        self.assertTrue(
+            migration._is_safe_legacy_provider_dispatcher(annotation_only_tree.body[1], annotation_only_tree),
+            "a declaration without a value does not rebind the builtin annotation target",
+        )
+
+        shadowed_generic = (
+            "class list:\n"
+            "    def __class_getitem__(cls, item):\n"
+            "        record_annotation_hook()\n"
+            "        return object\n\n"
+            + safe_dispatcher.replace("-> dict:", "-> list[str]:")
+        )
+        shadowed_tree = ast.parse(shadowed_generic)
+        self.assertFalse(
+            migration._is_safe_legacy_provider_dispatcher(shadowed_tree.body[1], shadowed_tree),
+            "a rebound generic base may execute a custom __class_getitem__ during definition",
+        )
+
     def test_strategy_migration_accepts_recognized_two_and_three_provider_flows(self):
         legacy_two = """from .config import settings
 from .ai_providers import AIProviderError, _gemini_json, _groq_json
@@ -1892,6 +2116,51 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
             '"model": settings.gemini_strategy_model if provider_used == "gemini" else settings.groq_strategy_model,',
             '"model": settings.gemini_model if provider_used == "gemini" else settings.groq_strategy_model if provider_used == "groq" else settings.cerebras_model,',
         )
+
+        legacy_three_cerebras_priority = legacy_three.replace(
+            "    if provider == \"groq\":\n"
+            "        return await _groq_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.groq_strategy_model or settings.groq_model)\n"
+            "    return await _cerebras_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.cerebras_model)\n",
+            "    if provider == \"cerebras\":\n"
+            "        return await _cerebras_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.cerebras_model)\n"
+            "    return await _groq_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.groq_strategy_model or settings.groq_model)\n",
+        )
+        self.assertNotEqual(legacy_three_cerebras_priority, legacy_three)
+        legacy_three_cerebras_priority = _with_canonical_schema_context(legacy_three_cerebras_priority)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy_three_cerebras_priority, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                migration.transform_strategy_ai("fake-commit")
+            result = target.read_text(encoding="utf-8")
+            ast.parse(result, filename="app/strategy_ai.py")
+            self.assertNotIn("_generate_with_provider", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
+        # Removing the helper must not erase side-effecting annotation evaluation.
+        legacy_with_side_effect_annotation = legacy_three.replace(
+            "async def _generate_with_provider(provider: str, prompt: str) -> dict:",
+            "async def _generate_with_provider(provider: audit(), prompt: str) -> dict:",
+        )
+        self.assertNotEqual(legacy_with_side_effect_annotation, legacy_three)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "strategy_ai.py"
+            target.parent.mkdir()
+            target.write_text(legacy_with_side_effect_annotation, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=CANONICAL_STRATEGY
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "_generate_with_provider contains additional or unknown behavior",
+                ):
+                    migration.transform_strategy_ai("fake-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy_with_side_effect_annotation)
 
         for label, legacy in (("two-provider", legacy_two), ("three-provider", legacy_three)):
             legacy = _with_canonical_schema_context(legacy)
