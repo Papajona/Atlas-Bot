@@ -130,6 +130,20 @@ def test_groq_actionable_instructions_are_rejected_across_all_text_fields(field,
         groq_ai._validate_review(review)
 
 
+@pytest.mark.parametrize("text", ["BUY BTCUSDT NOW", "Sell ETHUSDT now", "buy btc/usdt now"])
+def test_groq_unseparated_tickers_and_mixed_case_pairs_are_rejected(text):
+    with pytest.raises(groq_ai.GroqAIError, match="actionable trading instructions"):
+        groq_ai._validate_review({**VALID_REVIEW, "research_only_summary": text})
+
+@pytest.mark.parametrize("text", [
+    "markets may enter risk-off conditions",
+    "price could close mid-range after the release",
+    "Do not buy BTC/USDT now; this is an unsafe instruction to avoid.",
+    "Never sell ETHUSDT now as a research recommendation.",
+])
+def test_groq_ordinary_and_negated_research_is_retained(text):
+    validated = groq_ai._validate_review({**VALID_REVIEW, "research_only_summary": text})
+    assert validated["research_only_summary"] == text
 def test_groq_descriptive_strategy_research_is_not_rejected_as_a_trade_instruction():
     review = dict(VALID_REVIEW)
     review["strategy_watchlist"] = ["Trend-following research on BTC/USDT volatility"]
