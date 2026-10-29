@@ -2079,6 +2079,122 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
                 self.assertNotRegex(result, migration.PROVIDER_RE)
                 ast.parse(result, filename="app/ai_providers.py")
 
+    def test_equivalent_legacy_trade_safety_validator_is_deduplicated(self):
+        legacy_validator = '''def _validate_trade_safety_payload(value: dict[str, Any]) -> dict[str, Any]:
+    """Reject semantically incomplete model output before it can participate in a safety vote."""
+    if not isinstance(value, dict):
+        raise AIProviderError("Trade-safety response must be a JSON object")
+    if type(value.get("safe")) is not bool:
+        raise AIProviderError("Trade-safety response requires a boolean safe field")
+    confidence = value.get("confidence")
+    if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence)) or not 0.0 <= float(confidence) <= 1.0):
+        raise AIProviderError("Trade-safety response requires finite confidence between 0 and 1")
+    for field in ("reasons", "data_quality_flags"):
+        items = value.get(field)
+        if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
+            raise AIProviderError(f"Trade-safety response requires {field} to be an array of strings")
+    if value["safe"] is True and not value["reasons"]:
+        raise AIProviderError("Trade-safety approval requires at least one concrete reason")
+    return value
+'''
+        canonical_path = Path(__file__).resolve().parents[1] / "app" / "ai_providers.py"
+        canonical_tree = ast.parse(canonical_path.read_text(encoding="utf-8"))
+        canonical_validator = next(
+            node for node in canonical_tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_validate_trade_safety_payload"
+        )
+        legacy_tree = ast.parse(legacy_validator)
+        legacy_node = next(node for node in legacy_tree.body if isinstance(node, ast.FunctionDef))
+        self.assertTrue(migration._safe_canonical_trade_safety_validator(
+            legacy_node, canonical_validator, legacy_validator
+        ), "equivalent payload validation must not strand otherwise safe branch migration")
+
+        # Error wording and inert annotations may vary, but extra executable behavior may not.
+        wording_variant = legacy_validator.replace(
+            "Trade-safety response must be a JSON object",
+            "Trade-safety result must be a JSON object",
+        )
+        wording_tree = ast.parse(wording_variant)
+        self.assertTrue(migration._safe_canonical_trade_safety_validator(
+            wording_tree.body[0], canonical_validator, wording_variant
+        ))
+        changed_behavior = legacy_validator.replace(
+            "    return value\n",
+            '    value["validated_by_legacy"] = True\n    return value\n',
+        )
+        changed_tree = ast.parse(changed_behavior)
+        self.assertFalse(migration._safe_canonical_trade_safety_validator(
+            changed_tree.body[0], canonical_validator, changed_behavior
+        ), "validator with additional runtime behavior must remain fail-closed")
+
+    def test_ai_provider_migration_accepts_only_equivalent_trade_safety_validator(self):
+        canonical = (Path(__file__).resolve().parents[1] / "app" / "ai_providers.py").read_text(encoding="utf-8")
+        legacy = '''import math
+class AIProviderError(RuntimeError):
+    pass
+
+async def _gemini_json(prompt):
+    return {}
+
+def _validate_trade_safety_payload(value: dict[str, Any]) -> dict[str, Any]:
+    """Reject semantically incomplete model output before it can participate in a safety vote."""
+    if not isinstance(value, dict):
+        raise AIProviderError("Trade-safety response must be a JSON object")
+    if type(value.get("safe")) is not bool:
+        raise AIProviderError("Trade-safety response requires a boolean safe field")
+    confidence = value.get("confidence")
+    if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence)) or not 0.0 <= float(confidence) <= 1.0):
+        raise AIProviderError("Trade-safety response requires finite confidence between 0 and 1")
+    for field in ("reasons", "data_quality_flags"):
+        items = value.get(field)
+        if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
+            raise AIProviderError(f"Trade-safety response requires {field} to be an array of strings")
+    if value["safe"] is True and not value["reasons"]:
+        raise AIProviderError("Trade-safety approval requires at least one concrete reason")
+    return value
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            result_tree = ast.parse(result)
+            matches = [
+                node for node in result_tree.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "_validate_trade_safety_payload"
+            ]
+            self.assertEqual(len(matches), 1)
+            self.assertNotIn("_gemini_json", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
+        altered = legacy.replace(
+            "    return value\n",
+            '    value["legacy_side_effect"] = True\n    return value\n',
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(altered, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "branch-specific definition '_validate_trade_safety_payload'",
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), altered)
+
     def test_strategy_migration_refuses_to_discard_generator_validation(self):
         legacy = (
             "from .ai_providers import _gemini_json, _groq_json\n"
