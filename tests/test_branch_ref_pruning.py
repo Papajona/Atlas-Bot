@@ -954,47 +954,39 @@ def test_pruning_push_guard_handles_large_change_list_under_pipefail(tmp_path):
         / "safe-merged-branch-pruning.yml"
     ).read_text(encoding="utf-8")
     lines = workflow.splitlines()
-    guard_start = next(
+    loop_start = next(
         index for index, line in enumerate(lines)
-        if line.strip() == "skip_pruning=false"
+        if line.strip() == "while IFS= read -r changed_path; do"
     )
-    push_if = next(
-        index for index in range(guard_start, len(lines))
-        if lines[index].strip() == 'if [[ "$EVENT_NAME" == "push" ]]; then'
+    loop_end = next(
+        index for index in range(loop_start + 1, len(lines))
+        if lines[index].strip() == 'done <<< "$changed_paths"'
     )
-    push_indent = len(lines[push_if]) - len(lines[push_if].lstrip())
-    guard_end = next(
-        index for index in range(push_if + 1, len(lines))
-        if lines[index].strip() == "fi"
-        and len(lines[index]) - len(lines[index].lstrip()) == push_indent
+    loop_indent = len(lines[loop_start]) - len(lines[loop_start].lstrip())
+    guarded_loop = "\n".join(
+        line[loop_indent:] if line.strip() else ""
+        for line in lines[loop_start:loop_end + 1]
     )
-    guard = "\n".join(line[10:] for line in lines[guard_start:guard_end + 1])
 
-    # Substitute only git diff so the actual workflow guard consumes a large,
-    # deterministic list under pipefail without requiring a repository checkout.
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_git = fake_bin / "git"
-    fake_git.write_text(
-        "#!/bin/bash\n"
-        'if [[ "$1" != "diff" ]]; then exit 2; fi\n'
-        'printf "%s\\n" ".github/workflows/propagate-native-ai-all-branches.yml"\n'
-        'for index in {1..12000}; do printf "app/generated/module_%05d.py\\n" "$index"; done\n',
-        encoding="utf-8",
+    # Execute the workflow's actual line-by-line selector against a large change
+    # list. This specifically catches grep -q's early-pipe-close/SIGPIPE behavior.
+    script = (
+        "set -euo pipefail\n"
+        "skip_pruning=false\n"
+        'changed_paths="$(printf "%s\\n" ".github/workflows/propagate-native-ai-all-branches.yml"; '
+        'for index in {1..12000}; do printf "app/generated/module_%05d.py\\n" "$index"; done)"\n'
+        + guarded_loop
+        + '\nif [[ "$skip_pruning" == true ]]; then echo "skip=true" > "$GITHUB_OUTPUT"; '
+        'else echo "skip=false" > "$GITHUB_OUTPUT"; fi\n'
     )
-    fake_git.chmod(0o755)
     output_path = tmp_path / "github-output"
-    script = "set -euo pipefail\n" + guard + "\n"
     result = subprocess.run(
         ["bash", "-o", "pipefail", "-c", script],
         capture_output=True,
         text=True,
         check=False,
         env={
-            "PATH": f"{fake_bin}:/usr/bin:/bin",
-            "EVENT_NAME": "push",
-            "BEFORE_SHA": "before",
-            "AFTER_SHA": "after",
+            "PATH": "/usr/bin:/bin",
             "GITHUB_OUTPUT": str(output_path),
         },
     )
