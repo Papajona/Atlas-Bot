@@ -1888,6 +1888,30 @@ async def _gemini_json(prompt):
                 sys.modules.pop("fixture_app", None)
                 sys.path.remove(str(root))
 
+
+    def test_strategy_migration_rejects_side_effecting_dispatcher_annotations(self):
+        safe_dispatcher = """async def _generate_with_provider(provider: str, prompt: str) -> dict:
+    if provider == "gemini":
+        return await _gemini_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.gemini_strategy_model or settings.gemini_model)
+    return await _groq_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.groq_strategy_model or settings.groq_model)
+"""
+        safe_tree = ast.parse(safe_dispatcher)
+        self.assertTrue(
+            migration._is_safe_legacy_provider_dispatcher(safe_tree.body[0], safe_tree),
+            "the reviewed built-in annotation signature must remain accepted",
+        )
+        variants = (
+            safe_dispatcher.replace("provider: str", "provider: record_annotation()"),
+            safe_dispatcher.replace("-> dict:", "-> record_return_annotation():"),
+        )
+        for source in variants:
+            with self.subTest(source=source):
+                tree = ast.parse(source)
+                self.assertFalse(
+                    migration._is_safe_legacy_provider_dispatcher(tree.body[0], tree),
+                    "discarding a dispatcher must not suppress call-expression annotation effects",
+                )
+
     def test_strategy_migration_accepts_recognized_two_and_three_provider_flows(self):
         legacy_two = """from .config import settings
 from .ai_providers import AIProviderError, _gemini_json, _groq_json
@@ -2015,30 +2039,6 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
             '"model": settings.gemini_strategy_model if provider_used == "gemini" else settings.groq_strategy_model,',
             '"model": settings.gemini_model if provider_used == "gemini" else settings.groq_strategy_model if provider_used == "groq" else settings.cerebras_model,',
         )
-
-        legacy_three_cerebras_priority = legacy_three.replace(
-            "    if provider == \"groq\":\\n"
-            "        return await _groq_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.groq_strategy_model or settings.groq_model)\\n"
-            "    return await _cerebras_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.cerebras_model)\\n",
-            "    if provider == \"cerebras\":\\n"
-            "        return await _cerebras_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.cerebras_model)\\n"
-            "    return await _groq_json(prompt, system_instruction=SYSTEM_PROMPT, model=settings.groq_strategy_model or settings.groq_model)\\n",
-        )
-        self.assertNotEqual(legacy_three_cerebras_priority, legacy_three)
-        legacy_three_cerebras_priority = _with_canonical_schema_context(legacy_three_cerebras_priority)
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            target = root / "app" / "strategy_ai.py"
-            target.parent.mkdir()
-            target.write_text(legacy_three_cerebras_priority, encoding="utf-8")
-            with patch.object(migration, "ROOT", root), patch.object(
-                migration, "canonical_text", return_value=CANONICAL_STRATEGY
-            ):
-                migration.transform_strategy_ai("fake-commit")
-            result = target.read_text(encoding="utf-8")
-            ast.parse(result, filename="app/strategy_ai.py")
-            self.assertNotIn("_generate_with_provider", result)
-            self.assertNotRegex(result, migration.PROVIDER_RE)
 
         legacy_three_cerebras_priority = legacy_three.replace(
             "    if provider == \"groq\":\n"
