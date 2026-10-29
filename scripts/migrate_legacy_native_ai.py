@@ -3068,6 +3068,77 @@ def _is_safe_legacy_cerebras_adapter(node: ast.AST) -> bool:
 
 
 
+def _is_replaceable_legacy_market_context(
+    tree: ast.Module,
+    generator: ast.AsyncFunctionDef,
+) -> ast.FunctionDef | None:
+    """Recognize an inert-signature market binder that is only called by the replaced generator.
+
+    Older branches commonly use a weaker market-context binder. Replace it with
+    canonical context logic only when it has no decorators/default expressions and
+    no caller other than the generator that is itself being replaced.
+    """
+    contexts = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+    ]
+    if len(contexts) != 1:
+        return None
+    context = contexts[0]
+    args = context.args
+    if (
+        context.decorator_list
+        or args.posonlyargs
+        or [arg.arg for arg in args.args] != ["spec"]
+        or args.vararg
+        or args.kwarg
+        or [arg.arg for arg in args.kwonlyargs] != ["asset", "symbol", "timeframe"]
+        or args.defaults
+        or len(args.kw_defaults) != 3
+        or any(not isinstance(value, ast.Constant) or value.value is not None for value in args.kw_defaults)
+    ):
+        return None
+
+    def inert_annotation(node: ast.AST | None) -> bool:
+        if node is None or isinstance(node, (ast.Name, ast.Constant)):
+            return True
+        if isinstance(node, ast.Attribute):
+            return inert_annotation(node.value)
+        if isinstance(node, ast.Subscript):
+            return inert_annotation(node.value) and inert_annotation(node.slice)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            return inert_annotation(node.left) and inert_annotation(node.right)
+        if isinstance(node, (ast.Tuple, ast.List)):
+            return all(inert_annotation(item) for item in node.elts)
+        return False
+
+    annotations = [
+        *[arg.annotation for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]],
+        context.returns,
+    ]
+    if any(not inert_annotation(annotation) for annotation in annotations):
+        return None
+
+    # This helper is removed from runtime use together with generate_strategy_draft.
+    # Reject aliases, additional callers, and dynamic lookups elsewhere in the module.
+    references = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "_apply_market_context"
+        and isinstance(node.ctx, ast.Load)
+    ]
+    if len(references) != 1 or not generator.lineno <= references[0].lineno <= generator.end_lineno:
+        return None
+    direct_calls = [
+        node for node in ast.walk(generator)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_apply_market_context"
+    ]
+    if len(direct_calls) != 1:
+        return None
+    return context
+
+
 def transform_strategy_ai(commit: str) -> None:
     path = ROOT / "app/strategy_ai.py"
     if not path.is_file():
@@ -3791,9 +3862,32 @@ def transform_strategy_ai(commit: str) -> None:
         )
 
     if not _is_compatible_strategy_schema_and_context(old_tree, new_tree):
-        raise MigrationError(
-            "strategy schema/context helpers do not satisfy the canonical Native AI draft contract; refusing to replace the hosted generator"
-        )
+        # Older branches commonly have a safe market-context helper that predates
+        # canonical timeframe normalization. Replace that helper—not its schema—
+        # with the canonical implementation, then rerun the full schema/global-binding
+        # proof before rewriting any source.
+        legacy_context = _is_replaceable_legacy_market_context(old_tree, legacy_generate)
+        canonical_contexts = [
+            node for node in new_tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+        ]
+        if legacy_context is not None and len(canonical_contexts) == 1:
+            source_lines_for_context = source.splitlines(keepends=True)
+            canonical_lines_for_context = canonical.splitlines(keepends=True)
+            canonical_context = canonical_contexts[0]
+            replacement_lines = canonical_lines_for_context[
+                canonical_context.lineno - 1:canonical_context.end_lineno
+            ]
+            source = "".join(
+                source_lines_for_context[:legacy_context.lineno - 1]
+                + replacement_lines
+                + source_lines_for_context[legacy_context.end_lineno:]
+            )
+            old_tree = ast.parse(source, filename=str(path))
+        if not _is_compatible_strategy_schema_and_context(old_tree, new_tree):
+            raise MigrationError(
+                "strategy schema/context helpers do not satisfy the canonical Native AI draft contract; refusing to replace the hosted generator"
+            )
 
     edits: list[tuple[int, int, str]] = []
     found_generate = False
