@@ -5017,10 +5017,9 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             raise MigrationError(
                 f"{path} retains provider text in a non-provider shell statement; refusing lossy deletion"
             )
-        if line.strip():
-            output.append(line)
-        elif original.strip():
-            output.append(line)
+        # Keep blank lines outside removed provider-only blocks; preserving layout is
+        # important for multiline shell/YAML literals being migrated on divergent refs.
+        output.append(line)
 
     if skip_provider_block:
         raise MigrationError(f"{path} has an unterminated provider-specific shell block")
