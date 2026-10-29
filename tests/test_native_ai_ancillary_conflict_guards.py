@@ -236,6 +236,20 @@ class Settings(BaseModel):
             ):
                 migration.transform_config()
 
+    def test_daily_research_persistence_projection_is_updated_on_idempotent_migration(self):
+        source = 'review_json=json.dumps({k: review.get(k) for k in ("ai_brain_mode", "paper_candidates", "native_ai_review")})\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            path = root / "app" / "daily_research.py"
+            path.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_daily_research()
+            migrated = path.read_text(encoding="utf-8")
+        self.assertIn('"groq_research_review"', migrated)
+        self.assertIn('"native_ai_review", "groq_research_review"', migrated)
+
+
     def test_config_groq_fields_are_inserted_after_settings_body_when_class_has_no_methods(self):
         source = """from pydantic import BaseModel
 
