@@ -85,7 +85,7 @@ class AIStrategySpec(BaseModel):
 
 
 def _apply_market_context(spec: AIStrategySpec, *, asset: str | None = None, symbol: str | None = None, timeframe: str | None = None) -> AIStrategySpec:
-    """Bind an AI draft to the market selected by the user before persistence/backtest."""
+    'Bind an AI draft to the market selected by the user before persistence/backtest.'
     warnings = list(spec.validation_warnings)
     data = spec.model_dump()
     if asset and spec.asset != asset:
