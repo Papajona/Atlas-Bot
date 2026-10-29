@@ -5,6 +5,13 @@ on:
     branches:
       - main
   workflow_dispatch:
+  workflow_run:
+    workflows:
+      - Propagate Atlas Native AI across branches
+    types:
+      - completed
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -16,6 +23,10 @@ jobs:
       github.ref == 'refs/heads/main' &&
       (
         github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.head_branch == 'main'
+        ) ||
         (
           github.event_name == 'push' &&
           !startsWith(github.event.head_commit.message, '[atlas-branch-prune-once-20261020]') &&
