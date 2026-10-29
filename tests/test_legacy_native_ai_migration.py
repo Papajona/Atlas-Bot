@@ -3378,6 +3378,12 @@ for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-ope
         self.assertIn('export AI_SECRET_ARGS="${AI_SECRET_ARGS}"', cleaned)
         self.assertNotIn("GEMINI_API_KEY", cleaned)
 
+    def test_shell_scrub_separates_shared_secret_from_retained_entries(self):
+        source = 'export AI_SECRET_ARGS="OTHER_KEY=atlas-other:latest,${AI_SECRET_ARGS},GEMINI_API_KEY=atlas-gemini-api-key:1"\n'
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertIn('OTHER_KEY=atlas-other:latest,${AI_SECRET_ARGS}', cleaned)
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+
     def test_shell_scrub_handles_equals_style_cloud_run_flags(self):
         source = (
             'gcloud run deploy atlas --set-env-vars="ENVIRONMENT=paper,GEMINI_MODEL=gemini-3.5-flash,GROQ_MODEL=openai/gpt-oss-20b" '
