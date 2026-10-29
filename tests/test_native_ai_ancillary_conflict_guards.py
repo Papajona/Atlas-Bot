@@ -147,6 +147,16 @@ if __name__ == "__main__":
     unittest.main()
 
 
+    def test_ancillary_env_scrub_removes_retired_groq_strategy_knob_only(self):
+        source = """GROQ_STRATEGY_MODEL=legacy/strategy-model
+GROQ_MODEL=openai/gpt-oss-20b
+GROQ_RESEARCH_REVIEW_ENABLED=true
+"""
+        cleaned = migration.scrub_ancillary_text(".env.example", source)
+        self.assertNotIn("GROQ_STRATEGY_MODEL", cleaned)
+        self.assertIn("GROQ_MODEL=openai/gpt-oss-20b", cleaned)
+        self.assertIn("GROQ_RESEARCH_REVIEW_ENABLED=true", cleaned)
+
     def test_retired_groq_strategy_deployment_variable_is_removed_but_research_settings_survive(self):
         shell = """#!/usr/bin/env bash
 GROQ_STRATEGY_MODEL="legacy/strategy-model"
