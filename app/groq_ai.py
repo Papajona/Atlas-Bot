@@ -47,29 +47,29 @@ def _extract_json_object(text: Any) -> dict[str, Any]:
 _ACTIONABLE_TRADING_PATTERNS = (
     # Keep action verbs case-insensitive but symbol matching case-sensitive for
     # unseparated tickers. This catches BUY BTCUSDT without mistaking ordinary
-    # lowercase prose such as 'enter risk-off conditions' for a trade command.
+    # lowercase prose such as "enter risk-off conditions" for a trade command.
     re.compile(
-        r"(?i:\\b(?:buy|sell|go long|go short|enter|exit|open|close))\\s+"
-        r"(?:\\d+(?:\\.\\d+)?\\s+)?"
+        r"(?i:\b(?:buy|sell|go long|go short|enter|exit|open|close))\s+"
+        r"(?:\d+(?:\.\d+)?\s+)?"
         r"(?:[A-Za-z0-9]{2,}(?:[/_][A-Za-z0-9]{2,}){1,2}|"
-        r"[A-Z]{3,}[A-Z0-9]*|[A-Za-z][A-Za-z0-9]*\\d[A-Za-z0-9]*)"
-        r"(?:\\s+(?i:now|immediately|at market|market price|at)\\b)?"
+        r"[A-Z]{3,}[A-Z0-9]*|[A-Za-z][A-Za-z0-9]*\d[A-Za-z0-9]*)"
+        r"(?:\s+(?i:now|immediately|at market|market price|at)\b)?"
     ),
     re.compile(
-        r"(?i:\\b(?:place|submit|execute)\\s+(?:a\\s+)?"
-        r"(?:(?:buy|sell)\\s+)?order\\b)"
+        r"(?i:\b(?:place|submit|execute)\s+(?:a\s+)?"
+        r"(?:(?:buy|sell)\s+)?order\b)"
     ),
     re.compile(
-        r"(?i:\\b(?:entry|stop[- ]loss|take[- ]profit|limit|trigger)"
-        r"(?:\\s+price)?\\s*(?:=|:|at)\\s*[$€£]?\\d+(?:[.,]\\d+)?)"
+        r"(?i:\b(?:entry|stop[- ]loss|take[- ]profit|limit|trigger)"
+        r"(?:\s+price)?\s*(?:=|:|at)\s*[$€£]?\d+(?:[.,]\d+)?)"
     ),
-    re.compile(r"(?i:\\b(?:buy|sell)\\s+(?:now|immediately|at market)\\b)"),
+    re.compile(r"(?i:\b(?:buy|sell)\s+(?:now|immediately|at market)\b)"),
 )
 
 _NEGATED_ACTION_PREFIX = re.compile(
-    r"(?i)(?:\\bdo\\s+not|\\bdon['’]?t|\\bdont|\\bnever|"
-    r"\\bshould\\s+not|\\bmust\\s+not|\\bnot\\s+to|\\bavoid)"
-    r"(?:\\s+(?:recommend|instruct|suggest|tell)(?:\\s+to)?)?\\s*$"
+    r"(?i)(?:\bdo\s+not|\bdon['’]?t|\bdont|\bnever|"
+    r"\bshould\s+not|\bmust\s+not|\bnot\s+to|\bavoid)"
+    r"(?:\s+(?:recommend|instruct|suggest|tell)(?:\s+to)?)?\s*$"
 )
 
 
