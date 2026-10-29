@@ -43,6 +43,32 @@ def _extract_json_object(text: Any) -> dict[str, Any]:
     return value
 
 
+_ACTIONABLE_TRADING_PATTERNS = (
+    re.compile(
+        r"(?i)\\b(?:buy|sell|go long|go short|enter|exit|open|close)\\s+"
+        r"(?:\\d+(?:\\.\\d+)?\\s+)?"
+        r"(?:[A-Z0-9]{2,}(?:[/_-][A-Z0-9]{2,}){1,2})"
+        r"(?:\\s+(?:now|immediately|at market|market price|at)\\b)?"
+    ),
+    re.compile(
+        r"(?i)\\b(?:place|submit|execute)\\s+(?:a\\s+)?"
+        r"(?:(?:buy|sell)\\s+)?order\\b"
+    ),
+    re.compile(
+        r"(?i)\\b(?:entry|stop[- ]loss|take[- ]profit|limit|trigger)"
+        r"(?:\\s+price)?\\s*(?:=|:|at)\\s*[$€£]?\\d+(?:[.,]\\d+)?"
+    ),
+    re.compile(
+        r"(?i)\\b(?:buy|sell)\\s+(?:now|immediately|at market)\\b"
+    ),
+)
+
+
+def _contains_actionable_trading_instruction(text: str) -> bool:
+    """Reject explicit trade commands/order parameters in research-only advisory text."""
+    return any(pattern.search(text) for pattern in _ACTIONABLE_TRADING_PATTERNS)
+
+
 def _validate_review(value: dict[str, Any]) -> dict[str, Any]:
     required_text = ("regime_assessment", "research_only_summary")
     required_arrays = ("key_observations", "data_quality_flags", "strategy_watchlist")
@@ -52,7 +78,10 @@ def _validate_review(value: dict[str, Any]) -> dict[str, Any]:
         item = value.get(key)
         if not isinstance(item, str) or not item.strip() or len(item) > 4000:
             raise GroqAIError(f"Groq review field {key!r} must be non-empty text of at most 4000 characters")
-        result[key] = item.strip()
+        cleaned = item.strip()
+        if _contains_actionable_trading_instruction(cleaned):
+            raise GroqAIError(f"Groq review field {key!r} contains actionable trading instructions")
+        result[key] = cleaned
 
     for key in required_arrays:
         items = value.get(key)
@@ -62,7 +91,10 @@ def _validate_review(value: dict[str, Any]) -> dict[str, Any]:
             or any(not isinstance(item, str) or len(item) > 1000 for item in items)
         ):
             raise GroqAIError(f"Groq review field {key!r} must be an array of at most 20 text values")
-        result[key] = [item.strip() for item in items if item.strip()]
+        cleaned_items = [item.strip() for item in items if item.strip()]
+        if any(_contains_actionable_trading_instruction(item) for item in cleaned_items):
+            raise GroqAIError(f"Groq review field {key!r} contains actionable trading instructions")
+        result[key] = cleaned_items
 
     confidence = value.get("confidence")
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
