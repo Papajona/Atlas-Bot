@@ -91,7 +91,7 @@ NATIVE_PATHS = (
 )
 ANCILLARY_PATHS = tuple(p for p in NATIVE_PATHS if p not in {
     "app/ai_providers.py", "app/config.py", "app/daily_research.py",
-    "app/main.py", "app/native_ai.py", "app/groq_ai.py", "app/strategy_ai.py", "scripts/check_ai_models.py",
+    "app/main.py", "app/native_ai.py", "app/strategy_ai.py", "scripts/check_ai_models.py",
     "scripts/check_native_ai.py",
 })
 
@@ -4853,15 +4853,15 @@ def _workflow_has_active_provider_wiring(text: str) -> bool:
                 # Environment names can intentionally select protected approval gates;
                 # labels/descriptions are not executable provider configuration.
                 continue
-            if PROVIDER_SETTING_NAME_RE.fullmatch(key) or PROVIDER_FIELD_RE.search(key):
+            if PROVIDER_SETTING_NAME_RE.fullmatch(key) or RETIRED_PROVIDER_FIELD_RE.search(key):
                 return True
             # Remove YAML comments before considering scalar values; quoted values
             # remain conservatively checked when the provider token is in the value.
             value = value.split(" #", 1)[0]
-            if PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value):
+            if RETIRED_PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value):
                 return True
             continue
-        if PROVIDER_RE.search(line) or ATLAS_PROVIDER_SECRET_RE.search(line):
+        if RETIRED_PROVIDER_RE.search(line) or ATLAS_PROVIDER_SECRET_RE.search(line):
             return True
     return False
 
@@ -4921,7 +4921,7 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                     kept.extend(lines[index:end])
                 index = end
                 continue
-            if PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value):
+            if RETIRED_PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value):
                 cleaned = scrub_shell_deployment("deploy/cloud-run-deploy.sh", value)
                 if not cleaned.strip():
                     raise MigrationError(
@@ -4936,8 +4936,12 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
         if key_match:
             _indent, key, value, _newline = key_match.groups()
             if key.lower() == "environment":
-                # Keep the exact environment name; it may be a protected GitHub
-                # environment such as production-gemini with required approvers.
+                # Never rename an approval-gated environment. A retired-provider
+                # name requires manual reconciliation before this branch can migrate.
+                if value and RETIRED_PROVIDER_RE.search(value):
+                    raise MigrationError(
+                        f"{path} references a retired provider in its deployment environment; preserving the approval gate and refusing migration"
+                    )
                 kept.append(line)
                 index += 1
                 continue
@@ -4945,10 +4949,26 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                 kept.append(line)
                 index += 1
                 continue
-            if PROVIDER_SETTING_NAME_RE.fullmatch(key) or PROVIDER_FIELD_RE.search(key):
+            if PROVIDER_SETTING_NAME_RE.fullmatch(key) or RETIRED_PROVIDER_FIELD_RE.search(key):
+                # Removing a parent key and retaining its indented children can make
+                # GitHub Actions YAML invalid. Only scalar provider settings are removed.
+                key_indent = len(_indent)
+                has_nested_children = False
+                for child in lines[index + 1:]:
+                    if not child.strip() or child.lstrip().startswith("#"):
+                        continue
+                    child_indent = len(child) - len(child.lstrip())
+                    if child_indent <= key_indent:
+                        break
+                    has_nested_children = True
+                    break
+                if has_nested_children:
+                    raise MigrationError(
+                        f"{path} has provider-named YAML mapping {key!r} with children; refusing to invalidate workflow structure"
+                    )
                 index += 1
                 continue
-            if value and (PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value)):
+            if value and (RETIRED_PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value)):
                 # Do not run generic token substitution on a YAML value: it can alter
                 # an environment, URL, shell command, or approval/resource identifier.
                 raise MigrationError(
@@ -4961,7 +4981,7 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
         # Unstructured provider-bearing lines are not safe to edit generically.
         raise MigrationError(
             f"{path} has provider wiring outside a recognized YAML field; refusing unsafe text substitution: {stripped[:100]}"
-        ) if PROVIDER_RE.search(line) or ATLAS_PROVIDER_SECRET_RE.search(line) else None
+        ) if RETIRED_PROVIDER_RE.search(line) or ATLAS_PROVIDER_SECRET_RE.search(line) else None
         kept.append(line)
         index += 1
 
@@ -5119,7 +5139,7 @@ def _metadata_has_active_provider_wiring(text: str) -> bool:
                 return True
             for key, item in value.items():
                 key_text = str(key)
-                if PROVIDER_FIELD_RE.search(key_text):
+                if RETIRED_PROVIDER_FIELD_RE.search(key_text):
                     return True
                 if visit(item, key_text):
                     return True
@@ -5136,7 +5156,7 @@ def _metadata_has_active_provider_wiring(text: str) -> bool:
                 or HOST_RE.search(value)
             ):
                 return True
-            if re.search(r"(?i)(?:provider|gateway|model|api[_ -]?key|secret|endpoint)", key_context) and PROVIDER_RE.search(value):
+            if re.search(r"(?i)(?:provider|gateway|model|api[_ -]?key|secret|endpoint)", key_context) and RETIRED_PROVIDER_RE.search(value):
                 return True
         return False
 
@@ -5148,10 +5168,13 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
     # independent pins: changing one must not widen the other per-path diff.
     transform_ai_providers(canonical_commit)
     write_text("scripts/check_ai_models.py", canonical_text(canonical_commit, "scripts/check_ai_models.py"))
-    for path in ("app/native_ai.py", "scripts/check_native_ai.py"):
+    for path in ("app/native_ai.py", "scripts/check_native_ai.py", "app/groq_ai.py"):
         target = ROOT / path
         if not target.exists():
             write_text(path, canonical_text(canonical_commit, path))
+        elif path == "app/groq_ai.py":
+            if target.read_text(encoding="utf-8") != canonical_text(canonical_commit, path):
+                raise MigrationError("app/groq_ai.py differs from the reviewed Groq-only adapter; preserving the branch")
         elif PROVIDER_RE.search(target.read_text(encoding="utf-8")):
             raise MigrationError(f"{path} has a divergent provider-bearing implementation; refusing overwrite")
 
