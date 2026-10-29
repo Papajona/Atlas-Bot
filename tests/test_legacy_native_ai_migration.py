@@ -4690,20 +4690,21 @@ async def groq_research_review(research, intelligence):
             migration.scrub_ancillary_text("deploy/DEPLOY_WORKFLOW.md", source)
 
 
+
     def test_config_does_not_remove_validator_when_module_rebinds_str(self):
         unsafe = (
-            "from pydantic import field_validator\\n"
-            "str = audited_stringifier\\n"
-            "class Settings:\\n"
-            "    database_url: str = ''\\n"
-            "    gemini_model: str = 'gemini-3.8-flash'\\n"
-            "    @field_validator('gemini_model')\\n"
-            "    @classmethod\\n"
-            "    def _validate_gemini_model(cls, value: str) -> str:\\n"
-            "        normalized = str(value or '').strip().removeprefix('models/')\\n"
-            "        if normalized != 'gemini-3.8-flash':\\n"
-            "            raise ValueError('Gemini model must be exactly gemini-3.8-flash; alternative Gemini IDs are not permitted.')\\n"
-            "        return normalized\\n"
+            "from pydantic import field_validator\n"
+            "str = audited_stringifier\n"
+            "class Settings:\n"
+            "    database_url: str = ''\n"
+            "    gemini_model: str = 'gemini-3.8-flash'\n"
+            "    @field_validator('gemini_model')\n"
+            "    @classmethod\n"
+            "    def _validate_gemini_model(cls, value: str) -> str:\n"
+            "        normalized = str(value or '').strip().removeprefix('models/')\n"
+            "        if normalized != 'gemini-3.8-flash':\n"
+            "            raise ValueError('Gemini model must be exactly gemini-3.8-flash; alternative Gemini IDs are not permitted.')\n"
+            "        return normalized\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -4732,13 +4733,13 @@ def retained_helper():
             target = root / "app" / "ai_providers.py"
             target.parent.mkdir()
             (root / "shared.py").write_text(
-                "def branch_helper():\\n    return True\\n", encoding="utf-8"
+                "def branch_helper():\n    return True\n", encoding="utf-8"
             )
             target.write_text(legacy, encoding="utf-8")
             with patch.object(migration, "ROOT", root), patch.object(
                 migration,
                 "canonical_text",
-                return_value="from .native_ai import AIProviderError, NativeAIError\\n",
+                return_value="from .native_ai import AIProviderError, NativeAIError\n",
             ):
                 with self.assertRaisesRegex(
                     migration.MigrationError,
@@ -4762,14 +4763,14 @@ def retained_helper():
             helper_module = root / "app" / "branch_helpers.py"
             target.parent.mkdir()
             helper_module.write_text(
-                'run = exec\\nrun("def branch_helper():\\\\n    return True")\\n',
+                'run = exec\nrun("def branch_helper():\\n    return True")\n',
                 encoding="utf-8",
             )
             target.write_text(legacy, encoding="utf-8")
             with patch.object(migration, "ROOT", root), patch.object(
                 migration,
                 "canonical_text",
-                return_value="from .native_ai import AIProviderError, NativeAIError\\n",
+                return_value="from .native_ai import AIProviderError, NativeAIError\n",
             ):
                 with self.assertRaisesRegex(
                     migration.MigrationError,
