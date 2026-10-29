@@ -4716,9 +4716,18 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         r"(?i)^\s*(?:(?:export\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|"
         r"GROQ_SECRET_ARG|GROQ_SECRET_ARGS|GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|"
         r"GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\s*=|"
-        r"(?:echo|printf)\b.*\b(?:groq|warning|not configured|optional|disabled)\b|"
         r"(?:if|then|else|fi)\b|#|$)"
     )
+
+    def safe_groq_statement(statement: str) -> bool:
+        if re.match(r"^\s*(?:echo|printf)\b", statement, re.I):
+            # Printing a fixed validation/warning message is safe; reject shell
+            # chaining, redirection, pipelines, or command substitution.
+            return not re.search(r"&&|\|\||[;|<>]|\$\(", statement)
+        if re.match(r"^\s*exit\s+[0-9]+\s*(?:#.*)?$", statement, re.I):
+            return True
+        return bool(groq_allowed.match(statement))
+
     block_start = 0
     while block_start < len(source_lines):
         source_line = source_lines[block_start]
@@ -4726,7 +4735,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             inline = re.match(r"^\s*if\b.*?\bthen\s*(.*?);\s*fi\s*$", source_line, re.I)
             if inline:
                 inline_commands = [chunk.strip() for chunk in inline.group(1).split(";") if chunk.strip()]
-                if any(not groq_allowed.match(command) for command in inline_commands):
+                if any(not safe_groq_statement(command) for command in inline_commands):
                     raise MigrationError(
                         f"{path} has a mixed provider-conditioned shell block; refusing unrelated inline command"
                     )
@@ -4745,7 +4754,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             for block_line in source_lines[block_start + 1:end]:
                 if not block_line.strip() or block_line.lstrip().startswith("#"):
                     continue
-                if not groq_allowed.match(block_line):
+                if not safe_groq_statement(block_line):
                     raise MigrationError(
                         f"{path} has a mixed provider-conditioned shell block; refusing to discard unrelated statement: {block_line.strip()[:100]}"
                     )
