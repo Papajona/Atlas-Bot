@@ -4604,9 +4604,19 @@ def _ensure_groq_review_persisted(source: str, filename: str) -> str:
             offset = sum(len(line) for line in source_lines[:projection.end_lineno - 1]) + column
             if offset < 1 or source[offset - 1:offset] != "}":
                 raise MigrationError(f"{filename} has an unexpected ResearchRun.review_json mapping")
+            last_value = projection.values[-1] if projection.values else None
+            trailing_segment = ""
+            if last_value is not None:
+                end_line = source_lines[last_value.end_lineno - 1]
+                end_column = len(
+                    end_line.encode("utf-8")[:last_value.end_col_offset].decode("utf-8")
+                )
+                last_offset = sum(len(line) for line in source_lines[:last_value.end_lineno - 1]) + end_column
+                trailing_segment = source[last_offset:offset - 1]
+            trailing_segment = re.sub(r"#[^\\n]*", "", trailing_segment)
             addition = (
                 '"groq_research_review": review.get("groq_research_review")'
-                if source[:offset - 1].rstrip().endswith(",")
+                if "," in trailing_segment
                 else ', "groq_research_review": review.get("groq_research_review")'
             )
             insertions.append((offset - 1, addition))
@@ -4647,7 +4657,18 @@ def _ensure_groq_review_persisted(source: str, filename: str) -> str:
         offset = sum(len(line) for line in source_lines[:field_tuple.end_lineno - 1]) + column
         if offset < 1 or source[offset - 1:offset] != ")":
             raise MigrationError(f"{filename} has an unexpected ResearchRun.review_json projection")
-        insertions.append((offset - 1, ', "groq_research_review"'))
+        last_element = field_tuple.elts[-1] if field_tuple.elts else None
+        trailing_segment = ""
+        if last_element is not None:
+            end_line = source_lines[last_element.end_lineno - 1]
+            end_column = len(
+                end_line.encode("utf-8")[:last_element.end_col_offset].decode("utf-8")
+            )
+            last_offset = sum(len(line) for line in source_lines[:last_element.end_lineno - 1]) + end_column
+            trailing_segment = source[last_offset:offset - 1]
+        trailing_segment = re.sub(r"#[^\\n]*", "", trailing_segment)
+        addition = '"groq_research_review"' if "," in trailing_segment else ', "groq_research_review"'
+        insertions.append((offset - 1, addition))
 
     if complete_projection and not projection_seen:
         return source
@@ -5087,6 +5108,14 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 continue
             if RETIRED_PROVIDER_RE.search(key):
                 raise MigrationError(f"{path} has an unrecognized provider key in a deployment list: {key}")
+            if preserve_groq_tokens and "${AI_SECRET_ARGS}" in entry:
+                # Some legacy deploy scripts concatenate the expansion directly to
+                # the preceding Secret Manager reference. Insert the delimiter only
+                # when the normalized shared list is non-empty.
+                entry = entry.replace(
+                    "${AI_SECRET_ARGS}",
+                    "${AI_SECRET_ARGS:+,${AI_SECRET_ARGS}}",
+                )
             retained.append(entry)
         return prefix + delimiter.join(retained)
 
