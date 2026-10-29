@@ -2437,6 +2437,30 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST, module_tree: ast.Module |
             or args.vararg or args.kwarg or args.kwonlyargs or args.defaults):
         return False
 
+    # Removing this helper also removes annotation evaluation at module import.
+    # Accept only inert built-in names and literal annotations; reject calls,
+    # attribute lookups, subscripts, and other expressions with hidden behavior.
+    inert_annotation_names = {
+        "str", "dict", "int", "float", "bool", "list", "tuple",
+        "set", "frozenset", "bytes", "object", "type",
+    }
+
+    def is_inert_dispatcher_annotation(annotation: ast.AST | None) -> bool:
+        if annotation is None:
+            return True
+        if isinstance(annotation, ast.Name):
+            return annotation.id in inert_annotation_names
+        if isinstance(annotation, ast.Constant):
+            return annotation.value is None or isinstance(annotation.value, str)
+        return False
+
+    if (
+        any(not is_inert_dispatcher_annotation(argument.annotation)
+            for argument in [*args.posonlyargs, *args.args, *args.kwonlyargs])
+        or not is_inert_dispatcher_annotation(node.returns)
+    ):
+        return False
+
     def is_name(value: ast.AST | None, expected: str) -> bool:
         return isinstance(value, ast.Name) and value.id == expected
 
