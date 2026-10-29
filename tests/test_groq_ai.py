@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+
+import pytest
+
 from unittest.mock import patch
 
 
@@ -108,6 +111,32 @@ def test_groq_invalid_review_fails_closed_to_advisory_error():
     assert result["provider"] == "groq"
     assert result["error"] == "GroqAIError"
     assert result["execution_authority"] is False
+
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("regime_assessment", "BUY BTC/USDT NOW"),
+        ("research_only_summary", "Place an order to sell ETH/USDT at market"),
+        ("key_observations", ["Trend is positive.", "Stop-loss at 64000"]),
+        ("data_quality_flags", ["Take profit: 72000"]),
+        ("strategy_watchlist", ["execute buy order"]),
+    ],
+)
+def test_groq_actionable_instructions_are_rejected_across_all_text_fields(field, value):
+    review = dict(VALID_REVIEW)
+    review[field] = value
+    with pytest.raises(groq_ai.GroqAIError, match="actionable trading instructions"):
+        groq_ai._validate_review(review)
+
+
+def test_groq_descriptive_strategy_research_is_not_rejected_as_a_trade_instruction():
+    review = dict(VALID_REVIEW)
+    review["strategy_watchlist"] = ["Trend-following research on BTC/USDT volatility"]
+    assert groq_ai._validate_review(review)["strategy_watchlist"] == [
+        "Trend-following research on BTC/USDT volatility"
+    ]
 
 
 
