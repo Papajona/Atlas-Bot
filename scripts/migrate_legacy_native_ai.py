@@ -5046,7 +5046,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         return prefix + delimiter.join(retained)
 
     def scrub_cloud_run_flag(line: str, flag: str, *, preserve_groq_tokens: bool = False) -> str:
-        match = re.search(r"(" + re.escape(flag) + r"(?:\s*=\s*|\s+))(['"])(.*?)\2", line)
+        match = re.search(r"(" + re.escape(flag) + r"(?:\s*=\s*|\s+))" + r"""(['"])(.*?)\2""", line)
         if not match:
             return line
         cleaned = scrub_key_value_list(match.group(3), preserve_groq_tokens=preserve_groq_tokens)
