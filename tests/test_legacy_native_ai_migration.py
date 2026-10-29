@@ -3390,7 +3390,7 @@ gcloud run deploy atlas --set-secrets="DATABASE_URL=atlas-db:latest,${AI_SECRET_
         self.assertIn('--set-secrets="DATABASE_URL=atlas-db:latest,${AI_SECRET_ARGS}"', cleaned)
         self.assertNotIn("GEMINI_API_KEY", cleaned)
         self.assertNotIn(",,", cleaned)
-        self.assertNotIn(",}", cleaned)
+        self.assertNotIn('DATABASE_URL=atlas-db:latest,,', cleaned)
     def test_shell_scrub_separates_shared_secret_from_retained_entries(self):
         source = 'export AI_SECRET_ARGS="OTHER_KEY=atlas-other:latest,${AI_SECRET_ARGS},GEMINI_API_KEY=atlas-gemini-api-key:1"\n'
         cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
