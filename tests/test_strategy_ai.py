@@ -153,3 +153,32 @@ def test_selected_market_timeframe_constrains_multitimeframe_strategy_conditions
         for warning in spec["validation_warnings"]
     )
 
+def test_active_app_and_deployment_surface_has_no_gemini_provider_references():
+    """Keep the retired provider out of runtime, deployment and release sources."""
+    source_suffixes = {
+        ".py", ".kt", ".kts", ".js", ".mjs", ".cjs", ".html", ".css",
+        ".json", ".yml", ".yaml", ".toml", ".properties", ".xml", ".pro",
+        ".sh", ".sql", ".env", ".conf", ".txt",
+    }
+    roots = [ROOT / "app", ROOT / "deploy"]
+    paths = {
+        path
+        for root in roots
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() in source_suffixes
+    }
+    paths.update(
+        ROOT / path
+        for path in (
+            ".env.example",
+            "metadata.json",
+            ".github/workflows/production-deploy.yml",
+            ".github/workflows/production-verification.yml",
+            "scripts/check_ai_models.py",
+            "scripts/check_native_ai.py",
+        )
+    )
+    for path in sorted(paths):
+        assert "gemini" not in path.read_text(encoding="utf-8").casefold(), (
+            f"Retired Gemini provider reference remains in active source: {path.relative_to(ROOT)}"
+        )
