@@ -4574,6 +4574,14 @@ printf "Optional Gemini review is not configured"
         with self.assertRaises(migration.MigrationError):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
 
+    def test_shell_scrub_refuses_background_command_in_groq_guard(self):
+        source = '''if [[ -n "$GROQ_API_KEY" ]]; then
+  echo "Groq review is optional" & gcloud run deploy atlas
+fi
+'''
+        with self.assertRaisesRegex(migration.MigrationError, "mixed provider-conditioned shell block"):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+
     def test_markdown_provider_history_is_scrubbed_as_prose_not_shell(self):
         source = (
             "| Previous deployment integration | Gemini strategy secrets were injected "
