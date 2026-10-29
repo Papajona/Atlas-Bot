@@ -224,6 +224,7 @@ def test_groq_research_result_is_validated_and_normalized_at_consumer_boundary()
         "provider": "groq",
         "model": " review-model ",
         "execution_authority": False,
+        "input_truncated": True,
         "untrusted_extra_field": "must not be stored",
         "review": {
             "regime_assessment": "Volatility is elevated in the supplied sample.",
@@ -240,6 +241,19 @@ def test_groq_research_result_is_validated_and_normalized_at_consumer_boundary()
     assert "untrusted_extra_field" not in validated
     assert validated["review"]["confidence"] == 0.7
     assert validated["model"] == "review-model"
+    assert validated["input_truncated"] is True
+
+
+def test_groq_research_result_rejects_non_boolean_input_truncation_flag():
+    import app.daily_research as dr
+
+    with pytest.raises(ValueError, match="input_truncated flag must be boolean"):
+        dr._validate_groq_research_result({
+            "status": "OK",
+            "provider": "groq",
+            "execution_authority": False,
+            "input_truncated": "true",
+        })
 
 
 def test_groq_research_result_rejects_actionable_instruction_at_consumer_boundary():
