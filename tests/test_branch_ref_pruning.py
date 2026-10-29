@@ -679,3 +679,67 @@ def test_lease_rejection_preserves_branch_updated_after_proof(tmp_path, monkeypa
     assert "lease was rejected" in reason
     remote_listing = _git(advancer, "ls-remote", "origin", f"refs/heads/{branch_name}")
     assert remote_listing.split()[0] == advanced_sha
+
+
+def test_native_ai_branch_retirement_requires_exact_sha_and_migration_only_paths(monkeypatch):
+    branch_name = "fix/native-ai-propagation-error-alias-20261027"
+    expected_sha = "a7f35abfe8d3a73af329c5ae34320afe5f0def12"
+    migration_paths = sorted(pruning._NATIVE_AI_MIGRATION_ARTIFACT_PATHS)
+    monkeypatch.setattr(
+        pruning, "_main_has_verified_native_ai_migration", lambda _sha: True
+    )
+
+    assert pruning._is_explicitly_superseded_native_ai_migration_ref(
+        branch_name, expected_sha, "verified-main-sha", migration_paths
+    )
+    assert not pruning._is_explicitly_superseded_native_ai_migration_ref(
+        branch_name, "changed-branch-sha", "verified-main-sha", migration_paths
+    )
+    assert not pruning._is_explicitly_superseded_native_ai_migration_ref(
+        branch_name, expected_sha, "verified-main-sha", migration_paths + ["app/main.py"]
+    )
+    assert not pruning._is_explicitly_superseded_native_ai_migration_ref(
+        "unlisted-branch", expected_sha, "verified-main-sha", migration_paths
+    )
+
+
+def test_native_ai_branch_retirement_requires_verified_main_migration_contract(monkeypatch):
+    sources = {
+        "scripts/migrate_legacy_native_ai.py": (
+            "def _is_replaceable_legacy_market_context(): pass\n"
+            "def _safe_canonical_trade_safety_validator(): pass\n"
+        ),
+        "tests/test_legacy_native_ai_migration.py": (
+            "test_strategy_migration_accepts_recognized_two_and_three_provider_flows\n"
+            "test_equivalent_legacy_trade_safety_validator_is_deduplicated\n"
+            "test_ai_provider_migration_accepts_only_equivalent_trade_safety_validator\n"
+        ),
+    }
+    monkeypatch.setattr(
+        pruning, "_git_file_text_at_commit", lambda _sha, path: sources[path]
+    )
+    assert pruning._main_has_verified_native_ai_migration("verified-main-sha")
+    sources["tests/test_legacy_native_ai_migration.py"] = (
+        "test_strategy_migration_accepts_recognized_two_and_three_provider_flows\n"
+    )
+    assert not pruning._main_has_verified_native_ai_migration("unverified-main-sha")
+
+
+def test_native_ai_retirement_keeps_branches_with_open_prs(monkeypatch):
+    branch_name = "fix/native-ai-propagation-error-alias-20261027"
+    branch_sha = "a7f35abfe8d3a73af329c5ae34320afe5f0def12"
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: False)
+    monkeypatch.setattr(
+        pruning, "_branch_delta_mismatched_paths",
+        lambda *_args: sorted(pruning._NATIVE_AI_MIGRATION_ARTIFACT_PATHS),
+    )
+    monkeypatch.setattr(
+        pruning, "_main_has_verified_native_ai_migration", lambda _sha: True
+    )
+
+    safe, reason, paths = pruning._resolve_branch_integration(
+        branch_name, branch_sha, "verified-main-sha", {branch_name}, []
+    )
+    assert safe is False
+    assert reason == "branch has an open pull request"
+    assert paths == []
