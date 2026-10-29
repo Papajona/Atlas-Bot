@@ -136,7 +136,7 @@ def test_metadata_secret_refs_are_checked_even_when_source_grep_has_no_matches()
     helper = MIGRATION.read_text(encoding="utf-8")
     assert 'if (( rc == 1 )); then' in workflow
     assert 'matches=""' in workflow
-    assert 'helper._metadata_has_active_provider_wiring(Path("metadata.json").read_text(encoding="utf-8"))' in workflow
+    assert 'metadata_path.is_file() and helper._metadata_has_active_provider_wiring(metadata_path.read_text(encoding="utf-8"))' in workflow
     assert 'helper_path = Path(os.environ["MIGRATION_HELPER"])' in workflow
     assert "ATLAS_PROVIDER_SECRET_RE" in helper
     assert "metadata.json: active provider configuration or secret reference" in workflow
