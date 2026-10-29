@@ -4745,6 +4745,21 @@ async def groq_research_review(research, intelligence):
                     migration.transform_config()
             self.assertEqual(config.read_text(encoding="utf-8"), unsafe)
 
+        annotation_only = unsafe.replace(
+            "str = audited_stringifier\\n", "str: int\\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(annotation_only, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_config()
+            result = config.read_text(encoding="utf-8")
+            ast.parse(result, filename="app/config.py")
+            self.assertIn("str: int", result)
+            self.assertNotIn("_validate_gemini_model", result)
+
     def test_star_import_refuses_relative_level_above_app_package(self):
         legacy = """from ..shared import *
 
@@ -4820,7 +4835,9 @@ def retained_helper():
             helper_module = root / "app" / "branch_helpers.py"
             target.parent.mkdir()
             helper_module.write_text(
-                "def branch_helper():\n    return eval('1')\n",
+                "def branch_helper():\\n    return True\\n\\n"
+                "def inert_exec(source):\\n    exec(source)\\n\\n"
+                "def inert_eval(source):\\n    return eval(source)\\n",
                 encoding="utf-8",
             )
             target.write_text(legacy, encoding="utf-8")
