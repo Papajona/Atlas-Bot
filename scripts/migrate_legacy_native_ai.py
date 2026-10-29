@@ -815,8 +815,13 @@ def transform_config() -> None:
     removable_lines: set[int] = set()
 
     def is_provider_field(name: str) -> bool:
-        # Groq is supported through a separate research-only adapter.
-        return bool(PROVIDER_FIELD_RE.search(name)) and not bool(re.search(r"(?i)groq", name))
+        # Only the standalone review settings survive. The old Groq strategy selector
+        # is retired with the hosted strategy generator.
+        supported_groq_fields = {
+            "groq_api_key", "groq_model", "groq_max_completion_tokens",
+            "groq_timeout_seconds", "groq_research_review_enabled",
+        }
+        return bool(PROVIDER_FIELD_RE.search(name)) and name.lower() not in supported_groq_fields
 
     postponed_annotations = _uses_postponed_annotations(tree)
 
@@ -4908,7 +4913,7 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                     (item[body_indent:] if item.strip() else "")
                     for item in block
                 )
-                if PROVIDER_RE.search(body) or ATLAS_PROVIDER_SECRET_RE.search(body):
+                if RETIRED_PROVIDER_RE.search(body) or ATLAS_PROVIDER_SECRET_RE.search(body):
                     cleaned = scrub_shell_deployment("deploy/cloud-run-deploy.sh", body)
                     if not cleaned.strip():
                         raise MigrationError(
@@ -5202,7 +5207,7 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
     if remaining:
         raise MigrationError("provider references remain in: " + ", ".join(remaining))
 
-    for path in ("app/config.py", "app/daily_research.py", "app/strategy_ai.py", "app/ai_providers.py", "app/native_ai.py", "app/main.py"):
+    for path in ("app/config.py", "app/daily_research.py", "app/strategy_ai.py", "app/ai_providers.py", "app/native_ai.py", "app/groq_ai.py", "app/main.py"):
         target = ROOT / path
         if target.is_file():
             ast.parse(target.read_text(encoding="utf-8"), filename=path)
