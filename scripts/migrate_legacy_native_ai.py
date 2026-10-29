@@ -4484,170 +4484,19 @@ def transform_strategy_ai(commit: str) -> None:
     path.write_text(result, encoding="utf-8")
 
 
-def _ensure_groq_review_persisted(source: str, filename: str) -> str:
-    """Add Groq to a recognized projected research review payload, idempotently."""
-    tree = ast.parse(source, filename=filename)
-    lines = source.splitlines(keepends=True)
-
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        for keyword in node.keywords:
-            if keyword.arg != "review_json":
-                continue
-            payload = keyword.value
-            if not (
-                isinstance(payload, ast.Call)
-                and isinstance(payload.func, ast.Attribute)
-                and isinstance(payload.func.value, ast.Name)
-                and payload.func.value.id == "json"
-                and payload.func.attr == "dumps"
-                and payload.args
-            ):
-                continue
-            projected = payload.args[0]
-            # Persisting the complete review object already includes advisory results.
-            if isinstance(projected, ast.Name) and projected.id == "review":
-                return source
-            if not isinstance(projected, ast.DictComp):
-                continue
-            if not (
-                isinstance(projected.key, ast.Name)
-                and isinstance(projected.value, ast.Call)
-                and isinstance(projected.value.func, ast.Attribute)
-                and isinstance(projected.value.func.value, ast.Name)
-                and projected.value.func.value.id == "review"
-                and projected.value.func.attr == "get"
-                and len(projected.value.args) == 1
-                and isinstance(projected.value.args[0], ast.Name)
-                and projected.value.args[0].id == projected.key.id
-                and len(projected.generators) == 1
-                and isinstance(projected.generators[0].target, ast.Name)
-                and projected.generators[0].target.id == projected.key.id
-                and isinstance(projected.generators[0].iter, ast.Tuple)
-            ):
-                continue
-            fields = projected.generators[0].iter
-            if not all(isinstance(item, ast.Constant) and isinstance(item.value, str) for item in fields.elts):
-                continue
-            names = [item.value for item in fields.elts]
-            if "groq_research_review" in names:
-                return source
-            if not any(name in names for name in ("native_ai_review", "ai_brain_mode", "paper_candidates", "external_ai_review")):
-                continue
-
-            # AST column offsets are UTF-8 byte offsets; these known projection tuples are
-            # ASCII-only, so the end offset identifies the closing parenthesis exactly.
-            prefix = "".join(lines[:fields.end_lineno - 1])
-            offset = len(prefix) + fields.end_col_offset
-            if offset <= 0 or source[offset - 1:offset] != ")":
-                raise MigrationError(
-                    f"{filename} has an unexpected review_json projection tuple; refusing to lose Groq audit history"
-                )
-            return source[:offset - 1] + ', "groq_research_review"' + source[offset - 1:]
-    return source
-
-
-def _ensure_groq_import(source: str, filename: str) -> str:
-    tree = ast.parse(source, filename=filename)
-    if any(
-        isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "groq_ai"
-        and any(alias.name == "groq_research_review" for alias in node.names)
-        for node in tree.body
-    ):
-        return source
-    prefix_end = 0
-    for index, node in enumerate(tree.body):
-        if index == 0 and isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-            prefix_end = node.end_lineno
-            continue
-        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
-            prefix_end = node.end_lineno
-            continue
-        break
-    return _apply_line_edits(
-        source,
-        [(prefix_end + 1, prefix_end, "from .groq_ai import groq_research_review\n")],
-    )
-
-
-def _ensure_groq_research_call(source: str, filename: str) -> str:
-    """Wire Groq into already-Native-AI branches without rewriting unrelated code."""
-    tree = ast.parse(source, filename=filename)
-    parents: dict[ast.AST, ast.AST] = {}
-    for parent in ast.walk(tree):
-        for child in ast.iter_child_nodes(parent):
-            parents[child] = parent
-
-    def enclosing_function(node: ast.AST) -> ast.AST | None:
-        parent = parents.get(node)
-        while parent is not None:
-            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                return parent
-            parent = parents.get(parent)
-        return None
-
-    native_review_assignment = None
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-            continue
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        if any(
-            isinstance(target, ast.Subscript)
-            and isinstance(target.value, ast.Name)
-            and target.value.id == "review"
-            and isinstance(target.slice, ast.Constant)
-            and target.slice.value == "native_ai_review"
-            for target in targets
-        ):
-            native_review_assignment = node
-            break
-    if native_review_assignment is None:
-        return source
-
-    owner = enclosing_function(native_review_assignment)
-    if not isinstance(owner, ast.AsyncFunctionDef):
-        raise MigrationError(
-            f"{filename} has a Native AI review assignment outside an async function; refusing to add an unsafe Groq await"
-        )
-
-    for node in ast.walk(owner):
-        if not isinstance(node, ast.Call):
-            continue
-        if isinstance(node.func, ast.Name) and node.func.id == "groq_research_review":
-            return _ensure_groq_import(source, filename)
-        if isinstance(node.func, ast.Attribute) and node.func.attr == "groq_research_review":
-            return _ensure_groq_import(source, filename)
-
-    lines = source.splitlines(keepends=True)
-    first_line = lines[native_review_assignment.lineno - 1]
-    indent = first_line[:len(first_line) - len(first_line.lstrip())]
-    lines.insert(
-        native_review_assignment.end_lineno,
-        indent + 'review["groq_research_review"] = await groq_research_review(research, intelligence)\n',
-    )
-    return _ensure_groq_import("".join(lines), filename)
-
-
 def transform_daily_research() -> None:
     path = ROOT / "app/daily_research.py"
     if not path.is_file():
         raise MigrationError("app/daily_research.py is absent")
-    original = path.read_text(encoding="utf-8")
-    source = _ensure_groq_review_persisted(original, str(path))
-    # Already-native branches can pass the provider scan while still lacking the
-    # optional Groq review call. Add it only after proving a recognized async review target.
-    # The new Groq reviewer is supported wiring, not a retired strategy provider.
+    source = path.read_text(encoding="utf-8")
+    # The new Groq research reviewer is supported, canonical wiring—not a legacy
+    # strategy provider. Only invoke this AST migration when an old callsite or
+    # provider-key conditional remains, making reruns idempotent after migration.
     legacy_daily_provider_re = re.compile(
         r"(?i)(?:dual_ai_research_review|_gemini_json|_groq_json|_cerebras_json|"
         r"gemini_api_key|groq_api_key|cerebras_api_key|ai_gateway_)"
     )
     if not legacy_daily_provider_re.search(source):
-        source = _ensure_groq_research_call(source, str(path))
-        source = _ensure_groq_review_persisted(source, str(path))
-        if source != original:
-            ast.parse(source, filename=str(path))
-            path.write_text(source, encoding="utf-8")
         return
     tree = ast.parse(source, filename=str(path))
     lines = source.splitlines(keepends=True)
@@ -4655,81 +4504,13 @@ def transform_daily_research() -> None:
     found_callsite = False
     provider_delegations = {"dual_ai_research_review", "_gemini_json", "_groq_json", "_cerebras_json"}
 
-    def is_review_result_target(target: ast.AST) -> bool:
-        if not isinstance(target, ast.Subscript) or not isinstance(target.value, ast.Name):
-            return False
-        if target.value.id != "review" or not isinstance(target.slice, ast.Constant):
-            return False
-        return target.slice.value in {"external_ai", "ai_review", "external_ai_review"}
-
-    def is_provider_expression(expression: ast.AST | None) -> bool:
-        if isinstance(expression, ast.Await):
-            expression = expression.value
-        if not isinstance(expression, ast.Call):
-            return False
-        # Don't erase nested setup/configuration calls inside provider arguments.
-        if sum(1 for part in ast.walk(expression) if isinstance(part, ast.Call)) != 1:
-            return False
-        return (
-            (isinstance(expression.func, ast.Name) and expression.func.id in provider_delegations)
-            or (isinstance(expression.func, ast.Attribute) and expression.func.attr in provider_delegations)
+    def contains_provider_call(statement: ast.AST) -> bool:
+        return any(
+            isinstance(part, ast.Call)
+            and ((isinstance(part.func, ast.Name) and part.func.id in provider_delegations)
+                 or (isinstance(part.func, ast.Attribute) and part.func.attr in provider_delegations))
+            for part in ast.walk(statement)
         )
-
-    def is_provider_only_statement(statement: ast.AST) -> bool:
-        if isinstance(statement, ast.Assign):
-            return (len(statement.targets) == 1
-                    and is_review_result_target(statement.targets[0])
-                    and is_provider_expression(statement.value))
-        if isinstance(statement, ast.AnnAssign):
-            return is_review_result_target(statement.target) and is_provider_expression(statement.value)
-        # Returning from the enclosing routine changes control flow. Expression-only calls
-        # and arbitrary statements may contain side effects, so unknown shapes must fail closed.
-        return False
-
-    def is_not_configured_fallback(statement: ast.AST) -> bool:
-        if isinstance(statement, ast.Assign):
-            if len(statement.targets) != 1 or not is_review_result_target(statement.targets[0]):
-                return False
-        elif isinstance(statement, ast.AnnAssign):
-            if not is_review_result_target(statement.target):
-                return False
-        else:
-            return False
-        value = statement.value
-        if not isinstance(value, ast.Dict) or len(value.keys) != len(value.values):
-            return False
-        fields: dict[str, ast.AST] = {}
-        for key, item in zip(value.keys, value.values):
-            if not isinstance(key, ast.Constant) or not isinstance(key.value, str) or key.value in fields:
-                return False
-            fields[key.value] = item
-        status = fields.get("status")
-        if not (isinstance(status, ast.Constant) and status.value == "NOT_CONFIGURED"):
-            return False
-        if set(fields) == {"status"}:
-            return True
-        if set(fields) != {"status", "providers", "execution_authority"}:
-            return False
-        providers, authority = fields["providers"], fields["execution_authority"]
-        return (
-            isinstance(providers, ast.Dict) and not providers.keys and not providers.values
-            and isinstance(authority, ast.Constant) and authority.value is False
-        )
-
-    # A provider call may be imported directly instead of through the dual-review facade.
-    # Build a parent map to prove the replacement's await remains inside an async function.
-    parents: dict[ast.AST, ast.AST] = {}
-    for parent in ast.walk(tree):
-        for child in ast.iter_child_nodes(parent):
-            parents[child] = parent
-
-    def enclosing_function(node: ast.AST) -> ast.AST | None:
-        parent = parents.get(node)
-        while parent is not None:
-            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                return parent
-            parent = parents.get(parent)
-        return None
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.If):
@@ -4741,12 +4522,84 @@ def transform_daily_research() -> None:
             raise MigrationError(
                 "daily-research provider condition includes a call expression; refusing to discard condition side effects"
             )
-        owner = enclosing_function(node)
-        if not isinstance(owner, ast.AsyncFunctionDef):
-            raise MigrationError(
-                "daily-research provider callsite is not inside an async function; refusing to introduce an await into synchronous code"
+        def is_review_result_target(target: ast.AST) -> bool:
+            if not isinstance(target, ast.Subscript) or not isinstance(target.value, ast.Name):
+                return False
+            if target.value.id != "review" or not isinstance(target.slice, ast.Constant):
+                return False
+            return target.slice.value in {"external_ai", "ai_review", "external_ai_review"}
+
+        def is_provider_expression(expression: ast.AST | None) -> bool:
+            if isinstance(expression, ast.Await):
+                expression = expression.value
+            if not isinstance(expression, ast.Call):
+                return False
+            # Don't erase nested setup/configuration calls inside provider arguments.
+            if sum(1 for part in ast.walk(expression) if isinstance(part, ast.Call)) != 1:
+                return False
+            return (
+                (isinstance(expression.func, ast.Name) and expression.func.id in provider_delegations)
+                or (isinstance(expression.func, ast.Attribute) and expression.func.attr in provider_delegations)
             )
-        body_is_provider_only = bool(node.body) and all(is_provider_only_statement(statement) for statement in node.body)
+
+        def is_provider_only_statement(statement: ast.AST) -> bool:
+            if isinstance(statement, ast.Assign):
+                return (len(statement.targets) == 1
+                        and is_review_result_target(statement.targets[0])
+                        and is_provider_expression(statement.value))
+            if isinstance(statement, ast.AnnAssign):
+                return is_review_result_target(statement.target) and is_provider_expression(statement.value)
+            # Returning from the enclosing routine changes control flow. Expression-only calls
+            # and arbitrary statements may contain side effects, so unknown shapes must fail closed.
+            return False
+
+        def is_not_configured_fallback(statement: ast.AST) -> bool:
+            if isinstance(statement, ast.Assign):
+                if len(statement.targets) != 1 or not is_review_result_target(statement.targets[0]):
+                    return False
+            elif isinstance(statement, ast.AnnAssign):
+                if not is_review_result_target(statement.target):
+                    return False
+            else:
+                return False
+
+            # Historical provider facades use either the minimal status marker or
+            # this exact inert payload. Accept both, but do not erase dynamic values,
+            # unknown fields, or sibling audit assignments from a legacy branch.
+            value = statement.value
+            if not isinstance(value, ast.Dict) or len(value.keys) != len(value.values):
+                return False
+            fields: dict[str, ast.AST] = {}
+            for key, item in zip(value.keys, value.values):
+                if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                    return False
+                if key.value in fields:
+                    return False
+                fields[key.value] = item
+
+            status = fields.get("status")
+            if not (
+                isinstance(status, ast.Constant)
+                and status.value == "NOT_CONFIGURED"
+            ):
+                return False
+            if set(fields) == {"status"}:
+                return True
+            if set(fields) != {"status", "providers", "execution_authority"}:
+                return False
+            providers = fields["providers"]
+            authority = fields["execution_authority"]
+            return (
+                isinstance(providers, ast.Dict)
+                and not providers.keys
+                and not providers.values
+                and isinstance(authority, ast.Constant)
+                and authority.value is False
+            )
+
+        body_is_provider_only = bool(node.body) and all(
+            is_provider_only_statement(statement) for statement in node.body
+        )
         else_is_provider_fallback = all(
             is_provider_only_statement(statement) or is_not_configured_fallback(statement)
             for statement in node.orelse
@@ -4757,77 +4610,26 @@ def transform_daily_research() -> None:
             )
         first = lines[node.lineno - 1]
         indent = first[:len(first) - len(first.lstrip())]
-        replacement_text = "\n".join((
+        replacement = "\n".join((
             indent + "native_research_input = dict(research)",
             indent + 'native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))',
             indent + 'review["native_ai_review"] = native_research_review(native_research_input, intelligence)',
             indent + 'review["groq_research_review"] = await groq_research_review(research, intelligence)',
         )) + "\n"
-        edits.append((node.lineno, node.end_lineno, replacement_text))
+        edits.append((node.lineno, node.end_lineno, replacement))
         found_callsite = True
         break
-
-    # Remove imports of retired provider adapters, keeping any unrelated names imported
-    # from app.ai_providers. Native/Groq imports are restored independently of old call shape.
-    native_imported = any(
-        isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "native_ai"
-        and any(alias.name == "native_research_review" for alias in node.names)
-        for node in tree.body
-    )
-    groq_imported = any(
-        isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "groq_ai"
-        and any(alias.name == "groq_research_review" for alias in node.names)
-        for node in tree.body
-    )
-    missing_imports = []
-    if not native_imported:
-        missing_imports.append("from .native_ai import native_research_review")
-    if not groq_imported:
-        missing_imports.append("from .groq_ai import groq_research_review")
-
-    provider_import_nodes = []
-    for node in tree.body:
-        if not (isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "ai_providers"):
-            continue
-        if any(alias.name in provider_delegations for alias in node.names):
-            provider_import_nodes.append(node)
-    if provider_import_nodes:
-        for index, node in enumerate(provider_import_nodes):
-            indent = lines[node.lineno - 1][:len(lines[node.lineno - 1]) - len(lines[node.lineno - 1].lstrip())]
-            remaining_aliases = [alias for alias in node.names if alias.name not in provider_delegations]
-            replacement_lines = []
-            if remaining_aliases:
-                rendered = ", ".join(
-                    alias.name + (f" as {alias.asname}" if alias.asname else "")
-                    for alias in remaining_aliases
-                )
-                replacement_lines.append(indent + f"from .ai_providers import {rendered}\n")
-            if index == 0:
-                replacement_lines.extend(line + "\n" for line in missing_imports)
-            edits.append((node.lineno, node.end_lineno, "".join(replacement_lines)))
-    elif missing_imports:
-        # Insert after a module docstring and any __future__ imports, preserving Python's
-        # future-import ordering while supporting direct _gemini_json/_groq_json imports.
-        prefix_end = 0
-        for index, node in enumerate(tree.body):
-            if index == 0 and isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                prefix_end = node.end_lineno
-                continue
-            if isinstance(node, ast.ImportFrom) and node.module == "__future__":
-                prefix_end = node.end_lineno
-                continue
-            break
-        edits.append((prefix_end + 1, prefix_end, "".join(line + "\n" for line in missing_imports)))
-
+    for index, line in enumerate(lines, start=1):
+        if re.search(r"^\s*from\s+\.ai_providers\s+import\s+dual_ai_research_review\b", line):
+            edits.append((index, index, "from .native_ai import native_research_review\nfrom .groq_ai import groq_research_review\n"))
     if not found_callsite:
         raise MigrationError("daily-research provider callsite is unexpected; refusing lossy rewrite")
     result = _apply_line_edits(source, edits)
-    result = _ensure_groq_research_call(result, str(path))
-    result = _ensure_groq_review_persisted(result, str(path))
     if RETIRED_PROVIDER_RE.search(result):
         raise MigrationError("daily research still contains retired-provider references")
     ast.parse(result, filename=str(path))
     path.write_text(result, encoding="utf-8")
+
 
 
 def _release_diagnostics_block(source: str, filename: str) -> tuple[int, int, str]:
@@ -4925,609 +4727,6 @@ def scrub_shell_deployment(path: str, text: str) -> str:
     )
 
     def safe_groq_statement(statement: str) -> bool:
-        if re.match(r'^\s*create_secret\s+atlas-groq-api-key\s+"\$GROQ_API_KEY"\s*
-            # Printing a fixed validation/warning message is safe; reject shell
-            # chaining, redirection, pipelines, or command substitution.
-            normalized = re.sub(r"\s+>&2\s*$", "", statement)
-            return not re.search(r"&&|\|\||[;|<>]|\$\(", normalized)
-        if re.match(r"^\s*exit\s+[0-9]+\s*(?:#.*)?$", statement, re.I):
-            return True
-        return bool(groq_allowed.match(statement))
-
-    block_start = 0
-    while block_start < len(source_lines):
-        source_line = source_lines[block_start]
-        if re.match(r"^\s*if\b", source_line, re.I) and groq_condition.search(source_line):
-            inline = re.match(r"^\s*if\b.*?\bthen\s*(.*?);\s*fi\s*$", source_line, re.I)
-            if inline:
-                inline_commands = [chunk.strip() for chunk in inline.group(1).split(";") if chunk.strip()]
-                if any(not safe_groq_statement(command) for command in inline_commands):
-                    raise MigrationError(
-                        f"{path} has a mixed provider-conditioned shell block; refusing unrelated inline command"
-                    )
-                block_start += 1
-                continue
-            indent = len(source_line) - len(source_line.lstrip())
-            end = block_start + 1
-            while end < len(source_lines):
-                if re.match(r"^\s*fi\b", source_lines[end], re.I):
-                    break
-                if source_lines[end].strip() and len(source_lines[end]) - len(source_lines[end].lstrip()) < indent:
-                    break
-                end += 1
-            if end >= len(source_lines) or not re.match(r"^\s*fi\b", source_lines[end], re.I):
-                raise MigrationError(f"{path} has an unterminated Groq-conditioned block")
-            for block_line in source_lines[block_start + 1:end]:
-                if not block_line.strip() or block_line.lstrip().startswith("#"):
-                    continue
-                if not safe_groq_statement(block_line):
-                    raise MigrationError(
-                        f"{path} has a mixed provider-conditioned shell block; refusing to discard unrelated statement: {block_line.strip()[:100]}"
-                    )
-            block_start = end + 1
-            continue
-        block_start += 1
-
-    variable_pattern = re.compile(
-        r"(?i)\b(?:SECRET_GEMINI[A-Z0-9_]*|"
-        r"GEMINI_API_KEY|"
-        r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\b"
-    )
-    for original in text.splitlines(keepends=True):
-        line = original
-        stripped = line.lstrip()
-        if skip_provider_block:
-            if re.match(r"^\s*fi\b", line):
-                skip_provider_block = False
-                continue
-            if (not stripped or stripped.startswith("#")
-                    or re.match(r"^(?:else|elif\b|then\b)", stripped, re.I)):
-                continue
-            provider_assignment = re.match(
-                r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
-                r"GEMINI_API_KEY|"
-                r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
-                line, re.I,
-            )
-            warning_only = (
-                re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
-                and RETIRED_PROVIDER_RE.search(stripped)
-                and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", stripped)
-            )
-            if provider_assignment or warning_only:
-                continue
-            raise MigrationError(
-                f"{path} has a mixed provider-conditioned shell block; refusing to discard unrelated statement: {stripped[:100]}"
-            )
-
-        # Drop only a provider-specific if/else block, including its warning body.
-        if (re.match(r"^\s*if\b", line) and variable_pattern.search(line)
-                and not re.search(r";\s*fi\b", line)):
-            skip_provider_block = True
-            continue
-
-        # Provider-only shell declarations/guards/secret commands have no unrelated payload.
-        if re.match(r"^\s*(?::\s*)?['\"]?\$\{?(?:SECRET_GEMINI|GEMINI_API_KEY)", line, re.I):
-            continue
-        if re.match(
-            r"^\s*(?:SECRET_GEMINI[A-Z0-9_]*|"
-            r"GEMINI_API_KEY|"
-            r"CEREBRAS_API_KEY|AI_GATEWAY_API_KEY)\s*=",
-            line, re.I,
-        ):
-            continue
-        if re.search(r"(?i)\b(?:create_secret|grant_secret_access)\s+atlas-(?:gemini|cerebras|ai-gateway|openai)\b", line):
-            continue
-        if stripped.startswith("#") and RETIRED_PROVIDER_RE.search(line):
-            continue
-
-        # AI_SECRET_ARGS may be a shared Cloud Run secret bundle containing Groq.
-        # Remove only explicit retired-provider key/value pairs; preserve the bundle and
-        # its expansion so supported Groq credentials continue to reach the reviewer.
-        if re.match(r"^\s*(?:export\s+)?AI_SECRET_ARGS\s*=", line, re.I):
-            line = re.sub(
-                r",?(?:GEMINI_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|OPENAI_API_KEY)=[^,\"\s]*",
-                "",
-                line,
-                flags=re.I,
-            )
-            if RETIRED_PROVIDER_RE.search(line):
-                raise MigrationError(
-                    f"{path} has unrecognized retired-provider content in a shared secret argument; refusing to alter unrelated credentials"
-                )
-            output.append(line)
-            continue
-
-        # Remove provider entries from combined Cloud Run env-var lists.
-        if "ENV_VARS=" in line:
-            line = re.sub(
-                r"@(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
-                r"CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^@\"]*",
-                "",
-                line,
-                flags=re.I,
-            )
-        if "--set-env-vars" in line:
-            line = re.sub(
-                r",?(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
-                r"CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^,\"]*",
-                "",
-                line,
-                flags=re.I,
-            )
-        if "--set-secrets" in line:
-            line = re.sub(
-                r",?(?:GEMINI_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|OPENAI_API_KEY)=[^,\"]*",
-                "",
-                line,
-                flags=re.I,
-            )
-        # Provider secret names in bootstrap allowlists are independent list items.
-        if "for secret in" in line:
-            line = re.sub(
-                r"\s+atlas-(?:gemini|cerebras|ai-gateway|openai)[-a-z0-9]*",
-                "",
-                line,
-                flags=re.I,
-            )
-        # Strip any remaining provider-only executable line. If a mixed executable line
-        # still contains a provider token, refuse the branch rather than damage its command.
-        if RETIRED_PROVIDER_RE.search(line):
-            if stripped.startswith("#"):
-                continue
-            warning_only = (
-                re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
-                and re.search(r"(?i)\b(?:gemini|cerebras|ai.?gateway|openai)\b", stripped)
-                and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", stripped)
-            )
-            if warning_only:
-                continue
-            inline_if = re.match(r"^\s*if\b.*\bthen\b(.*);\s*fi\s*$", line, re.I)
-            if inline_if:
-                commands = [part.strip() for part in inline_if.group(1).split(";") if part.strip()]
-                safe_inline = all(
-                    re.match(
-                        r"^(?::|(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
-                        r"GEMINI_API_KEY|"
-                        r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=)",
-                        command, re.I,
-                    )
-                    or (
-                        re.match(r"^(?:echo|printf)\b", command, re.I)
-                        and re.search(r"(?i)\b(?:gemini|cerebras|ai.?gateway|openai)\b", command)
-                        and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", command)
-                    )
-                    for command in commands
-                )
-                if safe_inline:
-                    continue
-                raise MigrationError(
-                    f"{path} has a mixed inline provider conditional; refusing to discard unrelated commands"
-                )
-            if re.search(r"(?i)\b(?:gcloud|docker|curl|python|bash|run:|ENV_VARS=|--set-env-vars|--set-secrets)\b", line):
-                raise MigrationError(
-                    f"{path} retains provider wiring in a mixed shell command; refusing to rewrite it"
-                )
-            raise MigrationError(
-                f"{path} retains provider text in a non-provider shell statement; refusing lossy deletion"
-            )
-        if line.strip():
-            output.append(line)
-        elif original.strip():
-            output.append(line)
-
-    if skip_provider_block:
-        raise MigrationError(f"{path} has an unterminated provider-specific shell block")
-    cleaned = "".join(output)
-    if RETIRED_PROVIDER_RE.search(cleaned):
-        raise MigrationError(f"{path} still contains retired-provider wiring after shell cleanup")
-    return cleaned
-
-
-def _workflow_has_active_provider_wiring(text: str) -> bool:
-    """Check workflow semantics while permitting inert names and protected environments."""
-    for line in text.splitlines():
-        stripped = line.lstrip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        match = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$", line)
-        if match:
-            key, value = match.groups()
-            if key.lower() in {"environment", "name", "run-name", "description"}:
-                # Environment names can intentionally select protected approval gates;
-                # labels/descriptions are not executable provider configuration.
-                continue
-            if PROVIDER_SETTING_NAME_RE.fullmatch(key) or RETIRED_PROVIDER_FIELD_RE.search(key):
-                return True
-            # Remove YAML comments before considering scalar values; quoted values
-            # remain conservatively checked when the provider token is in the value.
-            value = value.split(" #", 1)[0]
-            if RETIRED_PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value):
-                return True
-            continue
-        if RETIRED_PROVIDER_RE.search(line) or ATLAS_PROVIDER_SECRET_RE.search(line):
-            return True
-    return False
-
-
-def scrub_workflow_ancillary(path: str, text: str) -> str:
-    """Remove provider configuration from workflows without rewriting environment gates or commands.
-
-    Provider env keys are removed as whole YAML entries. Shell run blocks go through the
-    strict shell scrubber, which refuses mixed commands; it never strips a provider URL
-    from an otherwise unrelated executable line.
-    """
-    lines = text.splitlines(keepends=True)
-    kept: list[str] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        stripped = line.lstrip()
-        if not stripped or stripped.startswith("#"):
-            index += 1
-            continue
-
-        run_match = re.match(r"^([ \t]*)run:[ \t]*(.*?)[ \t]*(?:\r?\n)?$", line)
-        if run_match:
-            indent_text, value = run_match.groups()
-            indent = len(indent_text)
-            value = value.strip()
-            if value in {"|", "|-", "|+", ">", ">-"} or not value:
-                end = index + 1
-                while end < len(lines):
-                    candidate = lines[end]
-                    if not candidate.strip():
-                        end += 1
-                        continue
-                    candidate_indent = len(candidate) - len(candidate.lstrip())
-                    if candidate_indent <= indent:
-                        break
-                    end += 1
-                block = lines[index + 1:end]
-                nonblank_indents = [
-                    len(item) - len(item.lstrip()) for item in block if item.strip()
-                ]
-                body_indent = min(nonblank_indents) if nonblank_indents else indent + 2
-                body = "".join(
-                    (item[body_indent:] if item.strip() else "")
-                    for item in block
-                )
-                if RETIRED_PROVIDER_RE.search(body) or ATLAS_PROVIDER_SECRET_RE.search(body):
-                    cleaned = scrub_shell_deployment("deploy/cloud-run-deploy.sh", body)
-                    if not cleaned.strip():
-                        raise MigrationError(
-                            f"{path} contains a provider-only run block; refusing to leave an invalid workflow step"
-                        )
-                    kept.append(line)
-                    for item in cleaned.splitlines(keepends=True):
-                        kept.append((" " * body_indent + item) if item.strip() else item)
-                else:
-                    kept.extend(lines[index:end])
-                index = end
-                continue
-            if RETIRED_PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value):
-                cleaned = scrub_shell_deployment("deploy/cloud-run-deploy.sh", value)
-                if not cleaned.strip():
-                    raise MigrationError(
-                        f"{path} contains a provider-only inline run; refusing to leave an invalid workflow step"
-                    )
-                newline = "\n" if line.endswith("\n") else ""
-                kept.append(f"{indent_text}run: {cleaned.strip()}{newline}")
-                index += 1
-                continue
-
-        key_match = re.match(r"^(\s*)([A-Za-z_][A-Za-z0-9_-]*):(?:\s*(.*?))?(\r?\n)?$", line)
-        if key_match:
-            _indent, key, value, _newline = key_match.groups()
-            if key.lower() == "environment":
-                # Never rename an approval-gated environment. A retired-provider
-                # name requires manual reconciliation before this branch can migrate.
-                if value and RETIRED_PROVIDER_RE.search(value):
-                    raise MigrationError(
-                        f"{path} references a retired provider in its deployment environment; preserving the approval gate and refusing migration"
-                    )
-                kept.append(line)
-                index += 1
-                continue
-            if key.lower() in {"name", "run-name", "description"}:
-                kept.append(line)
-                index += 1
-                continue
-            if PROVIDER_SETTING_NAME_RE.fullmatch(key) or RETIRED_PROVIDER_FIELD_RE.search(key):
-                # Removing a parent key and retaining its indented children can make
-                # GitHub Actions YAML invalid. Only scalar provider settings are removed.
-                key_indent = len(_indent)
-                has_nested_children = False
-                for child in lines[index + 1:]:
-                    if not child.strip() or child.lstrip().startswith("#"):
-                        continue
-                    child_indent = len(child) - len(child.lstrip())
-                    if child_indent <= key_indent:
-                        break
-                    has_nested_children = True
-                    break
-                if has_nested_children:
-                    raise MigrationError(
-                        f"{path} has provider-named YAML mapping {key!r} with children; refusing to invalidate workflow structure"
-                    )
-                index += 1
-                continue
-            if value and (RETIRED_PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value)):
-                # Do not run generic token substitution on a YAML value: it can alter
-                # an environment, URL, shell command, or approval/resource identifier.
-                raise MigrationError(
-                    f"{path} has provider-bearing YAML scalar {key!r}; refusing unsafe text substitution"
-                )
-            kept.append(line)
-            index += 1
-            continue
-
-        # Unstructured provider-bearing lines are not safe to edit generically.
-        if RETIRED_PROVIDER_RE.search(line) or ATLAS_PROVIDER_SECRET_RE.search(line):
-            raise MigrationError(
-                f"{path} has provider wiring outside a recognized YAML field; refusing unsafe text substitution: {stripped[:100]}"
-            )
-        kept.append(line)
-        index += 1
-
-    cleaned = "".join(_remove_empty_env(kept))
-    if _workflow_has_active_provider_wiring(cleaned):
-        raise MigrationError(f"{path} still contains active hosted-provider wiring after workflow cleanup")
-    return cleaned
-
-
-def scrub_ancillary_text(path: str, text: str) -> str:
-    if path in {".github/workflows/production-deploy.yml", ".github/workflows/production-verification.yml"}:
-        return scrub_workflow_ancillary(path, text)
-    if path in {"deploy/cloud-run-deploy.sh", "deploy/cloud-run-worker-deploy.sh", "deploy/gcp-bootstrap.sh"}:
-        return scrub_shell_deployment(path, text)
-    if path == "metadata.json":
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise MigrationError(f"metadata.json is invalid JSON: {exc}") from exc
-
-        remove_sentinel = object()
-
-        def scrub(value, key_context=""):
-            remove = remove_sentinel
-            if isinstance(value, dict):
-                named_setting = next(
-                    (item for key, item in value.items()
-                     if str(key).lower() in {"name", "key", "setting", "variable"} and isinstance(item, str)),
-                    None,
-                )
-                has_payload = any(
-                    str(key).lower() in {"value", "secretref", "secret_ref", "version", "endpoint"}
-                    for key in value
-                )
-                if isinstance(named_setting, str) and PROVIDER_SETTING_NAME_RE.fullmatch(named_setting) and has_payload:
-                    return remove
-                result = {}
-                for key, item in value.items():
-                    key_text = str(key)
-                    if RETIRED_PROVIDER_FIELD_RE.search(key_text):
-                        continue
-                    if key_text.lower() in {"secretref", "secret_ref"} and isinstance(item, str) and PROVIDER_SETTING_NAME_RE.fullmatch(item):
-                        continue
-                    cleaned_item = scrub(item, str(key))
-                    if cleaned_item is not remove:
-                        result[key] = cleaned_item
-                return result
-            if isinstance(value, list):
-                return [cleaned for item in value if (cleaned := scrub(item, key_context)) is not remove]
-            if isinstance(value, str) and key_context.lower() in {"name", "key", "setting", "variable"} and PROVIDER_SETTING_NAME_RE.fullmatch(value):
-                return ""
-            if isinstance(value, str) and (RETIRED_PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value)):
-                if re.fullmatch(r"(?i)(?:[a-z0-9]+_)*model(?:_(?:id|name|version))?", key_context):
-                    return "atlas-native-strategy-v1"
-                cleaned = SECRET_VERSION_RE.sub("", value)
-                cleaned = KEY_ASSIGNMENT_RE.sub("", cleaned)
-                cleaned = HOST_RE.sub("", cleaned)
-                cleaned = ATLAS_PROVIDER_SECRET_RE.sub("", cleaned)
-                cleaned = MODEL_RE.sub("atlas-native-strategy-v1", cleaned)
-                # Descriptive/audit prose may mention historical providers; preserve it.
-                return cleaned
-            return value
-
-        scrubbed = scrub(data)
-        if scrubbed is remove_sentinel:
-            scrubbed = {}
-        return json.dumps(scrubbed, indent=2, ensure_ascii=False) + "\n"
-
-    kept: list[str] = []
-    for line in text.splitlines(keepends=True):
-        if not RETIRED_PROVIDER_RE.search(line):
-            kept.append(line)
-            continue
-        candidate = SECRET_VERSION_RE.sub("", line)
-        candidate = KEY_ASSIGNMENT_RE.sub("", candidate)
-        candidate = HOST_RE.sub("", candidate)
-        candidate = MODEL_RE.sub("atlas-native-strategy-v1", candidate)
-        candidate = re.sub(r"(?i)\b(?:Gemini|Cerebras|AI Gateway)\b", "", candidate)
-        if RETIRED_PROVIDER_RE.search(candidate):
-            if re.search(r"(?i)\b(?:gcloud|docker|curl|python|bash|run:)\b", candidate):
-                raise MigrationError(f"{path} has provider wiring inside an executable line; refusing automatic deletion")
-            candidate = RETIRED_PROVIDER_RE.sub("legacy provider", candidate)
-        if candidate.strip():
-            kept.append(candidate)
-    cleaned = "".join(_remove_empty_env(kept))
-    if RETIRED_PROVIDER_RE.search(cleaned):
-        raise MigrationError(f"{path} still contains retired-provider references")
-    if path == "metadata.json":
-        json.loads(cleaned)
-    return cleaned
-
-
-def _apply_path_patch(base_commit: str, tip_commit: str, path: str) -> bool:
-    patch = _git("diff", "--binary", base_commit, tip_commit, "--", path).stdout
-    if not patch:
-        return True
-    applied = _git("apply", "--3way", "--index", input_text=patch, check=False)
-    if applied.returncode:
-        # Restore the branch's exact starting content. A path absent at HEAD must be
-        # removed from both index and worktree; git restore cannot restore a nonexistent path.
-        _git("restore", "--source=HEAD", "--staged", "--worktree", "--", path, check=False)
-        if _git("cat-file", "-e", f"HEAD:{path}", check=False).returncode != 0:
-            _git("rm", "-f", "--cached", "--ignore-unmatch", "--", path, check=False)
-            target = ROOT / path
-            if target.is_file() or target.is_symlink():
-                target.unlink()
-        return False
-    return True
-
-
-def apply_ancillary_patch(commit: str, path: str, extra_base: str, extra_commit: str) -> None:
-    cleanup_patch_applied = _apply_path_patch(f"{commit}^", commit, path)
-    if not cleanup_patch_applied and path in EXTRA_PATHS:
-        # The Android/document extras need their separately reviewed patch. Preserve
-        # their exact branch content when that patch conflicts; never use a broad text
-        # scrub as a substitute for those path-specific reviews.
-        return
-    if path in EXTRA_PATHS and not _apply_path_patch(extra_base, extra_commit, path):
-        # Preserve the exact conflicting Android/document path. If it still contains
-        # active provider wiring, the final scan will reject this branch instead.
-        return
-
-    target = ROOT / path
-    if target.exists():
-        current = target.read_text(encoding="utf-8")
-        # A failed patch against a divergent legacy deployment file is not proof that
-        # the file is unsafe to migrate. The scrubber below is deliberately narrow:
-        # it removes recognized provider wiring and raises MigrationError for mixed
-        # commands/unknown constructs instead of silently discarding them. Always run
-        # that semantic cleanup after patch conflicts on the ordinary ancillary paths.
-        cleaned = scrub_ancillary_text(path, current)
-        if cleaned != current:
-            target.write_text(cleaned, encoding="utf-8")
-
-
-def _metadata_has_active_provider_wiring(text: str) -> bool:
-    """Permit inert descriptive prose, but reject real provider configuration and credentials."""
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        return True
-
-    def visit(value, key_context: str = "") -> bool:
-        if isinstance(value, dict):
-            named_setting = next(
-                (item for key, item in value.items()
-                 if str(key).lower() in {"name", "key", "setting", "variable"} and isinstance(item, str)),
-                None,
-            )
-            has_payload = any(
-                str(key).lower() in {"value", "secretref", "secret_ref", "version", "endpoint"}
-                for key in value
-            )
-            if isinstance(named_setting, str) and PROVIDER_SETTING_NAME_RE.fullmatch(named_setting) and has_payload:
-                return True
-            for key, item in value.items():
-                key_text = str(key)
-                if RETIRED_PROVIDER_FIELD_RE.search(key_text):
-                    return True
-                if visit(item, key_text):
-                    return True
-            return False
-        if isinstance(value, list):
-            return any(visit(item, key_context) for item in value)
-        if isinstance(value, str):
-            if key_context.lower() in {"name", "key", "setting", "variable", "secretref", "secret_ref"} and PROVIDER_SETTING_NAME_RE.fullmatch(value):
-                return True
-            if (
-                ATLAS_PROVIDER_SECRET_RE.search(value)
-                or KEY_ASSIGNMENT_RE.search(value)
-                or SECRET_VERSION_RE.search(value)
-                or HOST_RE.search(value)
-            ):
-                return True
-            if re.search(r"(?i)(?:provider|gateway|model|api[_ -]?key|secret|endpoint)", key_context) and RETIRED_PROVIDER_RE.search(value):
-                return True
-        return False
-
-    return visit(data)
-
-
-def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:
-    # Canonical Native AI source and the original provider-removal patch baseline are
-    # independent pins: changing one must not widen the other per-path diff.
-    transform_ai_providers(canonical_commit)
-    write_text("scripts/check_ai_models.py", canonical_text(canonical_commit, "scripts/check_ai_models.py"))
-    for path in ("app/native_ai.py", "scripts/check_native_ai.py", "app/groq_ai.py"):
-        target = ROOT / path
-        if not target.exists():
-            write_text(path, canonical_text(canonical_commit, path))
-        elif path == "app/groq_ai.py":
-            if target.read_text(encoding="utf-8") != canonical_text(canonical_commit, path):
-                raise MigrationError("app/groq_ai.py differs from the reviewed Groq-only adapter; preserving the branch")
-        elif PROVIDER_RE.search(target.read_text(encoding="utf-8")):
-            raise MigrationError(f"{path} has a divergent provider-bearing implementation; refusing overwrite")
-
-    transform_config()
-    transform_strategy_ai(canonical_commit)
-    transform_daily_research()
-    transform_release_diagnostics(extra_commit)
-    for path in ANCILLARY_PATHS:
-        apply_ancillary_patch(cleanup_commit, path, extra_base, extra_commit)
-
-    remaining = []
-    for path in NATIVE_PATHS:
-        target = ROOT / path
-        if not target.is_file():
-            continue
-        contents = target.read_text(encoding="utf-8")
-        if path == "metadata.json":
-            if _metadata_has_active_provider_wiring(contents):
-                remaining.append(path)
-        elif path in {".github/workflows/production-deploy.yml", ".github/workflows/production-verification.yml"}:
-            if _workflow_has_active_provider_wiring(contents):
-                remaining.append(path)
-        elif RETIRED_PROVIDER_RE.search(contents):
-            remaining.append(path)
-    if remaining:
-        raise MigrationError("provider references remain in: " + ", ".join(remaining))
-
-    for path in ("app/config.py", "app/daily_research.py", "app/strategy_ai.py", "app/ai_providers.py", "app/native_ai.py", "app/groq_ai.py", "app/main.py"):
-        target = ROOT / path
-        if target.is_file():
-            ast.parse(target.read_text(encoding="utf-8"), filename=path)
-    for path in ("deploy/cloud-run-deploy.sh", "deploy/cloud-run-worker-deploy.sh",
-                 "deploy/gcp-bootstrap.sh", "scripts/verify_release.sh"):
-        target = ROOT / path
-        if target.is_file():
-            check = subprocess.run(["bash", "-n", str(target)], cwd=ROOT, text=True,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-            if check.returncode:
-                raise MigrationError(f"{path} fails bash -n: {check.stderr.strip()}")
-    _git("add", "-A")
-    _git("diff", "--cached", "--check")
-
-
-def main() -> int:
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--canonical-commit", default=DEFAULT_CANONICAL_COMMIT)
-    parser.add_argument("--cleanup-commit", default=DEFAULT_CLEANUP_COMMIT)
-    parser.add_argument("--extra-base-commit", default=DEFAULT_EXTRA_BASE_COMMIT)
-    parser.add_argument("--extra-commit", required=True)
-    args = parser.parse_args()
-    try:
-        _git("cat-file", "-e", f"{args.canonical_commit}^{{commit}}")
-        _git("cat-file", "-e", f"{args.cleanup_commit}^{{commit}}")
-        _git("cat-file", "-e", f"{args.extra_base_commit}^{{commit}}")
-        _git("cat-file", "-e", f"{args.extra_commit}^{{commit}}")
-        migrate(args.canonical_commit, args.cleanup_commit, args.extra_base_commit, args.extra_commit)
-    except (MigrationError, OSError, SyntaxError, json.JSONDecodeError) as exc:
-        print(f"SAFE MIGRATION REFUSED: {exc}")
-        return 1
-    print("PASS: targeted Native AI migration preserved other branch files.")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-, statement, re.I):
-            return True
         if re.match(r"^\s*(?:echo|printf)\b", statement, re.I):
             # Printing a fixed validation/warning message is safe; reject shell
             # chaining, redirection, pipelines, or command substitution.
@@ -5573,7 +4772,7 @@ if __name__ == "__main__":
 
     variable_pattern = re.compile(
         r"(?i)\b(?:SECRET_GEMINI[A-Z0-9_]*|"
-        r"GEMINI_API_KEY|"
+        r"GEMINI_API_KEY|AI_SECRET_ARGS|"
         r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\b"
     )
     for original in text.splitlines(keepends=True):
@@ -5588,7 +4787,7 @@ if __name__ == "__main__":
                 continue
             provider_assignment = re.match(
                 r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
-                r"GEMINI_API_KEY|"
+                r"GEMINI_API_KEY|AI_SECRET_ARGS|"
                 r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
                 line, re.I,
             )
@@ -5614,7 +4813,7 @@ if __name__ == "__main__":
             continue
         if re.match(
             r"^\s*(?:SECRET_GEMINI[A-Z0-9_]*|"
-            r"GEMINI_API_KEY|"
+            r"GEMINI_API_KEY|AI_SECRET_ARGS|"
             r"CEREBRAS_API_KEY|AI_GATEWAY_API_KEY)\s*=",
             line, re.I,
         ):
@@ -5622,23 +4821,6 @@ if __name__ == "__main__":
         if re.search(r"(?i)\b(?:create_secret|grant_secret_access)\s+atlas-(?:gemini|cerebras|ai-gateway|openai)\b", line):
             continue
         if stripped.startswith("#") and RETIRED_PROVIDER_RE.search(line):
-            continue
-
-        # AI_SECRET_ARGS may be a shared Cloud Run secret bundle containing Groq.
-        # Remove only explicit retired-provider key/value pairs; preserve the bundle and
-        # its expansion so supported Groq credentials continue to reach the reviewer.
-        if re.match(r"^\s*(?:export\s+)?AI_SECRET_ARGS\s*=", line, re.I):
-            line = re.sub(
-                r",?(?:GEMINI_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|OPENAI_API_KEY)=[^,\"\s]*",
-                "",
-                line,
-                flags=re.I,
-            )
-            if RETIRED_PROVIDER_RE.search(line):
-                raise MigrationError(
-                    f"{path} has unrecognized retired-provider content in a shared secret argument; refusing to alter unrelated credentials"
-                )
-            output.append(line)
             continue
 
         # Remove provider entries from combined Cloud Run env-var lists.
@@ -5665,6 +4847,7 @@ if __name__ == "__main__":
                 line,
                 flags=re.I,
             )
+            line = re.sub(r",?\$\{(?:AI_SECRET_ARGS)\}", "", line)
         # Provider secret names in bootstrap allowlists are independent list items.
         if "for secret in" in line:
             line = re.sub(
@@ -5691,7 +4874,7 @@ if __name__ == "__main__":
                 safe_inline = all(
                     re.match(
                         r"^(?::|(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
-                        r"GEMINI_API_KEY|"
+                        r"GEMINI_API_KEY|AI_SECRET_ARGS|"
                         r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=)",
                         command, re.I,
                     )
