@@ -4607,7 +4607,7 @@ def branch_specific_diagnostic():
 
     def test_groq_reviewer_ast_validator_requires_async_review_api(self):
         source = 'def helper_only():\n    return {"status": "OK"}\n'
-        with self.assertRaisesRegex(migration.MigrationError, "missing the reviewed async"):
+        with self.assertRaisesRegex(migration.MigrationError, "must define exactly one async groq_research_review API"):
             migration.validate_groq_research_module(source)
 
 
