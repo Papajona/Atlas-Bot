@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
 MIGRATION_PATH = Path(__file__).resolve().parents[1] / "scripts" / "migrate_legacy_native_ai.py"
 SPEC = importlib.util.spec_from_file_location("migrate_legacy_native_ai_conflict_tests", MIGRATION_PATH)
@@ -26,6 +28,33 @@ jobs:
             migration.scrub_workflow_ancillary(
                 ".github/workflows/production-deploy.yml", workflow
             )
+
+    def test_config_migration_preserves_groq_research_fields_but_removes_strategy_provider_field(self):
+        source = """from pydantic import BaseModel
+
+class Settings(BaseModel):
+    gemini_api_key: str = ""
+    groq_api_key: str = "existing-key-reference"
+    groq_model: str = "custom/research-model"
+    groq_strategy_model: str = "legacy-strategy-model"
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / "app"
+            config_dir.mkdir()
+            config = config_dir / "config.py"
+            config.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_config()
+            migrated = config.read_text(encoding="utf-8")
+
+        self.assertNotIn("gemini_api_key", migrated)
+        self.assertNotIn("groq_strategy_model", migrated)
+        self.assertIn('groq_api_key: str = "existing-key-reference"', migrated)
+        self.assertIn('groq_model: str = "custom/research-model"', migrated)
+        self.assertIn("groq_max_completion_tokens: int = 2048", migrated)
+        self.assertIn("groq_timeout_seconds: float = 20.0", migrated)
+        self.assertIn("groq_research_review_enabled: bool = True", migrated)
 
     def test_supported_groq_deployment_setting_is_preserved(self):
         shell = """#!/usr/bin/env bash
