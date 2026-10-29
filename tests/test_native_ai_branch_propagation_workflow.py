@@ -15,6 +15,8 @@ def test_propagation_reruns_when_migration_engine_changes() -> None:
 
     assert '".github/workflows/propagate-native-ai-all-branches.yml"' in push_trigger
     assert '"scripts/migrate_legacy_native_ai.py"' in push_trigger
+    assert '"app/prompt_safety.py"' in push_trigger
+    assert '"app/groq_ai.py"' in push_trigger
 
 
 def test_update_refs_uses_supported_graphql_fields_and_compare_and_swap() -> None:
@@ -65,6 +67,7 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert 'extra_parent="$(git rev-parse "$NATIVE_AI_EXTRA_COMMIT^")"' in workflow
     assert 'if [[ "$extra_parent" != "$NATIVE_AI_EXTRA_BASE_COMMIT" ]]; then' in workflow
     assert '"app/groq_ai.py"' in runtime_path_list
+    assert '"app/prompt_safety.py"' in runtime_path_list
     assert '"app/main.py"' in runtime_path_list
     assert '"ENTRY_EXIT_3_9_0.md"' in runtime_path_list
     assert '"app/src/main/java/com/atlas/trading/network/ReleaseAdvisorClient.kt"' in runtime_path_list
