@@ -5038,7 +5038,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             retained.append(entry)
         if shared_tokens:
             if retained:
-                retained[-1] += "".join("$" + "{" + token + "}" for token in shared_tokens)
+                retained[-1] += delimiter + delimiter.join("$" + "{" + token + "}" for token in shared_tokens)
             else:
                 # An incremental AI_SECRET_ARGS assignment may contain only a shared
                 # expansion plus retired entries. Keep the shared expansion by itself.
