@@ -156,66 +156,112 @@ def _research_prompt(
     research: dict[str, Any], intelligence: dict[str, Any]
 ) -> tuple[str, bool]:
     state = {"truncated": False}
-    research = research if isinstance(research, dict) else {}
-    validation = research.get("validation") if isinstance(research.get("validation"), dict) else {}
+    if not isinstance(research, dict):
+        state["truncated"] = True
+        research = {}
+    if not isinstance(intelligence, dict):
+        state["truncated"] = True
+        intelligence = {}
+    raw_validation = research.get("validation")
+    validation = raw_validation if isinstance(raw_validation, dict) else {}
+    if "validation" in research and not isinstance(raw_validation, dict):
+        state["truncated"] = True
     retained_research_keys = {
         "symbol", "asset", "regime", "research_order", "validation", "data_quality",
         "universe_bias", "paper_candidates", "trial_labels", "prospective_trial_archive",
     }
-    if any(key not in retained_research_keys for key in research):
+    research_fields_omitted = sum(1 for key in research if key not in retained_research_keys)
+    if research_fields_omitted:
         state["truncated"] = True
     retained_validation_keys = {
         "status", "trial_registry_complete", "walk_forward_purge_complete", "promotion_status",
         "per_strategy_oos",
     }
-    if any(key not in retained_validation_keys for key in validation):
+    validation_fields_omitted = sum(1 for key in validation if key not in retained_validation_keys)
+    if validation_fields_omitted:
         state["truncated"] = True
-    oos = validation.get("per_strategy_oos") if isinstance(validation.get("per_strategy_oos"), dict) else {}
-    order = research.get("research_order") if isinstance(research.get("research_order"), list) else []
+    raw_oos = validation.get("per_strategy_oos")
+    oos = raw_oos if isinstance(raw_oos, dict) else {}
+    if "per_strategy_oos" in validation and not isinstance(raw_oos, dict):
+        state["truncated"] = True
+    raw_order = research.get("research_order")
+    order = raw_order if isinstance(raw_order, list) else []
+    if "research_order" in research and not isinstance(raw_order, list):
+        state["truncated"] = True
     names = list(dict.fromkeys([str(item) for item in order] + sorted(str(item) for item in oos)))
     if any(len(name) > 80 for name in names):
         state["truncated"] = True
     selected = names[:40]
     metrics = {}
+    strategy_metric_fields_omitted = 0
+    metric_keys = {"status", "sharpe", "oos_total_return", "max_drawdown", "fold_count", "sample_count"}
     for name in selected:
         row = oos.get(name)
         if isinstance(row, dict):
-            metric_keys = {"status", "sharpe", "oos_total_return", "max_drawdown", "fold_count", "sample_count"}
-            if any(key not in metric_keys for key in row):
+            unknown_keys = [key for key in row if key not in metric_keys]
+            strategy_metric_fields_omitted += len(unknown_keys)
+            if unknown_keys:
                 state["truncated"] = True
-            metrics[name[:80]] = {key: _bounded_prompt_value(row[key], state) for key in
-                ("status", "sharpe", "oos_total_return", "max_drawdown", "fold_count", "sample_count")
-                if key in row and isinstance(row[key], (str, bool, int, float, type(None)))}
+            metric = {}
+            for key in ("status", "sharpe", "oos_total_return", "max_drawdown", "fold_count", "sample_count"):
+                if key not in row:
+                    continue
+                value = row[key]
+                if isinstance(value, (str, bool, int, float, type(None))):
+                    metric[key] = _bounded_prompt_value(value, state)
+                else:
+                    strategy_metric_fields_omitted += 1
+                    state["truncated"] = True
+            metrics[name[:80]] = metric
     if len(names) > len(selected):
         state["truncated"] = True
-    candidates = research.get("paper_candidates")
-    candidates = candidates if isinstance(candidates, list) else []
+    raw_candidates = research.get("paper_candidates")
+    candidates = raw_candidates if isinstance(raw_candidates, list) else []
+    if "paper_candidates" in research and not isinstance(raw_candidates, list):
+        state["truncated"] = True
     candidate_summaries = []
+    candidate_keys = {"strategy", "status", "score", "confidence", "reason", "data_quality_flags"}
+    paper_candidate_fields_omitted = 0
     for candidate in candidates[:15]:
         if isinstance(candidate, dict):
-            candidate_keys = {"strategy", "status", "score", "confidence", "reason", "data_quality_flags"}
-            if any(key not in candidate_keys for key in candidate):
+            omitted_keys = [key for key in candidate if key not in candidate_keys]
+            paper_candidate_fields_omitted += len(omitted_keys)
+            if omitted_keys:
                 state["truncated"] = True
-            candidate_summaries.append({key: _bounded_prompt_value(candidate[key], state)
+            summary = {key: _bounded_prompt_value(candidate[key], state)
                 for key in ("strategy", "status", "score", "confidence", "reason", "data_quality_flags")
-                if key in candidate})
+                if key in candidate}
+            if omitted_keys:
+                summary["omitted_field_count"] = len(omitted_keys)
+            candidate_summaries.append(summary)
         else:
             candidate_summaries.append(_bounded_prompt_value(candidate, state))
     if len(candidates) > 15:
         state["truncated"] = True
-    regime = research.get("regime") if isinstance(research.get("regime"), dict) else {}
-    regime_keys = {"regime", "annualized_realized_vol", "volatility", "status"}
-    if any(key not in regime_keys for key in regime):
+    raw_regime = research.get("regime")
+    regime = raw_regime if isinstance(raw_regime, dict) else {}
+    if "regime" in research and not isinstance(raw_regime, dict):
         state["truncated"] = True
-    quality = research.get("data_quality") if isinstance(research.get("data_quality"), dict) else {}
+    regime_keys = {"regime", "annualized_realized_vol", "volatility", "status"}
+    regime_fields_omitted = sum(1 for key in regime if key not in regime_keys)
+    if regime_fields_omitted:
+        state["truncated"] = True
+    raw_quality = research.get("data_quality")
+    quality = raw_quality if isinstance(raw_quality, dict) else {}
+    if "data_quality" in research and not isinstance(raw_quality, dict):
+        state["truncated"] = True
     bounded_research = {
         "symbol": _bounded_prompt_value(research.get("symbol"), state),
         "asset": _bounded_prompt_value(research.get("asset"), state),
         "regime": _bounded_prompt_value({key: regime[key] for key in
             ("regime", "annualized_realized_vol", "volatility", "status") if key in regime}, state),
         "research_order": [name[:80] for name in selected],
+        "research_fields_omitted": research_fields_omitted,
         "strategy_count": len(names),
         "strategy_metrics_omitted": max(0, len(names) - len(selected)),
+        "strategy_metric_fields_omitted": strategy_metric_fields_omitted,
+        "regime_fields_omitted": regime_fields_omitted,
+        "validation_fields_omitted": validation_fields_omitted,
         "validation": {key: validation[key] for key in
             ("status", "trial_registry_complete", "walk_forward_purge_complete", "promotion_status")
             if key in validation} | {"per_strategy_oos": metrics},
@@ -224,16 +270,20 @@ def _research_prompt(
         "paper_candidates": candidate_summaries,
         "paper_candidate_count": len(candidates),
         "paper_candidates_omitted": max(0, len(candidates) - len(candidate_summaries)),
+        "paper_candidate_fields_omitted": paper_candidate_fields_omitted,
         "trial_labels": _bounded_prompt_value(research.get("trial_labels", []), state),
         "prospective_trial_archive": _bounded_prompt_value(research.get("prospective_trial_archive", {}), state),
     }
+    external_keys = {"news_summary", "failures", "macro_regime"}
+    external_fields_omitted = sum(1 for key in intelligence if key not in external_keys)
+    if external_fields_omitted:
+        state["truncated"] = True
     external_source = {
         "news_summary": intelligence.get("news_summary", {}),
         "source_failures": intelligence.get("failures", {}),
         "macro_regime": intelligence.get("macro_regime", {}),
+        "external_fields_omitted": external_fields_omitted,
     }
-    if any(key not in {"news_summary", "failures", "macro_regime"} for key in intelligence):
-        state["truncated"] = True
     bounded_external = _bounded_prompt_value(external_source, state)
     research_json = json.dumps(bounded_research, default=str, separators=(",", ":"))
     external_json = json.dumps(bounded_external, default=str, separators=(",", ":"))
