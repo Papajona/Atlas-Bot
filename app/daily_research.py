@@ -283,6 +283,7 @@ async def run_daily_research() -> dict[str, Any]:
                 "real_money_execution": False,
             }
         runs = []
+        pending_groq_reviews = []
         cfg = _cfg()
         for symbol, df in intelligence["histories"].items():
             try:
@@ -306,19 +307,52 @@ async def run_daily_research() -> dict[str, Any]:
                 native_research_input = dict(research)
                 native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))
                 review["native_ai_review"] = native_research_review(native_research_input, intelligence)
-                # Optional external review is advisory only; local Native AI remains canonical.
-                review["groq_research_review"] = await groq_research_review(research, intelligence)
-                review["run_drift"] = await _persist_research_run(symbol, research, review, intelligence.get("macro_regime"))
+                # Schedule optional external reviews instead of serially waiting per symbol.
+                # The local Native AI review is already available and remains authoritative.
                 run_record = {
                     "symbol": symbol, "research": research, "review": review,
                     "trial_archive": trial_archive,
                 }
+                groq_task = asyncio.create_task(groq_research_review(research, intelligence))
+                pending_groq_reviews.append((symbol, research, review, run_record, groq_task))
                 if trial_archive.get("status") == "FAILED":
                     run_record["status"] = "FAILED"
                     run_record["error"] = f"trial_archive:{trial_archive.get('reason', 'UNKNOWN')}"
                 runs.append(run_record)
             except Exception as exc:
                 runs.append({"symbol": symbol, "status": "FAILED", "error": str(exc)})
+        # Run all optional Groq requests concurrently, then persist each completed advisory.
+        # A slow provider therefore costs at most roughly one request timeout, not N timeouts.
+        if pending_groq_reviews:
+            try:
+                groq_results = await asyncio.gather(
+                    *(item[4] for item in pending_groq_reviews),
+                    return_exceptions=True,
+                )
+            except asyncio.CancelledError:
+                raise
+            for pending, groq_result in zip(pending_groq_reviews, groq_results):
+                symbol, research, review, _run_record, _groq_task = pending
+                if isinstance(groq_result, asyncio.CancelledError):
+                    raise groq_result
+                if isinstance(groq_result, BaseException):
+                    groq_result = {
+                        "status": "ERROR",
+                        "provider": "groq",
+                        "error": type(groq_result).__name__,
+                        "execution_authority": False,
+                    }
+                if not isinstance(groq_result, dict) or groq_result.get("execution_authority") is not False:
+                    groq_result = {
+                        "status": "ERROR",
+                        "provider": "groq",
+                        "error": "Invalid advisory result contract",
+                        "execution_authority": False,
+                    }
+                review["groq_research_review"] = groq_result
+                review["run_drift"] = await _persist_research_run(
+                    symbol, research, review, intelligence.get("macro_regime")
+                )
         return {
             "status": ("PARTIAL_FAILURE" if any(r.get("status") == "FAILED" for r in runs) else ("COMPLETE" if runs else "NO_DATA")),
             "run_at": datetime.now(timezone.utc).isoformat(),

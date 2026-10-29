@@ -164,11 +164,27 @@ async def groq_research_review(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        _LOGGER.warning("Groq research review failed (%s)", type(exc).__name__)
+        # Keep diagnostics actionable without logging request bodies or credentials.
+        cause = exc
+        while getattr(cause, "__cause__", None) is not None:
+            cause = cause.__cause__
+        cause_type = type(cause).__name__
+        response = getattr(cause, "response", None)
+        raw_status = getattr(response, "status_code", None)
+        http_status = raw_status if isinstance(raw_status, int) and not isinstance(raw_status, bool) else None
+        _LOGGER.warning(
+            "Groq research review failed error_type=%s cause_type=%s http_status=%s",
+            type(exc).__name__,
+            cause_type,
+            http_status,
+            exc_info=True,
+        )
         return {
             "status": "ERROR",
             "provider": "groq",
             "error": type(exc).__name__,
+            "cause": cause_type,
+            "http_status": http_status,
             "execution_authority": False,
         }
     return {
