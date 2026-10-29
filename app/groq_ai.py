@@ -158,6 +158,18 @@ def _research_prompt(
     state = {"truncated": False}
     research = research if isinstance(research, dict) else {}
     validation = research.get("validation") if isinstance(research.get("validation"), dict) else {}
+    retained_research_keys = {
+        "symbol", "asset", "regime", "research_order", "validation", "data_quality",
+        "universe_bias", "paper_candidates", "trial_labels", "prospective_trial_archive",
+    }
+    if any(key not in retained_research_keys for key in research):
+        state["truncated"] = True
+    retained_validation_keys = {
+        "status", "trial_registry_complete", "walk_forward_purge_complete", "promotion_status",
+        "per_strategy_oos",
+    }
+    if any(key not in retained_validation_keys for key in validation):
+        state["truncated"] = True
     oos = validation.get("per_strategy_oos") if isinstance(validation.get("per_strategy_oos"), dict) else {}
     order = research.get("research_order") if isinstance(research.get("research_order"), list) else []
     names = list(dict.fromkeys([str(item) for item in order] + sorted(str(item) for item in oos)))
@@ -166,6 +178,9 @@ def _research_prompt(
     for name in selected:
         row = oos.get(name)
         if isinstance(row, dict):
+            metric_keys = {"status", "sharpe", "oos_total_return", "max_drawdown", "fold_count", "sample_count"}
+            if any(key not in metric_keys for key in row):
+                state["truncated"] = True
             metrics[name[:80]] = {key: row[key] for key in
                 ("status", "sharpe", "oos_total_return", "max_drawdown", "fold_count", "sample_count")
                 if key in row and isinstance(row[key], (str, bool, int, float, type(None)))}
@@ -209,14 +224,14 @@ def _research_prompt(
         "source_failures": intelligence.get("failures", {}),
         "macro_regime": intelligence.get("macro_regime", {}),
     }
+    if any(key not in {"news_summary", "failures", "macro_regime"} for key in intelligence):
+        state["truncated"] = True
     bounded_external = _bounded_prompt_value(external_source, state)
     research_json = json.dumps(bounded_research, default=str, separators=(",", ":"))
     external_json = json.dumps(bounded_external, default=str, separators=(",", ":"))
     if len(research_json) > 12_000 or len(external_json) > 5_000:
         raise GroqAIError("Compacted Groq research input exceeded its reviewed size bound")
-    source_size = len(json.dumps({"research": research, "external": external_source}, default=str))
-    compact_size = len(research_json) + len(external_json)
-    input_truncated = state["truncated"] or source_size > compact_size
+    input_truncated = state["truncated"]
     hits = suspicious_instruction_markers(external_json)
     if hits:
         _LOGGER.warning("possible prompt-injection markers in external research inputs: %s", hits[:5])
