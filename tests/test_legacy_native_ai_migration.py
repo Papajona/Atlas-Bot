@@ -1969,7 +1969,7 @@ async def _gemini_json(prompt):
             "inert PEP 604 unions of unshadowed builtin generic types should remain eligible",
         )
 
-        annotation_only = "list: int\\n\\n" + safe_dispatcher.replace("-> dict:", "-> list[str]:")
+        annotation_only = "list: int\n\n" + safe_dispatcher.replace("-> dict:", "-> list[str]:")
         annotation_only_tree = ast.parse(annotation_only)
         self.assertTrue(
             migration._is_safe_legacy_provider_dispatcher(annotation_only_tree.body[1], annotation_only_tree),
