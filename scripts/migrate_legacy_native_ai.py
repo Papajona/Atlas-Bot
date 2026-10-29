@@ -5036,7 +5036,7 @@ def _workflow_has_active_provider_wiring(text: str) -> bool:
         stripped = line.lstrip()
         if not stripped or stripped.startswith("#"):
             continue
-        match = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$", line)
+        match = re.match(r"^\s*(?:-\s+)?([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$", line)
         if match:
             key, value = match.groups()
             if key.lower() in {"environment", "name", "run-name", "description"}:
@@ -5070,15 +5070,20 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
         line = lines[index]
         stripped = line.lstrip()
         if not stripped or stripped.startswith("#"):
+            # Keep all comments and blank lines byte-for-byte. They can be part of
+            # an unrelated YAML block scalar, so deleting them is not a semantic edit.
+            kept.append(line)
             index += 1
             continue
 
-        run_match = re.match(r"^([ \t]*)run:[ \t]*(.*?)[ \t]*(?:\r?\n)?$", line)
+        run_match = re.match(r"^([ \t]*)(-\s+)?run:[ \t]*(.*?)[ \t]*(?:\r?\n)?$", line)
         if run_match:
-            indent_text, value = run_match.groups()
+            indent_text, list_marker, value = run_match.groups()
             indent = len(indent_text)
+            prefix = indent_text + (list_marker or "")
             value = value.strip()
-            if value in {"|", "|-", "|+", ">", ">-"} or not value:
+            block_indicator = bool(re.fullmatch(r"(?:\|(?:[+-]|\d[+-]?|[+-]\d)?|>(?:[+-]|\d[+-]?|[+-]\d)?)(?:\s+#.*)?", value))
+            if block_indicator or not value:
                 end = index + 1
                 while end < len(lines):
                     candidate = lines[end]
@@ -5118,11 +5123,11 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                         f"{path} contains a provider-only inline run; refusing to leave an invalid workflow step"
                     )
                 newline = "\n" if line.endswith("\n") else ""
-                kept.append(f"{indent_text}run: {cleaned.strip()}{newline}")
+                kept.append(f"{prefix}run: {cleaned.strip()}{newline}")
                 index += 1
                 continue
 
-        key_match = re.match(r"^(\s*)([A-Za-z_][A-Za-z0-9_-]*):(?:\s*(.*?))?(\r?\n)?$", line)
+        key_match = re.match(r"^(\s*)(?:-\s+)?([A-Za-z_][A-Za-z0-9_-]*):(?:\s*(.*?))?(\r?\n)?$", line)
         if key_match:
             _indent, key, value, _newline = key_match.groups()
             if key.lower() == "environment":
