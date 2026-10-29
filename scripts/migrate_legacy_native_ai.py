@@ -5096,16 +5096,16 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             return line
         cleaned = scrub_key_value_list(match.group(3), preserve_groq_tokens=preserve_groq_tokens)
         if preserve_groq_tokens:
-            # AI_SECRET_ARGS / GROQ_SECRET_ARG / GROQ_SECRET_ARGS are normalized to
-            # empty-or-no-leading-comma fragments. Make the separator conditional so an
-            # empty optional secret adds no empty list item, and a present value adds one.
+            # AI_SECRET_ARGS is normalized without a leading comma, whereas the
+            # legacy GROQ_SECRET_ARG(S) fragments already include their comma.
             def conditional_shared_expansion(match: re.Match[str]) -> str:
                 name = match.group(1)
-                expansion = "${" + name + "}"
-                return "${" + name + ":+," + expansion + "}"
+                if name == "AI_SECRET_ARGS":
+                    return "${AI_SECRET_ARGS:+,${AI_SECRET_ARGS}}"
+                return "${" + name + "}"
 
             cleaned = re.sub(
-                r"(?<!\+),\$\{(AI_SECRET_ARGS|GROQ_SECRET_ARG|GROQ_SECRET_ARGS)\}",
+                r",\\$\\{(AI_SECRET_ARGS|GROQ_SECRET_ARG|GROQ_SECRET_ARGS)\\}",
                 conditional_shared_expansion,
                 cleaned,
             )
