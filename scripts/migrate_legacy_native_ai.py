@@ -4723,7 +4723,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             )
             warning_only = (
                 re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
-                and PROVIDER_RE.search(stripped)
+                and RETIRED_PROVIDER_RE.search(stripped)
                 and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", stripped)
             )
             if provider_assignment or warning_only:
@@ -4750,14 +4750,14 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             continue
         if re.search(r"(?i)\b(?:create_secret|grant_secret_access)\s+atlas-(?:gemini|cerebras|ai-gateway|openai)\b", line):
             continue
-        if stripped.startswith("#") and PROVIDER_RE.search(line):
+        if stripped.startswith("#") and RETIRED_PROVIDER_RE.search(line):
             continue
 
         # Remove provider entries from combined Cloud Run env-var lists.
         if "ENV_VARS=" in line:
             line = re.sub(
                 r"@(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
-                r"GROQ_MAX_COMPLETION_TOKENS|CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^@\"]*",
+                r"CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^@\"]*",
                 "",
                 line,
                 flags=re.I,
@@ -4765,7 +4765,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if "--set-env-vars" in line:
             line = re.sub(
                 r",?(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
-                r"GROQ_MAX_COMPLETION_TOKENS|CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^,\"]*",
+                r"CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^,\"]*",
                 "",
                 line,
                 flags=re.I,
@@ -5021,7 +5021,7 @@ def scrub_ancillary_text(path: str, text: str) -> str:
                 result = {}
                 for key, item in value.items():
                     key_text = str(key)
-                    if PROVIDER_FIELD_RE.search(key_text):
+                    if RETIRED_PROVIDER_FIELD_RE.search(key_text):
                         continue
                     if key_text.lower() in {"secretref", "secret_ref"} and isinstance(item, str) and PROVIDER_SETTING_NAME_RE.fullmatch(item):
                         continue
@@ -5033,7 +5033,7 @@ def scrub_ancillary_text(path: str, text: str) -> str:
                 return [cleaned for item in value if (cleaned := scrub(item, key_context)) is not remove]
             if isinstance(value, str) and key_context.lower() in {"name", "key", "setting", "variable"} and PROVIDER_SETTING_NAME_RE.fullmatch(value):
                 return ""
-            if isinstance(value, str) and (PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value)):
+            if isinstance(value, str) and (RETIRED_PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value)):
                 if re.fullmatch(r"(?i)(?:[a-z0-9]+_)*model(?:_(?:id|name|version))?", key_context):
                     return "atlas-native-strategy-v1"
                 cleaned = SECRET_VERSION_RE.sub("", value)
@@ -5059,11 +5059,11 @@ def scrub_ancillary_text(path: str, text: str) -> str:
         candidate = KEY_ASSIGNMENT_RE.sub("", candidate)
         candidate = HOST_RE.sub("", candidate)
         candidate = MODEL_RE.sub("atlas-native-strategy-v1", candidate)
-        candidate = re.sub(r"(?i)\b(?:Gemini|Groq|Cerebras|AI Gateway)\b", "", candidate)
+        candidate = re.sub(r"(?i)\b(?:Gemini|Cerebras|AI Gateway)\b", "", candidate)
         if RETIRED_PROVIDER_RE.search(candidate):
             if re.search(r"(?i)\b(?:gcloud|docker|curl|python|bash|run:)\b", candidate):
                 raise MigrationError(f"{path} has provider wiring inside an executable line; refusing automatic deletion")
-            candidate = PROVIDER_RE.sub("legacy provider", candidate)
+            candidate = RETIRED_PROVIDER_RE.sub("legacy provider", candidate)
         if candidate.strip():
             kept.append(candidate)
     cleaned = "".join(_remove_empty_env(kept))
