@@ -5025,6 +5025,27 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         r"GEMINI_API_KEY|AI_SECRET_ARGS|"
         r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\b"
     )
+    def split_shell_list(value: str, delimiter: str) -> list[str]:
+        """Split list entries without treating delimiters inside ${...} as separators."""
+        parts: list[str] = []
+        start = 0
+        expansion_depth = 0
+        index = 0
+        while index < len(value):
+            if value.startswith("${", index):
+                expansion_depth += 1
+                index += 2
+                continue
+            char = value[index]
+            if char == "}" and expansion_depth:
+                expansion_depth -= 1
+            elif char == delimiter and expansion_depth == 0:
+                parts.append(value[start:index])
+                start = index + 1
+            index += 1
+        parts.append(value[start:])
+        return parts
+
     def scrub_key_value_list(value: str, *, preserve_groq_tokens: bool = False) -> str:
         prefix = ""
         delimiter = ","
@@ -5037,7 +5058,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         )
         dynamic_pattern = re.escape("$") + r"\{(AI_SECRET_ARGS|GROQ_SECRET_ARG|GROQ_SECRET_ARGS)\}"
         retained: list[str] = []
-        for raw_entry in value.split(delimiter):
+        for raw_entry in split_shell_list(value, delimiter):
             entry = raw_entry.strip()
             if not entry:
                 continue
@@ -5064,13 +5085,17 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             return line
         cleaned = scrub_key_value_list(match.group(3), preserve_groq_tokens=preserve_groq_tokens)
         if preserve_groq_tokens:
-            # These shared arguments are built as comma-prefixed fragments (or empty).
-            # The surrounding static list already has its own separators, so putting a
-            # comma before the expansion creates ",," when enabled and a trailing comma
-            # when disabled. Let the fragment supply its own delimiter.
+            # AI_SECRET_ARGS / GROQ_SECRET_ARG / GROQ_SECRET_ARGS are normalized to
+            # empty-or-no-leading-comma fragments. Make the separator conditional so an
+            # empty optional secret adds no empty list item, and a present value adds one.
+            def conditional_shared_expansion(match: re.Match[str]) -> str:
+                name = match.group(1)
+                expansion = "${" + name + "}"
+                return "${" + name + ":+," + expansion + "}"
+
             cleaned = re.sub(
-                r",(?=\$\{(?:AI_SECRET_ARGS|GROQ_SECRET_ARG|GROQ_SECRET_ARGS)\})",
-                "",
+                r",\$\{(AI_SECRET_ARGS|GROQ_SECRET_ARG|GROQ_SECRET_ARGS)\}",
+                conditional_shared_expansion,
                 cleaned,
             )
         if not cleaned:
