@@ -4559,7 +4559,7 @@ def _ensure_groq_review_persisted(source: str, filename: str) -> str:
             parent = parents.get(parent)
         return False
 
-    insertions: list[int] = []
+    insertions: list[tuple[int, str]] = []
     complete_projection = False
     projection_seen = False
     for node in ast.walk(tree):
@@ -4573,6 +4573,27 @@ def _ensure_groq_review_persisted(source: str, filename: str) -> str:
         projection = node.args[0]
         if isinstance(projection, ast.Name) and projection.id == "review":
             complete_projection = True
+            continue
+        if isinstance(projection, ast.Dict):
+            keys = projection.keys
+            if not all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in keys):
+                raise MigrationError(f"{filename} has a dynamic ResearchRun.review_json mapping; refusing to omit Groq review history")
+            fields = [key.value for key in keys]
+            if "groq_research_review" in fields:
+                continue
+            if not any(name in fields for name in ("ai_brain_mode", "paper_candidates", "native_ai_review", "external_ai_review")):
+                continue
+            projection_seen = True
+            source_lines = source.splitlines(keepends=True)
+            line_bytes = source_lines[projection.end_lineno - 1].encode("utf-8")
+            try:
+                column = len(line_bytes[:projection.end_col_offset].decode("utf-8"))
+            except UnicodeDecodeError as exc:
+                raise MigrationError(f"{filename} review mapping has an invalid source position") from exc
+            offset = sum(len(line) for line in source_lines[:projection.end_lineno - 1]) + column
+            if offset < 1 or source[offset - 1:offset] != "}":
+                raise MigrationError(f"{filename} has an unexpected ResearchRun.review_json mapping")
+            insertions.append((offset - 1, ', "groq_research_review": review.get("groq_research_review")'))
             continue
         if not isinstance(projection, ast.DictComp):
             continue
@@ -4610,12 +4631,12 @@ def _ensure_groq_review_persisted(source: str, filename: str) -> str:
         offset = sum(len(line) for line in source_lines[:field_tuple.end_lineno - 1]) + column
         if offset < 1 or source[offset - 1:offset] != ")":
             raise MigrationError(f"{filename} has an unexpected ResearchRun.review_json projection")
-        insertions.append(offset - 1)
+        insertions.append((offset - 1, ', "groq_research_review"'))
 
     if complete_projection and not projection_seen:
         return source
-    for offset in sorted(set(insertions), reverse=True):
-        source = source[:offset] + ', "groq_research_review"' + source[offset:]
+    for offset, addition in sorted(set(insertions), reverse=True):
+        source = source[:offset] + addition + source[offset:]
     ast.parse(source, filename=filename)
     return source
 
@@ -5185,7 +5206,7 @@ def _workflow_has_active_provider_wiring(text: str) -> bool:
         stripped = line.lstrip()
         if not stripped or stripped.startswith("#"):
             continue
-        match = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$", line)
+        match = re.match(r"^\s*(?:-\s+)?([A-Za-z_[A-Za-z0-9_-]*):\s*(.*)$", line)
         if match:
             key, value = match.groups()
             if key.lower() in {"environment", "name", "run-name", "description"}:
@@ -5273,6 +5294,16 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                 index += 1
                 continue
 
+        # GitHub Actions sequence-item labels are inert metadata just like mapping labels.
+        # Preserve them verbatim even when their display text names a retired provider.
+        label_match = re.match(
+            r"^([ \\t]*-[ \\t]+)(name|run-name|description):(?:[ \\t]*(.*?))?(\\r?\\n)?$",
+            line, re.I,
+        )
+        if label_match:
+            kept.append(line)
+            index += 1
+            continue
         key_match = re.match(r"^(\s*)([A-Za-z_][A-Za-z0-9_-]*):(?:\s*(.*?))?(\r?\n)?$", line)
         if key_match:
             _indent, key, value, _newline = key_match.groups()
