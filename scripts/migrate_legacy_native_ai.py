@@ -5054,7 +5054,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
 
     variable_pattern = re.compile(
         r"(?i)\b(?:SECRET_GEMINI[A-Z0-9_]*|"
-        r"GEMINI_API_KEY|AI_SECRET_ARGS|"
+        r"GEMINI_API_KEY|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|AI_SECRET_ARGS|"
         r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\b"
     )
     def split_shell_list(value: str, delimiter: str) -> list[str]:
@@ -5176,7 +5176,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 continue
             provider_assignment = re.match(
                 r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
-                r"GEMINI_API_KEY|"
+                r"GEMINI_API_KEY|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|"
                 r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
                 line, re.I,
             )
@@ -5202,7 +5202,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             continue
         if re.match(
             r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
-            r"GEMINI_API_KEY|"
+            r"GEMINI_API_KEY|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|"
             r"CEREBRAS_API_KEY|AI_GATEWAY_API_KEY)\s*=",
             line, re.I,
         ):
