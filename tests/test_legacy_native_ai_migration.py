@@ -4559,5 +4559,56 @@ GROQ_MODEL="openai/gpt-oss-20b"
         self.assertIn('GROQ_API_KEY="supported-review-key"', cleaned)
         self.assertIn('GROQ_MODEL="openai/gpt-oss-20b"', cleaned)
 
+
+    def test_shell_scrub_removes_only_static_provider_echo_messages(self):
+        source = '''DATABASE_URL="\${DATABASE_URL:?required}"
+echo "Gemini strategy provider was retired; Native AI is used now"
+printf "Optional Gemini review is not configured"
+'''
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertIn("DATABASE_URL", cleaned)
+        self.assertNotRegex(cleaned, migration.RETIRED_PROVIDER_RE)
+
+    def test_shell_scrub_still_refuses_dynamic_provider_echo(self):
+        source = 'echo "Gemini key: $GEMINI_API_KEY"\n'
+        with self.assertRaises(migration.MigrationError):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+
+    def test_markdown_provider_history_is_scrubbed_as_prose_not_shell(self):
+        source = (
+            "| Previous deployment integration | Gemini strategy secrets were injected "
+            "through a historical run: / bash workflow. |\n"
+        )
+        cleaned = migration.scrub_ancillary_text("deploy/DEPLOY_WORKFLOW.md", source)
+        self.assertNotRegex(cleaned, migration.RETIRED_PROVIDER_RE)
+        self.assertIn("Previous deployment integration", cleaned)
+        self.assertIn("historical", cleaned)
+
+    def test_groq_reviewer_ast_validator_preserves_compatible_branch_specific_code(self):
+        source = '''from __future__ import annotations
+import httpx
+
+async def groq_research_review(research):
+    response = await httpx.AsyncClient().post("https://api.groq.com/openai/v1/chat/completions")
+    return {"status": "OK", "response": response.status_code}
+
+def branch_specific_diagnostic():
+    return "extra reviewed diagnostics"
+'''
+        self.assertIsNone(migration.validate_groq_research_module(source))
+        self.assertIn("branch_specific_diagnostic", source)
+
+    def test_groq_reviewer_ast_validator_rejects_retired_strategy_provider_code(self):
+        source = '''async def groq_research_review(research):
+    return {"model": settings.gemini_model}
+'''
+        with self.assertRaisesRegex(migration.MigrationError, "retired-provider wiring"):
+            migration.validate_groq_research_module(source)
+
+    def test_groq_reviewer_ast_validator_requires_async_review_api(self):
+        source = 'def helper_only():\n    return {"status": "OK"}\n'
+        with self.assertRaisesRegex(migration.MigrationError, "missing the reviewed async"):
+            migration.validate_groq_research_module(source)
+
 if __name__ == "__main__":
     unittest.main()
