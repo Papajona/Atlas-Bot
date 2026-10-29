@@ -5022,7 +5022,27 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         # Only discard literal output text. Never rewrite dynamic expansions,
         # command substitutions, redirections, pipes, or composed commands.
         normalized = re.sub(r"\s+>&2\s*$", "", stripped)
-        return not re.search(r"\$|\x60|[;&|<>]", normalized)
+        if re.search(r"\$|\x60", normalized):
+            return False
+        quote = None
+        escaped = False
+        for character in normalized:
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\" and quote != "'":
+                escaped = True
+                continue
+            if quote is not None:
+                if character == quote:
+                    quote = None
+                continue
+            if character in {"'", '"'}:
+                quote = character
+                continue
+            if character in ";&|<>":
+                return False
+        return quote is None
 
     block_start = 0
     while block_start < len(source_lines):
