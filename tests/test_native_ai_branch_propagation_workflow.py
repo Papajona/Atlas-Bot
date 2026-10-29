@@ -144,10 +144,16 @@ def test_metadata_secret_refs_are_checked_even_when_source_grep_has_no_matches()
 
 def test_provider_free_branch_skip_requires_static_native_error_alias_identity() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    assert "native_error_alias = any(" in workflow
-    assert "facade_imports_native_error = any(" in workflow
+    assert "def top_level_bound_names(node):" in workflow
+    assert "facade_imports_native_error = (" in workflow
+    assert "facade_imports[0][2].asname is None" in workflow
+    assert "len(facade_error_bindings) == 1" in workflow
+    assert "native_alias_bindings" in workflow
     assert "if not native_error_alias or not facade_imports_native_error" in workflow
-    assert "app.native_ai.NativeAIError" in workflow
+    assert "app.native_ai.NativeAIError" in workflow or "NativeAI error alias is renamed or rebound" in workflow
+    assert "groq_reviewers = [" in workflow
+    assert "groq_reviewer must accept research and intelligence positional arguments" in workflow
+    assert "allowed_plain_imports" in workflow
     assert "if [[ -z \"$before_refs\" ]] && verify_native_ai_impl; then" in workflow
     assert 'importlib.import_module("app.groq_ai")' not in workflow
 
