@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+
+import pytest
 from unittest.mock import patch
 
 
@@ -164,3 +166,30 @@ def test_groq_rate_limit_diagnostic_preserves_status_without_secret_or_body():
     assert result["error_detail"] == "Groq upstream returned HTTP 429"
     assert "test-key-not-a-real-secret" not in str(result)
     assert "do not expose this body" not in str(result)
+
+
+def test_groq_review_rejects_actionable_trade_instructions():
+    unsafe = dict(VALID_REVIEW)
+    unsafe["strategy_watchlist"] = ["BUY BTC/USDT NOW"]
+    with pytest.raises(groq_ai.GroqAIError, match="actionable trading instructions"):
+        groq_ai._validate_review(unsafe)
+
+
+def test_groq_review_passes_explicit_paper_candidates_without_trade_authority():
+    client = _FakeAsyncClient(_FakeResponse(json.dumps(VALID_REVIEW)))
+    candidates = [{"symbol": "BTC-USD", "strategy": "TREND", "status": "PAPER_ONLY_CANDIDATE"}]
+    with _settings(
+        groq_api_key="test-key-not-a-real-secret",
+        groq_model="openai/gpt-oss-20b",
+        groq_max_completion_tokens=2048,
+        groq_timeout_seconds=20.0,
+        groq_research_review_enabled=True,
+    ), patch.object(groq_ai.httpx, "AsyncClient", return_value=client):
+        result = asyncio.run(
+            groq_ai.groq_research_review(
+                {"symbol": "BTC-USD"}, {}, paper_candidates=candidates
+            )
+        )
+    assert result["status"] == "OK"
+    assert result["execution_authority"] is False
+    assert "PAPER_ONLY_CANDIDATE" in client.request["json"]["messages"][1]["content"]
