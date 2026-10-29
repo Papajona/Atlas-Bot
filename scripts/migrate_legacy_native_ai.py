@@ -24,7 +24,7 @@ PROVIDER_RE = re.compile(
     r"api\.groq\.com|api\.cerebras\.ai|api\.openai\.com|"
     r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|"
     r"GEMINI_API_KEY|GROQ_API_KEY|SECRET_GEMINI|SECRET_GROQ|_gemini_json|_groq_json|"
-    r"settings\.(?:gemini|groq|cerebras|ai_gateway)_")
+    r"settings\.(?:gemini|groq|cerebras|ai_gateway)_)")
 PROVIDER_FIELD_RE = re.compile(
     r"(?i)(?:gemini|groq|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
     r"api\.groq\.com|api\.cerebras\.ai|api\.openai\.com|"
