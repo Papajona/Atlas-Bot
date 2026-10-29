@@ -164,10 +164,10 @@ jobs:
     steps:
       - name: deploy
         env:
-          \"GEMINI_API_KEY\": ${{ secrets.GEMINI_API_KEY }}
+          "GEMINI_API_KEY": ${{ secrets.GEMINI_API_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: echo deploy
-\"\"\"
+"""
         cleaned = migration.scrub_workflow_ancillary(
             ".github/workflows/production-deploy.yml", workflow
         )
@@ -183,9 +183,9 @@ jobs:
     steps:
       - name: migrate
         run: curl https://api.openai.com/v1 && python -m alembic upgrade head
-\"\"\"
+"""
         with self.assertRaisesRegex(
-            migration.MigrationError, r"\\.github/workflows/production-deploy\\.yml.*mixed shell command"
+            migration.MigrationError, r"\.github/workflows/production-deploy\.yml.*mixed shell command"
         ) as caught:
             migration.scrub_workflow_ancillary(
                 ".github/workflows/production-deploy.yml", workflow
@@ -199,7 +199,7 @@ class Settings(BaseModel):
   model_config = dict(
     env_file=".env",
   )
-\"\"\"
+"""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             app_dir = root / "app"
@@ -209,7 +209,7 @@ class Settings(BaseModel):
             with patch.object(migration, "ROOT", root):
                 migration.transform_config()
             result = config.read_text(encoding="utf-8")
-        self.assertIn("  )\\n  groq_api_key: str = \"\"", result)
+        self.assertIn("  )\n  groq_api_key: str = \"\"", result)
         self.assertNotIn("    groq_api_key: str = \"\"", result)
         import ast
         ast.parse(result, filename="app/config.py")
