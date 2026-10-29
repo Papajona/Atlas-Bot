@@ -3436,7 +3436,7 @@ def persist(review):
     )}, default=str))
 """
         updated = migration._ensure_groq_review_persisted(source, "app/daily_research.py")
-        self.assertIn('"native_ai_review", # keep the explanation\\n        "groq_research_review"', updated)
+        self.assertRegex(updated, r'"native_ai_review", # keep the explanation\s+"groq_research_review"')
         self.assertEqual(updated, migration._ensure_groq_review_persisted(updated, "app/daily_research.py"))
         ast.parse(updated, filename="app/daily_research.py")
 
@@ -3449,7 +3449,7 @@ def persist(review):
     }, default=str))
 """
         updated = migration._ensure_groq_review_persisted(source, "app/daily_research.py")
-        self.assertIn('"native_ai_review": review.get("native_ai_review"), # keep the explanation\\n        "groq_research_review": review.get("groq_research_review")', updated)
+        self.assertRegex(updated, r'"native_ai_review": review\.get\("native_ai_review"\), # keep the explanation\s+"groq_research_review": review\.get\("groq_research_review"\)')
         self.assertEqual(updated, migration._ensure_groq_review_persisted(updated, "app/daily_research.py"))
         ast.parse(updated, filename="app/daily_research.py")
     def test_shell_scrub_avoids_empty_secret_entry_when_only_groq_survives(self):
