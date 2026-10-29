@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 from typing import Any
 
 import httpx
@@ -24,6 +25,18 @@ _SYSTEM_PROMPT = (
     "You are Atlas's optional Groq research reviewer. Review supplied research evidence only. "
     "Do not place trades, provide buy/sell instructions, alter order parameters, invent market data, "
     "or claim execution authority. Return one JSON object only."
+)
+
+
+_ACTIONABLE_TRADE_INSTRUCTION_RE = re.compile(
+    r"(?i)\\b(?:"
+    r"(?:buy|sell)\\s+(?:now|immediately|[A-Z0-9][A-Z0-9./:_-]{0,30}\\s+(?:now|immediately|at\\s+(?:\\$?\\d)))|"
+    r"go\\s+(?:long|short)|"
+    r"open\\s+(?:a\\s+)?(?:long|short)\\s+(?:position|trade)|"
+    r"enter\\s+(?:a\\s+)?(?:long|short)\\s+(?:position|trade)|"
+    r"place\\s+(?:an?\\s+)?order|execute\\s+(?:a\\s+)?trade|"
+    r"set\\s+(?:the\\s+)?(?:stop[- ]loss|take[- ]profit|entry|target)"
+    r")\\b"
 )
 
 
@@ -75,6 +88,11 @@ def _validate_review(value: dict[str, Any]) -> dict[str, Any]:
     if not math.isfinite(float(confidence)) or not 0.0 <= float(confidence) <= 1.0:
         raise GroqAIError("Groq review confidence must be a finite number between 0 and 1")
     result["confidence"] = float(confidence)
+    rendered_text = [
+        *result[key] for key in required_text
+    ] + [item for key in required_arrays for item in result[key]]
+    if any(_ACTIONABLE_TRADE_INSTRUCTION_RE.search(item) for item in rendered_text):
+        raise GroqAIError("Groq review contains actionable trading instructions")
     return result
 
 
@@ -298,7 +316,7 @@ async def _groq_json(prompt: str) -> dict[str, Any]:
 
 
 async def groq_research_review(
-    research: dict[str, Any], intelligence: dict[str, Any]
+    research: dict[str, Any], intelligence: dict[str, Any], paper_candidates: Any = None
 ) -> dict[str, Any]:
     """Return an optional Groq research annotation without granting execution authority."""
     if not settings.groq_research_review_enabled:
