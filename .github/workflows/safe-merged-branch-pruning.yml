@@ -49,29 +49,34 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - name: Skip push-time pruning when Native AI propagation will update branch refs
+      - name: Skip pruning while Native AI propagation may update branch refs
         id: pruning_guard
-        if: github.event_name == 'push'
+        if: github.event_name != 'workflow_run'
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
         shell: bash
         run: |
-          changed_paths="$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA")"
           skip_pruning=false
-          while IFS= read -r changed_path; do
-            case "$changed_path" in
-              scripts/migrate_legacy_native_ai.py|.github/workflows/propagate-native-ai-all-branches.yml)
-                skip_pruning=true
-                break
-                ;;
-            esac
-          done <<< "$changed_paths"
 
-          # A later, unrelated main push can arrive while an earlier Native AI
-          # propagation run is still updating refs. Never prune concurrently.
+          # For pushes, skip when this same commit starts Native AI propagation.
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            changed_paths="$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA")"
+            while IFS= read -r changed_path; do
+              case "$changed_path" in
+                scripts/migrate_legacy_native_ai.py|.github/workflows/propagate-native-ai-all-branches.yml)
+                  skip_pruning=true
+                  break
+                  ;;
+              esac
+            done <<< "$changed_paths"
+          fi
+
+          # A later push or manual dispatch can overlap an already-running propagation.
+          # Query Actions for every non-workflow_run trigger; fail closed if unknown.
           if [[ "$skip_pruning" != true ]]; then
             if ! active_propagations="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow propagate-native-ai-all-branches.yml --branch main --json status --limit 50)"; then
               skip_pruning=true
