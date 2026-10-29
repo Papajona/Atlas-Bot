@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -679,3 +680,267 @@ def test_lease_rejection_preserves_branch_updated_after_proof(tmp_path, monkeypa
     assert "lease was rejected" in reason
     remote_listing = _git(advancer, "ls-remote", "origin", f"refs/heads/{branch_name}")
     assert remote_listing.split()[0] == advanced_sha
+
+
+def test_native_ai_branch_retirement_requires_exact_sha_and_migration_only_paths(monkeypatch):
+    branch_name = "fix/native-ai-propagation-error-alias-20261027"
+    expected_sha = "a7f35abfe8d3a73af329c5ae34320afe5f0def12"
+    migration_paths = sorted(pruning._NATIVE_AI_MIGRATION_ARTIFACT_PATHS)
+    monkeypatch.setattr(
+        pruning, "_main_has_verified_native_ai_migration", lambda _sha: True
+    )
+
+    assert pruning._is_explicitly_superseded_native_ai_migration_ref(
+        branch_name, expected_sha, "verified-main-sha", migration_paths
+    )
+    assert pruning._is_explicitly_superseded_native_ai_migration_ref(
+        "fix/remediation-dc7d0b60-cf91de",
+        "fc2776a36358cf22e4e677737ad0230464cb414a",
+        "verified-main-sha",
+        [
+            "scripts/migrate_legacy_native_ai.py",
+            "tests/test_legacy_native_ai_migration.py",
+        ],
+    )
+    monkeypatch.setattr(
+        pruning,
+        "_is_ancestor",
+        lambda ancestor, descendant: (
+            ancestor == expected_sha and descendant == "verified-descendant-sha"
+        ),
+    )
+    assert not pruning._is_explicitly_superseded_native_ai_migration_ref(
+        branch_name, "verified-descendant-sha", "verified-main-sha", migration_paths
+    )
+    assert not pruning._is_explicitly_superseded_native_ai_migration_ref(
+        branch_name, "changed-branch-sha", "verified-main-sha", migration_paths
+    )
+    assert not pruning._is_explicitly_superseded_native_ai_migration_ref(
+        branch_name, expected_sha, "verified-main-sha", migration_paths + ["app/main.py"]
+    )
+    assert not pruning._is_explicitly_superseded_native_ai_migration_ref(
+        "unlisted-branch", expected_sha, "verified-main-sha", migration_paths
+    )
+
+
+def test_native_ai_retirement_preserves_descendant_with_unmerged_migration_edit(tmp_path, monkeypatch):
+    local_repo = tmp_path / "native-ai-descendant-repo"
+    _git(tmp_path, "init", "-b", "main", local_repo)
+    _git(local_repo, "config", "user.name", "Atlas branch pruning regression")
+    _git(local_repo, "config", "user.email", "atlas-prune@example.invalid")
+
+    migration_path = local_repo / "scripts" / "migrate_legacy_native_ai.py"
+    migration_path.parent.mkdir(parents=True)
+    migration_path.write_text("AUDITED_MIGRATION = True\n", encoding="utf-8")
+    _git(local_repo, "add", "scripts/migrate_legacy_native_ai.py")
+    _git(local_repo, "commit", "-m", "audited migration tip")
+    audited_sha = _git(local_repo, "rev-parse", "HEAD")
+
+    migration_path.write_text(
+        "AUDITED_MIGRATION = True\nUNREVIEWED_EDIT = True\n",
+        encoding="utf-8",
+    )
+    _git(local_repo, "add", "scripts/migrate_legacy_native_ai.py")
+    _git(local_repo, "commit", "-m", "unmerged migration edit")
+    descendant_sha = _git(local_repo, "rev-parse", "HEAD")
+    assert _git(local_repo, "merge-base", "--is-ancestor", audited_sha, descendant_sha) == ""
+
+    branch_name = "fix/native-ai-propagation-error-alias-20261027"
+    monkeypatch.setattr(
+        pruning,
+        "_SUPERSEDED_NATIVE_AI_MIGRATION_BRANCHES",
+        {branch_name: audited_sha},
+    )
+
+    def local_is_ancestor(ancestor, descendant):
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+            cwd=local_repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.returncode == 0
+
+    monkeypatch.setattr(pruning, "_is_ancestor", local_is_ancestor)
+    monkeypatch.setattr(
+        pruning, "_branch_delta_mismatched_paths",
+        lambda *_args: ["scripts/migrate_legacy_native_ai.py"],
+    )
+    monkeypatch.setattr(
+        pruning, "_main_has_verified_native_ai_migration", lambda _sha: True
+    )
+
+    safe, reason, mismatch_paths = pruning._resolve_branch_integration(
+        branch_name, descendant_sha, audited_sha, set(), []
+    )
+    assert safe is False
+    assert reason == "no exact integration proof; preserve branch"
+    assert mismatch_paths == ["scripts/migrate_legacy_native_ai.py"]
+
+
+def test_native_ai_branch_retirement_gate_accepts_committed_migration_safeguards():
+    """Read the real committed tree; the success path must not mock git show."""
+    repository_root = Path(__file__).resolve().parents[1]
+    verified_main_sha = _git(repository_root, "rev-parse", "HEAD")
+
+    assert pruning._main_has_verified_native_ai_migration(verified_main_sha)
+    assert pruning._is_explicitly_superseded_native_ai_migration_ref(
+        "fix/native-ai-propagation-error-alias-20261027",
+        "a7f35abfe8d3a73af329c5ae34320afe5f0def12",
+        verified_main_sha,
+        sorted(pruning._NATIVE_AI_MIGRATION_ARTIFACT_PATHS),
+    )
+
+
+def test_native_ai_branch_retirement_fails_closed_when_a_required_guard_is_missing(monkeypatch):
+    sources = {
+        "scripts/migrate_legacy_native_ai.py": "\n".join((
+            "def _is_replaceable_legacy_market_context(): pass",
+            "def _safe_canonical_trade_safety_validator(): pass",
+        )),
+        "tests/test_legacy_native_ai_migration.py": "\n".join((
+            "import unittest",
+            "class MigrationTests(unittest.TestCase):",
+            "    def test_strategy_migration_accepts_recognized_two_and_three_provider_flows(self): pass",
+            "    def test_legacy_market_context_rejects_rebinding_and_dynamic_lookups(self): pass",
+            "    def test_equivalent_legacy_trade_safety_validator_is_deduplicated(self): pass",
+            # Intentionally omit the end-to-end safety-validator regression.
+        )),
+    }
+    monkeypatch.setattr(
+        pruning, "_git_file_text_at_commit", lambda _sha, path: sources[path]
+    )
+    assert not pruning._main_has_verified_native_ai_migration("missing-required-test-sha")
+
+
+def test_native_ai_retirement_does_not_accept_signatures_inside_multiline_strings(monkeypatch):
+    sources = {
+        "scripts/migrate_legacy_native_ai.py": (
+            '"""\n'
+            "def _is_compatible_strategy_schema_and_context(): pass\n"
+            "def _safe_canonical_json_helper(): pass\n"
+            '"""\n'
+        ),
+        "tests/test_legacy_native_ai_migration.py": (
+            '"""\n'
+            "def test_strategy_migration_accepts_recognized_two_and_three_provider_flows(self): pass\n"
+            "def test_exact_schema_contract_rejects_missing_canonical_validator(self): pass\n"
+            "def test_exact_schema_contract_rejects_market_binding_before_model_dump(self): pass\n"
+            "def test_legacy_extract_json_uses_canonical_pure_parser_contract(self): pass\n"
+            "def test_legacy_response_json_helper_uses_canonical_parser_contract(self): pass\n"
+            '"""\n'
+        ),
+    }
+    monkeypatch.setattr(
+        pruning, "_git_file_text_at_commit", lambda _sha, path: sources[path]
+    )
+    assert not pruning._main_has_verified_native_ai_migration("quoted-markers-only-sha")
+
+
+def test_native_ai_retirement_rejects_async_guard_definitions(monkeypatch):
+    sources = {
+        "scripts/migrate_legacy_native_ai.py": "\n".join((
+            "async def _is_replaceable_legacy_market_context(): pass",
+            "async def _safe_canonical_trade_safety_validator(): pass",
+        )),
+        "tests/test_legacy_native_ai_migration.py": "\n".join((
+            "import unittest",
+            "class MigrationTests(unittest.TestCase):",
+            "    async def test_strategy_migration_accepts_recognized_two_and_three_provider_flows(self): pass",
+            "    async def test_legacy_market_context_rejects_rebinding_and_dynamic_lookups(self): pass",
+            "    async def test_equivalent_legacy_trade_safety_validator_is_deduplicated(self): pass",
+            "    async def test_ai_provider_migration_accepts_only_equivalent_trade_safety_validator(self): pass",
+        )),
+    }
+    monkeypatch.setattr(
+        pruning, "_git_file_text_at_commit", lambda _sha, path: sources[path]
+    )
+    assert not pruning._main_has_verified_native_ai_migration("async-guards-only-sha")
+
+
+def test_native_ai_retirement_keeps_branches_with_open_prs(monkeypatch):
+    branch_name = "fix/native-ai-propagation-error-alias-20261027"
+    branch_sha = "a7f35abfe8d3a73af329c5ae34320afe5f0def12"
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: False)
+    monkeypatch.setattr(
+        pruning, "_branch_delta_mismatched_paths",
+        lambda *_args: sorted(pruning._NATIVE_AI_MIGRATION_ARTIFACT_PATHS),
+    )
+    monkeypatch.setattr(
+        pruning, "_main_has_verified_native_ai_migration", lambda _sha: True
+    )
+
+    safe, reason, paths = pruning._resolve_branch_integration(
+        branch_name, branch_sha, "verified-main-sha", {branch_name}, []
+    )
+    assert safe is False
+    assert reason == "branch has an open pull request"
+    assert paths == []
+
+
+def test_branch_pruning_runs_after_propagation_without_racing_its_push():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "safe-merged-branch-pruning.yml"
+    ).read_text(encoding="utf-8")
+    assert "\n  push:\n" in workflow
+    assert "\n  workflow_run:\n" in workflow
+    assert "Propagate Atlas Native AI across branches" in workflow
+    assert "github.event.workflow_run.head_branch == 'main'" in workflow
+    assert "Skip push-time pruning when Native AI propagation will update branch refs" in workflow
+    assert "github.event_name == 'push'" in workflow
+    assert "scripts/migrate_legacy_native_ai.py" in workflow
+    assert ".github/workflows/propagate-native-ai-all-branches.yml" in workflow
+    assert "while IFS= read -r changed_path;" in workflow
+    assert 'case "$changed_path" in' in workflow
+    assert "skip_pruning=false" in workflow
+    assert "grep -Fxq" not in workflow, (
+        "grep -q can close the pipe early under pipefail and fail open"
+    )
+    assert 'echo "skip=true" >> "$GITHUB_OUTPUT"' in workflow
+    assert "if: steps.pruning_guard.outputs.skip != 'true'" in workflow
+    # Keep the established marker guards so one-time cleanup commits cannot recurse.
+    assert "[atlas-branch-prune-once-20261020]" in workflow
+    assert "[atlas-branch-prune-content-once-20261020]" in workflow
+    assert "[atlas-branch-prune-reviewed-once-20261020]" in workflow
+    assert "[atlas-branch-prune-verified-duplicates-once-20261020]" in workflow
+
+
+def test_pruning_push_guard_handles_large_change_list_under_pipefail(tmp_path):
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "safe-merged-branch-pruning.yml"
+    ).read_text(encoding="utf-8")
+    lines = workflow.splitlines()
+    guard_start = next(
+        index for index, line in enumerate(lines)
+        if line.strip() == "skip_pruning=false"
+    )
+    guard_end = next(
+        index for index in range(guard_start, len(lines))
+        if lines[index].strip() == "fi"
+    )
+    guard = "\n".join(line[10:] for line in lines[guard_start:guard_end + 1])
+    output_path = tmp_path / "github-output"
+    script = (
+        'set -euo pipefail\n'
+        'changed_paths="$(printf "%s\\n" ".github/workflows/propagate-native-ai-all-branches.yml"; '
+        'for index in {1..12000}; do printf "app/generated/module_%05d.py\\n" "$index"; done)"\n'
+        + guard
+        + "\n"
+    )
+    result = subprocess.run(
+        ["bash", "-o", "pipefail", "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"PATH": "/usr/bin:/bin", "GITHUB_OUTPUT": str(output_path)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert output_path.read_text(encoding="utf-8").splitlines() == ["skip=true"]
+

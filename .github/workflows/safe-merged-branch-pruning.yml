@@ -5,6 +5,13 @@ on:
     branches:
       - main
   workflow_dispatch:
+  workflow_run:
+    workflows:
+      - Propagate Atlas Native AI across branches
+    types:
+      - completed
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -16,6 +23,10 @@ jobs:
       github.ref == 'refs/heads/main' &&
       (
         github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.head_branch == 'main'
+        ) ||
         (
           github.event_name == 'push' &&
           !startsWith(github.event.head_commit.message, '[atlas-branch-prune-once-20261020]') &&
@@ -36,7 +47,33 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
+      - name: Skip push-time pruning when Native AI propagation will update branch refs
+        id: pruning_guard
+        if: github.event_name == 'push'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          changed_paths="$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA")"
+          skip_pruning=false
+          while IFS= read -r changed_path; do
+            case "$changed_path" in
+              scripts/migrate_legacy_native_ai.py|.github/workflows/propagate-native-ai-all-branches.yml)
+                skip_pruning=true
+                break
+                ;;
+            esac
+          done <<< "$changed_paths"
+          if [[ "$skip_pruning" == true ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Branch refs will be pruned only after Native AI propagation completes."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Delete only refs proven integrated into main
+        if: steps.pruning_guard.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
