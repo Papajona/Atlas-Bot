@@ -4588,7 +4588,7 @@ printf "Optional Gemini review is not configured"
         source = '''from __future__ import annotations
 import httpx
 
-async def groq_research_review(research):
+async def groq_research_review(research, intelligence):
     response = await httpx.AsyncClient().post("https://api.groq.com/openai/v1/chat/completions")
     return {"status": "OK", "response": response.status_code}
 
@@ -4609,6 +4609,41 @@ def branch_specific_diagnostic():
         source = 'def helper_only():\n    return {"status": "OK"}\n'
         with self.assertRaisesRegex(migration.MigrationError, "missing the reviewed async"):
             migration.validate_groq_research_module(source)
+
+
+
+    def test_groq_reviewer_ast_validator_rejects_one_positional_argument(self):
+        source = '''async def groq_research_review(research):
+    return {"status": "DISABLED", "provider": "groq", "execution_authority": False}
+'''
+        with self.assertRaisesRegex(migration.MigrationError, "two positional arguments"):
+            migration.validate_groq_research_module(source)
+
+    def test_groq_reviewer_ast_validator_allows_varargs_signature(self):
+        source = '''import httpx
+async def groq_research_review(research, *args):
+    return {"status": "DISABLED", "provider": "groq", "execution_authority": False}
+'''
+        self.assertIsNone(migration.validate_groq_research_module(source))
+
+    def test_groq_reviewer_ast_validator_rejects_unreviewed_unresolvable_import(self):
+        source = '''import module_that_is_not_a_reviewed_runtime_dependency
+async def groq_research_review(research, intelligence):
+    return {"status": "DISABLED", "provider": "groq", "execution_authority": False}
+'''
+        with self.assertRaisesRegex(migration.MigrationError, "unreviewed or unavailable module"):
+            migration.validate_groq_research_module(source)
+
+    def test_shell_scrub_refuses_printf_v_side_effect(self):
+        source = 'printf -v deployment_status "Gemini"\n'
+        with self.assertRaises(migration.MigrationError):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+
+    def test_markdown_scrub_refuses_provider_bearing_command_in_fenced_code(self):
+        source = "\x60\x60\x60bash\ncurl https://example.invalid/v1 -H 'Authorization: Bearer $OPENAI_API_KEY'\n\x60\x60\x60\n"
+        with self.assertRaisesRegex(migration.MigrationError, "executable example in a Markdown code fence"):
+            migration.scrub_ancillary_text("deploy/DEPLOY_WORKFLOW.md", source)
+
 
 if __name__ == "__main__":
     unittest.main()
