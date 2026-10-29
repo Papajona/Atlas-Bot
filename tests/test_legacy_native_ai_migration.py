@@ -3138,6 +3138,9 @@ from .native_ai import AIProviderError
         legacy = self._legacy_strategy_with_retained_code(retained).replace(
             "from .strategy_evidence import evidence_for\n", "", 1
         )
+        # Keep the binding-under-test inside the literal non-empty loop while
+        # supplying the canonical schema/context required by the replacement generator.
+        legacy = _with_canonical_schema_context(legacy)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             target = root / "app" / "strategy_ai.py"
@@ -3153,7 +3156,8 @@ from .native_ai import AIProviderError
 
     def test_strategy_migration_preserves_bindings_through_compound_loop_breaks(self):
         bodies = (
-            "try:\n    break\n",
+            # A try statement must have at least one handler or a finally suite.
+            "try:\n    break\nfinally:\n    pass\n",
             "with open(__file__, 'r'):\n    break\n",
             "match 'stop':\n    case 'stop':\n        break\n",
         )
@@ -3163,7 +3167,9 @@ from .native_ai import AIProviderError
                     "    " + line if line.strip() else line
                     for line in body.splitlines(keepends=True)
                 )
-                legacy = self._legacy_strategy_with_retained_code(retained)
+                legacy = _with_canonical_schema_context(
+                    self._legacy_strategy_with_retained_code(retained)
+                )
                 with tempfile.TemporaryDirectory() as tmp:
                     root = Path(tmp)
                     target = root / "app" / "strategy_ai.py"
