@@ -152,7 +152,7 @@ def test_provider_free_branch_skip_requires_static_native_error_alias_identity()
     assert "if not native_error_alias or not facade_imports_native_error" in workflow
     assert "app.native_ai.NativeAIError" in workflow or "NativeAI error alias is renamed or rebound" in workflow
     assert "groq_reviewers = [" in workflow
-    assert "groq_reviewer must accept research and intelligence positional arguments" in workflow
+    assert "app.groq_ai reviewer must accept research and intelligence positional arguments" in workflow
     assert "required_positional > 2" in workflow
     assert "required_keyword_only" in workflow
     assert "allowed_plain_imports" in workflow
