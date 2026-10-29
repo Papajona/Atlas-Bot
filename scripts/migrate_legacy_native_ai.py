@@ -2442,7 +2442,7 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST, module_tree: ast.Module |
     # attribute lookups, subscripts, and other expressions with hidden behavior.
     inert_annotation_names = {
         "str", "dict", "int", "float", "bool", "list", "tuple",
-        "set", "frozenset", "bytes", "object", "type",
+        "set", "frozenset", "bytes", "object", "type", "Any",
     }
 
     def is_inert_dispatcher_annotation(annotation: ast.AST | None) -> bool:
@@ -2452,6 +2452,13 @@ def _is_safe_legacy_provider_dispatcher(node: ast.AST, module_tree: ast.Module |
             return annotation.id in inert_annotation_names
         if isinstance(annotation, ast.Constant):
             return annotation.value is None or isinstance(annotation.value, str)
+        if isinstance(annotation, ast.Subscript):
+            return (
+                is_inert_dispatcher_annotation(annotation.value)
+                and is_inert_dispatcher_annotation(annotation.slice)
+            )
+        if isinstance(annotation, (ast.Tuple, ast.List)):
+            return all(is_inert_dispatcher_annotation(item) for item in annotation.elts)
         return False
 
     if (
