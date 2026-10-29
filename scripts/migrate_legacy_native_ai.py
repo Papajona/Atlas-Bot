@@ -818,6 +818,19 @@ def transform_config() -> None:
             or args.kw_defaults
         ):
             return False
+
+        # Annotation expressions run when the Settings class is created. Retire
+        # this validator only when its annotations are inert type names.
+        def safe_annotation(annotation: ast.AST | None) -> bool:
+            return annotation is None or (
+                isinstance(annotation, ast.Name) and annotation.id == "str"
+            )
+
+        if (
+            any(not safe_annotation(argument.annotation) for argument in args.args)
+            or not safe_annotation(node.returns)
+        ):
+            return False
         if len(node.decorator_list) != 2:
             return False
         field_decorators = [
