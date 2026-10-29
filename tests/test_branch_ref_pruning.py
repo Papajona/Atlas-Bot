@@ -894,6 +894,7 @@ def test_branch_pruning_runs_after_propagation_without_racing_its_push():
     assert "actions: read" in workflow
     assert "if: always()" in workflow
     assert 'if [[ "$EVENT_NAME" == "push" ]]; then' in workflow
+    assert workflow.count("git diff --no-renames --name-only") == 2
     assert "gh api --paginate" in workflow
     assert "for propagation_status in queued in_progress waiting requested pending action_required stale;" in workflow
     assert "status=$propagation_status&per_page=100" in workflow
@@ -919,6 +920,30 @@ def test_branch_pruning_runs_after_propagation_without_racing_its_push():
     assert "[atlas-branch-prune-content-once-20261020]" in workflow
     assert "[atlas-branch-prune-reviewed-once-20261020]" in workflow
     assert "[atlas-branch-prune-verified-duplicates-once-20261020]" in workflow
+
+
+def test_pruning_guard_detects_renames_away_from_watched_paths(tmp_path):
+    repo = tmp_path / "rename-guard-repo"
+    _git(tmp_path, "init", "-b", "main", repo)
+    _git(repo, "config", "user.name", "Atlas rename guard regression")
+    _git(repo, "config", "user.email", "atlas-rename@example.invalid")
+
+    watched = repo / "scripts" / "migrate_legacy_native_ai.py"
+    watched.parent.mkdir(parents=True)
+    watched.write_text("def migrate():\n    return 'audited'\n", encoding="utf-8")
+    _git(repo, "add", "scripts/migrate_legacy_native_ai.py")
+    _git(repo, "commit", "-m", "add watched migration helper")
+    before = _git(repo, "rev-parse", "HEAD")
+
+    renamed = repo / "scripts" / "legacy_migration_retired.py"
+    watched.rename(renamed)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "rename watched migration helper")
+    after = _git(repo, "rev-parse", "HEAD")
+
+    changed = set(_git(repo, "diff", "--no-renames", "--name-only", before, after).splitlines())
+    assert "scripts/migrate_legacy_native_ai.py" in changed
+    assert "scripts/legacy_migration_retired.py" in changed
 
 
 def test_pruning_push_guard_handles_large_change_list_under_pipefail(tmp_path):
