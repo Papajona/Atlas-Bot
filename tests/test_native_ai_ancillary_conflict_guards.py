@@ -67,6 +67,24 @@ echo "Optional Groq research review only"
         self.assertIn("GROQ_API_KEY", cleaned)
         self.assertIn("GROQ_MODEL", cleaned)
 
+    def test_groq_secret_and_ordinary_yaml_step_are_preserved(self):
+        workflow = """name: optional Groq research
+jobs:
+  review:
+    environment: paper
+    steps:
+      - name: optional research review
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: echo "Groq research review is advisory"
+"""
+        cleaned = migration.scrub_workflow_ancillary(
+            ".github/workflows/production-deploy.yml", workflow
+        )
+        self.assertEqual(cleaned, workflow)
+        self.assertIn("GROQ_API_KEY", cleaned)
+        self.assertIn("steps:", cleaned)
+
     def test_mixed_provider_url_and_database_migration_command_fails_closed(self):
         workflow = """name: database deployment
 jobs:
