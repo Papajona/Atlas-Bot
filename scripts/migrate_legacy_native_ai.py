@@ -5358,9 +5358,10 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
             kept.append(line)
             index += 1
             continue
-        key_match = re.match(r"^(\s*)([A-Za-z_][A-Za-z0-9_-]*):(?:\s*(.*?))?(\r?\n)?$", line)
+        key_match = re.match(r"""^(\s*)(?:([\'"])([A-Za-z_][A-Za-z0-9_-]*)\2|([A-Za-z_][A-Za-z0-9_-]*)):(?:\s*(.*?))?(\r?\n)?$""", line)
         if key_match:
-            _indent, key, value, _newline = key_match.groups()
+            _indent, _key_quote, quoted_key, plain_key, value, _newline = key_match.groups()
+            key = quoted_key or plain_key
             if key.lower() == "environment":
                 # Never rename an approval-gated environment. A retired-provider
                 # name requires manual reconciliation before this branch can migrate.
