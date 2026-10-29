@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+
 : "${GCP_PROJECT_ID:?Set GCP_PROJECT_ID}"
 : "${GCP_REGION:?Set GCP_REGION}"
 : "${WORKER_POOL:?Set WORKER_POOL, e.g. atlas-trading-worker}"
@@ -61,7 +64,7 @@ GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"
 GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"
 GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"
 GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED,,}"
-python "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/validate_groq_deploy_env.py" \
+python "${REPO_ROOT}/scripts/validate_groq_deploy_env.py" \
   "$GROQ_MODEL" "$GROQ_MAX_COMPLETION_TOKENS" "$GROQ_RESEARCH_REVIEW_ENABLED"
 
 gcloud run worker-pools deploy "$WORKER_POOL" \
