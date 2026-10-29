@@ -4561,7 +4561,7 @@ GROQ_MODEL="openai/gpt-oss-20b"
 
 
     def test_shell_scrub_removes_only_static_provider_echo_messages(self):
-        source = '''DATABASE_URL="\${DATABASE_URL:?required}"
+        source = '''DATABASE_URL="required"
 echo "Gemini strategy provider was retired; Native AI is used now"
 printf "Optional Gemini review is not configured"
 '''
