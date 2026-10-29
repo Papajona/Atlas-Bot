@@ -4635,7 +4635,7 @@ async def groq_research_review(research, intelligence):
             migration.validate_groq_research_module(source)
 
     def test_shell_scrub_refuses_printf_v_side_effect(self):
-        source = 'printf -v deployment_status "Gemini"\n'
+        source = 'printf -v deployment_status "Gemini provider not configured"\n'
         with self.assertRaises(migration.MigrationError):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
 
