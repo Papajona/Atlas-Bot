@@ -4781,5 +4781,29 @@ def retained_helper():
 
 
 
+    def test_groq_guard_refuses_printf_v_with_quoted_separator_but_allows_echo(self):
+        unsafe = (
+            'if [[ -n "$GROQ_API_KEY" ]]; then\n'
+            "  printf -v DATABASE_URL 'postgres://other;db'\n"
+            "fi\n"
+        )
+        with self.assertRaisesRegex(
+            migration.MigrationError,
+            "mixed provider-conditioned shell block",
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe)
+
+        safe = (
+            'if [[ -n "$GROQ_API_KEY" ]]; then\n'
+            '  echo "research note & review only"\n'
+            "fi\n"
+        )
+        self.assertEqual(
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", safe),
+            safe,
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main()
