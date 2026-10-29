@@ -57,9 +57,21 @@ if [[ -n "$SECRET_GROQ_REF" && ! "$SECRET_GROQ_REF" =~ ^atlas-groq-api-key:[1-9]
 fi
 GROQ_SECRET_ARG=""
 if [[ -n "$SECRET_GROQ_REF" ]]; then GROQ_SECRET_ARG=",GROQ_API_KEY=${SECRET_GROQ_REF}"; fi
-GROQ_MODEL="openai/gpt-oss-20b"
-GROQ_MAX_COMPLETION_TOKENS="2048"
-GROQ_RESEARCH_REVIEW_ENABLED="true"
+GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"
+GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"
+GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"
+if [[ "$GROQ_RESEARCH_REVIEW_ENABLED" != "true" && "$GROQ_RESEARCH_REVIEW_ENABLED" != "false" ]]; then
+  echo "ERROR: GROQ_RESEARCH_REVIEW_ENABLED must be true or false." >&2
+  exit 2
+fi
+if [[ ! "$GROQ_MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ ]]; then
+  echo "ERROR: GROQ_MODEL must be a non-empty model identifier without shell/env delimiters." >&2
+  exit 2
+fi
+if [[ ! "$GROQ_MAX_COMPLETION_TOKENS" =~ ^[1-9][0-9]{0,3}$ ]] || (( GROQ_MAX_COMPLETION_TOKENS > 8192 )); then
+  echo "ERROR: GROQ_MAX_COMPLETION_TOKENS must be an integer between 1 and 8192." >&2
+  exit 2
+fi
 
 gcloud run worker-pools deploy "$WORKER_POOL" \
   --project "$GCP_PROJECT_ID" \
