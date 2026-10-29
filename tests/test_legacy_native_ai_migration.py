@@ -1960,6 +1960,28 @@ async def _gemini_json(prompt):
                     "discarding a dispatcher must not suppress call-expression annotation effects",
                 )
 
+        union_dispatcher = safe_dispatcher.replace(
+            "-> dict:", "-> dict[str, object] | None:"
+        )
+        union_tree = ast.parse(union_dispatcher)
+        self.assertTrue(
+            migration._is_safe_legacy_provider_dispatcher(union_tree.body[0], union_tree),
+            "inert PEP 604 unions of unshadowed builtin generic types should remain eligible",
+        )
+
+        shadowed_generic = (
+            "class list:\\n"
+            "    def __class_getitem__(cls, item):\\n"
+            "        record_annotation_hook()\\n"
+            "        return object\\n\\n"
+            + safe_dispatcher.replace("-> dict:", "-> list[str]:")
+        )
+        shadowed_tree = ast.parse(shadowed_generic)
+        self.assertFalse(
+            migration._is_safe_legacy_provider_dispatcher(shadowed_tree.body[1], shadowed_tree),
+            "a rebound generic base may execute a custom __class_getitem__ during definition",
+        )
+
     def test_strategy_migration_accepts_recognized_two_and_three_provider_flows(self):
         legacy_two = """from .config import settings
 from .ai_providers import AIProviderError, _gemini_json, _groq_json
