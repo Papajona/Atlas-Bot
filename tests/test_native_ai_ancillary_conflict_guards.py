@@ -147,6 +147,19 @@ if __name__ == "__main__":
     unittest.main()
 
 
+    def test_retired_groq_strategy_deployment_variable_is_removed_but_research_settings_survive(self):
+        shell = """#!/usr/bin/env bash
+GROQ_STRATEGY_MODEL="legacy/strategy-model"
+GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"
+GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"
+gcloud run deploy atlas --set-env-vars "GROQ_STRATEGY_MODEL=legacy/strategy-model,GROQ_MODEL=openai/gpt-oss-20b,GROQ_RESEARCH_REVIEW_ENABLED=true,DATABASE_URL=atlas-database-url"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertNotIn("GROQ_STRATEGY_MODEL", cleaned)
+        self.assertIn("GROQ_MODEL", cleaned)
+        self.assertIn("GROQ_RESEARCH_REVIEW_ENABLED", cleaned)
+        self.assertIn("DATABASE_URL", cleaned)
+
     def test_shell_list_removal_handles_first_entry_without_leading_commas(self):
         shell = """#!/usr/bin/env bash
 ENV_VARS="^@^GEMINI_MODEL=gemini-3.5-flash@DATABASE_URL=postgres://example/db"
