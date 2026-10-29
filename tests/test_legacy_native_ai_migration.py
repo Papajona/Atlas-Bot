@@ -4562,7 +4562,7 @@ GROQ_MODEL="openai/gpt-oss-20b"
 
     def test_shell_scrub_removes_only_static_provider_echo_messages(self):
         source = '''DATABASE_URL="required"
-echo "Gemini strategy provider was retired; Native AI is used now"
+echo "Gemini strategy provider was retired; Native AI is used now" >&2
 printf "Optional Gemini review is not configured"
 '''
         cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
