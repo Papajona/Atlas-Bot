@@ -1713,6 +1713,54 @@ async def _gemini_json(prompt):
                     migration.transform_config()
             self.assertEqual(config.read_text(encoding="utf-8"), unsafe_annotation)
 
+        rebound_decorators = (
+            (
+                "module field_validator rebind",
+                safe.replace(
+                    "from pydantic import field_validator\\n",
+                    "from pydantic import field_validator\\nfield_validator = custom_field_validator\\n",
+                ),
+            ),
+            (
+                "class-local field_validator rebind",
+                safe.replace(
+                    "class Settings:\\n",
+                    "class Settings:\\n    field_validator = custom_field_validator\\n",
+                ),
+            ),
+            (
+                "module classmethod rebind",
+                safe.replace(
+                    "class Settings:\\n",
+                    "classmethod = custom_classmethod\\nclass Settings:\\n",
+                ),
+            ),
+            (
+                "class-local classmethod rebind",
+                safe.replace(
+                    "class Settings:\\n",
+                    "class Settings:\\n    classmethod = custom_classmethod\\n",
+                ),
+            ),
+        )
+        for label, rebound_source in rebound_decorators:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                config = root / "app" / "config.py"
+                config.parent.mkdir()
+                config.write_text(rebound_source, encoding="utf-8")
+                with patch.object(migration, "ROOT", root):
+                    with self.assertRaisesRegex(
+                        migration.MigrationError,
+                        "provider text outside isolated Settings fields",
+                    ):
+                        migration.transform_config()
+                self.assertEqual(
+                    config.read_text(encoding="utf-8"),
+                    rebound_source,
+                    "custom decorator bindings must not be erased",
+                )
+
     def test_config_removes_provider_fields_but_preserves_unrelated_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
