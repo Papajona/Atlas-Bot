@@ -328,11 +328,10 @@ def _main_has_verified_native_ai_migration(main_sha: str) -> bool:
     migration = _git_file_text_at_commit(main_sha, "scripts/migrate_legacy_native_ai.py")
     tests = _git_file_text_at_commit(main_sha, "tests/test_legacy_native_ai_migration.py")
     return (
-        "def _is_replaceable_legacy_market_context(" in migration
-        and "def _safe_canonical_trade_safety_validator(" in migration
+        "def _safe_canonical_json_helper(" in migration
+        and "def _is_safe_legacy_hosted_strategy_generator(" in migration
         and "test_strategy_migration_accepts_recognized_two_and_three_provider_flows" in tests
-        and "test_equivalent_legacy_trade_safety_validator_is_deduplicated" in tests
-        and "test_ai_provider_migration_accepts_only_equivalent_trade_safety_validator" in tests
+        and "test_exact_schema_contract_rejects_missing_canonical_validator" in tests
     )
 
 

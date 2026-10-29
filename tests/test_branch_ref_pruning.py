@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -706,13 +707,12 @@ def test_native_ai_branch_retirement_requires_exact_sha_and_migration_only_paths
 def test_native_ai_branch_retirement_requires_verified_main_migration_contract(monkeypatch):
     sources = {
         "scripts/migrate_legacy_native_ai.py": (
-            "def _is_replaceable_legacy_market_context(): pass\n"
-            "def _safe_canonical_trade_safety_validator(): pass\n"
+            "def _safe_canonical_json_helper(): pass\n"
+            "def _is_safe_legacy_hosted_strategy_generator(): pass\n"
         ),
         "tests/test_legacy_native_ai_migration.py": (
             "test_strategy_migration_accepts_recognized_two_and_three_provider_flows\n"
-            "test_equivalent_legacy_trade_safety_validator_is_deduplicated\n"
-            "test_ai_provider_migration_accepts_only_equivalent_trade_safety_validator\n"
+            "test_exact_schema_contract_rejects_missing_canonical_validator\n"
         ),
     }
     monkeypatch.setattr(
@@ -723,6 +723,16 @@ def test_native_ai_branch_retirement_requires_verified_main_migration_contract(m
         "test_strategy_migration_accepts_recognized_two_and_three_provider_flows\n"
     )
     assert not pruning._main_has_verified_native_ai_migration("unverified-main-sha")
+
+
+def test_native_ai_main_migration_contract_matches_committed_sources(monkeypatch):
+    repository_root = Path(__file__).resolve().parents[1]
+
+    def read_committed_source(_sha, path):
+        return (repository_root / path).read_text(encoding="utf-8")
+
+    monkeypatch.setattr(pruning, "_git_file_text_at_commit", read_committed_source)
+    assert pruning._main_has_verified_native_ai_migration("committed-main")
 
 
 def test_native_ai_retirement_keeps_branches_with_open_prs(monkeypatch):
