@@ -891,6 +891,10 @@ def test_branch_pruning_runs_after_propagation_without_racing_its_push():
     assert "Propagate Atlas Native AI across branches" in workflow
     assert "github.event.workflow_run.head_branch == 'main'" in workflow
     assert "github.event.workflow_run.conclusion == 'success'" in workflow
+    assert "actions: read" in workflow
+    assert "gh run list --repo \"$GITHUB_REPOSITORY\" --workflow propagate-native-ai-all-branches.yml" in workflow
+    assert "Unable to verify Native AI propagation status; preserving every branch." in workflow
+    assert 'any(.[]; .status == "queued" or .status == "in_progress" or .status == "waiting" or .status == "requested")' in workflow
     assert "Skip push-time pruning when Native AI propagation will update branch refs" in workflow
     assert "github.event_name == 'push'" in workflow
     assert "scripts/migrate_legacy_native_ai.py" in workflow
