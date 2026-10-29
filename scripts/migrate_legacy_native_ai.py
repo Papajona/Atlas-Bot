@@ -5252,6 +5252,10 @@ def scrub_ancillary_text(path: str, text: str) -> str:
 
     kept: list[str] = []
     for line in text.splitlines(keepends=True):
+        # Obsolete strategy-generation knobs are not the supported research reviewer.
+        # Remove only a standalone assignment; preserve unrelated Groq review settings.
+        if re.match(r"^\s*(?:export\s+)?GROQ_STRATEGY_[A-Z0-9_]+\s*=", line, re.I):
+            continue
         if not RETIRED_PROVIDER_RE.search(line):
             kept.append(line)
             continue
