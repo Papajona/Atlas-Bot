@@ -17,6 +17,7 @@ merge is preserved. This script never deletes main.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -226,6 +227,40 @@ _ANDROID_RELEASE_GATE_PATHS = {
     "tests/test_android_production_backend_wiring.py",
 }
 
+# Exact old branch tips whose only branch-side changes were superseded Native AI
+# migration machinery. Names alone are never sufficient: both the SHA and the
+# complete branch-side path allowlist must match before a ref can be retired.
+_SUPERSEDED_NATIVE_AI_MIGRATION_BRANCHES = {
+    "fix/native-ai-branch-propagation-strategy-preservation-20261027": "1fce3784f16d36865206af3ea01601f754000156",
+    "fix/native-ai-propagation-error-alias-20261027": "a7f35abfe8d3a73af329c5ae34320afe5f0def12",
+    "fix/native-ai-propagation-error-alias-verified-20261027": "b933822d8a92d197e04b923068e9b245239ed961",
+    "fix/native-ai-propagation-final-20261027": "1ae360c3df0b1673c5ca01a807c2708d1881220a",
+    "fix/native-ai-propagation-final-reviewed-20261027": "1bcb94a634262411de22550f9110e8feef61a8b1",
+    "fix/native-ai-propagation-import-safety-20261027": "10dbbfeb5568f95fcd0f3a96f3268891c37c7604",
+    "fix/native-ai-propagation-import-safety-verified-20261027": "a08931e0c9777e05b12b796fdc75669f40004e1b",
+    "fix/native-ai-propagation-qodo-final2-20261027": "cdc1320014c9d284e2ec51e426bdf7798ba97ce6",
+    "fix/native-ai-propagation-qodo-final-20261027": "ab2b5c0cf46b4146beec300ecb013942b2ce8633",
+    "fix/native-ai-propagation-verified-20261027": "a7f35abfe8d3a73af329c5ae34320afe5f0def12",
+    "fix/native-ai-propagation-verified-final-20261027": "de24e7a1eb1a0bb4c06de1b375895ca0ee9c78f7",
+    "fix/native-ai-semantic-branch-migration-20261027": "015f1ed751d7ae6590dc45be38cb599a3ecef67e",
+    "fix/qodo-native-ai-binding-analysis-20261028": "9f6d5f43863270be9155fdaf1566fde654a4486d",
+    "fix/remediation-2f1bec4a-267583": "2da14cb8c9fd15824750cea905eeab9dad6243d8",
+    "fix/remediation-3e97e442-fa299f": "b4a3a113aa47ad27933f2f1f2aa9d0f04a01d750",
+    "fix/remediation-5bad2a5b-c2b709": "c062f6c0f9f7332aaaaea58c6544d6cd20d95acf",
+    "fix/remediation-29b9a458-8b7996": "53047279afc33ca9bc9a1e833d4b90664bfcf942",
+    "fix/remediation-92aa0059-36b9da": "7e50fdb5e6e3eac9d17b4afa9a1f0cf4117584e2",
+    "fix/remediation-585ba76d-28013b": "c0ca34e115bd70e1c96c4dfe77183440a68ee25c",
+    "fix/remediation-e28b5315-d3bb64": "9784f1e82ba6a7823872f600e6d33226e43d97c9",
+    "fix/remediation-fa13ad7e-7493b5": "3a78cc2a39844eb92227bd9b20d2d104f704931f",
+    "fix/remediation-dc7d0b60-cf91de": "fc2776a36358cf22e4e677737ad0230464cb414a",
+}
+_NATIVE_AI_MIGRATION_ARTIFACT_PATHS = {
+    ".github/workflows/propagate-native-ai-all-branches.yml",
+    "scripts/migrate_legacy_native_ai.py",
+    "tests/test_legacy_native_ai_migration.py",
+    "tests/test_native_ai_branch_propagation_workflow.py",
+}
+
 
 def _git_file_text_at_commit(commit_sha: str, path: str) -> str:
     result = _run(["git", "show", f"{commit_sha}:{path}"], check=False)
@@ -290,6 +325,85 @@ def _is_explicitly_superseded_android_release_ref(
     return _main_has_explicit_android_release_gate(main_sha)
 
 
+def _source_defines_function(
+    source: str, function_name: str, *, class_method: bool = False
+) -> bool:
+    """Recognize real definitions at module/class scope; reject invalid Python."""
+    try:
+        module = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return False
+
+    if class_method:
+        def is_unittest_test_case(node: ast.ClassDef) -> bool:
+            return any(
+                isinstance(base, ast.Name) and base.id == "TestCase"
+                or (
+                    isinstance(base, ast.Attribute)
+                    and base.attr == "TestCase"
+                    and isinstance(base.value, ast.Name)
+                    and base.value.id == "unittest"
+                )
+                for base in node.bases
+            )
+
+        return any(
+            isinstance(node, ast.ClassDef)
+            and is_unittest_test_case(node)
+            and any(
+                isinstance(member, ast.FunctionDef)
+                and member.name == function_name
+                for member in node.body
+            )
+            for node in module.body
+        )
+    return any(
+        isinstance(node, ast.FunctionDef)
+        and node.name == function_name
+        for node in module.body
+    )
+
+
+def _main_has_verified_native_ai_migration(main_sha: str) -> bool:
+    """Require committed canonical-schema guards and their real regression tests."""
+    migration = _git_file_text_at_commit(main_sha, "scripts/migrate_legacy_native_ai.py")
+    tests = _git_file_text_at_commit(main_sha, "tests/test_legacy_native_ai_migration.py")
+    required_migration_helpers = (
+        "_is_replaceable_legacy_market_context",
+        "_safe_canonical_trade_safety_validator",
+    )
+    required_regression_tests = (
+        "test_strategy_migration_accepts_recognized_two_and_three_provider_flows",
+        "test_legacy_market_context_rejects_rebinding_and_dynamic_lookups",
+        "test_equivalent_legacy_trade_safety_validator_is_deduplicated",
+        "test_ai_provider_migration_accepts_only_equivalent_trade_safety_validator",
+    )
+    return (
+        all(_source_defines_function(migration, name) for name in required_migration_helpers)
+        and all(_source_defines_function(tests, name, class_method=True) for name in required_regression_tests)
+    )
+
+
+def _is_explicitly_superseded_native_ai_migration_ref(
+    branch_name: str,
+    branch_sha: str,
+    main_sha: str,
+    mismatch_paths: list[str],
+) -> bool:
+    """Retire only the exact, independently audited legacy tip.
+
+    A descendant can carry unaudited edits even when its changed paths remain inside
+    the allowlist. Later tips must qualify through the ordinary integration/tree proofs;
+    ancestry from an audited tip alone never authorizes deletion.
+    """
+    expected_sha = _SUPERSEDED_NATIVE_AI_MIGRATION_BRANCHES.get(branch_name)
+    if expected_sha is None or branch_sha != expected_sha:
+        return False
+    if not mismatch_paths or not set(mismatch_paths).issubset(_NATIVE_AI_MIGRATION_ARTIFACT_PATHS):
+        return False
+    return _main_has_verified_native_ai_migration(main_sha)
+
+
 def _resolve_branch_integration(
     branch_name: str,
     branch_sha: str,
@@ -319,6 +433,15 @@ def _resolve_branch_integration(
             True,
             "exact historical Android release-trigger branch superseded by main's "
             "verified tag/manual-dispatch-only release gate",
+            [],
+        )
+    if _is_explicitly_superseded_native_ai_migration_ref(
+        branch_name, branch_sha, main_sha, mismatch_paths
+    ):
+        return (
+            True,
+            "exact historical Native AI migration-only branch superseded by main's "
+            "tested fail-closed migration contract",
             [],
         )
     return False, reason, mismatch_paths
