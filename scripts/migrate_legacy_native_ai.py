@@ -5065,8 +5065,12 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             return True
         if re.fullmatch(r"(?i)exit\s+[0-9]+", stripped):
             return True
-        if re.match(r"(?i)^(?:echo|printf)\b", stripped):
-            normalized = re.sub(r"\s+>&2\s*$", "", stripped)
+        # printf -v assigns a shell variable; quoted punctuation must not make
+        # it look like an output-only command.
+        if re.match(r"(?i)^printf\\s+-v(?:\\s|$)", stripped):
+            return False
+        if re.match(r"(?i)^(?:echo|printf)\\b", stripped):
+            normalized = re.sub(r"\\s+>&2\\s*$", "", stripped)
             return not has_unsafe_shell_operators(normalized)
         return re.fullmatch(
             r"(?i)(?:export\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
