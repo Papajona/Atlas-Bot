@@ -933,26 +933,45 @@ def test_pruning_push_guard_handles_large_change_list_under_pipefail(tmp_path):
         index for index, line in enumerate(lines)
         if line.strip() == "skip_pruning=false"
     )
-    guard_end = next(
+    push_if = next(
         index for index in range(guard_start, len(lines))
+        if lines[index].strip() == 'if [[ "$EVENT_NAME" == "push" ]]; then'
+    )
+    push_indent = len(lines[push_if]) - len(lines[push_if].lstrip())
+    guard_end = next(
+        index for index in range(push_if + 1, len(lines))
         if lines[index].strip() == "fi"
+        and len(lines[index]) - len(lines[index].lstrip()) == push_indent
     )
     guard = "\n".join(line[10:] for line in lines[guard_start:guard_end + 1])
-    output_path = tmp_path / "github-output"
-    script = (
-        'set -euo pipefail\n'
-        'changed_paths="$(printf "%s\\n" ".github/workflows/propagate-native-ai-all-branches.yml"; '
-        'for index in {1..12000}; do printf "app/generated/module_%05d.py\\n" "$index"; done)"\n'
-        + guard
-        + "\n"
+
+    # Substitute only git diff so the actual workflow guard consumes a large,
+    # deterministic list under pipefail without requiring a repository checkout.
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/bin/bash\n"
+        'if [[ "$1" != "diff" ]]; then exit 2; fi\n'
+        'printf "%s\\n" ".github/workflows/propagate-native-ai-all-branches.yml"\n'
+        'for index in {1..12000}; do printf "app/generated/module_%05d.py\\n" "$index"; done\n',
+        encoding="utf-8",
     )
+    fake_git.chmod(0o755)
+    output_path = tmp_path / "github-output"
+    script = "set -euo pipefail\n" + guard + "\n"
     result = subprocess.run(
         ["bash", "-o", "pipefail", "-c", script],
         capture_output=True,
         text=True,
         check=False,
-        env={"PATH": "/usr/bin:/bin", "GITHUB_OUTPUT": str(output_path)},
+        env={
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "EVENT_NAME": "push",
+            "BEFORE_SHA": "before",
+            "AFTER_SHA": "after",
+            "GITHUB_OUTPUT": str(output_path),
+        },
     )
     assert result.returncode == 0, result.stderr
     assert output_path.read_text(encoding="utf-8").splitlines() == ["skip=true"]
-
