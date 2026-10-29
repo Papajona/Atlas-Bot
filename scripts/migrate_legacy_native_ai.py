@@ -5660,18 +5660,61 @@ def _metadata_has_active_provider_wiring(text: str) -> bool:
 
 
 def validate_groq_research_module(source: str, path: str = "app/groq_ai.py") -> None:
-    """Validate the optional Groq research-review API without importing third-party HTTP code."""
+    """Validate the optional Groq review API and allow only reviewed, resolvable imports."""
     try:
         tree = ast.parse(source, filename=path)
     except SyntaxError as exc:
         raise MigrationError(f"{path} is not valid Python; preserving the branch") from exc
     if RETIRED_PROVIDER_RE.search(source):
         raise MigrationError(f"{path} contains retired-provider wiring; preserving the branch")
-    if not any(
-        isinstance(node, ast.AsyncFunctionDef) and node.name == "groq_research_review"
-        for node in tree.body
-    ):
-        raise MigrationError(f"{path} is missing the reviewed async groq_research_review API")
+
+    reviewers = [
+        node for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "groq_research_review"
+    ]
+    if len(reviewers) != 1:
+        raise MigrationError(f"{path} must define exactly one async groq_research_review API")
+    reviewer = reviewers[0]
+    positional = len(reviewer.args.posonlyargs) + len(reviewer.args.args)
+    # The consumer always calls reviewer(research, intelligence). Defaults do not
+    # change positional arity; *args is compatible, keyword-only parameters are not.
+    if positional < 2 and reviewer.args.vararg is None:
+        raise MigrationError(
+            f"{path} groq_research_review must accept two positional arguments (research, intelligence)"
+        )
+
+    # This adapter runs at app startup. Do not preserve arbitrary imports that could
+    # be missing on a branch or introduce side-effecting dependencies. These are the
+    # canonical adapter's runtime modules and the exact local contracts it consumes.
+    allowed_plain_imports = {
+        "asyncio", "httpx", "json", "logging", "math", "re",
+    }
+    allowed_from_imports = {
+        (0, "__future__"): {"annotations"},
+        (0, "typing"): {"Any"},
+        (1, "config"): {"settings"},
+        (1, "prompt_safety"): {
+            "UNTRUSTED_PREAMBLE", "suspicious_instruction_markers", "wrap_untrusted",
+        },
+    }
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name not in allowed_plain_imports:
+                    raise MigrationError(
+                        f"{path} imports unreviewed or unavailable module {alias.name!r}; preserving the branch"
+                    )
+        elif isinstance(node, ast.ImportFrom):
+            key = (node.level, node.module or "")
+            allowed_names = allowed_from_imports.get(key)
+            if allowed_names is None or any(
+                alias.name == "*" or alias.name not in allowed_names or alias.asname is not None
+                for alias in node.names
+            ):
+                raise MigrationError(
+                    f"{path} has unreviewed or unresolved import from {node.module!r}; preserving the branch"
+                )
+
 
 
 def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:
