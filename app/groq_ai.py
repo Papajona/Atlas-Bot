@@ -408,8 +408,8 @@ def _research_prompt(
             # summary rather than converting an optional research review into an error.
             size_budget_audit = {
                 "characters_omitted": 0,
-                "mapping_entries_omitted": 0,
-                "list_items_omitted": 0,
+                "mapping_entries_omitted": max(1, research_fields_omitted + validation_fields_omitted + external_fields_omitted),
+                "list_items_omitted": max(1, len(names) + len(candidates)),
                 "nested_values_omitted": 0,
             }
             strategy_count = len(names)
