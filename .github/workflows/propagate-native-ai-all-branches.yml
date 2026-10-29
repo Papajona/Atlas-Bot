@@ -124,7 +124,13 @@ jobs:
             # The obsolete strategy selector remains forbidden.
             local legacy_groq_config_refs=""
             if legacy_groq_config_refs="$(git grep -nIEi 'groq_strategy_model' -- app/config.py)"; then
-              matches+="$(printf '%s\n' "$matches" | awk '!($0 ~ /^\.github\/workflows\/prune-contained-branches-once\.yml:[0-9]+:/ && $0 ~ /grep -F .def _check_groq. >\/dev\/null/)')"
+              matches+=$'\n'"$legacy_groq_config_refs"
+            else
+              rc=$?
+              if (( rc != 1 )); then return "$rc"; fi
+            fi
+            # Filter only those exact marker lines; scan every other line in this workflow.
+            filtered="$(printf '%s\n' "$matches" | awk '!($0 ~ /^\.github\/workflows\/prune-contained-branches-once\.yml:[0-9]+:/ && $0 ~ /grep -F .def _check_groq. >\/dev\/null/)')"
             # Check metadata with the semantic helper so a generic secretRef
             # containing an Atlas provider secret cannot bypass this skip gate.
             local metadata_matches=""
