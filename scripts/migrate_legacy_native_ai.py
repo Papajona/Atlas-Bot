@@ -4774,15 +4774,36 @@ def scrub_shell_deployment(path: str, text: str) -> str:
     # Groq remains a supported research-only reviewer. Preserve pure Groq secret/config
     # conditionals verbatim, but fail closed if they wrap unrelated deployment commands.
     source_lines = text.splitlines(keepends=True)
+    ai_secret_assignments = [
+        line for line in source_lines
+        if re.match(r"^\s*(?:export\s+)?AI_SECRET_ARGS\s*=", line, re.I)
+    ]
+    ai_secret_args_has_groq = any(
+        re.search(r"(?i)(?:GROQ_API_KEY|GROQ_SECRET_ARGS|atlas-groq-api-key)", line)
+        for line in ai_secret_assignments
+    )
+    ai_secret_args_has_retired_provider = any(
+        re.search(r"(?i)(?:GEMINI_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|OPENAI_API_KEY|atlas-(?:gemini|cerebras|openai|ai-gateway))", line)
+        for line in ai_secret_assignments
+    )
+    if ai_secret_args_has_groq and ai_secret_args_has_retired_provider:
+        raise MigrationError(
+            f"{path} mixes supported Groq and retired provider entries in AI_SECRET_ARGS; refusing to drop either binding"
+        )
+
     groq_condition = re.compile(
         r"(?i)\b(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
-        r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED)\b"
+        r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED"
+        + (r"|AI_SECRET_ARGS" if ai_secret_args_has_groq else r"")
+        + r")\b"
     )
     groq_allowed = re.compile(
         r"(?i)^\s*(?:(?:export\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|"
         r"GROQ_SECRET_ARG|GROQ_SECRET_ARGS|GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|"
-        r"GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\s*=|"
-        r"(?:if|then|else|fi)\b|#|$)"
+        r"GROQ_RESEARCH_REVIEW_ENABLED)\s*=|"
+        r":\s*['\"]?\$\{(?:GROQ_API_KEY|SECRET_GROQ_[A-Z0-9_]+):\?[^}]*\}['\"]?\s*(?:#.*)?|"
+        r"if\b.*\bthen\s*(?:#.*)?|elif\b.*\bthen\s*(?:#.*)?|"
+        r"then\s*(?:#.*)?|else\s*(?:#.*)?|fi\s*(?:#.*)?|#|$)"
     )
 
     def safe_groq_statement(statement: str) -> bool:
@@ -4808,6 +4829,13 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                     )
                 block_start += 1
                 continue
+            opening = re.search(r"\bthen\b(.*)$", source_line, re.I)
+            if opening:
+                trailing = opening.group(1).strip()
+                if trailing and not trailing.startswith("#"):
+                    raise MigrationError(
+                        f"{path} has an executable command on a Groq-conditioned if line; refusing to preserve mixed behavior"
+                    )
             indent = len(source_line) - len(source_line.lstrip())
             end = block_start + 1
             while end < len(source_lines):
@@ -4831,8 +4859,9 @@ def scrub_shell_deployment(path: str, text: str) -> str:
 
     variable_pattern = re.compile(
         r"(?i)\b(?:SECRET_GEMINI[A-Z0-9_]*|"
-        r"GEMINI_API_KEY|AI_SECRET_ARGS|"
-        r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\b"
+        r"GEMINI_API_KEY|CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|"
+        r"OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\b"
+        + (r"" if ai_secret_args_has_groq else r"|\bAI_SECRET_ARGS\b")
     )
     for original in text.splitlines(keepends=True):
         line = original
@@ -4867,13 +4896,23 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             skip_provider_block = True
             continue
 
+        # Legacy AI_SECRET_ARGS may be removed only when its assignment is proven to
+        # contain retired-provider entries and no supported Groq binding.
+        if re.match(r"^\s*(?:export\s+)?AI_SECRET_ARGS\s*=", line, re.I):
+            if ai_secret_args_has_groq:
+                # Keep the entire Groq argument variable unchanged; mixed legacy
+                # references were rejected before the line loop.
+                output.append(line)
+                continue
+            if re.search(r"(?i)(?:GEMINI_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|OPENAI_API_KEY|atlas-(?:gemini|cerebras|openai|ai-gateway))", line):
+                continue
+
         # Provider-only shell declarations/guards/secret commands have no unrelated payload.
         if re.match(r"^\s*(?::\s*)?['\"]?\$\{?(?:SECRET_GEMINI|GEMINI_API_KEY)", line, re.I):
             continue
         if re.match(
             r"^\s*(?:SECRET_GEMINI[A-Z0-9_]*|"
-            r"GEMINI_API_KEY|AI_SECRET_ARGS|"
-            r"CEREBRAS_API_KEY|AI_GATEWAY_API_KEY)\s*=",
+            r"GEMINI_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY)\s*=",
             line, re.I,
         ):
             continue
@@ -4883,30 +4922,52 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             continue
 
         # Remove provider entries from combined Cloud Run env-var lists.
-        if "ENV_VARS=" in line:
-            line = re.sub(
-                r"@(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
-                r"CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^@\"]*",
-                "",
-                line,
-                flags=re.I,
-            )
+        # Rewrite list arguments structurally so removing the first element cannot
+        # leave an invalid leading comma. Never alter non-provider entries.
+        provider_env_key = re.compile(
+            r"(?i)^(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
+            r"CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)$"
+        )
+        provider_secret_key = re.compile(
+            r"(?i)^(?:GEMINI_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|OPENAI_API_KEY)$"
+        )
+
+        env_assignment = re.match(r"^(\s*ENV_VARS\s*=\s*)(['\"])(.*)\2(\s*(?:#.*)?)$", line)
+        if env_assignment:
+            prefix, quote, value, suffix = env_assignment.groups()
+            marker = "^@^"
+            if value.startswith(marker):
+                entries = value[len(marker):].split("@")
+                kept_entries = [
+                    entry for entry in entries
+                    if not provider_env_key.fullmatch(entry.split("=", 1)[0].strip())
+                ]
+                if not kept_entries or any(not entry.strip() for entry in kept_entries):
+                    raise MigrationError(f"{path} has an invalid environment list after provider removal")
+                line = prefix + quote + marker + "@".join(kept_entries) + quote + suffix
+
+        def scrub_cli_list(flag: str, key_pattern: re.Pattern[str], source_line: str) -> str:
+            match = re.search(r"(" + re.escape(flag) + r"\s+)(['\"])(.*?)\2", source_line)
+            if not match:
+                return source_line
+            prefix, quote, value = match.groups()
+            entries = value.split(",")
+            kept_entries = [
+                entry for entry in entries
+                if not key_pattern.fullmatch(entry.split("=", 1)[0].strip())
+            ]
+            if kept_entries == entries:
+                return source_line
+            if not kept_entries or any(not entry.strip() for entry in kept_entries):
+                raise MigrationError(f"{path} has an invalid {flag} list after provider removal")
+            return source_line[:match.start()] + prefix + quote + ",".join(kept_entries) + quote + source_line[match.end():]
+
         if "--set-env-vars" in line:
-            line = re.sub(
-                r",?(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
-                r"CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^,\"]*",
-                "",
-                line,
-                flags=re.I,
-            )
+            line = scrub_cli_list("--set-env-vars", provider_env_key, line)
         if "--set-secrets" in line:
-            line = re.sub(
-                r",?(?:GEMINI_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|OPENAI_API_KEY)=[^,\"]*",
-                "",
-                line,
-                flags=re.I,
-            )
-            line = re.sub(r",?\$\{(?:AI_SECRET_ARGS)\}", "", line)
+            line = scrub_cli_list("--set-secrets", provider_secret_key, line)
+            if ai_secret_args_has_retired_provider and not ai_secret_args_has_groq:
+                line = re.sub(r",?\$\{AI_SECRET_ARGS\}", "", line)
         # Provider secret names in bootstrap allowlists are independent list items.
         if "for secret in" in line:
             line = re.sub(
