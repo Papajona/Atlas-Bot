@@ -5548,10 +5548,27 @@ def scrub_ancillary_text(path: str, text: str) -> str:
         return json.dumps(scrubbed, indent=2, ensure_ascii=False) + "\n"
 
     kept: list[str] = []
+    is_markdown = path.lower().endswith(".md")
+    markdown_fence_open = False
     for line in text.splitlines(keepends=True):
+        if is_markdown and re.match(r"^\s*(?:\x60{3,}|~{3,})", line):
+            # Preserve fence delimiters verbatim and track executable examples
+            # separately from surrounding descriptive prose.
+            markdown_fence_open = not markdown_fence_open
+            kept.append(line)
+            continue
         if not RETIRED_PROVIDER_RE.search(line):
             kept.append(line)
             continue
+        if is_markdown and markdown_fence_open and re.search(
+            r"(?i)(?:\b(?:gcloud|docker|curl|python|bash|export|printf|echo)\b|"
+            r"\$\{?[A-Z][A-Z0-9_]*(?:API_KEY|SECRET|TOKEN)[A-Z0-9_]*\}?)",
+            line,
+        ):
+            raise MigrationError(
+                f"{path} contains a provider-bearing executable example in a Markdown code fence; "
+                "refusing to rewrite runnable documentation"
+            )
         candidate = SECRET_VERSION_RE.sub("", line)
         candidate = KEY_ASSIGNMENT_RE.sub("", candidate)
         candidate = HOST_RE.sub("", candidate)
@@ -5560,7 +5577,7 @@ def scrub_ancillary_text(path: str, text: str) -> str:
         if RETIRED_PROVIDER_RE.search(candidate):
             if (
                 re.search(r"(?i)\b(?:gcloud|docker|curl|python|bash|run:)\b", candidate)
-                and not path.lower().endswith(".md")
+                and not is_markdown
             ):
                 raise MigrationError(f"{path} has provider wiring inside an executable line; refusing automatic deletion")
             candidate = RETIRED_PROVIDER_RE.sub("legacy provider", candidate)
