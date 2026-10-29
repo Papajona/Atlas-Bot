@@ -35,7 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           NATIVE_AI_CLEANUP_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
-          NATIVE_AI_CANONICAL_COMMIT="f8bb968198ec909e66cc04b888716f87ded6c0fa"
+          NATIVE_AI_CANONICAL_COMMIT="$GITHUB_SHA"
           NATIVE_AI_EXTRA_BASE_COMMIT="0d38f95079833804713fcba080caee38a6ddfb4c"
           NATIVE_AI_EXTRA_COMMIT="2317ccc4c3293e8bbd7043970876eceb509d2d1d"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
@@ -65,6 +65,7 @@ jobs:
             ".github/workflows/production-verification.yml"
             "ENTRY_EXIT_3_9_0.md"
             "app/ai_providers.py"
+            "app/groq_ai.py"
             "app/config.py"
             "app/daily_research.py"
             "app/main.py"
@@ -93,7 +94,7 @@ jobs:
 
           scan_active_provider_refs() {
             local rc=0 matches filtered
-            if matches="$(git grep -nIEi 'gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py')"; then
+            if matches="$(git grep -nIEi 'gemini|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py')"; then
               rc=0
             else
               rc=$?
@@ -102,6 +103,14 @@ jobs:
               matches=""
             elif (( rc != 0 )); then
               return "$rc"
+            fi
+            # Groq remains supported in app/groq_ai.py; only its legacy strategy adapters are migration targets.
+            local legacy_groq_refs=""
+            if legacy_groq_refs="$(git grep -nIEi '_groq_json|settings\.groq_(strategy_model|model)|settings\.groq_api_key|GROQ_API_KEY|SECRET_GROQ|api\.groq\.com' -- app/strategy_ai.py app/daily_research.py app/ai_providers.py)"; then
+              matches+=$'\n'"$legacy_groq_refs"
+            else
+              rc=$?
+              if (( rc != 1 )); then return "$rc"; fi
             fi
             # These are historical proof-marker literals, not active provider wiring.
             # Filter only those exact marker lines; scan every other line in this workflow.
@@ -143,6 +152,7 @@ jobs:
           app_dir = Path("app")
           module_paths = {
               "native_ai": app_dir / "native_ai.py",
+              "groq_ai": app_dir / "groq_ai.py",
               "ai_providers": app_dir / "ai_providers.py",
           }
           trees = {}
@@ -208,6 +218,7 @@ jobs:
           # transitive exports, including missing native_trade_safety_review.
           native = importlib.import_module("app.native_ai")
           facade = importlib.import_module("app.ai_providers")
+          groq = importlib.import_module("app.groq_ai")
           for name in ("NativeAIError", "compose_strategy_spec", "native_research_review"):
               if not hasattr(native, name):
                   raise SystemExit(f"app.native_ai is missing required symbol: {name}")
@@ -218,6 +229,8 @@ jobs:
           ):
               if not hasattr(facade, name):
                   raise SystemExit(f"app.ai_providers is missing required symbol: {name}")
+          if not hasattr(groq, "groq_research_review"):
+              raise SystemExit("app.groq_ai is missing required symbol: groq_research_review")
           if facade.AIProviderError is not native.NativeAIError:
               raise SystemExit(
                   "app.ai_providers.AIProviderError must be the app.native_ai.NativeAIError compatibility alias"
@@ -346,7 +359,8 @@ jobs:
             git clean -fd >/dev/null 2>&1 || true; failed+=("$branch: post-migration provider scan errored; branch left unchanged"); continue; }
           if [[ -n "$after_refs" ]]; then
             echo "ACTIVE PROVIDER REFERENCES REMAIN after semantic migration on $branch:" >&2
-            git grep -nIEi 'gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.groq_api_key|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\.groq\.com|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' >&2 || true
+            git grep -nIEi 'gemini|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' >&2 || true
+            git grep -nIEi '_groq_json|settings\.groq_(strategy_model|model)|settings\.groq_api_key|GROQ_API_KEY|SECRET_GROQ|api\.groq\.com' -- app/strategy_ai.py app/daily_research.py app/ai_providers.py >&2 || true
             git reset --hard "$start_sha" >/dev/null 2>&1 || true
             git clean -fd >/dev/null 2>&1 || true
             failed+=("$branch: provider references remain after semantic migration; branch left unchanged")

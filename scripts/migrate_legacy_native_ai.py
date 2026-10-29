@@ -30,22 +30,35 @@ PROVIDER_FIELD_RE = re.compile(
     r"api\.groq\.com|api\.cerebras\.ai|api\.openai\.com|"
     r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|_gemini_json|_groq_json)"
 )
+# Final checks intentionally distinguish retired providers from Groq, which remains
+# supported as a separate research-only integration.
+RETIRED_PROVIDER_RE = re.compile(
+    r"(?i)(?:gemini|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
+    r"api\.cerebras\.ai|api\.openai\.com|"
+    r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|"
+    r"GEMINI_API_KEY|SECRET_GEMINI|_gemini_json|"
+    r"settings\.(?:gemini|cerebras|ai_gateway)_)"
+)
+RETIRED_PROVIDER_FIELD_RE = re.compile(
+    r"(?i)(?:gemini|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
+    r"api\.cerebras\.ai|api\.openai\.com|"
+    r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|_gemini_json)"
+)
 ATLAS_PROVIDER_SECRET_RE = re.compile(
-    r"(?i)\batlas[-_](?:openai|gemini|groq|cerebras|ai[-_]gateway)[-_][a-z0-9_-]*\b"
+    r"(?i)\batlas[-_](?:openai|gemini|cerebras|ai[-_]gateway)[-_][a-z0-9_-]*\b"
 )
 PROVIDER_SETTING_NAME_RE = re.compile(
-    r"(?i)^(?:SECRET_)?(?:GEMINI|GROQ|CEREBRAS|AI_GATEWAY|OPENAI)_[A-Z0-9_]+$"
+    r"(?i)^(?:SECRET_)?(?:GEMINI|CEREBRAS|AI_GATEWAY|OPENAI)_[A-Z0-9_]+$"
 )
 KEY_ASSIGNMENT_RE = re.compile(
-    r"""(?ix)\b(?:SECRET_)?(?:GEMINI|GROQ|CEREBRAS|AI_GATEWAY|OPENAI)[A-Z0-9_]*\b
+    r"""(?ix)\b(?:SECRET_)?(?:GEMINI|CEREBRAS|AI_GATEWAY|OPENAI)[A-Z0-9_]*\b
     \s*[:=]\s*(?:\$\{\{[^}]+\}\}|"[^"]*"|'[^']*'|[^,\s"']+)"""
 )
 SECRET_VERSION_RE = re.compile(
-    r"(?i)\bSECRET_(?:GEMINI|GROQ|CEREBRAS|AI_GATEWAY|OPENAI)[A-Z0-9_]*\s*:\s*\$\{\{[^}]+\}\}"
+    r"(?i)\bSECRET_(?:GEMINI|CEREBRAS|AI_GATEWAY|OPENAI)[A-Z0-9_]*\s*:\s*\$\{\{[^}]+\}\}"
 )
-HOST_RE = re.compile(r"""(?i)https?://(?:generativelanguage\.googleapis\.com|api\.groq\.com|api\.cerebras\.ai|api\.openai\.com)[^\s"']*""")
+HOST_RE = re.compile(r"""(?i)https?://(?:generativelanguage\.googleapis\.com|api\.cerebras\.ai|api\.openai\.com)[^\s"']*""")
 MODEL_RE = re.compile(r"(?i)\bgemini-[A-Za-z0-9_.-]+\b")
-
 EXTRA_PATHS = (
     "ENTRY_EXIT_3_9_0.md",
     "app/src/main/java/com/atlas/trading/network/ReleaseAdvisorClient.kt",
@@ -57,6 +70,7 @@ NATIVE_PATHS = (
     ".github/workflows/production-verification.yml",
     "ENTRY_EXIT_3_9_0.md",
     "app/ai_providers.py",
+    "app/groq_ai.py",
     "app/config.py",
     "app/daily_research.py",
     "app/main.py",
@@ -76,7 +90,7 @@ NATIVE_PATHS = (
     "scripts/verify_release.sh",
 )
 ANCILLARY_PATHS = tuple(p for p in NATIVE_PATHS if p not in {
-    "app/ai_providers.py", "app/config.py", "app/daily_research.py",
+    "app/ai_providers.py", "app/groq_ai.py", "app/config.py", "app/daily_research.py",
     "app/main.py", "app/native_ai.py", "app/strategy_ai.py", "scripts/check_ai_models.py",
     "scripts/check_native_ai.py",
 })
@@ -801,7 +815,13 @@ def transform_config() -> None:
     removable_lines: set[int] = set()
 
     def is_provider_field(name: str) -> bool:
-        return bool(PROVIDER_FIELD_RE.search(name))
+        # Only the standalone review settings survive. The old Groq strategy selector
+        # is retired with the hosted strategy generator.
+        supported_groq_fields = {
+            "groq_api_key", "groq_model", "groq_max_completion_tokens",
+            "groq_timeout_seconds", "groq_research_review_enabled",
+        }
+        return bool(PROVIDER_FIELD_RE.search(name)) and name.lower() not in supported_groq_fields
 
     postponed_annotations = _uses_postponed_annotations(tree)
 
@@ -1080,11 +1100,55 @@ def transform_config() -> None:
     result = "".join(line for number, line in enumerate(lines, start=1) if number not in removable_lines)
     result = "".join(
         line for line in result.splitlines(keepends=True)
-        if not (line.lstrip().startswith("#") and PROVIDER_RE.search(line))
+        if not (line.lstrip().startswith("#") and RETIRED_PROVIDER_RE.search(line))
     )
-    if PROVIDER_RE.search(result):
+    # Supply the separate Groq research-review settings on legacy branches that
+    # predate them, without overwriting settings already present on a branch.
+    post_cleanup_tree = ast.parse(result, filename=str(path))
+    settings_class = next(
+        (node for node in post_cleanup_tree.body
+         if isinstance(node, ast.ClassDef)
+         and node.name.lower() in {"settings", "appsettings", "atlassettings"}),
+        None,
+    )
+    if settings_class is None:
+        raise MigrationError("app/config.py has no recognized Settings class; cannot retain Groq")
+    existing_groq_fields = {
+        name
+        for node in settings_class.body
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        for name in target_names(target)
+    }
+    groq_field_definitions = [
+        ("groq_api_key", '    groq_api_key: str = ""'),
+        ("groq_model", '    groq_model: str = "openai/gpt-oss-20b"'),
+        ("groq_max_completion_tokens", "    groq_max_completion_tokens: int = 2048"),
+        ("groq_timeout_seconds", "    groq_timeout_seconds: float = 20.0"),
+        ("groq_research_review_enabled", "    groq_research_review_enabled: bool = True"),
+    ]
+    missing_groq_fields = [
+        source_line for field_name, source_line in groq_field_definitions
+        if field_name not in existing_groq_fields
+    ]
+    if missing_groq_fields:
+        class_methods = [
+            node for node in settings_class.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        first_method_line = min(
+            [min([node.lineno, *[decorator.lineno for decorator in node.decorator_list]])
+             for node in class_methods]
+            or [settings_class.end_lineno or settings_class.lineno + 1]
+        )
+        result_lines = result.splitlines(keepends=True)
+        result_lines[first_method_line - 1:first_method_line - 1] = [
+            source_line + "\n" for source_line in missing_groq_fields
+        ]
+        result = "".join(result_lines)
+    if RETIRED_PROVIDER_RE.search(result):
         raise MigrationError(
-            "app/config.py still contains provider text outside isolated Settings fields; refusing lossy cleanup"
+            "app/config.py still contains retired-provider text outside isolated Settings fields; refusing lossy cleanup"
         )
     ast.parse(result, filename=str(path))
     path.write_text(result, encoding="utf-8")
@@ -2072,8 +2136,8 @@ def transform_ai_providers(commit: str) -> None:
         pieces.extend(extras)
     result = "\n\n".join(piece for piece in pieces if piece.strip()) + "\n"
     ast.parse(result, filename=str(path))
-    if PROVIDER_RE.search(result):
-        raise MigrationError("app/ai_providers.py still contains hosted-provider wiring after facade migration")
+    if RETIRED_PROVIDER_RE.search(result):
+        raise MigrationError("app/ai_providers.py still contains retired-provider wiring after facade migration")
     path.write_text(result, encoding="utf-8")
 
 
@@ -4414,8 +4478,8 @@ def transform_strategy_ai(commit: str) -> None:
     if not found_generate or not ai_provider_imports:
         raise MigrationError("strategy module layout is unexpected; refusing lossy rewrite")
     result = _apply_line_edits(source, edits)
-    if PROVIDER_RE.search(result):
-        raise MigrationError("strategy module still contains provider references")
+    if RETIRED_PROVIDER_RE.search(result):
+        raise MigrationError("strategy module still contains retired-provider references")
     ast.parse(result, filename=str(path))
     path.write_text(result, encoding="utf-8")
 
@@ -4425,7 +4489,14 @@ def transform_daily_research() -> None:
     if not path.is_file():
         raise MigrationError("app/daily_research.py is absent")
     source = path.read_text(encoding="utf-8")
-    if not PROVIDER_RE.search(source):
+    # The new Groq research reviewer is supported, canonical wiring—not a legacy
+    # strategy provider. Only invoke this AST migration when an old callsite or
+    # provider-key conditional remains, making reruns idempotent after migration.
+    legacy_daily_provider_re = re.compile(
+        r"(?i)(?:dual_ai_research_review|_gemini_json|_groq_json|_cerebras_json|"
+        r"gemini_api_key|groq_api_key|cerebras_api_key|ai_gateway_)"
+    )
+    if not legacy_daily_provider_re.search(source):
         return
     tree = ast.parse(source, filename=str(path))
     lines = source.splitlines(keepends=True)
@@ -4543,18 +4614,19 @@ def transform_daily_research() -> None:
             indent + "native_research_input = dict(research)",
             indent + 'native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))',
             indent + 'review["native_ai_review"] = native_research_review(native_research_input, intelligence)',
+            indent + 'review["groq_research_review"] = await groq_research_review(research, intelligence)',
         )) + "\n"
         edits.append((node.lineno, node.end_lineno, replacement))
         found_callsite = True
         break
     for index, line in enumerate(lines, start=1):
         if re.search(r"^\s*from\s+\.ai_providers\s+import\s+dual_ai_research_review\b", line):
-            edits.append((index, index, "from .native_ai import native_research_review\n"))
+            edits.append((index, index, "from .native_ai import native_research_review\nfrom .groq_ai import groq_research_review\n"))
     if not found_callsite:
         raise MigrationError("daily-research provider callsite is unexpected; refusing lossy rewrite")
     result = _apply_line_edits(source, edits)
-    if PROVIDER_RE.search(result):
-        raise MigrationError("daily research still contains provider references")
+    if RETIRED_PROVIDER_RE.search(result):
+        raise MigrationError("daily research still contains retired-provider references")
     ast.parse(result, filename=str(path))
     path.write_text(result, encoding="utf-8")
 
@@ -4640,9 +4712,67 @@ def scrub_shell_deployment(path: str, text: str) -> str:
     """Remove provider-specific shell wiring without corrupting bundled env/secret lists."""
     output: list[str] = []
     skip_provider_block = False
+    # Groq remains a supported research-only reviewer. Preserve pure Groq secret/config
+    # conditionals verbatim, but fail closed if they wrap unrelated deployment commands.
+    source_lines = text.splitlines(keepends=True)
+    groq_condition = re.compile(
+        r"(?i)\b(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
+        r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED)\b"
+    )
+    groq_allowed = re.compile(
+        r"(?i)^\s*(?:(?:export\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|"
+        r"GROQ_SECRET_ARG|GROQ_SECRET_ARGS|GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|"
+        r"GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\s*=|"
+        r"(?:if|then|else|fi)\b|#|$)"
+    )
+
+    def safe_groq_statement(statement: str) -> bool:
+        if re.match(r"^\s*(?:echo|printf)\b", statement, re.I):
+            # Printing a fixed validation/warning message is safe; reject shell
+            # chaining, redirection, pipelines, or command substitution.
+            normalized = re.sub(r"\s+>&2\s*$", "", statement)
+            return not re.search(r"&&|\|\||[;|<>]|\$\(", normalized)
+        if re.match(r"^\s*exit\s+[0-9]+\s*(?:#.*)?$", statement, re.I):
+            return True
+        return bool(groq_allowed.match(statement))
+
+    block_start = 0
+    while block_start < len(source_lines):
+        source_line = source_lines[block_start]
+        if re.match(r"^\s*if\b", source_line, re.I) and groq_condition.search(source_line):
+            inline = re.match(r"^\s*if\b.*?\bthen\s*(.*?);\s*fi\s*$", source_line, re.I)
+            if inline:
+                inline_commands = [chunk.strip() for chunk in inline.group(1).split(";") if chunk.strip()]
+                if any(not safe_groq_statement(command) for command in inline_commands):
+                    raise MigrationError(
+                        f"{path} has a mixed provider-conditioned shell block; refusing unrelated inline command"
+                    )
+                block_start += 1
+                continue
+            indent = len(source_line) - len(source_line.lstrip())
+            end = block_start + 1
+            while end < len(source_lines):
+                if re.match(r"^\s*fi\b", source_lines[end], re.I):
+                    break
+                if source_lines[end].strip() and len(source_lines[end]) - len(source_lines[end].lstrip()) < indent:
+                    break
+                end += 1
+            if end >= len(source_lines) or not re.match(r"^\s*fi\b", source_lines[end], re.I):
+                raise MigrationError(f"{path} has an unterminated Groq-conditioned block")
+            for block_line in source_lines[block_start + 1:end]:
+                if not block_line.strip() or block_line.lstrip().startswith("#"):
+                    continue
+                if not safe_groq_statement(block_line):
+                    raise MigrationError(
+                        f"{path} has a mixed provider-conditioned shell block; refusing to discard unrelated statement: {block_line.strip()[:100]}"
+                    )
+            block_start = end + 1
+            continue
+        block_start += 1
+
     variable_pattern = re.compile(
-        r"(?i)\b(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_GROQ[A-Z0-9_]*|"
-        r"GEMINI_API_KEY|GROQ_API_KEY|GROQ_SECRET_ARG|AI_SECRET_ARGS|"
+        r"(?i)\b(?:SECRET_GEMINI[A-Z0-9_]*|"
+        r"GEMINI_API_KEY|AI_SECRET_ARGS|"
         r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\b"
     )
     for original in text.splitlines(keepends=True):
@@ -4656,14 +4786,14 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                     or re.match(r"^(?:else|elif\b|then\b)", stripped, re.I)):
                 continue
             provider_assignment = re.match(
-                r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_GROQ[A-Z0-9_]*|"
-                r"GEMINI_API_KEY|GROQ_API_KEY|GROQ_SECRET_ARG|AI_SECRET_ARGS|"
+                r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
+                r"GEMINI_API_KEY|AI_SECRET_ARGS|"
                 r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
                 line, re.I,
             )
             warning_only = (
                 re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
-                and PROVIDER_RE.search(stripped)
+                and RETIRED_PROVIDER_RE.search(stripped)
                 and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", stripped)
             )
             if provider_assignment or warning_only:
@@ -4679,61 +4809,61 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             continue
 
         # Provider-only shell declarations/guards/secret commands have no unrelated payload.
-        if re.match(r"^\s*(?::\s*)?['\"]?\$\{?(?:SECRET_GEMINI|GEMINI_API_KEY|GROQ_API_KEY)", line, re.I):
+        if re.match(r"^\s*(?::\s*)?['\"]?\$\{?(?:SECRET_GEMINI|GEMINI_API_KEY)", line, re.I):
             continue
         if re.match(
-            r"^\s*(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_GROQ[A-Z0-9_]*|"
-            r"GEMINI_API_KEY|GROQ_API_KEY|GROQ_SECRET_ARG|AI_SECRET_ARGS|"
+            r"^\s*(?:SECRET_GEMINI[A-Z0-9_]*|"
+            r"GEMINI_API_KEY|AI_SECRET_ARGS|"
             r"CEREBRAS_API_KEY|AI_GATEWAY_API_KEY)\s*=",
             line, re.I,
         ):
             continue
-        if re.search(r"(?i)\b(?:create_secret|grant_secret_access)\s+atlas-(?:gemini|groq|cerebras|ai-gateway|openai)\b", line):
+        if re.search(r"(?i)\b(?:create_secret|grant_secret_access)\s+atlas-(?:gemini|cerebras|ai-gateway|openai)\b", line):
             continue
-        if stripped.startswith("#") and PROVIDER_RE.search(line):
+        if stripped.startswith("#") and RETIRED_PROVIDER_RE.search(line):
             continue
 
         # Remove provider entries from combined Cloud Run env-var lists.
         if "ENV_VARS=" in line:
             line = re.sub(
-                r"@(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|GROQ_MODEL|GROQ_STRATEGY_MODEL|"
-                r"GROQ_MAX_COMPLETION_TOKENS|CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^@\"]*",
+                r"@(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
+                r"CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^@\"]*",
                 "",
                 line,
                 flags=re.I,
             )
         if "--set-env-vars" in line:
             line = re.sub(
-                r",?(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|GROQ_MODEL|GROQ_STRATEGY_MODEL|"
-                r"GROQ_MAX_COMPLETION_TOKENS|CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^,\"]*",
+                r",?(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
+                r"CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^,\"]*",
                 "",
                 line,
                 flags=re.I,
             )
         if "--set-secrets" in line:
             line = re.sub(
-                r",?(?:GEMINI_API_KEY|GROQ_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|OPENAI_API_KEY)=[^,\"]*",
+                r",?(?:GEMINI_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|OPENAI_API_KEY)=[^,\"]*",
                 "",
                 line,
                 flags=re.I,
             )
-            line = re.sub(r",?\$\{(?:AI_SECRET_ARGS|GROQ_SECRET_ARG)\}", "", line)
+            line = re.sub(r",?\$\{(?:AI_SECRET_ARGS)\}", "", line)
         # Provider secret names in bootstrap allowlists are independent list items.
         if "for secret in" in line:
             line = re.sub(
-                r"\s+atlas-(?:gemini|groq|cerebras|ai-gateway|openai)[-a-z0-9]*",
+                r"\s+atlas-(?:gemini|cerebras|ai-gateway|openai)[-a-z0-9]*",
                 "",
                 line,
                 flags=re.I,
             )
         # Strip any remaining provider-only executable line. If a mixed executable line
         # still contains a provider token, refuse the branch rather than damage its command.
-        if PROVIDER_RE.search(line):
+        if RETIRED_PROVIDER_RE.search(line):
             if stripped.startswith("#"):
                 continue
             warning_only = (
                 re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
-                and re.search(r"(?i)\b(?:gemini|groq|cerebras|ai.?gateway|openai)\b", stripped)
+                and re.search(r"(?i)\b(?:gemini|cerebras|ai.?gateway|openai)\b", stripped)
                 and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", stripped)
             )
             if warning_only:
@@ -4743,14 +4873,14 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 commands = [part.strip() for part in inline_if.group(1).split(";") if part.strip()]
                 safe_inline = all(
                     re.match(
-                        r"^(?::|(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_GROQ[A-Z0-9_]*|"
-                        r"GEMINI_API_KEY|GROQ_API_KEY|GROQ_SECRET_ARG|AI_SECRET_ARGS|"
+                        r"^(?::|(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
+                        r"GEMINI_API_KEY|AI_SECRET_ARGS|"
                         r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=)",
                         command, re.I,
                     )
                     or (
                         re.match(r"^(?:echo|printf)\b", command, re.I)
-                        and re.search(r"(?i)\b(?:gemini|groq|cerebras|ai.?gateway|openai)\b", command)
+                        and re.search(r"(?i)\b(?:gemini|cerebras|ai.?gateway|openai)\b", command)
                         and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", command)
                     )
                     for command in commands
@@ -4775,12 +4905,166 @@ def scrub_shell_deployment(path: str, text: str) -> str:
     if skip_provider_block:
         raise MigrationError(f"{path} has an unterminated provider-specific shell block")
     cleaned = "".join(output)
-    if PROVIDER_RE.search(cleaned):
-        raise MigrationError(f"{path} still contains hosted-provider wiring after shell cleanup")
+    if RETIRED_PROVIDER_RE.search(cleaned):
+        raise MigrationError(f"{path} still contains retired-provider wiring after shell cleanup")
+    return cleaned
+
+
+def _workflow_has_active_provider_wiring(text: str) -> bool:
+    """Check workflow semantics while permitting inert names and protected environments."""
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$", line)
+        if match:
+            key, value = match.groups()
+            if key.lower() in {"environment", "name", "run-name", "description"}:
+                # Environment names can intentionally select protected approval gates;
+                # labels/descriptions are not executable provider configuration.
+                continue
+            if PROVIDER_SETTING_NAME_RE.fullmatch(key) or RETIRED_PROVIDER_FIELD_RE.search(key):
+                return True
+            # Remove YAML comments before considering scalar values; quoted values
+            # remain conservatively checked when the provider token is in the value.
+            value = value.split(" #", 1)[0]
+            if RETIRED_PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value):
+                return True
+            continue
+        if RETIRED_PROVIDER_RE.search(line) or ATLAS_PROVIDER_SECRET_RE.search(line):
+            return True
+    return False
+
+
+def scrub_workflow_ancillary(path: str, text: str) -> str:
+    """Remove provider configuration from workflows without rewriting environment gates or commands.
+
+    Provider env keys are removed as whole YAML entries. Shell run blocks go through the
+    strict shell scrubber, which refuses mixed commands; it never strips a provider URL
+    from an otherwise unrelated executable line.
+    """
+    lines = text.splitlines(keepends=True)
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            index += 1
+            continue
+
+        run_match = re.match(r"^([ \t]*)run:[ \t]*(.*?)[ \t]*(?:\r?\n)?$", line)
+        if run_match:
+            indent_text, value = run_match.groups()
+            indent = len(indent_text)
+            value = value.strip()
+            if value in {"|", "|-", "|+", ">", ">-"} or not value:
+                end = index + 1
+                while end < len(lines):
+                    candidate = lines[end]
+                    if not candidate.strip():
+                        end += 1
+                        continue
+                    candidate_indent = len(candidate) - len(candidate.lstrip())
+                    if candidate_indent <= indent:
+                        break
+                    end += 1
+                block = lines[index + 1:end]
+                nonblank_indents = [
+                    len(item) - len(item.lstrip()) for item in block if item.strip()
+                ]
+                body_indent = min(nonblank_indents) if nonblank_indents else indent + 2
+                body = "".join(
+                    (item[body_indent:] if item.strip() else "")
+                    for item in block
+                )
+                if RETIRED_PROVIDER_RE.search(body) or ATLAS_PROVIDER_SECRET_RE.search(body):
+                    cleaned = scrub_shell_deployment("deploy/cloud-run-deploy.sh", body)
+                    if not cleaned.strip():
+                        raise MigrationError(
+                            f"{path} contains a provider-only run block; refusing to leave an invalid workflow step"
+                        )
+                    kept.append(line)
+                    for item in cleaned.splitlines(keepends=True):
+                        kept.append((" " * body_indent + item) if item.strip() else item)
+                else:
+                    kept.extend(lines[index:end])
+                index = end
+                continue
+            if RETIRED_PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value):
+                cleaned = scrub_shell_deployment("deploy/cloud-run-deploy.sh", value)
+                if not cleaned.strip():
+                    raise MigrationError(
+                        f"{path} contains a provider-only inline run; refusing to leave an invalid workflow step"
+                    )
+                newline = "\n" if line.endswith("\n") else ""
+                kept.append(f"{indent_text}run: {cleaned.strip()}{newline}")
+                index += 1
+                continue
+
+        key_match = re.match(r"^(\s*)([A-Za-z_][A-Za-z0-9_-]*):(?:\s*(.*?))?(\r?\n)?$", line)
+        if key_match:
+            _indent, key, value, _newline = key_match.groups()
+            if key.lower() == "environment":
+                # Never rename an approval-gated environment. A retired-provider
+                # name requires manual reconciliation before this branch can migrate.
+                if value and RETIRED_PROVIDER_RE.search(value):
+                    raise MigrationError(
+                        f"{path} references a retired provider in its deployment environment; preserving the approval gate and refusing migration"
+                    )
+                kept.append(line)
+                index += 1
+                continue
+            if key.lower() in {"name", "run-name", "description"}:
+                kept.append(line)
+                index += 1
+                continue
+            if PROVIDER_SETTING_NAME_RE.fullmatch(key) or RETIRED_PROVIDER_FIELD_RE.search(key):
+                # Removing a parent key and retaining its indented children can make
+                # GitHub Actions YAML invalid. Only scalar provider settings are removed.
+                key_indent = len(_indent)
+                has_nested_children = False
+                for child in lines[index + 1:]:
+                    if not child.strip() or child.lstrip().startswith("#"):
+                        continue
+                    child_indent = len(child) - len(child.lstrip())
+                    if child_indent <= key_indent:
+                        break
+                    has_nested_children = True
+                    break
+                if has_nested_children:
+                    raise MigrationError(
+                        f"{path} has provider-named YAML mapping {key!r} with children; refusing to invalidate workflow structure"
+                    )
+                index += 1
+                continue
+            if value and (RETIRED_PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value)):
+                # Do not run generic token substitution on a YAML value: it can alter
+                # an environment, URL, shell command, or approval/resource identifier.
+                raise MigrationError(
+                    f"{path} has provider-bearing YAML scalar {key!r}; refusing unsafe text substitution"
+                )
+            kept.append(line)
+            index += 1
+            continue
+
+        # Unstructured provider-bearing lines are not safe to edit generically.
+        if RETIRED_PROVIDER_RE.search(line) or ATLAS_PROVIDER_SECRET_RE.search(line):
+            raise MigrationError(
+                f"{path} has provider wiring outside a recognized YAML field; refusing unsafe text substitution: {stripped[:100]}"
+            )
+        kept.append(line)
+        index += 1
+
+    cleaned = "".join(_remove_empty_env(kept))
+    if _workflow_has_active_provider_wiring(cleaned):
+        raise MigrationError(f"{path} still contains active hosted-provider wiring after workflow cleanup")
     return cleaned
 
 
 def scrub_ancillary_text(path: str, text: str) -> str:
+    if path in {".github/workflows/production-deploy.yml", ".github/workflows/production-verification.yml"}:
+        return scrub_workflow_ancillary(path, text)
     if path in {"deploy/cloud-run-deploy.sh", "deploy/cloud-run-worker-deploy.sh", "deploy/gcp-bootstrap.sh"}:
         return scrub_shell_deployment(path, text)
     if path == "metadata.json":
@@ -4808,7 +5092,7 @@ def scrub_ancillary_text(path: str, text: str) -> str:
                 result = {}
                 for key, item in value.items():
                     key_text = str(key)
-                    if PROVIDER_FIELD_RE.search(key_text):
+                    if RETIRED_PROVIDER_FIELD_RE.search(key_text):
                         continue
                     if key_text.lower() in {"secretref", "secret_ref"} and isinstance(item, str) and PROVIDER_SETTING_NAME_RE.fullmatch(item):
                         continue
@@ -4820,7 +5104,7 @@ def scrub_ancillary_text(path: str, text: str) -> str:
                 return [cleaned for item in value if (cleaned := scrub(item, key_context)) is not remove]
             if isinstance(value, str) and key_context.lower() in {"name", "key", "setting", "variable"} and PROVIDER_SETTING_NAME_RE.fullmatch(value):
                 return ""
-            if isinstance(value, str) and (PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value)):
+            if isinstance(value, str) and (RETIRED_PROVIDER_RE.search(value) or ATLAS_PROVIDER_SECRET_RE.search(value)):
                 if re.fullmatch(r"(?i)(?:[a-z0-9]+_)*model(?:_(?:id|name|version))?", key_context):
                     return "atlas-native-strategy-v1"
                 cleaned = SECRET_VERSION_RE.sub("", value)
@@ -4839,23 +5123,23 @@ def scrub_ancillary_text(path: str, text: str) -> str:
 
     kept: list[str] = []
     for line in text.splitlines(keepends=True):
-        if not PROVIDER_RE.search(line):
+        if not RETIRED_PROVIDER_RE.search(line):
             kept.append(line)
             continue
         candidate = SECRET_VERSION_RE.sub("", line)
         candidate = KEY_ASSIGNMENT_RE.sub("", candidate)
         candidate = HOST_RE.sub("", candidate)
         candidate = MODEL_RE.sub("atlas-native-strategy-v1", candidate)
-        candidate = re.sub(r"(?i)\b(?:Gemini|Groq|Cerebras|AI Gateway)\b", "", candidate)
-        if PROVIDER_RE.search(candidate):
+        candidate = re.sub(r"(?i)\b(?:Gemini|Cerebras|AI Gateway)\b", "", candidate)
+        if RETIRED_PROVIDER_RE.search(candidate):
             if re.search(r"(?i)\b(?:gcloud|docker|curl|python|bash|run:)\b", candidate):
                 raise MigrationError(f"{path} has provider wiring inside an executable line; refusing automatic deletion")
-            candidate = PROVIDER_RE.sub("legacy provider", candidate)
+            candidate = RETIRED_PROVIDER_RE.sub("legacy provider", candidate)
         if candidate.strip():
             kept.append(candidate)
     cleaned = "".join(_remove_empty_env(kept))
-    if PROVIDER_RE.search(cleaned):
-        raise MigrationError(f"{path} still contains provider references")
+    if RETIRED_PROVIDER_RE.search(cleaned):
+        raise MigrationError(f"{path} still contains retired-provider references")
     if path == "metadata.json":
         json.loads(cleaned)
     return cleaned
@@ -4880,15 +5164,25 @@ def _apply_path_patch(base_commit: str, tip_commit: str, path: str) -> bool:
 
 
 def apply_ancillary_patch(commit: str, path: str, extra_base: str, extra_commit: str) -> None:
-    if not _apply_path_patch(f"{commit}^", commit, path):
+    cleanup_patch_applied = _apply_path_patch(f"{commit}^", commit, path)
+    if not cleanup_patch_applied and path in EXTRA_PATHS:
+        # The Android/document extras need their separately reviewed patch. Preserve
+        # their exact branch content when that patch conflicts; never use a broad text
+        # scrub as a substitute for those path-specific reviews.
         return
     if path in EXTRA_PATHS and not _apply_path_patch(extra_base, extra_commit, path):
         # Preserve the exact conflicting Android/document path. If it still contains
         # active provider wiring, the final scan will reject this branch instead.
         return
+
     target = ROOT / path
     if target.exists():
         current = target.read_text(encoding="utf-8")
+        # A failed patch against a divergent legacy deployment file is not proof that
+        # the file is unsafe to migrate. The scrubber below is deliberately narrow:
+        # it removes recognized provider wiring and raises MigrationError for mixed
+        # commands/unknown constructs instead of silently discarding them. Always run
+        # that semantic cleanup after patch conflicts on the ordinary ancillary paths.
         cleaned = scrub_ancillary_text(path, current)
         if cleaned != current:
             target.write_text(cleaned, encoding="utf-8")
@@ -4916,7 +5210,7 @@ def _metadata_has_active_provider_wiring(text: str) -> bool:
                 return True
             for key, item in value.items():
                 key_text = str(key)
-                if PROVIDER_FIELD_RE.search(key_text):
+                if RETIRED_PROVIDER_FIELD_RE.search(key_text):
                     return True
                 if visit(item, key_text):
                     return True
@@ -4933,7 +5227,7 @@ def _metadata_has_active_provider_wiring(text: str) -> bool:
                 or HOST_RE.search(value)
             ):
                 return True
-            if re.search(r"(?i)(?:provider|gateway|model|api[_ -]?key|secret|endpoint)", key_context) and PROVIDER_RE.search(value):
+            if re.search(r"(?i)(?:provider|gateway|model|api[_ -]?key|secret|endpoint)", key_context) and RETIRED_PROVIDER_RE.search(value):
                 return True
         return False
 
@@ -4945,10 +5239,13 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
     # independent pins: changing one must not widen the other per-path diff.
     transform_ai_providers(canonical_commit)
     write_text("scripts/check_ai_models.py", canonical_text(canonical_commit, "scripts/check_ai_models.py"))
-    for path in ("app/native_ai.py", "scripts/check_native_ai.py"):
+    for path in ("app/native_ai.py", "scripts/check_native_ai.py", "app/groq_ai.py"):
         target = ROOT / path
         if not target.exists():
             write_text(path, canonical_text(canonical_commit, path))
+        elif path == "app/groq_ai.py":
+            if target.read_text(encoding="utf-8") != canonical_text(canonical_commit, path):
+                raise MigrationError("app/groq_ai.py differs from the reviewed Groq-only adapter; preserving the branch")
         elif PROVIDER_RE.search(target.read_text(encoding="utf-8")):
             raise MigrationError(f"{path} has a divergent provider-bearing implementation; refusing overwrite")
 
@@ -4968,12 +5265,15 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
         if path == "metadata.json":
             if _metadata_has_active_provider_wiring(contents):
                 remaining.append(path)
-        elif PROVIDER_RE.search(contents):
+        elif path in {".github/workflows/production-deploy.yml", ".github/workflows/production-verification.yml"}:
+            if _workflow_has_active_provider_wiring(contents):
+                remaining.append(path)
+        elif RETIRED_PROVIDER_RE.search(contents):
             remaining.append(path)
     if remaining:
         raise MigrationError("provider references remain in: " + ", ".join(remaining))
 
-    for path in ("app/config.py", "app/daily_research.py", "app/strategy_ai.py", "app/ai_providers.py", "app/native_ai.py", "app/main.py"):
+    for path in ("app/config.py", "app/daily_research.py", "app/strategy_ai.py", "app/ai_providers.py", "app/native_ai.py", "app/groq_ai.py", "app/main.py"):
         target = ROOT / path
         if target.is_file():
             ast.parse(target.read_text(encoding="utf-8"), filename=path)

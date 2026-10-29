@@ -1,5 +1,6 @@
 """Regression tests for the repository-wide native-AI propagation workflow."""
 
+import ast
 from pathlib import Path
 
 
@@ -57,11 +58,12 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert "tests/" not in runtime_path_list
     assert 'git show "$GITHUB_SHA:scripts/migrate_legacy_native_ai.py"' in workflow
     assert 'python "$RUNNER_TEMP/migrate_legacy_native_ai.py" --canonical-commit "$NATIVE_AI_CANONICAL_COMMIT" --cleanup-commit "$NATIVE_AI_CLEANUP_COMMIT" --extra-base-commit "$NATIVE_AI_EXTRA_BASE_COMMIT" --extra-commit "$NATIVE_AI_EXTRA_COMMIT"' in workflow
-    assert 'NATIVE_AI_CANONICAL_COMMIT="f8bb968198ec909e66cc04b888716f87ded6c0fa"' in workflow
+    assert 'NATIVE_AI_CANONICAL_COMMIT="$GITHUB_SHA"' in workflow
     assert 'NATIVE_AI_CLEANUP_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"' in workflow
     assert 'NATIVE_AI_EXTRA_COMMIT="2317ccc4c3293e8bbd7043970876eceb509d2d1d"' in workflow
     assert 'extra_parent="$(git rev-parse "$NATIVE_AI_EXTRA_COMMIT^")"' in workflow
     assert 'if [[ "$extra_parent" != "$NATIVE_AI_EXTRA_BASE_COMMIT" ]]; then' in workflow
+    assert '"app/groq_ai.py"' in runtime_path_list
     assert '"app/main.py"' in runtime_path_list
     assert '"ENTRY_EXIT_3_9_0.md"' in runtime_path_list
     assert '"app/src/main/java/com/atlas/trading/network/ReleaseAdvisorClient.kt"' in runtime_path_list
@@ -81,6 +83,10 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert "ACTIVE PROVIDER REFERENCES REMAIN after semantic migration" in workflow
     assert r"generativelanguage\.googleapis\.com" in workflow
     assert r"api\.groq\.com" in workflow
+    global_scan = next(line for line in workflow.splitlines() if "if matches=\"$(git grep -nIEi" in line)
+    assert "groq" not in global_scan.lower()
+    assert "legacy_groq_refs" in workflow
+    assert "settings\\.groq_(strategy_model|model)" in workflow
     assert r"api\.cerebras\.ai" in workflow
 
 
@@ -122,3 +128,19 @@ def test_migration_script_preserves_unrelated_branch_logic_and_fails_closed() ->
     assert "provider references remain in:" in helper
     assert '_git("add", "-A")' in helper
     assert '_git("diff", "--cached", "--check")' in helper
+
+
+def test_embedded_native_ai_verifier_script_is_valid_python() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    function_start = workflow.index("verify_native_ai_impl() {")
+    heredoc_marker = "python - <<'PY'\n"
+    heredoc_start = workflow.index(heredoc_marker, function_start) + len(heredoc_marker)
+    heredoc_end = workflow.index("\n          PY\n", heredoc_start)
+    embedded_lines = workflow[heredoc_start:heredoc_end].splitlines()
+    # Remove the common indentation contributed by the YAML block scalar so this
+    # checks the exact Python source the shell heredoc executes.
+    source = "\n".join(
+        line[10:] if line.startswith("          ") else line
+        for line in embedded_lines
+    )
+    ast.parse(source, filename=f"{WORKFLOW.name}:verify_native_ai_impl")
