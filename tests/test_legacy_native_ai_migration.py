@@ -3330,6 +3330,56 @@ for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-ope
         with self.assertRaisesRegex(migration.MigrationError, "mixed provider-conditioned shell block"):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
 
+    def test_ancillary_patch_conflict_still_runs_guarded_deployment_scrub(self):
+        source = r'''#!/usr/bin/env bash
+set -euo pipefail
+DATABASE_URL="${DATABASE_URL:?required}"
+: "${SECRET_GEMINI_API_KEY_VERSION:?Set SECRET_GEMINI_API_KEY_VERSION}"
+SECRET_GROQ_API_KEY_VERSION="${SECRET_GROQ_API_KEY_VERSION:-}"
+AI_SECRET_ARGS=",GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}"
+ENV_VARS="^@^ENVIRONMENT=production@DATABASE_URL=${DATABASE_URL}@GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}@GROQ_MODEL=openai/gpt-oss-20b@OPENAI_ORGANIZATION=org-id"
+gcloud run deploy atlas --set-env-vars "ENVIRONMENT=production,DATABASE_URL=${DATABASE_URL},GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash},GROQ_MODEL=openai/gpt-oss-20b,OPENAI_ORGANIZATION=org-id" --set-secrets "DATABASE_URL=${DATABASE_SECRET_REF},GEMINI_API_KEY=${SECRET_GEMINI_API_KEY_VERSION}${AI_SECRET_ARGS}"
+grant_secret_access atlas-openai-api-key atlas-runtime
+for secret in atlas-database-url atlas-secret-key atlas-gemini-api-key atlas-openai-api-key; do echo "$secret"; done
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "deploy" / "cloud-run-deploy.sh"
+            target.parent.mkdir(parents=True)
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "_apply_path_patch", return_value=False
+            ):
+                migration.apply_ancillary_patch(
+                    "cleanup-commit", "deploy/cloud-run-deploy.sh",
+                    "extra-base", "extra-commit",
+                )
+            cleaned = target.read_text(encoding="utf-8")
+            self.assertIn("DATABASE_URL", cleaned)
+            self.assertIn("DATABASE_SECRET_REF", cleaned)
+            self.assertNotRegex(cleaned, migration.PROVIDER_RE)
+            check = subprocess.run(
+                ["bash", "-n", str(target)], text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_ancillary_patch_conflict_preserves_special_android_extra(self):
+        path = "app/src/main/java/com/atlas/trading/network/ReleaseAdvisorClient.kt"
+        source = "const legacyProvider = \"gemini\"\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / path
+            target.parent.mkdir(parents=True)
+            target.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "_apply_path_patch", return_value=False
+            ):
+                migration.apply_ancillary_patch(
+                    "cleanup-commit", path, "extra-base", "extra-commit"
+                )
+            self.assertEqual(target.read_text(encoding="utf-8"), source)
+
     def test_release_diagnostics_replaces_only_hosted_route_and_preserves_neighbor_routes(self):
         legacy = """# Authorized release diagnostics. The gateway key is read only from server configuration.
 _RELEASE_SECRET_PATTERNS = []
