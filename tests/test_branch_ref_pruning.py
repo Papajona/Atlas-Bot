@@ -890,6 +890,7 @@ def test_branch_pruning_runs_after_propagation_without_racing_its_push():
     assert "\n  workflow_run:\n" in workflow
     assert "Propagate Atlas Native AI across branches" in workflow
     assert "github.event.workflow_run.head_branch == 'main'" in workflow
+    assert "github.event.workflow_run.conclusion == 'success'" in workflow
     assert "Skip push-time pruning when Native AI propagation will update branch refs" in workflow
     assert "github.event_name == 'push'" in workflow
     assert "scripts/migrate_legacy_native_ai.py" in workflow
