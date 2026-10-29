@@ -152,6 +152,80 @@ def _bounded_prompt_value(value: Any, state: dict[str, bool], depth: int = 0) ->
     return _bounded_prompt_value(str(value), state, depth + 1)
 
 
+def _size_compact_prompt_value(
+    value: Any,
+    *,
+    string_limit: int,
+    mapping_limit: int,
+    list_limit: int,
+    audit: dict[str, int],
+    depth: int = 0,
+    key: str | None = None,
+) -> Any:
+    """Shrink a bounded prompt value without cutting serialized JSON arbitrarily."""
+    if isinstance(value, str):
+        if len(value) <= string_limit:
+            return value
+        omitted = len(value) - string_limit
+        audit["characters_omitted"] += omitted
+        return value[:string_limit] + f" [size-budget omitted {omitted} characters]"
+    if isinstance(value, dict):
+        if depth >= 5:
+            audit["nested_values_omitted"] += 1
+            return "[size-budget nested mapping omitted]"
+        items = list(value.items())
+        if depth > 0 and len(items) > mapping_limit:
+            priority = {
+                "status", "trial_registry_complete", "walk_forward_purge_complete", "promotion_status",
+                "per_strategy_oos", "symbol", "regime", "annualized_realized_vol", "volatility",
+                "strategy", "score", "confidence", "reason", "data_quality_flags", "article_count",
+                "average_sentiment", "headlines", "failures", "source_failures", "macro_regime",
+                "paper_candidates", "trial_labels", "prospective_trial_archive", "error", "cause",
+            }
+            preferred = [item for item in items if str(item[0]) in priority]
+            others = [item for item in items if str(item[0]) not in priority]
+            selected = preferred + others[:max(0, mapping_limit - len(preferred))]
+            selected_keys = {item[0] for item in selected}
+            items = [item for item in items if item[0] in selected_keys]
+            omitted = len(value) - len(items)
+            audit["mapping_entries_omitted"] += omitted
+        else:
+            omitted = 0
+        result = {
+            str(name): _size_compact_prompt_value(
+                item, string_limit=string_limit, mapping_limit=mapping_limit,
+                list_limit=list_limit, audit=audit, depth=depth + 1, key=str(name)
+            )
+            for name, item in items
+        }
+        if omitted:
+            result["size_budget_omitted_key_count"] = omitted
+        return result
+    if isinstance(value, (list, tuple)):
+        if depth >= 5:
+            audit["nested_values_omitted"] += 1
+            return "[size-budget nested sequence omitted]"
+        items = list(value)
+        effective_limit = list_limit
+        if key in {"research_order", "trial_labels"}:
+            effective_limit = max(effective_limit, min(12, len(items)))
+        kept = items[:effective_limit]
+        omitted = len(items) - len(kept)
+        if omitted:
+            audit["list_items_omitted"] += omitted
+        result = [
+            _size_compact_prompt_value(
+                item, string_limit=string_limit, mapping_limit=mapping_limit,
+                list_limit=list_limit, audit=audit, depth=depth + 1, key=key
+            )
+            for item in kept
+        ]
+        if omitted:
+            result.append(f"[{omitted} additional items omitted by the size budget]")
+        return result
+    return value
+
+
 def _research_prompt(
     research: dict[str, Any], intelligence: dict[str, Any]
 ) -> tuple[str, bool]:
@@ -175,8 +249,15 @@ def _research_prompt(
         state["truncated"] = True
     retained_validation_keys = {
         "status", "trial_registry_complete", "walk_forward_purge_complete", "promotion_status",
-        "per_strategy_oos",
+        "per_strategy_oos", "trial_labels",
     }
+    raw_trial_labels = validation.get("trial_labels", research.get("trial_labels", []))
+    if isinstance(raw_trial_labels, list):
+        trial_labels = raw_trial_labels
+    else:
+        trial_labels = []
+        if "trial_labels" in validation or "trial_labels" in research:
+            state["truncated"] = True
     validation_fields_omitted = sum(1 for key in validation if key not in retained_validation_keys)
     if validation_fields_omitted:
         state["truncated"] = True
@@ -273,7 +354,7 @@ def _research_prompt(
         "paper_candidate_count": len(candidates),
         "paper_candidates_omitted": max(0, len(candidates) - len(candidate_summaries)),
         "paper_candidate_fields_omitted": paper_candidate_fields_omitted,
-        "trial_labels": _bounded_prompt_value(research.get("trial_labels", []), state),
+        "trial_labels": _bounded_prompt_value(trial_labels, state),
         "prospective_trial_archive": _bounded_prompt_value(research.get("prospective_trial_archive", {}), state),
     }
     external_keys = {"news_summary", "failures", "macro_regime"}
@@ -287,10 +368,74 @@ def _research_prompt(
         "external_fields_omitted": external_fields_omitted,
     }
     bounded_external = _bounded_prompt_value(external_source, state)
+    size_budget_audit = {
+        "characters_omitted": 0,
+        "mapping_entries_omitted": 0,
+        "list_items_omitted": 0,
+        "nested_values_omitted": 0,
+    }
     research_json = json.dumps(bounded_research, default=str, separators=(",", ":"))
     external_json = json.dumps(bounded_external, default=str, separators=(",", ":"))
     if len(research_json) > 12_000 or len(external_json) > 5_000:
-        raise GroqAIError("Compacted Groq research input exceeded its reviewed size bound")
+        original_research = bounded_research
+        original_external = bounded_external
+        fitted = False
+        for string_limit, mapping_limit, list_limit in (
+            (240, 12, 10), (160, 10, 8), (100, 8, 6), (60, 6, 4), (32, 4, 3), (16, 3, 2),
+        ):
+            candidate_audit = {
+                "characters_omitted": 0, "mapping_entries_omitted": 0,
+                "list_items_omitted": 0, "nested_values_omitted": 0,
+            }
+            candidate_research = _size_compact_prompt_value(
+                original_research, string_limit=string_limit, mapping_limit=mapping_limit,
+                list_limit=list_limit, audit=candidate_audit,
+            )
+            candidate_external = _size_compact_prompt_value(
+                original_external, string_limit=string_limit, mapping_limit=mapping_limit,
+                list_limit=list_limit, audit=candidate_audit,
+            )
+            candidate_research_json = json.dumps(candidate_research, default=str, separators=(",", ":"))
+            candidate_external_json = json.dumps(candidate_external, default=str, separators=(",", ":"))
+            if len(candidate_research_json) <= 12_000 and len(candidate_external_json) <= 5_000:
+                bounded_research, bounded_external = candidate_research, candidate_external
+                research_json, external_json = candidate_research_json, candidate_external_json
+                size_budget_audit = candidate_audit
+                fitted = True
+                break
+        if not fitted:
+            # Valid but unusually broad inputs still get a useful, explicitly lossy
+            # summary rather than converting an optional research review into an error.
+            size_budget_audit = {
+                "characters_omitted": 0,
+                "mapping_entries_omitted": 0,
+                "list_items_omitted": 0,
+                "nested_values_omitted": 0,
+            }
+            strategy_count = len(names)
+            candidate_count = len(candidates)
+            bounded_research = {
+                "symbol": bounded_research.get("symbol"),
+                "asset": bounded_research.get("asset"),
+                "regime": bounded_research.get("regime"),
+                "validation": bounded_research.get("validation", {}).get("status", "UNKNOWN"),
+                "trial_labels": bounded_research.get("trial_labels", []),
+                "strategy_count": strategy_count,
+                "strategy_metrics_omitted": strategy_count,
+                "paper_candidate_count": candidate_count,
+                "paper_candidates_omitted": candidate_count,
+                "size_budget_compacted": True,
+            }
+            bounded_external = {
+                "source_status": "External research details omitted to stay within the reviewed size budget",
+                "external_fields_omitted": external_fields_omitted,
+                "size_budget_compacted": True,
+            }
+            research_json = json.dumps(bounded_research, default=str, separators=(",", ":"))
+            external_json = json.dumps(bounded_external, default=str, separators=(",", ":"))
+            if len(research_json) > 12_000 or len(external_json) > 5_000:
+                raise GroqAIError("Minimal Groq research summary exceeded the reviewed size budget")
+        state["truncated"] = True
     input_truncated = state["truncated"]
     hits = suspicious_instruction_markers(external_json)
     if hits:
@@ -307,6 +452,10 @@ def _research_prompt(
         "candidate_omitted_fields": [
             {"omitted_field_count": count} for count in candidate_omission_counts if count
         ],
+        "size_budget_compaction": {
+            "applied": any(size_budget_audit.values()),
+            **size_budget_audit,
+        },
     }
     omission_audit_json = json.dumps(omission_audit, separators=(",", ":"))
     research_block = wrap_untrusted("atlas_computed_research", bounded_research, max_chars=80_000)
