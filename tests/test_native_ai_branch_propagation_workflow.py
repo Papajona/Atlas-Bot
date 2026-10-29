@@ -60,7 +60,6 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert 'python "$RUNNER_TEMP/migrate_legacy_native_ai.py" --canonical-commit "$NATIVE_AI_CANONICAL_COMMIT" --cleanup-commit "$NATIVE_AI_CLEANUP_COMMIT" --extra-base-commit "$NATIVE_AI_EXTRA_BASE_COMMIT" --extra-commit "$NATIVE_AI_EXTRA_COMMIT"' in workflow
     assert 'NATIVE_AI_CANONICAL_COMMIT="78a1fc896eb2b906a069467194008e464107279d"' in workflow
     assert 'NATIVE_AI_CANONICAL_COMMIT="$GITHUB_SHA"' not in workflow
-    assert "filter inert workflow labels" not in workflow
     assert "run-name|description" in workflow
     assert 'NATIVE_AI_CLEANUP_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"' in workflow
     assert 'NATIVE_AI_EXTRA_COMMIT="2317ccc4c3293e8bbd7043970876eceb509d2d1d"' in workflow
@@ -156,3 +155,9 @@ def test_embedded_verifier_and_canonical_source_are_pinned_independently() -> No
     assert 'NATIVE_AI_CANONICAL_COMMIT="$GITHUB_SHA"' not in workflow
     assert "run-name|description" in workflow
     assert "NATIVE_AI_CANONICAL_COMMIT" in workflow
+
+
+def test_provider_scan_ignores_only_inert_workflow_labels_and_comments() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert '&& !($0 ~ /^\\.github\\/workflows\\/[^:]+:[0-9]+:[[:space:]]*(name|run-name|description):/)' in workflow
+    assert '&& !($0 ~ /^\\.github\\/workflows\\/[^:]+:[0-9]+:[[:space:]]*#/)' in workflow
