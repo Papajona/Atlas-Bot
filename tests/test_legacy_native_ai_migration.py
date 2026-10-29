@@ -4746,7 +4746,7 @@ async def groq_research_review(research, intelligence):
             self.assertEqual(config.read_text(encoding="utf-8"), unsafe)
 
         annotation_only = unsafe.replace(
-            "str = audited_stringifier\\n", "str: int\\n"
+            "str = audited_stringifier\n", "str: int\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -4835,9 +4835,9 @@ def retained_helper():
             helper_module = root / "app" / "branch_helpers.py"
             target.parent.mkdir()
             helper_module.write_text(
-                "def branch_helper():\\n    return True\\n\\n"
-                "def inert_exec(source):\\n    exec(source)\\n\\n"
-                "def inert_eval(source):\\n    return eval(source)\\n",
+                "def branch_helper():\n    return True\n\n"
+                "def inert_exec(source):\n    exec(source)\n\n"
+                "def inert_eval(source):\n    return eval(source)\n",
                 encoding="utf-8",
             )
             target.write_text(legacy, encoding="utf-8")
