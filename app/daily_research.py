@@ -193,7 +193,7 @@ async def _persist_research_run(symbol: str, research: dict[str, Any], review: d
                 previous = {"regime": prev_row.regime_assessment, "top_strategy": prev_row.top_strategy,
                             "sharpe": prev_row.sharpe, "max_drawdown": prev_row.max_drawdown, "total_return": prev_row.total_return}
             drift = compute_run_drift(previous, current)
-            db.add(ResearchRun(
+            row = ResearchRun(
                 symbol=symbol[:80], regime_assessment=current["regime"][:60], top_strategy=current["top_strategy"][:40],
                 sharpe=current["sharpe"], max_drawdown=current["max_drawdown"], total_return=current["total_return"],
                 macro_risk_state=str(macro_regime.get("risk_state") or "")[:20],
@@ -201,41 +201,33 @@ async def _persist_research_run(symbol: str, research: dict[str, Any], review: d
                 regime_drift_json=json.dumps(drift, default=str),
                 research_json=json.dumps(current, default=str),
                 review_json=json.dumps({k: review.get(k) for k in ("ai_brain_mode", "paper_candidates", "native_ai_review", "groq_research_review")}, default=str),
-            ))
+            )
+            db.add(row)
             await db.commit()
-        return drift
+            research_run_id = row.id
+        if research_run_id is None:
+            return {"status": "PERSIST_FAILED", "error": "inserted research run has no database ID", "flags": []}
+        return {**drift, "_research_run_id": research_run_id}
     except Exception as exc:
         return {"status": "PERSIST_FAILED", "error": str(exc), "flags": []}
 
 
 async def _update_persisted_research_review(
-    symbol: str, research: dict[str, Any], review: dict[str, Any]
+    research_run_id: int | None, review: dict[str, Any]
 ) -> bool:
-    """Attach the optional reviewer to the already-persisted run without creating a duplicate."""
+    """Attach the optional reviewer only to the exact ResearchRun inserted for this analysis."""
+    if research_run_id is None:
+        # _persist_research_run reports failures without an ID; never fall back to another row.
+        return False
     try:
-        from sqlalchemy import select, desc
+        from sqlalchemy import select
         from .db import SessionLocal, ResearchRun
 
-        expected_summary = summarize_research(research)
         async with SessionLocal() as db:
             row = (await db.execute(
-                select(ResearchRun)
-                .where(ResearchRun.symbol == symbol)
-                .order_by(desc(ResearchRun.created_at))
-                .limit(1)
+                select(ResearchRun).where(ResearchRun.id == research_run_id).limit(1)
             )).scalar_one_or_none()
             if row is None:
-                return False
-            try:
-                stored_summary = json.loads(row.research_json or "{}")
-            except (TypeError, ValueError):
-                logging.getLogger(__name__).warning(
-                    "research_review_audit_summary_invalid symbol=%s", symbol
-                )
-                return False
-            # Do not overwrite a newer run's review if a separate writer has advanced
-            # the symbol's latest record since this run was first persisted.
-            if stored_summary != expected_summary:
                 return False
             row.review_json = json.dumps(
                 {
@@ -433,9 +425,15 @@ async def _run_daily_research_work() -> dict[str, Any]:
                 # Commit the local result and native review before any optional external
                 # request can block or be cancelled. A lost lease must not erase completed
                 # research evidence from the audit database.
-                review["run_drift"] = await _persist_research_run(
+                persistence_result = await _persist_research_run(
                     symbol, research, review, intelligence.get("macro_regime")
                 )
+                research_run_id = (
+                    persistence_result.pop("_research_run_id", None)
+                    if isinstance(persistence_result, dict)
+                    else None
+                )
+                review["run_drift"] = persistence_result
                 run_record = {
                     "symbol": symbol,
                     "research": research,
@@ -458,6 +456,7 @@ async def _run_daily_research_work() -> dict[str, Any]:
                     "research": research,
                     "review": review,
                     "trial_archive": trial_archive,
+                    "research_run_id": research_run_id,
                     "groq_task": groq_task,
                 })
             except asyncio.CancelledError:
@@ -495,7 +494,7 @@ async def _run_daily_research_work() -> dict[str, Any]:
 
             # Research was committed before this optional task was launched. Update its
             # review payload in place; never create a second run record for the same work.
-            await _update_persisted_research_review(symbol, item["research"], review)
+            await _update_persisted_research_review(item.get("research_run_id"), review)
     except BaseException:
         # A lost lease cancels this operation. Do not leave detached provider tasks
         # running after the lease owner has stopped.
