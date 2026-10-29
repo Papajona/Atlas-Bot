@@ -73,6 +73,8 @@ anything on the API, while the worker pool is always-on by design.
 
 Atlas Native AI remains the local strategy composer and deterministic safety authority. An optional Groq call can add research commentary only; it cannot compose the strategy, alter risk/order parameters, or authorize execution. If no Groq key is configured, no Groq request is sent. Existing deterministic risk, paper-ledger, and execution gates remain authoritative.
 
+Groq version selection: Optional and must be an exact numeric Secret Manager version (`SECRET_GROQ_API_KEY_VERSION`); omit it when Groq is disabled, and do not use `latest` or a placeholder.
+
 ### 3.2 Service accounts
 `SERVICE_ACCOUNT` (API, e.g. `atlas-trading-api`), `WORKER_SERVICE_ACCOUNT` (e.g. `atlas-trading-worker`), `MIGRATION_SERVICE_ACCOUNT` (default `atlas-migrator`).
 Each gets `secretAccessor` only on the secrets in the table above. Review the bucket roles bootstrap grants (API read-only on models, worker read/write on both).
