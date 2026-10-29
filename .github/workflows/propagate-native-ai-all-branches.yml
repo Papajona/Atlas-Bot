@@ -283,7 +283,7 @@ jobs:
                   "UNTRUSTED_PREAMBLE", "suspicious_instruction_markers", "wrap_untrusted",
               },
           }
-          for node in trees["groq_ai"].body:
+          for node in ast.walk(trees["groq_ai"]):
               if isinstance(node, ast.Import):
                   for alias in node.names:
                       if alias.name not in allowed_plain_imports:
