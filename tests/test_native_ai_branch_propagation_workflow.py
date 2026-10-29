@@ -19,6 +19,22 @@ def test_propagation_reruns_when_migration_engine_changes() -> None:
     assert '"app/groq_ai.py"' in push_trigger
 
 
+
+def test_propagation_uses_ancestral_pinned_source_and_semantic_workflow_validation() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    migration = MIGRATION.read_text(encoding="utf-8")
+
+    assert 'git merge-base --is-ancestor "$NATIVE_AI_CANONICAL_COMMIT" "$GITHUB_SHA"' in workflow
+    assert workflow.count("':!.github/workflows/production-deploy.yml'") == 2
+    assert workflow.count("':!.github/workflows/production-verification.yml'") == 2
+    assert "groq_research_review" in workflow
+    assert "app/prompt_safety.py" in workflow
+    # Workflow labels can mention retired providers without being active wiring. The
+    # excluded YAML files are still parsed, scrubbed, and rejected if wiring remains.
+    assert "if _workflow_has_active_provider_wiring(cleaned):" in migration
+    assert "def scrub_workflow_ancillary(path: str, text: str) -> str:" in migration
+
+
 def test_update_refs_uses_supported_graphql_fields_and_compare_and_swap() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     assert "refUpdates: [{name: $name, beforeOid: $before, afterOid: $after, force: false}]" in workflow
