@@ -4955,7 +4955,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             return True
         if re.match(r"(?i)^(?:echo|printf)\b", stripped):
             normalized = re.sub(r"\s+>&2\s*$", "", stripped)
-            return not re.search(r"&&|\|\||[;|<>]|\$\(", normalized)
+            return not re.search(r"&&|\|\||[;|<>`]|\$\(", normalized)
         return re.fullmatch(
             r"(?i)(?:export\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
             r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\s*=\s*[^;|<>]*",
@@ -5037,13 +5037,16 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 raise MigrationError(f"{path} has an unrecognized provider key in a deployment list: {key}")
             retained.append(entry)
         if shared_tokens:
-            if not retained:
-                raise MigrationError(f"{path} cannot preserve a shared Groq secret without another list entry")
-            retained[-1] += "".join("$" + "{" + token + "}" for token in shared_tokens)
+            if retained:
+                retained[-1] += "".join("$" + "{" + token + "}" for token in shared_tokens)
+            else:
+                # An incremental AI_SECRET_ARGS assignment may contain only a shared
+                # expansion plus retired entries. Keep the shared expansion by itself.
+                retained.extend("$" + "{" + token + "}" for token in shared_tokens)
         return prefix + delimiter.join(retained)
 
     def scrub_cloud_run_flag(line: str, flag: str, *, preserve_groq_tokens: bool = False) -> str:
-        match = re.search(r"(" + re.escape(flag) + r"\s+)(['\"])(.*?)\2", line)
+        match = re.search(r"(" + re.escape(flag) + r"(?:\s*=\s*|\s+))(['"])(.*?)\2", line)
         if not match:
             return line
         cleaned = scrub_key_value_list(match.group(3), preserve_groq_tokens=preserve_groq_tokens)
@@ -5118,8 +5121,8 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             continue
 
         # Remove retired pairs and normalize commas after deletion, while retaining Groq expansions.
-        if "ENV_VARS=" in line:
-            env_match = re.search(r"(ENV_VARS\\s*=\\s*)(['\\"])(.*?)\\2", line)
+        if re.search(r"\bENV_VARS\s*=", line):
+            env_match = re.search(r"""(ENV_VARS\s*=\s*)(['"])(.*?)\2""", line)
             if env_match:
                 cleaned_list = scrub_key_value_list(env_match.group(3))
                 line = line[:env_match.start(3)] + cleaned_list + line[env_match.end(3):]
