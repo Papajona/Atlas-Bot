@@ -1700,7 +1700,6 @@ async def _daily_research_loop():
         await asyncio.sleep(max(5, (target - now).total_seconds()))
         try:
             result = await run_daily_research()
-            _mark_worker_loop_success("daily-research")
             status = result.get("status")
             payload = {
                 "status": status,
@@ -1709,6 +1708,27 @@ async def _daily_research_loop():
                 "drift_flags": {r.get("symbol"): ((r.get("review") or {}).get("run_drift") or {}).get("flags", [])
                                 for r in result.get("runs", []) if r.get("review")},
             }
+            if status in {"FAILED", "PARTIAL_FAILURE"}:
+                detail = (
+                    f"daily research {status.lower()}: "
+                    f"stage={result.get('stage', 'per_symbol_research')} "
+                    f"error={result.get('error', 'one or more symbols failed')}"
+                )
+                _mark_worker_loop_failure("daily-research", RuntimeError(detail))
+                failure_payload = {
+                    **payload,
+                    "stage": result.get("stage", "per_symbol_research"),
+                    "error": result.get("error", "one or more symbols failed"),
+                }
+                event = (
+                    "RESEARCH_DAILY_FAILED"
+                    if status == "FAILED"
+                    else "RESEARCH_DAILY_PARTIAL_FAILURE"
+                )
+                await _safe_audit(event, failure_payload)
+                continue
+
+            _mark_worker_loop_success("daily-research")
             if status == "SKIPPED_NO_DISTRIBUTED_LOCK_BACKEND":
                 # This is not a normal day's outcome: the job never even attempted to run.
                 # Give it its own event name so it can't be mistaken for a real completion

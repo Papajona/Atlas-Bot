@@ -88,6 +88,11 @@ async def refresh_lock(key: str, ttl_seconds: int = 900) -> bool:
         )
         return bool(result)
     except Exception:
+        logging.getLogger(__name__).warning(
+            "redis_lock_refresh_failed error_type=%s",
+            "RedisError",
+            exc_info=True,
+        )
         return False
 
 

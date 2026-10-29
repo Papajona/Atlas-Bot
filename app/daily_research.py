@@ -208,6 +208,61 @@ async def _persist_research_run(symbol: str, research: dict[str, Any], review: d
         return {"status": "PERSIST_FAILED", "error": str(exc), "flags": []}
 
 
+async def _update_persisted_research_review(
+    symbol: str, research: dict[str, Any], review: dict[str, Any]
+) -> bool:
+    """Attach the optional reviewer to the already-persisted run without creating a duplicate."""
+    try:
+        from sqlalchemy import select, desc
+        from .db import SessionLocal, ResearchRun
+
+        expected_summary = summarize_research(research)
+        async with SessionLocal() as db:
+            row = (await db.execute(
+                select(ResearchRun)
+                .where(ResearchRun.symbol == symbol)
+                .order_by(desc(ResearchRun.created_at))
+                .limit(1)
+            )).scalar_one_or_none()
+            if row is None:
+                return False
+            try:
+                stored_summary = json.loads(row.research_json or "{}")
+            except (TypeError, ValueError):
+                logging.getLogger(__name__).warning(
+                    "research_review_audit_summary_invalid symbol=%s", symbol
+                )
+                return False
+            # Do not overwrite a newer run's review if a separate writer has advanced
+            # the symbol's latest record since this run was first persisted.
+            if stored_summary != expected_summary:
+                return False
+            row.review_json = json.dumps(
+                {
+                    key: review.get(key)
+                    for key in (
+                        "ai_brain_mode",
+                        "paper_candidates",
+                        "native_ai_review",
+                        "groq_research_review",
+                    )
+                },
+                default=str,
+            )
+            await db.commit()
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "research_review_audit_update_failed symbol=%s error_type=%s",
+            symbol,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return False
+
+
 async def latest_macro_context(max_age_hours: float = 48.0) -> dict[str, Any]:
     """Most recent macro/news risk snapshot from any daily research run, for live decision context.
 
@@ -375,6 +430,23 @@ async def _run_daily_research_work() -> dict[str, Any]:
                 )
                 review["native_ai_review"] = native_research_review(native_research_input, intelligence)
 
+                # Commit the local result and native review before any optional external
+                # request can block or be cancelled. A lost lease must not erase completed
+                # research evidence from the audit database.
+                review["run_drift"] = await _persist_research_run(
+                    symbol, research, review, intelligence.get("macro_regime")
+                )
+                run_record = {
+                    "symbol": symbol,
+                    "research": research,
+                    "review": review,
+                    "trial_archive": trial_archive,
+                }
+                if trial_archive.get("status") == "FAILED":
+                    run_record["status"] = "FAILED"
+                    run_record["error"] = f"trial_archive:{trial_archive.get('reason', 'UNKNOWN')}"
+                run_records[symbol] = run_record
+
                 # Launch each optional Groq review as soon as its local analysis is ready.
                 # At most three external requests run at once; failures stay advisory-only.
                 groq_task = asyncio.create_task(
@@ -421,26 +493,9 @@ async def _run_daily_research_work() -> dict[str, Any]:
                     "execution_authority": False,
                 }
 
-            try:
-                review["run_drift"] = await _persist_research_run(
-                    symbol, item["research"], review, intelligence.get("macro_regime")
-                )
-                run_record = {
-                    "symbol": symbol,
-                    "research": item["research"],
-                    "review": review,
-                    "trial_archive": item["trial_archive"],
-                }
-                if item["trial_archive"].get("status") == "FAILED":
-                    run_record["status"] = "FAILED"
-                    run_record["error"] = (
-                        f"trial_archive:{item['trial_archive'].get('reason', 'UNKNOWN')}"
-                    )
-                run_records[symbol] = run_record
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                run_records[symbol] = {"symbol": symbol, "status": "FAILED", "error": str(exc)}
+            # Research was committed before this optional task was launched. Update its
+            # review payload in place; never create a second run record for the same work.
+            await _update_persisted_research_review(symbol, item["research"], review)
     except BaseException:
         # A lost lease cancels this operation. Do not leave detached provider tasks
         # running after the lease owner has stopped.

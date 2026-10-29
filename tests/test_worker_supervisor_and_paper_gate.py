@@ -420,3 +420,51 @@ def test_supervisor_preserves_risk_stop_when_decision_recording_raises(monkeypat
     assert bot.last_stage == "risk_fraction_invalid"
     assert "Persisted risk fraction is invalid" in bot.last_error
     assert bot.consecutive_errors == 0
+
+
+def test_daily_research_failed_result_is_audited_as_failure_not_completion(monkeypatch):
+    import app.main as main
+
+    sleeps = {"count": 0}
+    events = []
+    successes = []
+    failures = []
+
+    async def controlled_sleep(_seconds):
+        sleeps["count"] += 1
+        if sleeps["count"] > 1:
+            raise asyncio.CancelledError()
+
+    async def failed_research():
+        return {
+            "status": "FAILED",
+            "stage": "distributed_lock",
+            "error": "LOCK_LEASE_LOST",
+            "symbols_requested": [],
+            "runs": [],
+            "real_money_execution": False,
+        }
+
+    async def safe_audit(event, payload):
+        events.append((event, payload))
+
+    monkeypatch.setattr(main.asyncio, "sleep", controlled_sleep)
+    monkeypatch.setattr(main, "run_daily_research", failed_research)
+    monkeypatch.setattr(main, "_safe_audit", safe_audit)
+    monkeypatch.setattr(main, "_mark_worker_loop_success", lambda *args: successes.append(args))
+    monkeypatch.setattr(main, "_mark_worker_loop_failure", lambda *args: failures.append(args))
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(main._daily_research_loop())
+
+    assert successes == []
+    assert len(failures) == 1
+    assert failures[0][0] == "daily-research"
+    assert events == [("RESEARCH_DAILY_FAILED", {
+        "status": "FAILED",
+        "symbols": [],
+        "real_money_execution": False,
+        "drift_flags": {},
+        "stage": "distributed_lock",
+        "error": "LOCK_LEASE_LOST",
+    })]

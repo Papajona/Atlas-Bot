@@ -190,3 +190,24 @@ def test_daily_research_cancels_work_when_lock_lease_is_lost():
         dr.refresh_lock = refresh_lock
 
     assert cancelled == [True]
+
+
+def test_refresh_lock_logs_redis_renewal_exception(monkeypatch, caplog):
+    import logging
+    import app.distributed as distributed
+
+    class BrokenRedis:
+        async def eval(self, *_args):
+            raise TimeoutError("redis renewal timed out")
+
+    monkeypatch.setattr(distributed.settings, "redis_url", "redis://test.invalid")
+    monkeypatch.setattr(distributed, "_client", BrokenRedis())
+    token = distributed._lock_tokens.set({"daily-research-log-test": "owner-token"})
+    try:
+        with caplog.at_level(logging.WARNING, logger=distributed.__name__):
+            assert asyncio.run(distributed.refresh_lock("daily-research-log-test", ttl_seconds=300)) is False
+        assert "redis_lock_refresh_failed" in caplog.text
+        assert "TimeoutError" in caplog.text
+        assert "redis renewal timed out" in caplog.text
+    finally:
+        distributed._lock_tokens.reset(token)
