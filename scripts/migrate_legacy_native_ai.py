@@ -4936,20 +4936,42 @@ def scrub_shell_deployment(path: str, text: str) -> str:
     )
 
     def safe_groq_statement(statement: str) -> bool:
-        if re.match(r"^\s*(?:echo|printf)\b", statement, re.I):
-            # Printing a fixed validation/warning message is safe; reject shell
-            # chaining, redirection, pipelines, or command substitution.
-            normalized = re.sub(r"\s+>&2\s*$", "", statement)
-            return not re.search(r"&&|\|\||[;|<>]|\$\(", normalized)
-        if re.match(r"^\s*exit\s+[0-9]+\s*(?:#.*)?$", statement, re.I):
+        stripped = statement.strip()
+        if not stripped or stripped.startswith("#"):
             return True
-        return bool(groq_allowed.match(statement))
+        if re.fullmatch(r"(?i)(?:then|else|fi)", stripped):
+            return True
+        if re.fullmatch(r"(?i)elif\s+\[\[.*\]\]\s*;?\s*then", stripped):
+            return True
+        groq_guard = re.compile(
+            r"^:\s*['\"]?" + re.escape("$") + r"\{(?:GROQ_API_KEY|SECRET_GROQ[A-Z0-9_]*)(?::\?[^}]*)?\}['\"]?$",
+            re.I,
+        )
+        if groq_guard.fullmatch(stripped):
+            return True
+        if re.fullmatch(r'(?i)create_secret\s+atlas-groq-api-key\s+"\$GROQ_API_KEY"', stripped):
+            return True
+        if re.fullmatch(r"(?i)exit\s+[0-9]+", stripped):
+            return True
+        if re.match(r"(?i)^(?:echo|printf)\b", stripped):
+            normalized = re.sub(r"\s+>&2\s*$", "", stripped)
+            return not re.search(r"&&|\|\||[;|<>]|\$\(", normalized)
+        return re.fullmatch(
+            r"(?i)(?:export\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
+            r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\s*=\s*[^;|<>]*",
+            stripped,
+        ) is not None
 
     block_start = 0
     while block_start < len(source_lines):
         source_line = source_lines[block_start]
         if re.match(r"^\s*if\b", source_line, re.I) and groq_condition.search(source_line):
             inline = re.match(r"^\s*if\b.*?\bthen\s*(.*?);\s*fi\s*$", source_line, re.I)
+            header = re.search(r"\bthen\b(.*)$", source_line, re.I)
+            if header and not inline:
+                tail = header.group(1).strip().rstrip(";").strip()
+                if tail and not safe_groq_statement(tail):
+                    raise MigrationError(f"{path} has an executable command on a Groq if-header; refusing it")
             if inline:
                 inline_commands = [chunk.strip() for chunk in inline.group(1).split(";") if chunk.strip()]
                 if any(not safe_groq_statement(command) for command in inline_commands):
@@ -4984,6 +5006,62 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         r"GEMINI_API_KEY|AI_SECRET_ARGS|"
         r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\b"
     )
+    def scrub_key_value_list(value: str, *, preserve_groq_tokens: bool = False) -> str:
+        prefix = ""
+        delimiter = ","
+        if value.startswith("^@^"):
+            prefix, value, delimiter = "^@^", value[3:], "@"
+        retired_assignment = re.compile(
+            r"(?i)^(?:SECRET_GEMINI[A-Z0-9_]*|GEMINI_API_KEY|GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
+            r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG|"
+            r"GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY)$"
+        )
+        dynamic_pattern = re.escape("$") + r"\{(AI_SECRET_ARGS|GROQ_SECRET_ARG|GROQ_SECRET_ARGS)\}"
+        retained: list[str] = []
+        shared_tokens: list[str] = []
+        for raw_entry in value.split(delimiter):
+            entry = raw_entry.strip()
+            if not entry:
+                continue
+            dynamic = re.fullmatch(dynamic_pattern, entry)
+            if dynamic:
+                if preserve_groq_tokens:
+                    shared_tokens.append(dynamic.group(1))
+                continue
+            key = entry.split("=", 1)[0].strip()
+            if retired_assignment.fullmatch(key):
+                if preserve_groq_tokens:
+                    shared_tokens.extend(re.findall(dynamic_pattern, entry))
+                continue
+            if RETIRED_PROVIDER_RE.search(key):
+                raise MigrationError(f"{path} has an unrecognized provider key in a deployment list: {key}")
+            retained.append(entry)
+        if shared_tokens:
+            if not retained:
+                raise MigrationError(f"{path} cannot preserve a shared Groq secret without another list entry")
+            retained[-1] += "".join("$" + "{" + token + "}" for token in shared_tokens)
+        return prefix + delimiter.join(retained)
+
+    def scrub_cloud_run_flag(line: str, flag: str, *, preserve_groq_tokens: bool = False) -> str:
+        match = re.search(r"(" + re.escape(flag) + r"\s+)(['\"])(.*?)\2", line)
+        if not match:
+            return line
+        cleaned = scrub_key_value_list(match.group(3), preserve_groq_tokens=preserve_groq_tokens)
+        if not cleaned:
+            return line[:match.start()] + line[match.end():]
+        return line[:match.start(3)] + cleaned + line[match.end(3):]
+
+    def scrub_ai_secret_args(line: str) -> str:
+        match = re.match(r"""^(\s*(?:export\s+)?AI_SECRET_ARGS\s*=\s*)(["'])(.*)(\2\s*(?:\r?\n)?)$""", line)
+        if not match:
+            raise MigrationError(f"{path} has an unparseable shared AI_SECRET_ARGS assignment")
+        prefix, quote, value, suffix = match.groups()
+        leading_comma = value.startswith(",")
+        cleaned = scrub_key_value_list(value.lstrip(","), preserve_groq_tokens=True)
+        if leading_comma and cleaned and not cleaned.startswith("^@^"):
+            cleaned = "," + cleaned
+        return prefix + quote + cleaned + suffix
+
     for original in text.splitlines(keepends=True):
         line = original
         stripped = line.lstrip()
@@ -4994,9 +5072,12 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             if (not stripped or stripped.startswith("#")
                     or re.match(r"^(?:else|elif\b|then\b)", stripped, re.I)):
                 continue
+            if re.match(r"^\s*(?:export\s+)?AI_SECRET_ARGS\s*=", line, re.I):
+                output.append(scrub_ai_secret_args(line))
+                continue
             provider_assignment = re.match(
                 r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
-                r"GEMINI_API_KEY|AI_SECRET_ARGS|"
+                r"GEMINI_API_KEY|"
                 r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
                 line, re.I,
             )
@@ -5032,31 +5113,16 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if stripped.startswith("#") and RETIRED_PROVIDER_RE.search(line):
             continue
 
-        # Remove provider entries from combined Cloud Run env-var lists.
+        # Remove retired pairs and normalize commas after deletion, while retaining Groq expansions.
         if "ENV_VARS=" in line:
-            line = re.sub(
-                r"@(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
-                r"CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^@\"]*",
-                "",
-                line,
-                flags=re.I,
-            )
+            env_match = re.search(r"(ENV_VARS\\s*=\\s*)(['\\"])(.*?)\\2", line)
+            if env_match:
+                cleaned_list = scrub_key_value_list(env_match.group(3))
+                line = line[:env_match.start(3)] + cleaned_list + line[env_match.end(3):]
         if "--set-env-vars" in line:
-            line = re.sub(
-                r",?(?:GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
-                r"CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)=[^,\"]*",
-                "",
-                line,
-                flags=re.I,
-            )
+            line = scrub_cloud_run_flag(line, "--set-env-vars")
         if "--set-secrets" in line:
-            line = re.sub(
-                r",?(?:GEMINI_API_KEY|CEREBRAS_API_KEY|AI_GATEWAY_API_KEY|OPENAI_API_KEY)=[^,\"]*",
-                "",
-                line,
-                flags=re.I,
-            )
-            line = re.sub(r",?\$\{(?:AI_SECRET_ARGS)\}", "", line)
+            line = scrub_cloud_run_flag(line, "--set-secrets", preserve_groq_tokens=True)
         # Provider secret names in bootstrap allowlists are independent list items.
         if "for secret in" in line:
             line = re.sub(
