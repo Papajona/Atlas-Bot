@@ -113,8 +113,10 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert "-- app " in legacy_groq_scan
     assert "':!app/groq_ai.py'" in legacy_groq_scan
     assert "':!app/daily_research.py'" not in legacy_groq_scan
-    assert "':!app/config.py'" not in legacy_groq_scan
-    assert "groq_strategy_model" in legacy_groq_scan
+    assert "':!app/config.py'" in legacy_groq_scan
+    assert "groq_strategy_model" not in legacy_groq_scan
+    assert "legacy_groq_config_refs" in workflow
+    assert "git grep -nIEi 'groq_strategy_model' -- app/config.py" in workflow
     assert r"api\.cerebras\.ai" in workflow
 
 
