@@ -17,6 +17,11 @@ def test_api_keeps_groq_secret_optional_and_gemini_removed():
     assert "GROQ_MODEL=${GROQ_MODEL}" in script
     assert "GROQ_MAX_COMPLETION_TOKENS=${GROQ_MAX_COMPLETION_TOKENS}" in script
     assert "GROQ_RESEARCH_REVIEW_ENABLED=${GROQ_RESEARCH_REVIEW_ENABLED}" in script
+    assert 'GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"' in script
+    assert 'GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"' in script
+    assert 'GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"' in script
+    assert "must be true or false" in script
+    assert "must be an integer between 1 and 8192" in script
     assert "GEMINI_API_KEY" not in script
     assert "GEMINI_MODEL" not in script
     assert "GEMINI_STRATEGY_MODEL" not in script
@@ -28,6 +33,11 @@ def test_worker_keeps_groq_secret_optional_and_gemini_removed():
     assert "GROQ_API_KEY=${SECRET_GROQ_REF}" in script
     assert "${GROQ_SECRET_ARG}" in script
     assert "GROQ_RESEARCH_REVIEW_ENABLED=${GROQ_RESEARCH_REVIEW_ENABLED}" in script
+    assert 'GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"' in script
+    assert 'GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"' in script
+    assert 'GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"' in script
+    assert "must be true or false" in script
+    assert "must be an integer between 1 and 8192" in script
     assert "GEMINI_API_KEY" not in script
     assert "GEMINI_MODEL" not in script
     assert "GEMINI_STRATEGY_MODEL" not in script
