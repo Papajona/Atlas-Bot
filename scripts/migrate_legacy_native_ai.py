@@ -803,6 +803,143 @@ def transform_config() -> None:
     def is_provider_field(name: str) -> bool:
         return bool(PROVIDER_FIELD_RE.search(name))
 
+    def is_safe_gemini_model_validator(node: ast.AST) -> bool:
+        """Recognize only the known pure validator for a setting being removed."""
+        if not isinstance(node, ast.FunctionDef) or node.name != "_validate_gemini_model":
+            return False
+        args = node.args
+        if (
+            args.posonlyargs
+            or [argument.arg for argument in args.args] != ["cls", "value"]
+            or args.vararg
+            or args.kwarg
+            or args.kwonlyargs
+            or args.defaults
+            or args.kw_defaults
+        ):
+            return False
+        if len(node.decorator_list) != 2:
+            return False
+        field_decorators = [
+            decorator for decorator in node.decorator_list
+            if isinstance(decorator, ast.Call)
+            and isinstance(decorator.func, ast.Name)
+            and decorator.func.id == "field_validator"
+        ]
+        classmethod_decorators = [
+            decorator for decorator in node.decorator_list
+            if isinstance(decorator, ast.Name) and decorator.id == "classmethod"
+        ]
+        if len(field_decorators) != 1 or len(classmethod_decorators) != 1:
+            return False
+        field_decorator = field_decorators[0]
+        if (
+            field_decorator.keywords
+            or not field_decorator.args
+            or any(
+                not isinstance(argument, ast.Constant)
+                or not isinstance(argument.value, str)
+                or not is_provider_field(argument.value)
+                for argument in field_decorator.args
+            )
+        ):
+            return False
+
+        body = list(node.body)
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            body = body[1:]
+        if len(body) != 3:
+            return False
+
+        assignment, condition, returned = body
+        if not isinstance(assignment, ast.Assign) or (
+            len(assignment.targets) != 1
+            or not isinstance(assignment.targets[0], ast.Name)
+            or assignment.targets[0].id != "normalized"
+        ):
+            return False
+        outer = assignment.value
+        if not (
+            isinstance(outer, ast.Call)
+            and not outer.keywords
+            and len(outer.args) == 1
+            and isinstance(outer.args[0], ast.Constant)
+            and outer.args[0].value == "models/"
+            and isinstance(outer.func, ast.Attribute)
+            and outer.func.attr == "removeprefix"
+        ):
+            return False
+        stripped = outer.func.value
+        if not (
+            isinstance(stripped, ast.Call)
+            and not stripped.args
+            and not stripped.keywords
+            and isinstance(stripped.func, ast.Attribute)
+            and stripped.func.attr == "strip"
+        ):
+            return False
+        stringified = stripped.func.value
+        if not (
+            isinstance(stringified, ast.Call)
+            and isinstance(stringified.func, ast.Name)
+            and stringified.func.id == "str"
+            and len(stringified.args) == 1
+            and not stringified.keywords
+            and isinstance(stringified.args[0], ast.BoolOp)
+            and isinstance(stringified.args[0].op, ast.Or)
+            and len(stringified.args[0].values) == 2
+            and isinstance(stringified.args[0].values[0], ast.Name)
+            and stringified.args[0].values[0].id == "value"
+            and isinstance(stringified.args[0].values[1], ast.Constant)
+            and stringified.args[0].values[1].value == ""
+        ):
+            return False
+        if not (
+            isinstance(condition, ast.If)
+            and not condition.orelse
+            and isinstance(condition.test, ast.Compare)
+            and isinstance(condition.test.left, ast.Name)
+            and condition.test.left.id == "normalized"
+            and len(condition.test.ops) == 1
+            and isinstance(condition.test.ops[0], ast.NotEq)
+            and len(condition.test.comparators) == 1
+            and isinstance(condition.test.comparators[0], ast.Constant)
+            and isinstance(condition.test.comparators[0].value, str)
+            and re.fullmatch(r"gemini-[A-Za-z0-9_.-]+", condition.test.comparators[0].value)
+            and len(condition.body) == 1
+            and isinstance(condition.body[0], ast.Raise)
+            and isinstance(condition.body[0].exc, ast.Call)
+            and isinstance(condition.body[0].exc.func, ast.Name)
+            and condition.body[0].exc.func.id == "ValueError"
+            and len(condition.body[0].exc.args) == 1
+            and not condition.body[0].exc.keywords
+            and isinstance(condition.body[0].exc.args[0], ast.Constant)
+            and condition.body[0].exc.args[0].value
+                == f"Gemini model must be exactly {condition.test.comparators[0].value}; alternative Gemini IDs are not permitted."
+        ):
+            return False
+        return (
+            isinstance(returned, ast.Return)
+            and isinstance(returned.value, ast.Name)
+            and returned.value.id == "normalized"
+        )
+
+    # A removed provider model field may have one exact, pure field validator.
+    # Remove only the recognized normalization/constant-ID check; any custom branch
+    # behavior, side effect, or different validator shape remains a hard refusal.
+    for settings_class in settings_classes:
+        for member in settings_class.body:
+            if is_safe_gemini_model_validator(member):
+                first_line = min(
+                    [member.lineno, *[decorator.lineno for decorator in member.decorator_list]]
+                )
+                removable_lines.update(range(first_line, (member.end_lineno or member.lineno) + 1))
+
     for node in assignments:
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         names = {name for target in targets for name in target_names(target)}
