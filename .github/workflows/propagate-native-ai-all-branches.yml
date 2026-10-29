@@ -113,7 +113,7 @@ jobs:
             fi
             # Groq remains supported in app/groq_ai.py; only its legacy strategy adapters are migration targets.
             local legacy_groq_refs=""
-            if legacy_groq_refs="$(git grep -nIEi '_groq_json|groq_research_review|from[[:space:]]+\.groq_ai|settings\.groq_(strategy_model|model|api_key)|GROQ_API_KEY|SECRET_GROQ|api\.groq\.com' -- app ':!app/groq_ai.py' ':!app/daily_research.py' ':!app/config.py')"; then
+            if legacy_groq_refs="$(git grep -nIEi '_groq_json|settings\.groq_(strategy_model|model|api_key)|groq_strategy_model|GROQ_API_KEY|SECRET_GROQ|api\.groq\.com' -- app ':!app/groq_ai.py')"; then
               matches+=$'\n'"$legacy_groq_refs"
             else
               rc=$?
