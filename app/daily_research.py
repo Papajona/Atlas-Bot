@@ -110,6 +110,9 @@ def _validate_groq_research_result(value: Any) -> dict[str, Any]:
 
     if status != "OK" or value.get("provider") != "groq" or value.get("execution_authority") is not False:
         raise ValueError("Groq result does not have the reviewed research-only envelope")
+    input_truncated = value.get("input_truncated", False)
+    if not isinstance(input_truncated, bool):
+        raise ValueError("Groq result input_truncated flag must be boolean")
     model = value.get("model")
     if not isinstance(model, str):
         raise ValueError("Groq result model is invalid")
@@ -157,6 +160,7 @@ def _validate_groq_research_result(value: Any) -> dict[str, Any]:
         "provider": "groq",
         "model": model.strip(),
         "review": safe_review,
+        "input_truncated": input_truncated,
         "execution_authority": False,
     }
 
