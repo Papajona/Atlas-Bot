@@ -85,13 +85,41 @@ class AIStrategySpec(BaseModel):
 
 
 def _apply_market_context(spec: AIStrategySpec, *, asset: str | None = None, symbol: str | None = None, timeframe: str | None = None) -> AIStrategySpec:
+    'Bind an AI draft to the market selected by the user before persistence/backtest.'
+    warnings = list(spec.validation_warnings)
     data = spec.model_dump()
-    if asset is not None:
+    if asset and spec.asset != asset:
+        warnings.append(f"AI asset overridden to the selected market asset: {asset}.")
         data["asset"] = asset
-    if symbol is not None:
+    if symbol and (not spec.symbols or symbol not in spec.symbols):
+        warnings.append(f"AI symbol overridden to the selected market symbol: {symbol}.")
         data["symbols"] = [symbol]
-    if timeframe is not None:
+    elif symbol:
+        data["symbols"] = [symbol]
+    if timeframe:
+        condition_timeframes = [
+            str(condition.get("timeframe") or "")
+            for key in ("entry_conditions", "exit_conditions")
+            for condition in data.get(key, [])
+        ]
+        requested_different_timeframes = (
+            any(value != timeframe for value in spec.timeframes)
+            or any(value and value != timeframe for value in condition_timeframes)
+        )
+        if requested_different_timeframes:
+            warnings.append(
+                f"Selected market timeframe {timeframe} overrides the draft's multi-timeframe setup; "
+                "all conditions were constrained to this timeframe so validation uses a consistent dataset."
+            )
+        elif not spec.timeframes or timeframe not in spec.timeframes:
+            warnings.append(f"AI timeframe overridden to the selected market timeframe: {timeframe}.")
         data["timeframes"] = [timeframe]
+        for key in ("entry_conditions", "exit_conditions"):
+            data[key] = [
+                {**condition, "timeframe": timeframe}
+                for condition in data.get(key, [])
+            ]
+    data["validation_warnings"] = warnings[:12]
     return AIStrategySpec.model_validate(data)
 
 
@@ -1698,8 +1726,8 @@ async def _gemini_json(prompt):
                 "    return {'version':'atlas-strategy-v1','title':'Fixture strategy','summary':'A test-only strategy fixture.',"
                 "'asset':asset or 'crypto','symbols':[symbol] if symbol else ['EUR_USD'],"
                 "'timeframes':[timeframe] if timeframe else ['1h'],'direction':'LONG','strategy_family':'TREND',"
-                "'entry_conditions':[{'type':'indicator','rule':'RSI is above threshold','timeframe':timeframe or '1h'}],"
-                "'exit_conditions':[{'type':'indicator','rule':'RSI is below threshold','timeframe':timeframe or '1h'}],"
+                "'entry_conditions':[{'type':'indicator','rule':'RSI is above threshold','timeframe':'1h'}],"
+                "'exit_conditions':[{'type':'indicator','rule':'RSI is below threshold','timeframe':'1h'}],"
                 "'risk_per_trade':max_risk_per_trade * 2,'validation_warnings':[],'requires_backtest':True,'requires_walk_forward':True,"
                 "'execution_mode':'PAPER_SHADOW_ONLY','implementation_status':'ATLAS_SUPPORTED_FAMILY'}\n",
                 encoding="utf-8",
@@ -1716,9 +1744,18 @@ async def _gemini_json(prompt):
                 module = importlib.import_module("fixture_app.strategy_ai")
                 outcome = asyncio.run(module.generate_strategy_draft(
                     prompt="build a paper-only trend strategy", name="migration-test",
-                    asset="forex", symbol="EUR_USD", timeframe="1h",
+                    asset="forex", symbol="EUR_USD", timeframe="15m",
                 ))
                 self.assertEqual(outcome["strategy"]["strategy_family"], "TREND")
+                self.assertEqual(outcome["strategy"]["timeframes"], ["15m"])
+                self.assertEqual(
+                    {condition["timeframe"] for condition in outcome["strategy"]["entry_conditions"]},
+                    {"15m"},
+                )
+                self.assertEqual(
+                    {condition["timeframe"] for condition in outcome["strategy"]["exit_conditions"]},
+                    {"15m"},
+                )
                 self.assertEqual(outcome["strategy"]["risk_per_trade"], 0.01)
                 self.assertTrue(any("capped" in warning for warning in outcome["strategy"]["validation_warnings"]))
                 self.assertEqual(outcome["ai"]["provider"], "atlas_native")
@@ -1858,6 +1895,70 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
 
         for label, legacy in (("two-provider", legacy_two), ("three-provider", legacy_three)):
             legacy = _with_canonical_schema_context(legacy)
+            if label == "two-provider":
+                # Exercise the real legacy control flow with the older binder that
+                # failed to normalize nested condition timeframes.
+                legacy_context = """def _apply_market_context(spec: AIStrategySpec, *, asset: str | None = None, symbol: str | None = None, timeframe: str | None = None) -> AIStrategySpec:
+    warnings = list(spec.validation_warnings)
+    data = spec.model_dump()
+    if asset and spec.asset != asset:
+        warnings.append(f"AI asset overridden to the selected market asset: {asset}.")
+        data["asset"] = asset
+    if symbol and (not spec.symbols or symbol not in spec.symbols):
+        warnings.append(f"AI symbol overridden to the selected market symbol: {symbol}.")
+        data["symbols"] = [symbol]
+    elif symbol:
+        data["symbols"] = [symbol]
+    if timeframe and (not spec.timeframes or timeframe not in spec.timeframes):
+        warnings.append(f"AI timeframe overridden to the selected market timeframe: {timeframe}.")
+        data["timeframes"] = [timeframe]
+    elif timeframe:
+        data["timeframes"] = [timeframe]
+    data["validation_warnings"] = warnings[:12]
+    return AIStrategySpec.model_validate(data)
+"""
+                legacy_tree_for_context = ast.parse(legacy)
+                context_node = next(
+                    node for node in legacy_tree_for_context.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+                )
+                legacy_lines_for_context = legacy.splitlines(keepends=True)
+                legacy = "".join(
+                    legacy_lines_for_context[:context_node.lineno - 1]
+                    + [legacy_context + "\n"]
+                    + legacy_lines_for_context[context_node.end_lineno:]
+                )
+            if label == "two-provider":
+                # Put the import after the short legacy context helper. Replacing the
+                # helper lengthens source before that import, so stale AST locations
+                # would edit the wrong lines unless the import nodes are reparsed.
+                provider_import_line = "from .ai_providers import AIProviderError, _gemini_json, _groq_json"
+                legacy_without_provider_import = "".join(
+                    line for line in legacy.splitlines(keepends=True)
+                    if line.strip() != provider_import_line
+                )
+                layout_tree = ast.parse(legacy_without_provider_import)
+                context_node = next(
+                    node for node in layout_tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+                )
+                layout_lines = legacy_without_provider_import.splitlines(keepends=True)
+                layout_lines.insert(context_node.end_lineno, provider_import_line + "\n")
+                legacy_import_after_context = "".join(layout_lines)
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    target = root / "app" / "strategy_ai.py"
+                    target.parent.mkdir()
+                    target.write_text(legacy_import_after_context, encoding="utf-8")
+                    with patch.object(migration, "ROOT", root), patch.object(
+                        migration, "canonical_text", return_value=CANONICAL_STRATEGY
+                    ):
+                        migration.transform_strategy_ai("fake-commit")
+                    transformed = target.read_text(encoding="utf-8")
+                    ast.parse(transformed, filename="app/strategy_ai.py")
+                    self.assertNotRegex(transformed, migration.PROVIDER_RE)
+                    self.assertIn("from .native_ai import NativeAIError, compose_strategy_spec", transformed)
+
             with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 target = root / "app" / "strategy_ai.py"
@@ -1871,6 +1972,20 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
                 ast.parse(result, filename="app/strategy_ai.py")
                 self.assertIn("compose_strategy_spec", result)
                 self.assertIn("def _apply_market_context", result)
+                result_tree = ast.parse(result, filename="app/strategy_ai.py")
+                result_context = next(
+                    node for node in result_tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+                )
+                canonical_tree = ast.parse(CANONICAL_STRATEGY)
+                canonical_context = next(
+                    node for node in canonical_tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+                )
+                self.assertEqual(
+                    ast.dump(result_context, include_attributes=False),
+                    ast.dump(canonical_context, include_attributes=False),
+                )
                 self.assertNotIn("_generate_with_provider", result)
                 self.assertNotRegex(result, migration.PROVIDER_RE)
 
@@ -2021,6 +2136,192 @@ async def _cerebras_json(prompt: str, *, timeout: float = 30.0, system_instructi
                 self.assertNotIn("_cerebras_json", result)
                 self.assertNotRegex(result, migration.PROVIDER_RE)
                 ast.parse(result, filename="app/ai_providers.py")
+
+    def test_equivalent_legacy_trade_safety_validator_is_deduplicated(self):
+        legacy_validator = '''def _validate_trade_safety_payload(value: dict[str, Any]) -> dict[str, Any]:
+    """Reject semantically incomplete model output before it can participate in a safety vote."""
+    if not isinstance(value, dict):
+        raise AIProviderError("Trade-safety response must be a JSON object")
+    if type(value.get("safe")) is not bool:
+        raise AIProviderError("Trade-safety response requires a boolean safe field")
+    confidence = value.get("confidence")
+    if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence)) or not 0.0 <= float(confidence) <= 1.0):
+        raise AIProviderError("Trade-safety response requires finite confidence between 0 and 1")
+    for field in ("reasons", "data_quality_flags"):
+        items = value.get(field)
+        if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
+            raise AIProviderError(f"Trade-safety response requires {field} to be an array of strings")
+    if value["safe"] is True and not value["reasons"]:
+        raise AIProviderError("Trade-safety approval requires at least one concrete reason")
+    return value
+'''
+        canonical_path = Path(__file__).resolve().parents[1] / "app" / "ai_providers.py"
+        canonical_tree = ast.parse(canonical_path.read_text(encoding="utf-8"))
+        canonical_validator = next(
+            node for node in canonical_tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_validate_trade_safety_payload"
+        )
+        legacy_tree = ast.parse(legacy_validator)
+        legacy_node = next(node for node in legacy_tree.body if isinstance(node, ast.FunctionDef))
+        self.assertTrue(migration._safe_canonical_trade_safety_validator(
+            legacy_node, canonical_validator, legacy_validator
+        ), "equivalent payload validation must not strand otherwise safe branch migration")
+
+        # Error wording and inert annotations may vary, but extra executable behavior may not.
+        wording_variant = legacy_validator.replace(
+            "Trade-safety response must be a JSON object",
+            "Trade-safety result must be a JSON object",
+        )
+        wording_tree = ast.parse(wording_variant)
+        self.assertTrue(migration._safe_canonical_trade_safety_validator(
+            wording_tree.body[0], canonical_validator, wording_variant
+        ))
+        side_effect_message = legacy_validator.replace(
+            'AIProviderError("Trade-safety response must be a JSON object")',
+            "AIProviderError(audit_error_message())",
+        )
+        side_effect_tree = ast.parse(side_effect_message)
+        self.assertFalse(
+            migration._safe_canonical_trade_safety_validator(
+                side_effect_tree.body[0], canonical_validator, side_effect_message
+            ),
+            "message expressions with calls must not be erased as harmless wording",
+        )
+        changed_behavior = legacy_validator.replace(
+            "    return value\n",
+            '    value["validated_by_legacy"] = True\n    return value\n',
+        )
+        changed_tree = ast.parse(changed_behavior)
+        self.assertFalse(migration._safe_canonical_trade_safety_validator(
+            changed_tree.body[0], canonical_validator, changed_behavior
+        ), "validator with additional runtime behavior must remain fail-closed")
+
+    def test_ai_provider_migration_accepts_only_equivalent_trade_safety_validator(self):
+        canonical = (Path(__file__).resolve().parents[1] / "app" / "ai_providers.py").read_text(encoding="utf-8")
+        legacy = '''import math
+class AIProviderError(RuntimeError):
+    pass
+
+async def _gemini_json(prompt):
+    return {}
+
+def _validate_trade_safety_payload(value: dict[str, Any]) -> dict[str, Any]:
+    """Reject semantically incomplete model output before it can participate in a safety vote."""
+    if not isinstance(value, dict):
+        raise AIProviderError("Trade-safety response must be a JSON object")
+    if type(value.get("safe")) is not bool:
+        raise AIProviderError("Trade-safety response requires a boolean safe field")
+    confidence = value.get("confidence")
+    if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence)) or not 0.0 <= float(confidence) <= 1.0):
+        raise AIProviderError("Trade-safety response requires finite confidence between 0 and 1")
+    for field in ("reasons", "data_quality_flags"):
+        items = value.get(field)
+        if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
+            raise AIProviderError(f"Trade-safety response requires {field} to be an array of strings")
+    if value["safe"] is True and not value["reasons"]:
+        raise AIProviderError("Trade-safety approval requires at least one concrete reason")
+    return value
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            result_tree = ast.parse(result)
+            matches = [
+                node for node in result_tree.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "_validate_trade_safety_payload"
+            ]
+            self.assertEqual(len(matches), 1)
+            self.assertNotIn("_gemini_json", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
+        altered = legacy.replace(
+            "    return value\n",
+            '    value["legacy_side_effect"] = True\n    return value\n',
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(altered, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "branch-specific definition '_validate_trade_safety_payload'",
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), altered)
+
+        side_effect_message = legacy.replace(
+            'AIProviderError("Trade-safety response must be a JSON object")',
+            "AIProviderError(audit_error_message())",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            target.write_text(side_effect_message, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "branch-specific definition '_validate_trade_safety_payload'",
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), side_effect_message)
+
+    def test_legacy_market_context_rejects_rebinding_and_dynamic_lookups(self):
+        safe_source = """class AIStrategySpec:
+    pass
+
+def _apply_market_context(spec, *, asset=None, symbol=None, timeframe=None):
+    return spec
+
+async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, timeframe=None):
+    _apply_market_context(spec, asset=asset, symbol=symbol, timeframe=timeframe)
+    return await _generate_with_provider("gemini", prompt)
+"""
+        def replaceable(source):
+            tree = ast.parse(source)
+            generator = next(
+                node for node in tree.body
+                if isinstance(node, ast.AsyncFunctionDef)
+                and node.name == "generate_strategy_draft"
+            )
+            return migration._is_replaceable_legacy_market_context(tree, generator)
+
+        self.assertIsNotNone(replaceable(safe_source))
+
+        rebound = safe_source + "\n_apply_market_context = replacement\n"
+        self.assertIsNone(
+            replaceable(rebound),
+            "later stores to the helper name must prevent canonical replacement",
+        )
+
+        dynamic_lookup = safe_source + '\n_context = globals()["_apply_market_context"]\n'
+        self.assertIsNone(
+            replaceable(dynamic_lookup),
+            "literal-name reflection must prevent canonical replacement",
+        )
+
+        reflective_lookup = safe_source + '\n_context = getattr(module, "_apply_market_context")\n'
+        self.assertIsNone(
+            replaceable(reflective_lookup),
+            "dynamic attribute lookups must prevent canonical replacement",
+        )
 
     def test_strategy_migration_refuses_to_discard_generator_validation(self):
         legacy = (

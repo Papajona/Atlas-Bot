@@ -121,6 +121,122 @@ def _name(node: ast.AST) -> str | None:
     return None
 
 
+def _safe_canonical_trade_safety_validator(
+    node: ast.AST, canonical_node: ast.AST, source_segment: str
+) -> bool:
+    """Accept only the canonical local safety-payload validator contract.
+
+    Several old provider facades carry this validator alongside hosted safety
+    calls. Its typed payload checks are also present in the Native AI facade.
+    Remove the duplicate only when the complete executable AST matches that
+    canonical validator after ignoring inert annotations, docstrings, and
+    validation error wording. Any extra check or side effect remains a refusal.
+    """
+    if (
+        not isinstance(node, ast.FunctionDef)
+        or not isinstance(canonical_node, ast.FunctionDef)
+        or node.name != "_validate_trade_safety_payload"
+        or canonical_node.name != node.name
+        or node.decorator_list
+        or canonical_node.decorator_list
+        or PROVIDER_RE.search(source_segment)
+    ):
+        return False
+
+    def safe_annotation(annotation: ast.AST | None) -> bool:
+        if annotation is None:
+            return True
+        if isinstance(annotation, ast.Name):
+            return annotation.id in {"Any", "dict", "str", "int", "float", "bool", "list", "tuple"}
+        if isinstance(annotation, ast.Constant):
+            return annotation.value is None or isinstance(annotation.value, str)
+        if isinstance(annotation, ast.Subscript):
+            return safe_annotation(annotation.value) and safe_annotation(annotation.slice)
+        if isinstance(annotation, (ast.Tuple, ast.List)):
+            return all(safe_annotation(item) for item in annotation.elts)
+        return False
+
+    def eligible_signature(function: ast.FunctionDef) -> bool:
+        args = function.args
+        if (
+            args.posonlyargs
+            or [arg.arg for arg in args.args] != ["value"]
+            or args.vararg
+            or args.kwarg
+            or args.kwonlyargs
+            or args.defaults
+            or args.kw_defaults
+        ):
+            return False
+        return (
+            all(safe_annotation(arg.annotation) for arg in args.args)
+            and safe_annotation(function.returns)
+        )
+
+    if not eligible_signature(node) or not eligible_signature(canonical_node):
+        return False
+
+    def inert_error_message(expression: ast.AST) -> bool:
+        # The canonical validator uses literal messages and f-strings interpolating
+        # the local loop variable only. Never normalize away calls, attributes, or
+        # other expressions whose evaluation could have side effects or raise.
+        if isinstance(expression, ast.Constant):
+            return isinstance(expression.value, str)
+        if not isinstance(expression, ast.JoinedStr):
+            return False
+        for part in expression.values:
+            if isinstance(part, ast.Constant):
+                if not isinstance(part.value, str):
+                    return False
+                continue
+            if not (
+                isinstance(part, ast.FormattedValue)
+                and isinstance(part.value, ast.Name)
+                and part.value.id == "field"
+                and part.conversion == -1
+                and part.format_spec is None
+            ):
+                return False
+        return True
+
+    def normalized(function: ast.FunctionDef) -> str | None:
+        try:
+            clone = ast.parse(ast.unparse(function)).body[0]
+        except (SyntaxError, ValueError):
+            return None
+        if not isinstance(clone, ast.FunctionDef):
+            return None
+        clone.args.args[0].annotation = None
+        clone.returns = None
+        if (
+            clone.body
+            and isinstance(clone.body[0], ast.Expr)
+            and isinstance(clone.body[0].value, ast.Constant)
+            and isinstance(clone.body[0].value.value, str)
+        ):
+            clone.body.pop(0)
+        for part in ast.walk(clone):
+            if not isinstance(part, ast.Raise) or part.exc is None:
+                continue
+            error = part.exc
+            if (
+                not isinstance(error, ast.Call)
+                or not isinstance(error.func, ast.Name)
+                or error.func.id != "AIProviderError"
+                or len(error.args) != 1
+                or error.keywords
+                or not inert_error_message(error.args[0])
+            ):
+                return None
+            error.args[0] = ast.Constant(value="__CANONICAL_VALIDATION_ERROR__")
+        ast.fix_missing_locations(clone)
+        return ast.dump(clone, include_attributes=False)
+
+    legacy_contract = normalized(node)
+    canonical_contract = normalized(canonical_node)
+    return legacy_contract is not None and legacy_contract == canonical_contract
+
+
 def _safe_canonical_json_helper(
     node: ast.AST, name: str, source_segment: str, legacy_tree: ast.Module
 ) -> bool:
@@ -1294,6 +1410,17 @@ def transform_ai_providers(commit: str) -> None:
                     raise MigrationError(
                         f"app/ai_providers.py has branch-specific definition {collision!r} that collides with a canonical name; refusing to discard or shadow it"
                     )
+                continue
+            # The provider-era facade may also carry an exact duplicate of the
+            # canonical local safety-payload validator. Accept only its proven AST
+            # equivalent; additional checks or side effects still fail closed.
+            if (
+                len(collisions) == 1
+                and next(iter(collisions)) == name == "_validate_trade_safety_payload"
+                and _safe_canonical_trade_safety_validator(
+                    node, canonical_nodes_by_name[name], segment
+                )
+            ):
                 continue
             # The canonical facade deliberately provides safer implementations of these
             # generic parsers (same callable contract, broader malformed-input handling).
@@ -3068,6 +3195,93 @@ def _is_safe_legacy_cerebras_adapter(node: ast.AST) -> bool:
 
 
 
+def _is_replaceable_legacy_market_context(
+    tree: ast.Module,
+    generator: ast.AsyncFunctionDef,
+) -> ast.FunctionDef | None:
+    """Recognize an inert-signature market binder that is only called by the replaced generator.
+
+    Older branches commonly use a weaker market-context binder. Replace it with
+    canonical context logic only when it has no decorators/default expressions and
+    no caller other than the generator that is itself being replaced.
+    """
+    contexts = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+    ]
+    if len(contexts) != 1:
+        return None
+    context = contexts[0]
+    args = context.args
+    if (
+        context.decorator_list
+        or args.posonlyargs
+        or [arg.arg for arg in args.args] != ["spec"]
+        or args.vararg
+        or args.kwarg
+        or [arg.arg for arg in args.kwonlyargs] != ["asset", "symbol", "timeframe"]
+        or args.defaults
+        or len(args.kw_defaults) != 3
+        or any(not isinstance(value, ast.Constant) or value.value is not None for value in args.kw_defaults)
+    ):
+        return None
+
+    def inert_annotation(node: ast.AST | None) -> bool:
+        if node is None or isinstance(node, (ast.Name, ast.Constant)):
+            return True
+        if isinstance(node, ast.Attribute):
+            return inert_annotation(node.value)
+        if isinstance(node, ast.Subscript):
+            return inert_annotation(node.value) and inert_annotation(node.slice)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            return inert_annotation(node.left) and inert_annotation(node.right)
+        if isinstance(node, (ast.Tuple, ast.List)):
+            return all(inert_annotation(item) for item in node.elts)
+        return False
+
+    annotations = [
+        *[arg.annotation for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]],
+        context.returns,
+    ]
+    if any(not inert_annotation(annotation) for annotation in annotations):
+        return None
+
+    # This helper is removed from runtime use together with generate_strategy_draft.
+    # Reject rebinding, deletion, reflection, and literal-name lookups anywhere in the
+    # module; one direct call does not prove the helper has no dynamic/hidden callers.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "_apply_market_context":
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                return None
+        if isinstance(node, ast.Constant) and node.value == "_apply_market_context":
+            return None
+        if isinstance(node, (ast.Global, ast.Nonlocal)) and "_apply_market_context" in node.names:
+            return None
+        if isinstance(node, ast.Call):
+            function = node.func
+            if isinstance(function, ast.Name) and function.id in {
+                "globals", "locals", "vars", "getattr", "setattr", "delattr", "eval", "exec"
+            }:
+                return None
+
+    references = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "_apply_market_context"
+        and isinstance(node.ctx, ast.Load)
+    ]
+    if len(references) != 1 or not generator.lineno <= references[0].lineno <= generator.end_lineno:
+        return None
+    direct_calls = [
+        node for node in ast.walk(generator)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_apply_market_context"
+    ]
+    if len(direct_calls) != 1:
+        return None
+    return context
+
+
 def transform_strategy_ai(commit: str) -> None:
     path = ROOT / "app/strategy_ai.py"
     if not path.is_file():
@@ -3791,9 +4005,41 @@ def transform_strategy_ai(commit: str) -> None:
         )
 
     if not _is_compatible_strategy_schema_and_context(old_tree, new_tree):
-        raise MigrationError(
-            "strategy schema/context helpers do not satisfy the canonical Native AI draft contract; refusing to replace the hosted generator"
-        )
+        # Older branches commonly have a safe market-context helper that predates
+        # canonical timeframe normalization. Replace that helper—not its schema—
+        # with the canonical implementation, then rerun the full schema/global-binding
+        # proof before rewriting any source.
+        legacy_context = _is_replaceable_legacy_market_context(old_tree, legacy_generate)
+        canonical_contexts = [
+            node for node in new_tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_apply_market_context"
+        ]
+        if legacy_context is not None and len(canonical_contexts) == 1:
+            source_lines_for_context = source.splitlines(keepends=True)
+            canonical_lines_for_context = canonical.splitlines(keepends=True)
+            canonical_context = canonical_contexts[0]
+            replacement_lines = canonical_lines_for_context[
+                canonical_context.lineno - 1:canonical_context.end_lineno
+            ]
+            source = "".join(
+                source_lines_for_context[:legacy_context.lineno - 1]
+                + replacement_lines
+                + source_lines_for_context[legacy_context.end_lineno:]
+            )
+            old_tree = ast.parse(source, filename=str(path))
+        if not _is_compatible_strategy_schema_and_context(old_tree, new_tree):
+            raise MigrationError(
+                "strategy schema/context helpers do not satisfy the canonical Native AI draft contract; refusing to replace the hosted generator"
+            )
+
+    # Context replacement changes source line positions. Always derive import nodes
+    # from the current reparsed tree rather than retaining pre-replacement AST locations.
+    ai_provider_imports = [
+        node for node in old_tree.body
+        if isinstance(node, ast.ImportFrom)
+        and node.level == 1
+        and node.module == "ai_providers"
+    ]
 
     edits: list[tuple[int, int, str]] = []
     found_generate = False
