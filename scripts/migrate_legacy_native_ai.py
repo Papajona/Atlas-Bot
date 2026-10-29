@@ -3121,6 +3121,34 @@ def _is_replaceable_legacy_market_context(
 
     # This helper is removed from runtime use together with generate_strategy_draft.
     # Reject aliases, additional callers, and dynamic lookups elsewhere in the module.
+    # In particular, a later assignment must not survive the replacement and shadow
+    # the canonical helper.  Check bindings separately because FunctionDef and import
+    # names are not represented by ast.Name Store nodes.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "_apply_market_context" and isinstance(
+            node.ctx, (ast.Store, ast.Del)
+        ):
+            return None
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node is not context and node.name == "_apply_market_context":
+                return None
+        if isinstance(node, ast.ExceptHandler) and node.name == "_apply_market_context":
+            return None
+        if (
+            isinstance(node, (ast.MatchAs, ast.MatchStar))
+            and node.name == "_apply_market_context"
+        ):
+            return None
+        if isinstance(node, ast.MatchMapping) and node.rest == "_apply_market_context":
+            return None
+        if isinstance(node, ast.alias):
+            bound_name = node.asname or node.name.split(".", 1)[0]
+            if bound_name == "_apply_market_context":
+                return None
+        if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
+            # A star import could rebind the helper without an explicit AST name.
+            return None
+
     references = [
         node for node in ast.walk(tree)
         if isinstance(node, ast.Name) and node.id == "_apply_market_context"
