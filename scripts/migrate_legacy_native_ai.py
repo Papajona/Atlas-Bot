@@ -90,7 +90,7 @@ NATIVE_PATHS = (
     "scripts/verify_release.sh",
 )
 ANCILLARY_PATHS = tuple(p for p in NATIVE_PATHS if p not in {
-    "app/ai_providers.py", "app/config.py", "app/daily_research.py",
+    "app/ai_providers.py", "app/groq_ai.py", "app/config.py", "app/daily_research.py",
     "app/main.py", "app/native_ai.py", "app/strategy_ai.py", "scripts/check_ai_models.py",
     "scripts/check_native_ai.py",
 })
