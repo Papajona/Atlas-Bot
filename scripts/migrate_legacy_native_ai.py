@@ -5006,7 +5006,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             return True
         if re.match(r"(?i)^(?:echo|printf)\b", stripped):
             normalized = re.sub(r"\s+>&2\s*$", "", stripped)
-            return not re.search(r"&&|\|\||[;|<>`]|\$\(", normalized)
+            return not re.search(r"[&;|<>`]|\$\(", normalized)
         return re.fullmatch(
             r"(?i)(?:export\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
             r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\s*=\s*[^;|<>]*",
