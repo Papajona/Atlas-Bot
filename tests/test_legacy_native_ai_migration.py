@@ -4589,6 +4589,16 @@ fi
         with self.assertRaisesRegex(migration.MigrationError, "mixed provider-conditioned shell block"):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
 
+    def test_shell_scrub_preserves_quoted_ampersand_in_groq_guard_message(self):
+        source = '''if [[ -n "$GROQ_API_KEY" ]]; then
+  echo "Native AI & Groq review enabled"
+fi
+'''
+        self.assertEqual(
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source),
+            source,
+        )
+
     def test_markdown_provider_history_is_scrubbed_as_prose_not_shell(self):
         source = (
             "| Previous deployment integration | Gemini strategy secrets were injected "
