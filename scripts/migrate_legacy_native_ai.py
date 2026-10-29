@@ -1006,9 +1006,14 @@ def transform_config() -> None:
         # shadow the builtin even when it appears after the class definition, so
         # removal is safe only when every module-scope statement leaves str unbound.
         for module_statement in tree.body:
-            module_bindings = _defined_names(module_statement) | _module_scope_maybe_binds(
+            runtime_bindings = _module_scope_maybe_binds(
                 module_statement, postponed_annotations=postponed_annotations
             )
+            # Annotation-only declarations populate __annotations__ but do not bind
+            # their target name. Do not mistake an annotation-only str declaration for a shadowing of str.
+            if not (isinstance(module_statement, ast.AnnAssign) and module_statement.value is None):
+                runtime_bindings |= _defined_names(module_statement)
+            module_bindings = runtime_bindings
             has_star_import = (
                 isinstance(module_statement, ast.ImportFrom)
                 and any(alias.name == "*" for alias in module_statement.names)
@@ -1947,6 +1952,15 @@ def transform_ai_providers(commit: str) -> None:
             ):
                 dynamic_all = True
 
+            deferred_body_nodes: set[int] = set()
+            for candidate in ast.walk(module_node):
+                if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    # Function bodies run only if called later, not while importing
+                    # the module. Do not treat their eval/exec usage as import-time
+                    # dynamic export mutation.
+                    for body_statement in candidate.body:
+                        deferred_body_nodes.update(id(item) for item in ast.walk(body_statement))
+
             for nested in ast.walk(module_node):
                 # Reading __all__ can leak its mutable list through an alias
                 # (e.g. names = __all__; names.append(...)). Reject that escape
@@ -1962,6 +1976,7 @@ def transform_ai_providers(commit: str) -> None:
                     isinstance(nested, ast.Name)
                     and nested.id in {"exec", "eval"}
                     and isinstance(nested.ctx, ast.Load)
+                    and id(nested) not in deferred_body_nodes
                 ):
                     # A builtin can be aliased (run = exec; run(...)); looking only
                     # for calls whose spelling is exec/eval would miss that mutation.
@@ -1976,6 +1991,7 @@ def transform_ai_providers(commit: str) -> None:
                     elif (
                         isinstance(nested.func, ast.Name)
                         and nested.func.id in {"exec", "eval"}
+                        and id(nested) not in deferred_body_nodes
                     ):
                         dynamic_exports = True
                     elif (
