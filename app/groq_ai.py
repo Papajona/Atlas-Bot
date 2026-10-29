@@ -46,21 +46,21 @@ def _extract_json_object(text: Any) -> dict[str, Any]:
 
 _ACTIONABLE_TRADING_PATTERNS = (
     re.compile(
-        r"(?i)\\b(?:buy|sell|go long|go short|enter|exit|open|close)\\s+"
-        r"(?:\\d+(?:\\.\\d+)?\\s+)?"
+        r"(?i)\b(?:buy|sell|go long|go short|enter|exit|open|close)\s+"
+        r"(?:\d+(?:\.\d+)?\s+)?"
         r"(?:[A-Z0-9]{2,}(?:[/_-][A-Z0-9]{2,}){1,2})"
-        r"(?:\\s+(?:now|immediately|at market|market price|at)\\b)?"
+        r"(?:\s+(?:now|immediately|at market|market price|at)\b)?"
     ),
     re.compile(
-        r"(?i)\\b(?:place|submit|execute)\\s+(?:a\\s+)?"
-        r"(?:(?:buy|sell)\\s+)?order\\b"
+        r"(?i)\b(?:place|submit|execute)\s+(?:a\s+)?"
+        r"(?:(?:buy|sell)\s+)?order\b"
     ),
     re.compile(
-        r"(?i)\\b(?:entry|stop[- ]loss|take[- ]profit|limit|trigger)"
-        r"(?:\\s+price)?\\s*(?:=|:|at)\\s*[$€£]?\\d+(?:[.,]\\d+)?"
+        r"(?i)\b(?:entry|stop[- ]loss|take[- ]profit|limit|trigger)"
+        r"(?:\s+price)?\s*(?:=|:|at)\s*[$€£]?\d+(?:[.,]\d+)?"
     ),
     re.compile(
-        r"(?i)\\b(?:buy|sell)\\s+(?:now|immediately|at market)\\b"
+        r"(?i)\b(?:buy|sell)\s+(?:now|immediately|at market)\b"
     ),
 )
 
