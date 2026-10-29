@@ -152,7 +152,7 @@ jobs:
           app_dir = Path("app")
           module_paths = {
               "native_ai": app_dir / "native_ai.py",
-              "groq_ai": app_dir / "groq_ai.py"
+              "groq_ai": app_dir / "groq_ai.py",
               "ai_providers": app_dir / "ai_providers.py",
           }
           trees = {}
