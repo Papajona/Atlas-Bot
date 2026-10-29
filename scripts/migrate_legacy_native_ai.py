@@ -1134,11 +1134,11 @@ def transform_config() -> None:
         for name in target_names(target)
     }
     groq_field_definitions = [
-        ("groq_api_key", '    groq_api_key: str = ""'),
-        ("groq_model", '    groq_model: str = "openai/gpt-oss-20b"'),
-        ("groq_max_completion_tokens", "    groq_max_completion_tokens: int = 2048"),
-        ("groq_timeout_seconds", "    groq_timeout_seconds: float = 20.0"),
-        ("groq_research_review_enabled", "    groq_research_review_enabled: bool = True"),
+        ("groq_api_key", 'groq_api_key: str = ""'),
+        ("groq_model", 'groq_model: str = "openai/gpt-oss-20b"'),
+        ("groq_max_completion_tokens", "groq_max_completion_tokens: int = 2048"),
+        ("groq_timeout_seconds", "groq_timeout_seconds: float = 20.0"),
+        ("groq_research_review_enabled", "groq_research_review_enabled: bool = True"),
     ]
     missing_groq_fields = [
         source_line for field_name, source_line in groq_field_definitions
@@ -1150,6 +1150,17 @@ def transform_config() -> None:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         ]
         result_lines = result.splitlines(keepends=True)
+        class_line = result_lines[settings_class.lineno - 1]
+        class_indent = re.match(r"^[ \t]*", class_line).group(0)
+        body_indent = next(
+            (
+                re.match(r"^[ \t]*", result_lines[member.lineno - 1]).group(0)
+                for member in settings_class.body
+                if len(re.match(r"^[ \t]*", result_lines[member.lineno - 1]).group(0))
+                > len(class_indent)
+            ),
+            class_indent + ("\t" if "\t" in class_indent else "    "),
+        )
         if class_methods:
             first_method_line = min(
                 min([node.lineno, *[decorator.lineno for decorator in node.decorator_list]])
@@ -1160,7 +1171,7 @@ def transform_config() -> None:
             # Insert after the full final statement, not inside a multiline field.
             insertion_index = settings_class.end_lineno or settings_class.lineno
         result_lines[insertion_index:insertion_index] = [
-            source_line + "\n" for source_line in missing_groq_fields
+            body_indent + source_line + "\n" for source_line in missing_groq_fields
         ]
         result = "".join(result_lines)
     if RETIRED_PROVIDER_RE.search(result):
