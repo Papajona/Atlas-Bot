@@ -2157,6 +2157,17 @@ def transform_ai_providers(commit: str) -> None:
                     # Lambda bodies are deferred; default expressions remain checked.
                     deferred_body_nodes.update(id(item) for item in ast.walk(candidate.body))
 
+            class_scope_nodes: set[int] = set()
+            for candidate in ast.walk(module_node):
+                if isinstance(candidate, ast.ClassDef):
+                    # Names introduced by a class suite (including walrus targets
+                    # in class-body expressions/defaults) are bound in the class
+                    # namespace, not exported by the containing module.
+                    for body_statement in candidate.body:
+                        class_scope_nodes.update(
+                            id(item) for item in ast.walk(body_statement)
+                        )
+
             for nested in ast.walk(module_node):
                 # Reading __all__ can leak its mutable list through an alias
                 # (e.g. names = __all__; names.append(...)). Reject that escape
@@ -2198,6 +2209,8 @@ def transform_ai_providers(commit: str) -> None:
                     ):
                         dynamic_all = True
                 elif isinstance(nested, ast.NamedExpr):
+                    if id(nested) in class_scope_nodes:
+                        continue
                     if directly_assigns_all(nested.target):
                         # Only a module-level expression (__all__ := [...]) is an
                         # export declaration. Function-local/nested walruses have a
