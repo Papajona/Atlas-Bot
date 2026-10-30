@@ -178,10 +178,6 @@ def _validate_plan_price_references(text: str, trade_plan: dict[str, Any]) -> No
                 normalized_token = normalized_token.replace(",", ".")
             else:
                 raise GroqAIError(f"Groq trade review cites an invalid {kind} price token")
-            elif re.fullmatch(r"[+-]?\d{1,3}(?:,\d{3})+(?:[eE][+-]?\d+)?", normalized_token):
-                normalized_token = normalized_token.replace(",", "")
-            elif normalized_token.count(",") == 1 and re.fullmatch(r"[+-]?\d+,\d+(?:[eE][+-]?\d+)?", normalized_token):
-                normalized_token = normalized_token.replace(",", ".")
         if not _PRICE_NUMBER_PATTERN.fullmatch(normalized_token):
             raise GroqAIError(
                 f"Groq trade review cites an invalid {kind} price token"
