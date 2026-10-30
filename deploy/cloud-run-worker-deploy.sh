@@ -115,6 +115,10 @@ GROQ_RESEARCH_REVIEW_ENABLED="${API_GROQ_CONFIG[2]}"
 GROQ_TRADE_REVIEW_ENABLED="${API_GROQ_CONFIG[3]}"
 SECRET_GROQ_REF="${API_GROQ_CONFIG[4]}"
 [[ "$SECRET_GROQ_REF" == "__NONE__" ]] && SECRET_GROQ_REF=""
+if [[ "$GROQ_TRADE_REVIEW_ENABLED" == "true" && -z "$SECRET_GROQ_REF" ]]; then
+  echo "ERROR: serving API requires Groq trade review but has no pinned Groq Secret Manager version." >&2
+  exit 2
+fi
 if [[ -n "$SECRET_GROQ_REF" && ! "$SECRET_GROQ_REF" =~ ^atlas-groq-api-key:[1-9][0-9]*$ ]]; then
   echo "ERROR: API GROQ_API_KEY must reference atlas-groq-api-key:VERSION with a positive numeric version." >&2
   exit 2
