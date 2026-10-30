@@ -5975,12 +5975,16 @@ def scrub_ancillary_text(path: str, text: str) -> str:
         line = re.sub(r"(?i)\bgemini-[A-Za-z0-9_.*-]+\b", "", line)
         line = re.sub(r"(?i)\bGROQ_STRATEGY_(?:MODEL|API_KEY)\b", "", line)
         line = re.sub(r"(?i)\bgroq_strategy_model\b|\b_groq_json\b|\b_gemini_json\b", "", line)
+        line = re.sub(r"(?i)\b(?:CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)\b", "", line)
+        line = re.sub(r"(?i)\batlas-(?:cerebras|ai-gateway|openai)-[A-Za-z0-9_.:-]+\b", "", line)
+        line = re.sub(r"(?i)\bopenai-compatible\b", "", line)
         line = re.sub(r"(?i)\bCerebras\b|\bAI Gateway\b", "", line)
         line = re.sub(r"(?i)\bGemini\b", "Atlas Native AI", line)
         # Keep Groq in documentation, but make its permitted role explicit.
         # Uppercase GROQ_* configuration identifiers are intentionally unchanged.
         line = re.sub(r"\bGroq\b", "optional Groq research review", line)
-        line = re.sub(r"[ \t]{2,}", " ", line)
+        if not re.search(r"(?i)\bSecret Manager\b", line):
+            line = re.sub(r"[ \t]{2,}", " ", line)
         return line
 
     def scrub_markdown_assignment_line(line: str) -> str | None:
@@ -6008,6 +6012,10 @@ def scrub_ancillary_text(path: str, text: str) -> str:
             "GROQ_STRATEGY_MODEL",
             "GROQ_STRATEGY_API_KEY",
         }
+        # Do not mistake arbitrary fenced Python assignments (for example,
+        # client = GeminiClient()) for disposable environment declarations.
+        if not any(token.split("=", 1)[0].upper() in removed_names for token in tokens):
+            return None
         retained = []
         for token in tokens:
             name = token.split("=", 1)[0]
