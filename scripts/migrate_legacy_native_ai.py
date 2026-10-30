@@ -5738,7 +5738,7 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
             index = end
             continue
         legacy_named_ai_step = re.match(
-            r"^([ \t]*)-[ \t]+name:[ \t]*AI model/provider verification when credentials are supplied[ \t]*(?:\r?\n)?$",
+            r"^([ \t]*)-[ \t]+name:[ \t]*(AI model/provider verification when credentials are supplied|AI model/provider verification \(manual dispatch only; uses provider quota\))[ \t]*(?:\r?\n)?$",
             line,
             re.I,
         )
@@ -5777,14 +5777,22 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                 "GEMINI_STRATEGY_MODEL",
             }
             observed_env_keys = set(metadata_keys).intersection(allowed_env_keys)
+            step_name = legacy_named_ai_step.group(2)
+            manual_dispatch_condition = "if: github.event_name == 'workflow_dispatch'"
+            metadata_conditions = [item for item in metadata_lines if item.startswith("if:")]
             if (
                 not run_match
-                or metadata_lines[0] != "- name: AI model/provider verification when credentials are supplied"
+                or metadata_lines[0] != "- name: " + step_name
                 or "id: ai_provider_verification" not in metadata_lines
                 or "continue-on-error: true" not in metadata_lines
                 or "env:" not in metadata_lines
                 or not {"PYTHONPATH", "GEMINI_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY"}.issubset(observed_env_keys)
                 or set(metadata_keys) - allowed_env_keys
+                or any(item != manual_dispatch_condition for item in metadata_conditions)
+                or (
+                    "manual dispatch only" in step_name.lower()
+                    and metadata_conditions != [manual_dispatch_condition]
+                )
             ):
                 raise MigrationError(
                     f"{path} has an unrecognized legacy AI model/provider verification step; refusing to discard workflow behavior"
