@@ -68,7 +68,7 @@ API_GROQ_CONFIG=()
 for API_REVISION in "${API_TRAFFIC_REVISIONS[@]}"; do
   API_REVISION_CONFIG="$(gcloud run revisions describe "$API_REVISION" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format=json)"
   mapfile -t REVISION_GROQ_CONFIG < <(
-    printf "%s" "$API_REVISION_CONFIG" | python "${REPO_ROOT}/scripts/resolve_worker_groq_config.py" --revision-config
+    printf "%s" "$API_REVISION_CONFIG" | python "${REPO_ROOT}/scripts/resolve_worker_groq_config.py" --revision-config "$GCP_PROJECT_ID"
   )
   if (( ${#REVISION_GROQ_CONFIG[@]} != 4 )); then
     echo "ERROR: could not resolve Groq configuration from serving API revision $API_REVISION; refusing worker rollout." >&2
