@@ -5254,6 +5254,35 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 return True
         return quote is not None or escaped
 
+    def is_standalone_assignment(line: str, assignment: re.Match[str]) -> bool:
+        """Only discard an assignment when its RHS is not also a shell command."""
+        rhs = line[assignment.end():].rstrip()
+        quote: str | None = None
+        escaped = False
+        for index, character in enumerate(rhs):
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\" and quote != "'":
+                escaped = True
+                continue
+            if quote == "'":
+                if character == "'":
+                    quote = None
+                continue
+            if quote == '"':
+                if character == '"':
+                    quote = None
+                continue
+            if character in {"'", '"'}:
+                quote = character
+                continue
+            if character.isspace():
+                if rhs[index:].lstrip().startswith("#"):
+                    return True
+                return False
+        return not has_unsafe_shell_operators(rhs)
+
     def safe_groq_condition(condition: str) -> bool:
         """Accept only bracket-test conditions with no executable substitutions."""
         stripped = condition.strip()
@@ -5512,7 +5541,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         block_start += 1
 
     variable_pattern = re.compile(
-        r"(?i)\b(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|"
+        r"(?i)\b(?:SECRET_GEMINI[A-Z0-9_]*|"
         r"GEMINI_API_KEY|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|AI_SECRET_ARGS|"
         r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\b"
     )
@@ -5633,11 +5662,15 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             if re.match(r"^\s*(?:export\s+)?AI_SECRET_ARGS\s*=", line, re.I):
                 output.append(scrub_ai_secret_args(line))
                 continue
-            provider_assignment = re.match(
+            provider_assignment_match = re.match(
                 r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|"
-                r"GEMINI_API_KEY|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|"
-                r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
+                r"SECRET_AI_GATEWAY[A-Z0-9_]*|SECRET_OPENAI[A-Z0-9_]*|GEMINI_API_KEY|"
+                r"GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|CEREBRAS_[A-Z0-9_]*|"
+                r"AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
                 line, re.I,
+            )
+            provider_assignment = provider_assignment_match is not None and is_standalone_assignment(
+                line, provider_assignment_match
             )
             warning_only = inert_provider_message(stripped) or (
                 re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
@@ -5658,13 +5691,17 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             continue
 
         # Provider-only shell declarations/guards/secret commands have no unrelated payload.
-        if re.match(r"^\s*(?::\s*)?['\"]?\$\{?(?:SECRET_GEMINI|SECRET_CEREBRAS|GEMINI_API_KEY)", line, re.I):
+        if re.match(r"^\s*(?::\s*)?['\"]?\$\{?(?:SECRET_GEMINI|GEMINI_API_KEY)", line, re.I):
             continue
-        if re.match(
+        provider_assignment_match = re.match(
             r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|"
-            r"GEMINI_API_KEY|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|"
-            r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
+            r"SECRET_AI_GATEWAY[A-Z0-9_]*|SECRET_OPENAI[A-Z0-9_]*|GEMINI_API_KEY|"
+            r"GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|CEREBRAS_[A-Z0-9_]*|"
+            r"AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
             line, re.I,
+        )
+        if provider_assignment_match and is_standalone_assignment(
+            line, provider_assignment_match
         ):
             continue
         if re.search(r"(?i)\b(?:create_secret|grant_secret_access)\s+atlas-(?:gemini|cerebras|ai-gateway|openai)\b", line):
