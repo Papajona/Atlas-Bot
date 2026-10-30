@@ -10,6 +10,14 @@ import pytest
 from app import groq_ai
 
 
+def _trade_prompt_evidence(prompt: str) -> dict:
+    """Parse the JSON inside the labelled untrusted trade-evidence block."""
+    marker = '<untrusted_data label="atlas_trade_decision_evidence">\\n'
+    start = prompt.index(marker) + len(marker)
+    end = prompt.index("\\n</untrusted_data>", start)
+    return json.loads(prompt[start:end])
+
+
 VALID_REVIEW = {
     "regime_assessment": "Mixed regime with incomplete coverage.",
     "key_observations": ["Research is descriptive, not a validated signal."],
@@ -509,23 +517,21 @@ def test_groq_trade_context_prompt_includes_produced_rule_macro_and_model_risk_f
     }
     prompt, truncated = groq_ai._trade_context_prompt(packet)
     assert truncated is False
-    for evidence in (
-        '"min_reward_risk":2.0',
-        '"max_spread_bps":25.0',
-        '"risk_state":"ELEVATED"',
-        '"risk_score":0.82',
-        '"feature_drift":{"status":"WARN","mean_psi":0.12}',
-        '"long_probability":0.78',
-        '"flat_probability":0.12',
-        '"short_probability":0.1',
-        '"validation_gate":{"passed":true,"folds":5}',
-        '"atr":2.5',
-        '"stress_score":0.68',
-        '"components":{"funding_crowding":0.7}',
-        '"observations":3',
-        '"confidence":0.6',
-    ):
-        assert evidence in prompt
+    evidence = _trade_prompt_evidence(prompt)
+    assert evidence["deterministic_rules"]["min_reward_risk"] == 2.0
+    assert evidence["deterministic_rules"]["max_spread_bps"] == 25.0
+    assert evidence["macro_context"]["risk_state"] == "ELEVATED"
+    assert evidence["macro_context"]["risk_score"] == 0.82
+    assert evidence["adaptive_model"]["feature_drift"] == {"status": "WARN", "mean_psi": 0.12}
+    assert evidence["ml_signal"]["long_probability"] == 0.78
+    assert evidence["ml_signal"]["flat_probability"] == 0.12
+    assert evidence["ml_signal"]["short_probability"] == 0.1
+    assert evidence["strategy_router"]["validation_gate"] == {"passed": True, "folds": 5}
+    assert evidence["trade_plan"]["atr"] == 2.5
+    assert evidence["derivatives_context"]["stress_score"] == 0.68
+    assert evidence["derivatives_context"]["components"] == {"funding_crowding": 0.7}
+    assert evidence["derivatives_context"]["observations"] == 3
+    assert evidence["derivatives_context"]["confidence"] == 0.6
 
 
 def test_groq_trade_review_is_bounded_by_native_ai_deadline(monkeypatch):
@@ -600,13 +606,16 @@ def test_groq_trade_prompt_summarizes_router_and_model_drift_without_nested_trun
     prompt, truncated = groq_ai._trade_context_prompt(packet)
 
     assert truncated is False
-    assert '"atr":2.5' in prompt
-    assert '"validation_gate":{"passed":true,"folds":5,"positive_fold_ratio":0.8}' in prompt
-    assert '"mean_psi":0.12' in prompt
-    assert '"max_psi_feature":"vol_12"' in prompt
-    assert '"ranked"' not in prompt
-    assert '"blend"' not in prompt
-    assert '"per_feature_psi"' not in prompt
+    evidence = _trade_prompt_evidence(prompt)
+    assert evidence["trade_plan"]["atr"] == 2.5
+    assert evidence["strategy_router"]["validation_gate"] == {
+        "passed": True, "folds": 5, "positive_fold_ratio": 0.8,
+    }
+    assert evidence["adaptive_model"]["feature_drift"]["mean_psi"] == 0.12
+    assert evidence["adaptive_model"]["feature_drift"]["max_psi_feature"] == "vol_12"
+    assert "ranked" not in evidence["strategy_router"]
+    assert "blend" not in evidence["strategy_router"]
+    assert "per_feature_psi" not in evidence["adaptive_model"]["feature_drift"]
 
 
 def test_groq_trade_prompt_preserves_status_only_derivatives_failures():
@@ -619,8 +628,9 @@ def test_groq_trade_prompt_preserves_status_only_derivatives_failures():
     prompt, truncated = groq_ai._trade_context_prompt(packet)
 
     assert truncated is False
-    assert '"status":"UNAVAILABLE"' in prompt
-    assert '"status":"UNSUPPORTED_EXCHANGE"' in prompt
+    evidence = _trade_prompt_evidence(prompt)
+    assert evidence["data_quality"]["derivatives_context"]["status"] == "UNAVAILABLE"
+    assert evidence["derivatives_context"]["status"] == "UNSUPPORTED_EXCHANGE"
 
 
 def test_groq_trade_prompt_marks_wrapper_escaping_truncation_as_incomplete():
