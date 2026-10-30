@@ -5734,6 +5734,15 @@ fi
         ):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
 
+    def test_retired_assignment_with_even_trailing_backslashes_does_not_consume_next_command(self):
+        shell = (
+            "SECRET_CEREBRAS_API_KEY_VERSION=value"
+            + "\\\\"
+            + "\n./deploy/gcp-bootstrap.sh\n"
+        )
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertEqual(cleaned, "./deploy/gcp-bootstrap.sh\n")
+
     def test_retired_provider_stderr_warning_is_removed_without_blocking_migration(self):
         shell = (
             'if [[ -z "$SECRET_CEREBRAS_API_KEY_VERSION" ]]; then\n'
