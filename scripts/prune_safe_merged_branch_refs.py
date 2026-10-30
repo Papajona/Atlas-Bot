@@ -293,11 +293,22 @@ def _main_has_explicit_android_release_gate(main_sha: str) -> bool:
         "(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v'))"
     )
     release_job_lines = [line for line in release_job.splitlines() if line.strip()]
+    expected_if_line = f"    if: {expected_release_condition}"
     release_conditions = [
         " ".join(line.split("if:", 1)[1].split())
         for line in release_job_lines
         if line.startswith("    if:")
     ]
+    # A single descriptive job name is harmless metadata. Keep the actual
+    # release condition exact and reject every other key/continuation.
+    release_name_lines = [
+        line for line in release_job_lines if line.startswith("    name:")
+    ]
+    release_job_shape_is_safe = (
+        len(release_name_lines) <= 1
+        and all(line == expected_if_line or line.startswith("    name:")
+                for line in release_job_lines)
+    )
     return (
         'tags:\n      - "android-v*"' in push_trigger
         and "branches:" not in push_trigger
@@ -305,9 +316,8 @@ def _main_has_explicit_android_release_gate(main_sha: str) -> bool:
         # Require the whole job condition, not merely the presence of two safe
         # alternatives. Extra alternatives (for example pull_request) can bypass
         # the release boundary even when the required substrings are present.
-        # This job has one deliberately single-line condition. Reject YAML plain-scalar
-        # continuations rather than accidentally attesting only the first line.
-        and release_job_lines == [f"    if: {expected_release_condition}"]
+        # Keep the condition single-line and exact; allow only one harmless name key.
+        and release_job_shape_is_safe
         and release_conditions == [expected_release_condition]
         # Require a real module-level regression test, not a name in a comment/string.
         and _source_defines_function(
