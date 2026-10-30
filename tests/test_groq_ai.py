@@ -12,9 +12,9 @@ from app import groq_ai
 
 def _trade_prompt_evidence(prompt: str) -> dict:
     """Parse the JSON inside the labelled untrusted trade-evidence block."""
-    marker = '<untrusted_data label="atlas_trade_decision_evidence">\\n'
+    marker = '<untrusted_data label="atlas_trade_decision_evidence">\n'
     start = prompt.index(marker) + len(marker)
-    end = prompt.index("\\n</untrusted_data>", start)
+    end = prompt.index("\n</untrusted_data>", start)
     return json.loads(prompt[start:end])
 
 
