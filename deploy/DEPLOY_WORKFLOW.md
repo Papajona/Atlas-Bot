@@ -69,9 +69,9 @@ anything on the API, while the worker pool is always-on by design.
 | `atlas-model-signing-public-key` | yes | yes | no |
 | `atlas-model-signing-private-key` | **no** | yes (to sign trained models) | no |
 | `atlas-supabase-anon-key`, `atlas-funding-webhook-secret` | yes | no | no |
-| `atlas-groq-api-key` (optional research reviewer only; created by bootstrap only when `GROQ_API_KEY` is supplied) | optional | optional | no |
+| `atlas-groq-api-key` (optional Groq research and trade-context reviewer; created only when `GROQ_API_KEY` is supplied) | optional | optional | no |
 
-Atlas Native AI remains the local strategy composer and deterministic safety authority. An optional Groq call can add research commentary only; it cannot compose the strategy, alter risk/order parameters, or authorize execution. If no Groq key is configured, no Groq request is sent. Existing deterministic risk, paper-ledger, and execution gates remain authoritative.
+Atlas Native AI remains the local strategy composer and deterministic safety authority. Groq can add research annotations and, when `GROQ_TRADE_REVIEW_ENABLED=true`, bounded market/risk evidence to the trade packet. Groq cannot compose the strategy, choose a side, change order parameters, or authorize execution; Native AI applies the final veto. `GROQ_RESEARCH_REVIEW_ENABLED` and `GROQ_TRADE_REVIEW_ENABLED` are independent controls, and the trade-time setting defaults to `false`. A missing key or unavailable required trade review fails closed; no live-trading or payout setting is enabled by this reviewer.
 
 Groq version selection: Optional and must be an exact numeric Secret Manager version (`SECRET_GROQ_API_KEY_VERSION`); omit it when Groq is disabled, and do not use `latest` or a placeholder.
 
@@ -88,6 +88,7 @@ Each gets `secretAccessor` only on the secrets in the table above. Review the bu
 | `ADAPTIVE_BOT_CONTROLLER_ENABLED` | `true` | worker starts bot and executor controllers |
 | `RESEARCH_REQUIRE_COST_STRESS` / `RESEARCH_COST_STRESS_MULTIPLIER` | `true` / `2.0` | promotion needs a positive net edge at 2x costs |
 | `RESEARCH_MIN_DEFLATED_SHARPE` | `0.95` in production | production adaptive-model promotion fails closed below 0.95; development/staging may use a lower value for research |
+| `GROQ_RESEARCH_REVIEW_ENABLED`, `GROQ_TRADE_REVIEW_ENABLED` | `true`, `false` | independent research and trade-context review opt-ins; the worker inherits the effective trade setting from all API revisions receiving traffic |
 | `EDGE_DECAY_HALT_ENABLED`, `EDGE_DECAY_WINDOW_TRADES`, `EDGE_DECAY_MIN_TRADES`, `EDGE_DECAY_Z_HALT` | `true`, 100, 60, 2.0 | blocks **new** entries when recent realized net returns are significantly negative; closes always pass |
 | `CUSTOMER_KEY_AUDIT_INTERVAL_SECONDS` | 900 (0 disables) | worker re-verifies customer exchange-key permissions |
 | `MAX_DRAWDOWN`, `DAILY_LOSS_LIMIT`, `MAX_LEVERAGE`, `RISK_PER_TRADE` | 0.15, 0.03, 3.0, 0.005 | keep customer trading unlevered; pilot with smaller caps |
