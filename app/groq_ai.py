@@ -190,8 +190,20 @@ def _trade_context_prompt(packet: dict[str, Any]) -> tuple[str, bool]:
         return {name: value[name] for name in names if name in value}
 
     plan = fields(packet.get("trade_plan"), (
-        "side", "entry_price", "stop_loss_price", "take_profit_price", "reward_risk", "strategy",
+        "side", "entry_price", "stop_loss_price", "take_profit_price", "reward_risk", "strategy", "atr",
     ))
+    adaptive_source = packet.get("adaptive_model")
+    adaptive_model = fields(adaptive_source, (
+        "status", "model_version", "confidence", "prediction", "signal", "walk_forward_status",
+        "promotion", "consecutive_passes", "consecutive_passes_required",
+    ))
+    drift_source = adaptive_source.get("feature_drift") if isinstance(adaptive_source, dict) else None
+    drift_summary = fields(drift_source, (
+        "status", "mean_psi", "max_psi", "max_psi_feature", "sample_bars",
+    ))
+    if drift_summary:
+        adaptive_model["feature_drift"] = drift_summary
+
     market_data = {
         "market_identity": fields(packet, ("symbol", "asset", "exchange", "timeframe", "market_timestamp")),
         "trade_plan": plan,
@@ -201,9 +213,12 @@ def _trade_context_prompt(packet: dict[str, Any]) -> tuple[str, bool]:
             "trail_atr", "min_adx", "min_signal", "max_spread_bps",
             "entry", "exit", "signal", "trend", "momentum", "volatility", "reason", "reasons",
         )),
+        # Keep only scalar router evidence and the one-level validation summary.
+        # ranked/blend are nested arrays and would be dropped by the bounded projection,
+        # incorrectly marking an otherwise complete trade review as truncated.
         "strategy_router": fields(packet.get("strategy_router"), (
             "regime", "strategy", "confidence", "status", "reason", "signal",
-            "validation", "validation_gate", "blend", "ranked", "regime_stable_bars", "action",
+            "validation_gate", "regime_stable_bars", "action",
         )),
         "price_context": fields(packet.get("price_context"), (
             "latest_close", "bars", "spread_bps", "bid", "ask", "mid", "timestamp",
@@ -211,11 +226,7 @@ def _trade_context_prompt(packet: dict[str, Any]) -> tuple[str, bool]:
         "data_quality": fields(packet.get("data_quality"), (
             "safe", "status", "reasons", "flags", "freshness", "gap_bars",
         )),
-        "adaptive_model": fields(packet.get("adaptive_model"), (
-            "status", "model_version", "confidence", "prediction", "signal", "walk_forward_status",
-            "promotion", "gate", "wfo", "feature_drift", "consecutive_passes",
-            "consecutive_passes_required",
-        )),
+        "adaptive_model": adaptive_model,
         "ml_signal": fields(packet.get("ml_signal"), (
             "status", "signal", "model_version", "signal_timestamp", "long_probability",
             "flat_probability", "short_probability", "score", "confidence", "reason", "probability",
@@ -225,7 +236,7 @@ def _trade_context_prompt(packet: dict[str, Any]) -> tuple[str, bool]:
             "confidence", "status", "as_of", "age_hours", "source",
         )),
         "derivatives_context": fields(packet.get("derivatives_context"), (
-            "state", "funding_rate", "open_interest_change", "long_short_ratio", "status", "reasons",
+            "state", "stress_score", "components", "observations", "confidence", "action",
         )),
     }
     state = {"truncated": False}
@@ -246,6 +257,12 @@ def _trade_context_prompt(packet: dict[str, Any]) -> tuple[str, bool]:
     hits = suspicious_instruction_markers(serialized)
     if hits:
         _LOGGER.warning("possible prompt-injection markers in trade evidence: %s", hits[:5])
+    wrapped_body = json.dumps(bounded, default=str).replace("<", "\\u003c").replace(">", "\\u003e")
+    if len(wrapped_body) > 18_000:
+        raise GroqAIError(
+            "Wrapped Groq trade review evidence exceeds its safe size bound",
+            input_truncated=True,
+        )
     prompt = (
         "Assess the proposed trade context without issuing an action. Return exactly one JSON object with "
         "regime_assessment, setup_alignment (ALIGNED, CONTRADICTS, NEUTRAL, INSUFFICIENT_EVIDENCE), "
