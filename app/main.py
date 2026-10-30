@@ -1383,6 +1383,15 @@ async def _run_persisted_adaptive_bot_cycle(
             return {"decision": "NO_TRADE", "stage": "customer_paper_recovery",
                     "reason": str(exc)}
         if recovered is not None:
+            pending_stage = await _customer_paper_submission_stage(
+                recovered, customer_id=profile.id, trading_account_id=account.id, req=req,
+            )
+            if pending_stage:
+                return {
+                    **recovered,
+                    "stage": pending_stage,
+                    "analysis": {"market_timestamp": str(df.index[-1].isoformat()), "data_quality": "PASS"},
+                }
             if (
                 str(recovered.get("decision") or "").upper() == "TRADE"
                 and str(((recovered.get("execution") or {}).get("fill") or {}).get("status") or "").upper() == "APPENDED"
@@ -4840,10 +4849,21 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     "reason": str(exc), "execution": None,
                 })
             if recovered is not None:
+                pending_stage = await _customer_paper_submission_stage(
+                    recovered, customer_id=profile.id, trading_account_id=account_id, req=req,
+                )
+                if pending_stage:
+                    return await _record_customer_decision({
+                        **recovered,
+                        "stage": pending_stage,
+                        "analysis": {"market_timestamp": str(df.index[-1].isoformat()), "data_quality": "PASS"},
+                        "autonomous_bot_id": bot_id,
+                        "autonomous_status": "RUNNING" if bot_id else "DISABLED",
+                    })
                 if (
-                str(recovered.get("decision") or "").upper() == "TRADE"
-                and str(((recovered.get("execution") or {}).get("fill") or {}).get("status") or "").upper() == "APPENDED"
-            ):
+                    str(recovered.get("decision") or "").upper() == "TRADE"
+                    and str(((recovered.get("execution") or {}).get("fill") or {}).get("status") or "").upper() == "APPENDED"
+                ):
                     recovered_execution = recovered.get("execution") or {}
                     recovered_fill = recovered_execution.get("fill") or {}
                     await _safe_audit("CUSTOMER_BOT_TRADE", {
