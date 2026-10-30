@@ -507,23 +507,55 @@ def _load_branch_protection_status(repository: str) -> dict[str, bool]:
     return statuses
 
 
-def _delete_remote_ref_with_lease(
-    branch_name: str, expected_sha: str, expected_main_sha: str
-) -> tuple[str, str]:
-    """Atomically require unchanged main and branch tips while deleting the branch.
+def _verify_main_branch_is_non_rewritable(repository: str) -> None:
+    """Require main protection that prevents force-pushes and deletion, including admins.
 
-    The no-op main refspec participates in the same atomic push as the branch deletion.
-    If either ref advanced after proof, GitHub rejects the whole update and preserves both.
+    A same-SHA main refspec is not a compare-and-swap: Git omits unchanged ref updates
+    from the push transaction. The pruning proof is therefore safe across concurrent
+    main advances only when GitHub enforces fast-forward-only, non-deletable main.
+    """
+    result = _run(
+        ["gh", "api", f"repos/{repository}/branches/main/protection"],
+        check=False,
+    )
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+        raise RuntimeError(
+            "Cannot verify main branch protection against force-push/deletion; "
+            f"refusing all branch pruning: {detail}"
+        )
+    try:
+        protection = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "GitHub returned malformed main branch protection; refusing all branch pruning"
+        ) from exc
+
+    allow_force_pushes = protection.get("allow_force_pushes")
+    allow_deletions = protection.get("allow_deletions")
+    enforce_admins = protection.get("enforce_admins")
+    if not isinstance(allow_force_pushes, Mapping) or allow_force_pushes.get("enabled") is not False:
+        raise RuntimeError("main must explicitly disallow force pushes before branch pruning")
+    if not isinstance(allow_deletions, Mapping) or allow_deletions.get("enabled") is not False:
+        raise RuntimeError("main must explicitly disallow deletion before branch pruning")
+    if not isinstance(enforce_admins, Mapping) or enforce_admins.get("enabled") is not True:
+        raise RuntimeError("main protection must be enforced for administrators before branch pruning")
+
+
+def _delete_remote_ref_with_lease(
+    branch_name: str, expected_sha: str
+) -> tuple[str, str]:
+    """Delete a remote branch only if its current tip still equals the proven SHA.
+
+    Main's non-rewritable branch protection is verified before any deletion. The
+    explicit lease protects the candidate branch against concurrent updates.
     """
     result = _run(
         [
             "git",
             "push",
-            "--atomic",
             "origin",
-            f"--force-with-lease=refs/heads/main:{expected_main_sha}",
             f"--force-with-lease=refs/heads/{branch_name}:{expected_sha}",
-            "refs/remotes/origin/main:refs/heads/main",
             f":refs/heads/{branch_name}",
         ],
         check=False,
@@ -587,6 +619,9 @@ def main() -> int:
         )
 
         branch_protection = _load_branch_protection_status(repository)
+        if not branch_protection.get("main", False):
+            raise RuntimeError("main is not reported as a protected branch; refusing all branch pruning")
+        _verify_main_branch_is_non_rewritable(repository)
         branches = _reconcile_unknown_protection_branches(branches, branch_protection)
 
         open_pr_payload = _run(
@@ -733,7 +768,7 @@ def main() -> int:
             # force-with-lease on this push is the atomic guard against a ref
             # update between proof and deletion.
             deletion_status, deletion_reason = _delete_remote_ref_with_lease(
-                branch_name, branch_sha, main_sha
+                branch_name, branch_sha
             )
             if deletion_status == "PRESERVE":
                 record("PRESERVE", branch_name, deletion_reason)
