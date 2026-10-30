@@ -1217,3 +1217,13 @@ def test_customer_paper_buy_discipline_counts_any_filled_order_and_checks_cooldo
     cooldown_start_at = now - timedelta(seconds=90)
     prior_entry = datetime(2026, 10, 23, 23, 59, 30, tzinfo=timezone.utc)
     assert cooldown_start_at <= prior_entry < now
+
+
+def test_ownerless_legacy_paper_positions_default_to_manual():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_lifecycle.py").read_text(
+        encoding="utf-8"
+    )
+    assert "COALESCE(\n                        entry_order.metadata_json ->> 'execution_owner',\n                        'manual_customer_api'\n                    ) AS execution_owner" in source
+    assert "CASE WHEN entry_order.metadata_json ->> 'paper_flow_version' = '1'" not in source
