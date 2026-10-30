@@ -512,8 +512,10 @@ def _delete_remote_ref_with_lease(
 ) -> tuple[str, str]:
     """Atomically require unchanged main and branch tips while deleting the branch.
 
-    The no-op main refspec participates in the same atomic push as the branch deletion.
-    If either ref advanced after proof, GitHub rejects the whole update and preserves both.
+    The explicit main update is intentional: it makes the expected-SHA lease a
+    server-enforced condition of the atomic transaction rather than relying on a
+    no-op refspec being checked. If either ref advanced after proof, GitHub
+    rejects the whole update and preserves both.
     """
     result = _run(
         [
