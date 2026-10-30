@@ -1254,7 +1254,7 @@ async def list_open_customer_paper_orders(*, customer_id: int) -> list[dict[str,
             await _set_tenant(conn, customer_id)
             rows = (await conn.execute(text(
                 """
-                SELECT o.client_order_id, o.venue, o.market_type, o.symbol, o.side,
+                SELECT o.id AS order_id, o.client_order_id, o.venue, o.market_type, o.symbol, o.side,
                        o.quantity, o.metadata_json,
                        COALESCE(f.filled_quantity,0) AS filled_quantity, e.event_type AS status
                 FROM customer_paper.orders o
@@ -1282,6 +1282,7 @@ async def list_open_customer_paper_orders(*, customer_id: int) -> list[dict[str,
                     raw_metadata = {}
             metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
             orders.append({
+                "order_id": int(row["order_id"]),
                 "client_order_id": str(row["client_order_id"]),
                 "venue": str(row["venue"]).lower(),
                 "market_type": str(row["market_type"]),
