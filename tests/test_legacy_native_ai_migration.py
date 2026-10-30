@@ -5028,6 +5028,21 @@ async def groq_research_review(research, intelligence):
         self.assertIn("Atlas Native AI offline verification (no provider calls)", cleaned)
         self.assertIn("python -m scripts.check_native_ai", cleaned)
 
+    def test_workflow_scrub_rejects_trailing_inline_step_fields(self):
+        source = """jobs:
+  verify:
+    steps:
+      - name: AI model/provider verification when credentials are supplied
+        run: python scripts/check_ai_models.py || test $? -eq 2
+        if: github.event_name == 'workflow_dispatch'
+"""
+        with self.assertRaisesRegex(
+            migration.MigrationError, "YAML fields or commands after its inline"
+        ):
+            migration.scrub_workflow_ancillary(
+                ".github/workflows/production-verification.yml", source
+            )
+
     def test_workflow_scrub_rejects_unexpected_inline_provider_step_command(self):
         source = """jobs:
   verify:
