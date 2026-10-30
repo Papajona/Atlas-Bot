@@ -53,20 +53,71 @@ fi
 SA="${WORKER_SERVICE_ACCOUNT}@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 
 # Atlas Native AI remains the strategy/safety authority; Groq is an optional research-only reviewer.
-SECRET_GROQ_REF="${SECRET_GROQ_REF:-}"
+# Read the effective API revision so the separately rolled-out worker cannot drift from it.
+API_SERVICE="${API_SERVICE:-${CLOUD_RUN_SERVICE:-}}"
+: "${API_SERVICE:?Set API_SERVICE to the currently deployed Cloud Run API service}"
+API_SERVICE_CONFIG="$(gcloud run services describe "$API_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format=json)"
+mapfile -t API_TRAFFIC_REVISIONS < <(
+  printf "%s" "$API_SERVICE_CONFIG" | python "${REPO_ROOT}/scripts/resolve_worker_groq_config.py" --traffic-revisions
+)
+if (( ${#API_TRAFFIC_REVISIONS[@]} == 0 )); then
+  echo "ERROR: could not determine the API revisions currently receiving traffic; refusing worker rollout." >&2
+  exit 2
+fi
+API_GROQ_CONFIG=()
+for API_REVISION in "${API_TRAFFIC_REVISIONS[@]}"; do
+  API_REVISION_CONFIG="$(gcloud run revisions describe "$API_REVISION" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format=json)"
+  mapfile -t REVISION_GROQ_CONFIG < <(
+    printf "%s" "$API_REVISION_CONFIG" | python "${REPO_ROOT}/scripts/resolve_worker_groq_config.py" --revision-config "$GCP_PROJECT_ID"
+  )
+  if (( ${#REVISION_GROQ_CONFIG[@]} != 4 )); then
+    echo "ERROR: could not resolve Groq configuration from serving API revision $API_REVISION; refusing worker rollout." >&2
+    exit 2
+  fi
+  if (( ${#API_GROQ_CONFIG[@]} == 0 )); then
+    API_GROQ_CONFIG=("${REVISION_GROQ_CONFIG[@]}")
+  else
+    for index in 0 1 2 3; do
+      if [[ "${REVISION_GROQ_CONFIG[$index]}" != "${API_GROQ_CONFIG[$index]}" ]]; then
+        echo "ERROR: API revisions receiving traffic have different Groq configuration; refusing worker rollout." >&2
+        exit 2
+      fi
+    done
+  fi
+done
+if (( ${#API_GROQ_CONFIG[@]} != 4 )); then
+  echo "ERROR: active API Groq configuration is incomplete; refusing worker rollout." >&2
+  exit 2
+fi
+if [[ -n "${GROQ_MODEL:-}" && "$GROQ_MODEL" != "${API_GROQ_CONFIG[0]}" ]]; then
+  echo "ERROR: supplied GROQ_MODEL differs from the deployed API; use the API value." >&2
+  exit 2
+fi
+if [[ -n "${GROQ_MAX_COMPLETION_TOKENS:-}" && "$GROQ_MAX_COMPLETION_TOKENS" != "${API_GROQ_CONFIG[1]}" ]]; then
+  echo "ERROR: supplied GROQ_MAX_COMPLETION_TOKENS differs from the deployed API; use the API value." >&2
+  exit 2
+fi
+if [[ -n "${GROQ_RESEARCH_REVIEW_ENABLED:-}" && "${GROQ_RESEARCH_REVIEW_ENABLED,,}" != "${API_GROQ_CONFIG[2]}" ]]; then
+  echo "ERROR: supplied GROQ_RESEARCH_REVIEW_ENABLED differs from the deployed API; use the API value." >&2
+  exit 2
+fi
+if [[ -n "${SECRET_GROQ_REF:-}" && "$SECRET_GROQ_REF" != "${API_GROQ_CONFIG[3]}" ]]; then
+  echo "ERROR: supplied SECRET_GROQ_REF differs from the deployed API; use the API secret version." >&2
+  exit 2
+fi
+GROQ_MODEL="${API_GROQ_CONFIG[0]}"
+GROQ_MAX_COMPLETION_TOKENS="${API_GROQ_CONFIG[1]}"
+GROQ_RESEARCH_REVIEW_ENABLED="${API_GROQ_CONFIG[2]}"
+SECRET_GROQ_REF="${API_GROQ_CONFIG[3]}"
+[[ "$SECRET_GROQ_REF" == "__NONE__" ]] && SECRET_GROQ_REF=""
 if [[ -n "$SECRET_GROQ_REF" && ! "$SECRET_GROQ_REF" =~ ^atlas-groq-api-key:[1-9][0-9]*$ ]]; then
-  echo "ERROR: SECRET_GROQ_REF must be atlas-groq-api-key:VERSION with a positive numeric version." >&2
+  echo "ERROR: API GROQ_API_KEY must reference atlas-groq-api-key:VERSION with a positive numeric version." >&2
   exit 2
 fi
 GROQ_SECRET_ARG=""
 if [[ -n "$SECRET_GROQ_REF" ]]; then GROQ_SECRET_ARG=",GROQ_API_KEY=${SECRET_GROQ_REF}"; fi
-: "${GROQ_MODEL:?Set GROQ_MODEL to the same approved value used by the API deployment}"
-: "${GROQ_MAX_COMPLETION_TOKENS:?Set GROQ_MAX_COMPLETION_TOKENS to the same approved API value}"
-: "${GROQ_RESEARCH_REVIEW_ENABLED:?Set GROQ_RESEARCH_REVIEW_ENABLED to the same approved API value}"
-GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED,,}"
 python "${REPO_ROOT}/scripts/validate_groq_deploy_env.py" \
   "$GROQ_MODEL" "$GROQ_MAX_COMPLETION_TOKENS" "$GROQ_RESEARCH_REVIEW_ENABLED"
-
 gcloud run worker-pools deploy "$WORKER_POOL" \
   --project "$GCP_PROJECT_ID" \
   --region "$GCP_REGION" \
