@@ -2212,6 +2212,14 @@ def transform_ai_providers(commit: str) -> None:
                             dynamic_all = True
                     elif mutates_all_target(nested.target):
                         dynamic_all = True
+                    elif (
+                        id(nested) not in deferred_body_nodes
+                        and id(nested) not in annotation_node_ids
+                    ):
+                        # A module-scope walrus can create a public star export even
+                        # though _defined_names() does not see its target. Without
+                        # proving that binding and its order, refuse to migrate it.
+                        dynamic_exports = True
 
         if dynamic_all or dynamic_exports or has_nested_star or len(all_values) > 1:
             raise MigrationError(
