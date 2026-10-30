@@ -1906,14 +1906,17 @@ fi
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
 
     def test_retired_assignment_rejects_parameter_expansion_side_effects(self):
-        unsafe_shell = (
+        unsafe_cases = (
             "SECRET_OPENAI_API_KEY=${other:=value}\n"
-            'printf "%s" "$other"\n'
+            'printf "%s" "$other"\n',
+            "SECRET_OPENAI_API_KEY=${state[0]:=ready}\n"
+            'printf "%s" "${state[0]}"\n',
         )
-        with self.assertRaisesRegex(
-            migration.MigrationError, "compound retired-provider assignment"
-        ):
-            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe_shell)
+        for unsafe_shell in unsafe_cases:
+            with self.subTest(shell=unsafe_shell), self.assertRaisesRegex(
+                migration.MigrationError, "compound retired-provider assignment"
+            ):
+                migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe_shell)
 
     def test_retired_assignment_rejects_blank_prefix_commands(self):
         unsafe_cases = (
