@@ -270,6 +270,8 @@ class Settings(BaseSettings):
     groq_model: str = "openai/gpt-oss-20b"
     groq_max_completion_tokens: int = 2048
     groq_timeout_seconds: float = 20.0
+    # Separate external trade-review budget; Native AI receives its own veto deadline afterwards.
+    groq_trade_review_timeout_seconds: float = 5.0
     # Scheduled research can use Groq when a key is configured. Trade-time review is
     # separately opt-in so the default empty Groq key never blocks otherwise eligible trades.
     groq_research_review_enabled: bool = True
