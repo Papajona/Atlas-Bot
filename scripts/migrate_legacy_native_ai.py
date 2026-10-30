@@ -820,7 +820,7 @@ def transform_config() -> None:
         # is retired with the hosted strategy generator.
         supported_groq_fields = {
             "groq_api_key", "groq_model", "groq_max_completion_tokens",
-            "groq_timeout_seconds", "groq_research_review_enabled",
+            "groq_timeout_seconds", "groq_research_review_enabled", "groq_trade_review_enabled",
         }
         return bool(PROVIDER_FIELD_RE.search(name)) and name.lower() not in supported_groq_fields
 
@@ -1086,7 +1086,7 @@ def transform_config() -> None:
         names = {name for target in targets for name in target_names(target)}
         supported_groq_fields = {
             "groq_api_key", "groq_model", "groq_max_completion_tokens",
-            "groq_timeout_seconds", "groq_research_review_enabled",
+            "groq_timeout_seconds", "groq_research_review_enabled", "groq_trade_review_enabled",
         }
         supported_groq_names = {
             name for name in names
@@ -1209,6 +1209,7 @@ def transform_config() -> None:
         ("groq_max_completion_tokens", "groq_max_completion_tokens: int = 2048"),
         ("groq_timeout_seconds", "groq_timeout_seconds: float = 20.0"),
         ("groq_research_review_enabled", "groq_research_review_enabled: bool = True"),
+        ("groq_trade_review_enabled", "groq_trade_review_enabled: bool = False"),
     ]
     result_lines = result.splitlines(keepends=True)
     class_insertions: list[tuple[int, str, list[str]]] = []
@@ -1954,6 +1955,7 @@ def transform_ai_providers(commit: str) -> None:
             ) from exc
 
         all_values: list[ast.AST | None] = []
+        top_level_named_exports: dict[str, ast.Expr] = {}
         dynamic_all = False
         has_nested_star = False
         dynamic_exports = any(
@@ -2157,6 +2159,67 @@ def transform_ai_providers(commit: str) -> None:
                     # Lambda bodies are deferred; default expressions remain checked.
                     deferred_body_nodes.update(id(item) for item in ast.walk(candidate.body))
 
+            class_scope_nodes: set[int] = set()
+            class_global_named_expr_ids: set[int] = set()
+            for candidate in ast.walk(module_node):
+                if not isinstance(candidate, ast.ClassDef):
+                    continue
+                class_global_names: set[str] = set()
+                class_named_expressions: list[ast.NamedExpr] = []
+                pending_class_nodes = list(candidate.body)
+                while pending_class_nodes:
+                    current = pending_class_nodes.pop()
+                    if isinstance(current, ast.ClassDef):
+                        # The nested class name belongs to this class, but its suite
+                        # has its own namespace and is handled by its own iteration.
+                        class_scope_nodes.add(id(current))
+                        pending_class_nodes.extend(current.decorator_list)
+                        pending_class_nodes.extend(current.bases)
+                        pending_class_nodes.extend(keyword.value for keyword in current.keywords)
+                        continue
+                    if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        # Function bodies execute later; only their decorators,
+                        # defaults and annotations are evaluated in the class suite.
+                        class_scope_nodes.add(id(current))
+                        pending_class_nodes.extend(current.decorator_list)
+                        pending_class_nodes.extend(current.args.defaults)
+                        pending_class_nodes.extend(
+                            item for item in current.args.kw_defaults if item is not None
+                        )
+                        for argument in [
+                            *current.args.posonlyargs,
+                            *current.args.args,
+                            *current.args.kwonlyargs,
+                        ]:
+                            if argument.annotation is not None:
+                                pending_class_nodes.append(argument.annotation)
+                        if current.args.vararg and current.args.vararg.annotation is not None:
+                            pending_class_nodes.append(current.args.vararg.annotation)
+                        if current.args.kwarg and current.args.kwarg.annotation is not None:
+                            pending_class_nodes.append(current.args.kwarg.annotation)
+                        if current.returns is not None:
+                            pending_class_nodes.append(current.returns)
+                        continue
+                    if isinstance(current, ast.Lambda):
+                        # Lambda bodies are deferred, but defaults are evaluated here.
+                        class_scope_nodes.add(id(current))
+                        pending_class_nodes.extend(current.args.defaults)
+                        pending_class_nodes.extend(
+                            item for item in current.args.kw_defaults if item is not None
+                        )
+                        continue
+                    class_scope_nodes.add(id(current))
+                    if isinstance(current, ast.Global):
+                        class_global_names.update(current.names)
+                    elif isinstance(current, ast.NamedExpr):
+                        class_named_expressions.append(current)
+                    pending_class_nodes.extend(ast.iter_child_nodes(current))
+                class_global_named_expr_ids.update(
+                    id(expression)
+                    for expression in class_named_expressions
+                    if root_name(expression.target) in class_global_names
+                )
+
             for nested in ast.walk(module_node):
                 # Reading __all__ can leak its mutable list through an alias
                 # (e.g. names = __all__; names.append(...)). Reject that escape
@@ -2198,10 +2261,12 @@ def transform_ai_providers(commit: str) -> None:
                     ):
                         dynamic_all = True
                 elif isinstance(nested, ast.NamedExpr):
+                    if (
+                        id(nested) in class_scope_nodes
+                        and id(nested) not in class_global_named_expr_ids
+                    ):
+                        continue
                     if directly_assigns_all(nested.target):
-                        # Only a module-level expression (__all__ := [...]) is an
-                        # export declaration. Function-local/nested walruses have a
-                        # different scope, so reject rather than misinfer exports.
                         if (
                             isinstance(module_node, ast.Expr)
                             and module_node.value is nested
@@ -2212,6 +2277,20 @@ def transform_ai_providers(commit: str) -> None:
                             dynamic_all = True
                     elif mutates_all_target(nested.target):
                         dynamic_all = True
+                    elif (
+                        isinstance(module_node, ast.Expr)
+                        and module_node.value is nested
+                        and isinstance(nested.target, ast.Name)
+                    ):
+                        top_level_named_exports[nested.target.id] = module_node
+                    elif (
+                        id(nested) not in deferred_body_nodes
+                        and (
+                            not postponed_annotations
+                            or id(nested) not in annotation_node_ids
+                        )
+                    ):
+                        dynamic_exports = True
 
         if dynamic_all or dynamic_exports or has_nested_star or len(all_values) > 1:
             raise MigrationError(
@@ -2239,6 +2318,9 @@ def transform_ai_providers(commit: str) -> None:
                 for name in _defined_names(module_node)
                 if not name.startswith("_")
             }
+            exports.update(
+                name for name in top_level_named_exports if not name.startswith("_")
+            )
 
         last_definitions: dict[str, ast.AST] = {}
         deleted_bindings: set[str] = set()
@@ -2254,6 +2336,17 @@ def transform_ai_providers(commit: str) -> None:
             for defined_name in _defined_names(module_node):
                 last_definitions[defined_name] = module_node
                 deleted_bindings.discard(defined_name)
+            named_expr = top_level_named_exports.get(
+                module_node.value.target.id
+                if isinstance(module_node, ast.Expr)
+                and isinstance(module_node.value, ast.NamedExpr)
+                and isinstance(module_node.value.target, ast.Name)
+                else ""
+            )
+            if named_expr is module_node:
+                named_target = module_node.value.target
+                last_definitions[named_target.id] = module_node
+                deleted_bindings.discard(named_target.id)
         if explicit_all and deleted_bindings.intersection(exports):
             deleted_exports = sorted(deleted_bindings.intersection(exports))
             raise MigrationError(
@@ -5220,7 +5313,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
     source_lines = text.splitlines(keepends=True)
     groq_condition = re.compile(
         r"(?i)\b(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
-        r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED)\b"
+        r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED|GROQ_TRADE_REVIEW_ENABLED)\b"
     )
     def has_unsafe_shell_operators(command: str) -> bool:
         """Reject active shell operators without mistaking quoted output for syntax."""
@@ -5370,7 +5463,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         return (
             re.fullmatch(
                 r"(?i)(?:export\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
-                r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\s*=\s*[^;|<>]*",
+                r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED|GROQ_TRADE_REVIEW_ENABLED|AI_SECRET_ARGS)\s*=\s*[^;|<>]*",
                 stripped,
             ) is not None
             and not has_unsafe_shell_operators(stripped)
@@ -5528,6 +5621,53 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             + ending
         )
 
+    retired_assignment_names = (
+        r"(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|"
+        r"SECRET_OPENAI[A-Z0-9_]*|SECRET_AI_GATEWAY[A-Z0-9_]*|"
+        r"GEMINI_API_KEY|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|"
+        r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|"
+        r"OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)"
+    )
+
+    def is_safe_retired_assignment(statement: str, *, include_ai_secret_args: bool = False) -> bool:
+        """Accept only a complete simple assignment; never discard a shell side effect."""
+        names = retired_assignment_names
+        if include_ai_secret_args:
+            names = names[:-1] + r"|AI_SECRET_ARGS)"
+        pattern = re.compile(
+            r"^\s*(?:export\s+)?" + names
+            + r"\s*=\s*(?:\"(?:\\.|[^\"\\])*\"|'[^']*'|[^\s;|&<>]+)?\s*(?:#.*)?$",
+            re.I,
+        )
+        candidate = statement.rstrip("\r\n")
+        if not pattern.fullmatch(candidate):
+            return False
+        return "$(" not in candidate and chr(96) not in candidate
+
+    def is_safe_provider_parameter_guard(statement: str) -> bool:
+        """Recognize complete quoted or unquoted parameter guards without shell execution."""
+        pattern = re.compile(
+            r"""^\s*:\s*(?:"\$\{(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|SECRET_OPENAI[A-Z0-9_]*|SECRET_AI_GATEWAY[A-Z0-9_]*|GEMINI_API_KEY)[^\x60"$]*\}"|\$\{(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|SECRET_OPENAI[A-Z0-9_]*|SECRET_AI_GATEWAY[A-Z0-9_]*|GEMINI_API_KEY)[^\x60$]*\})(?:\s+#.*)?$""",
+            re.I,
+        )
+        candidate = statement.rstrip("\r\n")
+        return pattern.fullmatch(candidate) is not None and "$(" not in candidate and chr(96) not in candidate
+    def is_safe_retired_secret_command(statement: str) -> bool:
+        """Remove complete literal retired-secret commands, allowing trailing comments."""
+        create = re.fullmatch(
+            r"""^\s*create_secret\s+atlas-(?:gemini|cerebras|ai-gateway|openai)[-a-z0-9]*\s+"""
+            r"""(?:"(?:\\.|[^"\\])*"|\x27[^\x27]*\x27|[^\s;|&<>]+)(?:\s+#.*)?\s*$""",
+            statement.rstrip("\r\n"),
+            re.I,
+        )
+        grant = re.fullmatch(
+            r"""^\s*grant_secret_access\s+atlas-(?:gemini|cerebras|ai-gateway|openai)[-a-z0-9]*\s+"""
+            r"""(?:"\$(?:SERVICE_ACCOUNT|WORKER_SERVICE_ACCOUNT)"|\x27\\$(?:SERVICE_ACCOUNT|WORKER_SERVICE_ACCOUNT)\x27|atlas-runtime)(?:\s+#.*)?\s*$""",
+            statement.rstrip("\r\n"),
+            re.I,
+        )
+        candidate = statement.rstrip("\r\n")
+        return (create is not None or grant is not None) and "$(" not in candidate and chr(96) not in candidate
     block_start = 0
     while block_start < len(source_lines):
         source_line = source_lines[block_start]
@@ -5574,7 +5714,8 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         block_start += 1
 
     variable_pattern = re.compile(
-        r"(?i)\b(?:SECRET_GEMINI[A-Z0-9_]*|"
+        r"(?i)\b(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|"
+        r"SECRET_OPENAI[A-Z0-9_]*|SECRET_AI_GATEWAY[A-Z0-9_]*|"
         r"GEMINI_API_KEY|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|AI_SECRET_ARGS|"
         r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\b"
     )
@@ -5605,7 +5746,9 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if value.startswith("^@^"):
             prefix, value, delimiter = "^@^", value[3:], "@"
         retired_assignment = re.compile(
-            r"(?i)^(?:SECRET_GEMINI[A-Z0-9_]*|GEMINI_API_KEY|GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
+            r"(?i)^(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|"
+            r"SECRET_OPENAI[A-Z0-9_]*|SECRET_AI_GATEWAY[A-Z0-9_]*|"
+            r"GEMINI_API_KEY|GEMINI_MODEL|GEMINI_STRATEGY_MODEL|"
             r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG|"
             r"GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY)$"
         )
@@ -5686,28 +5829,60 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         line = original
         stripped = line.lstrip()
         if skip_provider_block:
-            if re.match(r"^\s*fi\b", line):
+            if not stripped or stripped.startswith("#"):
+                continue
+            fi_match = re.match(r"^\s*fi\b(.*)$", line, re.I)
+            if fi_match:
+                suffix = fi_match.group(1).strip()
+                if suffix and not suffix.startswith("#"):
+                    raise MigrationError(
+                        f"{path} has an executable command after a retired-provider fi; refusing to discard it"
+                    )
                 skip_provider_block = False
                 continue
-            if (not stripped or stripped.startswith("#")
-                    or re.match(r"^(?:else|elif\b|then\b)", stripped, re.I)):
+            control_match = re.match(r"^(then|else|elif)\b(.*)$", stripped, re.I)
+            if control_match:
+                keyword, suffix = control_match.group(1).lower(), control_match.group(2).strip()
+                if keyword == "elif":
+                    elif_match = re.fullmatch(
+                        r"(?is)(\[\[.*?\]\]|\[.*?\])\s*;?\s*then\s*(?:#.*)?",
+                        suffix,
+                    )
+                    if not elif_match or not safe_groq_condition(elif_match.group(1)):
+                        raise MigrationError(
+                            f"{path} has an unsafe or executable elif in a retired-provider block; refusing to discard it"
+                        )
+                elif suffix and not suffix.startswith("#"):
+                    raise MigrationError(
+                        f"{path} has an executable command after retired-provider {keyword}; refusing to discard it"
+                    )
                 continue
             if re.match(r"^\s*(?:export\s+)?AI_SECRET_ARGS\s*=", line, re.I):
-                output.append(scrub_ai_secret_args(line))
+                cleaned_args = scrub_ai_secret_args(line)
+                if re.search(
+                    r"(?i)\b(?:GROQ_API_KEY|SECRET_GROQ[A-Z0-9_]*|GROQ_SECRET_(?:ARG|ARGS))\b",
+                    cleaned_args,
+                ):
+                    raise MigrationError(
+                        f"{path} has a Groq secret assignment inside a retired-provider conditional; refusing to remove its guard"
+                    )
+                output.append(cleaned_args)
                 continue
             provider_assignment = re.match(
-                r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
+                r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|"
+                r"SECRET_OPENAI[A-Z0-9_]*|SECRET_AI_GATEWAY[A-Z0-9_]*|"
                 r"GEMINI_API_KEY|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|"
                 r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
                 line, re.I,
             )
-            warning_only = inert_provider_message(stripped) or (
-                re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
-                and not re.match(r"^\s*printf\s+-v(?:\s|$)", stripped, re.I)
-                and RETIRED_PROVIDER_RE.search(stripped)
-                and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", stripped)
-            )
-            if provider_assignment or warning_only:
+            warning_only = inert_provider_message(stripped) and not has_unsafe_shell_operators(stripped)
+            if provider_assignment:
+                if is_safe_retired_assignment(line):
+                    continue
+                raise MigrationError(
+                    f"{path} has a compound retired-provider assignment; refusing to discard its trailing shell command: {stripped[:140]}"
+                )
+            if warning_only:
                 continue
             raise MigrationError(
                 f"{path} has a mixed provider-conditioned shell block; refusing to discard unrelated statement: {stripped[:100]}"
@@ -5716,6 +5891,20 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         # Drop only a provider-specific if/else block, including its warning body.
         if (re.match(r"^\s*if\b", line) and variable_pattern.search(line)
                 and not re.search(r";\s*fi\b", line)):
+            parsed_retired_header = split_groq_if_header(line)
+            if parsed_retired_header is None:
+                raise MigrationError(
+                    f"{path} has an unsafe retired-provider if-header; refusing to discard it"
+                )
+            retired_condition, header_tail = parsed_retired_header
+            if not safe_groq_condition(retired_condition):
+                raise MigrationError(
+                    f"{path} has an unsafe retired-provider if-condition; refusing to discard it"
+                )
+            if header_tail and not header_tail.lstrip().startswith("#"):
+                raise MigrationError(
+                    f"{path} has an executable command on a retired-provider if-header; refusing to discard it"
+                )
             skip_provider_block = True
             continue
 
@@ -5727,16 +5916,11 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             continue
 
         # Provider-only shell declarations/guards/secret commands have no unrelated payload.
-        if re.match(r"^\s*(?::\s*)?['\"]?\$\{?(?:SECRET_GEMINI|GEMINI_API_KEY)", line, re.I):
+        if is_safe_provider_parameter_guard(line):
             continue
-        if re.match(
-            r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
-            r"GEMINI_API_KEY|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|"
-            r"CEREBRAS_API_KEY|AI_GATEWAY_API_KEY)\s*=",
-            line, re.I,
-        ):
+        if is_safe_retired_assignment(line):
             continue
-        if re.search(r"(?i)\b(?:create_secret|grant_secret_access)\s+atlas-(?:gemini|cerebras|ai-gateway|openai)\b", line):
+        if is_safe_retired_secret_command(line):
             continue
         if stripped.startswith("#") and RETIRED_PROVIDER_RE.search(line):
             continue
@@ -5768,24 +5952,16 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if RETIRED_PROVIDER_RE.search(line):
             if stripped.startswith("#"):
                 continue
-            warning_only = inert_provider_message(stripped) or (
-                re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
-                and not re.match(r"^\s*printf\s+-v(?:\s|$)", stripped, re.I)
-                and re.search(r"(?i)\b(?:gemini|cerebras|ai.?gateway|openai)\b", stripped)
-                and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", stripped)
-            )
+            warning_only = inert_provider_message(stripped)
             if warning_only:
                 continue
             inline_if = re.match(r"^\s*if\b.*\bthen\b(.*);\s*fi\s*$", line, re.I)
             if inline_if:
                 commands = [part.strip() for part in inline_if.group(1).split(";") if part.strip()]
                 safe_inline = all(
-                    re.match(
-                        r"^(?::|(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
-                        r"GEMINI_API_KEY|AI_SECRET_ARGS|"
-                        r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=)",
-                        command, re.I,
-                    )
+                    is_safe_retired_assignment(command, include_ai_secret_args=True)
+                    or command.strip() == ":"
+                    or is_safe_provider_parameter_guard(command)
                     or (
                         re.match(r"^(?:echo|printf)\b", command, re.I)
                         and not re.match(r"^printf\s+-v(?:\s|$)", command, re.I)

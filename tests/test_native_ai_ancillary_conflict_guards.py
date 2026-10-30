@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -366,5 +367,114 @@ fi
         cleaned = migration.scrub_shell_deployment("deploy/cloud-run-worker-deploy.sh", shell)
         self.assertEqual(cleaned, shell)
 
+
+    def test_optional_groq_warning_keeps_the_guard_shell_valid(self):
+        shell = """SECRET_GROQ_API_KEY_VERSION=\"${SECRET_GROQ_API_KEY_VERSION:-}\"
+AI_SECRET_ARGS=\",GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}\"
+if [[ -z \"$SECRET_GROQ_API_KEY_VERSION\" ]]; then
+  echo \"WARNING: no Groq key. The AI safety veto requires BOTH Gemini and Groq to approve (fail-closed), so customer bot starts via the API will return NO_TRADE until GROQ is configured.\" >&2
+fi
+if [[ -n \"$SECRET_GROQ_API_KEY_VERSION\" ]]; then AI_SECRET_ARGS=\"${AI_SECRET_ARGS},GROQ_API_KEY=atlas-groq-api-key:${SECRET_GROQ_API_KEY_VERSION}\"; fi
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertNotIn("Gemini", cleaned)
+        self.assertIn(
+            "Groq remains optional research-only support; Atlas Native AI continues locally.",
+            cleaned,
+        )
+        self.assertIn('if [[ -z "$SECRET_GROQ_API_KEY_VERSION" ]]; then', cleaned)
+        self.assertIn('if [[ -n "$SECRET_GROQ_API_KEY_VERSION" ]]; then', cleaned)
+        result = subprocess.run(
+            ["bash", "-n"], input=cleaned, text=True, capture_output=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_retired_cerebras_secret_version_assignment_is_removed_but_groq_is_kept(self):
+        shell = """SECRET_CEREBRAS_API_KEY_VERSION=\"${SECRET_CEREBRAS_API_KEY_VERSION:-}\"
+SECRET_GROQ_API_KEY_VERSION=\"${SECRET_GROQ_API_KEY_VERSION:-}\"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertNotIn("CEREBRAS", cleaned)
+        self.assertIn('SECRET_GROQ_API_KEY_VERSION="${SECRET_GROQ_API_KEY_VERSION:-}"', cleaned)
+
+    def test_compound_retired_provider_assignment_cannot_erase_deploy_command(self):
+        shell = "OPENAI_API_KEY=legacy; gcloud run deploy atlas-trading-api\\n"
+        with self.assertRaisesRegex(
+            migration.MigrationError, "compound retired-provider assignment|mixed shell command"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_configured_groq_message_is_not_rewritten_as_missing_key_warning(self):
+        shell = 'echo "Optional Groq review configured; Gemini removed"\\n'
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertIn(
+            'Groq remains optional research-only support; Atlas Native AI continues locally.',
+            cleaned,
+        )
+        self.assertNotIn("not configured", cleaned)
+
+    def test_empty_and_commented_retired_assignments_are_removed(self):
+        shell = """OPENAI_API_KEY=
+OPENAI_API_KEY=legacy # historical value
+SECRET_CEREBRAS_API_KEY_VERSION=
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertNotIn("OPENAI_API_KEY", cleaned)
+        self.assertNotIn("SECRET_CEREBRAS_API_KEY_VERSION", cleaned)
+
+    def test_provider_assignment_command_substitution_is_refused(self):
+        unsafe = (
+            'SECRET_CEREBRAS_API_KEY="$(touch /tmp/atlas-secret-side-effect)"\n',
+            'if [[ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]]; then\n'
+            '  SECRET_CEREBRAS_API_KEY="$(touch /tmp/atlas-secret-side-effect)"\n'
+            'fi\n',
+            'if [[ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]]; then '
+            'SECRET_CEREBRAS_API_KEY="$(touch /tmp/atlas-secret-side-effect)"; fi\n',
+        )
+        for shell in unsafe:
+            with self.subTest(shell=shell), self.assertRaises(migration.MigrationError):
+                migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_secret_creation_command_with_trailing_deploy_command_is_refused(self):
+        shell = 'create_secret atlas-gemini-api-key "$GEMINI_API_KEY"; gcloud run deploy atlas\n'
+        with self.assertRaises(migration.MigrationError):
+            migration.scrub_shell_deployment("deploy/gcp-bootstrap.sh", shell)
+
+    def test_unquoted_retired_provider_parameter_guard_is_removed(self):
+        unquoted = ": ${SECRET_GEMINI_API_KEY_VERSION:?Set SECRET_GEMINI_API_KEY_VERSION}\n"
+        quoted = ': "${SECRET_CEREBRAS_API_KEY_VERSION:?Set SECRET_CEREBRAS_API_KEY_VERSION}"\n'
+        self.assertEqual(migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unquoted), "")
+        self.assertEqual(migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", quoted), "")
+
+    def test_inline_retired_provider_noop_guard_is_removed(self):
+        shell = 'if [[ -n "$SECRET_OPENAI_API_KEY" ]]; then :; fi\n'
+        self.assertEqual(migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell), "")
+
+    def test_groq_secret_inside_retired_provider_block_is_not_made_unconditional(self):
+        shell = """if [[ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]]; then
+  AI_SECRET_ARGS="${AI_SECRET_ARGS},GROQ_API_KEY=atlas-groq-api-key:1"
+fi
+"""
+        with self.assertRaisesRegex(
+            migration.MigrationError, "Groq secret assignment inside a retired-provider conditional"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_secret_creation_and_grant_commands_allow_trailing_comments(self):
+        shell = """create_secret atlas-gemini-api-key "$GEMINI_API_KEY" # retired provider secret
+grant_secret_access atlas-gemini-api-key "$SERVICE_ACCOUNT" # retired provider access
+"""
+        self.assertEqual(migration.scrub_shell_deployment("deploy/gcp-bootstrap.sh", shell), "")
+
+    def test_parameter_guard_allows_parentheses_but_rejects_command_substitution(self):
+        valid = ': "${SECRET_GEMINI_API_KEY_VERSION:?Set (or verify) the key}"\n'
+        self.assertEqual(migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", valid), "")
+        unsafe = ': "${SECRET_GEMINI_API_KEY_VERSION:?Set $(touch /tmp/atlas-migration-sentinel)}"\n'
+        with self.assertRaisesRegex(migration.MigrationError, "retains provider text"):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe)
+
+    def test_inline_retired_provider_parameter_guard_is_removed(self):
+        shell = 'if [[ -n "$SECRET_OPENAI_API_KEY" ]]; then : "${SECRET_OPENAI_API_KEY:?required}"; fi\n'
+        self.assertEqual(migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell), "")
 if __name__ == "__main__":
     unittest.main()
