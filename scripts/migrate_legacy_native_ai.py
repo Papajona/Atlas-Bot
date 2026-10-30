@@ -5640,7 +5640,9 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             re.I,
         )
         candidate = statement.rstrip("\r\n")
-        if not pattern.fullmatch(candidate):
+        # A final backslash joins the next physical line in Bash. Deleting
+        # only this assignment would expose its continuation as a command.
+        if candidate.endswith("\\") or not pattern.fullmatch(candidate):
             return False
         return "$(" not in candidate and chr(96) not in candidate
 
@@ -5875,7 +5877,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
                 line, re.I,
             )
-            warning_only = inert_provider_message(stripped) and not has_unsafe_shell_operators(stripped)
+            warning_only = inert_provider_message(stripped)
             if provider_assignment:
                 if is_safe_retired_assignment(line):
                     continue
