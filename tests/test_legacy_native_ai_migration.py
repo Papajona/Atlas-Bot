@@ -4779,6 +4779,99 @@ async def groq_research_review(research, intelligence):
 
 
 
+    def test_markdown_scrub_updates_fenced_worker_environment_without_losing_backup_setting(self):
+        fence = chr(96) * 3
+        source = (
+            "### Worker example\n"
+            + fence + "\n"
+            + "export WORKER_POOL=atlas-trading-worker IMAGE=<same image> \\\n"
+            + "  SECRET_GEMINI_REF=atlas-gemini-api-key:<v> SECRET_GROQ_REF=atlas-groq-api-key:<v> BACKUP_RECOVERY_URL=...\n"
+            + "bash deploy/cloud-run-worker-deploy.sh\n"
+            + fence + "\n"
+        )
+        cleaned = migration.scrub_ancillary_text("deploy/DEPLOY_WORKFLOW.md", source)
+        self.assertNotIn("GEMINI", cleaned)
+        self.assertNotIn("SECRET_GROQ_REF", cleaned)
+        self.assertIn("BACKUP_RECOVERY_URL=...", cleaned)
+        self.assertIn("bash deploy/cloud-run-worker-deploy.sh", cleaned)
+
+    def test_markdown_scrub_rewrites_architecture_diagram_and_preserves_groq_role(self):
+        fence = chr(96) * 3
+        source = (
+            fence + "\n"
+            + "Secret Manager (per-secret IAM: API, worker) exchanges (sandbox), Gemini, Groq\n"
+            + fence + "\n"
+        )
+        cleaned = migration.scrub_ancillary_text("deploy/DEPLOY_WORKFLOW.md", source)
+        self.assertNotIn("Gemini", cleaned)
+        self.assertIn("Atlas Native AI", cleaned)
+        self.assertIn("optional Groq research review", cleaned)
+
+    def test_workflow_scrub_replaces_legacy_live_ai_check_with_offline_native_ai_gate(self):
+        dollar = chr(36)
+        source = (
+            "jobs:\n"
+            "  verify:\n"
+            "    steps:\n"
+            "      - name: AI provider live inference verification\n"
+            "        env:\n"
+            "          GEMINI_API_KEY: " + dollar + "{{ secrets.GEMINI_API_KEY }}\n"
+            "          GROQ_API_KEY: " + dollar + "{{ secrets.GROQ_API_KEY }}\n"
+            "        run: |\n"
+            "          set +e\n"
+            "          python scripts/check_ai_models.py\n"
+            "          status=$?\n"
+            "          set -e\n"
+            "          if [ \"$status\" -eq 0 ]; then\n"
+            "            echo \"AI provider verification: PASS (Gemini and Groq inference requests succeeded).\" | tee -a \"$GITHUB_STEP_SUMMARY\"\n"
+            "          elif [ \"$status\" -eq 2 ]; then\n"
+            "            echo \"AI provider verification: NOT VERIFIED (one or more required AI credentials/models are missing; see checker output).\" | tee -a \"$GITHUB_STEP_SUMMARY\"\n"
+            "            exit 1\n"
+            "          else\n"
+            "            echo \"AI provider verification: FAIL (one or more inference requests failed; checker exit code $status).\" | tee -a \"$GITHUB_STEP_SUMMARY\"\n"
+            "            exit \"$status\"\n"
+            "          fi\n"
+            "      - name: Deriv token authentication (no trading)\n"
+            "        run: python scripts/check_deriv_auth.py\n"
+        )
+        cleaned = migration.scrub_workflow_ancillary(".github/workflows/production-verification.yml", source)
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+        self.assertNotIn("GROQ_API_KEY", cleaned)
+        self.assertNotIn("check_ai_models.py", cleaned)
+        self.assertIn("Atlas Native AI offline verification (no provider calls)", cleaned)
+        self.assertIn("python -m scripts.check_native_ai", cleaned)
+        self.assertIn("Deriv token authentication (no trading)", cleaned)
+        self.assertIn("python scripts/check_deriv_auth.py", cleaned)
+
+    def test_workflow_scrub_refuses_unrecognized_live_ai_step_commands(self):
+        dollar = chr(36)
+        source = (
+            "jobs:\n"
+            "  verify:\n"
+            "    steps:\n"
+            "      - name: AI provider live inference verification\n"
+            "        env:\n"
+            "          GEMINI_API_KEY: " + dollar + "{{ secrets.GEMINI_API_KEY }}\n"
+            "          GROQ_API_KEY: " + dollar + "{{ secrets.GROQ_API_KEY }}\n"
+            "        run: |\n"
+            "          set +e\n"
+            "          python scripts/check_ai_models.py\n"
+            "          python scripts/delete_unrelated_data.py\n"
+            "          status=$?\n"
+            "          set -e\n"
+            "          if [ \"$status\" -eq 0 ]; then\n"
+            "            echo \"AI provider verification: PASS (Gemini and Groq inference requests succeeded).\" | tee -a \"$GITHUB_STEP_SUMMARY\"\n"
+            "          elif [ \"$status\" -eq 2 ]; then\n"
+            "            echo \"AI provider verification: NOT VERIFIED (one or more required AI credentials/models are missing; see checker output).\" | tee -a \"$GITHUB_STEP_SUMMARY\"\n"
+            "            exit 1\n"
+            "          else\n"
+            "            echo \"AI provider verification: FAIL (one or more inference requests failed; checker exit code $status).\" | tee -a \"$GITHUB_STEP_SUMMARY\"\n"
+            "            exit \"$status\"\n"
+            "          fi\n"
+        )
+        with self.assertRaisesRegex(migration.MigrationError, "unexpected command in the legacy live-AI verification step"):
+            migration.scrub_workflow_ancillary(".github/workflows/production-verification.yml", source)
+
     def test_config_does_not_remove_validator_when_module_rebinds_str(self):
         unsafe = (
             "from pydantic import field_validator\n"
