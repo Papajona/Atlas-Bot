@@ -151,6 +151,45 @@ def test_worker_resolver_selects_only_revisions_receiving_api_traffic():
     ]
 
 
+def test_worker_resolver_uses_cloud_run_v2_observed_traffic_not_pending_allocations():
+    import json
+    import subprocess
+    import sys
+
+    resolver = ROOT / "scripts" / "resolve_worker_groq_config.py"
+    payload = {
+        "status": {
+            "traffic": [{"revision": "atlas-api-00009-pending", "percent": 100}],
+            "trafficStatuses": [{"revision": "atlas-api-00007-serving", "percent": 100}],
+        }
+    }
+    result = subprocess.run(
+        [sys.executable, str(resolver), "--traffic-revisions"],
+        input=json.dumps(payload), text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["atlas-api-00007-serving"]
+
+
+def test_worker_resolver_fails_closed_when_v2_observed_traffic_is_unavailable():
+    import json
+    import subprocess
+    import sys
+
+    resolver = ROOT / "scripts" / "resolve_worker_groq_config.py"
+    payload = {
+        "status": {
+            "traffic": [{"revision": "atlas-api-00009-pending", "percent": 100}],
+            "trafficStatuses": [],
+        }
+    }
+    result = subprocess.run(
+        [sys.executable, str(resolver), "--traffic-revisions"],
+        input=json.dumps(payload), text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 2
+    assert "no observed trafficStatuses" in result.stderr
+
 def test_worker_resolver_fails_closed_when_api_traffic_revision_is_ambiguous():
     import json
     import subprocess
