@@ -39,8 +39,9 @@ def test_customer_bot_ai_review_has_hard_latency_ceiling_and_fails_closed():
     helper = main[helper_start:helper_end]
     assert "deadline = loop.time() + timeout" in helper
     assert "def _trade_safety_timeout_metadata()" in main
-    assert "native_reserve = min(float(settings.ai_strategy_provider_timeout_seconds), total)" in main
-    assert "min(float(settings.groq_trade_review_timeout_seconds), total - native_reserve)" in main
+    assert "configured_native = float(settings.ai_strategy_provider_timeout_seconds)" in main
+    assert "total > native_reserve" in main
+    assert "min(configured_groq, total - native_reserve)" in main
     assert "await _attach_groq_trade_review(packet, timeout_seconds=groq_budget)" in helper
     assert "remaining = deadline - loop.time()" in helper
     assert "return await asyncio.wait_for(dual_ai_trade_safety_review(packet), timeout=remaining)" in helper
