@@ -5412,6 +5412,30 @@ def retained_helper():
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_shell_scrub_rewrites_legacy_gemini_warning_without_unbalancing_groq_guard(self):
+        legacy = '''
+: "${SECRET_GEMINI_API_KEY_VERSION:?Set SECRET_GEMINI_API_KEY_VERSION}"
+SECRET_GROQ_API_KEY_VERSION="${SECRET_GROQ_API_KEY_VERSION:-}"
+AI_SECRET_ARGS=",GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}"
+if [[ -z "$SECRET_GROQ_API_KEY_VERSION" ]]; then
+  echo "WARNING: no Groq key. The AI safety veto requires BOTH Gemini and Groq to approve (fail-closed), so customer bot starts via the API will return NO_TRADE until GROQ is configured (set SECRET_GROQ_REF on the worker too)." >&2
+fi
+if [[ -n "$SECRET_GROQ_API_KEY_VERSION" ]]; then AI_SECRET_ARGS="${AI_SECRET_ARGS},GROQ_API_KEY=atlas-groq-api-key:${SECRET_GROQ_API_KEY_VERSION}"; fi
+'''
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", legacy)
+
+        self.assertNotIn("GEMINI", cleaned.upper())
+        self.assertIn('if [[ -z "$SECRET_GROQ_API_KEY_VERSION" ]]; then', cleaned)
+        self.assertIn(
+            'echo "Groq remains optional research-only support; Atlas Native AI continues locally." >&2',
+            cleaned,
+        )
+        self.assertIn('if [[ -n "$SECRET_GROQ_API_KEY_VERSION" ]]; then', cleaned)
+        result = subprocess.run(
+            ["bash", "-n"], input=cleaned, text=True, capture_output=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_shell_scrub_rejects_compound_bracket_conditions_before_dropping_block(self):
         unsafe = (
             'if [[ -n "$GEMINI_API_KEY" ]] || touch /tmp/atlas-qodo-marker || '
