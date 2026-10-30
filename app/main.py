@@ -229,9 +229,22 @@ async def _customer_paper_submission_stage(
         "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
         "order_role": str(intent.get("order_role") or "STRATEGY"),
     }
-    # The audit helper is idempotent and repairs a prior best-effort write failure.
-    # It also serializes concurrent retries on the audit-chain head.
-    await _audit_customer_paper_order_submitted_once(detail)
+    # The ledger order is already durably pending. An audit-store outage must
+    # not turn that accepted intent into an HTTP 500 or make the caller retry a
+    # submission that has already been persisted. Record a bounded failure marker
+    # when possible and keep the trade decision at NO_TRADE.
+    try:
+        await _audit_customer_paper_order_submitted_once(detail)
+    except Exception as exc:
+        await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE", {
+            "customer_id": customer_id,
+            "trading_account_id": trading_account_id,
+            "client_order_id": client_order_id,
+            "symbol": str(req.symbol),
+            "exchange": str(req.exchange),
+            "reason": type(exc).__name__,
+        })
+        return "customer_paper_order_pending"
     return (
         "customer_paper_order_submitted"
         if intent.get("newly_submitted") is True
