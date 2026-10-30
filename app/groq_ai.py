@@ -77,8 +77,10 @@ _ACTIONABLE_TRADING_PATTERNS = (
         r"(?i:\b(?:place|submit|execute)\s+(?:a\s+)?"
         r"(?:(?:buy|sell)\s+)?order\b)"
     ),
+    # Reject price-setting commands, not factual restatements of the submitted plan.
     re.compile(
-        r"(?i:\b(?:entry|stop[- ]loss|take[- ]profit|limit|trigger)"
+        r"(?i:\b(?:set|move|place|adjust|raise|lower|change|update|put)\s+"
+        r"(?:the\s+)?(?:entry|stop[- ]loss|take[- ]profit|limit|trigger)"
         r"(?:\s+price)?\s*(?:=|:|at)\s*[$€£]?\d+(?:[.,]\d+)?)"
     ),
     re.compile(r"(?i:\b(?:buy|sell)\s+(?:now|immediately|at market)\b)"),
@@ -166,13 +168,15 @@ def _validate_trade_context_review(value: dict[str, Any]) -> dict[str, Any]:
     }
     for key in ("key_observations", "contradictions", "data_quality_flags"):
         items = value.get(key)
-        if (
-            not isinstance(items, list)
-            or len(items) > 12
-            or any(not isinstance(item, str) or not item.strip() or len(item) > 500 for item in items)
+        if not isinstance(items, list) or any(
+            not isinstance(item, str) or len(item) > 500 for item in items
         ):
             raise GroqAIError(f"Groq trade review field {key!r} must be an array of at most 12 short text values")
-        cleaned = [item.strip() for item in items]
+        # Models occasionally include empty list entries. Drop those harmless
+        # placeholders rather than turning a complete evidence envelope into ERROR.
+        cleaned = [item.strip() for item in items if item.strip()]
+        if len(cleaned) > 12:
+            raise GroqAIError(f"Groq trade review field {key!r} must be an array of at most 12 short text values")
         if any(_contains_actionable_trading_instruction(item) for item in cleaned):
             raise GroqAIError("Groq trade review contains actionable trading instructions")
         result[key] = cleaned
