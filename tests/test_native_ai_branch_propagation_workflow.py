@@ -9,14 +9,21 @@ WORKFLOW = ROOT / ".github" / "workflows" / "propagate-native-ai-all-branches.ym
 MIGRATION = ROOT / "scripts" / "migrate_legacy_native_ai.py"
 
 
-def test_propagation_token_can_update_workflow_files() -> None:
+def test_propagation_requires_a_separate_credential_for_workflow_file_updates() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     permissions = workflow.split("permissions:", 1)[1].split("concurrency:", 1)[0]
+    upload = workflow.split("update_existing_branch_ref()", 1)[1].split(
+        "declare -a updated=", 1
+    )[0]
 
-    # The propagator intentionally updates the retired-provider wiring in workflow
-    # files on each branch; contents:write alone is rejected by GitHub for that path.
+    # workflows is not a GITHUB_TOKEN permission. Branches that need workflow-file
+    # changes are only updated when a separately scoped credential is provided.
     assert "contents: write" in permissions
-    assert "workflows: write" in permissions
+    assert "workflows: write" not in permissions
+    assert "ATLAS_WORKFLOW_UPDATE_TOKEN" in workflow
+    assert 'git diff --name-only "$expected_sha" "$new_sha" -- .github/workflows' in upload
+    assert 'if [[ -z "$workflow_token" ]]' in upload
+    assert "x-access-token:%s" in upload
 
 
 def test_propagation_reruns_when_migration_engine_changes() -> None:
