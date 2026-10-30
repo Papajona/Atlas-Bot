@@ -706,18 +706,19 @@ def main() -> int:
             branch_protection = _load_branch_protection_status(repository)
         except BranchProtectionPolicyUnavailable as exc:
             message = (
-                "SKIPPED: detailed main branch protection could not be verified; "
-                "no branch refs were modified. Add the optional "
-                "ATLAS_BRANCH_PROTECTION_READ_TOKEN secret with repository Administration read access "
-                "to enable guarded pruning. Details: " + str(exc)
+                "BLOCKED: detailed main branch protection could not be verified; "
+                "no branch refs were modified. Verify that main is protected, "
+                "administrator enforcement is enabled, force-pushes and deletions are disabled, "
+                "and ATLAS_BRANCH_PROTECTION_READ_TOKEN has repository Administration read access. "
+                "Details: " + str(exc)
             )
-            print(message)
+            print(message, file=sys.stderr)
             summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
             if summary_path:
                 with open(summary_path, "a", encoding="utf-8") as summary:
                     summary.write("# Atlas-Bot branch reconciliation\n\n")
                     summary.write(message + "\n")
-            return 0
+            return 2
         branches = _reconcile_unknown_protection_branches(branches, branch_protection)
 
         open_pr_payload = _run(
