@@ -5369,7 +5369,7 @@ def retained_helper():
             ):
                 with self.assertRaisesRegex(
                     migration.MigrationError,
-                    "dynamic exports or mutates __all__",
+                    "dynamic exports|different or unknown binding",
                 ):
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
