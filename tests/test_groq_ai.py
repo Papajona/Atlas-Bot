@@ -535,6 +535,29 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
         "key_observations": ["The target at 65,000 is the submitted plan level."],
     }
     groq_ai._validate_trade_context_review(rounded_review, packet=rounded_packet)
+    european_review = {
+        **VALID_TRADE_REVIEW,
+        "regime_assessment": "The submitted stop-loss is at 64.123,46.",
+        "key_observations": ["Target at 65,000 is already in the submitted plan."],
+    }
+    groq_ai._validate_trade_context_review(european_review, packet=rounded_packet)
+
+    invented_grammar = {
+        **VALID_TRADE_REVIEW,
+        "key_observations": ["The stop-loss is at 999999."],
+    }
+    with pytest.raises(groq_ai.GroqAIError, match="outside the submitted trade plan"):
+        groq_ai._validate_trade_context_review(invented_grammar, packet=rounded_packet)
+
+    ordinary_text = {
+        **VALID_TRADE_REVIEW,
+        "key_observations": [
+            "Data limitations remain.",
+            "Entry to the market is not recommended.",
+            "The stop-loss is at the swing low.",
+        ],
+    }
+    groq_ai._validate_trade_context_review(ordinary_text, packet=rounded_packet)
     assert validated["contradictions"] == [
         "Target at 110 is the value already in the submitted plan."
     ]
