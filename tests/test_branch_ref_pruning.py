@@ -288,7 +288,7 @@ def test_deletion_of_already_absent_remote_ref_is_a_successful_noop(monkeypatch)
 
     monkeypatch.setattr(pruning, "_run", fake_run)
 
-    status, reason = pruning._delete_remote_ref_with_lease("feature/already-gone", "abc123", "main123")
+    status, reason = pruning._delete_remote_ref_with_lease("feature/already-gone", "abc123")
 
     assert status == "PRESERVE"
     assert "already removed" in reason
@@ -300,14 +300,11 @@ def test_deletion_of_already_absent_remote_ref_is_a_successful_noop(monkeypatch)
 def test_deletion_lease_rejection_preserves_remote_branch_that_advanced(monkeypatch):
     def fake_run(args, *, check=True):
         if args[:2] == ["git", "push"]:
-            assert args[2] == "--atomic"
-            assert args[3] == "origin"
-            assert args[4] == "--force-with-lease=refs/heads/main:main-sha"
-            assert args[5] == (
+            assert args[2] == "origin"
+            assert args[3] == (
                 "--force-with-lease=refs/heads/feature/advancing:proven-sha"
             )
-            assert args[6] == "refs/remotes/origin/main:refs/heads/main"
-            assert args[7] == ":refs/heads/feature/advancing"
+            assert args[4] == ":refs/heads/feature/advancing"
             return subprocess.CompletedProcess(
                 args, 1, "", "! [rejected] feature/advancing (stale info)"
             )
@@ -322,7 +319,7 @@ def test_deletion_lease_rejection_preserves_remote_branch_that_advanced(monkeypa
     monkeypatch.setattr(pruning, "_run", fake_run)
 
     status, reason = pruning._delete_remote_ref_with_lease(
-        "feature/advancing", "proven-sha", "main-sha"
+        "feature/advancing", "proven-sha"
     )
 
     assert status == "PRESERVE"
@@ -739,7 +736,7 @@ def test_lease_rejection_preserves_branch_updated_after_proof(tmp_path, monkeypa
 
     # Run the actual lease-protected push from the stale cleanup checkout.
     monkeypatch.chdir(checkout)
-    status, reason = pruning._delete_remote_ref_with_lease(branch_name, proven_sha, _git(checkout, "rev-parse", "refs/remotes/origin/main"))
+    status, reason = pruning._delete_remote_ref_with_lease(branch_name, proven_sha)
 
     assert status == "PRESERVE"
     assert "lease was rejected" in reason
@@ -775,52 +772,48 @@ def test_branch_without_common_merge_base_is_preserved_without_aborting_reconcil
     assert mismatches == []
 
 
-def test_main_advance_after_proof_prevents_atomic_branch_deletion(tmp_path, monkeypatch):
-    remote = tmp_path / "origin.git"
-    checkout = tmp_path / "checkout"
-    main_advancer = tmp_path / "main-advancer"
-    branch_name = "feature/main-rewrite-race"
-
-    _git(tmp_path, "init", "--bare", remote)
-    _git(tmp_path, "init", "-b", "main", checkout)
-    _git(checkout, "config", "user.name", "Atlas main lease regression")
-    _git(checkout, "config", "user.email", "atlas-main-lease@example.invalid")
-    (checkout / "README.md").write_text("base\n", encoding="utf-8")
-    _git(checkout, "add", "README.md")
-    _git(checkout, "commit", "-m", "main proof base")
-    _git(checkout, "remote", "add", "origin", remote)
-    _git(checkout, "push", "-u", "origin", "main")
-    _git(checkout, "fetch", "origin")
-    proven_main_sha = _git(checkout, "rev-parse", "refs/remotes/origin/main")
-
-    _git(checkout, "checkout", "-b", branch_name)
-    (checkout / "feature.txt").write_text("branch proof content\n", encoding="utf-8")
-    _git(checkout, "add", "feature.txt")
-    _git(checkout, "commit", "-m", "branch proof")
-    _git(checkout, "push", "-u", "origin", branch_name)
-    proven_branch_sha = _git(checkout, "rev-parse", "HEAD")
-
-    _git(tmp_path, "clone", "--branch", "main", remote, main_advancer)
-    _git(main_advancer, "config", "user.name", "Atlas main advancer")
-    _git(main_advancer, "config", "user.email", "atlas-main-advancer@example.invalid")
-    with (main_advancer / "README.md").open("a", encoding="utf-8") as readme:
-        readme.write("main advanced after branch proof\n")
-    _git(main_advancer, "commit", "-am", "advance main after proof")
-    _git(main_advancer, "push", "origin", "main")
-    advanced_main_sha = _git(main_advancer, "rev-parse", "HEAD")
-    assert advanced_main_sha != proven_main_sha
-
-    monkeypatch.chdir(checkout)
-    status, reason = pruning._delete_remote_ref_with_lease(
-        branch_name, proven_branch_sha, proven_main_sha
+def test_main_protection_must_block_force_push_and_deletion_and_enforce_admins(monkeypatch):
+    safe = {
+        "allow_force_pushes": {"enabled": False},
+        "allow_deletions": {"enabled": False},
+        "enforce_admins": {"enabled": True},
+    }
+    monkeypatch.setattr(
+        pruning,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, json.dumps(safe), ""),
     )
+    pruning._verify_main_branch_is_non_rewritable("Papajona/Atlas-Bot")
 
-    assert status == "PRESERVE"
-    assert "lease was rejected" in reason or "stale" in reason.lower()
-    branch_remote = _git(main_advancer, "ls-remote", "origin", f"refs/heads/{branch_name}")
-    main_remote = _git(main_advancer, "ls-remote", "origin", "refs/heads/main")
-    assert branch_remote.split()[0] == proven_branch_sha
-    assert main_remote.split()[0] == advanced_main_sha
+    for key, value in (
+        ("allow_force_pushes", {"enabled": True}),
+        ("allow_deletions", {"enabled": True}),
+        ("enforce_admins", {"enabled": False}),
+        ("allow_force_pushes", {}),
+    ):
+        unsafe = dict(safe)
+        unsafe[key] = value
+        monkeypatch.setattr(
+            pruning,
+            "_run",
+            lambda *_args, _unsafe=unsafe, **_kwargs: subprocess.CompletedProcess(
+                [], 0, json.dumps(_unsafe), ""
+            ),
+        )
+        with pytest.raises(RuntimeError, match="main"):
+            pruning._verify_main_branch_is_non_rewritable("Papajona/Atlas-Bot")
+
+
+def test_main_protection_api_failure_blocks_pruning(monkeypatch):
+    monkeypatch.setattr(
+        pruning,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 403, "", "Resource not accessible by integration"
+        ),
+    )
+    with pytest.raises(RuntimeError, match="refusing all branch pruning"):
+        pruning._verify_main_branch_is_non_rewritable("Papajona/Atlas-Bot")
 
 
 def test_native_ai_branch_retirement_requires_exact_sha_and_migration_only_paths(monkeypatch):
