@@ -378,10 +378,9 @@ def test_file_backed_bootstrap_accepts_distinct_passwords_without_disclosing_the
     assert primary_password not in result.stdout + result.stderr
 
 
-def test_customer_paper_preflight_excludes_only_its_dedicated_schema_from_primary_scan():
+def test_customer_paper_preflight_excludes_dedicated_schema_only_when_database_is_shared():
     source = Path("app/customer_paper_ledger.py").read_text(encoding="utf-8")
-    assert source.count("AND n.nspname <> 'customer_paper'") == 4
-    assert "(NOT :same_database OR n.nspname <> 'customer_paper')" not in source
+    assert source.count("(NOT :same_database OR n.nspname <> 'customer_paper')") == 4
 
 
 def test_mandatory_postgres_workflow_covers_config_and_real_shared_primary_relations():
