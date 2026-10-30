@@ -355,12 +355,40 @@ async def native_trade_safety_review(packet: dict[str, Any]) -> dict[str, Any]:
     providers = {"atlas_native": result}
     groq = packet.get("groq_trade_review") if isinstance(packet, dict) else None
     if isinstance(groq, dict):
-        # Preserve the bounded provider review in the decision audit; it cannot authorize execution.
-        providers["groq"] = {
+        # Preserve bounded review evidence and safe failure diagnostics; provider
+        # output remains advisory and can never authorize execution.
+        groq_audit = {
             key: groq[key]
             for key in ("status", "provider", "model", "input_truncated", "execution_authority", "review")
             if key in groq
         }
+        for key in ("error", "cause"):
+            value = groq.get(key)
+            if (
+                isinstance(value, str)
+                and value
+                and len(value) <= 80
+                and value.isascii()
+                and all(char.isalnum() or char in "._" for char in value)
+            ):
+                groq_audit[key] = value
+        http_status = groq.get("http_status")
+        if (
+            isinstance(http_status, int)
+            and not isinstance(http_status, bool)
+            and 100 <= http_status <= 599
+        ):
+            groq_audit["http_status"] = http_status
+        reason = groq.get("reason")
+        if (
+            isinstance(reason, str)
+            and reason
+            and len(reason) <= 80
+            and reason.isascii()
+            and all(char.isalnum() or char in "._-" for char in reason)
+        ):
+            groq_audit["reason"] = reason
+        providers["groq"] = groq_audit
     return {"mode": "ATLAS_NATIVE_AI_SAFETY_VETO", "safe": result["safe"], "configured": True,
             "providers": providers, "errors": {}, "execution_authority": False,
             **({"reasons": result["reasons"]} if not result["safe"] else {})}
