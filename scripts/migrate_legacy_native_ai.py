@@ -5659,7 +5659,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             return False
         # Parameter-expansion assignment operators mutate a different variable;
         # deleting this retired secret assignment would silently remove that effect.
-        if re.search(r"\$\{[A-Za-z_][A-Za-z0-9_]*(?::?=)", candidate):
+        if re.search(r"\$\{[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]\r\n]+\])?(?::?=)", candidate):
             return False
         return "$(" not in candidate and chr(96) not in candidate
 
