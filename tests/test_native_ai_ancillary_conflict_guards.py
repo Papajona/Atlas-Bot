@@ -479,5 +479,24 @@ grant_secret_access atlas-gemini-api-key "$SERVICE_ACCOUNT" # retired provider a
     def test_inline_retired_provider_parameter_guard_is_removed(self):
         shell = 'if [[ -n "$SECRET_OPENAI_API_KEY" ]]; then : "${SECRET_OPENAI_API_KEY:?required}"; fi\n'
         self.assertEqual(migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell), "")
+    def test_retired_assignment_rejects_quotes_and_escaped_comment_commands(self):
+        unsafe = (
+            'SECRET_GEMINI_KEY=a"b #"; gcloud run deploy atlas\n',
+            "SECRET_GEMINI_KEY=a\\ #; gcloud run deploy atlas\n",
+        )
+        for shell in unsafe:
+            with self.subTest(shell=shell), self.assertRaises(migration.MigrationError):
+                migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_retired_secret_command_rejects_quotes_and_parameter_side_effects(self):
+        unsafe = (
+            'create_secret atlas-gemini-api-key a"b #"; gcloud run deploy atlas\n',
+            'create_secret atlas-gemini-api-key "${REQUIRED:?message}"\n',
+            'create_secret atlas-gemini-api-key "${OTHER:=value}"\n',
+        )
+        for shell in unsafe:
+            with self.subTest(shell=shell), self.assertRaises(migration.MigrationError):
+                migration.scrub_shell_deployment("deploy/gcp-bootstrap.sh", shell)
+
 if __name__ == "__main__":
     unittest.main()
