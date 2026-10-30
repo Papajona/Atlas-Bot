@@ -5668,7 +5668,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             names = names[:-1] + r"|AI_SECRET_ARGS)"
         pattern = re.compile(
             r"^\s*(?:export\s+)?" + names
-            + r"=(?:\"(?:\\.|[^\"\\])*\"|'[^']*'|[^\s;|&<>\"'\\]+)?(?:\s+#.*)?\s*$",
+            + r"=(?:\"(?:\\.|[^\"\\])*\"|'[^']*'|[^\s;|&<>\"'\\]+(?:\\\\)*)?(?:\s+#.*)?\s*$",
             re.I,
         )
         candidate = statement.rstrip("\r\n")
@@ -5701,7 +5701,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         """Remove complete literal retired-secret commands, allowing trailing comments."""
         create = re.fullmatch(
             r"""^\s*create_secret\s+atlas-(?:gemini|cerebras|ai-gateway|openai)[-a-z0-9]*\s+"""
-            r"""(?:"(?:\\.|[^"\\])*"|\x27[^\x27]*\x27|[^\s;|&<>\"'\\]+)(?:\s+#.*)?\s*$""",
+            r"""(?:"(?:\\.|[^"\\])*"|\x27[^\x27]*\x27|[^\s;|&<>\"'\\]+(?:\\\\)*)(?:\s+#.*)?\s*$""",
             statement.rstrip("\r\n"),
             re.I,
         )
