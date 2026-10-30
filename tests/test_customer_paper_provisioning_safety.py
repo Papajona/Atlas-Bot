@@ -394,6 +394,12 @@ def test_provision_verifier_rejects_mutating_privileges_on_every_paper_table():
     assert "NOT has_table_privilege('atlas_customer_paper',c.oid,'SELECT')" in VERIFY_SQL
     assert "NOT has_table_privilege('atlas_customer_paper',c.oid,'INSERT')" in VERIFY_SQL
     assert "n.nspname='customer_paper' AND c.relkind IN ('r','p')" in VERIFY_SQL
+    public_start = VERIFY_SQL.index("WHERE n.nspname='public'")
+    public_check = VERIFY_SQL[public_start : VERIFY_SQL.index(
+        "WHERE n.nspname='customer_paper'", public_start
+    )]
+    assert "current_setting('server_version_num')::integer >= 170000" in public_check
+    assert "has_table_privilege('atlas_customer_paper',c.oid,'MAINTAIN')" in public_check
 
 def test_role_setup_preflights_database_grant_authority_before_generating_credentials():
     from scripts import provision_customer_paper_schema as provisioner

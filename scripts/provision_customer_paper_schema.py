@@ -117,7 +117,15 @@ SELECT
         OR has_table_privilege('atlas_customer_paper',c.oid,'DELETE')
         OR has_table_privilege('atlas_customer_paper',c.oid,'TRUNCATE')
         OR has_table_privilege('atlas_customer_paper',c.oid,'REFERENCES')
-        OR has_table_privilege('atlas_customer_paper',c.oid,'TRIGGER'))
+        OR has_table_privilege('atlas_customer_paper',c.oid,'TRIGGER')
+        -- MAINTAIN was added in PostgreSQL 17. Guard the call so older supported
+        -- PostgreSQL versions never evaluate an unknown privilege name.
+        OR CASE
+             WHEN current_setting('server_version_num')::integer >= 170000
+             THEN has_table_privilege('atlas_customer_paper',c.oid,'MAINTAIN')
+             ELSE false
+           END
+      )
   ))::text || '|' ||
   (NOT EXISTS (
     SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
