@@ -279,12 +279,61 @@ def _cost_inputs() -> tuple[Decimal, Decimal, str]:
     return fee_bps, slippage_bps, "UNVERIFIED_DEFAULT_ASSUMPTIONS"
 
 
+def _rounded_paper_fill_notional_and_fee(
+    quantity: Decimal, price: Decimal, fee_bps: Decimal
+) -> tuple[Decimal, Decimal, Decimal]:
+    """Return ledger-scale quantity, notional, and fee using the exact fill rounding."""
+    with localcontext() as context:
+        context.prec = 80
+        rounded_quantity = quantity.quantize(_BAR_QUANTUM, rounding=ROUND_DOWN)
+        if rounded_quantity <= 0:
+            raise CustomerPaperFlowBlocked("Simulated fill quantity is below supported precision")
+        notional = (rounded_quantity * price).quantize(
+            _BAR_QUANTUM, rounding=ROUND_HALF_EVEN
+        )
+        fee = (notional * fee_bps / Decimal("10000")).quantize(
+            _BAR_QUANTUM, rounding=ROUND_UP
+        )
+    return rounded_quantity, notional, fee
+
+
+def _max_affordable_paper_buy_quantity(
+    cash: Decimal, max_quantity: Decimal, price: Decimal, fee_bps: Decimal
+) -> Decimal:
+    """Find the largest 18-decimal BUY quantity whose rounded debit fits available cash."""
+    with localcontext() as context:
+        context.prec = 80
+        cash = _finite_decimal(cash, "paper cash", non_negative=True)
+        price = _finite_decimal(price, "paper fill price")
+        fee_bps = _finite_decimal(fee_bps, "paper fee basis points", non_negative=True)
+        quantity_cap = max_quantity.quantize(_BAR_QUANTUM, rounding=ROUND_DOWN)
+        if cash <= 0 or price <= 0 or quantity_cap <= 0:
+            return Decimal("0")
+
+        # Search integer ledger quanta using the same notional/fee rounding used by
+        # _fill_price_and_fee. Dividing by unrounded unit cost can overdraw by one
+        # NUMERIC(38,18) quantum when the fee is rounded up after notional rounding.
+        low = 0
+        high = int(quantity_cap / _BAR_QUANTUM)
+        while low < high:
+            ticks = (low + high + 1) // 2
+            candidate = Decimal(ticks) * _BAR_QUANTUM
+            _, notional, fee = _rounded_paper_fill_notional_and_fee(
+                candidate, price, fee_bps
+            )
+            if notional + fee <= cash:
+                low = ticks
+            else:
+                high = ticks - 1
+        return Decimal(low) * _BAR_QUANTUM
+
+
 def _fill_price_and_fee(side: str, quantity: Decimal, market: dict) -> tuple[str, str, dict]:
     fee_bps, slippage_bps, cost_status = _cost_inputs()
     side = str(side).upper()
     top_of_book = market["ask"] if side == "BUY" else market["bid"]
     with localcontext() as context:
-        context.prec = 50
+        context.prec = 80
         slip_fraction = slippage_bps / Decimal("10000")
         raw_price = top_of_book * (
             Decimal("1") + slip_fraction if side == "BUY" else Decimal("1") - slip_fraction
@@ -295,13 +344,8 @@ def _fill_price_and_fee(side: str, quantity: Decimal, market: dict) -> tuple[str
         price = raw_price.quantize(_BAR_QUANTUM, rounding=price_rounding)
         if price <= 0:
             raise CustomerPaperFlowBlocked("Rounded simulated fill price is invalid")
-        rounded_quantity = quantity.quantize(_BAR_QUANTUM, rounding=ROUND_DOWN)
-        if rounded_quantity <= 0:
-            raise CustomerPaperFlowBlocked("Simulated fill quantity is below supported precision")
-        # Match the ledger's NUMERIC(..., 18) money scale before calculating costs.
-        notional = (rounded_quantity * price).quantize(_BAR_QUANTUM, rounding=ROUND_HALF_EVEN)
-        fee = (notional * fee_bps / Decimal("10000")).quantize(
-            _BAR_QUANTUM, rounding=ROUND_UP
+        rounded_quantity, notional, fee = _rounded_paper_fill_notional_and_fee(
+            quantity, price, fee_bps
         )
     cost_details = {
         "cost_model_status": cost_status,
@@ -565,10 +609,9 @@ async def _fill_open_order(
             Decimal("0"),
         )
         fee_bps = Decimal(str(costs["fee_bps_assumption"]))
-        unit_cost = Decimal(fill_price) * (Decimal("1") + fee_bps / Decimal("10000"))
-        with localcontext() as context:
-            context.prec = 50
-            affordable = max(Decimal("0"), cash / unit_cost).quantize(_BAR_QUANTUM, rounding=ROUND_DOWN)
+        affordable = _max_affordable_paper_buy_quantity(
+            cash, remaining, Decimal(fill_price), fee_bps
+        )
         remaining = min(remaining, affordable)
         if remaining <= 0:
             await _paper_call(
