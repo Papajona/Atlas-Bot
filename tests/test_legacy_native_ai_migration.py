@@ -4976,6 +4976,87 @@ async def groq_research_review(research, intelligence):
         self.assertNotIn("ai_provider_verification", cleaned)
         self.assertIn("Atlas Native AI offline verification (no provider calls)", cleaned)
 
+    def test_workflow_scrub_replaces_inline_optional_provider_check(self):
+        source = """jobs:
+  verify:
+    steps:
+      - name: AI model/provider verification when credentials are supplied
+        run: python scripts/check_ai_models.py || test $? -eq 2
+      - name: Keep unrelated production validation
+        run: python -m compileall -q app
+"""
+        cleaned = migration.scrub_workflow_ancillary(
+            ".github/workflows/production-verification.yml", source
+        )
+        self.assertNotIn("check_ai_models.py", cleaned)
+        self.assertIn("Atlas Native AI offline verification (no provider calls)", cleaned)
+        self.assertIn("python -m scripts.check_native_ai", cleaned)
+        self.assertIn("Keep unrelated production validation", cleaned)
+        self.assertIn("python -m compileall -q app", cleaned)
+
+    def test_workflow_scrub_replaces_minimal_legacy_provider_status_block(self):
+        source = """jobs:
+  verify:
+    steps:
+      - name: AI model/provider verification when credentials are supplied
+        env:
+          PYTHONPATH: .
+          GEMINI_API_KEY: __DOLLAR__{{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: __DOLLAR__{{ secrets.GROQ_API_KEY }}
+        run: |
+          set +e
+          python -m scripts.check_ai_models
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          elif [ "$status" -eq 2 ]; then
+            echo "BLOCKED: provider credentials are not configured; production verification cannot pass without provider checks"
+            exit 2
+          else
+            echo "BLOCKED: AI model/provider verification failed with exit code $status"
+            exit "$status"
+          fi
+"""
+        source = source.replace("__DOLLAR__", chr(36))
+        cleaned = migration.scrub_workflow_ancillary(
+            ".github/workflows/production-verification.yml", source
+        )
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+        self.assertNotIn("GROQ_API_KEY", cleaned)
+        self.assertNotIn("check_ai_models", cleaned)
+        self.assertIn("Atlas Native AI offline verification (no provider calls)", cleaned)
+        self.assertIn("python -m scripts.check_native_ai", cleaned)
+
+    def test_workflow_scrub_rejects_trailing_inline_step_fields(self):
+        source = """jobs:
+  verify:
+    steps:
+      - name: AI model/provider verification when credentials are supplied
+        run: python scripts/check_ai_models.py || test $? -eq 2
+        if: github.event_name == 'workflow_dispatch'
+"""
+        with self.assertRaisesRegex(
+            migration.MigrationError, "YAML fields or commands after its inline"
+        ):
+            migration.scrub_workflow_ancillary(
+                ".github/workflows/production-verification.yml", source
+            )
+
+    def test_workflow_scrub_rejects_unexpected_inline_provider_step_command(self):
+        source = """jobs:
+  verify:
+    steps:
+      - name: AI model/provider verification when credentials are supplied
+        run: python scripts/check_ai_models.py && curl https://example.invalid
+"""
+        with self.assertRaisesRegex(
+            migration.MigrationError, "unexpected inline command"
+        ):
+            migration.scrub_workflow_ancillary(
+                ".github/workflows/production-verification.yml", source
+            )
+
     def test_workflow_scrub_refuses_unexpected_command_in_guarded_live_provider_variant(self):
         source = """jobs:
   verify:

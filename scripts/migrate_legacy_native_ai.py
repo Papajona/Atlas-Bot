@@ -5342,6 +5342,11 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             return True
         if re.fullmatch(r'(?i)create_secret\s+atlas-groq-api-key\s+"\$GROQ_API_KEY"', stripped):
             return True
+        if re.fullmatch(
+            r'(?i)grant_secret_access\s+atlas-groq-api-key\s+"\$(?:SERVICE_ACCOUNT|WORKER_SERVICE_ACCOUNT)"',
+            stripped,
+        ):
+            return True
         if re.fullmatch(r"(?i)exit\s+[0-9]+", stripped):
             return True
         # printf -v assigns a shell variable; quoted punctuation must not make
@@ -5707,7 +5712,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                     f"{path} retains provider wiring in a mixed shell command; refusing to rewrite it"
                 )
             raise MigrationError(
-                f"{path} retains provider text in a non-provider shell statement; refusing lossy deletion"
+                f"{path} retains provider text in a non-provider shell statement; refusing lossy deletion: {stripped[:180]}"
             )
         if line.strip():
             output.append(line)
@@ -5891,8 +5896,13 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                     break
                 end += 1
             step_text = "".join(lines[index:end])
+            run_line_match = re.search(
+                r"(?m)^([ \t]*)run:[ \t]*(.*?)[ \t]*(?:\r?\n)?$",
+                step_text,
+            )
+            run_value = run_line_match.group(2).strip() if run_line_match else ""
             run_match = re.search(r"(?m)^([ \t]*)run:[ \t]*\|[ \t]*\r?$", step_text)
-            metadata_text = step_text[:run_match.start()] if run_match else ""
+            metadata_text = step_text[:run_line_match.start()] if run_line_match else ""
             metadata_lines = [
                 item.strip()
                 for item in metadata_text.splitlines()
@@ -5929,13 +5939,19 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                     and not re.match(r"^[A-Z_]+:", item)
                 )
             ]
+            env_declared = "env:" in metadata_lines
+            has_provider_credential = bool(
+                observed_env_keys.intersection(
+                    {"GEMINI_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY"}
+                )
+            )
+            inline_run = "" if run_value in {"|", "|-", "|+", ">", ">-"} else run_value
             if (
-                not run_match
+                not metadata_lines
                 or metadata_lines[0] != "- name: " + step_name
-                or "id: ai_provider_verification" not in metadata_lines
-                or "continue-on-error: true" not in metadata_lines
-                or "env:" not in metadata_lines
-                or not {"PYTHONPATH", "GEMINI_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY"}.issubset(observed_env_keys)
+                or ("id: ai_provider_verification" in metadata_lines and metadata_lines.count("id: ai_provider_verification") != 1)
+                or ("continue-on-error: true" in metadata_lines and metadata_lines.count("continue-on-error: true") != 1)
+                or ("env:" in metadata_lines and metadata_lines.count("env:") != 1)
                 or set(metadata_keys) - allowed_env_keys
                 or unexpected_metadata
                 or any(item != manual_dispatch_condition for item in metadata_conditions)
@@ -5943,11 +5959,48 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                     "manual dispatch only" in step_name.lower()
                     and metadata_conditions != [manual_dispatch_condition]
                 )
+                or (env_declared and not has_provider_credential)
             ):
                 raise MigrationError(
                     f"{path} has an unrecognized legacy AI model/provider verification step; refusing to discard workflow behavior"
                 )
 
+            # A few early legacy branches used a single guarded command instead of
+            # the later multi-line status block. Only accept the exact known checker
+            # forms; never discard arbitrary workflow commands or environment fields.
+            if inline_run:
+                trailing_inline_fields = [
+                    item.strip()
+                    for item in step_text[run_line_match.end():].splitlines()
+                    if item.strip() and not item.lstrip().startswith("#")
+                ]
+                if trailing_inline_fields:
+                    raise MigrationError(
+                        f"{path} has YAML fields or commands after its inline legacy AI provider run field: {trailing_inline_fields[0][:100]}"
+                    )
+                allowed_inline_commands = {
+                    "python scripts/check_ai_models.py || test $? -eq 2",
+                    "python scripts/check_ai_models.py",
+                    "python -m scripts.check_ai_models",
+                }
+                if inline_run not in allowed_inline_commands:
+                    raise MigrationError(
+                        f"{path} has an unexpected inline command in the legacy AI model/provider verification step: {inline_run[:100]}"
+                    )
+                kept.extend(
+                    [
+                        f"{step_indent}- name: Atlas Native AI offline verification (no provider calls)\n",
+                        f"{step_indent}  id: native_ai_verification\n",
+                        f"{step_indent}  run: python -m scripts.check_native_ai\n",
+                    ]
+                )
+                native_ai_provider_step_replaced_in_job = True
+                index = end
+                continue
+            if not run_match:
+                raise MigrationError(
+                    f"{path} has an unrecognized legacy AI model/provider verification step; refusing to discard workflow behavior"
+                )
             run_indent = len(run_match.group(1))
             commands = []
             grep_checks = []

@@ -142,6 +142,31 @@ fi
         self.assertEqual(cleaned, shell)
         self.assertIn('create_secret atlas-groq-api-key "$GROQ_API_KEY"', cleaned)
 
+    def test_optional_groq_secret_access_grants_are_preserved(self):
+        shell = """if [[ -n "$GROQ_API_KEY" ]]; then grant_secret_access atlas-groq-api-key "$SERVICE_ACCOUNT"; grant_secret_access atlas-groq-api-key "$WORKER_SERVICE_ACCOUNT"; fi
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/gcp-bootstrap.sh", shell)
+        self.assertEqual(cleaned, shell)
+        self.assertIn('grant_secret_access atlas-groq-api-key "$SERVICE_ACCOUNT"', cleaned)
+        self.assertIn('grant_secret_access atlas-groq-api-key "$WORKER_SERVICE_ACCOUNT"', cleaned)
+
+    def test_groq_secret_access_grant_to_unapproved_identity_is_refused(self):
+        shell = """if [[ -n "$GROQ_API_KEY" ]]; then
+  grant_secret_access atlas-groq-api-key "$PROJECT_NUMBER"
+fi
+"""
+        with self.assertRaisesRegex(
+            migration.MigrationError, "mixed provider-conditioned shell block"
+        ):
+            migration.scrub_shell_deployment("deploy/gcp-bootstrap.sh", shell)
+
+    def test_shell_refusal_includes_the_exact_unrecognized_provider_line(self):
+        shell = 'printf -v deployment_status "Gemini provider not configured"\\n'
+        with self.assertRaisesRegex(
+            migration.MigrationError, r"printf -v deployment_status"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
     def test_mixed_provider_url_and_database_migration_command_fails_closed(self):
         workflow = """name: database deployment
 jobs:
