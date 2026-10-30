@@ -345,10 +345,7 @@ async def submit_customer_paper_order(
                     )
                 return {"status": "REPLAYED", "order_id": str(existing_intent[0]), "client_order_id": client_id}
 
-            new_owner = str(
-                safe_metadata.get("execution_owner")
-                or ("autonomous_customer_bot" if safe_metadata.get("paper_flow_version") == 1 else "manual_customer_api")
-            )
+            new_owner = str(safe_metadata.get("execution_owner") or "manual_customer_api")
             protective_exit = str(safe_metadata.get("order_role") or "").upper() == "PROTECTIVE_EXIT"
             await conn.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
@@ -382,10 +379,7 @@ async def submit_customer_paper_order(
                         except ValueError:
                             raw_owner = {}
                     prior_metadata = dict(raw_owner) if isinstance(raw_owner, Mapping) else {}
-                    prior_owner = str(
-                        prior_metadata.get("execution_owner")
-                        or ("autonomous_customer_bot" if prior_metadata.get("paper_flow_version") == 1 else "manual_customer_api")
-                    )
+                    prior_owner = str(prior_metadata.get("execution_owner") or "manual_customer_api")
                     if prior_owner != new_owner:
                         raise CustomerPaperOrderConflict(
                             "Manual and autonomous customer paper orders cannot coexist for the same market; reconcile the pending order first"
@@ -437,10 +431,7 @@ async def submit_customer_paper_order(
                         except ValueError:
                             prior_position_metadata = {}
                     prior_position_metadata = dict(prior_position_metadata) if isinstance(prior_position_metadata, Mapping) else {}
-                    position_owner = str(
-                        prior_position_metadata.get("execution_owner")
-                        or ("autonomous_customer_bot" if prior_position_metadata.get("paper_flow_version") == 1 else "manual_customer_api")
-                    )
+                    position_owner = str(prior_position_metadata.get("execution_owner") or "manual_customer_api")
                     if position_owner != new_owner:
                         raise CustomerPaperOrderConflict(
                             "Manual and autonomous customer paper flows cannot operate on the same open position; reconcile/close it through its owning flow"
