@@ -551,7 +551,7 @@ async def preflight_isolated_customer_paper_ledger(
                         JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
-                          AND n.nspname <> 'customer_paper'
+                          AND (NOT :same_database OR n.nspname <> 'customer_paper')
                         """
                     ), {"paper_role": role_name, "same_database": same_database})).mappings().all()
                     # PostgreSQL normally grants USAGE on the "public" schema to
@@ -588,7 +588,7 @@ async def preflight_isolated_customer_paper_ledger(
                         JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
-                          AND n.nspname <> 'customer_paper'
+                          AND (NOT :same_database OR n.nspname <> 'customer_paper')
                           -- An object ACL is not effectively reachable without USAGE
                           -- on its schema. Supabase grants PUBLIC SELECT on two
                           -- extensions.pg_stat_statements views while this runtime
@@ -615,7 +615,7 @@ async def preflight_isolated_customer_paper_ledger(
                         JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
-                          AND n.nspname <> 'customer_paper'
+                          AND (NOT :same_database OR n.nspname <> 'customer_paper')
                           AND has_schema_privilege(r.oid, n.oid, 'USAGE')
                           AND c.relkind = 'S'
                         """
@@ -631,7 +631,7 @@ async def preflight_isolated_customer_paper_ledger(
                         JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
-                          AND n.nspname <> 'customer_paper'
+                          AND (NOT :same_database OR n.nspname <> 'customer_paper')
                           AND has_schema_privilege(r.oid, n.oid, 'USAGE')
                           AND p.prosecdef
                           AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
