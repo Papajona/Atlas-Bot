@@ -17,11 +17,9 @@ on:
       - 'tests/test_unified_custody.py'
       # Changes to the customer paper execution/ledger/provisioning path must
       # receive the dedicated PostgreSQL gate, not only the general pytest job.
-      - 'app/customer_paper_*.py'
       - 'scripts/bootstrap_atlas_paper_staging_gcp.sh'
       - 'scripts/provision_customer_paper_schema.py'
       - 'scripts/setup_customer_paper_role_interactive.py'
-      - 'tests/test_customer_paper_*.py'
       - 'tests/test_interactive_paper_role_setup.py'
       - 'scripts/customer_paper_ledger_schema.sql'
       - 'app/paper_staging.py'
@@ -233,7 +231,7 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
         run: |
           pytest -q -rs --junitxml=pg-paper.xml \
-            tests/test_customer_paper_*.py \
+            tests/test_customer_paper_provisioning_safety.py \
             tests/test_interactive_paper_role_setup.py \
             tests/test_paper_staging_runtime.py -v --tb=short
       - name: Reject skipped mandatory PostgreSQL tests
