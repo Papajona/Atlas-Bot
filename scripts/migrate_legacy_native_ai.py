@@ -5642,7 +5642,8 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         candidate = statement.rstrip("\r\n")
         # A final backslash joins the next physical line in Bash. Deleting
         # only this assignment would expose its continuation as a command.
-        if candidate.endswith("\\") or not pattern.fullmatch(candidate):
+        trailing_backslashes = len(candidate) - len(candidate.rstrip("\\"))
+        if trailing_backslashes % 2 == 1 or not pattern.fullmatch(candidate):
             return False
         return "$(" not in candidate and chr(96) not in candidate
 
