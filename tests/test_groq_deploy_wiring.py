@@ -185,7 +185,7 @@ def test_worker_revision_config_resolver_reads_pinned_secret_and_validated_value
                     {"name": "GROQ_MAX_COMPLETION_TOKENS", "value": "2048"},
                     {"name": "GROQ_RESEARCH_REVIEW_ENABLED", "value": "true"},
                     {"name": "GROQ_API_KEY", "valueFrom": {"secretKeyRef": {
-                        "name": "projects/atlas/secrets/atlas-groq-api-key",
+                        "name": "projects/atlas-project/secrets/atlas-groq-api-key",
                         "key": "7",
                     }}},
                 ]
@@ -193,7 +193,7 @@ def test_worker_revision_config_resolver_reads_pinned_secret_and_validated_value
         }
     }
     result = subprocess.run(
-        [sys.executable, str(resolver), "--revision-config", "atlas"],
+        [sys.executable, str(resolver), "--revision-config", "atlas-project"],
         input=json.dumps(payload), text=True, capture_output=True, check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -215,14 +215,14 @@ def test_worker_revision_config_resolver_rejects_qualified_cross_project_groq_se
                 {"name": "GROQ_MAX_COMPLETION_TOKENS", "value": "2048"},
                 {"name": "GROQ_RESEARCH_REVIEW_ENABLED", "value": "true"},
                 {"name": "GROQ_API_KEY", "valueFrom": {"secretKeyRef": {
-                    "name": "projects/another-project/secrets/atlas-groq-api-key",
+                    "name": "projects/other-project/secrets/atlas-groq-api-key",
                     "key": "7",
                 }}},
             ]
         }]}
     }
     result = subprocess.run(
-        [sys.executable, str(resolver), "--revision-config", "atlas"],
+        [sys.executable, str(resolver), "--revision-config", "atlas-project"],
         input=json.dumps(payload), text=True, capture_output=True, check=False,
     )
     assert result.returncode == 2
@@ -240,7 +240,7 @@ def test_worker_revision_config_resolver_supports_cloud_run_v2_without_optional_
         {"name": "GROQ_RESEARCH_REVIEW_ENABLED", "value": "false"},
     ]}]}
     result = subprocess.run(
-        [sys.executable, str(resolver), "--revision-config", "atlas"],
+        [sys.executable, str(resolver), "--revision-config", "atlas-project"],
         input=json.dumps(payload), text=True, capture_output=True, check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -261,7 +261,7 @@ def test_worker_revision_config_resolver_rejects_cap_above_worker_validator_limi
         {"name": "GROQ_RESEARCH_REVIEW_ENABLED", "value": "true"},
     ]}]}}
     result = subprocess.run(
-        [sys.executable, str(resolver), "--revision-config", "atlas"],
+        [sys.executable, str(resolver), "--revision-config", "atlas-project"],
         input=json.dumps(payload), text=True, capture_output=True, check=False,
     )
     assert result.returncode == 2
