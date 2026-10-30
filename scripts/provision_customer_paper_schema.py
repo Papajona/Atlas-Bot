@@ -62,6 +62,23 @@ SELECT current_database() || '|' || current_user || '|' ||
 ROLE_EXISTS_SQL = "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='atlas_customer_paper')::text;"
 
 
+# CREATE ROLE authority does not automatically confer authority to grant CONNECT.
+# The setup operator must own the target database (including inherited owner role
+# membership) or be a superuser before any credential is generated or role DDL runs.
+ROLE_GRANT_AUTHORITY_SQL = """
+SELECT EXISTS (
+  SELECT 1
+  FROM pg_database target_db
+  JOIN pg_roles operator_role ON operator_role.rolname = current_user
+  WHERE target_db.datname = current_database()
+    AND (
+      operator_role.rolsuper
+      OR pg_has_role(current_user, target_db.datdba, 'USAGE')
+    )
+)::text;
+"""
+
+
 VERIFY_SQL = """
 SELECT
   (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -101,6 +118,19 @@ SELECT
         OR has_table_privilege('atlas_customer_paper',c.oid,'TRUNCATE')
         OR has_table_privilege('atlas_customer_paper',c.oid,'REFERENCES')
         OR has_table_privilege('atlas_customer_paper',c.oid,'TRIGGER'))
+  ))::text || '|' ||
+  (NOT EXISTS (
+    SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='customer_paper' AND c.relkind IN ('r','p')
+      AND (
+        NOT has_table_privilege('atlas_customer_paper',c.oid,'SELECT')
+        OR NOT has_table_privilege('atlas_customer_paper',c.oid,'INSERT')
+        OR has_table_privilege('atlas_customer_paper',c.oid,'UPDATE')
+        OR has_table_privilege('atlas_customer_paper',c.oid,'DELETE')
+        OR has_table_privilege('atlas_customer_paper',c.oid,'TRUNCATE')
+        OR has_table_privilege('atlas_customer_paper',c.oid,'REFERENCES')
+        OR has_table_privilege('atlas_customer_paper',c.oid,'TRIGGER')
+      )
   ))::text;
 """
 
@@ -274,6 +304,12 @@ def main() -> int:
                 raise RuntimeError("atlas_customer_paper already exists; inspect its attributes/ACLs instead of replacing its password")
             if can_manage_roles.strip().lower() not in {"true", "t"}:
                 raise RuntimeError("Refusing role creation: current database role lacks CREATEROLE/SUPERUSER authority")
+            grant_authority = _psql(env, "-c", ROLE_GRANT_AUTHORITY_SQL).strip().lower()
+            if grant_authority not in {"true", "t"}:
+                raise RuntimeError(
+                    "Refusing role creation: current database role must own the target database "
+                    "or be a superuser to grant CONNECT"
+                )
             repo_root = Path(__file__).resolve().parents[1]
             output_path = Path.home().resolve() / ".atlas-customer-paper" / "database-url"
             try:
@@ -329,11 +365,11 @@ def main() -> int:
             "-f", str(SCHEMA_FILE),
         )
         verification = _psql(env, "-c", VERIFY_SQL).split("|")
-        if len(verification) != 12:
+        if len(verification) != 13:
             raise RuntimeError("Schema DDL ran, but post-DDL verification output was incomplete; keep feature disabled")
         (table_count, expected_table_count, forced_rls_count, policy_count, tenant_policy_count,
          backend_policy_count, schema_usage, schema_create_denied, public_create_denied,
-         sequence_count, sequence_usage_count, real_tables_denied) = verification
+         sequence_count, sequence_usage_count, real_tables_denied, paper_table_privileges_safe) = verification
         checks = {
             "nine_paper_tables_only": table_count == "9" and expected_table_count == "9",
             "forced_rls_on_seven_customer_tables": forced_rls_count == "7",
@@ -346,6 +382,7 @@ def main() -> int:
             "four_identity_sequences_only": sequence_count == "4",
             "all_identity_sequences_have_usage": sequence_usage_count == "4",
             "real_money_table_privileges_denied": real_tables_denied.strip().lower() in {"true", "t"},
+            "paper_tables_allow_only_select_insert": paper_table_privileges_safe.strip().lower() in {"true", "t"},
         }
         for name, passed in checks.items():
             print(f"{'PASS' if passed else 'FAIL'} {name}")
