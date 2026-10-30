@@ -103,9 +103,9 @@ def test_daily_research_runs_bounded_optional_groq_reviews_concurrently():
 def test_worker_runbook_does_not_require_a_groq_secret_placeholder():
     runbook = (ROOT / "deploy" / "DEPLOY_WORKFLOW.md").read_text(encoding="utf-8")
     assert "SECRET_GROQ_REF=atlas-groq-api-key:<v>" not in runbook
-    assert "API_SERVICE=atlas-api" in runbook
+    assert "API_SERVICE=atlas-api \\" in runbook
     assert "reads the active API service revision" in runbook
-    assert "must exactly match the approved API deployment values" in runbook
+    assert "does not accept an independent worker Groq configuration" in runbook
     assert "is optional and must be an exact" in runbook
 
 
