@@ -39,10 +39,17 @@ def test_groq_deployment_validator_rejects_unsafe_values(values: tuple[str, str,
     assert "ERROR:" in result.stderr
 
 
-def test_api_and_worker_deployments_preserve_groq_operator_overrides() -> None:
-    for relative_path in ("deploy/cloud-run-deploy.sh", "deploy/cloud-run-worker-deploy.sh"):
-        source = (ROOT / relative_path).read_text(encoding="utf-8")
-        assert 'GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"' in source
-        assert 'GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"' in source
-        assert 'GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"' in source
-        assert "validate_groq_deploy_env.py" in source
+def test_api_defaults_groq_but_worker_requires_explicit_api_parity_values() -> None:
+    api = (ROOT / "deploy" / "cloud-run-deploy.sh").read_text(encoding="utf-8")
+    worker = (ROOT / "deploy" / "cloud-run-worker-deploy.sh").read_text(encoding="utf-8")
+    assert 'GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"' in api
+    assert 'GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"' in api
+    assert 'GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"' in api
+    assert 'GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"' not in worker
+    assert 'GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"' not in worker
+    assert 'GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"' not in worker
+    assert "GROQ_MODEL:?Set GROQ_MODEL to the same approved value used by the API deployment" in worker
+    assert "GROQ_MAX_COMPLETION_TOKENS:?Set GROQ_MAX_COMPLETION_TOKENS to the same approved API value" in worker
+    assert "GROQ_RESEARCH_REVIEW_ENABLED:?Set GROQ_RESEARCH_REVIEW_ENABLED to the same approved API value" in worker
+    assert "validate_groq_deploy_env.py" in api
+    assert "validate_groq_deploy_env.py" in worker
