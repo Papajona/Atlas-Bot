@@ -108,8 +108,8 @@ BEGIN
   END IF;
 
   -- CREATE ROLE does not grant authority to grant database privileges. The
-  -- CONNECT grant below is issued by current_user, so require database-owner
-  -- authority (including inherited owner membership) or superuser up front.
+  -- CONNECT grant below is issued by current_user, so require database-owner,
+  -- superuser, or delegated CONNECT WITH GRANT OPTION authority up front.
   IF NOT EXISTS (
     SELECT 1
     FROM pg_database target_db
@@ -118,10 +118,13 @@ BEGIN
       AND (
         operator_role.rolsuper
         OR pg_has_role(current_user, target_db.datdba, 'USAGE')
+        OR has_database_privilege(
+             current_user, current_database(), 'CONNECT WITH GRANT OPTION'
+           )
       )
   ) THEN
     RAISE EXCEPTION
-      'Connected role must own the target database or be a superuser to grant CONNECT';
+      'Connected role must own the target database, hold CONNECT WITH GRANT OPTION, or be a superuser to grant CONNECT';
   END IF;
 
   IF current_user IN (
