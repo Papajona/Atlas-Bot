@@ -366,7 +366,8 @@ jobs:
               # GITHUB_TOKEN has no workflow-file write permission. Use a separately
               # scoped GitHub App/PAT token only for uploading this temporary commit.
               workflow_auth_header="$(printf 'x-access-token:%s' "$workflow_token" | base64 -w0)"
-              if ! git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $workflow_auth_header" \
+              if ! git -c "http.https://github.com/.extraheader=" \
+                  -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $workflow_auth_header" \
                   push origin "HEAD:refs/heads/$temp_ref" >/dev/null; then
                 echo "Could not upload workflow-changing temporary commit ref for $branch; target branch unchanged." >&2
                 return 1
