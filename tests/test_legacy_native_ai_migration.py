@@ -1820,7 +1820,7 @@ async def _gemini_json(prompt):
             self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
     def test_config_refuses_one_line_settings_class_with_retired_provider_field(self):
-        source = "class Settings: gemini_api_key: str = ''\\n"
+        source = "class Settings: gemini_api_key: str = ''\n"
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = root / "app" / "config.py"
@@ -1833,11 +1833,11 @@ async def _gemini_json(prompt):
 
     def test_config_refuses_multiple_recognized_settings_classes_with_retired_provider_fields(self):
         source = (
-            "class Settings:\\n"
-            "    gemini_api_key: str = ''\\n"
-            "class AppSettings:\\n"
-            "    database_url: str = ''\\n"
-            "settings = AppSettings()\\n"
+            "class Settings:\n"
+            "    gemini_api_key: str = ''\n"
+            "class AppSettings:\n"
+            "    database_url: str = ''\n"
+            "settings = AppSettings()\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3549,7 +3549,7 @@ gcloud run services update atlas-api --set-secrets="DATABASE_URL=atlas-db:latest
             command = (
                 "gcloud() {\n"
                 "  for arg in \"$@\"; do\n"
-                "    case \"$arg\" in --set-secrets=*) printf '%s\\n' \"${arg#--set-secrets=}\" ;; esac\n"
+                "    case \"$arg\" in --set-secrets=*) printf '%s\n' \"${arg#--set-secrets=}\" ;; esac\n"
                 "  done\n"
                 "}\n"
                 + cleaned
@@ -4834,7 +4834,7 @@ def retained_helper():
             helper_module = root / "app" / "branch_helpers.py"
             target.parent.mkdir()
             helper_module.write_text(
-                'run = exec\nrun("def branch_helper():\\n    return True")\n',
+                'run = exec\nrun("def branch_helper():\n    return True")\n',
                 encoding="utf-8",
             )
             target.write_text(legacy, encoding="utf-8")
