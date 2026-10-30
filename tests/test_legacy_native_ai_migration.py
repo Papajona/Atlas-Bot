@@ -5774,8 +5774,16 @@ fi
         ):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_retired_assignment_rejects_indexed_parameter_expansion_side_effects(self):
+        unsafe_shell = (
+            "SECRET_OPENAI_API_KEY=${state[0]:=ready}\n"
+            'printf "%s" "${state[0]}"\n'
+        )
+        with self.assertRaisesRegex(
+            migration.MigrationError, "compound retired-provider assignment"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe_shell)
+
     def test_retired_assignment_rejects_parameter_expansion_side_effects(self):
         unsafe_shell = (
             "SECRET_OPENAI_API_KEY=${other:=value}\n"
@@ -5806,6 +5814,9 @@ if __name__ == "__main__":
             migration.MigrationError, "unsafe retired-provider if-header|executable command"
         ):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+if __name__ == "__main__":
+    unittest.main()
 
 if __name__ == "__main__":
     unittest.main()
