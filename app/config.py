@@ -270,6 +270,8 @@ class Settings(BaseSettings):
     groq_model: str = "openai/gpt-oss-20b"
     groq_max_completion_tokens: int = 2048
     groq_timeout_seconds: float = 20.0
+    # Separate external trade-review budget; Native AI receives its own veto deadline afterwards.
+    groq_trade_review_timeout_seconds: float = 5.0
     # Scheduled research can use Groq when a key is configured. Trade-time review is
     # separately opt-in so the default empty Groq key never blocks otherwise eligible trades.
     groq_research_review_enabled: bool = True
@@ -394,6 +396,8 @@ class Settings(BaseSettings):
     otp_rate_limit_per_minute: int = 5
     withdrawal_step_up_minutes: int = 3
     ai_strategy_provider_timeout_seconds: float = 1.5
+    # Optional Groq trade review receives a bounded window plus a protected local veto window.
+    ai_trade_decision_total_timeout_seconds: float = 6.5
     # Fail closed for live/broker-demo execution if the originating signal time is missing.
     # Paper execution may default missing timestamps to request time for simulation only.
     require_signal_timestamp_for_live: bool = True

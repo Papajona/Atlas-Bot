@@ -390,7 +390,17 @@ fun RiskDashboardScreen(
                         fontSize = 13.sp
                     )
                     Text(
-                        text = "• AI Safety Latency Ceiling: 1.5s Fail-Closed (NO_TRADE)",
+                        text = if (
+                            wsConnectionState is com.atlas.trading.network.WebSocketConnectionState.Connected &&
+                            metrics.lastUpdatedEpochMs > 0L &&
+                            metrics.streamType == "WEBSOCKET_PUSH" &&
+                            metrics.aiSafetyTimeoutSeconds.isFinite() &&
+                            metrics.aiSafetyTimeoutSeconds > 0.0
+                        ) {
+                            "• AI Safety Decision Deadline: ${metrics.aiSafetyTimeoutSeconds}s Fail-Closed (NO_TRADE)"
+                        } else {
+                            "• AI Safety Decision Deadline: unavailable (live risk telemetry not available)"
+                        },
                         color = textMuted,
                         fontSize = 13.sp
                     )
