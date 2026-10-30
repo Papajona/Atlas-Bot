@@ -41,15 +41,29 @@ async def append_audit_once(
         raise ValueError("audit idempotency fields must be present in the detail payload")
 
     await _lock_chain_state(db)
-    existing_query = select(AuditLog).where(AuditLog.event == event)
-    for field in idempotency_fields:
-        # AuditLog.detail is stored with json.dumps' default separators (": ").
-        # Match that canonical persisted representation, not compact JSON.
-        value = json.dumps(detail[field], sort_keys=True, default=str)
-        existing_query = existing_query.where(AuditLog.detail.contains(f'"{field}": {value}'))
-    existing = (await db.execute(existing_query.order_by(AuditLog.id).limit(1))).scalar_one_or_none()
-    if existing is not None:
-        return existing, False
+    # AuditLog.detail uses EncryptedText. SQL substring predicates inspect ciphertext,
+    # not the decrypted JSON payload, and therefore miss valid retries. Filter by the
+    # unencrypted event column, then compare the decrypted identity fields in Python.
+    candidates = (
+        await db.execute(
+            select(AuditLog).where(AuditLog.event == event).order_by(AuditLog.id)
+        )
+    ).scalars().all()
+    for candidate in candidates:
+        try:
+            stored_detail = (
+                candidate.detail
+                if isinstance(candidate.detail, dict)
+                else json.loads(candidate.detail or "{}")
+            )
+        except (TypeError, ValueError):
+            # A malformed historical audit payload cannot prove an idempotent match.
+            continue
+        if isinstance(stored_detail, dict) and all(
+            stored_detail.get(field) == detail[field]
+            for field in idempotency_fields
+        ):
+            return candidate, False
 
     row = await append_audit(db, event=event, detail=detail, actor_id=actor_id)
     return row, True
