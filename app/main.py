@@ -143,32 +143,51 @@ async def _attach_groq_trade_review(
     return result
 
 
-async def _run_trade_safety_review(packet: dict) -> dict:
-    """Run Groq and Native AI within one end-to-end decision deadline.
+def _trade_safety_timeout_metadata() -> dict[str, float]:
+    """Expose the effective total, optional Groq window and protected Native AI reserve."""
+    if settings.groq_trade_review_enabled:
+        total = float(settings.ai_trade_decision_total_timeout_seconds)
+        native_reserve = min(float(settings.ai_strategy_provider_timeout_seconds), total)
+        groq_budget = max(
+            0.0,
+            min(float(settings.groq_trade_review_timeout_seconds), total - native_reserve),
+        )
+    else:
+        total = float(settings.ai_strategy_provider_timeout_seconds)
+        native_reserve = total
+        groq_budget = 0.0
+    return {
+        "timeout_seconds": total,
+        "total_timeout_seconds": total,
+        "groq_provider_timeout_seconds": groq_budget,
+        "native_veto_reserve_seconds": native_reserve,
+    }
 
-    Groq is advisory evidence. Its provider timeout is converted into an ERROR
-    envelope within the reserved Groq slice; Native AI then uses the remaining
-    part of the original deadline for its local final veto.
+
+async def _run_trade_safety_review(packet: dict) -> dict:
+    """Run optional Groq evidence and Native AI within one explicit deadline.
+
+    When Groq is enabled, reserve the configured local Native AI timeout and give
+    Groq only the remaining portion of the end-to-end decision budget. When it is
+    disabled, retain the original local-only timeout unchanged.
     """
-    timeout = float(settings.ai_strategy_provider_timeout_seconds)
+    timeout_meta = _trade_safety_timeout_metadata()
+    timeout = timeout_meta["total_timeout_seconds"]
+    groq_budget = timeout_meta["groq_provider_timeout_seconds"]
     if not math.isfinite(timeout) or timeout <= 0:
+        raise asyncio.TimeoutError
+    if settings.groq_trade_review_enabled and (
+        not math.isfinite(groq_budget) or groq_budget <= 0
+    ):
         raise asyncio.TimeoutError
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     if settings.groq_trade_review_enabled:
-        native_reserve = min(0.25, timeout * 0.20)
-        groq_budget = min(
-            float(settings.groq_trade_review_timeout_seconds),
-            max(0.0, timeout - native_reserve),
-        )
-        if not math.isfinite(groq_budget) or groq_budget <= 0:
-            raise asyncio.TimeoutError
-        # No outer wait_for here: _attach_groq_trade_review catches its own
-        # bounded timeout and attaches an ERROR envelope for the Native veto.
+        # The helper converts its bounded provider timeout into an ERROR envelope;
+        # Native AI receives the remaining reserved veto time for its final decision.
         await _attach_groq_trade_review(packet, timeout_seconds=groq_budget)
     else:
-        # Local DISABLED marker only; no external provider call is made.
         await _attach_groq_trade_review(packet)
 
     remaining = deadline - loop.time()
@@ -1413,7 +1432,7 @@ async def _run_persisted_adaptive_bot_cycle(
     try:
         ai_review = await _run_trade_safety_review(packet)
     except asyncio.TimeoutError:
-        await _audit("ADAPTIVE_BOT_AI_TIMEOUT", {"bot_id": bot_id, "customer_id": profile.id, "symbol": req.symbol, "timeout_seconds": settings.ai_strategy_provider_timeout_seconds})
+        await _audit("ADAPTIVE_BOT_AI_TIMEOUT", {"bot_id": bot_id, "customer_id": profile.id, "symbol": req.symbol, **_trade_safety_timeout_metadata()})
         return {"decision": "NO_TRADE", "stage": "ai_safety_timeout", "analysis": deterministic, "adaptive_model": adaptive, "ml_signal": ml_signal}
     if not ai_review["safe"]:
         stage = "ai_safety_not_configured" if not ai_review.get("configured", True) else "ai_safety_gate"
@@ -4984,7 +5003,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
         try:
             ai_review = await _run_trade_safety_review(packet)
         except asyncio.TimeoutError:
-            await _audit("CUSTOMER_BOT_AI_TIMEOUT", {"customer_id": profile.id, "symbol": req.symbol, "timeout_seconds": settings.ai_strategy_provider_timeout_seconds})
+            await _audit("CUSTOMER_BOT_AI_TIMEOUT", {"customer_id": profile.id, "symbol": req.symbol, **_trade_safety_timeout_metadata()})
             return await _record_customer_decision({"decision": "NO_TRADE", "stage": "ai_safety_timeout", "analysis": deterministic, "execution": None})
         if not ai_review["safe"]:
             stage = "ai_safety_not_configured" if not ai_review.get("configured", True) else "ai_safety_gate"
@@ -6298,7 +6317,9 @@ async def risk_dashboard_metrics(
             "session_weight": 0,
             "carry_weight": 0,
             "cost_stress_headroom": 0.0,
-            "ai_safety_timeout_seconds": float(settings.ai_strategy_provider_timeout_seconds),
+            "ai_safety_timeout_seconds": _trade_safety_timeout_metadata()["total_timeout_seconds"],
+            "ai_safety_native_veto_reserve_seconds": _trade_safety_timeout_metadata()["native_veto_reserve_seconds"],
+            "groq_trade_review_timeout_seconds": _trade_safety_timeout_metadata()["groq_provider_timeout_seconds"],
             "is_halted": kill,
             "stream_type": "HTTP_POLL",
             "worker_health": worker_health,
@@ -6416,7 +6437,9 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 "session_weight": 0,
                 "carry_weight": 0,
                 "cost_stress_headroom": 0.0,
-                "ai_safety_timeout_seconds": float(settings.ai_strategy_provider_timeout_seconds),
+                "ai_safety_timeout_seconds": _trade_safety_timeout_metadata()["total_timeout_seconds"],
+            "ai_safety_native_veto_reserve_seconds": _trade_safety_timeout_metadata()["native_veto_reserve_seconds"],
+            "groq_trade_review_timeout_seconds": _trade_safety_timeout_metadata()["groq_provider_timeout_seconds"],
                 "is_halted": kill,
                 "stream_type": "WEBSOCKET_PUSH",
                 "worker_health": worker_health,
