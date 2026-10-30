@@ -5947,7 +5947,8 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
             )
             inline_run = "" if run_value in {"|", "|-", "|+", ">", ">-"} else run_value
             if (
-                metadata_lines[0] != "- name: " + step_name
+                not metadata_lines
+                or metadata_lines[0] != "- name: " + step_name
                 or ("id: ai_provider_verification" in metadata_lines and metadata_lines.count("id: ai_provider_verification") != 1)
                 or ("continue-on-error: true" in metadata_lines and metadata_lines.count("continue-on-error: true") != 1)
                 or ("env:" in metadata_lines and metadata_lines.count("env:") != 1)
@@ -5968,6 +5969,15 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
             # the later multi-line status block. Only accept the exact known checker
             # forms; never discard arbitrary workflow commands or environment fields.
             if inline_run:
+                trailing_inline_fields = [
+                    item.strip()
+                    for item in step_text[run_line_match.end():].splitlines()
+                    if item.strip() and not item.lstrip().startswith("#")
+                ]
+                if trailing_inline_fields:
+                    raise MigrationError(
+                        f"{path} has YAML fields or commands after its inline legacy AI provider run field: {trailing_inline_fields[0][:100]}"
+                    )
                 allowed_inline_commands = {
                     "python scripts/check_ai_models.py || test $? -eq 2",
                     "python scripts/check_ai_models.py",
