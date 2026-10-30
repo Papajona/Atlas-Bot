@@ -82,7 +82,9 @@ from .startup_guards import assert_multidict_safe_backend, assert_database_migra
 
 
 
-async def _attach_groq_trade_review(packet: dict) -> dict:
+async def _attach_groq_trade_review(
+    packet: dict, *, timeout_seconds: float | None = None
+) -> dict:
     """Attach a bounded Groq review; Native AI remains the sole trade-safety authority."""
     required = bool(settings.groq_trade_review_enabled)
     packet["groq_trade_review_required"] = required
@@ -96,18 +98,23 @@ async def _attach_groq_trade_review(packet: dict) -> dict:
         }
     else:
         try:
-            # Keep external review bounded independently; Native AI receives its
-            # own full local veto deadline after this advisory call completes.
-            groq_timeout = float(settings.groq_trade_review_timeout_seconds)
+            # Groq receives only the reserved slice of the overall decision budget.
+            configured_budget = float(settings.groq_trade_review_timeout_seconds)
             transport_timeout = float(settings.groq_timeout_seconds)
             if (
-                not math.isfinite(groq_timeout) or groq_timeout <= 0
+                not math.isfinite(configured_budget) or configured_budget <= 0
                 or not math.isfinite(transport_timeout) or transport_timeout <= 0
             ):
                 raise ValueError("Groq trade-review timeout configuration must be finite and positive")
+            budget = configured_budget
+            if timeout_seconds is not None:
+                reserved_budget = float(timeout_seconds)
+                if not math.isfinite(reserved_budget) or reserved_budget <= 0:
+                    raise asyncio.TimeoutError
+                budget = min(budget, reserved_budget)
             result = await asyncio.wait_for(
                 groq_trade_context_review(packet),
-                timeout=min(groq_timeout, transport_timeout),
+                timeout=min(budget, transport_timeout),
             )
         except asyncio.CancelledError:
             raise
@@ -137,19 +144,37 @@ async def _attach_groq_trade_review(packet: dict) -> dict:
 
 
 async def _run_trade_safety_review(packet: dict) -> dict:
-    """Run bounded advisory Groq review, then give Native AI its own veto deadline.
+    """Run Groq and Native AI within one end-to-end decision deadline.
 
-    The Groq call has a dedicated provider timeout and converts its own timeout into
-    an ERROR envelope. Native AI is then run locally within the configured safety
-    deadline; an external provider cannot cancel its veto window.
+    Groq is advisory evidence. Its provider timeout is converted into an ERROR
+    envelope within the reserved Groq slice; Native AI then uses the remaining
+    part of the original deadline for its local final veto.
     """
     timeout = float(settings.ai_strategy_provider_timeout_seconds)
     if not math.isfinite(timeout) or timeout <= 0:
         raise asyncio.TimeoutError
 
-    await _attach_groq_trade_review(packet)
-    return await asyncio.wait_for(dual_ai_trade_safety_review(packet), timeout=timeout)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    if settings.groq_trade_review_enabled:
+        native_reserve = min(0.25, timeout * 0.20)
+        groq_budget = min(
+            float(settings.groq_trade_review_timeout_seconds),
+            max(0.0, timeout - native_reserve),
+        )
+        if not math.isfinite(groq_budget) or groq_budget <= 0:
+            raise asyncio.TimeoutError
+        # No outer wait_for here: _attach_groq_trade_review catches its own
+        # bounded timeout and attaches an ERROR envelope for the Native veto.
+        await _attach_groq_trade_review(packet, timeout_seconds=groq_budget)
+    else:
+        # Local DISABLED marker only; no external provider call is made.
+        await _attach_groq_trade_review(packet)
 
+    remaining = deadline - loop.time()
+    if remaining <= 0:
+        raise asyncio.TimeoutError
+    return await asyncio.wait_for(dual_ai_trade_safety_review(packet), timeout=remaining)
 
 def _validated_customer_paper_mark(context: dict | None) -> tuple[float, str]:
     """Return a positive bid and timestamp only when the quote is demonstrably current."""
