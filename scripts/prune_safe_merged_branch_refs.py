@@ -304,10 +304,14 @@ def _main_has_explicit_android_release_gate(main_sha: str) -> bool:
     release_name_lines = [
         line for line in release_job_lines if line.startswith("    name:")
     ]
+    # The production verifier selects the signing job by the exact displayed name.
+    # An explicit name is safe only when it preserves that identity.
     release_job_shape_is_safe = (
         len(release_name_lines) <= 1
-        and all(line == expected_if_line or line.startswith("    name:")
-                for line in release_job_lines)
+        and all(
+            line == expected_if_line or line == "    name: android-release"
+            for line in release_job_lines
+        )
     )
     return (
         'tags:\n      - "android-v*"' in push_trigger
