@@ -44,6 +44,10 @@ if [[ "$GROQ_TRADE_REVIEW_ENABLED" != "true" && "$GROQ_TRADE_REVIEW_ENABLED" != 
   echo "ERROR: GROQ_TRADE_REVIEW_ENABLED must be true or false." >&2
   exit 2
 fi
+if [[ "$GROQ_TRADE_REVIEW_ENABLED" == "true" && -z "$SECRET_GROQ_API_KEY_VERSION" ]]; then
+  echo "ERROR: required Groq trade review cannot be enabled without a pinned SECRET_GROQ_API_KEY_VERSION." >&2
+  exit 2
+fi
 python "${REPO_ROOT}/scripts/validate_groq_deploy_env.py" \
   "$GROQ_MODEL" "$GROQ_MAX_COMPLETION_TOKENS" "$GROQ_RESEARCH_REVIEW_ENABLED"
 : "${FORWARDED_ALLOW_IPS:?Set FORWARDED_ALLOW_IPS to trusted proxy IP/CIDR; never *}"
