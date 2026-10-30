@@ -18,7 +18,11 @@ from app.customer_paper_flow import (
     validate_customer_paper_market,
 )
 from app.customer_paper_ledger import get_customer_paper_balances
-from app.customer_paper_lifecycle import get_customer_paper_positions, submit_customer_paper_order
+from app.customer_paper_lifecycle import (
+    CustomerPaperOrderConflict,
+    get_customer_paper_positions,
+    submit_customer_paper_order,
+)
 
 
 def _market_fixture(*, timestamp: datetime | None = None, low: float = 98.0, high: float = 102.0,
@@ -243,6 +247,7 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
             order_type="MARKET",
             metadata={
                 "paper_flow_version": 1,
+                "execution_owner": "autonomous_customer_bot",
                 "exchange": str(recovery_req.exchange).lower(),
                 "market_type": "spot",
                 "order_role": "ENTRY",
@@ -273,6 +278,52 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
         recovered_positions = await get_customer_paper_positions(customer_id=recovery_customer)
         assert len(recovered_positions) == 1
         assert recovered_positions[0]["quantity"] == "0.250000000000000000"
+
+        # An empty owner string is still ownerless. It must not let another manual
+        # order bypass the legacy-intent quarantine on the same market.
+        quarantine_customer = 99235
+        quarantine_at = recovery_next_at + timedelta(minutes=5)
+        quarantine_req, quarantine_frame, quarantine_context = _market_fixture(
+            timestamp=quarantine_at, timeframe="1m"
+        )
+        await ensure_customer_paper_account(quarantine_customer, "USDT")
+        quarantine_bar = quarantine_frame.index[-1].isoformat()
+        legacy_pending = await submit_customer_paper_order(
+            customer_id=quarantine_customer,
+            client_order_id="legacy-empty-owner-v1",
+            venue="binance",
+            market_type="spot",
+            symbol="BTC/USDT",
+            side="BUY",
+            quantity="0.10",
+            currency="USDT",
+            order_type="MARKET",
+            metadata={
+                "paper_flow_version": 1,
+                "execution_owner": "",
+                "exchange": str(quarantine_req.exchange).lower(),
+                "market_type": "spot",
+                "order_role": "ENTRY",
+                "timeframe": str(quarantine_req.timeframe),
+                "signal_bar_timestamp": quarantine_bar,
+                "submission_bar_at": quarantine_bar,
+                "data_sha256": quarantine_frame.attrs["data_provenance"]["sha256"],
+            },
+        )
+        assert legacy_pending["status"] == "APPENDED"
+        with pytest.raises(CustomerPaperOrderConflict, match="ownerless legacy"):
+            await submit_customer_paper_order(
+                customer_id=quarantine_customer,
+                client_order_id="new-manual-order-after-legacy",
+                venue="binance",
+                market_type="spot",
+                symbol="BTC/USDT",
+                side="BUY",
+                quantity="0.10",
+                currency="USDT",
+                order_type="MARKET",
+                metadata={"execution_owner": "manual_customer_api"},
+            )
 
     asyncio.run(run())
 
@@ -1175,3 +1226,45 @@ def test_pending_paper_buy_caps_quantity_after_rounded_notional_and_fee(monkeypa
     ).quantize(quantum, rounding="ROUND_DOWN")
     assert notional + fee == Decimal("0.1")
     assert quantity == previous_quantity - quantum
+
+
+def test_ownerless_legacy_paper_positions_and_orders_default_to_manual():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    lifecycle_source = (root / "app" / "customer_paper_lifecycle.py").read_text(encoding="utf-8")
+    flow_source = (root / "app" / "customer_paper_flow.py").read_text(encoding="utf-8")
+    assert "COALESCE(\n                        entry_order.metadata_json ->> 'execution_owner',\n                        'manual_customer_api'\n                    ) AS execution_owner" in lifecycle_source
+    assert 'safe_metadata.get("execution_owner") or "manual_customer_api"' in lifecycle_source
+    assert "not prior_execution_owner" in lifecycle_source
+    assert 'prior_position_metadata.get("execution_owner") or "manual_customer_api"' in lifecycle_source
+    assert 'meta.get("execution_owner") != "autonomous_customer_bot"' in flow_source
+
+
+def test_ownerless_version_one_pending_sell_is_not_recovered(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1m")
+    monkeypatch.setattr(
+        flow, "validate_customer_paper_market",
+        lambda *_args, **_kwargs: {
+            "bar_timestamp": "2026-10-30T12:01:00+00:00",
+            "currency": "USDT",
+            "data_sha256": "d" * 64,
+        },
+    )
+    monkeypatch.setattr(flow, "list_open_customer_paper_orders", _async_value([
+        {
+            "venue": "binance",
+            "symbol": "BTC/USDT",
+            "side": "SELL",
+            "client_order_id": "legacy-ownerless-v1-sell",
+            "metadata": {"paper_flow_version": 1, "order_role": "STRATEGY"},
+        }
+    ]))
+    with pytest.raises(CustomerPaperFlowBlocked, match="manual paper order is open"):
+        asyncio.run(
+            flow.process_customer_paper_orders(
+                customer_id=99173, req=req, df=pd.DataFrame(), market_context={},
+            )
+        )

@@ -345,10 +345,8 @@ async def submit_customer_paper_order(
                     )
                 return {"status": "REPLAYED", "order_id": str(existing_intent[0]), "client_order_id": client_id}
 
-            new_owner = str(
-                safe_metadata.get("execution_owner")
-                or ("autonomous_customer_bot" if safe_metadata.get("paper_flow_version") == 1 else "manual_customer_api")
-            )
+            # Caller-supplied schema/version metadata is not proof of autonomous ownership.
+            new_owner = str(safe_metadata.get("execution_owner") or "manual_customer_api")
             protective_exit = str(safe_metadata.get("order_role") or "").upper() == "PROTECTIVE_EXIT"
             await conn.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
@@ -382,10 +380,17 @@ async def submit_customer_paper_order(
                         except ValueError:
                             raw_owner = {}
                     prior_metadata = dict(raw_owner) if isinstance(raw_owner, Mapping) else {}
-                    prior_owner = str(
-                        prior_metadata.get("execution_owner")
-                        or ("autonomous_customer_bot" if prior_metadata.get("paper_flow_version") == 1 else "manual_customer_api")
-                    )
+                    prior_execution_owner = str(
+                        prior_metadata.get("execution_owner") or ""
+                    ).strip()
+                    if (
+                        not prior_execution_owner
+                        and str(prior_metadata.get("paper_flow_version") or "") == "1"
+                    ):
+                        raise CustomerPaperOrderConflict(
+                            "An ownerless legacy customer paper order must be reconciled or expired before another order can be submitted for this market"
+                        )
+                    prior_owner = prior_execution_owner or "manual_customer_api"
                     if prior_owner != new_owner:
                         raise CustomerPaperOrderConflict(
                             "Manual and autonomous customer paper orders cannot coexist for the same market; reconcile the pending order first"
@@ -438,8 +443,7 @@ async def submit_customer_paper_order(
                             prior_position_metadata = {}
                     prior_position_metadata = dict(prior_position_metadata) if isinstance(prior_position_metadata, Mapping) else {}
                     position_owner = str(
-                        prior_position_metadata.get("execution_owner")
-                        or ("autonomous_customer_bot" if prior_position_metadata.get("paper_flow_version") == 1 else "manual_customer_api")
+                        prior_position_metadata.get("execution_owner") or "manual_customer_api"
                     )
                     if position_owner != new_owner:
                         raise CustomerPaperOrderConflict(
@@ -1330,8 +1334,7 @@ async def get_customer_paper_positions(*, customer_id: int) -> list[dict[str, st
                     COALESCE(entry_order.metadata_json ->> 'take_profit_price', '') AS take_profit_price,
                     COALESCE(
                         entry_order.metadata_json ->> 'execution_owner',
-                        CASE WHEN entry_order.metadata_json ->> 'paper_flow_version' = '1'
-                             THEN 'autonomous_customer_bot' ELSE 'manual_customer_api' END
+                        'manual_customer_api'
                     ) AS execution_owner
                 FROM customer_paper.position_events AS pe
                 JOIN customer_paper.fills AS f
