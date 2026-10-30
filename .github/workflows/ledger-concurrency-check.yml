@@ -15,6 +15,14 @@ on:
       - 'tests/test_ledger_invariants_3_10_46.py'
       - 'tests/test_ledger_all_paths_concurrent_3_10_46.py'
       - 'tests/test_unified_custody.py'
+      # Changes to the customer paper execution/ledger/provisioning path must
+      # receive the dedicated PostgreSQL gate, not only the general pytest job.
+      - 'app/customer_paper_*.py'
+      - 'scripts/bootstrap_atlas_paper_staging_gcp.sh'
+      - 'scripts/provision_customer_paper_schema.py'
+      - 'scripts/setup_customer_paper_role_interactive.py'
+      - 'tests/test_customer_paper_*.py'
+      - 'tests/test_interactive_paper_role_setup.py'
       - 'requirements-dev.txt'
       - 'alembic/**'
       - 'scripts/prune_safe_merged_branch_refs.py'
