@@ -197,3 +197,20 @@ def test_native_safety_audit_exposes_groq_as_advisory_not_execution_authority():
     assert result["providers"]["groq"]["status"] == "OK"
     assert result["providers"]["groq"]["execution_authority"] is False
     assert result["providers"]["atlas_native"]["execution_authority"] is False
+
+    packet["groq_trade_review"] = {
+        "status": "ERROR",
+        "provider": "groq",
+        "error": "GroqAIError",
+        "cause": "ReadTimeout",
+        "http_status": 429,
+        "reason": "groq_provider_call_failed",
+        "execution_authority": False,
+    }
+    failed = asyncio.run(native_trade_safety_review(packet))
+    diagnostics = failed["providers"]["groq"]
+    assert diagnostics["error"] == "GroqAIError"
+    assert diagnostics["cause"] == "ReadTimeout"
+    assert diagnostics["http_status"] == 429
+    assert diagnostics["reason"] == "groq_provider_call_failed"
+    assert diagnostics["execution_authority"] is False
