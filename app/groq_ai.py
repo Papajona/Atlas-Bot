@@ -29,7 +29,18 @@ _SYSTEM_PROMPT = (
 
 
 class GroqAIError(RuntimeError):
-    """Raised when Groq research output is missing, malformed, or unsafe to use."""
+    """Raised when Groq research output is missing, malformed, or unsafe to use.
+
+    input_truncated is populated when a bounded-prompt failure occurs after
+    the compactor has established whether source material was omitted. None
+    means the state genuinely could not be determined.
+    """
+
+    def __init__(self, message: str, *, input_truncated: bool | None = None) -> None:
+        super().__init__(message)
+        if input_truncated is not None and not isinstance(input_truncated, bool):
+            raise TypeError("input_truncated must be boolean or null")
+        self.input_truncated = input_truncated
 
 
 def _extract_json_object(text: Any) -> dict[str, Any]:
@@ -489,8 +500,15 @@ def _research_prompt(
                 size_budget_audit[audit_field] += external_size_audit[audit_field]
             research_json = json.dumps(bounded_research, default=str, separators=(",", ":"))
             external_json = json.dumps(bounded_external, default=str, separators=(",", ":"))
+            # The minimal summary is itself a lossy fallback even when its output
+            # cannot fit. Preserve that fact on the exception so the audit record
+            # never reports an unknown or complete input after this compaction path.
+            state["truncated"] = True
             if len(research_json) > 12_000 or len(external_json) > 5_000:
-                raise GroqAIError("Minimal Groq research summary exceeded the reviewed size budget")
+                raise GroqAIError(
+                    "Minimal Groq research summary exceeded the reviewed size budget",
+                    input_truncated=True,
+                )
         state["truncated"] = True
     input_truncated = state["truncated"]
     hits = suspicious_instruction_markers(external_json)
@@ -527,7 +545,10 @@ def _research_prompt(
         + external_block
     )
     if len(prompt) > 24_000:
-        raise GroqAIError("Compacted Groq research prompt exceeded the reviewed size bound")
+        raise GroqAIError(
+            "Compacted Groq research prompt exceeded the reviewed size bound",
+            input_truncated=input_truncated,
+        )
     return prompt, input_truncated
 
 async def _groq_json(prompt: str) -> dict[str, Any]:
@@ -602,6 +623,12 @@ async def groq_research_review(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
+        # Prompt construction can fail after a lossy fallback. Recover its explicit
+        # audit state instead of incorrectly persisting UNKNOWN.
+        if input_truncated is None:
+            captured_truncation = getattr(exc, "input_truncated", None)
+            if isinstance(captured_truncation, bool):
+                input_truncated = captured_truncation
         # Keep diagnostics actionable without logging request bodies or credentials.
         cause = exc
         while getattr(cause, "__cause__", None) is not None:
