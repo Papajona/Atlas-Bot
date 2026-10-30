@@ -693,6 +693,9 @@ def test_native_veto_uses_only_remaining_shared_deadline(monkeypatch):
     native_started = []
 
     async def quick_groq(_packet):
+        # Consume most of Groq's 80ms slice so Native AI sees only the
+        # remaining shared deadline rather than the full overall budget.
+        await asyncio.sleep(0.075)
         return {
             "status": "OK",
             "provider": "groq",
