@@ -11,7 +11,7 @@ import json
 import logging
 import math
 import re
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 import httpx
@@ -77,26 +77,25 @@ _ACTIONABLE_IMMEDIATE_COMMAND_PATTERN = re.compile(
     r"(?i:\b(?:buy|sell)\s+(?:now|immediately|at market)\b)"
 )
 _PRICE_LEVEL_REFERENCE_PATTERN = re.compile(
-    r"(?i:\b(?P<kind>entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger))"
-    r"(?:\s+price)?\s*(?:=|:|at|to)\s*[$€£]?"
-    # Capture the complete adjacent token, including a sign, exponent, or
-    # malformed suffix. The validator below must reject the full token rather
-    # than silently accepting a numeric prefix or skipping a signed value.
-    r"(?P<price>\S+)"
+    r"(?i:\b(?P<kind>entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger)\b)"
+    r"(?:\s+price)?(?:\s*(?:=|:)\s*|\s+(?:at|to)\s+|\s+)[$€£]?"
+    # Capture the whole numeric-looking token (including invalid suffixes), but
+    # never begin a reference match with ordinary prose such as "the market".
+    r"(?P<price>[+-]?(?:\d|\.\d)\S*)"
 )
 _PRICE_NUMBER_PATTERN = re.compile(
-    r"[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][+-]?\d+)?"
+    r"[+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?"
 )
 _TRADE_PRICE_SETTING_COMMAND_PATTERN = re.compile(
     r"(?i:\b(?:set|sets|setting|move|moves|moving|place|places|placing|"
     r"adjust|adjusts|adjusting|raise|raises|raising|lower|lowers|lowering|"
     r"change|changes|changing|update|updates|updating|put|puts|putting|"
     r"tighten|tightens|tightening|widen|widens|widening|recommend|recommends|"
-    r"recommending|use|uses|using)\s+"
+    r"recommending)\s+"
     r"(?:(?:the|a|your|my|our|this|new|current)\s+)?"
     r"(?:(?:protective|trailing)\s+)?"
-    r"(?:entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger)"
-    r"(?:\s+price)?(?:\s*(?:=|:|at|to)\s*[$€£]?\d+(?:[.,]\d+)?)?)"
+    r"(?:entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger)\b"
+    r"(?:\s+price)?(?:\s*(?:=|:)\s*[$€£]?[+-]?(?:\d|\.\d)\S*)?"
 )
 _ACTIONABLE_TRADING_PATTERNS = (
     _ACTIONABLE_SYMBOL_COMMAND_PATTERN,
@@ -160,12 +159,29 @@ def _validate_plan_price_references(text: str, trade_plan: dict[str, Any]) -> No
         kind = re.sub(r"\s+", "-", match.group("kind").lower())
         expected = _decimal_plan_price(trade_plan.get(field_for_kind[kind]))
         raw_token = match.group("price").rstrip(".,;:!?)]}\\\"'")
-        if not _PRICE_NUMBER_PATTERN.fullmatch(raw_token):
+        normalized_token = raw_token
+        if "," in normalized_token:
+            if "." in normalized_token:
+                if not re.fullmatch(r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d+(?:[eE][+-]?\d+)?", normalized_token):
+                    raise GroqAIError(f"Groq trade review cites an invalid {kind} price token")
+                normalized_token = normalized_token.replace(",", "")
+            elif re.fullmatch(r"[+-]?\d{1,3}(?:,\d{3})+(?:[eE][+-]?\d+)?", normalized_token):
+                normalized_token = normalized_token.replace(",", "")
+            elif normalized_token.count(",") == 1 and re.fullmatch(r"[+-]?\d+,\d+(?:[eE][+-]?\d+)?", normalized_token):
+                normalized_token = normalized_token.replace(",", ".")
+        if not _PRICE_NUMBER_PATTERN.fullmatch(normalized_token):
             raise GroqAIError(
                 f"Groq trade review cites an invalid {kind} price token"
             )
-        actual = _decimal_plan_price(raw_token.replace(",", "."))
-        if expected is None or actual is None or actual != expected:
+        actual = _decimal_plan_price(normalized_token)
+        try:
+            mantissa = re.split(r"[eE]", normalized_token, maxsplit=1)[0]
+            cited_decimals = len(mantissa.split(".", 1)[1]) if "." in mantissa else 0
+            quantum = Decimal(1).scaleb(-cited_decimals)
+            rounded_expected = expected.quantize(quantum, rounding=ROUND_HALF_UP) if expected is not None else None
+        except (InvalidOperation, ValueError):
+            rounded_expected = None
+        if expected is None or actual is None or (actual != expected and actual != rounded_expected):
             raise GroqAIError(
                 f"Groq trade review cites {kind} price outside the submitted trade plan"
             )
