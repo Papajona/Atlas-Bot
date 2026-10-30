@@ -766,11 +766,11 @@ async def groq_research_review(
     research: dict[str, Any], intelligence: dict[str, Any]
 ) -> dict[str, Any]:
     """Return an optional Groq research annotation without granting execution authority."""
-    if not settings.groq_trade_review_enabled:
+    if not settings.groq_research_review_enabled:
         return {
             "status": "DISABLED",
             "provider": "groq",
-            "reason": "GROQ_TRADE_REVIEW_ENABLED is false",
+            "reason": "GROQ_RESEARCH_REVIEW_ENABLED is false",
             "execution_authority": False,
         }
     if not str(settings.groq_api_key or "").strip():
