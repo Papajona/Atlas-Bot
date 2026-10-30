@@ -73,6 +73,24 @@ def _market_fixture(*, timestamp: datetime | None = None, low: float = 98.0, hig
     return request, frame, context
 
 
+def test_ownerless_legacy_paper_positions_default_to_manual():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_lifecycle.py").read_text(
+        encoding="utf-8"
+    )
+    assert "COALESCE(\n                        entry_order.metadata_json ->> 'execution_owner',\n                        'manual_customer_api'\n                    ) AS execution_owner" in source
+    assert "CASE WHEN entry_order.metadata_json ->> 'paper_flow_version' = '1'" not in source
+    # Legacy metadata must not silently grant autonomous ownership during order
+    # submission, ownership-conflict checks, or protective-position checks.
+    assert 'safe_metadata.get("execution_owner") or "manual_customer_api"' in source
+    assert 'prior_metadata.get("execution_owner") or "manual_customer_api"' in source
+    assert 'prior_position_metadata.get("execution_owner") or "manual_customer_api"' in source
+    assert '"autonomous_customer_bot" if safe_metadata.get("paper_flow_version") == 1' not in source
+    assert '"autonomous_customer_bot" if prior_metadata.get("paper_flow_version") == 1' not in source
+    assert '"autonomous_customer_bot" if prior_position_metadata.get("paper_flow_version") == 1' not in source
+
+
 def test_customer_paper_market_context_requires_verified_closed_spot_data(monkeypatch):
     monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
     monkeypatch.setattr(settings, "customer_paper_initial_currency", "USDT")
