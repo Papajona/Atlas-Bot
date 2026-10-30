@@ -4831,8 +4831,10 @@ async def groq_research_review(research, intelligence):
             "            echo \"AI provider verification: FAIL (one or more inference requests failed; checker exit code $status).\" | tee -a \"$GITHUB_STEP_SUMMARY\"\n"
             "            exit \"$status\"\n"
             "          fi\n"
-            "      - name: Deriv token authentication (no trading)\n"
-            "        run: python scripts/check_deriv_auth.py\n"
+            "      - uses: actions/upload-artifact@v4\n"
+            "        with:\n"
+            "          name: provider-check-result\n"
+            "          path: results.txt\n"
         )
         cleaned = migration.scrub_workflow_ancillary(".github/workflows/production-verification.yml", source)
         self.assertNotIn("GEMINI_API_KEY", cleaned)
@@ -4840,8 +4842,8 @@ async def groq_research_review(research, intelligence):
         self.assertNotIn("check_ai_models.py", cleaned)
         self.assertIn("Atlas Native AI offline verification (no provider calls)", cleaned)
         self.assertIn("python -m scripts.check_native_ai", cleaned)
-        self.assertIn("Deriv token authentication (no trading)", cleaned)
-        self.assertIn("python scripts/check_deriv_auth.py", cleaned)
+        self.assertIn("- uses: actions/upload-artifact@v4", cleaned)
+        self.assertIn("path: results.txt", cleaned)
 
     def test_workflow_scrub_refuses_unrecognized_live_ai_step_commands(self):
         dollar = chr(36)
@@ -5007,6 +5009,101 @@ async def groq_research_review(research, intelligence):
             "__PIPESTATUS_CAPTURE__", chr(36) + "{PIPESTATUS[0]}"
         )
         with self.assertRaisesRegex(migration.MigrationError, "unexpected command in the legacy AI model/provider verification step"):
+            migration.scrub_workflow_ancillary(".github/workflows/production-verification.yml", source)
+
+    def test_workflow_scrub_rejects_shell_substitution_inside_legacy_status_echo(self):
+        source = """jobs:
+  verify:
+    steps:
+      - name: AI provider live inference verification
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          set +e
+          python scripts/check_ai_models.py
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "AI provider verification: PASS $(touch /tmp/atlas-migration-marker) (Gemini and Groq inference requests succeeded)." | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$status" -eq 2 ]; then
+            echo "AI provider verification: NOT VERIFIED (one or more required AI credentials/models are missing; see checker output)." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          else
+            echo "AI provider verification: FAIL (one or more inference requests failed; checker exit code $status)." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit "$status"
+          fi
+"""
+        source = source.replace("$", chr(36))
+        with self.assertRaisesRegex(migration.MigrationError, "unexpected command in the legacy live-AI verification step"):
+            migration.scrub_workflow_ancillary(".github/workflows/production-verification.yml", source)
+
+    def test_workflow_scrub_rejects_reordered_or_duplicated_legacy_commands(self):
+        source = """jobs:
+  verify:
+    steps:
+      - name: AI provider live inference verification
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          set +e
+          python scripts/check_ai_models.py
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "AI provider verification: PASS (Gemini and Groq inference requests succeeded)." | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$status" -eq 2 ]; then
+            echo "AI provider verification: NOT VERIFIED (one or more required AI credentials/models are missing; see checker output)." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          else
+            echo "AI provider verification: FAIL (one or more inference requests failed; checker exit code $status)." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit "$status"
+          fi
+"""
+        source = source.replace("$", chr(36))
+        reordered = source.replace(
+            "          python scripts/check_ai_models.py\n          status=$?\n",
+            "          status=$?\n          python scripts/check_ai_models.py\n",
+        )
+        duplicated = source.replace(
+            "            exit 1\n",
+            "            exit 1\n            exit 1\n",
+        )
+        for altered in (reordered, duplicated):
+            with self.subTest(altered=altered):
+                with self.assertRaisesRegex(migration.MigrationError, "incomplete legacy live-AI verification step"):
+                    migration.scrub_workflow_ancillary(".github/workflows/production-verification.yml", altered)
+
+    def test_markdown_scrub_preserves_historical_hosted_provider_defect_meaning(self):
+        source = (
+            "| API deployment previously injected Gemini strategy-provider secrets | "
+            "Gemini quotas and credentials could block strategy generation despite healthy core code | "
+            "Gemini strategy calls removed; Native AI is local, while an optional Groq research-only secret can be injected separately |\n"
+        )
+        cleaned = migration.scrub_ancillary_text("deploy/DEPLOY_WORKFLOW.md", source)
+        self.assertNotIn("Gemini", cleaned)
+        self.assertIn("legacy hosted strategy-provider secrets", cleaned)
+        self.assertIn("Legacy hosted-provider quotas and credentials could block strategy generation", cleaned)
+        self.assertIn("Legacy hosted strategy calls were removed", cleaned)
+        self.assertNotIn("Native AI quotas", cleaned)
+
+    def test_workflow_scrub_refuses_orphaned_provider_result_gate(self):
+        source = """jobs:
+  verify:
+    steps:
+      - name: Enforce provider verification result
+        if: always()
+        env:
+          PROVIDER_VERIFICATION_OUTCOME: ${{ steps.ai_provider_verification.outcome }}
+        run: |
+          if [ "$PROVIDER_VERIFICATION_OUTCOME" != "success" ]; then
+            echo "BLOCKED: production gate requires successful live AI provider verification."
+            exit 1
+          fi
+"""
+        source = source.replace("$", chr(36))
+        with self.assertRaisesRegex(migration.MigrationError, "orphaned provider verification result gate"):
             migration.scrub_workflow_ancillary(".github/workflows/production-verification.yml", source)
 
     def test_config_does_not_remove_validator_when_module_rebinds_str(self):
