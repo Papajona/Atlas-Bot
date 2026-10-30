@@ -596,6 +596,39 @@ def retained_helper():
             self.assertIn("branch_helper", result)
             self.assertIn("class_value = (class_local := 'class-only')", helper_module.read_text(encoding="utf-8"))
 
+    def test_class_suite_global_walrus_fails_closed_for_star_import(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                "__all__ = ['BranchContainer', 'branch_helper', 'json']\n"
+                "class BranchContainer:\n"
+                "    global json\n"
+                "    class_value = (json := 'module-export')\n"
+                "def branch_helper():\n    return True\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            canonical = "import json\nfrom .native_ai import AIProviderError\n"
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "dynamic exports or mutates __all__"
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_module_level_walrus_export_fails_closed_for_star_import(self):
         legacy = """from .branch_helpers import *
 
