@@ -1826,6 +1826,116 @@ async def _gemini_json(prompt):
             self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
             self.assertIn("str: int", result)
 
+    def test_retired_provider_block_refuses_executable_control_line_suffixes(self):
+        unsafe_cases = (
+            """if [ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]; then
+  true
+then gcloud run deploy atlas
+fi
+""",
+            """if [ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]; then
+  true
+elif [[ $(touch /tmp/atlas-shell-marker) ]]; then
+  true
+fi
+""",
+            """if [ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]; then
+  true
+elsewhere "$DATABASE_URL"
+fi
+""",
+            """if [ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]; then
+  true
+fi; gcloud run deploy atlas
+""",
+        )
+        for shell in unsafe_cases:
+            with self.subTest(shell=shell), self.assertRaises(migration.MigrationError):
+                migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_retired_assignment_line_continuation_refuses_to_expose_following_command(self):
+        shell = (
+            'if [ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]; then\n'
+            + "  SECRET_CEREBRAS_API_KEY_VERSION=" + "\\" + "\n"
+            + "  ./deploy/gcp-bootstrap.sh\n"
+            + "fi\n"
+        )
+        with self.assertRaisesRegex(
+            migration.MigrationError, "compound retired-provider assignment"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_retired_assignment_with_even_trailing_backslashes_does_not_consume_next_command(self):
+        shell = (
+            "SECRET_CEREBRAS_API_KEY_VERSION=value"
+            + "\\\\"
+            + "\n./deploy/gcp-bootstrap.sh\n"
+        )
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertEqual(cleaned, "./deploy/gcp-bootstrap.sh\n")
+
+    def test_retired_provider_stderr_warning_is_removed_without_blocking_migration(self):
+        shell = (
+            'if [[ -z "$SECRET_CEREBRAS_API_KEY_VERSION" ]]; then\n'
+            '  echo "WARNING: Cerebras not configured" >&2\n'
+            'fi\n'
+        )
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertEqual(cleaned, "")
+        result = subprocess.run(
+            ["bash", "-n"], input=cleaned, text=True, capture_output=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_retired_provider_header_refuses_executable_after_then(self):
+        shell = """if [ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]; then gcloud run deploy atlas
+"""
+        with self.assertRaisesRegex(
+            migration.MigrationError, "executable command on a retired-provider if-header"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_retired_provider_warning_refuses_trailing_deploy_command(self):
+        shell = """if [ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]; then
+  echo "Cerebras missing"; gcloud run deploy atlas
+fi
+"""
+        with self.assertRaisesRegex(
+            migration.MigrationError, "mixed provider-conditioned shell block"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_retired_assignment_rejects_parameter_expansion_side_effects(self):
+        unsafe_shell = (
+            "SECRET_OPENAI_API_KEY=${other:=value}\n"
+            'printf "%s" "$other"\n'
+        )
+        with self.assertRaisesRegex(
+            migration.MigrationError, "compound retired-provider assignment"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe_shell)
+
+    def test_retired_assignment_rejects_blank_prefix_commands(self):
+        unsafe_cases = (
+            "CEREBRAS_API_KEY= ./deploy-step.sh\n",
+            "OPENAI_API_KEY =value\n",
+        )
+        for shell in unsafe_cases:
+            with self.subTest(shell=shell), self.assertRaises(migration.MigrationError):
+                migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_retired_provider_test_header_is_safely_scrubbed(self):
+        shell = 'if test -n "${GEMINI_API_KEY:-}"; then\n  echo "Gemini missing"\nfi\n'
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertEqual(cleaned, "")
+
+    def test_retired_provider_test_header_with_executable_suffix_is_rejected(self):
+        shell = 'if test -n "${GEMINI_API_KEY:-}"; then gcloud run deploy atlas\n'
+        with self.assertRaisesRegex(
+            migration.MigrationError, "unsafe retired-provider if-header|executable command"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
     def test_config_removes_provider_fields_but_preserves_unrelated_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
