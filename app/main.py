@@ -84,13 +84,13 @@ from .startup_guards import assert_multidict_safe_backend, assert_database_migra
 
 async def _attach_groq_trade_review(packet: dict) -> dict:
     """Attach a bounded Groq review; Native AI remains the sole trade-safety authority."""
-    required = bool(settings.groq_research_review_enabled)
+    required = bool(settings.groq_trade_review_enabled)
     packet["groq_trade_review_required"] = required
     if not required:
         result = {
             "status": "DISABLED",
             "provider": "groq",
-            "reason": "GROQ_RESEARCH_REVIEW_ENABLED is false",
+            "reason": "GROQ_TRADE_REVIEW_ENABLED is false",
             "input_truncated": False,
             "execution_authority": False,
         }
