@@ -226,6 +226,62 @@ def _size_compact_prompt_value(
     return value
 
 
+def _count_prompt_value_omissions(original: Any, retained: Any) -> dict[str, int]:
+    """Count structural and scalar values removed by the minimal prompt fallback."""
+    audit = {
+        "characters_omitted": 0,
+        "mapping_entries_omitted": 0,
+        "list_items_omitted": 0,
+        "nested_values_omitted": 0,
+    }
+    missing = object()
+
+    def visit(before: Any, after: Any) -> None:
+        if isinstance(before, dict):
+            if after is missing or not isinstance(after, dict):
+                audit["mapping_entries_omitted"] += len(before)
+                for item in before.values():
+                    visit(item, missing)
+                return
+            removed = set(before) - set(after)
+            audit["mapping_entries_omitted"] += len(removed)
+            for name in removed:
+                visit(before[name], missing)
+            for name in set(before) & set(after):
+                visit(before[name], after[name])
+            return
+        if isinstance(before, (list, tuple)):
+            old_items = list(before)
+            if after is missing or not isinstance(after, list):
+                audit["list_items_omitted"] += len(old_items)
+                for item in old_items:
+                    visit(item, missing)
+                return
+            audit["list_items_omitted"] += max(0, len(old_items) - len(after))
+            for item in old_items[len(after):]:
+                visit(item, missing)
+            for old_item, new_item in zip(old_items, after):
+                visit(old_item, new_item)
+            return
+        if isinstance(before, str):
+            if after is missing:
+                audit["characters_omitted"] += len(before)
+                if before:
+                    audit["nested_values_omitted"] += 1
+            elif isinstance(after, str):
+                audit["characters_omitted"] += max(0, len(before) - len(after))
+                if before != after and len(after) >= len(before):
+                    audit["nested_values_omitted"] += 1
+            else:
+                audit["nested_values_omitted"] += 1
+            return
+        if after is missing or before != after:
+            audit["nested_values_omitted"] += 1
+
+    visit(original, retained)
+    return audit
+
+
 def _research_prompt(
     research: dict[str, Any], intelligence: dict[str, Any]
 ) -> tuple[str, bool]:
@@ -376,7 +432,9 @@ def _research_prompt(
     }
     research_json = json.dumps(bounded_research, default=str, separators=(",", ":"))
     external_json = json.dumps(bounded_external, default=str, separators=(",", ":"))
+    size_budget_compaction_applied = False
     if len(research_json) > 12_000 or len(external_json) > 5_000:
+        size_budget_compaction_applied = True
         original_research = bounded_research
         original_external = bounded_external
         fitted = False
@@ -406,12 +464,6 @@ def _research_prompt(
         if not fitted:
             # Valid but unusually broad inputs still get a useful, explicitly lossy
             # summary rather than converting an optional research review into an error.
-            size_budget_audit = {
-                "characters_omitted": 0,
-                "mapping_entries_omitted": max(1, research_fields_omitted + validation_fields_omitted + external_fields_omitted),
-                "list_items_omitted": max(1, len(names) + len(candidates)),
-                "nested_values_omitted": 0,
-            }
             strategy_count = len(names)
             candidate_count = len(candidates)
             bounded_research = {
@@ -431,6 +483,10 @@ def _research_prompt(
                 "external_fields_omitted": external_fields_omitted,
                 "size_budget_compacted": True,
             }
+            size_budget_audit = _count_prompt_value_omissions(original_research, bounded_research)
+            external_size_audit = _count_prompt_value_omissions(original_external, bounded_external)
+            for audit_field in size_budget_audit:
+                size_budget_audit[audit_field] += external_size_audit[audit_field]
             research_json = json.dumps(bounded_research, default=str, separators=(",", ":"))
             external_json = json.dumps(bounded_external, default=str, separators=(",", ":"))
             if len(research_json) > 12_000 or len(external_json) > 5_000:
@@ -453,7 +509,7 @@ def _research_prompt(
             {"omitted_field_count": count} for count in candidate_omission_counts if count
         ],
         "size_budget_compaction": {
-            "applied": any(size_budget_audit.values()),
+            "applied": size_budget_compaction_applied,
             **size_budget_audit,
         },
     }
