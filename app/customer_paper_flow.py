@@ -705,7 +705,10 @@ async def process_customer_paper_orders(
 
     # Manual API and autonomous-controller order intents are not interchangeable.
     # Before refusing ownership, let a pending manual BUY yield to an existing stop.
-    if meta.get("paper_flow_version") != 1:
+    if (
+        meta.get("paper_flow_version") != 1
+        or meta.get("execution_owner") != "autonomous_customer_bot"
+    ):
         if order_side == "BUY":
             protective = await _protective_exit(customer_id, req, df, market, history_loader=history_loader)
             if protective is not None:
