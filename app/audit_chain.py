@@ -43,7 +43,9 @@ async def append_audit_once(
     await _lock_chain_state(db)
     existing_query = select(AuditLog).where(AuditLog.event == event)
     for field in idempotency_fields:
-        value = json.dumps(detail[field], sort_keys=True, separators=(",", ":"), default=str)
+        # AuditLog.detail is stored with json.dumps' default separators (": ").
+        # Match that canonical persisted representation, not compact JSON.
+        value = json.dumps(detail[field], sort_keys=True, default=str)
         existing_query = existing_query.where(AuditLog.detail.contains(f'"{field}": {value}'))
     existing = (await db.execute(existing_query.order_by(AuditLog.id).limit(1))).scalar_one_or_none()
     if existing is not None:
