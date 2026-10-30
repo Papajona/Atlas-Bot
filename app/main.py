@@ -159,9 +159,16 @@ def _trade_safety_timeout_metadata() -> dict[str, float]:
             configured_total = configured_native = configured_groq = 0.0
         total = configured_total if math.isfinite(configured_total) and configured_total > 0 else 0.0
         native_reserve = configured_native if math.isfinite(configured_native) and configured_native > 0 else 0.0
-        if total > native_reserve and math.isfinite(configured_groq) and configured_groq > 0:
+        if (
+            native_reserve > 0
+            and total > native_reserve
+            and math.isfinite(configured_groq)
+            and configured_groq > 0
+        ):
             groq_budget = min(configured_groq, total - native_reserve)
         else:
+            # A Groq-enabled decision is invalid without a positive reserved
+            # Native AI veto window; never let Groq run alone.
             groq_budget = 0.0
     else:
         try:
