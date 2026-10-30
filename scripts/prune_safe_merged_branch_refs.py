@@ -292,9 +292,10 @@ def _main_has_explicit_android_release_gate(main_sha: str) -> bool:
         "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || "
         "(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v'))"
     )
+    release_job_lines = [line for line in release_job.splitlines() if line.strip()]
     release_conditions = [
         " ".join(line.split("if:", 1)[1].split())
-        for line in release_job.splitlines()
+        for line in release_job_lines
         if line.startswith("    if:")
     ]
     return (
@@ -304,9 +305,15 @@ def _main_has_explicit_android_release_gate(main_sha: str) -> bool:
         # Require the whole job condition, not merely the presence of two safe
         # alternatives. Extra alternatives (for example pull_request) can bypass
         # the release boundary even when the required substrings are present.
+        # This job has one deliberately single-line condition. Reject YAML plain-scalar
+        # continuations rather than accidentally attesting only the first line.
+        and release_job_lines == [f"    if: {expected_release_condition}"]
         and release_conditions == [expected_release_condition]
-        and "test_signed_release_is_only_triggered_by_an_explicit_release_tag_or_manual_main_dispatch"
-        in test_source
+        # Require a real module-level regression test, not a name in a comment/string.
+        and _source_defines_function(
+            test_source,
+            "test_signed_release_is_only_triggered_by_an_explicit_release_tag_or_manual_main_dispatch",
+        )
     )
 
 
