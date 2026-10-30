@@ -5440,6 +5440,29 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 return False
         return quote is None and not escaped
 
+    def optional_groq_status_message(line: str) -> str | None:
+        """Replace obsolete two-provider warning text without emptying Groq guards."""
+        stripped = line.strip()
+        if not inert_provider_message(stripped):
+            return None
+        if not re.search(r"(?i)\bgroq\b", stripped):
+            return None
+        if not re.search(
+            r"(?i)\b(?:no groq|not configured|missing|unset|optional|warning)\b",
+            stripped,
+        ):
+            return None
+        indent = line[: len(line) - len(line.lstrip())]
+        redirection = " >&2" if re.search(r"\s+>&2\s*(?:\r?\n)?$", line) else ""
+        ending = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+        return (
+            indent
+            + 'echo "WARNING: optional Groq research review is not configured; '
+            + 'Atlas Native AI continues locally."'
+            + redirection
+            + ending
+        )
+
     block_start = 0
     while block_start < len(source_lines):
         source_line = source_lines[block_start]
@@ -5640,7 +5663,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if re.match(
             r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
             r"GEMINI_API_KEY|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|"
-            r"CEREBRAS_API_KEY|AI_GATEWAY_API_KEY)\s*=",
+            r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
             line, re.I,
         ):
             continue
@@ -5675,6 +5698,10 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         # still contains a provider token, refuse the branch rather than damage its command.
         if RETIRED_PROVIDER_RE.search(line):
             if stripped.startswith("#"):
+                continue
+            sanitized_groq_message = optional_groq_status_message(line)
+            if sanitized_groq_message is not None:
+                output.append(sanitized_groq_message)
                 continue
             warning_only = inert_provider_message(stripped) or (
                 re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
