@@ -1227,3 +1227,11 @@ def test_ownerless_legacy_paper_positions_default_to_manual():
     )
     assert "COALESCE(\n                        entry_order.metadata_json ->> 'execution_owner',\n                        'manual_customer_api'\n                    ) AS execution_owner" in source
     assert "CASE WHEN entry_order.metadata_json ->> 'paper_flow_version' = '1'" not in source
+    # Legacy metadata must not silently grant autonomous ownership during order
+    # submission, ownership-conflict checks, or protective-position checks.
+    assert 'safe_metadata.get("execution_owner") or "manual_customer_api"' in source
+    assert 'prior_metadata.get("execution_owner") or "manual_customer_api"' in source
+    assert 'prior_position_metadata.get("execution_owner") or "manual_customer_api"' in source
+    assert '"autonomous_customer_bot" if safe_metadata.get("paper_flow_version") == 1' not in source
+    assert '"autonomous_customer_bot" if prior_metadata.get("paper_flow_version") == 1' not in source
+    assert '"autonomous_customer_bot" if prior_position_metadata.get("paper_flow_version") == 1' not in source
