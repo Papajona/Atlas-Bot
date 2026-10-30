@@ -17,9 +17,10 @@ def test_api_keeps_groq_secret_optional_and_gemini_removed():
     assert "GROQ_MODEL=${GROQ_MODEL}" in script
     assert "GROQ_MAX_COMPLETION_TOKENS=${GROQ_MAX_COMPLETION_TOKENS}" in script
     assert "GROQ_RESEARCH_REVIEW_ENABLED=${GROQ_RESEARCH_REVIEW_ENABLED}" in script
-    assert 'GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"' in script
-    assert 'GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"' in script
-    assert 'GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"' in script
+    assert ': "${GROQ_MODEL:?Set GROQ_MODEL to the same approved value used by the API deployment}"' in script
+    assert ': "${GROQ_MAX_COMPLETION_TOKENS:?Set GROQ_MAX_COMPLETION_TOKENS to the same approved API value}"' in script
+    assert ': "${GROQ_RESEARCH_REVIEW_ENABLED:?Set GROQ_RESEARCH_REVIEW_ENABLED to the same approved API value}"' in script
+    assert 'GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"' not in script
     assert 'python "${REPO_ROOT}/scripts/validate_groq_deploy_env.py"' in script
     assert 'dirname -- "${BASH_SOURCE[0]}") && pwd)/validate_groq_deploy_env.py' not in script
     assert "GEMINI_API_KEY" not in script
@@ -95,4 +96,6 @@ def test_daily_research_runs_bounded_optional_groq_reviews_concurrently():
 def test_worker_runbook_does_not_require_a_groq_secret_placeholder():
     runbook = (ROOT / "deploy" / "DEPLOY_WORKFLOW.md").read_text(encoding="utf-8")
     assert "SECRET_GROQ_REF=atlas-groq-api-key:<v>" not in runbook
+    assert 'GROQ_MODEL="${GROQ_MODEL:?copy the approved API deployment value}"' in runbook
+    assert "must exactly match the approved API deployment values" in runbook
     assert "is optional and must be an exact" in runbook
