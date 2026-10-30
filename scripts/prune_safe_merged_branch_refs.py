@@ -33,6 +33,68 @@ class NoCommonMergeBaseError(RuntimeError):
     """A branch and main have no common ancestor; preserve this branch only."""
 
 
+def _merged_pr_records_in_range(
+    closed_prs: Iterable[Mapping[str, Any]],
+    repository: str,
+    *,
+    first_pr: int = 164,
+    last_pr: int = 330,
+) -> list[dict[str, Any]]:
+    """Return exact merged-PR evidence inside the requested #164-#330 scope.
+
+    This is a candidate scope filter, not deletion authority. The live branch tip
+    must equal an in-scope PR's recorded head SHA before any resolver proof runs.
+    Deletion then requires exact branch-tip ancestry, an exact in-scope merge commit
+    on main, the pinned duplicate-alias proof, the pinned Android release-gate
+    supersession proof, or the pinned Native AI migration supersession proof.
+    Closed but unmerged PRs and PRs outside #164-#330 are never deletion evidence.
+    """
+    eligible: list[dict[str, Any]] = []
+    for item in closed_prs:
+        try:
+            number = int(item.get("number"))
+        except (TypeError, ValueError):
+            continue
+        raw_head = item.get("head")
+        if not isinstance(raw_head, Mapping):
+            continue
+        head_repo = raw_head.get("repo")
+        head_repo_name = (
+            str(head_repo.get("full_name") or "").strip().lower()
+            if isinstance(head_repo, Mapping) else ""
+        )
+        head_name = str(raw_head.get("ref") or "").strip()
+        head_sha = str(raw_head.get("sha") or "").strip()
+        merge_sha = str(item.get("merge_commit_sha") or "").strip()
+        if (
+            first_pr <= number <= last_pr
+            and bool(item.get("merged_at"))
+            and head_repo_name == repository.strip().lower()
+            and head_name
+            and head_sha
+        ):
+            eligible.append({
+                "number": number,
+                "headRefName": head_name,
+                "headRefOid": head_sha,
+                "mergeCommit": {"oid": merge_sha or None},
+            })
+    return eligible
+
+
+def _has_in_scope_merged_pr_head(
+    merged_prs: Iterable[Mapping[str, Any]],
+    branch_name: str,
+    branch_sha: str,
+) -> bool:
+    """Require both the branch name and live tip to match an in-scope merged PR."""
+    return any(
+        item.get("headRefName") == branch_name
+        and item.get("headRefOid") == branch_sha
+        for item in merged_prs
+    )
+
+
 def should_delete_ref(
     branch_name: str,
     branch_sha: str,
@@ -162,6 +224,39 @@ def _tree_entry_at_commit(
         )
     mode, object_type, object_id = fields
     return mode, object_type, object_id
+
+
+def _load_open_pull_request_heads(repository: str) -> set[str]:
+    """Enumerate every open PR head; a failed or malformed page blocks pruning."""
+    result = _run(
+        [
+            "gh", "api", "--paginate", "--slurp",
+            f"repos/{repository}/pulls?state=open&per_page=100",
+        ],
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(
+            "Unable to list all open pull requests for reconciliation: "
+            + (result.stderr.strip() or f"exit code {result.returncode}")
+        )
+    raw_pages = json.loads(result.stdout)
+    if not isinstance(raw_pages, list) or not raw_pages or any(
+        not isinstance(page, list) for page in raw_pages
+    ):
+        raise RuntimeError(
+            "GitHub returned an unexpected paginated open-pull-request response"
+        )
+    pull_requests = [item for page in raw_pages for item in page]
+    heads: set[str] = set()
+    for item in pull_requests:
+        if not isinstance(item, dict) or not isinstance(item.get("head"), dict):
+            raise RuntimeError("GitHub returned a malformed open-pull-request record")
+        head = item["head"].get("ref")
+        if not isinstance(head, str) or not head.strip():
+            raise RuntimeError("GitHub returned an open pull request without a head branch")
+        heads.add(head)
+    return heads
 
 
 def _reconcile_unknown_protection_branches(
@@ -721,17 +816,7 @@ def main() -> int:
             return 2
         branches = _reconcile_unknown_protection_branches(branches, branch_protection)
 
-        open_pr_payload = _run(
-            [
-                "gh", "pr", "list", "--repo", repository, "--state", "open",
-                "--limit", "1000", "--json", "headRefName",
-            ]
-        ).stdout
-        open_pr_heads = {
-            str(item.get("headRefName") or "")
-            for item in json.loads(open_pr_payload)
-            if item.get("headRefName")
-        }
+        open_pr_heads = _load_open_pull_request_heads(repository)
 
         # Read closed PRs through the GitHub REST API. `gh pr list --state merged`
         # is not consistently supported across CLI versions; an empty result must
@@ -755,18 +840,8 @@ def main() -> int:
             closed_prs = [item for page in raw_pages for item in page]
         else:
             closed_prs = raw_pages
-        merged_prs = [
-            {
-                "headRefName": item.get("head", {}).get("ref"),
-                "headRefOid": item.get("head", {}).get("sha"),
-                "mergeCommit": {"oid": item.get("merge_commit_sha")},
-            }
-            for item in closed_prs
-            if isinstance(item, dict)
-            and item.get("merged_at")
-            and isinstance(item.get("head"), dict)
-        ]
-
+        merged_prs = _merged_pr_records_in_range(closed_prs, repository)
+        in_scope_branch_heads = {str(item["headRefName"]) for item in merged_prs}
         deleted = 0
         preserved = 0
         failed = 0
@@ -776,6 +851,15 @@ def main() -> int:
             decisions.append((status, branch_name, reason))
             print(f"{status} {branch_name}: {reason}")
         for branch_name in branches:
+            if branch_name not in in_scope_branch_heads:
+                record(
+                    "PRESERVE",
+                    branch_name,
+                    "outside requested merged-PR cleanup scope #164-#330",
+                )
+                preserved += 1
+                continue
+
             if branch_protection[branch_name]:
                 record(
                     "PRESERVE",
@@ -797,10 +881,19 @@ def main() -> int:
                 preserved += 1
                 continue
             branch_sha = result.stdout.strip()
+            if not _has_in_scope_merged_pr_head(merged_prs, branch_name, branch_sha):
+                record(
+                    "PRESERVE",
+                    branch_name,
+                    "live branch tip does not match an exact merged PR head in scope #164-#330",
+                )
+                preserved += 1
+                continue
 
             branch_merged_prs = [
                 item for item in merged_prs
                 if item.get("headRefName") == branch_name
+                and item.get("headRefOid") == branch_sha
             ]
             duplicate_safe, duplicate_reason, duplicate_keeper = _explicit_duplicate_alias_retirement_proof(
                 branch_name, branch_sha

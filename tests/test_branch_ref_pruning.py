@@ -27,6 +27,87 @@ def test_branch_pruning_never_deletes_main_or_a_branch_with_an_open_pr():
     ) == (False, "branch has an open pull request")
 
 
+def test_branch_cleanup_scope_is_limited_to_same_repository_merged_prs_164_through_330():
+    repository = "Papajona/Atlas-Bot"
+    closed_prs = [
+        {"number": 163, "merged_at": "2026-09-29T00:00:00Z", "merge_commit_sha": "outside-before-merge", "head": {"ref": "outside-before", "sha": "outside-before-sha", "repo": {"full_name": repository}}},
+        {"number": 164, "merged_at": "2026-09-30T00:00:00Z", "merge_commit_sha": "range-lower-merge", "head": {"ref": "range-lower", "sha": "range-lower-sha", "repo": {"full_name": repository}}},
+        {"number": 170, "merged_at": "2026-10-01T00:00:00Z", "merge_commit_sha": "range-start-merge", "head": {"ref": "range-start", "sha": "range-start-sha", "repo": {"full_name": repository}}},
+        {"number": 270, "merged_at": "2026-10-02T00:00:00Z", "merge_commit_sha": "range-end-merge", "head": {"ref": "range-end", "sha": "range-end-sha", "repo": {"full_name": repository}}},
+        {"number": 271, "merged_at": "2026-10-03T00:00:00Z", "merge_commit_sha": "outside-271-merge", "head": {"ref": "range-271", "sha": "range-271-sha", "repo": {"full_name": repository}}},
+        {"number": 328, "merged_at": "2026-10-04T00:00:00Z", "merge_commit_sha": "outside-328-merge", "head": {"ref": "range-late", "sha": "range-late-sha", "repo": {"full_name": repository}}},
+        {"number": 330, "merged_at": "2026-10-05T00:00:00Z", "merge_commit_sha": "outside-330-merge", "head": {"ref": "range-330", "sha": "range-330-sha", "repo": {"full_name": repository}}},
+        {"number": 331, "merged_at": "2026-10-06T00:00:00Z", "merge_commit_sha": "outside-after-merge", "head": {"ref": "outside-after", "sha": "outside-after-sha", "repo": {"full_name": repository}}},
+        {"number": None, "merged_at": "2026-10-07T00:00:00Z", "merge_commit_sha": "malformed-merge", "head": {"ref": "malformed-number", "sha": "malformed-sha", "repo": {"full_name": repository}}},
+        {"number": 200, "merged_at": "2026-10-08T00:00:00Z", "merge_commit_sha": "missing-head-merge", "head": None},
+        # A fork PR with the same ref name must never authorize deletion of the
+        # same-named local branch in this repository.
+        {"number": 200, "merged_at": "2026-10-09T00:00:00Z", "merge_commit_sha": "fork-merge", "head": {"ref": "fork-collision", "sha": "fork-sha", "repo": {"full_name": "contributor/Atlas-Bot"}}},
+        {"number": 201, "merged_at": "2026-10-10T00:00:00Z", "merge_commit_sha": "deleted-fork-merge", "head": {"ref": "deleted-fork-ref", "sha": "deleted-fork-sha", "repo": None}},
+    ]
+
+    records = pruning._merged_pr_records_in_range(closed_prs, repository)
+
+    assert {(x["number"], x["headRefName"], x["headRefOid"]) for x in records} == {
+        (164, "range-lower", "range-lower-sha"),
+        (170, "range-start", "range-start-sha"),
+        (270, "range-end", "range-end-sha"),
+        (271, "range-271", "range-271-sha"),
+        (328, "range-late", "range-late-sha"),
+        (330, "range-330", "range-330-sha"),
+    }
+
+
+def test_reused_branch_name_cannot_borrow_out_of_range_merged_pr_proof():
+    repository = "Papajona/Atlas-Bot"
+    closed_prs = [
+        {
+            "number": 200,
+            "merged_at": "2026-10-08T00:00:00Z",
+            "merge_commit_sha": "in-range-merge",
+            "head": {
+                "ref": "reused-ref",
+                "sha": "in-range-head-sha",
+                "repo": {"full_name": repository},
+            },
+        },
+        {
+            "number": 290,
+            "merged_at": "2026-10-09T00:00:00Z",
+            "merge_commit_sha": "out-of-range-merge",
+            "head": {
+                "ref": "reused-ref",
+                "sha": "out-of-range-head-sha",
+                "repo": {"full_name": repository},
+            },
+        },
+    ]
+
+    records = pruning._merged_pr_records_in_range(closed_prs, repository)
+
+    assert pruning._has_in_scope_merged_pr_head(records, "reused-ref", "in-range-head-sha")
+    assert not pruning._has_in_scope_merged_pr_head(records, "reused-ref", "out-of-range-head-sha")
+
+
+def test_closed_unmerged_pr_branch_is_never_admitted_to_merged_cleanup_scope():
+    repository = "Papajona/Atlas-Bot"
+    closed_unmerged_pr = {
+        "number": 200,
+        "merged_at": None,
+        "merge_commit_sha": None,
+        "head": {
+            "ref": "closed-unmerged-unique-work",
+            "sha": "unmerged-head-sha",
+            "repo": {"full_name": repository},
+        },
+    }
+
+    scoped = pruning._merged_pr_records_in_range([closed_unmerged_pr], repository)
+
+    # A reachable branch tip is not enough to make a closed, unmerged PR branch
+    # eligible for this merged-PR cleanup workflow.
+    assert scoped == []
+
 def test_branch_pruning_accepts_only_a_branch_tip_that_is_in_main_history():
     decision = should_delete_ref(
         "old-merged-branch",
@@ -1070,6 +1151,19 @@ def test_branch_pruning_runs_after_propagation_without_racing_its_push():
     assert "Verify Native AI propagation is successful before pruning" in workflow
     assert "github.event_name == 'push'" in workflow
     assert "scripts/migrate_legacy_native_ai.py" in workflow
+    propagation = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "propagate-native-ai-all-branches.yml"
+    ).read_text(encoding="utf-8")
+    shared_group = "atlas-native-ai-branch-propagation-and-pruning"
+    assert f"group: {shared_group}" in workflow
+    assert f"group: {shared_group}" in propagation
+    assert "queue: max" in workflow
+    assert "queue: max" in propagation
+    assert "cancel-in-progress: false" in workflow
+    assert "cancel-in-progress: false" in propagation
     assert ".github/workflows/propagate-native-ai-all-branches.yml" in workflow
     assert "while IFS= read -r changed_path;" in workflow
     assert 'case "$changed_path" in' in workflow
@@ -1373,3 +1467,47 @@ def test_one_time_prune_workflow_uses_safe_literal_path_comparison_and_allowlist
         'git rev-parse "$sha:.github/workflows/ledger-concurrency-check.yml"'
         in ledger_case
     )
+
+
+def test_open_pull_request_heads_are_fully_paginated_without_a_result_cap(monkeypatch):
+    # Two pages model GitHub's --paginate --slurp response. The protected branch
+    # is deliberately placed beyond the first 1,000 PRs from the former CLI limit.
+    page_one = [{"head": {"ref": f"feature/open-{index}"}} for index in range(1000)]
+    page_two = [{"head": {"ref": "feature/open-beyond-former-limit"}}]
+    calls = []
+
+    def fake_run(args, *, check=True):
+        calls.append(args)
+        assert args[:3] == ["gh", "api", "--paginate"]
+        assert "--slurp" in args
+        assert "pulls?state=open&per_page=100" in args[-1]
+        return subprocess.CompletedProcess(
+            args, 0, json.dumps([page_one, page_two]), ""
+        )
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+    heads = pruning._load_open_pull_request_heads("Papajona/Atlas-Bot")
+
+    assert len(heads) == 1001
+    assert "feature/open-beyond-former-limit" in heads
+    assert len(calls) == 1
+
+
+def test_open_pull_request_enumeration_failure_blocks_branch_pruning(monkeypatch):
+    def fake_run(args, *, check=True):
+        return subprocess.CompletedProcess(args, 1, "", "API pagination failed")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Unable to list all open pull requests"):
+        pruning._load_open_pull_request_heads("Papajona/Atlas-Bot")
+
+
+def test_open_pull_request_enumeration_rejects_malformed_page(monkeypatch):
+    def fake_run(args, *, check=True):
+        return subprocess.CompletedProcess(args, 0, json.dumps([[{"head": None}]]), "")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+
+    with pytest.raises(RuntimeError, match="malformed open-pull-request record"):
+        pruning._load_open_pull_request_heads("Papajona/Atlas-Bot")
