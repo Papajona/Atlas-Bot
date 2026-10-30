@@ -87,29 +87,152 @@ def test_customer_paper_market_context_rejects_unverified_or_incomplete_candle(m
     assert rejected_bar.value.status_code == 409
 
 
-def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race():
-    from pathlib import Path
+def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypatch):
+    frozen_now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    bar_at = frozen_now - timedelta(minutes=1)
+    _freeze_paper_api_clock(monkeypatch, frozen_now)
+    frame = _verified_bars(bar_at)
+    frame.attrs["data_provenance"]["fetched_at_utc"] = (
+        frozen_now - timedelta(seconds=1)
+    ).isoformat()
 
-    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_api.py").read_text(
-        encoding="utf-8"
+    open_order = {
+        "client_order_id": "manual-replay-race",
+        "order_id": 88001,
+        "status": "PARTIALLY_FILLED",
+        "venue": "binance",
+        "market_type": "spot",
+        "symbol": "BTC/USDT",
+        "side": "BUY",
+        "metadata": {
+            "timeframe": "1m",
+            "execution_model": "completed_bar_volume_capped_heuristic_v1",
+            "submission_bar_at": (bar_at - timedelta(minutes=1)).isoformat(),
+        },
+    }
+    prior_fill = {
+        "fill_id": "immutable-prior-fill",
+        "status": "APPENDED",
+        "quantity": "0.25",
+    }
+    concurrent_fill = {
+        "fill_id": "concurrent-final-fill",
+        "status": "APPENDED",
+        "quantity": "0.50",
+    }
+    shared_state = {
+        "order": dict(open_order),
+        "fills": [dict(prior_fill)],
+        "transitions": [],
+    }
+    order_reads = []
+    expiry_calls = []
+    fill_lookups = []
+
+    async def get_customer_paper_order(*, customer_id, client_order_id):
+        assert customer_id == 99031
+        assert client_order_id == "manual-replay-race"
+        order_reads.append(len(order_reads) + 1)
+        # Every read reflects the same shared lifecycle state; the result is not
+        # selected by call count.
+        return dict(shared_state["order"])
+
+    async def get_prior_fill(**kwargs):
+        assert kwargs["customer_id"] == 99031
+        assert kwargs["client_order_id"] == "manual-replay-race"
+        assert kwargs["bar_key"] == "manual-replay-bar"
+        fill_lookups.append(kwargs)
+        assert shared_state["fills"]
+        return dict(shared_state["fills"][0])
+
+    async def expire_order(**kwargs):
+        expiry_calls.append(kwargs)
+        assert shared_state["order"]["status"] == "PARTIALLY_FILLED"
+        # Model the concurrent transaction winning the order lock: it appends
+        # the final fill and changes the order to FILLED before TTL expiry can
+        # commit. The expiry helper reports the observed lifecycle conflict.
+        shared_state["fills"].append(dict(concurrent_fill))
+        shared_state["order"] = {
+            **shared_state["order"],
+            "status": "FILLED",
+            "filled_quantity": "0.75",
+        }
+        shared_state["transitions"].append(
+            {
+                "from": "PARTIALLY_FILLED",
+                "to": "FILLED",
+                "fill_id": concurrent_fill["fill_id"],
+            }
+        )
+        raise paper_api.CustomerPaperOrderConflict(
+            "order became terminal after a concurrent fill"
+        )
+
+    async def forbidden_record_fill(**_kwargs):
+        raise AssertionError("a replay must not append a duplicate fill")
+
+    async def fake_get_customer(authorization, _db, require_aal2=True):
+        assert authorization == "Bearer replay-customer"
+        assert require_aal2 is True
+        return SimpleNamespace(id=99031), {"aal": "aal2"}
+
+    class DummySession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _type, _value, _traceback):
+            return False
+
+    async def state_guard():
+        return None
+
+    async def register_bar(**kwargs):
+        assert kwargs["venue"] == "binance"
+        assert kwargs["symbol"] == "BTC/USDT"
+        return {"bar_key": "manual-replay-bar"}
+
+    monkeypatch.setattr(paper_api, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(paper_api, "_paper_feature_flags", lambda: None)
+    monkeypatch.setattr(paper_api, "get_customer_paper_order", get_customer_paper_order)
+    monkeypatch.setattr(paper_api, "get_customer_paper_fill_for_bar", get_prior_fill)
+    monkeypatch.setattr(paper_api, "expire_customer_paper_order", expire_order)
+    monkeypatch.setattr(paper_api, "record_customer_paper_fill", forbidden_record_fill)
+    monkeypatch.setattr(paper_api, "register_customer_paper_market_bar", register_bar)
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 1)
+
+    api_app = FastAPI()
+    api_app.include_router(paper_api.build_customer_paper_router(
+        get_customer=fake_get_customer,
+        market_data=lambda _request: frame,
+        market_request_type=PaperMarketRequest,
+        state_guard=state_guard,
+    ))
+    response = TestClient(api_app).post(
+        "/api/customer/paper/orders/manual-replay-race/advance",
+        headers={"Authorization": "Bearer replay-customer"},
     )
-    route_start = source.index('    @router.post("/orders/{client_order_id}/advance")')
-    replay_start = source.index("            if prior_fill is not None:", route_start)
-    replay_end = source.index('            values = bar["values"]', replay_start)
-    replay_block = source[replay_start:replay_end]
 
-    # Do not make a TTL decision from the stale order row read before the fill lookup.
-    assert 'replay_order = await _order_detail(profile.id, client_order_id)' in replay_block
-    assert replay_block.index('replay_order = await _order_detail(profile.id, client_order_id)') < replay_block.index(
-        'and replay_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}'
-    )
-    # If a concurrent fill wins between the re-read and expiry, inspect the current state
-    # and replay the immutable fill if the order is now terminal.
-    assert "except CustomerPaperOrderConflict:" in replay_block
-    assert replay_block.count('replay_order = await _order_detail(profile.id, client_order_id)') >= 3
-    assert 'if replay_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}:' in replay_block
-
-
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["status"] == "REPLAYED"
+    assert payload["fill"]["fill_id"] == "immutable-prior-fill"
+    assert payload["order"]["status"] == "FILLED"
+    assert shared_state["order"]["filled_quantity"] == "0.75"
+    assert shared_state["transitions"] == [
+        {
+            "from": "PARTIALLY_FILLED",
+            "to": "FILLED",
+            "fill_id": "concurrent-final-fill",
+        }
+    ]
+    assert [fill["fill_id"] for fill in shared_state["fills"]] == [
+        "immutable-prior-fill",
+        "concurrent-final-fill",
+    ]
+    assert len(order_reads) == 3
+    assert len(fill_lookups) == 1
+    assert len(expiry_calls) == 1
 def test_customer_paper_order_request_rejects_malformed_limit_orders():
     with pytest.raises(ValueError):
         paper_api.CustomerPaperOrderRequest(
