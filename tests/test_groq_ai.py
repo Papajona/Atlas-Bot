@@ -519,6 +519,36 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
     with pytest.raises(groq_ai.GroqAIError, match="outside the submitted trade plan"):
         groq_ai._validate_trade_context_review(invented, packet=packet)
 
+    # Complete numeric tokens must be checked: signs and scientific notation
+    # cannot disappear into an unmatched prefix.
+    scientific_packet = {
+        "trade_plan": {
+            "entry_price": 100.0,
+            "stop_loss_price": 0.00001,
+            "take_profit_price": 110.0,
+        }
+    }
+    scientific = {
+        **VALID_TRADE_REVIEW,
+        "regime_assessment": "Stop at 1e-5 is the submitted stop level.",
+        "key_observations": ["Target at +1.10e2 is the submitted target."],
+    }
+    groq_ai._validate_trade_context_review(scientific, packet=scientific_packet)
+
+    malformed = {
+        **VALID_TRADE_REVIEW,
+        "key_observations": ["Target at +999999 is in the submitted plan."],
+    }
+    with pytest.raises(groq_ai.GroqAIError, match="outside the submitted trade plan"):
+        groq_ai._validate_trade_context_review(malformed, packet=packet)
+
+    suffix = {
+        **VALID_TRADE_REVIEW,
+        "key_observations": ["Target at 110USD is in the submitted plan."],
+    }
+    with pytest.raises(groq_ai.GroqAIError, match="invalid target price token"):
+        groq_ai._validate_trade_context_review(suffix, packet=packet)
+
     directives = [
         "Set a stop-loss at 95.",
         "Set your take-profit at 110.",
