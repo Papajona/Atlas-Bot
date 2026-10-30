@@ -312,7 +312,7 @@ def test_branch_protection_status_fails_closed_on_api_error(monkeypatch):
         pruning._load_branch_protection_status("Papajona/Atlas-Bot")
 
 
-def test_main_skips_without_deleting_when_detailed_protection_is_unavailable(monkeypatch):
+def test_main_fails_without_deleting_when_detailed_protection_is_unavailable(monkeypatch, capsys):
     calls = []
     monkeypatch.setenv("GITHUB_REPOSITORY", "Papajona/Atlas-Bot")
     monkeypatch.setenv("GH_TOKEN", "default-workflow-token")
@@ -338,7 +338,10 @@ def test_main_skips_without_deleting_when_detailed_protection_is_unavailable(mon
         ),
     )
 
-    assert pruning.main() == 0
+    assert pruning.main() == 2
+    captured = capsys.readouterr()
+    assert "BLOCKED: detailed main branch protection could not be verified" in captured.err
+    assert "no branch refs were modified" in captured.err
     assert not any(args[:2] == ["git", "push"] for args in calls)
 
 
