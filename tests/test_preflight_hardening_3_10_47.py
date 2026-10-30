@@ -33,8 +33,13 @@ def test_customer_bot_ai_review_has_hard_latency_ceiling_and_fails_closed():
     main = (ROOT / "app/main.py").read_text()
     marker = '@app.post("/api/customer/bot/start")'
     section = main[main.index(marker):]
-    assert 'asyncio.wait_for(\n                dual_ai_trade_safety_review(packet)' in section
-    assert 'timeout=settings.ai_strategy_provider_timeout_seconds' in section
+    helper_start = main.index("async def _run_trade_safety_review(")
+    helper_end = main.index("def _validated_customer_paper_mark(", helper_start)
+    helper = main[helper_start:helper_end]
+    assert "deadline = loop.time() + timeout" in helper
+    assert "await asyncio.wait_for(_attach_groq_trade_review(packet), timeout=groq_budget)" in helper
+    assert "return await asyncio.wait_for(dual_ai_trade_safety_review(packet), timeout=remaining)" in helper
+    assert "await _run_trade_safety_review(packet)" in section
     assert '"CUSTOMER_BOT_AI_TIMEOUT"' in section
     assert '"decision": "NO_TRADE"' in section
 
