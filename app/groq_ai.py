@@ -77,10 +77,8 @@ _ACTIONABLE_TRADING_PATTERNS = (
         r"(?i:\b(?:place|submit|execute)\s+(?:a\s+)?"
         r"(?:(?:buy|sell)\s+)?order\b)"
     ),
-    # Reject price-setting commands, not factual restatements of the submitted plan.
     re.compile(
-        r"(?i:\b(?:set|move|place|adjust|raise|lower|change|update|put)\s+"
-        r"(?:the\s+)?(?:entry|stop[- ]loss|take[- ]profit|limit|trigger)"
+        r"(?i:\b(?:entry|stop[- ]loss|take[- ]profit|limit|trigger)"
         r"(?:\s+price)?\s*(?:=|:|at)\s*[$€£]?\d+(?:[.,]\d+)?)"
     ),
     re.compile(r"(?i:\b(?:buy|sell)\s+(?:now|immediately|at market)\b)"),
@@ -93,10 +91,28 @@ _NEGATED_ACTION_PREFIX = re.compile(
 )
 
 
-def _contains_actionable_trading_instruction(text: str) -> bool:
-    """Reject explicit trade commands while retaining clearly negated warnings."""
-    for pattern in _ACTIONABLE_TRADING_PATTERNS:
+_TRADE_PRICE_SETTING_PATTERN = re.compile(
+    r"(?i:\b(?:set|move|place|adjust|raise|lower|change|update|put)\s+"
+    r"(?:the\s+)?(?:entry|stop[- ]loss|take[- ]profit|limit|trigger)"
+    r"(?:\s+price)?\s*(?:=|:|at)\s*[$€£]?\d+(?:[.,]\d+)?)"
+)
+
+
+def _contains_actionable_trading_instruction(
+    text: str, *, allow_factual_price_references: bool = False
+) -> bool:
+    """Reject explicit trade commands, with an option for factual plan-price citations."""
+    for index, pattern in enumerate(_ACTIONABLE_TRADING_PATTERNS):
+        # Research responses must not introduce new prices. Trade-time risk reviews
+        # may repeat the supplied stop/target levels as evidence, but not instruct
+        # the caller to set or move those levels.
+        if allow_factual_price_references and index == 2:
+            continue
         for match in pattern.finditer(text):
+            if not _NEGATED_ACTION_PREFIX.search(text[max(0, match.start() - 80):match.start()]):
+                return True
+    if allow_factual_price_references:
+        for match in _TRADE_PRICE_SETTING_PATTERN.finditer(text):
             if not _NEGATED_ACTION_PREFIX.search(text[max(0, match.start() - 80):match.start()]):
                 return True
     return False
@@ -144,7 +160,9 @@ def _validate_trade_context_review(value: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(regime, str) or not regime.strip() or len(regime) > 1000:
         raise GroqAIError("Groq trade review regime_assessment must be non-empty text")
     regime = regime.strip()
-    if _contains_actionable_trading_instruction(regime):
+    if _contains_actionable_trading_instruction(
+        regime, allow_factual_price_references=True
+    ):
         raise GroqAIError("Groq trade review contains actionable trading instructions")
 
     alignment = str(value.get("setup_alignment") or "").strip().upper()
@@ -177,7 +195,10 @@ def _validate_trade_context_review(value: dict[str, Any]) -> dict[str, Any]:
         cleaned = [item.strip() for item in items if item.strip()]
         if len(cleaned) > 12:
             raise GroqAIError(f"Groq trade review field {key!r} must be an array of at most 12 short text values")
-        if any(_contains_actionable_trading_instruction(item) for item in cleaned):
+        if any(
+            _contains_actionable_trading_instruction(item, allow_factual_price_references=True)
+            for item in cleaned
+        ):
             raise GroqAIError("Groq trade review contains actionable trading instructions")
         result[key] = cleaned
     return result
