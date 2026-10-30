@@ -220,7 +220,14 @@ async def _run_trade_safety_review(packet: dict) -> dict:
     remaining = deadline - loop.time()
     if remaining <= 0:
         raise asyncio.TimeoutError
-    return await asyncio.wait_for(dual_ai_trade_safety_review(packet), timeout=remaining)
+    # A prompt Groq response must not expand Native AI beyond its separately
+    # configured veto reserve. The shared deadline remains an additional cap.
+    native_timeout = min(native_reserve, remaining)
+    if not math.isfinite(native_timeout) or native_timeout <= 0:
+        raise asyncio.TimeoutError
+    return await asyncio.wait_for(
+        dual_ai_trade_safety_review(packet), timeout=native_timeout
+    )
 
 def _validated_customer_paper_mark(context: dict | None) -> tuple[float, str]:
     """Return a positive bid and timestamp only when the quote is demonstrably current."""
