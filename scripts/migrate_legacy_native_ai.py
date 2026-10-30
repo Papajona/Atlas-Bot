@@ -5265,6 +5265,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         ):
             return False
 
+        double_bracket = stripped.startswith("[[")
         quote: str | None = None
         escaped = False
         index = 0
@@ -5301,6 +5302,22 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             if ord(character) == 96 or (character == "$" and next_character == "("):
                 return False
             if character in {"<", ">"} and next_character == "(":
+                return False
+            # An unquoted semicolon terminates the test command; a following
+            # command would execute before the conditional result is evaluated.
+            if character == ";":
+                return False
+            # && and || are test operators only inside [[ ... ]]. Reject
+            # command separators in the single-bracket test form.
+            if character == "&":
+                if double_bracket and next_character == "&":
+                    index += 2
+                    continue
+                return False
+            if character == "|":
+                if double_bracket and next_character == "|":
+                    index += 2
+                    continue
                 return False
             index += 1
         return quote is None and not escaped
@@ -5425,7 +5442,13 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             inline = re.match(r"^\s*if\b.*?\bthen\s*(.*?);\s*fi\s*$", source_line, re.I)
             header = re.search(r"\bthen\b(.*)$", source_line, re.I)
             condition_match = re.match(r"^\s*if\s+(.+?)\s*;?\s*then\b", source_line, re.I)
-            if not condition_match or not safe_groq_condition(condition_match.group(1)):
+            if condition_match:
+                condition_text = condition_match.group(1)
+            else:
+                # Valid shell permits "then" on the next line after the test.
+                condition_without_then = re.match(r"^\s*if\s+(.+?)\s*$", source_line, re.I)
+                condition_text = condition_without_then.group(1) if condition_without_then else ""
+            if not condition_text or not safe_groq_condition(condition_text):
                 raise MigrationError(f"{path} has an unsafe Groq if-condition; refusing it")
             if header and not inline:
                 tail = header.group(1).strip().rstrip(";").strip()
