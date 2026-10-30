@@ -101,8 +101,8 @@ def _container_env(revision: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return result
 
 
-def resolve(revision: dict[str, Any], expected_project_id: str) -> tuple[str, str, str, str]:
-    """Return validated model, token cap, enablement and pinned optional secret from one revision."""
+def resolve(revision: dict[str, Any], expected_project_id: str) -> tuple[str, str, str, str, str]:
+    """Return validated model, token cap, research/trade gates and pinned optional secret."""
     env = _container_env(revision)
     values: list[str] = []
     for name in ("GROQ_MODEL", "GROQ_MAX_COMPLETION_TOKENS", "GROQ_RESEARCH_REVIEW_ENABLED"):
@@ -118,6 +118,13 @@ def resolve(revision: dict[str, Any], expected_project_id: str) -> tuple[str, st
         raise ValueError("serving API GROQ_MAX_COMPLETION_TOKENS must be between 1 and 8192")
     if enabled.lower() not in {"true", "false"}:
         raise ValueError("serving API GROQ_RESEARCH_REVIEW_ENABLED must be true or false")
+
+    # Older API revisions omit this new opt-in; the app runtime default is false.
+    trade_entry = env.get("GROQ_TRADE_REVIEW_ENABLED")
+    trade_enabled = trade_entry.get("value") if trade_entry else "false"
+    if not isinstance(trade_enabled, str) or trade_enabled.strip().lower() not in {"true", "false"}:
+        raise ValueError("serving API GROQ_TRADE_REVIEW_ENABLED must be true or false")
+    trade_enabled = trade_enabled.strip().lower()
 
     secret_entry = env.get("GROQ_API_KEY")
     secret_ref = "__NONE__"
@@ -146,10 +153,10 @@ def resolve(revision: dict[str, Any], expected_project_id: str) -> tuple[str, st
         if secret_name != "atlas-groq-api-key" or not re.fullmatch(r"[1-9][0-9]*", version):
             raise ValueError("serving API GROQ_API_KEY does not use an immutable atlas-groq-api-key version")
         secret_ref = f"{secret_name}:{version}"
-    return model, tokens, enabled.lower(), secret_ref
+    return model, tokens, enabled.lower(), trade_enabled, secret_ref
 
 
-def require_consistent_configs(configs: list[tuple[str, str, str, str]]) -> tuple[str, str, str, str]:
+def require_consistent_configs(configs: list[tuple[str, str, str, str, str]]) -> tuple[str, str, str, str, str]:
     """Refuse split-traffic API revisions that would give workers ambiguous settings."""
     if not configs:
         raise ValueError("no active API revision configuration was resolved")
