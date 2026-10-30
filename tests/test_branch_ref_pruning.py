@@ -449,9 +449,9 @@ def test_known_android_gate_branch_is_pruned_only_after_main_has_stronger_gate(m
         branch_name, branch_sha, "main-sha", set(), []
     )
 
-    assert safe is True
-    assert "exact historical Android release-trigger branch superseded" in reason
-    assert mismatches == []
+    assert safe is False
+    assert "exact branch ancestry or merged-PR proof is absent" in reason
+    assert mismatches == ["tests/test_android_production_backend_wiring.py"]
 
 
 def test_android_gate_supersession_does_not_match_an_unknown_or_advanced_sha(monkeypatch):
@@ -791,16 +791,12 @@ def test_matching_tree_without_ancestry_or_merged_pr_proof_is_not_deleted(monkey
     assert paths == []
 
 
-def test_main_protection_api_failure_blocks_pruning(monkeypatch):
-    monkeypatch.setattr(
-        pruning,
-        "_run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            [], 403, "", "Resource not accessible by integration"
-        ),
-    )
-    with pytest.raises(RuntimeError, match="refusing all branch pruning"):
-        pruning._verify_main_branch_is_non_rewritable("Papajona/Atlas-Bot")
+def test_main_protection_status_must_be_known_and_true():
+    pruning._require_protected_main({"main": True, "feature/one": False})
+    with pytest.raises(RuntimeError, match="main is not reported as protected"):
+        pruning._require_protected_main({"main": False})
+    with pytest.raises(RuntimeError, match="main is not reported as protected"):
+        pruning._require_protected_main({"feature/one": True})
 
 
 def test_native_ai_branch_retirement_requires_exact_sha_and_migration_only_paths(monkeypatch):
