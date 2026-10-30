@@ -27,22 +27,26 @@ def test_api_keeps_groq_secret_optional_and_gemini_removed():
     assert "GEMINI_STRATEGY_MODEL" not in script
 
 
-def test_worker_keeps_groq_secret_optional_and_gemini_removed():
+def test_worker_keeps_groq_secret_optional_and_inherits_only_serving_api_revisions():
     script = WORKER_DEPLOY.read_text(encoding="utf-8")
-    assert 'SECRET_GROQ_REF="${SECRET_GROQ_REF:-}"' in script
-    assert "GROQ_API_KEY=${SECRET_GROQ_REF}" in script
-    assert "${GROQ_SECRET_ARG}" in script
-    assert "GROQ_RESEARCH_REVIEW_ENABLED=${GROQ_RESEARCH_REVIEW_ENABLED}" in script
     assert ': "${API_SERVICE:?Set API_SERVICE to the currently deployed Cloud Run API service}"' in script
     assert 'gcloud run services describe "$API_SERVICE"' in script
-    assert 'scripts/resolve_worker_groq_config.py' in script
+    assert 'gcloud run revisions describe "$API_REVISION"' in script
+    assert "scripts/resolve_worker_groq_config.py" in script
+    assert "--traffic-revisions" in script
+    assert "--revision-config" in script
     assert 'GROQ_MODEL="${API_GROQ_CONFIG[0]}"' in script
     assert 'GROQ_MAX_COMPLETION_TOKENS="${API_GROQ_CONFIG[1]}"' in script
     assert 'GROQ_RESEARCH_REVIEW_ENABLED="${API_GROQ_CONFIG[2]}"' in script
     assert 'SECRET_GROQ_REF="${API_GROQ_CONFIG[3]}"' in script
+    assert 'if [[ "${REVISION_GROQ_CONFIG[$index]}" != "${API_GROQ_CONFIG[$index]}" ]]' in script
+    assert "API revisions receiving traffic have different Groq configuration" in script
+    assert 'SECRET_GROQ_REF="${SECRET_GROQ_REF:-}"' not in script
+    assert ': "${GROQ_MODEL:?Set GROQ_MODEL' not in script
+    assert ': "${GROQ_MAX_COMPLETION_TOKENS:?Set GROQ_MAX_COMPLETION_TOKENS' not in script
+    assert ': "${GROQ_RESEARCH_REVIEW_ENABLED:?Set GROQ_RESEARCH_REVIEW_ENABLED' not in script
     assert 'GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"' not in script
     assert 'python "${REPO_ROOT}/scripts/validate_groq_deploy_env.py"' in script
-    assert 'dirname -- "${BASH_SOURCE[0]}") && pwd)/validate_groq_deploy_env.py' not in script
     assert "GEMINI_API_KEY" not in script
     assert "GEMINI_MODEL" not in script
     assert "GEMINI_STRATEGY_MODEL" not in script
@@ -51,7 +55,6 @@ def test_worker_keeps_groq_secret_optional_and_gemini_removed():
     assert "PAYOUT_LIVE_ENABLED=false" in script
     assert "BROKER_SANDBOX=true" in script
     assert "PAPER_TRADING=true" in script
-
 
 def test_production_workflow_passes_optional_groq_secret_without_gemini():
     workflow = PRODUCTION_WORKFLOW.read_text(encoding="utf-8")
