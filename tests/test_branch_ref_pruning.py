@@ -430,8 +430,8 @@ def test_android_gate_allows_harmless_release_job_name_metadata(monkeypatch):
     branch_name = "fix/android-release-trigger-gating-followup-20261023"
     branch_sha = "6b9feef6b55be4ef06eef630d4b558e0ffad35b7"
     named_workflow = _safe_android_release_workflow().replace(
-        "  android-release:\\n",
-        "  android-release:\\n    name: Signed Android release\\n",
+        "  android-release:\n",
+        "  android-release:\n    name: Signed Android release\n",
     )
     monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: False)
     monkeypatch.setattr(
