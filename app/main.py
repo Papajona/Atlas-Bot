@@ -143,6 +143,49 @@ async def _run_trade_safety_review(packet: dict) -> dict:
     return await asyncio.wait_for(dual_ai_trade_safety_review(packet), timeout=remaining)
 
 
+async def _customer_paper_submission_stage(
+    execution: dict,
+    *,
+    customer_id: int,
+    trading_account_id: int,
+    req,
+) -> str | None:
+    """Distinguish a newly persisted paper order intent from a rejected trade."""
+    if (
+        not isinstance(execution, dict)
+        or str(execution.get("status") or "").upper() != "WAITING_FOR_NEXT_COMPLETED_BAR"
+    ):
+        return None
+
+    intent = execution.get("order_intent")
+    if not isinstance(intent, dict):
+        await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE", {
+            "customer_id": customer_id,
+            "trading_account_id": trading_account_id,
+            "symbol": str(req.symbol),
+            "exchange": str(req.exchange),
+            "reason": "pending execution omitted order_intent evidence",
+        })
+        return "customer_paper_order_pending"
+
+    if intent.get("newly_submitted") is True:
+        await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMITTED", {
+            "customer_id": customer_id,
+            "trading_account_id": trading_account_id,
+            "symbol": str(req.symbol),
+            "exchange": str(req.exchange),
+            "timeframe": str(req.timeframe),
+            "client_order_id": str(intent.get("client_order_id") or ""),
+            "order_id": intent.get("order_id"),
+            "side": str(intent.get("side") or "").upper(),
+            "quantity": str(intent.get("quantity") or ""),
+            "bar_timestamp": str(intent.get("bar_timestamp") or ""),
+            "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
+        })
+        return "customer_paper_order_submitted"
+    return "customer_paper_order_pending"
+
+
 def _validated_customer_paper_mark(context: dict | None) -> tuple[float, str]:
     """Return a positive bid and timestamp only when the quote is demonstrably current."""
     if not isinstance(context, dict):
@@ -1589,6 +1632,15 @@ async def _run_persisted_adaptive_bot_cycle(
         except CustomerPaperFlowBlocked as exc:
             return {"decision": "NO_TRADE", "stage": "customer_paper_execution",
                     "reason": str(exc)}
+        pending_stage = await _customer_paper_submission_stage(
+            execution, customer_id=profile.id, trading_account_id=account.id, req=req,
+        )
+        if pending_stage:
+            return {
+                "decision": "NO_TRADE", "stage": pending_stage, "mode": "CUSTOMER_PAPER",
+                "analysis": deterministic, "adaptive_model": adaptive, "ml_signal": ml_signal,
+                "ai_review": ai_review, "execution": execution,
+            }
         if execution.get("decision") != "TRADE":
             return {
                 "decision": "NO_TRADE", "stage": "customer_paper_order_gate", "mode": "CUSTOMER_PAPER",
@@ -5093,6 +5145,22 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 )
             except CustomerPaperFlowBlocked as exc:
                 raise HTTPException(409, f"Customer paper execution blocked: {exc}") from exc
+            pending_stage = await _customer_paper_submission_stage(
+                execution, customer_id=profile.id, trading_account_id=account_id, req=req,
+            )
+            if pending_stage:
+                return await _record_customer_decision({
+                    "decision": "NO_TRADE",
+                    "stage": pending_stage,
+                    "mode": "CUSTOMER_PAPER",
+                    "analysis": deterministic,
+                    "adaptive_model": adaptive or {"status": "DISABLED"},
+                    "ml_signal": ml_signal if settings.adaptive_ai_enabled else {"status": "DISABLED"},
+                    "ai_review": ai_review,
+                    "execution": execution,
+                    "autonomous_bot_id": bot_id,
+                    "autonomous_status": "RUNNING" if bot_id else "DISABLED",
+                })
             if execution.get("decision") != "TRADE":
                 return await _record_customer_decision({
                     "decision": "NO_TRADE",
