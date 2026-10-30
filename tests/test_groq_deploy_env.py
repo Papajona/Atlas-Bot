@@ -66,3 +66,14 @@ def test_api_defaults_groq_and_worker_inherits_only_traffic_serving_revisions() 
     assert ': "${GROQ_RESEARCH_REVIEW_ENABLED:?' not in worker
     assert "validate_groq_deploy_env.py" in api
     assert "validate_groq_deploy_env.py" in worker
+
+
+def test_production_deploy_forwards_separate_groq_trade_review_opt_in():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "production-deploy.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "GROQ_TRADE_REVIEW_ENABLED: ${{ vars.GROQ_TRADE_REVIEW_ENABLED }}" in workflow
