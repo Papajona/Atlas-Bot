@@ -312,7 +312,7 @@ def _max_affordable_paper_buy_quantity(
 
         # Search integer ledger quanta using the same notional/fee rounding used by
         # _fill_price_and_fee. Dividing by unrounded unit cost can overdraw by one
-        # NUMERIC(38,18) quantum when the fee is rounded up after notional rounding.
+        # NUMERIC(38,18) quantum when fee rounding is applied after notional rounding.
         low = 0
         high = int(quantity_cap / _BAR_QUANTUM)
         while low < high:
@@ -740,9 +740,55 @@ async def process_customer_paper_orders(
     meta = _json_mapping(order.get("metadata"))
     order_side = str(order.get("side") or "").upper()
 
-    # Manual API and autonomous-controller order intents are not interchangeable.
-    # Before refusing ownership, let a pending manual BUY yield to an existing stop.
-    if meta.get("paper_flow_version") != 1:
+    # Order schema version does not prove who owns an order. Legacy version-1 rows
+    # without an explicit owner are not safe to fill autonomously or through the
+    # manual advance API (they lack the manual execution model). Expire them
+    # idempotently so they cannot permanently block this market.
+    if (
+        not str(meta.get("execution_owner") or "").strip()
+        and str(meta.get("paper_flow_version") or "") == "1"
+    ):
+        client_id = str(order.get("client_order_id") or "").strip()
+        if not client_id:
+            raise CustomerPaperFlowBlocked(
+                "Ownerless legacy paper order has no client identity; operator reconciliation is required"
+            )
+        await _paper_call(
+            expire_customer_paper_order(
+                customer_id=customer_id,
+                client_order_id=client_id,
+                idempotency_key="paper-legacy-ownerless-expired-" + _sha(client_id)[:40],
+            ),
+            "expire ownerless legacy customer paper order",
+        )
+        legacy_order_id = str(order.get("order_id") or "")
+        legacy_quantity = str(order.get("quantity") or "")
+        legacy_bar_at = str(
+            meta.get("submission_bar_at")
+            or meta.get("signal_bar_timestamp")
+            or ""
+        )
+        return {
+            "status": "EXPIRED_LEGACY_OWNERLESS",
+            "client_order_id": client_id,
+            "order_id": legacy_order_id,
+            "fill": {"status": "EXPIRED"},
+            "order_intent": {
+                "client_order_id": client_id,
+                "order_id": legacy_order_id,
+                "side": order_side,
+                "quantity": legacy_quantity,
+                "bar_timestamp": legacy_bar_at,
+                "submission_status": "SUBMITTED",
+                "execution_status": "EXPIRED",
+                "order_role": str(meta.get("order_role") or "LEGACY_MANUAL_RECONCILIATION").upper(),
+                "newly_submitted": False,
+            },
+            "recovered_pending_order": True,
+        }
+
+    # Orders with an explicit manual owner remain outside autonomous recovery.
+    if str(meta.get("execution_owner") or "manual_customer_api") != "autonomous_customer_bot":
         if order_side == "BUY":
             protective = await _protective_exit(customer_id, req, df, market, history_loader=history_loader)
             if protective is not None:
@@ -781,11 +827,28 @@ async def process_customer_paper_orders(
 
     if str(meta.get("timeframe") or "") != str(req.timeframe):
         raise CustomerPaperFlowBlocked("Open paper order timeframe differs from the current request; reconcile before execution")
-    return await _fill_open_order(
+    recovered = await _fill_open_order(
         customer_id, order, market, df,
         group_mark_price_loader=group_mark_price_loader,
         request=req,
     )
+    # Preserve the persisted submission identity even when this recovery poll
+    # fills or expires the order. The audit stage must be able to repair a lost
+    # submission event after terminal execution, not only while still pending.
+    recovered["order_intent"] = {
+        "client_order_id": str(order.get("client_order_id") or ""),
+        "order_id": recovered.get("order_id") or order.get("order_id"),
+        "side": str(order.get("side") or "").upper(),
+        "quantity": str(order.get("quantity") or ""),
+        "bar_timestamp": str(
+            meta.get("submission_bar_at") or meta.get("signal_bar_timestamp") or ""
+        ),
+        "submission_status": str(order.get("status") or "SUBMITTED").upper(),
+        "execution_status": str(recovered.get("status") or "").upper(),
+        "order_role": str(meta.get("order_role") or "STRATEGY").upper(),
+        "newly_submitted": False,
+    }
+    return recovered
 
 
 async def _protective_exit(
@@ -798,6 +861,9 @@ async def _protective_exit(
         )
         if str(p.get("venue") or "").lower() == str(req.exchange).lower()
         and str(p.get("symbol") or "").strip().upper() == str(req.symbol).strip().upper()
+        # Missing/legacy ownership is manual. Only positions explicitly persisted by
+        # the autonomous paper flow may receive bot-generated protective exits.
+        and str(p.get("execution_owner") or "manual_customer_api") == "autonomous_customer_bot"
         and Decimal(str(p.get("quantity") or "0")) > 0
     ]
     if not positions:
@@ -931,7 +997,7 @@ async def _protective_exit(
     position_client_id = "cpx-" + _sha(
         f"{customer_id}|{req.exchange}|{req.symbol}|{req.timeframe}|{breach_bar_at}|{reason}"
     )[:48]
-    await _paper_call(submit_customer_paper_order(
+    submitted = await _paper_call(submit_customer_paper_order(
         customer_id=customer_id,
         client_order_id=position_client_id,
         venue=str(req.exchange).lower(),
@@ -966,7 +1032,22 @@ async def _protective_exit(
     ]
     if len(match) != 1:
         raise CustomerPaperFlowBlocked("Protective exit intent was not visible to recovery")
-    return await _fill_open_order(customer_id, match[0], market, df)
+    execution = await _fill_open_order(customer_id, match[0], market, df)
+    # Preserve intent identity for pending and terminal fills alike. If audit storage
+    # was unavailable at submission time, a same-cycle terminal fill still needs a
+    # durable key so the audit stage can repair the event idempotently.
+    execution["order_intent"] = {
+        "client_order_id": position_client_id,
+        "order_id": execution.get("order_id") or submitted.get("order_id"),
+        "side": "SELL",
+        "quantity": format(quantity, "f"),
+        "bar_timestamp": submission_bar_at,
+        "submission_status": "SUBMITTED",
+        "execution_status": str(execution.get("status") or "").upper(),
+        "order_role": "PROTECTIVE_EXIT",
+        "newly_submitted": str(submitted.get("status") or "").upper() != "REPLAYED",
+    }
+    return execution
 
 
 async def recover_customer_paper_spot_flow(
@@ -989,6 +1070,7 @@ async def recover_customer_paper_spot_flow(
             "status": "RECOVERY_PROCESSED" if executed else str(recovered.get("status") or "WAITING_FOR_NEXT_COMPLETED_BAR"),
             "decision": "TRADE" if executed else "NO_TRADE",
             "execution": recovered,
+            "order_intent": recovered.get("order_intent"),
             "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
         }
     protective = await _protective_exit(customer_id, req, df, market, history_loader=history_loader)
@@ -999,6 +1081,7 @@ async def recover_customer_paper_spot_flow(
             "status": "PROTECTIVE_EXIT" if executed else "PROTECTIVE_EXIT_PENDING",
             "decision": "TRADE" if executed else "NO_TRADE",
             "execution": protective,
+            "order_intent": protective.get("order_intent"),
             "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
         }
     return None
@@ -1037,6 +1120,7 @@ async def execute_customer_paper_spot_signal(
             "status": "RECOVERY_PROCESSED",
             "decision": "TRADE" if str(recovered.get("fill", {}).get("status") or "").upper() in {"APPENDED", "REPLAYED"} else "NO_TRADE",
             "execution": recovered,
+            "order_intent": recovered.get("order_intent"),
             "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
         }
 
@@ -1131,6 +1215,8 @@ async def execute_customer_paper_spot_signal(
         limit_price=None,
         metadata=meta,
     ), "submit strategy paper order")
+    # Idempotent retries must not emit a second submission audit event.
+    newly_submitted = str(submitted.get("status") or "").upper() != "REPLAYED"
     if submitted.get("status") == "REPLAYED":
         prior = await _paper_call(
             get_customer_paper_order(customer_id=customer_id, client_order_id=client_id),
@@ -1143,6 +1229,21 @@ async def execute_customer_paper_spot_signal(
                 "mode": "CUSTOMER_PAPER", "status": "REPLAYED",
                 "decision": "NO_TRADE" if prior.get("status") != "FILLED" else "TRADE",
                 "execution": {"status": "REPLAYED", "order": prior},
+                "order_intent": {
+                    "client_order_id": client_id,
+                    "order_id": prior.get("order_id"),
+                    "side": normalized_side,
+                    "quantity": str(prior.get("quantity") or format(raw_quantity, "f")),
+                    "bar_timestamp": str(
+                        _json_mapping(prior.get("metadata")).get("submission_bar_at")
+                        or _json_mapping(prior.get("metadata")).get("signal_bar_timestamp")
+                        or market["bar_timestamp"]
+                    ),
+                    "submission_status": "SUBMITTED",
+                    "execution_status": str(prior.get("status") or "").upper(),
+                    "order_role": str(_json_mapping(prior.get("metadata")).get("order_role") or role).upper(),
+                    "newly_submitted": False,
+                },
                 "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
                 "cost_model_status": cost_status,
                 "real_money_ledger_written": False,
@@ -1162,6 +1263,17 @@ async def execute_customer_paper_spot_signal(
         "status": execution.get("status", "UNKNOWN"),
         "decision": "TRADE" if execution.get("status") in {"APPENDED", "REPLAYED"} else "NO_TRADE",
         "execution": execution,
+        "order_intent": {
+            "client_order_id": client_id,
+            "order_id": execution.get("order_id"),
+            "side": normalized_side,
+            "quantity": format(raw_quantity, "f"),
+            "bar_timestamp": market["bar_timestamp"],
+            "submission_status": str(match[0].get("status") or "SUBMITTED").upper(),
+            "execution_status": str(execution.get("status") or "").upper(),
+            "order_role": role,
+            "newly_submitted": newly_submitted,
+        },
         "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
         "cost_model_status": cost_status,
         "real_money_ledger_written": False,

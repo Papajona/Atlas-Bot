@@ -344,9 +344,13 @@ class Position(Base):
 
 class AuditLog(Base):
     __tablename__ = "audit_log"
-    __table_args__ = (Index("ix_audit_log_created_event", "created_at", "event"),)
+    __table_args__ = (
+        Index("ix_audit_log_created_event", "created_at", "event"),
+        Index("uq_audit_log_event_idempotency", "event", "idempotency_key", unique=True),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     event: Mapped[str] = mapped_column(String(100))
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     detail: Mapped[str] = mapped_column(EncryptedText, default="")
     actor_id: Mapped[str] = mapped_column(String(160), default="")
     previous_hash: Mapped[str] = mapped_column(String(64), default="")
