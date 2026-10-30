@@ -5255,20 +5255,20 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         return quote is not None or escaped
 
     def safe_groq_condition(condition: str) -> bool:
-        """Accept only bracket-test conditions with no executable substitutions."""
+        """Accept one complete bracket-test condition with no executable substitutions."""
         stripped = condition.strip()
         if stripped.endswith(";"):
             stripped = stripped[:-1].rstrip()
-        if not (
-            (stripped.startswith("[[") and stripped.endswith("]]"))
-            or (stripped.startswith("[") and stripped.endswith("]"))
-        ):
+        double_bracket = stripped.startswith("[[")
+        opening_length = 2 if double_bracket else 1
+        closing_token = "]]" if double_bracket else "]"
+        if not (double_bracket or stripped.startswith("[")) or not stripped.endswith(closing_token):
             return False
 
-        double_bracket = stripped.startswith("[[")
         quote: str | None = None
         escaped = False
-        index = 0
+        index = opening_length
+        closing_index: int | None = None
         while index < len(stripped):
             character = stripped[index]
             next_character = stripped[index + 1:index + 2]
@@ -5299,6 +5299,9 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 quote = character
                 index += 1
                 continue
+            if stripped.startswith(closing_token, index):
+                closing_index = index
+                break
             if ord(character) == 96 or (character == "$" and next_character == "("):
                 return False
             if character in {"<", ">"} and next_character == "(":
@@ -5307,8 +5310,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             # command would execute before the conditional result is evaluated.
             if character == ";":
                 return False
-            # && and || are test operators only inside [[ ... ]]. Reject
-            # command separators in the single-bracket test form.
+            # && and || are test operators only inside [[ ... ]].
             if character == "&":
                 if double_bracket and next_character == "&":
                     index += 2
@@ -5320,7 +5322,14 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                     continue
                 return False
             index += 1
-        return quote is None and not escaped
+        # The first unquoted closing delimiter must also be the final token.
+        # This rejects a second bracket test joined with shell control operators.
+        return (
+            closing_index is not None
+            and closing_index + len(closing_token) == len(stripped)
+            and quote is None
+            and not escaped
+        )
 
     def safe_groq_statement(statement: str) -> bool:
         stripped = statement.strip()
@@ -5405,6 +5414,62 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         statements.append(tail[start:].strip())
         return bool(statements) and all(safe_groq_statement(item) for item in statements)
 
+    def split_groq_if_header(line: str) -> tuple[str, str | None] | None:
+        """Extract a bracket-test and actual shell 'then' suffix while respecting quotes."""
+        prefix = re.match(r"^\s*if\s+", line, re.I)
+        if prefix is None:
+            return None
+        start = prefix.end()
+        if line.startswith("[[", start):
+            opening_length, closing_token = 2, "]]"
+        elif line.startswith("[", start):
+            opening_length, closing_token = 1, "]"
+        else:
+            return None
+
+        quote: str | None = None
+        escaped = False
+        index = start + opening_length
+        while index < len(line):
+            character = line[index]
+            if escaped:
+                escaped = False
+                index += 1
+                continue
+            if character == "\\" and quote != "'":
+                escaped = True
+                index += 1
+                continue
+            if quote == "'":
+                if character == "'":
+                    quote = None
+                index += 1
+                continue
+            if quote == '"':
+                if character == '"':
+                    quote = None
+                index += 1
+                continue
+            if character in {"'", '"'}:
+                quote = character
+                index += 1
+                continue
+            if line.startswith(closing_token, index):
+                condition_end = index + len(closing_token)
+                condition = line[start:condition_end]
+                remainder = line[condition_end:].strip()
+                if remainder.startswith(";"):
+                    remainder = remainder[1:].lstrip()
+                if not remainder:
+                    return condition, None
+                then_match = re.match(r"(?is)^then\b(.*)$", remainder)
+                if then_match is None:
+                    # Any non-control syntax between the test and then is executable shell text.
+                    return None
+                return condition, then_match.group(1).strip()
+            index += 1
+        return None
+
     def inert_provider_message(statement: str) -> bool:
         stripped = statement.strip()
         if not re.match(r"^\s*(?:echo|printf)\b", stripped, re.I):
@@ -5444,21 +5509,18 @@ def scrub_shell_deployment(path: str, text: str) -> str:
     while block_start < len(source_lines):
         source_line = source_lines[block_start]
         if re.match(r"^\s*if\b", source_line, re.I) and groq_condition.search(source_line):
-            inline = re.match(r"^\s*if\b.*?\bthen\s*(.*?);\s*fi\s*$", source_line, re.I)
-            header = re.search(r"\bthen\b(.*)$", source_line, re.I)
-            condition_match = re.match(r"^\s*if\s+(.+?)\s*;?\s*then\b", source_line, re.I)
-            if condition_match:
-                condition_text = condition_match.group(1)
-            else:
-                # Valid shell permits "then" on the next line after the test.
-                condition_without_then = re.match(r"^\s*if\s+(.+?)\s*$", source_line, re.I)
-                condition_text = condition_without_then.group(1) if condition_without_then else ""
+            parsed_header = split_groq_if_header(source_line)
+            if parsed_header is None:
+                raise MigrationError(f"{path} has an unsafe Groq if-condition; refusing it")
+            condition_text, header_tail = parsed_header
             if not condition_text or not safe_groq_condition(condition_text):
                 raise MigrationError(f"{path} has an unsafe Groq if-condition; refusing it")
-            if header and not inline:
-                tail = header.group(1).strip().rstrip(";").strip()
-                if tail and not safe_groq_header_tail(tail):
-                    raise MigrationError(f"{path} has an executable command on a Groq if-header; refusing it")
+            inline = (
+                re.fullmatch(r"(.*);\s*fi\s*", header_tail, re.I | re.S)
+                if header_tail is not None else None
+            )
+            if header_tail and not inline and not safe_groq_header_tail(header_tail):
+                raise MigrationError(f"{path} has an executable command on a Groq if-header; refusing it")
             if inline:
                 inline_commands = [chunk.strip() for chunk in inline.group(1).split(";") if chunk.strip()]
                 if any(not safe_groq_statement(command) for command in inline_commands):
@@ -5482,7 +5544,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                     continue
                 if not safe_groq_statement(block_line):
                     raise MigrationError(
-                        f"{path} has a mixed provider-conditioned shell block; refusing to discard unrelated statement: {block_line.strip()[:100]}"
+                        f"{path} has a mixed provider-conditioned shell block; refusing to discard unrelated statement"
                     )
             block_start = end + 1
             continue
@@ -5712,7 +5774,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                     f"{path} retains provider wiring in a mixed shell command; refusing to rewrite it"
                 )
             raise MigrationError(
-                f"{path} retains provider text in a non-provider shell statement; refusing lossy deletion: {stripped[:180]}"
+                f"{path} retains provider text in a non-provider shell statement; refusing lossy deletion"
             )
         if line.strip():
             output.append(line)

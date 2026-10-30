@@ -160,12 +160,15 @@ fi
         ):
             migration.scrub_shell_deployment("deploy/gcp-bootstrap.sh", shell)
 
-    def test_shell_refusal_includes_the_exact_unrecognized_provider_line(self):
+    def test_shell_refusal_redacts_the_exact_unrecognized_provider_line(self):
         shell = 'printf -v deployment_status "Gemini provider not configured"\\n'
         with self.assertRaisesRegex(
-            migration.MigrationError, r"printf -v deployment_status"
-        ):
+            migration.MigrationError,
+            "provider text in a non-provider shell statement; refusing lossy deletion",
+        ) as raised:
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertNotIn("printf -v deployment_status", str(raised.exception))
+        self.assertNotIn("Gemini provider not configured", str(raised.exception))
 
     def test_mixed_provider_url_and_database_migration_command_fails_closed(self):
         workflow = """name: database deployment
