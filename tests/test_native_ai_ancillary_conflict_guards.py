@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -166,6 +167,35 @@ fi
             migration.MigrationError, r"printf -v deployment_status"
         ):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_optional_groq_warning_keeps_the_guard_shell_valid(self):
+        shell = """SECRET_GROQ_API_KEY_VERSION=\"${SECRET_GROQ_API_KEY_VERSION:-}\"
+AI_SECRET_ARGS=\",GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}\"
+if [[ -z \"$SECRET_GROQ_API_KEY_VERSION\" ]]; then
+  echo \"WARNING: no Groq key. The AI safety veto requires BOTH Gemini and Groq to approve (fail-closed), so customer bot starts via the API will return NO_TRADE until GROQ is configured.\" >&2
+fi
+if [[ -n \"$SECRET_GROQ_API_KEY_VERSION\" ]]; then AI_SECRET_ARGS=\"${AI_SECRET_ARGS},GROQ_API_KEY=atlas-groq-api-key:${SECRET_GROQ_API_KEY_VERSION}\"; fi
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertNotIn("Gemini", cleaned)
+        self.assertIn(
+            "WARNING: optional Groq research review is not configured; Atlas Native AI continues locally.",
+            cleaned,
+        )
+        self.assertIn('if [[ -z "$SECRET_GROQ_API_KEY_VERSION" ]]; then', cleaned)
+        self.assertIn('if [[ -n "$SECRET_GROQ_API_KEY_VERSION" ]]; then', cleaned)
+        result = subprocess.run(
+            ["bash", "-n"], input=cleaned, text=True, capture_output=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_retired_cerebras_secret_version_assignment_is_removed_but_groq_is_kept(self):
+        shell = """SECRET_CEREBRAS_API_KEY_VERSION=\"${SECRET_CEREBRAS_API_KEY_VERSION:-}\"
+SECRET_GROQ_API_KEY_VERSION=\"${SECRET_GROQ_API_KEY_VERSION:-}\"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertNotIn("CEREBRAS", cleaned)
+        self.assertIn('SECRET_GROQ_API_KEY_VERSION="${SECRET_GROQ_API_KEY_VERSION:-}"', cleaned)
 
     def test_mixed_provider_url_and_database_migration_command_fails_closed(self):
         workflow = """name: database deployment
