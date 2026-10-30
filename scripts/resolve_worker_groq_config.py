@@ -14,19 +14,30 @@ _TOKEN_RE = re.compile(r"[1-9][0-9]{0,4}\Z")
 
 
 def serving_revisions(service: dict[str, Any]) -> list[str]:
-    """Return every immutable revision receiving traffic; never use the desired template."""
+    """Return only observed revisions receiving Cloud Run traffic, not pending targets."""
     status = service.get("status")
-    status = status if isinstance(status, dict) else {}
-    traffic = status.get("traffic")
-    if not isinstance(traffic, list):
-        traffic = service.get("traffic")
-    if not isinstance(traffic, list) or not traffic:
-        raise ValueError("API service response has no traffic allocation; cannot determine serving revision")
+    if not isinstance(status, dict):
+        raise ValueError("API service response has no observed status")
+
+    # Cloud Run v2 distinguishes desired Service.traffic from output-only
+    # status.trafficStatuses. Never use the desired allocation during rollout.
+    if "trafficStatuses" in status:
+        traffic = status.get("trafficStatuses")
+        observed_v2 = True
+        if not isinstance(traffic, list) or not traffic:
+            raise ValueError("API service has no observed trafficStatuses; refusing worker rollout")
+    elif "traffic" in status:
+        # Cloud Run v1 reports its observed targets as status.traffic.
+        traffic = status.get("traffic")
+        observed_v2 = False
+        if not isinstance(traffic, list) or not traffic:
+            raise ValueError("API service has no observed v1 traffic allocation")
+    else:
+        raise ValueError("API service has no observed traffic state; refusing requested traffic targets")
 
     latest_ready = (
         status.get("latestReadyRevisionName")
         or status.get("latestReadyRevision")
-        or service.get("latestReadyRevision")
     )
     if isinstance(latest_ready, str):
         latest_ready = latest_ready.rsplit("/", 1)[-1]
@@ -34,40 +45,39 @@ def serving_revisions(service: dict[str, Any]) -> list[str]:
     total = Decimal("0")
     for target in traffic:
         if not isinstance(target, dict):
-            raise ValueError("API service has an invalid traffic target")
+            raise ValueError("API service has an invalid observed traffic target")
         raw_percent = target.get("percent")
         if raw_percent is None and target.get("tag"):
-            # A tagged canary URL with no assigned production traffic is not serving
-            # the worker's production requests.
+            # A tagged target without a traffic allocation is not serving
+            # production requests and must not determine worker configuration.
             continue
         if raw_percent is None:
-            raise ValueError("API traffic target has no explicit percent allocation")
+            raise ValueError("observed API traffic target has no explicit percent allocation")
         try:
             percent = Decimal(str(raw_percent))
         except (InvalidOperation, ValueError) as exc:
-            raise ValueError("API traffic target has an invalid percent allocation") from exc
+            raise ValueError("observed API traffic target has an invalid percent allocation") from exc
         if not percent.is_finite() or percent < 0 or percent > 100:
-            raise ValueError("API traffic target percent must be finite and between 0 and 100")
+            raise ValueError("observed API traffic target percent must be finite and between 0 and 100")
         if percent == 0:
             continue
 
-        revision = target.get("revisionName") or target.get("revision")
-        if not revision and target.get("latestRevision") is True:
+        revision = target.get("revision") or target.get("revisionName")
+        if not revision and not observed_v2 and target.get("latestRevision") is True:
             revision = latest_ready
         if not isinstance(revision, str):
-            raise ValueError("active API traffic target has no resolvable revision name")
+            raise ValueError("active observed API traffic target has no resolvable revision name")
         revision = revision.rsplit("/", 1)[-1]
         if not _REVISION_RE.fullmatch(revision):
-            raise ValueError("active API traffic target has an invalid revision name")
+            raise ValueError("active observed API traffic target has an invalid revision name")
         active.add(revision)
         total += percent
 
     if not active or total != Decimal("100"):
         raise ValueError(
-            f"API traffic allocations must resolve to revisions totaling exactly 100 percent; observed {total}"
+            f"observed API traffic allocations must resolve to revisions totaling exactly 100 percent; observed {total}"
         )
     return sorted(active)
-
 
 def _container_env(revision: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Read the first container's environment from Cloud Run v1 or v2 revision JSON."""
