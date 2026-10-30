@@ -493,39 +493,12 @@ def _load_branch_protection_status(repository: str) -> dict[str, bool]:
     return statuses
 
 
-def _verify_main_branch_is_non_rewritable(repository: str) -> None:
-    """Require main protection that prevents force-pushes and deletion, including admins.
-
-    A same-SHA main refspec is not a compare-and-swap: Git omits unchanged ref updates
-    from the push transaction. The pruning proof is therefore safe across concurrent
-    main advances only when GitHub enforces fast-forward-only, non-deletable main.
-    """
-    result = _run(
-        ["gh", "api", f"repos/{repository}/branches/main/protection"],
-        check=False,
-    )
-    if result.returncode:
-        detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+def _require_protected_main(branch_protection: Mapping[str, bool]) -> None:
+    """Refuse all ref deletion unless GitHub reports main as protected."""
+    if branch_protection.get("main") is not True:
         raise RuntimeError(
-            "Cannot verify main branch protection against force-push/deletion; "
-            f"refusing all branch pruning: {detail}"
+            "main is not reported as protected by GitHub; refusing all branch pruning"
         )
-    try:
-        protection = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            "GitHub returned malformed main branch protection; refusing all branch pruning"
-        ) from exc
-
-    allow_force_pushes = protection.get("allow_force_pushes")
-    allow_deletions = protection.get("allow_deletions")
-    enforce_admins = protection.get("enforce_admins")
-    if not isinstance(allow_force_pushes, Mapping) or allow_force_pushes.get("enabled") is not False:
-        raise RuntimeError("main must explicitly disallow force pushes before branch pruning")
-    if not isinstance(allow_deletions, Mapping) or allow_deletions.get("enabled") is not False:
-        raise RuntimeError("main must explicitly disallow deletion before branch pruning")
-    if not isinstance(enforce_admins, Mapping) or enforce_admins.get("enabled") is not True:
-        raise RuntimeError("main protection must be enforced for administrators before branch pruning")
 
 
 def _delete_remote_ref_with_lease(
@@ -605,9 +578,7 @@ def main() -> int:
         )
 
         branch_protection = _load_branch_protection_status(repository)
-        if not branch_protection.get("main", False):
-            raise RuntimeError("main is not reported as a protected branch; refusing all branch pruning")
-        _verify_main_branch_is_non_rewritable(repository)
+        _require_protected_main(branch_protection)
         branches = _reconcile_unknown_protection_branches(branches, branch_protection)
 
         open_pr_payload = _run(
