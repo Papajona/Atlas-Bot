@@ -143,12 +143,11 @@ It deploys with `--execution-environment gen2`, the read-only models volume, ing
 (`DOCS_ENABLED=false`) and `/metrics` must require an admin (`METRICS_REQUIRE_ADMIN=true`).
 
 ### Step 7: Deploy the worker pool -- `deploy/cloud-run-worker-deploy.sh`
+The worker script reads the active API service revision and inherits its validated Groq model, token cap, enablement flag, and optional Secret Manager version. Set `API_SERVICE` to the same Cloud Run API service used in Step 6; supplied Groq overrides are rejected if they differ from the API revision.
 ```
 
 export WORKER_POOL=atlas-trading-worker IMAGE=<same image> WORKER_SERVICE_ACCOUNT=atlas-trading-worker \
-  GROQ_MODEL="${GROQ_MODEL:?set the exact approved value used by the API}" \
-  GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:?set the exact API token cap}" \
-  GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:?set the exact API true/false value}" \
+  API_SERVICE=atlas-api
   DATABASE_SECRET_REF=atlas-database-url:<v> SECRET_REDIS_URL_REF=atlas-redis-url:<v> SECRET_KEY_REF=atlas-secret-key:<v> \
   SECRET_APP_ENCRYPTION_REF=atlas-app-encryption-key:<v> SECRET_TRON_XPUB_REF=atlas-usdt-tron-account-xpub:<v> SECRET_TRONGRID_REF=atlas-trongrid-api-key:<v> \
   SECRET_MODEL_SIGNING_PUBLIC_REF=atlas-model-signing-public-key:<v> SECRET_MODEL_SIGNING_PRIVATE_REF=atlas-model-signing-private-key:<v> \
