@@ -4900,7 +4900,7 @@ async def groq_research_review(research, intelligence):
             && ! grep -Eq '\\[FAIL\\] Groq .*Chat Completions inference failed' ai-provider-verification.log \\
             && ! grep -Eq '\\[FAIL\\] Cerebras .*Chat Completions inference failed' ai-provider-verification.log; then
             echo "gemini_deferred=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::Gemini quota waiver is advisory only; retry after quota reset."
+            echo "::warning::Gemini check temporarily waived due to known exhausted test quota (HTTP 429); Groq inference passed. Recheck Gemini after quota reset."
             exit 0
           else
             echo "BLOCKED: AI model/provider verification failed with exit code $status"
@@ -4919,7 +4919,7 @@ async def groq_research_review(research, intelligence):
             exit 1
           fi
           if [ "$GEMINI_VERIFICATION_DEFERRED" = "true" ]; then
-            echo "::warning::Provider gate passed with temporary Gemini quota waiver."
+            echo "::warning::Provider gate passed with temporary Gemini quota waiver. Groq passed; retry Gemini after the quota resets."
           else
             echo "AI provider verification passed for all configured providers."
           fi
