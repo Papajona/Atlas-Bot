@@ -191,7 +191,12 @@ async def _customer_paper_submission_stage(
         "NO_LIQUIDITY",
         "NO_CORRELATION_GROUP_HEADROOM",
     }
-    status = str(execution.get("status") or "").upper()
+    nested_execution = execution.get("execution")
+    nested_status = str(
+        nested_execution.get("status") or ""
+    ).upper() if isinstance(nested_execution, dict) else ""
+    outer_status = str(execution.get("status") or "").upper()
+    status = nested_status or outer_status or str(intent.get("execution_status") or "").upper()
     if not isinstance(intent, dict):
         if status in pending_statuses:
             await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE", {
@@ -250,7 +255,7 @@ async def _customer_paper_submission_stage(
             "execution_status": status,
             "reason": type(exc).__name__,
         })
-        return "customer_paper_order_audit_incomplete"
+        return "customer_paper_order_audit_incomplete" if status in pending_statuses else None
     # Only live pending states should be reported as pending or short-circuit the
     # strategy route. Filled, replayed, expired or terminal orders keep their real
     # execution result after the missing submission audit has been repaired.
