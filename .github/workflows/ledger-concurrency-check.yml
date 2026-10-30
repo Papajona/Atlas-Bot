@@ -15,6 +15,18 @@ on:
       - 'tests/test_ledger_invariants_3_10_46.py'
       - 'tests/test_ledger_all_paths_concurrent_3_10_46.py'
       - 'tests/test_unified_custody.py'
+      # Changes to the customer paper execution/ledger/provisioning path must
+      # receive the dedicated PostgreSQL gate, not only the general pytest job.
+      - 'scripts/bootstrap_atlas_paper_staging_gcp.sh'
+      - 'scripts/provision_customer_paper_schema.py'
+      - 'scripts/setup_customer_paper_role_interactive.py'
+      - 'tests/test_interactive_paper_role_setup.py'
+      - 'app/customer_paper_*.py'
+      - 'app/config.py'
+      - 'tests/test_customer_paper_*.py'
+      - 'scripts/customer_paper_ledger_schema.sql'
+      - 'app/paper_staging.py'
+      - 'tests/test_paper_staging_runtime.py'
       - 'requirements-dev.txt'
       - 'alembic/**'
       - 'scripts/prune_safe_merged_branch_refs.py'
@@ -216,8 +228,53 @@ jobs:
             exit $EXIT_CODE
           fi
 
+      - name: Provision isolated customer-paper PostgreSQL test database
+        shell: bash
+        run: |
+          set -euo pipefail
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test \
+            -c "CREATE ROLE atlas_paper_app LOGIN NOINHERIT NOBYPASSRLS PASSWORD 'paper_test_password'"
+          PGPASSWORD=test_password createdb -h 127.0.0.1 -U atlas atlas_paper_test
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_paper_test \
+            -c "REVOKE CONNECT ON DATABASE atlas_paper_test FROM PUBLIC; GRANT CONNECT ON DATABASE atlas_paper_test TO atlas_paper_app"
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_paper_test \
+            -v paper_runtime_role=atlas_paper_app -f scripts/customer_paper_ledger_schema.sql
+          # The shared-schema preflight must see the migrated primary ledger relations,
+          # not a paper-only database. Apply the paper schema alongside Alembic's
+          # primary tables in atlas_test for the dedicated shared-schema test below.
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test \
+            -c "GRANT CONNECT ON DATABASE atlas_test TO atlas_paper_app"
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test \
+            -v paper_runtime_role=atlas_paper_app -f scripts/customer_paper_ledger_schema.sql
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test \
+            -c "REVOKE CREATE ON SCHEMA public FROM PUBLIC; REVOKE CREATE ON SCHEMA public FROM atlas_paper_app"
+          echo "ATLAS_PAPER_TEST_DATABASE_URL=postgresql+asyncpg://atlas_paper_app:paper_test_password@127.0.0.1:5432/atlas_paper_test" >> "$GITHUB_ENV"
+          echo "ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL=postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_test" >> "$GITHUB_ENV"
+
+      - name: Run customer-paper PostgreSQL and runtime tests (MANDATORY)
+        env:
+          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_test
+          DATABASE_URL: postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_test
+        run: |
+          pytest -q -rs --junitxml=pg-paper.xml \
+            tests/test_customer_paper_*.py \
+            tests/test_interactive_paper_role_setup.py \
+            tests/test_paper_staging_runtime.py \
+            -k "not test_customer_paper_shared_database_schema_preflight_isolated_from_primary_relations" \
+            -v --tb=short
+
+      - name: Run shared-schema isolation test against migrated primary database (MANDATORY)
+        env:
+          ATLAS_PAPER_SHARED_PRIMARY_TEST_DATABASE_URL: postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_test
+          ATLAS_PAPER_TEST_DATABASE_URL: postgresql+asyncpg://atlas_paper_app:paper_test_password@127.0.0.1:5432/atlas_test
+          ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL: postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_test
+        run: |
+          pytest -q -rs --junitxml=pg-paper-shared.xml \
+            tests/test_customer_paper_ledger.py::test_customer_paper_shared_database_schema_preflight_isolated_from_primary_relations \
+            -v --tb=short
+
       - name: Reject skipped mandatory PostgreSQL tests
-        run: python scripts/assert_no_skips.py pg-ledger.xml pg-paths.xml
+        run: python scripts/assert_no_skips.py pg-ledger.xml pg-paths.xml pg-paper.xml pg-paper-shared.xml
 
       - name: Report success
         if: success()
@@ -225,4 +282,5 @@ jobs:
           echo "✓ Ledger concurrency tests PASSED"
           echo "✓ Invariants PASSED"
           echo "✓ All mutation paths tested PASSED"
+          echo "✓ Customer-paper provisioning/runtime tests PASSED"
           echo "✓ PostgreSQL ledger concurrency gate PASSED"
