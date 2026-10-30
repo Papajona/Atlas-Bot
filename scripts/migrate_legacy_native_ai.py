@@ -2341,7 +2341,7 @@ def transform_ai_providers(commit: str) -> None:
                 last_definitions[defined_name] = module_node
                 deleted_bindings.discard(defined_name)
             named_expr = top_level_named_exports.get(
-                module_node.value.id
+                module_node.value.target.id
                 if isinstance(module_node, ast.Expr)
                 and isinstance(module_node.value, ast.NamedExpr)
                 and isinstance(module_node.value.target, ast.Name)
