@@ -5776,5 +5776,36 @@ fi
 
 if __name__ == "__main__":
     unittest.main()
+    def test_retired_assignment_rejects_parameter_expansion_side_effects(self):
+        unsafe_shell = (
+            "SECRET_OPENAI_API_KEY=${other:=value}\n"
+            'printf "%s" "$other"\n'
+        )
+        with self.assertRaisesRegex(
+            migration.MigrationError, "compound retired-provider assignment"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe_shell)
+
+    def test_retired_assignment_rejects_blank_prefix_commands(self):
+        unsafe_cases = (
+            "CEREBRAS_API_KEY= ./deploy-step.sh\n",
+            "OPENAI_API_KEY =value\n",
+        )
+        for shell in unsafe_cases:
+            with self.subTest(shell=shell), self.assertRaises(migration.MigrationError):
+                migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_retired_provider_test_header_is_safely_scrubbed(self):
+        shell = 'if test -n "${GEMINI_API_KEY:-}"; then\n  echo "Gemini missing"\nfi\n'
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertEqual(cleaned, "")
+
+    def test_retired_provider_test_header_with_executable_suffix_is_rejected(self):
+        shell = 'if test -n "${GEMINI_API_KEY:-}"; then gcloud run deploy atlas\n'
+        with self.assertRaisesRegex(
+            migration.MigrationError, "unsafe retired-provider if-header|executable command"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
 if __name__ == "__main__":
     unittest.main()
