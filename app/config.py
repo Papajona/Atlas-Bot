@@ -270,7 +270,10 @@ class Settings(BaseSettings):
     groq_model: str = "openai/gpt-oss-20b"
     groq_max_completion_tokens: int = 2048
     groq_timeout_seconds: float = 20.0
+    # Scheduled research can use Groq when a key is configured. Trade-time review is
+    # separately opt-in so the default empty Groq key never blocks otherwise eligible trades.
     groq_research_review_enabled: bool = True
+    groq_trade_review_enabled: bool = False
 
     # Withdrawal approval/execution controls. Fund release is fail-closed unless explicitly configured.
     withdrawals_enabled: bool = False
