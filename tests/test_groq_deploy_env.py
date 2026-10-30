@@ -48,8 +48,11 @@ def test_api_defaults_groq_but_worker_requires_explicit_api_parity_values() -> N
     assert 'GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"' not in worker
     assert 'GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"' not in worker
     assert 'GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"' not in worker
-    assert "GROQ_MODEL:?Set GROQ_MODEL to the same approved value used by the API deployment" in worker
-    assert "GROQ_MAX_COMPLETION_TOKENS:?Set GROQ_MAX_COMPLETION_TOKENS to the same approved API value" in worker
-    assert "GROQ_RESEARCH_REVIEW_ENABLED:?Set GROQ_RESEARCH_REVIEW_ENABLED to the same approved API value" in worker
+    assert 'GROQ_MODEL="${API_GROQ_CONFIG[0]}"' in worker
+    assert 'GROQ_MAX_COMPLETION_TOKENS="${API_GROQ_CONFIG[1]}"' in worker
+    assert 'GROQ_RESEARCH_REVIEW_ENABLED="${API_GROQ_CONFIG[2]}"' in worker
+    assert 'supplied GROQ_MODEL differs from the deployed API' in worker
+    assert 'supplied GROQ_MAX_COMPLETION_TOKENS differs from the deployed API' in worker
+    assert 'supplied GROQ_RESEARCH_REVIEW_ENABLED differs from the deployed API' in worker
     assert "validate_groq_deploy_env.py" in api
     assert "validate_groq_deploy_env.py" in worker
