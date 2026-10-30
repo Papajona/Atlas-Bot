@@ -33,9 +33,13 @@ def test_worker_keeps_groq_secret_optional_and_gemini_removed():
     assert "GROQ_API_KEY=${SECRET_GROQ_REF}" in script
     assert "${GROQ_SECRET_ARG}" in script
     assert "GROQ_RESEARCH_REVIEW_ENABLED=${GROQ_RESEARCH_REVIEW_ENABLED}" in script
-    assert ': "${GROQ_MODEL:?Set GROQ_MODEL to the same approved value used by the API deployment}"' in script
-    assert ': "${GROQ_MAX_COMPLETION_TOKENS:?Set GROQ_MAX_COMPLETION_TOKENS to the same approved API value}"' in script
-    assert ': "${GROQ_RESEARCH_REVIEW_ENABLED:?Set GROQ_RESEARCH_REVIEW_ENABLED to the same approved API value}"' in script
+    assert ': "${API_SERVICE:?Set API_SERVICE to the currently deployed Cloud Run API service}"' in script
+    assert 'gcloud run services describe "$API_SERVICE"' in script
+    assert 'scripts/resolve_worker_groq_config.py' in script
+    assert 'GROQ_MODEL="${API_GROQ_CONFIG[0]}"' in script
+    assert 'GROQ_MAX_COMPLETION_TOKENS="${API_GROQ_CONFIG[1]}"' in script
+    assert 'GROQ_RESEARCH_REVIEW_ENABLED="${API_GROQ_CONFIG[2]}"' in script
+    assert 'SECRET_GROQ_REF="${API_GROQ_CONFIG[3]}"' in script
     assert 'GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"' not in script
     assert 'python "${REPO_ROOT}/scripts/validate_groq_deploy_env.py"' in script
     assert 'dirname -- "${BASH_SOURCE[0]}") && pwd)/validate_groq_deploy_env.py' not in script
@@ -99,8 +103,71 @@ def test_daily_research_runs_bounded_optional_groq_reviews_concurrently():
 def test_worker_runbook_does_not_require_a_groq_secret_placeholder():
     runbook = (ROOT / "deploy" / "DEPLOY_WORKFLOW.md").read_text(encoding="utf-8")
     assert "SECRET_GROQ_REF=atlas-groq-api-key:<v>" not in runbook
-    assert 'GROQ_MODEL="${GROQ_MODEL:?set the exact approved value used by the API}"' in runbook
-    assert 'GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:?set the exact API token cap}"' in runbook
-    assert 'GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:?set the exact API true/false value}"' in runbook
-    assert "must exactly match the approved API deployment values" in runbook
-    assert "is optional and must be an exact" in runbook
+    assert "API_SERVICE=atlas-api \\" in runbook
+    assert "reads the active API service revision" in runbook
+    assert "does not accept an independent worker Groq configuration" in runbook
+    assert "optional pinned `GROQ_API_KEY` Secret Manager reference" in runbook
+    assert "GROQ_STRATEGY_MODEL" in runbook
+
+
+def test_worker_groq_config_is_resolved_from_the_active_api_revision():
+    import json
+    import subprocess
+    import sys
+
+    resolver = ROOT / "scripts" / "resolve_worker_groq_config.py"
+    payload = {
+        "spec": {"template": {"spec": {"containers": [{
+            "env": [
+                {"name": "GROQ_MODEL", "value": "openai/gpt-oss-20b"},
+                {"name": "GROQ_MAX_COMPLETION_TOKENS", "value": "2048"},
+                {"name": "GROQ_RESEARCH_REVIEW_ENABLED", "value": "true"},
+                {"name": "GROQ_API_KEY", "valueSource": {"secretKeyRef": {
+                    "secret": "atlas-groq-api-key", "version": "7"
+                }}},
+            ]
+        }]}}}
+    }
+    result = subprocess.run(
+        [sys.executable, str(resolver)], input=json.dumps(payload), text=True,
+        capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["openai/gpt-oss-20b", "2048", "true", "atlas-groq-api-key:7"]
+
+
+def test_worker_groq_config_resolver_fails_closed_on_missing_api_override():
+    import json
+    import subprocess
+    import sys
+
+    resolver = ROOT / "scripts" / "resolve_worker_groq_config.py"
+    payload = {"spec": {"template": {"spec": {"containers": [{"env": [
+        {"name": "GROQ_MODEL", "value": "openai/gpt-oss-20b"},
+        {"name": "GROQ_MAX_COMPLETION_TOKENS", "value": "2048"},
+    ]}]}}}}
+    result = subprocess.run(
+        [sys.executable, str(resolver)], input=json.dumps(payload), text=True,
+        capture_output=True, check=False,
+    )
+    assert result.returncode == 2
+    assert "GROQ_RESEARCH_REVIEW_ENABLED" in result.stderr
+
+
+def test_worker_groq_config_resolver_supports_cloud_run_v2_without_optional_secret():
+    import json
+    import subprocess
+    import sys
+
+    resolver = ROOT / "scripts" / "resolve_worker_groq_config.py"
+    payload = {"template": {"containers": [{"env": [
+        {"name": "GROQ_MODEL", "value": "openai/gpt-oss-20b"},
+        {"name": "GROQ_MAX_COMPLETION_TOKENS", "value": "1024"},
+        {"name": "GROQ_RESEARCH_REVIEW_ENABLED", "value": "false"},
+    ]}]}}
+    result = subprocess.run(
+        [sys.executable, str(resolver)], input=json.dumps(payload), text=True,
+        capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["openai/gpt-oss-20b", "1024", "false", "__NONE__"]
