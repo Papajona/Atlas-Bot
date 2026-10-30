@@ -420,3 +420,33 @@ def test_customer_paper_trigger_functions_pin_search_path_and_account_key_is_not
     ):
         assert f"CREATE INDEX IF NOT EXISTS {index_name}" in sql
 
+def test_provision_verifier_rejects_mutating_privileges_on_every_paper_table():
+    provisioner = Path("scripts/provision_customer_paper_schema.py").read_text(encoding="utf-8")
+    assert "len(verification) != 13" in provisioner
+    assert '"paper_tables_allow_only_select_insert"' in provisioner
+    forbidden = ("UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
+    for privilege in forbidden:
+        assert (
+            f"has_table_privilege('atlas_customer_paper',c.oid,'{privilege}')"
+            in VERIFY_SQL
+        )
+    assert "NOT has_table_privilege('atlas_customer_paper',c.oid,'SELECT')" in VERIFY_SQL
+    assert "NOT has_table_privilege('atlas_customer_paper',c.oid,'INSERT')" in VERIFY_SQL
+    assert "n.nspname='customer_paper' AND c.relkind IN ('r','p')" in VERIFY_SQL
+
+
+def test_role_setup_preflights_database_grant_authority_before_generating_credentials():
+    from scripts import provision_customer_paper_schema as provisioner
+
+    assert "pg_has_role(current_user, target_db.datdba, 'USAGE')" in provisioner.ROLE_GRANT_AUTHORITY_SQL
+    assert "operator_role.rolsuper" in provisioner.ROLE_GRANT_AUTHORITY_SQL
+    source = Path("scripts/provision_customer_paper_schema.py").read_text(encoding="utf-8")
+    setup_start = source.index("        if args.setup_role:")
+    setup_end = source.index("        if not backup_ref:", setup_start)
+    setup = source[setup_start:setup_end]
+    assert setup.index("ROLE_GRANT_AUTHORITY_SQL") < setup.index(
+        'output_path.write_text(connection_uri + "\\n", encoding="utf-8")'
+    )
+    assert setup.index("ROLE_GRANT_AUTHORITY_SQL") < setup.index(
+        "role_sql = _role_setup_sql(password)"
+    )
