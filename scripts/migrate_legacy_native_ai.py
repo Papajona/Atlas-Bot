@@ -5279,11 +5279,54 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if re.match(r"(?i)^(?:echo|printf)\b", stripped):
             normalized = re.sub(r"\s+>&2\s*$", "", stripped)
             return not has_unsafe_shell_operators(normalized)
-        return re.fullmatch(
-            r"(?i)(?:export\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
-            r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\s*=\s*[^;|<>]*",
-            stripped,
-        ) is not None
+        # A permitted Groq assignment must be a simple assignment, not a hidden
+        # command substitution or a compound shell command.
+        return (
+            re.fullmatch(
+                r"(?i)(?:export\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
+                r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\s*=\s*[^;|<>]*",
+                stripped,
+            ) is not None
+            and not has_unsafe_shell_operators(stripped)
+        )
+
+    def safe_groq_header_tail(tail: str) -> bool:
+        """Validate simple Groq assignments around inline else/elif control tokens.
+
+        Legacy scripts commonly put the first assignment and the else keyword
+        on the same if/then header. Split only on an unquoted semicolon
+        immediately before a shell control keyword; compound commands remain
+        one statement and fail the allow-list above.
+        """
+        statements: list[str] = []
+        start = 0
+        quote: str | None = None
+        escaped = False
+        for index, character in enumerate(tail):
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\" and quote != "'":
+                escaped = True
+                continue
+            if quote == "'":
+                if character == "'":
+                    quote = None
+                continue
+            if quote == '"':
+                if character == '"':
+                    quote = None
+                continue
+            if character in {"'", '"'}:
+                quote = character
+                continue
+            if character == ";":
+                remainder = tail[index + 1:].lstrip()
+                if re.match(r"(?i)(?:else|elif\b|fi\b)", remainder):
+                    statements.append(tail[start:index].strip())
+                    start = index + 1
+        statements.append(tail[start:].strip())
+        return bool(statements) and all(safe_groq_statement(item) for item in statements)
 
     def inert_provider_message(statement: str) -> bool:
         stripped = statement.strip()
@@ -5328,7 +5371,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             header = re.search(r"\bthen\b(.*)$", source_line, re.I)
             if header and not inline:
                 tail = header.group(1).strip().rstrip(";").strip()
-                if tail and not safe_groq_statement(tail):
+                if tail and not safe_groq_header_tail(tail):
                     raise MigrationError(f"{path} has an executable command on a Groq if-header; refusing it")
             if inline:
                 inline_commands = [chunk.strip() for chunk in inline.group(1).split(";") if chunk.strip()]
