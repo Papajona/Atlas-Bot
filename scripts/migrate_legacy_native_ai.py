@@ -5513,6 +5513,18 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if prefix is None:
             return None
         start = prefix.end()
+        # Legacy scripts also use the equivalent POSIX test form. Accept only
+        # a single -n/-z test of a retired-provider parameter, with no executable
+        # expression or trailing command; normalize it for the same safety checks.
+        test_match = re.fullmatch(
+            r"""test\s+(-[nz])\s+(?:"(\$\{(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|SECRET_OPENAI[A-Z0-9_]*|SECRET_AI_GATEWAY[A-Z0-9_]*|GEMINI_API_KEY)(?::-[^}]*)?\})"|'(\$\{(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|SECRET_OPENAI[A-Z0-9_]*|SECRET_AI_GATEWAY[A-Z0-9_]*|GEMINI_API_KEY)(?::-[^}]*)?\})'|(\$\{(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|SECRET_OPENAI[A-Z0-9_]*|SECRET_AI_GATEWAY[A-Z0-9_]*|GEMINI_API_KEY)(?::-[^}]*)?\}))\s*;\s*then(?:\s*(.*))?""",
+            line[start:].rstrip("\\r\\n"),
+            re.I,
+        )
+        if test_match is not None:
+            value = next(group for group in test_match.groups()[1:4] if group is not None)
+            tail = test_match.group(5)
+            return f"[ {test_match.group(1)} {value} ]", (tail.strip() or None) if tail else None
         if line.startswith("[[", start):
             opening_length, closing_token = 2, "]]"
         elif line.startswith("[", start):
