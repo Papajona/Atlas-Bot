@@ -379,7 +379,15 @@ async def submit_customer_paper_order(
                         except ValueError:
                             raw_owner = {}
                     prior_metadata = dict(raw_owner) if isinstance(raw_owner, Mapping) else {}
-                    prior_owner = str(prior_metadata.get("execution_owner") or "manual_customer_api")
+                    prior_execution_owner = prior_metadata.get("execution_owner")
+                    if (
+                        prior_execution_owner is None
+                        and str(prior_metadata.get("paper_flow_version") or "") == "1"
+                    ):
+                        raise CustomerPaperOrderConflict(
+                            "An ownerless legacy customer paper order must be reconciled or expired before another order can be submitted for this market"
+                        )
+                    prior_owner = str(prior_execution_owner or "manual_customer_api")
                     if prior_owner != new_owner:
                         raise CustomerPaperOrderConflict(
                             "Manual and autonomous customer paper orders cannot coexist for the same market; reconcile the pending order first"
