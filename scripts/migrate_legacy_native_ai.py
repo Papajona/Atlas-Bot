@@ -5698,7 +5698,7 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                         "fi",
                     }
                     or re.fullmatch(
-                        r'echo "AI provider verification: (?:PASS|NOT VERIFIED|FAIL) \([^"]*\)" \| tee -a "\$GITHUB_STEP_SUMMARY"',
+                        r'echo "AI provider verification: (?:PASS|NOT VERIFIED|FAIL) \([^"]*\)\.?" \| tee -a "\$GITHUB_STEP_SUMMARY"',
                         command,
                     )
                 )
