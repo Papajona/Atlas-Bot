@@ -337,9 +337,9 @@ def evaluate_native_trade_packet(packet: dict[str, Any]) -> dict[str, Any]:
                         reasons.append("groq_trade_evidence_insufficient")
                     if alignment == "CONTRADICTS" and groq_confidence >= 0.80:
                         reasons.append("groq_setup_contradiction_veto")
-                    if risk_level == "CRITICAL" and groq_confidence >= 0.80:
+                    if risk_level == "CRITICAL":
                         reasons.append("groq_critical_risk_veto")
-                    elif risk_level == "HIGH" and groq_confidence >= 0.90:
+                    elif risk_level == "HIGH":
                         reasons.append("groq_high_risk_veto")
     if reasons:
         return {"safe": False, "confidence": 0.0, "reasons": sorted(set(reasons)), "data_quality_flags": data_quality_flags,
