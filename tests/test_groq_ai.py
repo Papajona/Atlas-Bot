@@ -171,6 +171,7 @@ def test_groq_http_failures_keep_sanitized_cause_and_status_diagnostics():
     assert result["error"] == "GroqAIError"
     assert result["cause"] == "HTTPStatusError"
     assert result["http_status"] == 429
+    assert result["input_truncated"] is False
     assert result["execution_authority"] is False
 
 
@@ -182,3 +183,186 @@ def test_groq_review_can_be_disabled_even_when_a_key_exists():
 
     assert result["status"] == "DISABLED"
     assert result["execution_authority"] is False
+
+
+def test_groq_prompt_compacts_large_research_without_arbitrary_json_prefix():
+    names = [f"STRATEGY_{index:02d}" for index in range(45)]
+    research = {
+        "symbol": "EUR_USD",
+        "research_order": names,
+        "regime": {"regime": "HIGH_VOLATILITY", "annualized_realized_vol": 0.28},
+        "validation": {
+            "trial_registry_complete": True,
+            "walk_forward_purge_complete": True,
+            "per_strategy_oos": {
+                name: {"status": "OK", "sharpe": 0.4, "oos_total_return": 0.05,
+                       "max_drawdown": -0.1, "large_fold_dump": "X" * 5_000}
+                for name in names
+            },
+        },
+        "paper_candidates": [{"strategy": name, "score": 0.5} for name in names],
+        "raw_walk_forward_dump": "UNNECESSARY_RAW_DETAIL" * 20_000,
+    }
+    intelligence = {
+        "news_summary": {"article_count": 60, "headlines": ["market headline " + str(i) for i in range(60)]},
+        "failures": {},
+    }
+
+    prompt, input_truncated = groq_ai._research_prompt(research, intelligence)
+
+    assert input_truncated is True
+    assert len(prompt) < 24_000
+    assert "EUR_USD" in prompt
+    assert "strategy_metrics_omitted" in prompt
+    assert "paper_candidates_omitted" in prompt
+    assert "UNNECESSARY_RAW_DETAIL" not in prompt
+    assert '"[truncated]"' not in prompt
+
+
+def test_groq_review_records_truncation_and_preserves_computed_candidate_context():
+    client = _FakeAsyncClient(_FakeResponse(json.dumps(VALID_REVIEW)))
+    research = {
+        "symbol": "EUR_USD",
+        "paper_candidates": [
+            {"strategy": "CANDIDATE_EVIDENCE_SENTINEL", "score": 0.71, "status": "UNVERIFIED"}
+        ],
+        "raw_walk_forward_dump": "omitted-raw-research-detail " * 20_000,
+    }
+    intelligence = {
+        "news_summary": {"headlines": [f"headline-{index}" for index in range(100)]},
+        "failures": {},
+    }
+    with _settings(
+        groq_api_key="test-key-not-a-real-secret",
+        groq_model="openai/gpt-oss-20b",
+        groq_max_completion_tokens=2048,
+        groq_timeout_seconds=20.0,
+        groq_research_review_enabled=True,
+    ), patch.object(groq_ai.httpx, "AsyncClient", return_value=client):
+        result = asyncio.run(groq_ai.groq_research_review(research, intelligence))
+
+    assert result["status"] == "OK"
+    assert result["input_truncated"] is True
+    assert result["execution_authority"] is False
+    assert client.request is not None
+    user_prompt = client.request["json"]["messages"][1]["content"]
+    assert "CANDIDATE_EVIDENCE_SENTINEL" in user_prompt
+    assert "paper_candidates_omitted" in user_prompt
+    assert "omitted-raw-research-detail" not in user_prompt
+
+
+def test_groq_prompt_discloses_nested_fields_omitted_from_compacted_research():
+    research = {
+        "symbol": "EUR_USD",
+        "regime": {
+            "regime": "HIGH_VOLATILITY",
+            "annualized_realized_vol": 0.28,
+            "unmodeled_regime_detail": "must be disclosed as omitted",
+        },
+        "validation": {
+            "trial_labels": ["trial-label-nested-under-validation"],
+            "per_strategy_oos": {
+                "TREND": {
+                    "status": "OK",
+                    "sharpe": 0.4,
+                    "fold_diagnostics": {"sensitive_detail": "must not be sent"},
+                },
+            },
+        },
+        "paper_candidates": [
+            {
+                "strategy": "CANDIDATE_EVIDENCE_SENTINEL",
+                "score": 0.71,
+                "feature_attribution": "must not be sent",
+            },
+        ],
+    }
+
+    prompt, input_truncated = groq_ai._research_prompt(research, {})
+
+    assert input_truncated is True
+    assert "trial-label-nested-under-validation" in prompt
+    assert "CANDIDATE_EVIDENCE_SENTINEL" in prompt
+    assert '"regime_fields_omitted":1' in prompt
+    assert '"strategy_metric_fields_omitted":1' in prompt
+    assert '"paper_candidate_fields_omitted":1' in prompt
+    assert '"omitted_field_count":1' in prompt
+    assert "must not be sent" not in prompt
+
+
+def test_groq_prompt_compacts_many_symbol_failures_without_failing_review_input():
+    intelligence = {
+        "news_summary": {"article_count": 300, "headlines": [f"headline-{i}-" + "x" * 350 for i in range(80)]},
+        "failures": {
+            f"SYMBOL_{i:03d}": {"source": "market-data", "reason": "temporarily unavailable " * 12}
+            for i in range(100)
+        },
+        "macro_regime": {
+            f"SYMBOL_{i:03d}": {"regime": "HIGH_VOLATILITY", "details": "y" * 450}
+            for i in range(100)
+        },
+    }
+    research = {
+        "symbol": "EUR_USD",
+        "research_order": [f"STRATEGY_{i:02d}" for i in range(45)],
+        "validation": {
+            "per_strategy_oos": {
+                f"STRATEGY_{i:02d}": {"status": "OK", "sharpe": 0.4}
+                for i in range(45)
+            },
+            "trial_labels": [f"trial-label-{i}" for i in range(20)],
+        },
+        "paper_candidates": [{"strategy": f"STRATEGY_{i:02d}", "score": 0.5} for i in range(45)],
+    }
+
+    prompt, input_truncated = groq_ai._research_prompt(research, intelligence)
+
+    assert input_truncated is True
+    assert len(prompt) < 24_000
+    assert "EUR_USD" in prompt
+    assert "trial-label-0" in prompt
+    assert "size_budget_compaction" in prompt
+    assert "temporarily unavailable" in prompt
+
+
+def test_groq_prompt_build_failure_records_unknown_truncation_status():
+    with _settings(
+        groq_api_key="test-key-not-a-real-secret",
+        groq_model="openai/gpt-oss-20b",
+        groq_max_completion_tokens=2048,
+        groq_timeout_seconds=20.0,
+        groq_research_review_enabled=True,
+    ), patch.object(
+        groq_ai, "_research_prompt", side_effect=groq_ai.GroqAIError("compaction unavailable")
+    ):
+        result = asyncio.run(groq_ai.groq_research_review({"symbol": "EUR_USD"}, {}))
+
+    assert result["status"] == "ERROR"
+    assert result["input_truncated"] is None
+    assert result["input_truncation_status"] == "UNKNOWN"
+    assert result["execution_authority"] is False
+
+
+
+def test_groq_minimal_fallback_reports_zero_omitted_list_items_when_no_lists_exist():
+    oversized_integer = int("9" * 4_000)
+    research = {
+        "symbol": "EUR_USD",
+        "research_order": [],
+        "paper_candidates": [],
+        "data_quality": {
+            "source_a": oversized_integer,
+            "source_b": oversized_integer,
+            "source_c": oversized_integer,
+        },
+    }
+
+    prompt, input_truncated = groq_ai._research_prompt(research, {})
+
+    audit_text = prompt.split("INPUT_OMISSION_AUDIT=", 1)[1].split("\n\n", 1)[0]
+    audit = json.loads(audit_text)
+    size_audit = audit["size_budget_compaction"]
+    assert input_truncated is True
+    assert size_audit["applied"] is True
+    assert size_audit["list_items_omitted"] == 0
+    assert size_audit["mapping_entries_omitted"] > 0

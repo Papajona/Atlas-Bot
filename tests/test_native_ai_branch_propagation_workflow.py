@@ -142,11 +142,23 @@ def test_metadata_secret_refs_are_checked_even_when_source_grep_has_no_matches()
     assert "metadata.json: active provider configuration or secret reference" in workflow
 
 
-def test_provider_free_branch_skip_requires_native_error_alias_identity() -> None:
+def test_provider_free_branch_skip_requires_static_native_error_alias_identity() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    assert "facade.AIProviderError is not native.NativeAIError" in workflow
-    assert "AIProviderError must be the app.native_ai.NativeAIError compatibility alias" in workflow
-    assert 'if [[ -z "$before_refs" ]] && verify_native_ai_impl; then' in workflow
+    assert "def top_level_bound_names(node):" in workflow
+    assert "facade_imports_native_error = (" in workflow
+    assert "facade_imports[0][2].asname is None" in workflow
+    assert "len(facade_error_bindings) == 1" in workflow
+    assert "native_alias_bindings" in workflow
+    assert "if not native_error_alias or not facade_imports_native_error" in workflow
+    assert "app.native_ai.NativeAIError" in workflow or "NativeAI error alias is renamed or rebound" in workflow
+    assert "groq_reviewers = [" in workflow
+    assert "app.groq_ai reviewer must accept research and intelligence positional arguments" in workflow
+    assert "required_positional > 2" in workflow
+    assert "required_keyword_only" in workflow
+    assert "allowed_plain_imports" in workflow
+    assert '(node.level, node.module or "") == (0, "__future__") and alias.asname is not None' in workflow
+    assert "if [[ -z \"$before_refs\" ]] && verify_native_ai_impl; then" in workflow
+    assert 'importlib.import_module("app.groq_ai")' not in workflow
 
 
 def test_migration_script_preserves_unrelated_branch_logic_and_fails_closed() -> None:

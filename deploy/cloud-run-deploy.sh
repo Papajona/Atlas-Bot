@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+
 : "${GCP_PROJECT_ID:?Set GCP_PROJECT_ID}"
 : "${GCP_REGION:?Set GCP_REGION, e.g. europe-west1}"
 : "${AR_REPOSITORY:?Set AR_REPOSITORY, e.g. trading}"
@@ -31,9 +34,12 @@ GROQ_SECRET_ARGS=""
 if [[ -n "$SECRET_GROQ_API_KEY_VERSION" ]]; then
   GROQ_SECRET_ARGS=",GROQ_API_KEY=atlas-groq-api-key:${SECRET_GROQ_API_KEY_VERSION}"
 fi
-GROQ_MODEL="openai/gpt-oss-20b"
-GROQ_MAX_COMPLETION_TOKENS="2048"
-GROQ_RESEARCH_REVIEW_ENABLED="true"
+GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"
+GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"
+GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"
+GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED,,}"
+python "${REPO_ROOT}/scripts/validate_groq_deploy_env.py" \
+  "$GROQ_MODEL" "$GROQ_MAX_COMPLETION_TOKENS" "$GROQ_RESEARCH_REVIEW_ENABLED"
 : "${FORWARDED_ALLOW_IPS:?Set FORWARDED_ALLOW_IPS to trusted proxy IP/CIDR; never *}"
 : "${RESEARCH_FEE_SOURCE:?Set RESEARCH_FEE_SOURCE to a traceable research-fee source}"
 : "${RESEARCH_FEE_EVIDENCE_ID:?Set RESEARCH_FEE_EVIDENCE_ID to an immutable evidence identifier}"

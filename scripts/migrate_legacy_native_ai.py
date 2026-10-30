@@ -1002,6 +1002,24 @@ def transform_config() -> None:
             and stripped.func.attr == "strip"
         ):
             return False
+        # The validator calls str(value) at runtime. A module-level binding can
+        # shadow the builtin even when it appears after the class definition, so
+        # removal is safe only when every module-scope statement leaves str unbound.
+        for module_statement in tree.body:
+            runtime_bindings = _module_scope_maybe_binds(
+                module_statement, postponed_annotations=postponed_annotations
+            )
+            # Annotation-only declarations populate __annotations__ but do not bind
+            # their target name. Do not mistake an annotation-only str declaration for a shadowing of str.
+            if not (isinstance(module_statement, ast.AnnAssign) and module_statement.value is None):
+                runtime_bindings |= _defined_names(module_statement)
+            module_bindings = runtime_bindings
+            has_star_import = (
+                isinstance(module_statement, ast.ImportFrom)
+                and any(alias.name == "*" for alias in module_statement.names)
+            )
+            if "str" in module_bindings or has_star_import:
+                return False
         stringified = stripped.func.value
         if not (
             isinstance(stringified, ast.Call)
@@ -1092,6 +1110,33 @@ def transform_config() -> None:
         provider_nodes.append(node)
         removable_lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
 
+    # Removing a provider field that shares the class header's physical line
+    # would delete the only class declaration. Refuse this valid but ambiguous
+    # compact syntax before touching the file rather than emit invalid Python.
+    for settings_class in settings_classes:
+        if any(
+            member in provider_nodes and member.lineno == settings_class.lineno
+            for member in settings_class.body
+        ):
+            raise MigrationError(
+                "app/config.py has a one-line Settings class with a retired provider field; "
+                "refusing to remove its class header"
+            )
+
+    if provider_nodes and len(settings_classes) > 1:
+        raise MigrationError(
+            "app/config.py has multiple recognized Settings classes; refusing to add an incomplete or ambiguous Groq configuration"
+        )
+    provider_node_ids = {id(node) for node in provider_nodes}
+    if any(
+        member.lineno == settings_class.lineno and id(member) in provider_node_ids
+        for settings_class in settings_classes
+        for member in settings_class.body
+    ):
+        raise MigrationError(
+            "app/config.py has a one-line Settings class with a retired provider field; refusing to drop the class header"
+        )
+
     statement_types = (
         ast.Assign, ast.AnnAssign, ast.Expr, ast.Import, ast.ImportFrom,
         ast.Raise, ast.Return, ast.Assert, ast.AugAssign, ast.Delete,
@@ -1110,29 +1155,54 @@ def transform_config() -> None:
                 )
 
     lines = source.splitlines(keepends=True)
-    result = "".join(line for number, line in enumerate(lines, start=1) if number not in removable_lines)
-    result = "".join(
-        line for line in result.splitlines(keepends=True)
-        if not (line.lstrip().startswith("#") and RETIRED_PROVIDER_RE.search(line))
-    )
+    retained_lines: list[str] = []
+    retained_original_lines: list[int | None] = []
+    for number, line in enumerate(lines, start=1):
+        if number in removable_lines:
+            continue
+        if line.lstrip().startswith("#") and RETIRED_PROVIDER_RE.search(line):
+            continue
+        retained_lines.append(line)
+        retained_original_lines.append(number)
+
+    # If all original Settings members were retired provider fields/validators,
+    # the class still needs a valid body before the Groq defaults are appended
+    # below. Seed the first canonical Groq field at the former body position;
+    # later field insertion recognizes it instead of duplicating it.
+    for original_class in reversed(settings_classes):
+        if not original_class.body:
+            continue
+        body_was_fully_removed = all(
+            all(
+                line_number in removable_lines
+                for line_number in range(member.lineno, (member.end_lineno or member.lineno) + 1)
+            )
+            for member in original_class.body
+        )
+        if not body_was_fully_removed:
+            continue
+        first_body_line = min(member.lineno for member in original_class.body)
+        insertion_index = sum(
+            1 for original_line in retained_original_lines
+            if original_line is not None and original_line < first_body_line
+        )
+        class_indent = re.match(r"^[ \t]*", lines[original_class.lineno - 1]).group(0)
+        body_indent = class_indent + ("\t" if "\t" in class_indent else "    ")
+        retained_lines.insert(insertion_index, body_indent + 'groq_api_key: str = ""\n')
+        retained_original_lines.insert(insertion_index, None)
+
+    result = "".join(retained_lines)
     # Supply the separate Groq research-review settings on legacy branches that
     # predate them, without overwriting settings already present on a branch.
     post_cleanup_tree = ast.parse(result, filename=str(path))
-    settings_class = next(
-        (node for node in post_cleanup_tree.body
-         if isinstance(node, ast.ClassDef)
-         and node.name.lower() in {"settings", "appsettings", "atlassettings"}),
-        None,
-    )
-    if settings_class is None:
+    post_cleanup_settings_classes = [
+        node for node in post_cleanup_tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name.lower() in {"settings", "appsettings", "atlassettings"}
+    ]
+    if not post_cleanup_settings_classes:
         raise MigrationError("app/config.py has no recognized Settings class; cannot retain Groq")
-    existing_groq_fields = {
-        name
-        for node in settings_class.body
-        if isinstance(node, (ast.Assign, ast.AnnAssign))
-        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
-        for name in target_names(target)
-    }
+
     groq_field_definitions = [
         ("groq_api_key", 'groq_api_key: str = ""'),
         ("groq_model", 'groq_model: str = "openai/gpt-oss-20b"'),
@@ -1140,16 +1210,27 @@ def transform_config() -> None:
         ("groq_timeout_seconds", "groq_timeout_seconds: float = 20.0"),
         ("groq_research_review_enabled", "groq_research_review_enabled: bool = True"),
     ]
-    missing_groq_fields = [
-        source_line for field_name, source_line in groq_field_definitions
-        if field_name not in existing_groq_fields
-    ]
-    if missing_groq_fields:
-        class_methods = [
-            node for node in settings_class.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    result_lines = result.splitlines(keepends=True)
+    class_insertions: list[tuple[int, str, list[str]]] = []
+    for settings_class in post_cleanup_settings_classes:
+        existing_groq_fields = {
+            name
+            for node in settings_class.body
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+            for name in target_names(target)
+        }
+        missing_groq_fields = [
+            source_line for field_name, source_line in groq_field_definitions
+            if field_name not in existing_groq_fields
         ]
-        result_lines = result.splitlines(keepends=True)
+        if not missing_groq_fields:
+            continue
+        if any(member.lineno == settings_class.lineno for member in settings_class.body):
+            raise MigrationError(
+                f"app/config.py Settings class {settings_class.name} uses a one-line suite; "
+                "refusing to insert Groq defaults ambiguously"
+            )
         class_line = result_lines[settings_class.lineno - 1]
         class_indent = re.match(r"^[ \t]*", class_line).group(0)
         body_indent = next(
@@ -1161,6 +1242,10 @@ def transform_config() -> None:
             ),
             class_indent + ("\t" if "\t" in class_indent else "    "),
         )
+        class_methods = [
+            node for node in settings_class.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
         if class_methods:
             first_method_line = min(
                 min([node.lineno, *[decorator.lineno for decorator in node.decorator_list]])
@@ -1170,9 +1255,17 @@ def transform_config() -> None:
         else:
             # Insert after the full final statement, not inside a multiline field.
             insertion_index = settings_class.end_lineno or settings_class.lineno
+        class_insertions.append((insertion_index, body_indent, missing_groq_fields))
+
+    # Apply insertions bottom-up so original AST line numbers remain valid for
+    # every recognized Settings/AppSettings/AtlasSettings class.
+    for insertion_index, body_indent, missing_groq_fields in sorted(
+        class_insertions, key=lambda item: item[0], reverse=True
+    ):
         result_lines[insertion_index:insertion_index] = [
             body_indent + source_line + "\n" for source_line in missing_groq_fields
         ]
+    if class_insertions:
         result = "".join(result_lines)
     if RETIRED_PROVIDER_RE.search(result):
         raise MigrationError(
@@ -1473,13 +1566,12 @@ def _module_scope_maybe_binds(node: ast.AST, *, postponed_annotations: bool = Fa
             for statement in [*part.body, *part.orelse]:
                 visit(statement)
             return
-        if isinstance(part, ast.AnnAssign) and postponed_annotations:
-            # With postponed annotations an annotation-only name does not bind,
-            # and its annotation expression is never evaluated.
-            if part.value is not None:
-                visit(part.target)
-                visit(part.value)
-            elif not isinstance(part.target, ast.Name):
+        if isinstance(part, ast.AnnAssign) and part.value is None:
+            # A value-less annotation stores metadata but does not assign the
+            # target name at module scope, regardless of annotation postponement.
+            if not postponed_annotations:
+                visit(part.annotation)
+            if not isinstance(part.target, ast.Name):
                 visit(part.target)
             return
         if isinstance(part, ast.MatchAs) and part.name:
@@ -1818,6 +1910,13 @@ def transform_ai_providers(commit: str) -> None:
     ) -> tuple[set[str], dict[str, tuple[str, int, str, str, str] | None]]:
         """Statically enumerate star exports and identify simple import-backed bindings."""
         if star_node.level:
+            # app.ai_providers is a module in the top-level app package. A
+            # relative level above one escapes that package and is invalid here;
+            # never resolve it against a parent directory and guess its exports.
+            if star_node.level > 1:
+                raise MigrationError(
+                    f"relative star import {star_node.module!r} escapes the app package; refusing to guess its exports"
+                )
             module_base = ROOT / "app"
             for _ in range(star_node.level - 1):
                 module_base = module_base.parent
@@ -1882,6 +1981,106 @@ def transform_ai_providers(commit: str) -> None:
         if any(isinstance(node, unsafe_module_statements) for node in module_tree.body):
             dynamic_exports = True
 
+        postponed_annotations = _uses_postponed_annotations(module_tree)
+
+        def contains_exec_eval(node: ast.AST, root: bool = True) -> bool:
+            if not root and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                return False
+            if isinstance(node, ast.Name) and node.id in {"exec", "eval"} and isinstance(node.ctx, ast.Load):
+                return True
+            return any(contains_exec_eval(child, root=False) for child in ast.iter_child_nodes(node))
+
+        def import_time_calls(node: ast.AST, calls: set[str]) -> None:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                expressions: list[ast.AST] = [
+                    *node.decorator_list, *node.args.defaults,
+                    *(value for value in node.args.kw_defaults if value is not None),
+                ]
+                if not postponed_annotations:
+                    expressions.extend(
+                        arg.annotation for arg in [
+                            *node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs
+                        ] if arg.annotation is not None
+                    )
+                    if node.args.vararg and node.args.vararg.annotation is not None:
+                        expressions.append(node.args.vararg.annotation)
+                    if node.args.kwarg and node.args.kwarg.annotation is not None:
+                        expressions.append(node.args.kwarg.annotation)
+                    if node.returns is not None:
+                        expressions.append(node.returns)
+                for expression in expressions:
+                    import_time_calls(expression, calls)
+                return
+            if isinstance(node, ast.Lambda):
+                for expression in [*node.args.defaults, *(v for v in node.args.kw_defaults if v is not None)]:
+                    import_time_calls(expression, calls)
+                return
+            if isinstance(node, ast.ClassDef):
+                for expression in [*node.decorator_list, *node.bases, *(kw.value for kw in node.keywords)]:
+                    import_time_calls(expression, calls)
+                for statement in node.body:
+                    import_time_calls(statement, calls)
+                return
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                calls.add(node.func.id)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Lambda) and contains_exec_eval(node.func.body):
+                calls.add("__atlas_dynamic_lambda__")
+            for child in ast.iter_child_nodes(node):
+                import_time_calls(child, calls)
+
+        dangerous_functions: set[str] = set()
+        function_calls: dict[str, set[str]] = {}
+        aliases: dict[str, str] = {}
+        for statement in module_tree.body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if any(contains_exec_eval(body) for body in statement.body):
+                    dangerous_functions.add(statement.name)
+                calls: set[str] = set()
+                for body in statement.body:
+                    # Function bodies execute only if called; this call graph is
+                    # used below only to determine whether a called helper is dangerous.
+                    for item in ast.walk(body):
+                        if isinstance(item, ast.Call) and isinstance(item.func, ast.Name):
+                            calls.add(item.func.id)
+                function_calls[statement.name] = calls
+            elif isinstance(statement, ast.Assign) and isinstance(statement.value, (ast.Name, ast.Lambda)):
+                for target in statement.targets:
+                    if isinstance(target, ast.Name):
+                        if isinstance(statement.value, ast.Name):
+                            aliases[target.id] = statement.value.id
+                        elif contains_exec_eval(statement.value.body):
+                            dangerous_functions.add(target.id)
+            elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+                if isinstance(statement.value, ast.Name):
+                    aliases[statement.target.id] = statement.value.id
+                elif isinstance(statement.value, ast.Lambda) and contains_exec_eval(statement.value.body):
+                    dangerous_functions.add(statement.target.id)
+
+        changed = True
+        while changed:
+            changed = False
+            for function_name, called_names in function_calls.items():
+                if function_name not in dangerous_functions and any(
+                    called in dangerous_functions or aliases.get(called, called) in dangerous_functions
+                    for called in called_names
+                ):
+                    dangerous_functions.add(function_name)
+                    changed = True
+
+        module_calls: set[str] = set()
+        for statement in module_tree.body:
+            import_time_calls(statement, module_calls)
+        if "__atlas_dynamic_lambda__" in module_calls:
+            dynamic_exports = True
+        for called in module_calls:
+            resolved = called
+            seen: set[str] = set()
+            while resolved in aliases and resolved not in seen:
+                seen.add(resolved)
+                resolved = aliases[resolved]
+            if resolved in dangerous_functions or called in dangerous_functions:
+                dynamic_exports = True
+
         for module_node in module_tree.body:
             if isinstance(module_node, ast.ImportFrom) and any(alias.name == "*" for alias in module_node.names):
                 has_nested_star = True
@@ -1927,6 +2126,37 @@ def transform_ai_providers(commit: str) -> None:
             ):
                 dynamic_all = True
 
+            annotation_node_ids: set[int] = set()
+            for candidate in ast.walk(module_node):
+                if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    annotations = [
+                        arg.annotation for arg in [
+                            *candidate.args.posonlyargs, *candidate.args.args, *candidate.args.kwonlyargs
+                        ] if arg.annotation is not None
+                    ]
+                    if candidate.args.vararg and candidate.args.vararg.annotation is not None:
+                        annotations.append(candidate.args.vararg.annotation)
+                    if candidate.args.kwarg and candidate.args.kwarg.annotation is not None:
+                        annotations.append(candidate.args.kwarg.annotation)
+                    if candidate.returns is not None:
+                        annotations.append(candidate.returns)
+                    for annotation in annotations:
+                        annotation_node_ids.update(id(item) for item in ast.walk(annotation))
+                elif isinstance(candidate, ast.AnnAssign):
+                    annotation_node_ids.update(id(item) for item in ast.walk(candidate.annotation))
+
+            deferred_body_nodes: set[int] = set()
+            for candidate in ast.walk(module_node):
+                if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    # Function bodies run only if called later, not while importing
+                    # the module. Do not treat their eval/exec usage as import-time
+                    # dynamic export mutation.
+                    for body_statement in candidate.body:
+                        deferred_body_nodes.update(id(item) for item in ast.walk(body_statement))
+                elif isinstance(candidate, ast.Lambda):
+                    # Lambda bodies are deferred; default expressions remain checked.
+                    deferred_body_nodes.update(id(item) for item in ast.walk(candidate.body))
+
             for nested in ast.walk(module_node):
                 # Reading __all__ can leak its mutable list through an alias
                 # (e.g. names = __all__; names.append(...)). Reject that escape
@@ -1938,6 +2168,17 @@ def transform_ai_providers(commit: str) -> None:
                 ):
                     dynamic_all = True
 
+                if (
+                    isinstance(nested, ast.Name)
+                    and nested.id in {"exec", "eval"}
+                    and isinstance(nested.ctx, ast.Load)
+                    and id(nested) not in deferred_body_nodes
+                    and id(nested) not in annotation_node_ids
+                ):
+                    # A builtin can be aliased (run = exec; run(...)); looking only
+                    # for calls whose spelling is exec/eval would miss that mutation.
+                    dynamic_exports = True
+
                 if isinstance(nested, ast.Call):
                     # Any globals() access can create or mutate module exports through
                     # a computed name; fail closed even when the call is indirect,
@@ -1947,6 +2188,8 @@ def transform_ai_providers(commit: str) -> None:
                     elif (
                         isinstance(nested.func, ast.Name)
                         and nested.func.id in {"exec", "eval"}
+                        and id(nested) not in deferred_body_nodes
+                        and (not postponed_annotations or id(nested) not in annotation_node_ids)
                     ):
                         dynamic_exports = True
                     elif (
@@ -1989,13 +2232,6 @@ def transform_ai_providers(commit: str) -> None:
             if has_nested_star or dynamic_exports:
                 raise MigrationError(
                     f"star-import module {module_file} has dynamic exports; refusing to guess its bindings"
-                )
-            if any(
-                isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "exec"
-                for node in ast.walk(module_tree)
-            ):
-                raise MigrationError(
-                    f"star-import module {module_file} uses exec; refusing to guess its exports"
                 )
             exports = {
                 name
@@ -4986,6 +5222,38 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         r"(?i)\b(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
         r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED)\b"
     )
+    def has_unsafe_shell_operators(command: str) -> bool:
+        """Reject active shell operators without mistaking quoted output for syntax."""
+        quote: str | None = None
+        escaped = False
+        for index, character in enumerate(command):
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\" and quote != "'":
+                escaped = True
+                continue
+            if quote == "'":
+                if character == "'":
+                    quote = None
+                continue
+            if quote == '"':
+                if character == '"':
+                    quote = None
+                    continue
+                # Command substitutions remain active inside double quotes.
+                if character == "`" or (character == "$" and command[index + 1:index + 2] == "("):
+                    return True
+                continue
+            if character in {"'", '"'}:
+                quote = character
+                continue
+            if character in {"&", ";", "|", "<", ">", "`"}:
+                return True
+            if character == "$" and command[index + 1:index + 2] == "(":
+                return True
+        return quote is not None or escaped
+
     def safe_groq_statement(statement: str) -> bool:
         stripped = statement.strip()
         if not stripped or stripped.startswith("#"):
@@ -5004,14 +5272,53 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             return True
         if re.fullmatch(r"(?i)exit\s+[0-9]+", stripped):
             return True
+        # printf -v assigns a shell variable; quoted punctuation must not make
+        # it look like an output-only command.
+        if re.match(r"(?i)^printf\s+-v(?:\s|$)", stripped):
+            return False
         if re.match(r"(?i)^(?:echo|printf)\b", stripped):
             normalized = re.sub(r"\s+>&2\s*$", "", stripped)
-            return not re.search(r"&&|\|\||[;|<>`]|\$\(", normalized)
+            return not has_unsafe_shell_operators(normalized)
         return re.fullmatch(
             r"(?i)(?:export\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
             r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\s*=\s*[^;|<>]*",
             stripped,
         ) is not None
+
+    def inert_provider_message(statement: str) -> bool:
+        stripped = statement.strip()
+        if not re.match(r"^\s*(?:echo|printf)\b", stripped, re.I):
+            return False
+        # Bash printf -v assigns a variable; it is not output-only. Reject it
+        # before classifying any provider-bearing literal as removable commentary.
+        if re.match(r"^\s*printf\s+-v(?:\s|$)", stripped, re.I):
+            return False
+        if not RETIRED_PROVIDER_RE.search(stripped):
+            return False
+        # Only discard literal output text. Never rewrite dynamic expansions,
+        # command substitutions, redirections, pipes, or composed commands.
+        normalized = re.sub(r"\s+>&2\s*$", "", stripped)
+        if re.search(r"\$|\x60", normalized):
+            return False
+        quote = None
+        escaped = False
+        for character in normalized:
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\" and quote != "'":
+                escaped = True
+                continue
+            if quote is not None:
+                if character == quote:
+                    quote = None
+                continue
+            if character in {"'", '"'}:
+                quote = character
+                continue
+            if character in ";&|<>":
+                return False
+        return quote is None and not escaped
 
     block_start = 0
     while block_start < len(source_lines):
@@ -5180,8 +5487,9 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
                 line, re.I,
             )
-            warning_only = (
+            warning_only = inert_provider_message(stripped) or (
                 re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
+                and not re.match(r"^\s*printf\s+-v(?:\s|$)", stripped, re.I)
                 and RETIRED_PROVIDER_RE.search(stripped)
                 and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", stripped)
             )
@@ -5239,8 +5547,9 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if RETIRED_PROVIDER_RE.search(line):
             if stripped.startswith("#"):
                 continue
-            warning_only = (
+            warning_only = inert_provider_message(stripped) or (
                 re.match(r"^\s*(?:echo|printf)\b", stripped, re.I)
+                and not re.match(r"^\s*printf\s+-v(?:\s|$)", stripped, re.I)
                 and re.search(r"(?i)\b(?:gemini|cerebras|ai.?gateway|openai)\b", stripped)
                 and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", stripped)
             )
@@ -5258,6 +5567,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                     )
                     or (
                         re.match(r"^(?:echo|printf)\b", command, re.I)
+                        and not re.match(r"^printf\s+-v(?:\s|$)", command, re.I)
                         and re.search(r"(?i)\b(?:gemini|cerebras|ai.?gateway|openai)\b", command)
                         and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", command)
                     )
@@ -5513,17 +5823,47 @@ def scrub_ancillary_text(path: str, text: str) -> str:
         return json.dumps(scrubbed, indent=2, ensure_ascii=False) + "\n"
 
     kept: list[str] = []
+    is_markdown = path.lower().endswith(".md")
+    markdown_fence_char: str | None = None
+    markdown_fence_length = 0
     for line in text.splitlines(keepends=True):
+        fence_match = re.match(r"^\s*(\x60{3,}|~{3,})(.*?)(?:\r?\n)?$", line)
+        if is_markdown and fence_match:
+            marker, suffix = fence_match.groups()
+            if markdown_fence_char is None:
+                markdown_fence_char = marker[0]
+                markdown_fence_length = len(marker)
+                kept.append(line)
+                continue
+            if (
+                marker[0] == markdown_fence_char
+                and len(marker) >= markdown_fence_length
+                and not suffix.strip()
+            ):
+                markdown_fence_char = None
+                markdown_fence_length = 0
+                kept.append(line)
+                continue
+            # A shorter marker (e.g. three backticks inside a four-backtick
+            # fence) is content rather than a closing delimiter.
         if not RETIRED_PROVIDER_RE.search(line):
             kept.append(line)
             continue
+        if is_markdown and markdown_fence_char is not None:
+            raise MigrationError(
+                f"{path} contains provider-bearing code inside a Markdown code fence; "
+                "refusing to rewrite an executable example"
+            )
         candidate = SECRET_VERSION_RE.sub("", line)
         candidate = KEY_ASSIGNMENT_RE.sub("", candidate)
         candidate = HOST_RE.sub("", candidate)
         candidate = MODEL_RE.sub("atlas-native-strategy-v1", candidate)
         candidate = re.sub(r"(?i)\b(?:Gemini|Cerebras|AI Gateway)\b", "", candidate)
         if RETIRED_PROVIDER_RE.search(candidate):
-            if re.search(r"(?i)\b(?:gcloud|docker|curl|python|bash|run:)\b", candidate):
+            if (
+                re.search(r"(?i)\b(?:gcloud|docker|curl|python|bash|run:)\b", candidate)
+                and not is_markdown
+            ):
                 raise MigrationError(f"{path} has provider wiring inside an executable line; refusing automatic deletion")
             candidate = RETIRED_PROVIDER_RE.sub("legacy provider", candidate)
         if candidate.strip():
@@ -5625,6 +5965,81 @@ def _metadata_has_active_provider_wiring(text: str) -> bool:
     return visit(data)
 
 
+def validate_groq_research_module(source: str, path: str = "app/groq_ai.py") -> None:
+    """Validate the optional Groq review API and allow only reviewed, resolvable imports."""
+    try:
+        tree = ast.parse(source, filename=path)
+    except SyntaxError as exc:
+        raise MigrationError(f"{path} is not valid Python; preserving the branch") from exc
+    if RETIRED_PROVIDER_RE.search(source):
+        raise MigrationError(f"{path} contains retired-provider wiring; preserving the branch")
+
+    reviewers = [
+        node for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "groq_research_review"
+    ]
+    if len(reviewers) != 1:
+        raise MigrationError(f"{path} must define exactly one async groq_research_review API")
+    reviewer = reviewers[0]
+    positional_parameters = reviewer.args.posonlyargs + reviewer.args.args
+    positional = len(positional_parameters)
+    required_positional = positional - len(reviewer.args.defaults)
+    required_keyword_only = [
+        argument.arg
+        for argument, default in zip(reviewer.args.kwonlyargs, reviewer.args.kw_defaults)
+        if default is None
+    ]
+    # The consumer supplies exactly two positional values. Optional extra positional
+    # parameters and *args are safe; extra required positional or keyword-only values are not.
+    if positional < 2 and reviewer.args.vararg is None:
+        raise MigrationError(
+            f"{path} groq_research_review must accept two positional arguments (research, intelligence)"
+        )
+    if required_positional > 2:
+        raise MigrationError(
+            f"{path} groq_research_review has more than two required positional parameters"
+        )
+    if required_keyword_only:
+        raise MigrationError(
+            f"{path} groq_research_review requires keyword-only parameters: {required_keyword_only}"
+        )
+
+    # This adapter runs at app startup. Do not preserve arbitrary imports that could
+    # be missing on a branch or introduce side-effecting dependencies. These are the
+    # canonical adapter's runtime modules and the exact local contracts it consumes.
+    allowed_plain_imports = {
+        "asyncio", "httpx", "json", "logging", "math", "re",
+    }
+    allowed_from_imports = {
+        (0, "__future__"): {"annotations"},
+        (0, "typing"): {"Any"},
+        (1, "config"): {"settings"},
+        (1, "prompt_safety"): {
+            "UNTRUSTED_PREAMBLE", "suspicious_instruction_markers", "wrap_untrusted",
+        },
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name not in allowed_plain_imports:
+                    raise MigrationError(
+                        f"{path} imports unreviewed or unavailable module {alias.name!r}; preserving the branch"
+                    )
+        elif isinstance(node, ast.ImportFrom):
+            key = (node.level, node.module or "")
+            allowed_names = allowed_from_imports.get(key)
+            if allowed_names is None or any(
+                alias.name == "*"
+                or alias.name not in allowed_names
+                or (key == (0, "__future__") and alias.asname is not None)
+                for alias in node.names
+            ):
+                raise MigrationError(
+                    f"{path} has unreviewed or unresolved import from {node.module!r}; preserving the branch"
+                )
+
+
+
 def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:
     # Canonical Native AI source and the original provider-removal patch baseline are
     # independent pins: changing one must not widen the other per-path diff.
@@ -5634,7 +6049,11 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
         target = ROOT / path
         if not target.exists():
             write_text(path, canonical_text(canonical_commit, path))
-        elif path in {"app/groq_ai.py", "app/prompt_safety.py"}:
+        elif path == "app/groq_ai.py":
+            validate_groq_research_module(target.read_text(encoding="utf-8"), path)
+            # Preserve compatible branch-specific Groq diagnostics while still rejecting
+            # stale hosted-provider wiring; do not overwrite divergent unrelated logic.
+        elif path == "app/prompt_safety.py":
             if target.read_text(encoding="utf-8") != canonical_text(canonical_commit, path):
                 raise MigrationError(f"{path} differs from its reviewed canonical implementation; preserving the branch")
         elif PROVIDER_RE.search(target.read_text(encoding="utf-8")):

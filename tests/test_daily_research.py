@@ -1,5 +1,6 @@
 import asyncio
 import pandas as pd
+import pytest
 
 
 def test_yahoo_normalization():
@@ -214,6 +215,131 @@ def test_refresh_lock_logs_redis_renewal_exception(monkeypatch, caplog):
 
 
 
+
+
+def test_groq_research_result_is_validated_and_normalized_at_consumer_boundary():
+    import app.daily_research as dr
+
+    result = {
+        "status": "OK",
+        "provider": "groq",
+        "model": " review-model ",
+        "execution_authority": False,
+        "input_truncated": True,
+        "untrusted_extra_field": "must not be stored",
+        "review": {
+            "regime_assessment": "Volatility is elevated in the supplied sample.",
+            "research_only_summary": "Continue observation; no trade recommendation is made.",
+            "key_observations": ["The sample shows widening volatility."],
+            "data_quality_flags": ["One source has delayed timestamps."],
+            "strategy_watchlist": ["Monitor drawdown stability."],
+            "confidence": 0.7,
+        },
+    }
+    validated = dr._validate_groq_research_result(result)
+    assert validated["status"] == "OK"
+    assert validated["execution_authority"] is False
+    assert "untrusted_extra_field" not in validated
+    assert validated["review"]["confidence"] == 0.7
+    assert validated["model"] == "review-model"
+    assert validated["input_truncated"] is True
+
+
+def test_groq_research_result_rejects_non_boolean_input_truncation_flag():
+    import app.daily_research as dr
+
+    with pytest.raises(ValueError, match="input_truncated flag must be boolean"):
+        dr._validate_groq_research_result({
+            "status": "OK",
+            "provider": "groq",
+            "execution_authority": False,
+            "input_truncated": "true",
+        })
+
+
+def test_groq_error_result_preserves_boolean_input_truncation_audit():
+    import app.daily_research as dr
+
+    validated = dr._validate_groq_research_result({
+        "status": "ERROR",
+        "provider": "groq",
+        "error": "GroqAIError",
+        "cause": "HTTPStatusError",
+        "http_status": 429,
+        "input_truncated": True,
+        "execution_authority": False,
+    })
+    assert validated["status"] == "ERROR"
+    assert validated["input_truncated"] is True
+    assert validated["http_status"] == 429
+
+
+def test_groq_research_result_rejects_actionable_instruction_at_consumer_boundary():
+    import app.daily_research as dr
+
+    result = {
+        "status": "OK",
+        "provider": "groq",
+        "model": "review-model",
+        "execution_authority": False,
+        "review": {
+            "regime_assessment": "BUY BTCUSDT now.",
+            "research_only_summary": "No recommendation.",
+            "key_observations": [],
+            "data_quality_flags": [],
+            "strategy_watchlist": [],
+            "confidence": 0.4,
+        },
+    }
+    try:
+        dr._validate_groq_research_result(result)
+    except ValueError as exc:
+        assert "actionable trading instruction" in str(exc)
+    else:
+        raise AssertionError("actionable Groq output must not pass the persistence boundary")
+
+
+
+
+def test_groq_research_result_rejects_unwrapped_provider_dictionary():
+    import app.daily_research as dr
+
+    # A branch-specific implementation returning raw JSON cannot bypass the
+    # canonical research-only result envelope and its output validator.
+    try:
+        dr._validate_groq_research_result({
+            "regime_assessment": "BUY BTCUSDT now",
+            "research_only_summary": "unwrapped",
+            "key_observations": [],
+            "data_quality_flags": [],
+            "strategy_watchlist": [],
+            "confidence": 0.9,
+        })
+    except ValueError as exc:
+        assert "research-only envelope" in str(exc)
+    else:
+        raise AssertionError("unwrapped provider dictionaries must be rejected")
+
+def test_groq_non_success_result_is_sanitized_at_consumer_boundary():
+    import app.daily_research as dr
+
+    value = dr._validate_groq_research_result({
+        "status": "ERROR",
+        "provider": "groq",
+        "error": "TimeoutError",
+        "execution_authority": True,
+        "arbitrary_payload": {"secret": "must be discarded"},
+    })
+    assert value == {
+        "status": "ERROR",
+        "provider": "groq",
+        "error": "TimeoutError",
+        "input_truncated": None,
+        "input_truncation_status": "UNKNOWN",
+        "execution_authority": False,
+    }
+
+
 def test_review_update_skips_when_research_run_insert_did_not_succeed():
     import app.daily_research as dr
 
@@ -224,3 +350,22 @@ def test_review_update_skips_when_research_run_insert_did_not_succeed():
             None, {"groq_research_review": {"status": "OK"}}
         )
     ) is False
+
+
+def test_groq_error_result_persists_unknown_input_truncation_status():
+    import app.daily_research as dr
+
+    result = dr._validate_groq_research_result({
+        "status": "ERROR",
+        "provider": "groq",
+        "error": "GroqReviewFailed",
+        "input_truncated": None,
+        "input_truncation_status": "UNKNOWN",
+        "execution_authority": False,
+    })
+
+    assert result["status"] == "ERROR"
+    assert result["input_truncated"] is None
+    assert result["input_truncation_status"] == "UNKNOWN"
+    assert result["execution_authority"] is False
+

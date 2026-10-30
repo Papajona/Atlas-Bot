@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+
 : "${GCP_PROJECT_ID:?Set GCP_PROJECT_ID}"
 : "${GCP_REGION:?Set GCP_REGION}"
 : "${WORKER_POOL:?Set WORKER_POOL, e.g. atlas-trading-worker}"
@@ -57,9 +60,12 @@ if [[ -n "$SECRET_GROQ_REF" && ! "$SECRET_GROQ_REF" =~ ^atlas-groq-api-key:[1-9]
 fi
 GROQ_SECRET_ARG=""
 if [[ -n "$SECRET_GROQ_REF" ]]; then GROQ_SECRET_ARG=",GROQ_API_KEY=${SECRET_GROQ_REF}"; fi
-GROQ_MODEL="openai/gpt-oss-20b"
-GROQ_MAX_COMPLETION_TOKENS="2048"
-GROQ_RESEARCH_REVIEW_ENABLED="true"
+: "${GROQ_MODEL:?Set GROQ_MODEL to the same approved value used by the API deployment}"
+: "${GROQ_MAX_COMPLETION_TOKENS:?Set GROQ_MAX_COMPLETION_TOKENS to the same approved API value}"
+: "${GROQ_RESEARCH_REVIEW_ENABLED:?Set GROQ_RESEARCH_REVIEW_ENABLED to the same approved API value}"
+GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED,,}"
+python "${REPO_ROOT}/scripts/validate_groq_deploy_env.py" \
+  "$GROQ_MODEL" "$GROQ_MAX_COMPLETION_TOKENS" "$GROQ_RESEARCH_REVIEW_ENABLED"
 
 gcloud run worker-pools deploy "$WORKER_POOL" \
   --project "$GCP_PROJECT_ID" \

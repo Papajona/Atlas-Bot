@@ -117,26 +117,418 @@ def _validate_review(value: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _research_prompt(research: dict[str, Any], intelligence: dict[str, Any]) -> str:
-    external = {
+def _bounded_prompt_value(value: Any, state: dict[str, bool], depth: int = 0) -> Any:
+    """Compact nested source data so prompt delimiters are never cut mid-value."""
+    if depth >= 4:
+        state["truncated"] = True
+        return "[nested value omitted]"
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        state["truncated"] = True
+        return None
+    if isinstance(value, str):
+        if len(value) <= 300:
+            return value
+        state["truncated"] = True
+        return value[:300] + f" [omitted {len(value) - 300} characters]"
+    if isinstance(value, dict):
+        pairs = list(value.items())
+        result = {str(key)[:80]: _bounded_prompt_value(item, state, depth + 1)
+                  for key, item in pairs[:15]}
+        if len(pairs) > 15:
+            result["omitted_key_count"] = len(pairs) - 15
+            state["truncated"] = True
+        return result
+    if isinstance(value, (list, tuple)):
+        items = list(value)
+        result = [_bounded_prompt_value(item, state, depth + 1) for item in items[:12]]
+        if len(items) > 12:
+            result.append(f"[{len(items) - 12} additional items omitted]")
+            state["truncated"] = True
+        return result
+    return _bounded_prompt_value(str(value), state, depth + 1)
+
+
+def _size_compact_prompt_value(
+    value: Any,
+    *,
+    string_limit: int,
+    mapping_limit: int,
+    list_limit: int,
+    audit: dict[str, int],
+    depth: int = 0,
+    key: str | None = None,
+) -> Any:
+    """Shrink a bounded prompt value without cutting serialized JSON arbitrarily."""
+    if isinstance(value, str):
+        if len(value) <= string_limit:
+            return value
+        omitted = len(value) - string_limit
+        audit["characters_omitted"] += omitted
+        return value[:string_limit] + f" [size-budget omitted {omitted} characters]"
+    if isinstance(value, dict):
+        if depth >= 5:
+            audit["nested_values_omitted"] += 1
+            return "[size-budget nested mapping omitted]"
+        items = list(value.items())
+        if depth > 0 and len(items) > mapping_limit:
+            priority = {
+                "status", "trial_registry_complete", "walk_forward_purge_complete", "promotion_status",
+                "per_strategy_oos", "symbol", "regime", "annualized_realized_vol", "volatility",
+                "strategy", "score", "confidence", "reason", "data_quality_flags", "article_count",
+                "average_sentiment", "headlines", "failures", "source_failures", "macro_regime",
+                "paper_candidates", "trial_labels", "prospective_trial_archive", "error", "cause",
+            }
+            preferred = [item for item in items if str(item[0]) in priority]
+            others = [item for item in items if str(item[0]) not in priority]
+            selected = preferred + others[:max(0, mapping_limit - len(preferred))]
+            selected_keys = {item[0] for item in selected}
+            items = [item for item in items if item[0] in selected_keys]
+            omitted = len(value) - len(items)
+            audit["mapping_entries_omitted"] += omitted
+        else:
+            omitted = 0
+        result = {
+            str(name): _size_compact_prompt_value(
+                item, string_limit=string_limit, mapping_limit=mapping_limit,
+                list_limit=list_limit, audit=audit, depth=depth + 1, key=str(name)
+            )
+            for name, item in items
+        }
+        if omitted:
+            result["size_budget_omitted_key_count"] = omitted
+        return result
+    if isinstance(value, (list, tuple)):
+        if depth >= 5:
+            audit["nested_values_omitted"] += 1
+            return "[size-budget nested sequence omitted]"
+        items = list(value)
+        effective_limit = list_limit
+        if key in {"research_order", "trial_labels"}:
+            effective_limit = max(effective_limit, min(12, len(items)))
+        kept = items[:effective_limit]
+        omitted = len(items) - len(kept)
+        if omitted:
+            audit["list_items_omitted"] += omitted
+        result = [
+            _size_compact_prompt_value(
+                item, string_limit=string_limit, mapping_limit=mapping_limit,
+                list_limit=list_limit, audit=audit, depth=depth + 1, key=key
+            )
+            for item in kept
+        ]
+        if omitted:
+            result.append(f"[{omitted} additional items omitted by the size budget]")
+        return result
+    return value
+
+
+def _count_prompt_value_omissions(original: Any, retained: Any) -> dict[str, int]:
+    """Count structural and scalar values removed by the minimal prompt fallback."""
+    audit = {
+        "characters_omitted": 0,
+        "mapping_entries_omitted": 0,
+        "list_items_omitted": 0,
+        "nested_values_omitted": 0,
+    }
+    missing = object()
+
+    def visit(before: Any, after: Any) -> None:
+        if isinstance(before, dict):
+            if after is missing or not isinstance(after, dict):
+                audit["mapping_entries_omitted"] += len(before)
+                for item in before.values():
+                    visit(item, missing)
+                return
+            removed = set(before) - set(after)
+            audit["mapping_entries_omitted"] += len(removed)
+            for name in removed:
+                visit(before[name], missing)
+            for name in set(before) & set(after):
+                visit(before[name], after[name])
+            return
+        if isinstance(before, (list, tuple)):
+            old_items = list(before)
+            if after is missing or not isinstance(after, list):
+                audit["list_items_omitted"] += len(old_items)
+                for item in old_items:
+                    visit(item, missing)
+                return
+            audit["list_items_omitted"] += max(0, len(old_items) - len(after))
+            for item in old_items[len(after):]:
+                visit(item, missing)
+            for old_item, new_item in zip(old_items, after):
+                visit(old_item, new_item)
+            return
+        if isinstance(before, str):
+            if after is missing:
+                audit["characters_omitted"] += len(before)
+                if before:
+                    audit["nested_values_omitted"] += 1
+            elif isinstance(after, str):
+                audit["characters_omitted"] += max(0, len(before) - len(after))
+                if before != after and len(after) >= len(before):
+                    audit["nested_values_omitted"] += 1
+            else:
+                audit["nested_values_omitted"] += 1
+            return
+        if after is missing or before != after:
+            audit["nested_values_omitted"] += 1
+
+    visit(original, retained)
+    return audit
+
+
+def _research_prompt(
+    research: dict[str, Any], intelligence: dict[str, Any]
+) -> tuple[str, bool]:
+    state = {"truncated": False}
+    if not isinstance(research, dict):
+        state["truncated"] = True
+        research = {}
+    if not isinstance(intelligence, dict):
+        state["truncated"] = True
+        intelligence = {}
+    raw_validation = research.get("validation")
+    validation = raw_validation if isinstance(raw_validation, dict) else {}
+    if "validation" in research and not isinstance(raw_validation, dict):
+        state["truncated"] = True
+    retained_research_keys = {
+        "symbol", "asset", "regime", "research_order", "validation", "data_quality",
+        "universe_bias", "paper_candidates", "trial_labels", "prospective_trial_archive",
+    }
+    research_fields_omitted = sum(1 for key in research if key not in retained_research_keys)
+    if research_fields_omitted:
+        state["truncated"] = True
+    retained_validation_keys = {
+        "status", "trial_registry_complete", "walk_forward_purge_complete", "promotion_status",
+        "per_strategy_oos", "trial_labels",
+    }
+    raw_trial_labels = validation.get("trial_labels", research.get("trial_labels", []))
+    if isinstance(raw_trial_labels, list):
+        trial_labels = raw_trial_labels
+    else:
+        trial_labels = []
+        if "trial_labels" in validation or "trial_labels" in research:
+            state["truncated"] = True
+    validation_fields_omitted = sum(1 for key in validation if key not in retained_validation_keys)
+    if validation_fields_omitted:
+        state["truncated"] = True
+    raw_oos = validation.get("per_strategy_oos")
+    oos = raw_oos if isinstance(raw_oos, dict) else {}
+    if "per_strategy_oos" in validation and not isinstance(raw_oos, dict):
+        state["truncated"] = True
+    raw_order = research.get("research_order")
+    order = raw_order if isinstance(raw_order, list) else []
+    if "research_order" in research and not isinstance(raw_order, list):
+        state["truncated"] = True
+    names = list(dict.fromkeys([str(item) for item in order] + sorted(str(item) for item in oos)))
+    if any(len(name) > 80 for name in names):
+        state["truncated"] = True
+    selected = names[:40]
+    metrics = {}
+    strategy_metric_fields_omitted = 0
+    metric_keys = {"status", "sharpe", "oos_total_return", "max_drawdown", "fold_count", "sample_count"}
+    for name in selected:
+        row = oos.get(name)
+        if isinstance(row, dict):
+            unknown_keys = [key for key in row if key not in metric_keys]
+            strategy_metric_fields_omitted += len(unknown_keys)
+            if unknown_keys:
+                state["truncated"] = True
+            metric = {}
+            for key in ("status", "sharpe", "oos_total_return", "max_drawdown", "fold_count", "sample_count"):
+                if key not in row:
+                    continue
+                value = row[key]
+                if isinstance(value, (str, bool, int, float, type(None))):
+                    metric[key] = _bounded_prompt_value(value, state)
+                else:
+                    strategy_metric_fields_omitted += 1
+                    state["truncated"] = True
+            metrics[name[:80]] = metric
+    if len(names) > len(selected):
+        state["truncated"] = True
+    raw_candidates = research.get("paper_candidates")
+    candidates = raw_candidates if isinstance(raw_candidates, list) else []
+    if "paper_candidates" in research and not isinstance(raw_candidates, list):
+        state["truncated"] = True
+    candidate_summaries = []
+    candidate_omission_counts: list[int] = []
+    candidate_keys = {"strategy", "status", "score", "confidence", "reason", "data_quality_flags"}
+    paper_candidate_fields_omitted = 0
+    for candidate in candidates[:15]:
+        if isinstance(candidate, dict):
+            omitted_keys = [key for key in candidate if key not in candidate_keys]
+            paper_candidate_fields_omitted += len(omitted_keys)
+            candidate_omission_counts.append(len(omitted_keys))
+            if omitted_keys:
+                state["truncated"] = True
+            summary = {key: _bounded_prompt_value(candidate[key], state)
+                for key in ("strategy", "status", "score", "confidence", "reason", "data_quality_flags")
+                if key in candidate}
+            if omitted_keys:
+                summary["omitted_field_count"] = len(omitted_keys)
+            candidate_summaries.append(summary)
+        else:
+            candidate_summaries.append(_bounded_prompt_value(candidate, state))
+    if len(candidates) > 15:
+        state["truncated"] = True
+    raw_regime = research.get("regime")
+    regime = raw_regime if isinstance(raw_regime, dict) else {}
+    if "regime" in research and not isinstance(raw_regime, dict):
+        state["truncated"] = True
+    regime_keys = {"regime", "annualized_realized_vol", "volatility", "status"}
+    regime_fields_omitted = sum(1 for key in regime if key not in regime_keys)
+    if regime_fields_omitted:
+        state["truncated"] = True
+    raw_quality = research.get("data_quality")
+    quality = raw_quality if isinstance(raw_quality, dict) else {}
+    if "data_quality" in research and not isinstance(raw_quality, dict):
+        state["truncated"] = True
+    bounded_research = {
+        "symbol": _bounded_prompt_value(research.get("symbol"), state),
+        "asset": _bounded_prompt_value(research.get("asset"), state),
+        "regime": _bounded_prompt_value({key: regime[key] for key in
+            ("regime", "annualized_realized_vol", "volatility", "status") if key in regime}, state),
+        "research_order": [name[:80] for name in selected],
+        "research_fields_omitted": research_fields_omitted,
+        "strategy_count": len(names),
+        "strategy_metrics_omitted": max(0, len(names) - len(selected)),
+        "strategy_metric_fields_omitted": strategy_metric_fields_omitted,
+        "regime_fields_omitted": regime_fields_omitted,
+        "validation_fields_omitted": validation_fields_omitted,
+        "validation": {key: validation[key] for key in
+            ("status", "trial_registry_complete", "walk_forward_purge_complete", "promotion_status")
+            if key in validation} | {"per_strategy_oos": metrics},
+        "data_quality": _bounded_prompt_value(quality, state),
+        "universe_bias": _bounded_prompt_value(research.get("universe_bias", quality.get("universe_bias", "UNKNOWN")), state),
+        "paper_candidates": candidate_summaries,
+        "paper_candidate_count": len(candidates),
+        "paper_candidates_omitted": max(0, len(candidates) - len(candidate_summaries)),
+        "paper_candidate_fields_omitted": paper_candidate_fields_omitted,
+        "trial_labels": _bounded_prompt_value(trial_labels, state),
+        "prospective_trial_archive": _bounded_prompt_value(research.get("prospective_trial_archive", {}), state),
+    }
+    external_keys = {"news_summary", "failures", "macro_regime"}
+    external_fields_omitted = sum(1 for key in intelligence if key not in external_keys)
+    if external_fields_omitted:
+        state["truncated"] = True
+    external_source = {
         "news_summary": intelligence.get("news_summary", {}),
         "source_failures": intelligence.get("failures", {}),
+        "macro_regime": intelligence.get("macro_regime", {}),
+        "external_fields_omitted": external_fields_omitted,
     }
-    hits = suspicious_instruction_markers(json.dumps(external, default=str))
+    bounded_external = _bounded_prompt_value(external_source, state)
+    size_budget_audit = {
+        "characters_omitted": 0,
+        "mapping_entries_omitted": 0,
+        "list_items_omitted": 0,
+        "nested_values_omitted": 0,
+    }
+    research_json = json.dumps(bounded_research, default=str, separators=(",", ":"))
+    external_json = json.dumps(bounded_external, default=str, separators=(",", ":"))
+    size_budget_compaction_applied = False
+    if len(research_json) > 12_000 or len(external_json) > 5_000:
+        size_budget_compaction_applied = True
+        original_research = bounded_research
+        original_external = bounded_external
+        fitted = False
+        for string_limit, mapping_limit, list_limit in (
+            (240, 12, 10), (160, 10, 8), (100, 8, 6), (60, 6, 4), (32, 4, 3), (16, 3, 2),
+        ):
+            candidate_audit = {
+                "characters_omitted": 0, "mapping_entries_omitted": 0,
+                "list_items_omitted": 0, "nested_values_omitted": 0,
+            }
+            candidate_research = _size_compact_prompt_value(
+                original_research, string_limit=string_limit, mapping_limit=mapping_limit,
+                list_limit=list_limit, audit=candidate_audit,
+            )
+            candidate_external = _size_compact_prompt_value(
+                original_external, string_limit=string_limit, mapping_limit=mapping_limit,
+                list_limit=list_limit, audit=candidate_audit,
+            )
+            candidate_research_json = json.dumps(candidate_research, default=str, separators=(",", ":"))
+            candidate_external_json = json.dumps(candidate_external, default=str, separators=(",", ":"))
+            if len(candidate_research_json) <= 12_000 and len(candidate_external_json) <= 5_000:
+                bounded_research, bounded_external = candidate_research, candidate_external
+                research_json, external_json = candidate_research_json, candidate_external_json
+                size_budget_audit = candidate_audit
+                fitted = True
+                break
+        if not fitted:
+            # Valid but unusually broad inputs still get a useful, explicitly lossy
+            # summary rather than converting an optional research review into an error.
+            strategy_count = len(names)
+            candidate_count = len(candidates)
+            bounded_research = {
+                "symbol": bounded_research.get("symbol"),
+                "asset": bounded_research.get("asset"),
+                "regime": bounded_research.get("regime"),
+                "validation": bounded_research.get("validation", {}).get("status", "UNKNOWN"),
+                "trial_labels": bounded_research.get("trial_labels", []),
+                "strategy_count": strategy_count,
+                "strategy_metrics_omitted": strategy_count,
+                "paper_candidate_count": candidate_count,
+                "paper_candidates_omitted": candidate_count,
+                "size_budget_compacted": True,
+            }
+            bounded_external = {
+                "source_status": "External research details omitted to stay within the reviewed size budget",
+                "external_fields_omitted": external_fields_omitted,
+                "size_budget_compacted": True,
+            }
+            size_budget_audit = _count_prompt_value_omissions(original_research, bounded_research)
+            external_size_audit = _count_prompt_value_omissions(original_external, bounded_external)
+            for audit_field in size_budget_audit:
+                size_budget_audit[audit_field] += external_size_audit[audit_field]
+            research_json = json.dumps(bounded_research, default=str, separators=(",", ":"))
+            external_json = json.dumps(bounded_external, default=str, separators=(",", ":"))
+            if len(research_json) > 12_000 or len(external_json) > 5_000:
+                raise GroqAIError("Minimal Groq research summary exceeded the reviewed size budget")
+        state["truncated"] = True
+    input_truncated = state["truncated"]
+    hits = suspicious_instruction_markers(external_json)
     if hits:
         _LOGGER.warning("possible prompt-injection markers in external research inputs: %s", hits[:5])
-    return (
-        "Review this Atlas research packet. Return an object with keys: regime_assessment (text), "
-        "key_observations (array of strings), data_quality_flags (array of strings), "
-        "strategy_watchlist (array of strings), confidence (number from 0 to 1), and "
-        "research_only_summary (text). Do not return buy/sell instructions or order parameters.\n\n"
-        + UNTRUSTED_PREAMBLE
-        + "\n\n"
-        + wrap_untrusted("atlas_computed_research", research)
-        + "\n\n"
-        + wrap_untrusted("external_news_and_source_status", external)
+    omission_audit = {
+        "research_fields_omitted": research_fields_omitted,
+        "validation_fields_omitted": validation_fields_omitted,
+        "regime_fields_omitted": regime_fields_omitted,
+        "strategy_metrics_omitted": max(0, len(names) - len(selected)),
+        "strategy_metric_fields_omitted": strategy_metric_fields_omitted,
+        "paper_candidates_omitted": max(0, len(candidates) - len(candidate_summaries)),
+        "paper_candidate_fields_omitted": paper_candidate_fields_omitted,
+        "external_fields_omitted": external_fields_omitted,
+        "candidate_omitted_fields": [
+            {"omitted_field_count": count} for count in candidate_omission_counts if count
+        ],
+        "size_budget_compaction": {
+            "applied": size_budget_compaction_applied,
+            **size_budget_audit,
+        },
+    }
+    omission_audit_json = json.dumps(omission_audit, separators=(",", ":"))
+    research_block = wrap_untrusted("atlas_computed_research", bounded_research, max_chars=80_000)
+    external_block = wrap_untrusted("external_news_and_source_status", bounded_external, max_chars=35_000)
+    prompt = (
+        "Review this Atlas research packet. Return one JSON object with regime_assessment, "
+        "key_observations, data_quality_flags, strategy_watchlist, confidence, and research_only_summary. "
+        "Do not return buy/sell instructions or order parameters. The supplied values are a bounded structured "
+        "summary of computed evidence; omitted rows and fields are disclosed. Do not infer omitted facts.\n\n"
+        + "INPUT_OMISSION_AUDIT=" + omission_audit_json + "\n\n"
+        + UNTRUSTED_PREAMBLE + "\n\n"
+        + research_block + "\n\n"
+        + external_block
     )
-
+    if len(prompt) > 24_000:
+        raise GroqAIError("Compacted Groq research prompt exceeded the reviewed size bound")
+    return prompt, input_truncated
 
 async def _groq_json(prompt: str) -> dict[str, Any]:
     api_key = str(settings.groq_api_key or "").strip()
@@ -203,8 +595,10 @@ async def groq_research_review(
             "reason": "Groq API key is not configured",
             "execution_authority": False,
         }
+    input_truncated: bool | None = None
     try:
-        review = await _groq_json(_research_prompt(research, intelligence))
+        prompt, input_truncated = _research_prompt(research, intelligence)
+        review = await _groq_json(prompt)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -229,6 +623,8 @@ async def groq_research_review(
             "error": type(exc).__name__,
             "cause": cause_type,
             "http_status": http_status,
+            "input_truncated": input_truncated,
+            "input_truncation_status": "UNKNOWN" if input_truncated is None else "KNOWN",
             "execution_authority": False,
         }
     return {
@@ -236,5 +632,6 @@ async def groq_research_review(
         "provider": "groq",
         "model": settings.groq_model,
         "review": review,
+        "input_truncated": input_truncated,
         "execution_authority": False,
     }

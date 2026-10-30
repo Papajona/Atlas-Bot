@@ -676,6 +676,38 @@ def retained_helper():
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_tuple_unpacking_assignment_to_all_fails_closed(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                "__all__, unused = (['branch_helper'], None)\n"
+                "class NativeAIError(RuntimeError):\n    pass\n"
+                "def branch_helper():\n    return True\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration,
+                "canonical_text",
+                return_value="from .native_ai import AIProviderError, NativeAIError\n",
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "dynamic exports or mutates __all__"
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
     def test_aliased_all_list_mutation_fails_closed(self):
         legacy = """from .branch_helpers import *
 
@@ -1768,6 +1800,32 @@ async def _gemini_json(prompt):
                     "custom decorator bindings must not be erased",
                 )
 
+    def test_config_annotation_only_builtin_declaration_does_not_block_validator_removal(self):
+        source = (
+            "str: int\n"
+            "from pydantic import field_validator\n"
+            "class Settings:\n"
+            "    gemini_model: str = 'gemini-3.8-flash'\n"
+            "    @field_validator('gemini_model')\n"
+            "    @classmethod\n"
+            "    def _validate_gemini_model(cls, value: str) -> str:\n"
+            "        normalized = str(value or '').strip().removeprefix('models/')\n"
+            "        if normalized != 'gemini-3.8-flash':\n"
+            "            raise ValueError('Gemini model must be exactly gemini-3.8-flash; alternative Gemini IDs are not permitted.')\n"
+            "        return normalized\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_config()
+            result = config.read_text(encoding="utf-8")
+            ast.parse(result, filename="app/config.py")
+            self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
+            self.assertIn("str: int", result)
+
     def test_config_removes_provider_fields_but_preserves_unrelated_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1792,6 +1850,36 @@ async def _gemini_json(prompt):
             self.assertIn("groq_research_review_enabled", result)
             self.assertNotIn("groq_strategy_model", result)
             self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
+
+    def test_config_refuses_one_line_settings_class_with_retired_provider_field(self):
+        source = "class Settings: gemini_api_key: str = ''\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "one-line Settings class"):
+                    migration.transform_config()
+            self.assertEqual(config.read_text(encoding="utf-8"), source)
+
+    def test_config_refuses_multiple_recognized_settings_classes_with_retired_provider_fields(self):
+        source = (
+            "class Settings:\n"
+            "    gemini_api_key: str = ''\n"
+            "class AppSettings:\n"
+            "    database_url: str = ''\n"
+            "settings = AppSettings()\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "multiple recognized Settings classes"):
+                    migration.transform_config()
+            self.assertEqual(config.read_text(encoding="utf-8"), source)
 
     def test_config_refuses_a_provider_field_sharing_a_line_with_an_unrelated_setting(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2882,7 +2970,14 @@ async def generate_strategy_draft(*, prompt, name, asset=None, symbol=None, time
             target.write_text(legacy, encoding="utf-8")
             with patch.object(migration, "ROOT", root):
                 migration.transform_daily_research()
-            result = target.read_text(encoding="utf-8")
+                result = target.read_text(encoding="utf-8")
+                # Re-run the migrated legacy fixture, not just an already-canonical no-op.
+                migration.transform_daily_research()
+                self.assertEqual(
+                    target.read_text(encoding="utf-8"),
+                    result,
+                    "daily research migration must be idempotent after rewriting legacy provider wiring",
+                )
             self.assertIn("keep_this = True", result)
             self.assertIn("review['run_drift']", result)
             self.assertIn('native_research_input["paper_candidates"] = review.get("paper_candidates", research.get("paper_candidates", []))', result)
@@ -4558,6 +4653,380 @@ GROQ_MODEL="openai/gpt-oss-20b"
         self.assertNotIn("GROQ_STRATEGY_API_KEY", cleaned)
         self.assertIn('GROQ_API_KEY="supported-review-key"', cleaned)
         self.assertIn('GROQ_MODEL="openai/gpt-oss-20b"', cleaned)
+
+
+    def test_shell_scrub_removes_only_static_provider_echo_messages(self):
+        source = '''DATABASE_URL="required"
+echo "Gemini strategy provider was retired; Native AI is used now" >&2
+printf "Optional Gemini review is not configured"
+'''
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertIn("DATABASE_URL", cleaned)
+        self.assertNotRegex(cleaned, migration.RETIRED_PROVIDER_RE)
+
+    def test_shell_scrub_still_refuses_dynamic_provider_echo(self):
+        source = 'echo "Gemini key: $GEMINI_API_KEY"\n'
+        with self.assertRaises(migration.MigrationError):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+
+    def test_shell_scrub_refuses_background_command_in_groq_guard(self):
+        source = '''if [[ -n "$GROQ_API_KEY" ]]; then
+  echo "Groq review is optional" & gcloud run deploy atlas
+fi
+'''
+        with self.assertRaisesRegex(migration.MigrationError, "mixed provider-conditioned shell block"):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+
+    def test_shell_scrub_preserves_quoted_ampersand_in_groq_guard_message(self):
+        source = '''if [[ -n "$GROQ_API_KEY" ]]; then
+  echo "Native AI & Groq review enabled"
+fi
+'''
+        self.assertEqual(
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source),
+            source,
+        )
+
+    def test_markdown_provider_history_is_scrubbed_as_prose_not_shell(self):
+        source = (
+            "| Previous deployment integration | Gemini strategy secrets were injected "
+            "through a historical run: / bash workflow. |\n"
+        )
+        cleaned = migration.scrub_ancillary_text("deploy/DEPLOY_WORKFLOW.md", source)
+        self.assertNotRegex(cleaned, migration.RETIRED_PROVIDER_RE)
+        self.assertIn("Previous deployment integration", cleaned)
+        self.assertIn("historical", cleaned)
+
+    def test_groq_reviewer_ast_validator_preserves_compatible_branch_specific_code(self):
+        source = '''from __future__ import annotations
+import httpx
+from .config import settings as config_settings
+
+async def groq_research_review(research, intelligence, paper_candidates=None):
+    response = await httpx.AsyncClient().post("https://api.groq.com/openai/v1/chat/completions")
+    return {"status": "OK", "response": response.status_code}
+
+def branch_specific_diagnostic():
+    return "extra reviewed diagnostics"
+'''
+        self.assertIsNone(migration.validate_groq_research_module(source))
+        self.assertIn("branch_specific_diagnostic", source)
+
+    def test_groq_reviewer_ast_validator_rejects_retired_strategy_provider_code(self):
+        source = '''async def groq_research_review(research):
+    return {"model": settings.gemini_model}
+'''
+        with self.assertRaisesRegex(migration.MigrationError, "retired-provider wiring"):
+            migration.validate_groq_research_module(source)
+
+    def test_groq_reviewer_ast_validator_requires_async_review_api(self):
+        source = 'def helper_only():\n    return {"status": "OK"}\n'
+        with self.assertRaisesRegex(migration.MigrationError, "must define exactly one async groq_research_review API"):
+            migration.validate_groq_research_module(source)
+
+
+
+    def test_groq_reviewer_ast_validator_rejects_one_positional_argument(self):
+        source = '''async def groq_research_review(research):
+    return {"status": "DISABLED", "provider": "groq", "execution_authority": False}
+'''
+        with self.assertRaisesRegex(migration.MigrationError, "two positional arguments"):
+            migration.validate_groq_research_module(source)
+
+    def test_groq_reviewer_ast_validator_rejects_third_required_positional_argument(self):
+        source = '''async def groq_research_review(research, intelligence, required_extra):
+    return {"status": "DISABLED", "provider": "groq", "execution_authority": False}
+'''
+        with self.assertRaisesRegex(migration.MigrationError, "more than two required positional"):
+            migration.validate_groq_research_module(source)
+
+    def test_groq_reviewer_ast_validator_rejects_required_keyword_only_argument(self):
+        source = '''async def groq_research_review(research, intelligence, *, required_extra):
+    return {"status": "DISABLED", "provider": "groq", "execution_authority": False}
+'''
+        with self.assertRaisesRegex(migration.MigrationError, "requires keyword-only parameters"):
+            migration.validate_groq_research_module(source)
+
+    def test_groq_reviewer_ast_validator_allows_varargs_signature(self):
+        source = '''import httpx
+async def groq_research_review(research, *args):
+    return {"status": "DISABLED", "provider": "groq", "execution_authority": False}
+'''
+        self.assertIsNone(migration.validate_groq_research_module(source))
+
+    def test_groq_reviewer_ast_validator_rejects_unreviewed_unresolvable_import(self):
+        source = '''import module_that_is_not_a_reviewed_runtime_dependency
+async def groq_research_review(research, intelligence):
+    return {"status": "DISABLED", "provider": "groq", "execution_authority": False}
+'''
+        with self.assertRaisesRegex(migration.MigrationError, "unreviewed or unavailable module"):
+            migration.validate_groq_research_module(source)
+
+    def test_shell_scrub_refuses_printf_v_side_effect(self):
+        source = 'printf -v deployment_status "Gemini provider not configured"\n'
+        with self.assertRaises(migration.MigrationError):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+
+    def test_markdown_scrub_refuses_provider_bearing_assignment_inside_long_fence(self):
+        source = "\x60\x60\x60\x60python\n\x60\x60\x60\nclient = GeminiClient()\n\x60\x60\x60\x60\n"
+        with self.assertRaisesRegex(migration.MigrationError, "provider-bearing code inside a Markdown code fence"):
+            migration.scrub_ancillary_text("deploy/DEPLOY_WORKFLOW.md", source)
+
+    def test_markdown_scrub_refuses_provider_bearing_command_in_fenced_code(self):
+        source = "\x60\x60\x60bash\ncurl https://example.invalid/v1 -H 'Authorization: Bearer $OPENAI_API_KEY'\n\x60\x60\x60\n"
+        with self.assertRaisesRegex(migration.MigrationError, "provider-bearing code inside a Markdown code fence"):
+            migration.scrub_ancillary_text("deploy/DEPLOY_WORKFLOW.md", source)
+
+
+
+    def test_config_does_not_remove_validator_when_module_rebinds_str(self):
+        unsafe = (
+            "from pydantic import field_validator\n"
+            "str = audited_stringifier\n"
+            "class Settings:\n"
+            "    database_url: str = ''\n"
+            "    gemini_model: str = 'gemini-3.8-flash'\n"
+            "    @field_validator('gemini_model')\n"
+            "    @classmethod\n"
+            "    def _validate_gemini_model(cls, value: str) -> str:\n"
+            "        normalized = str(value or '').strip().removeprefix('models/')\n"
+            "        if normalized != 'gemini-3.8-flash':\n"
+            "            raise ValueError('Gemini model must be exactly gemini-3.8-flash; alternative Gemini IDs are not permitted.')\n"
+            "        return normalized\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(unsafe, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "provider text outside isolated Settings fields",
+                ):
+                    migration.transform_config()
+            self.assertEqual(config.read_text(encoding="utf-8"), unsafe)
+
+        annotation_only = unsafe.replace(
+            "str = audited_stringifier\n", "str: int\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(annotation_only, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_config()
+            result = config.read_text(encoding="utf-8")
+            ast.parse(result, filename="app/config.py")
+            self.assertIn("str: int", result)
+            self.assertNotIn("_validate_gemini_model", result)
+
+    def test_star_import_refuses_relative_level_above_app_package(self):
+        legacy = """from ..shared import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            target.parent.mkdir()
+            (root / "shared.py").write_text(
+                "def branch_helper():\n    return True\n", encoding="utf-8"
+            )
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration,
+                "canonical_text",
+                return_value="from .native_ai import AIProviderError, NativeAIError\n",
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "relative star import .* escapes the app package",
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_star_import_refuses_indirect_exec_alias(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                'run = exec\nrun("def branch_helper():\\n    return True")\n',
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration,
+                "canonical_text",
+                return_value="from .native_ai import AIProviderError, NativeAIError\n",
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "dynamic exports or mutates __all__",
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_star_import_ignores_eval_in_uninvoked_helper_body(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                "def branch_helper():\n    return True\n\n"
+                "def inert_exec(source):\n    exec(source)\n\n"
+                "def inert_eval(source):\n    return eval(source)\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration,
+                "canonical_text",
+                return_value="from .native_ai import AIProviderError, NativeAIError\n",
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            rewritten = target.read_text(encoding="utf-8")
+            self.assertIn("from .branch_helpers import *", rewritten)
+            self.assertIn("def retained_helper", rewritten)
+
+    def test_star_import_allows_exec_name_in_postponed_annotation(self):
+        legacy = """from __future__ import annotations
+from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper(value: exec) -> eval:
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text("def branch_helper():\n    return True\n", encoding="utf-8")
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text",
+                return_value="from .native_ai import AIProviderError, NativeAIError\n",
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            rewritten = target.read_text(encoding="utf-8")
+            ast.parse(rewritten, filename="app/ai_providers.py")
+            # The canonical facade does not retain postponed annotations, so the
+            # migration stringizes them to preserve the old deferred-evaluation contract.
+            self.assertIn("value: 'exec'", rewritten)
+            self.assertIn("-> 'eval'", rewritten)
+            self.assertNotIn("from __future__ import annotations", rewritten)
+
+    def test_star_import_refuses_import_time_call_to_exec_helper(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                'def configure():\n    exec("global hidden_export; hidden_export = 1")\n'
+                'configure()\n\n'
+                'def branch_helper():\n    return True\n',
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text",
+                return_value="from .native_ai import AIProviderError, NativeAIError\n",
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "dynamic exports or mutates __all__"
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_star_import_refuses_immediately_invoked_exec_lambda(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                '((lambda: exec("global hidden_export; hidden_export = 1"))())\n'
+                'def branch_helper():\n    return True\n',
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text",
+                return_value="from .native_ai import AIProviderError, NativeAIError\n",
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "dynamic exports or mutates __all__"
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_groq_guard_refuses_printf_v_with_quoted_separator_but_allows_echo(self):
+        unsafe = (
+            'if [[ -n "$GROQ_API_KEY" ]]; then\n'
+            "  printf -v DATABASE_URL 'postgres://other;db'\n"
+            "fi\n"
+        )
+        with self.assertRaisesRegex(
+            migration.MigrationError,
+            "mixed provider-conditioned shell block",
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe)
+
+        safe = (
+            'if [[ -n "$GROQ_API_KEY" ]]; then\n'
+            '  echo "research note & review only"\n'
+            "fi\n"
+        )
+        self.assertEqual(
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", safe),
+            safe,
+        )
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -144,17 +144,21 @@ It deploys with `--execution-environment gen2`, the read-only models volume, ing
 
 ### Step 7: Deploy the worker pool -- `deploy/cloud-run-worker-deploy.sh`
 ```
+
 export WORKER_POOL=atlas-trading-worker IMAGE=<same image> WORKER_SERVICE_ACCOUNT=atlas-trading-worker \
+  GROQ_MODEL="${GROQ_MODEL:?set the exact approved value used by the API}" \
+  GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:?set the exact API token cap}" \
+  GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:?set the exact API true/false value}" \
   DATABASE_SECRET_REF=atlas-database-url:<v> SECRET_REDIS_URL_REF=atlas-redis-url:<v> SECRET_KEY_REF=atlas-secret-key:<v> \
   SECRET_APP_ENCRYPTION_REF=atlas-app-encryption-key:<v> SECRET_TRON_XPUB_REF=atlas-usdt-tron-account-xpub:<v> SECRET_TRONGRID_REF=atlas-trongrid-api-key:<v> \
   SECRET_MODEL_SIGNING_PUBLIC_REF=atlas-model-signing-public-key:<v> SECRET_MODEL_SIGNING_PRIVATE_REF=atlas-model-signing-private-key:<v> \
   BACKUP_RECOVERY_URL=... \
-  RESEARCH_FEE_SOURCE="${RESEARCH_FEE_SOURCE:?set to actual fee source}" \\
-  RESEARCH_FEE_EVIDENCE_ID="${RESEARCH_FEE_EVIDENCE_ID:?set to immutable evidence ID}" \\
+  RESEARCH_FEE_SOURCE="${RESEARCH_FEE_SOURCE:?set to actual fee source}" \
+  RESEARCH_FEE_EVIDENCE_ID="${RESEARCH_FEE_EVIDENCE_ID:?set to immutable evidence ID}" \
   RESEARCH_MIN_DEFLATED_SHARPE="${RESEARCH_MIN_DEFLATED_SHARPE:-0.95}"
 bash deploy/cloud-run-worker-deploy.sh
 ```
-The three `RESEARCH_*` values are mandatory for production worker startup. `SECRET_GROQ_REF` is optional and must be an exact `atlas-groq-api-key:<positive-version>` reference; the legacy `GROQ_STRATEGY_MODEL` is not used. Use the actual fee source and immutable evidence identifier consumed by the research process; placeholders or CI fixtures are not operational evidence. The deployment validator rejects nonnumeric/nonfinite thresholds and values containing the active environment-variable delimiter before the deploy command runs. It verifies input shape only, not evidence authenticity.
+The three `GROQ_*` values are mandatory for the worker and must exactly match the approved API deployment values, including repository `vars.GROQ_*` overrides. The worker script rejects missing values rather than silently applying worker-only defaults. The three `RESEARCH_*` values are mandatory for production worker startup. `SECRET_GROQ_REF` is optional and must be an exact `atlas-groq-api-key:<positive-version>` reference; the legacy `GROQ_STRATEGY_MODEL` is not used. Use the actual fee source and immutable evidence identifier consumed by the research process; placeholders or CI fixtures are not operational evidence. The deployment validator rejects nonnumeric/nonfinite thresholds and values containing the active environment-variable delimiter before the deploy command runs. It verifies input shape only, not evidence authenticity.
 **Check:** `ServiceHeartbeat` rows appear for role `worker`; logs show the loops starting; the single-writer execution lease is held (only one worker may hold it).
 **Rollout caveat:** a worker-pool update can briefly run old and new instances together. Safety then rests on the distributed lease with fencing; keep live
 trading off until a rollout drill proves it.

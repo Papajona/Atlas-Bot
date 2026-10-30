@@ -178,7 +178,6 @@ jobs:
           verify_native_ai_impl() {
             python - <<'PY'
           import ast
-          import importlib
           from pathlib import Path
 
           app_dir = Path("app")
@@ -246,29 +245,100 @@ jobs:
               print("\n".join(problems))
               raise SystemExit(1)
 
-          # Execute the compatibility facade import as well: this catches broken
-          # transitive exports, including missing native_trade_safety_review.
-          native = importlib.import_module("app.native_ai")
-          facade = importlib.import_module("app.ai_providers")
-          groq = importlib.import_module("app.groq_ai")
+          # This workflow intentionally has no application dependencies installed.
+          # Verify API and alias contracts from the parsed AST instead of importing the
+          # optional Groq adapter (which imports httpx) in the bare GitHub runner.
+          native_names = available["native_ai"]
+          facade_names = available["ai_providers"]
+          groq_names = available["groq_ai"]
           for name in ("NativeAIError", "compose_strategy_spec", "native_research_review"):
-              if not hasattr(native, name):
+              if name not in native_names:
                   raise SystemExit(f"app.native_ai is missing required symbol: {name}")
           for name in (
               "AIProviderError", "dual_ai_research_review", "dual_ai_trade_safety_review",
               "evaluate_native_trade_packet", "native_ai_health_check", "native_research_review",
               "native_trade_safety_review",
           ):
-              if not hasattr(facade, name):
+              if name not in facade_names:
                   raise SystemExit(f"app.ai_providers is missing required symbol: {name}")
-          if not hasattr(groq, "groq_research_review"):
-              raise SystemExit("app.groq_ai is missing required symbol: groq_research_review")
-          if facade.AIProviderError is not native.NativeAIError:
-              raise SystemExit(
-                  "app.ai_providers.AIProviderError must be the app.native_ai.NativeAIError compatibility alias"
-              )
+          groq_reviewers = [
+              node for node in trees["groq_ai"].body
+              if isinstance(node, ast.AsyncFunctionDef) and node.name == "groq_research_review"
+          ]
+          if len(groq_reviewers) != 1:
+              raise SystemExit("app.groq_ai must define exactly one async groq_research_review API")
+          groq_reviewer = groq_reviewers[0]
+          positional_parameters = groq_reviewer.args.posonlyargs + groq_reviewer.args.args
+          positional_args = len(positional_parameters)
+          required_positional = positional_args - len(groq_reviewer.args.defaults)
+          required_keyword_only = [
+              argument.arg
+              for argument, default in zip(groq_reviewer.args.kwonlyargs, groq_reviewer.args.kw_defaults)
+              if default is None
+          ]
+          if positional_args < 2 and groq_reviewer.args.vararg is None:
+              raise SystemExit("app.groq_ai reviewer must accept research and intelligence positional arguments")
+          if required_positional > 2:
+              raise SystemExit("app.groq_ai reviewer cannot require more than two positional arguments")
+          if required_keyword_only:
+              raise SystemExit(f"app.groq_ai reviewer has required keyword-only arguments: {required_keyword_only}")
 
-          print("PASS: Native AI imports and compatibility exports resolve.")
+          # Keep branch-specific diagnostics only when their imports are within the
+          # reviewed adapter contract and are known to resolve in the application.
+          allowed_plain_imports = {"asyncio", "httpx", "json", "logging", "math", "re"}
+          allowed_from_imports = {
+              (0, "__future__"): {"annotations"},
+              (0, "typing"): {"Any"},
+              (1, "config"): {"settings"},
+              (1, "prompt_safety"): {
+                  "UNTRUSTED_PREAMBLE", "suspicious_instruction_markers", "wrap_untrusted",
+              },
+          }
+          for node in ast.walk(trees["groq_ai"]):
+              if isinstance(node, ast.Import):
+                  for alias in node.names:
+                      if alias.name not in allowed_plain_imports:
+                          raise SystemExit(f"app.groq_ai imports an unreviewed module: {alias.name}")
+              elif isinstance(node, ast.ImportFrom):
+                  allowed_names = allowed_from_imports.get((node.level, node.module or ""))
+                  if allowed_names is None or any(
+                      alias.name == "*"
+                      or alias.name not in allowed_names
+                      or ((node.level, node.module or "") == (0, "__future__") and alias.asname is not None)
+                      for alias in node.names
+                  ):
+                      raise SystemExit(f"app.groq_ai has an unreviewed import from: {node.module}")
+          def top_level_bound_names(node):
+              names = set()
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                  names.add(node.name)
+              elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                  names.update((alias.asname or alias.name.split('.')[0] if isinstance(node, ast.Import) else alias.asname or alias.name) for alias in node.names if alias.name != '*')
+              elif isinstance(node, ast.Assign):
+                  for target in node.targets:
+                      names.update(assigned_names(target))
+              elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                  names.update(assigned_names(node.target))
+              elif isinstance(node, ast.Delete):
+                  for target in node.targets:
+                      names.update(assigned_names(target))
+              return names
+
+          nt = trees['native_ai']
+          error_classes = [(i,n) for i,n in enumerate(nt.body) if isinstance(n, ast.ClassDef) and n.name == 'NativeAIError']
+          alias_assignments = [(i,n) for i,n in enumerate(nt.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'AIProviderError' for t in n.targets) and isinstance(n.value, ast.Name) and n.value.id == 'NativeAIError']
+          native_error_bindings = [(i,n) for i,n in enumerate(nt.body) if 'NativeAIError' in top_level_bound_names(n)]
+          native_alias_bindings = [(i,n) for i,n in enumerate(nt.body) if 'AIProviderError' in top_level_bound_names(n)]
+          native_error_alias = (len(error_classes) == 1 and len(alias_assignments) == 1 and error_classes[0][0] < alias_assignments[0][0] and len(native_error_bindings) == 1 and native_error_bindings[0][1] is error_classes[0][1] and len(native_alias_bindings) == 1 and native_alias_bindings[0][1] is alias_assignments[0][1])
+
+          ft = trees['ai_providers']
+          facade_imports = [(i,n,a) for i,n in enumerate(ft.body) if isinstance(n, ast.ImportFrom) and n.level == 1 and n.module == 'native_ai' for a in n.names if a.name == 'AIProviderError']
+          facade_error_bindings = [(i,n) for i,n in enumerate(ft.body) if 'AIProviderError' in top_level_bound_names(n)]
+          facade_imports_native_error = (len(facade_imports) == 1 and facade_imports[0][2].asname is None and len(facade_error_bindings) == 1 and facade_error_bindings[0][1] is facade_imports[0][1])
+          if not native_error_alias or not facade_imports_native_error:
+              raise SystemExit('NativeAI error alias is renamed or rebound; preserving the branch')
+
+          print("PASS: Native AI AST exports and compatibility aliases resolve.")
           PY
           }
           declare -a cleanup_warnings=()
