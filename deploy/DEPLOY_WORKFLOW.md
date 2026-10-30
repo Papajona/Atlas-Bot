@@ -296,3 +296,6 @@ bash deploy/verify-deployed-release.sh
 ```
 
 The verifier calls `/healthz` and fails unless both the Git SHA and Artifact Registry image digest match exactly. A green CI run alone does not prove that the live Cloud Run revision is serving the intended immutable artifact.
+
+
+The API's scheduled research review is controlled by `GROQ_RESEARCH_REVIEW_ENABLED`. Trade-time Groq review is a separate opt-in using `GROQ_TRADE_REVIEW_ENABLED` (default `false`); enabling it requires a configured Groq key and still leaves the final safety decision to Atlas Native AI.
