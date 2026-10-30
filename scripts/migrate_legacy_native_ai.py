@@ -5518,7 +5518,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         # expression or trailing command; normalize it for the same safety checks.
         test_match = re.fullmatch(
             r"""test\s+(-[nz])\s+(?:"(\$\{(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|SECRET_OPENAI[A-Z0-9_]*|SECRET_AI_GATEWAY[A-Z0-9_]*|GEMINI_API_KEY)(?::-[^}]*)?\})"|'(\$\{(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|SECRET_OPENAI[A-Z0-9_]*|SECRET_AI_GATEWAY[A-Z0-9_]*|GEMINI_API_KEY)(?::-[^}]*)?\})'|(\$\{(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|SECRET_OPENAI[A-Z0-9_]*|SECRET_AI_GATEWAY[A-Z0-9_]*|GEMINI_API_KEY)(?::-[^}]*)?\}))\s*;\s*then(?:\s*(.*))?""",
-            line[start:].rstrip("\\r\\n"),
+            line[start:].rstrip("\r\n"),
             re.I,
         )
         if test_match is not None:
