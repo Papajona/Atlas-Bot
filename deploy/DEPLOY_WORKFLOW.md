@@ -143,7 +143,7 @@ It deploys with `--execution-environment gen2`, the read-only models volume, ing
 (`DOCS_ENABLED=false`) and `/metrics` must require an admin (`METRICS_REQUIRE_ADMIN=true`).
 
 ### Step 7: Deploy the worker pool -- `deploy/cloud-run-worker-deploy.sh`
-The worker script reads the active API revision and inherits its validated Groq model, token cap, enablement setting and optional Secret Manager version. Set `API_SERVICE` to the same Cloud Run API service deployed in Step 6; supplied Groq overrides that differ from the API revision are rejected.
+The worker script reads every API revision currently receiving traffic and inherits its validated Groq model, token cap, enablement setting and optional pinned Secret Manager version. No-traffic tagged canaries are excluded. If multiple serving revisions have different Groq configurations, the worker rollout is refused. Set `API_SERVICE` to the same Cloud Run API service deployed in Step 6; any supplied Groq overrides that differ from the serving API configuration are rejected.
 ```
 
 export WORKER_POOL=atlas-trading-worker IMAGE=<same image> WORKER_SERVICE_ACCOUNT=atlas-trading-worker \
