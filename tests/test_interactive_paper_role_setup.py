@@ -160,3 +160,15 @@ def test_atomic_url_file_publication_never_overwrites_existing_file(tmp_path: Pa
 
     assert final_path.read_text(encoding="utf-8") == original + "\n"
     assert list(tmp_path.glob(".database-url.*.tmp")) == []
+
+def test_role_setup_preflights_database_owner_authority_before_creating_role():
+    sql = role_setup_sql("not-a-real-secret")
+    owner_guard = "pg_has_role(current_user, target_db.datdba, 'USAGE')"
+    error = "must own the target database or be a superuser to grant CONNECT"
+
+    assert owner_guard in sql
+    assert error in sql
+    assert sql.index(owner_guard) < sql.index("CREATE ROLE atlas_customer_paper")
+    assert sql.index("CREATE ROLE atlas_customer_paper") < sql.index(
+        "GRANT CONNECT ON DATABASE postgres TO atlas_customer_paper"
+    )
