@@ -342,6 +342,28 @@ def test_groq_prompt_build_failure_records_unknown_truncation_status():
     assert result["input_truncation_status"] == "UNKNOWN"
     assert result["execution_authority"] is False
 
+def test_groq_prompt_budget_failure_preserves_known_truncation_status():
+    def oversized_untrusted_block(label, *_args, **_kwargs):
+        return "X" * 25_000 if label == "atlas_computed_research" else "external"
+
+    with _settings(
+        groq_api_key="test-key-not-a-real-secret",
+        groq_model="openai/gpt-oss-20b",
+        groq_max_completion_tokens=2048,
+        groq_timeout_seconds=20.0,
+        groq_research_review_enabled=True,
+    ), patch.object(groq_ai, "wrap_untrusted", side_effect=oversized_untrusted_block):
+        result = asyncio.run(
+            groq_ai.groq_research_review(
+                {"symbol": "EUR_USD", "branch_specific_metadata": {"retained": False}}, {}
+            )
+        )
+
+    assert result["status"] == "ERROR"
+    assert result["input_truncated"] is True
+    assert result["input_truncation_status"] == "KNOWN"
+    assert result["execution_authority"] is False
+
 
 
 def test_groq_minimal_fallback_reports_zero_omitted_list_items_when_no_lists_exist():
