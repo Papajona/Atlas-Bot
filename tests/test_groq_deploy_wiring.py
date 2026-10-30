@@ -107,7 +107,7 @@ def test_worker_runbook_does_not_require_a_groq_secret_placeholder():
     runbook = (ROOT / "deploy" / "DEPLOY_WORKFLOW.md").read_text(encoding="utf-8")
     assert "SECRET_GROQ_REF=atlas-groq-api-key:<v>" not in runbook
     assert "API_SERVICE=atlas-api \\" in runbook
-    assert "reads the active API service revision" in runbook
+    assert "reads every API revision currently receiving traffic" in runbook
     assert "does not accept an independent worker Groq configuration" in runbook
     assert "optional pinned `GROQ_API_KEY` Secret Manager reference" in runbook
     assert "GROQ_STRATEGY_MODEL" in runbook
