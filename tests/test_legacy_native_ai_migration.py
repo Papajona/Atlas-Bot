@@ -5724,10 +5724,10 @@ fi
 
     def test_retired_assignment_line_continuation_refuses_to_expose_following_command(self):
         shell = (
-            "if [ -n \"$SECRET_CEREBRAS_API_KEY_VERSION\" ]; then\\n"
-            "  SECRET_CEREBRAS_API_KEY_VERSION=\\\\\\n"
-            "  ./deploy/gcp-bootstrap.sh\\n"
-            "fi\\n"
+            'if [ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]; then\n'
+            + "  SECRET_CEREBRAS_API_KEY_VERSION=" + "\\" + "\n"
+            + "  ./deploy/gcp-bootstrap.sh\n"
+            + "fi\n"
         )
         with self.assertRaisesRegex(
             migration.MigrationError, "compound retired-provider assignment"
@@ -5736,9 +5736,9 @@ fi
 
     def test_retired_provider_stderr_warning_is_removed_without_blocking_migration(self):
         shell = (
-            "if [[ -z \"$SECRET_CEREBRAS_API_KEY_VERSION\" ]]; then\\n"
-            "  echo \"WARNING: Cerebras not configured\" >&2\\n"
-            "fi\\n"
+            'if [[ -z "$SECRET_CEREBRAS_API_KEY_VERSION" ]]; then\n'
+            '  echo "WARNING: Cerebras not configured" >&2\n'
+            'fi\n'
         )
         cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
         self.assertEqual(cleaned, "")
