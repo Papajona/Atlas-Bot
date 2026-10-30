@@ -143,7 +143,7 @@ It deploys with `--execution-environment gen2`, the read-only models volume, ing
 (`DOCS_ENABLED=false`) and `/metrics` must require an admin (`METRICS_REQUIRE_ADMIN=true`).
 
 ### Step 7: Deploy the worker pool -- `deploy/cloud-run-worker-deploy.sh`
-The worker script reads the active API service revision and inherits its validated Groq model, token cap, enablement flag, and optional Secret Manager version. Set `API_SERVICE` to the same Cloud Run API service used in Step 6; supplied Groq overrides are rejected if they differ from the API revision.
+The worker script reads the active API revision and inherits its validated Groq model, token cap, enablement setting and optional Secret Manager version. Set `API_SERVICE` to the same Cloud Run API service deployed in Step 6; supplied Groq overrides that differ from the API revision are rejected.
 ```
 
 export WORKER_POOL=atlas-trading-worker IMAGE=<same image> WORKER_SERVICE_ACCOUNT=atlas-trading-worker \
@@ -233,7 +233,7 @@ and before each release (the verify script does).
 |---|---|---|
 | Migration job had no `--service-account` | ran as the default compute identity, which bootstrap never granted the DB secret (or ran over-privileged) | dedicated `atlas-migrator`, DB-secret-only, `--max-retries 0 --task-timeout 900s` |
 | Worker script never set `BACKUP_RECOVERY_URL` | production startup refused to boot: the worker pool crash-looped | variable now required and passed |
-| API deployment previously injected legacy hosted strategy-provider secrets | Legacy hosted-provider quotas and credentials could block strategy generation despite healthy core code | Legacy hosted strategy calls were removed; Native AI now runs locally, while an optional Groq research-only secret can be injected separately |
+| API deployment previously injected Gemini strategy-provider secrets | Gemini quotas and credentials could block strategy generation despite healthy core code | Gemini strategy calls removed; Native AI is local, while an optional Groq research-only secret can be injected separately |
 | Worker previously depended on a dual-hosted-provider veto | missing API keys forced every worker cycle to NO_TRADE | Native AI uses local evidence checks and fails closed on missing or inconsistent trade packets |
 | Hosted model availability and quota | provider status, API keys, rate limits and core-code correctness are separate concerns | Local Native AI health check is deterministic and offline; no external provider attestation is required |
 | `DEPLOYMENT_ACCEPTANCE.md` stated `max=1, concurrency=1` and listed migrations after deploy | wrong numbers and order | corrected |
