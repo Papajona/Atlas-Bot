@@ -5426,7 +5426,7 @@ def retained_helper():
 
     def test_shell_scrub_redacts_provider_secret_from_refusal_error(self):
         secret = "sk-proj-atlas-regression-secret-123456"
-        source = f'echo "OPENAI_API_KEY={secret}"\n'
+        source = f'printf -v deployment_status "Gemini provider credential {secret}"\n'
         with self.assertRaises(migration.MigrationError) as raised:
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
         self.assertNotIn(secret, str(raised.exception))
