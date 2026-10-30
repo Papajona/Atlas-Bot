@@ -18,7 +18,11 @@ from app.customer_paper_flow import (
     validate_customer_paper_market,
 )
 from app.customer_paper_ledger import get_customer_paper_balances
-from app.customer_paper_lifecycle import get_customer_paper_positions, submit_customer_paper_order
+from app.customer_paper_lifecycle import (
+    CustomerPaperOrderConflict,
+    get_customer_paper_positions,
+    submit_customer_paper_order,
+)
 
 
 def _market_fixture(*, timestamp: datetime | None = None, low: float = 98.0, high: float = 102.0,
@@ -274,6 +278,52 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
         recovered_positions = await get_customer_paper_positions(customer_id=recovery_customer)
         assert len(recovered_positions) == 1
         assert recovered_positions[0]["quantity"] == "0.250000000000000000"
+
+        # An empty owner string is still ownerless. It must not let another manual
+        # order bypass the legacy-intent quarantine on the same market.
+        quarantine_customer = 99233
+        quarantine_at = recovery_next_at + timedelta(minutes=5)
+        quarantine_req, quarantine_frame, quarantine_context = _market_fixture(
+            timestamp=quarantine_at, timeframe="1m"
+        )
+        await ensure_customer_paper_account(quarantine_customer, "USDT")
+        quarantine_bar = quarantine_frame.index[-1].isoformat()
+        legacy_pending = await submit_customer_paper_order(
+            customer_id=quarantine_customer,
+            client_order_id="legacy-empty-owner-v1",
+            venue="binance",
+            market_type="spot",
+            symbol="BTC/USDT",
+            side="BUY",
+            quantity="0.10",
+            currency="USDT",
+            order_type="MARKET",
+            metadata={
+                "paper_flow_version": 1,
+                "execution_owner": "",
+                "exchange": str(quarantine_req.exchange).lower(),
+                "market_type": "spot",
+                "order_role": "ENTRY",
+                "timeframe": str(quarantine_req.timeframe),
+                "signal_bar_timestamp": quarantine_bar,
+                "submission_bar_at": quarantine_bar,
+                "data_sha256": quarantine_frame.attrs["data_provenance"]["sha256"],
+            },
+        )
+        assert legacy_pending["status"] == "APPENDED"
+        with pytest.raises(CustomerPaperOrderConflict, match="ownerless legacy"):
+            await submit_customer_paper_order(
+                customer_id=quarantine_customer,
+                client_order_id="new-manual-order-after-legacy",
+                venue="binance",
+                market_type="spot",
+                symbol="BTC/USDT",
+                side="BUY",
+                quantity="0.10",
+                currency="USDT",
+                order_type="MARKET",
+                metadata={"execution_owner": "manual_customer_api"},
+            )
 
     asyncio.run(run())
 
