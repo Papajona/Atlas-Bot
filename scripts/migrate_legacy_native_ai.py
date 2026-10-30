@@ -5780,6 +5780,20 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
             step_name = legacy_named_ai_step.group(2)
             manual_dispatch_condition = "if: github.event_name == 'workflow_dispatch'"
             metadata_conditions = [item for item in metadata_lines if item.startswith("if:")]
+            allowed_metadata_fields = {
+                "id: ai_provider_verification",
+                "continue-on-error: true",
+                "env:",
+            }
+            unexpected_metadata = [
+                item
+                for item in metadata_lines[1:]
+                if (
+                    item not in allowed_metadata_fields
+                    and item not in metadata_conditions
+                    and not re.match(r"^[A-Z_]+:", item)
+                )
+            ]
             if (
                 not run_match
                 or metadata_lines[0] != "- name: " + step_name
@@ -5788,6 +5802,7 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                 or "env:" not in metadata_lines
                 or not {"PYTHONPATH", "GEMINI_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY"}.issubset(observed_env_keys)
                 or set(metadata_keys) - allowed_env_keys
+                or unexpected_metadata
                 or any(item != manual_dispatch_condition for item in metadata_conditions)
                 or (
                     "manual dispatch only" in step_name.lower()
@@ -5820,15 +5835,13 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                     and command.startswith(("elif ", "&& ", "&& ! "))
                     and (command.endswith("\\") or command.endswith("; then"))
                 )
-                is_echo = (
-                    command.startswith('echo "')
-                    and command.endswith('"')
-                    and (
-                        "BLOCKED:" in command
-                        or "::warning::" in command
-                        or "gemini_deferred=" in command
-                    )
-                )
+                is_echo = command in {
+                    'echo "gemini_deferred=false" >> "$GITHUB_OUTPUT"',
+                    'echo "gemini_deferred=true" >> "$GITHUB_OUTPUT"',
+                    'echo "BLOCKED: provider credentials are not configured; production verification cannot pass without provider checks"',
+                    'echo "::warning::Gemini check temporarily waived due to known exhausted test quota (HTTP 429); Groq inference passed. Recheck Gemini after quota reset."',
+                    'echo "BLOCKED: AI model/provider verification failed with exit code $status"',
+                }
                 allowed = (
                     command in {
                         "set +e",
@@ -5955,15 +5968,13 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                         "fi",
                         "exit 1",
                     }
-                    or (
-                        command.startswith('echo "')
-                        and command.endswith('"')
-                        and (
-                            "BLOCKED:" in command
-                            or "::warning::" in command
-                            or "verification passed" in command
-                        )
-                    )
+                    or command in {
+                        'echo "BLOCKED: production gate requires successful live AI provider verification."',
+                        'echo "BLOCKED: production gate requires successful live inference for every configured AI provider."',
+                        'echo "::warning::Provider gate passed with temporary Gemini quota waiver. Groq passed; retry Gemini after the quota resets."',
+                        'echo "AI provider verification passed for all configured providers."',
+                        'echo "Live AI provider verification passed for every configured model."',
+                    }
                 )
                 if not allowed:
                     raise MigrationError(
