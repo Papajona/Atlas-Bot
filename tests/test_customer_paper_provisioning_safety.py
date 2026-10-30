@@ -384,8 +384,8 @@ def test_mandatory_postgres_workflow_covers_config_and_real_shared_primary_relat
     assert "GRANT CONNECT ON DATABASE atlas_test TO atlas_paper_app" in workflow
     assert "-d atlas_test" in workflow
     assert "-v paper_runtime_role=atlas_paper_app -f scripts/customer_paper_ledger_schema.sql" in workflow
-    assert "ATLAS_PAPER_SHARED_PRIMARY_TEST_DATABASE_URL=postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_test" in workflow
-    assert "ATLAS_PAPER_TEST_DATABASE_URL=postgresql+asyncpg://atlas_paper_app:paper_test_password@127.0.0.1:5432/atlas_test" in workflow
+    assert "ATLAS_PAPER_SHARED_PRIMARY_TEST_DATABASE_URL: postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_test" in workflow
+    assert "ATLAS_PAPER_TEST_DATABASE_URL: postgresql+asyncpg://atlas_paper_app:paper_test_password@127.0.0.1:5432/atlas_test" in workflow
     assert "pg-paper-shared.xml" in workflow
 
 def test_customer_paper_trigger_functions_pin_search_path_and_account_key_is_not_duplicated():
