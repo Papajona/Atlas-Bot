@@ -79,7 +79,13 @@ _ACTIONABLE_IMMEDIATE_COMMAND_PATTERN = re.compile(
 _PRICE_LEVEL_REFERENCE_PATTERN = re.compile(
     r"(?i:\b(?P<kind>entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger)"
     r"(?:\s+price)?\s*(?:=|:|at|to)\s*[$€£]?"
-    r"(?P<price>\d+(?:[.,]\d+)?))"
+    # Capture the complete adjacent token, including a sign, exponent, or
+    # malformed suffix. The validator below must reject the full token rather
+    # than silently accepting a numeric prefix or skipping a signed value.
+    r"(?P<price>\S+)"
+)
+_PRICE_NUMBER_PATTERN = re.compile(
+    r"[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][+-]?\d+)?"
 )
 _TRADE_PRICE_SETTING_COMMAND_PATTERN = re.compile(
     r"(?i:\b(?:set|sets|setting|move|moves|moving|place|places|placing|"
@@ -153,7 +159,12 @@ def _validate_plan_price_references(text: str, trade_plan: dict[str, Any]) -> No
     for match in _PRICE_LEVEL_REFERENCE_PATTERN.finditer(text):
         kind = re.sub(r"\s+", "-", match.group("kind").lower())
         expected = _decimal_plan_price(trade_plan.get(field_for_kind[kind]))
-        actual = _decimal_plan_price(match.group("price").replace(",", "."))
+        raw_token = match.group("price").rstrip(".,;:!?)]}\\\"'")
+        if not _PRICE_NUMBER_PATTERN.fullmatch(raw_token):
+            raise GroqAIError(
+                f"Groq trade review cites an invalid {kind} price token"
+            )
+        actual = _decimal_plan_price(raw_token.replace(",", "."))
         if expected is None or actual is None or actual != expected:
             raise GroqAIError(
                 f"Groq trade review cites {kind} price outside the submitted trade plan"
