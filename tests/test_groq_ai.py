@@ -342,3 +342,27 @@ def test_groq_prompt_build_failure_records_unknown_truncation_status():
     assert result["input_truncation_status"] == "UNKNOWN"
     assert result["execution_authority"] is False
 
+
+
+def test_groq_minimal_fallback_reports_zero_omitted_list_items_when_no_lists_exist():
+    oversized_integer = int("9" * 4_000)
+    research = {
+        "symbol": "EUR_USD",
+        "research_order": [],
+        "paper_candidates": [],
+        "data_quality": {
+            "source_a": oversized_integer,
+            "source_b": oversized_integer,
+            "source_c": oversized_integer,
+        },
+    }
+
+    prompt, input_truncated = groq_ai._research_prompt(research, {})
+
+    audit_text = prompt.split("INPUT_OMISSION_AUDIT=", 1)[1].split("\n\n", 1)[0]
+    audit = json.loads(audit_text)
+    size_audit = audit["size_budget_compaction"]
+    assert input_truncated is True
+    assert size_audit["applied"] is True
+    assert size_audit["list_items_omitted"] == 0
+    assert size_audit["mapping_entries_omitted"] > 0
