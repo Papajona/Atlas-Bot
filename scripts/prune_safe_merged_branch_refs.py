@@ -443,23 +443,9 @@ def _resolve_branch_integration(
     except NoCommonMergeBaseError as exc:
         return False, str(exc), []
     if not mismatch_paths:
-        return True, "all branch-side changed paths match main", []
-    if _is_explicitly_superseded_android_release_ref(
-        branch_name, branch_sha, main_sha, mismatch_paths
-    ):
         return (
-            True,
-            "exact historical Android release-trigger branch superseded by main's "
-            "verified tag/manual-dispatch-only release gate",
-            [],
-        )
-    if _is_explicitly_superseded_native_ai_migration_ref(
-        branch_name, branch_sha, main_sha, mismatch_paths
-    ):
-        return (
-            True,
-            "exact historical Native AI migration-only branch superseded by main's "
-            "tested fail-closed migration contract",
+            False,
+            "tree contents match main but exact branch ancestry or merged-PR proof is absent; preserve for review",
             [],
         )
     return False, reason, mismatch_paths
