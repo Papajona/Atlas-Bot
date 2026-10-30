@@ -77,7 +77,7 @@ from .trading_requirements import spot_requirement, oanda_requirement, deriv_req
 from .executor_engine import ExecutorConfig, ExecutorValidationError, build_executor_plan, next_slice
 from .admin_rbac import require_role, get_roles, upsert_role, ROLES
 from .transaction_policy import register_or_check_destination, verify_destination
-from .audit_chain import append_audit
+from .audit_chain import append_audit, append_audit_once
 from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current, assert_database_role_compatible_with_rls_lockdown
 
 
@@ -148,6 +148,137 @@ async def _run_trade_safety_review(packet: dict) -> dict:
     return await asyncio.wait_for(
         dual_ai_trade_safety_review(packet), timeout=native_timeout
     )
+
+
+async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
+    """Persist one submission event per customer/order identity, including recovery repairs."""
+    actor = f"customer:{int(detail['customer_id'])}"
+    async with SessionLocal() as db:
+        row, created = await append_audit_once(
+            db,
+            event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+            detail=detail,
+            actor_id=actor,
+            idempotency_fields=("customer_id", "client_order_id"),
+        )
+    if created:
+        safe_detail = {
+            key: value for key, value in detail.items()
+            if key not in {"token", "secret", "api_token", "api_secret", "authorization", "destination"}
+        }
+        emit_security_audit(
+            event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+            actor_id=actor,
+            detail=safe_detail,
+            event_hash=row.event_hash,
+        )
+    return created
+
+
+async def _customer_paper_submission_stage(
+    execution: dict,
+    *,
+    customer_id: int,
+    trading_account_id: int,
+    req,
+) -> str | None:
+    """Audit first submissions and repair missing audit events during pending-order recovery."""
+    if not isinstance(execution, dict):
+        return None
+
+    intent = execution.get("order_intent")
+    if not isinstance(intent, dict):
+        nested = execution.get("execution")
+        intent = nested.get("order_intent") if isinstance(nested, dict) else None
+
+    pending_statuses = {
+        "WAITING_FOR_NEXT_COMPLETED_BAR",
+        "WAITING_FOR_FILL_LATENCY",
+        "WAITING_FOR_PRICE_PRECISION",
+        "NO_LIQUIDITY",
+        "NO_CORRELATION_GROUP_HEADROOM",
+    }
+    nested_execution = execution.get("execution")
+    nested_status = str(
+        nested_execution.get("status") or ""
+    ).upper() if isinstance(nested_execution, dict) else ""
+    outer_status = str(execution.get("status") or "").upper()
+    intent_status = (
+        str(intent.get("execution_status") or "").upper()
+        if isinstance(intent, dict) else ""
+    )
+    # The persisted intent carries the order's terminal result even when a wrapper
+    # reports only REPLAYED; prefer that durable status when constructing the audit.
+    status = intent_status or nested_status or outer_status
+    if not isinstance(intent, dict):
+        if status in pending_statuses:
+            await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE", {
+                "customer_id": customer_id,
+                "trading_account_id": trading_account_id,
+                "symbol": str(req.symbol),
+                "exchange": str(req.exchange),
+                "reason": "pending execution omitted order_intent evidence",
+            })
+            return "customer_paper_order_pending"
+        return None
+
+    client_order_id = str(intent.get("client_order_id") or "").strip()
+    if not client_order_id:
+        await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE", {
+            "customer_id": customer_id,
+            "trading_account_id": trading_account_id,
+            "symbol": str(req.symbol),
+            "exchange": str(req.exchange),
+            "execution_status": status,
+            "reason": "order intent omitted client_order_id evidence",
+        })
+        return "customer_paper_order_pending" if status in pending_statuses else None
+
+    submission_status = str(
+        intent.get("submission_status")
+        or (status if status in pending_statuses else "SUBMITTED")
+    ).upper()
+    detail = {
+        "customer_id": customer_id,
+        "trading_account_id": trading_account_id,
+        "symbol": str(req.symbol),
+        "exchange": str(req.exchange),
+        "timeframe": str(req.timeframe),
+        "client_order_id": client_order_id,
+        "order_id": intent.get("order_id"),
+        "side": str(intent.get("side") or "").upper(),
+        "quantity": str(intent.get("quantity") or ""),
+        "bar_timestamp": str(intent.get("bar_timestamp") or ""),
+        "status": submission_status,
+        "execution_status": status or str(intent.get("execution_status") or ""),
+        "order_role": str(intent.get("order_role") or "STRATEGY"),
+    }
+    # The ledger submission is durable. Never convert an accepted order into an
+    # HTTP error or invite a duplicate retry when the audit store is unavailable.
+    try:
+        await _audit_customer_paper_order_submitted_once(detail)
+    except Exception as exc:
+        await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE", {
+            "customer_id": customer_id,
+            "trading_account_id": trading_account_id,
+            "client_order_id": client_order_id,
+            "symbol": str(req.symbol),
+            "exchange": str(req.exchange),
+            "submission_status": submission_status,
+            "execution_status": status,
+            "reason": type(exc).__name__,
+        })
+        return "customer_paper_order_audit_incomplete" if status in pending_statuses else None
+    # Only live pending states should be reported as pending or short-circuit the
+    # strategy route. Filled, replayed, expired or terminal orders keep their real
+    # execution result after the missing submission audit has been repaired.
+    if status in pending_statuses:
+        return (
+            "customer_paper_order_submitted"
+            if intent.get("newly_submitted") is True
+            else "customer_paper_order_pending"
+        )
+    return None
 
 
 def _validated_customer_paper_mark(context: dict | None) -> tuple[float, str]:
@@ -1294,6 +1425,15 @@ async def _run_persisted_adaptive_bot_cycle(
             return {"decision": "NO_TRADE", "stage": "customer_paper_recovery",
                     "reason": str(exc)}
         if recovered is not None:
+            pending_stage = await _customer_paper_submission_stage(
+                recovered, customer_id=profile.id, trading_account_id=account.id, req=req,
+            )
+            if pending_stage:
+                return {
+                    **recovered,
+                    "stage": pending_stage,
+                    "analysis": {"market_timestamp": str(df.index[-1].isoformat()), "data_quality": "PASS"},
+                }
             if (
                 str(recovered.get("decision") or "").upper() == "TRADE"
                 and str(((recovered.get("execution") or {}).get("fill") or {}).get("status") or "").upper() == "APPENDED"
@@ -1596,6 +1736,15 @@ async def _run_persisted_adaptive_bot_cycle(
         except CustomerPaperFlowBlocked as exc:
             return {"decision": "NO_TRADE", "stage": "customer_paper_execution",
                     "reason": str(exc)}
+        pending_stage = await _customer_paper_submission_stage(
+            execution, customer_id=profile.id, trading_account_id=account.id, req=req,
+        )
+        if pending_stage:
+            return {
+                "decision": "NO_TRADE", "stage": pending_stage, "mode": "CUSTOMER_PAPER",
+                "analysis": deterministic, "adaptive_model": adaptive, "ml_signal": ml_signal,
+                "ai_review": ai_review, "execution": execution,
+            }
         if execution.get("decision") != "TRADE":
             return {
                 "decision": "NO_TRADE", "stage": "customer_paper_order_gate", "mode": "CUSTOMER_PAPER",
@@ -4742,10 +4891,21 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     "reason": str(exc), "execution": None,
                 })
             if recovered is not None:
+                pending_stage = await _customer_paper_submission_stage(
+                    recovered, customer_id=profile.id, trading_account_id=account_id, req=req,
+                )
+                if pending_stage:
+                    return await _record_customer_decision({
+                        **recovered,
+                        "stage": pending_stage,
+                        "analysis": {"market_timestamp": str(df.index[-1].isoformat()), "data_quality": "PASS"},
+                        "autonomous_bot_id": bot_id,
+                        "autonomous_status": "RUNNING" if bot_id else "DISABLED",
+                    })
                 if (
-                str(recovered.get("decision") or "").upper() == "TRADE"
-                and str(((recovered.get("execution") or {}).get("fill") or {}).get("status") or "").upper() == "APPENDED"
-            ):
+                    str(recovered.get("decision") or "").upper() == "TRADE"
+                    and str(((recovered.get("execution") or {}).get("fill") or {}).get("status") or "").upper() == "APPENDED"
+                ):
                     recovered_execution = recovered.get("execution") or {}
                     recovered_fill = recovered_execution.get("fill") or {}
                     await _safe_audit("CUSTOMER_BOT_TRADE", {
@@ -5100,6 +5260,22 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 )
             except CustomerPaperFlowBlocked as exc:
                 raise HTTPException(409, f"Customer paper execution blocked: {exc}") from exc
+            pending_stage = await _customer_paper_submission_stage(
+                execution, customer_id=profile.id, trading_account_id=account_id, req=req,
+            )
+            if pending_stage:
+                return await _record_customer_decision({
+                    "decision": "NO_TRADE",
+                    "stage": pending_stage,
+                    "mode": "CUSTOMER_PAPER",
+                    "analysis": deterministic,
+                    "adaptive_model": adaptive or {"status": "DISABLED"},
+                    "ml_signal": ml_signal if settings.adaptive_ai_enabled else {"status": "DISABLED"},
+                    "ai_review": ai_review,
+                    "execution": execution,
+                    "autonomous_bot_id": bot_id,
+                    "autonomous_status": "RUNNING" if bot_id else "DISABLED",
+                })
             if execution.get("decision") != "TRADE":
                 return await _record_customer_decision({
                     "decision": "NO_TRADE",

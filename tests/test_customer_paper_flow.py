@@ -18,7 +18,11 @@ from app.customer_paper_flow import (
     validate_customer_paper_market,
 )
 from app.customer_paper_ledger import get_customer_paper_balances
-from app.customer_paper_lifecycle import get_customer_paper_positions, submit_customer_paper_order
+from app.customer_paper_lifecycle import (
+    CustomerPaperOrderConflict,
+    get_customer_paper_positions,
+    submit_customer_paper_order,
+)
 
 
 def _market_fixture(*, timestamp: datetime | None = None, low: float = 98.0, high: float = 102.0,
@@ -71,6 +75,28 @@ def _market_fixture(*, timestamp: datetime | None = None, low: float = 98.0, hig
         "last_completed_bar_timestamp_utc": index[-1].isoformat(),
     }
     return request, frame, context
+
+
+def test_ownerless_legacy_paper_positions_default_to_manual():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_lifecycle.py").read_text(
+        encoding="utf-8"
+    )
+    assert "COALESCE(\n                        entry_order.metadata_json ->> 'execution_owner',\n                        'manual_customer_api'\n                    ) AS execution_owner" in source
+    assert "CASE WHEN entry_order.metadata_json ->> 'paper_flow_version' = '1'" not in source
+    # Normalize whitespace so this regression asserts the owner fallback semantics,
+    # not whether the implementation happens to wrap the expression over lines.
+    normalized = " ".join(source.split())
+    assert 'safe_metadata.get("execution_owner") or "manual_customer_api"' in normalized
+    assert 'prior_execution_owner = str( prior_metadata.get("execution_owner") or "" ).strip()' in normalized
+    assert 'not prior_execution_owner and str(prior_metadata.get("paper_flow_version") or "") == "1"' in normalized
+    assert 'prior_execution_owner or "manual_customer_api"' in normalized
+    assert "ownerless legacy customer paper order must be reconciled or expired" in normalized
+    assert 'prior_position_metadata.get("execution_owner") or "manual_customer_api"' in normalized
+    assert '"autonomous_customer_bot" if safe_metadata.get("paper_flow_version") == 1' not in normalized
+    assert '"autonomous_customer_bot" if prior_metadata.get("paper_flow_version") == 1' not in normalized
+    assert '"autonomous_customer_bot" if prior_position_metadata.get("paper_flow_version") == 1' not in normalized
 
 
 def test_customer_paper_market_context_requires_verified_closed_spot_data(monkeypatch):
@@ -243,6 +269,7 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
             order_type="MARKET",
             metadata={
                 "paper_flow_version": 1,
+                "execution_owner": "autonomous_customer_bot",
                 "exchange": str(recovery_req.exchange).lower(),
                 "market_type": "spot",
                 "order_role": "ENTRY",
@@ -273,6 +300,54 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
         recovered_positions = await get_customer_paper_positions(customer_id=recovery_customer)
         assert len(recovered_positions) == 1
         assert recovered_positions[0]["quantity"] == "0.250000000000000000"
+
+        # Legacy version-1 intent without an explicit owner is quarantined.
+        # Even a new manual order must not be accepted alongside that unresolved
+        # intent because the prior order's true ownership cannot be proven.
+        quarantine_customer = 99235
+        quarantine_at = recovery_next_at + timedelta(minutes=5)
+        quarantine_req, quarantine_frame, _quarantine_context = _market_fixture(
+            timestamp=quarantine_at, timeframe="1m"
+        )
+        from app.customer_paper_flow import ensure_customer_paper_account
+        await ensure_customer_paper_account(quarantine_customer, "USDT")
+        quarantine_bar = quarantine_frame.index[-1].isoformat()
+        legacy_pending = await submit_customer_paper_order(
+            customer_id=quarantine_customer,
+            client_order_id="legacy-empty-owner-v1",
+            venue="binance",
+            market_type="spot",
+            symbol="BTC/USDT",
+            side="BUY",
+            quantity="0.10",
+            currency="USDT",
+            order_type="MARKET",
+            metadata={
+                "paper_flow_version": 1,
+                "execution_owner": "",
+                "exchange": str(quarantine_req.exchange).lower(),
+                "market_type": "spot",
+                "order_role": "ENTRY",
+                "timeframe": str(quarantine_req.timeframe),
+                "signal_bar_timestamp": quarantine_bar,
+                "submission_bar_at": quarantine_bar,
+                "data_sha256": quarantine_frame.attrs["data_provenance"]["sha256"],
+            },
+        )
+        assert legacy_pending["status"] == "APPENDED"
+        with pytest.raises(CustomerPaperOrderConflict, match="ownerless legacy"):
+            await submit_customer_paper_order(
+                customer_id=quarantine_customer,
+                client_order_id="new-manual-order-after-legacy",
+                venue="binance",
+                market_type="spot",
+                symbol="BTC/USDT",
+                side="BUY",
+                quantity="0.10",
+                currency="USDT",
+                order_type="MARKET",
+                metadata={"execution_owner": "manual_customer_api"},
+            )
 
     asyncio.run(run())
 
@@ -427,12 +502,17 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
         "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
         "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
         "stop_loss_price": "95", "take_profit_price": "110",
+        "execution_owner": "autonomous_customer_bot",
     }]))
     captured = {}
 
     async def submit(**kwargs):
         captured.update(kwargs)
-        return {"status": "APPENDED", "client_order_id": kwargs["client_order_id"]}
+        return {
+            "status": "APPENDED",
+            "client_order_id": kwargs["client_order_id"],
+            "order_id": 88031,
+        }
 
     async def pending(**kwargs):
         return [{
@@ -442,20 +522,35 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
         }]
 
     async def wait_next(customer_id, order, market_context, df):
-        return {"status": "WAITING_FOR_NEXT_COMPLETED_BAR", "client_order_id": order["client_order_id"]}
+        return {
+            "status": "APPENDED",
+            "order_id": 88031,
+            "fill": {"status": "APPENDED"},
+        }
 
     monkeypatch.setattr(flow, "submit_customer_paper_order", submit)
     monkeypatch.setattr(flow, "list_open_customer_paper_orders", pending)
     monkeypatch.setattr(flow, "_fill_open_order", wait_next)
 
     result = asyncio.run(flow._protective_exit(7, req, frame, market))
-    assert result["status"] == "WAITING_FOR_NEXT_COMPLETED_BAR"
+    assert result["status"] == "APPENDED"
     assert captured["side"] == "SELL"
     assert captured["metadata"]["exchange"] == "binance"
     assert captured["metadata"]["market_type"] == "spot"
     assert captured["metadata"]["exit_reason"] == "STOP_LOSS"
     assert captured["metadata"]["signal_bar_timestamp"] == breach.isoformat()
     assert captured["metadata"]["submission_bar_at"] == latest.isoformat()
+    assert result["order_intent"] == {
+        "client_order_id": captured["client_order_id"],
+        "order_id": 88031,
+        "side": "SELL",
+        "quantity": "1",
+        "bar_timestamp": latest.isoformat(),
+        "submission_status": "SUBMITTED",
+        "execution_status": "APPENDED",
+        "order_role": "PROTECTIVE_EXIT",
+        "newly_submitted": True,
+    }
 
 
 def test_pending_paper_buy_is_resized_at_the_fill_quote_to_available_cash(monkeypatch):
@@ -843,6 +938,7 @@ def test_paper_protective_exit_fails_closed_when_intervening_candle_is_missing(m
         "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
         "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
         "stop_loss_price": "95", "take_profit_price": "110",
+        "execution_owner": "autonomous_customer_bot",
     }]))
     with pytest.raises(CustomerPaperFlowBlocked, match="history is incomplete"):
         asyncio.run(flow._protective_exit(12003, req, frame, market))
@@ -1100,35 +1196,6 @@ def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monke
     asyncio.run(run())
 
 
-def test_customer_paper_buy_discipline_counts_any_filled_order_and_checks_cooldown_across_midnight():
-    from pathlib import Path
-
-    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_lifecycle.py").read_text(
-        encoding="utf-8"
-    )
-    daily_start = source.index("todays_entries =")
-    daily_end = source.index("if int(todays_entries", daily_start)
-    daily_query = source[daily_start:daily_end]
-    cooldown_start = source.index("last_entry =")
-    cooldown_end = source.index("if last_entry is not None", cooldown_start)
-    cooldown_query = source[cooldown_start:cooldown_end]
-
-    for query in (daily_query, cooldown_query):
-        assert "EXISTS (" in query
-        assert "FROM customer_paper.fills f" in query
-        assert "f.customer_id=o.customer_id AND f.order_id=o.id" in query
-        assert "latest.event_type IN ('SUBMITTED','PARTIALLY_FILLED','FILLED')" in query
-    assert "o.created_at >= :day_start" not in cooldown_query
-    assert "cooldown_start = now - timedelta(" in source
-    assert "o.created_at >= :cooldown_start" in cooldown_query
-    # A 90-second cooldown starting at 00:00:30 includes a 23:59:30 entry.
-    from datetime import datetime, timedelta, timezone
-
-    now = datetime(2026, 10, 24, 0, 0, 30, tzinfo=timezone.utc)
-    cooldown_start_at = now - timedelta(seconds=90)
-    prior_entry = datetime(2026, 10, 23, 23, 59, 30, tzinfo=timezone.utc)
-    assert cooldown_start_at <= prior_entry < now
-
 def test_pending_paper_buy_caps_quantity_after_rounded_notional_and_fee(monkeypatch):
     import app.customer_paper_flow as flow
 
@@ -1175,3 +1242,225 @@ def test_pending_paper_buy_caps_quantity_after_rounded_notional_and_fee(monkeypa
     ).quantize(quantum, rounding="ROUND_DOWN")
     assert notional + fee == Decimal("0.1")
     assert quantity == previous_quantity - quantum
+
+
+
+def test_customer_paper_buy_discipline_counts_any_filled_order_and_checks_cooldown_across_midnight():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_lifecycle.py").read_text(
+        encoding="utf-8"
+    )
+    daily_start = source.index("todays_entries =")
+    daily_end = source.index("if int(todays_entries", daily_start)
+    daily_query = source[daily_start:daily_end]
+    cooldown_start = source.index("last_entry =")
+    cooldown_end = source.index("if last_entry is not None", cooldown_start)
+    cooldown_query = source[cooldown_start:cooldown_end]
+
+    for query in (daily_query, cooldown_query):
+        assert "EXISTS (" in query
+        assert "FROM customer_paper.fills f" in query
+        assert "f.customer_id=o.customer_id AND f.order_id=o.id" in query
+        assert "latest.event_type IN ('SUBMITTED','PARTIALLY_FILLED','FILLED')" in query
+    assert "o.created_at >= :day_start" not in cooldown_query
+    assert "cooldown_start = now - timedelta(" in source
+    assert "o.created_at >= :cooldown_start" in cooldown_query
+    # A 90-second cooldown starting at 00:00:30 includes a 23:59:30 entry.
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 10, 24, 0, 0, 30, tzinfo=timezone.utc)
+    cooldown_start_at = now - timedelta(seconds=90)
+    prior_entry = datetime(2026, 10, 23, 23, 59, 30, tzinfo=timezone.utc)
+    assert cooldown_start_at <= prior_entry < now
+
+
+def test_paper_protective_exit_never_closes_manual_or_legacy_owned_positions(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    now = pd.Timestamp.now(tz="UTC").floor("h")
+    prior, breach, latest = now - pd.Timedelta(hours=3), now - pd.Timedelta(hours=2), now - pd.Timedelta(hours=1)
+    frame = pd.DataFrame(
+        {"open": [100.0, 96.0, 100.0], "high": [101.0, 101.0, 101.0],
+         "low": [99.0, 94.0, 99.0], "close": [100.0, 96.0, 100.0],
+         "volume": [1000.0, 1000.0, 1000.0]},
+        index=pd.DatetimeIndex([prior, breach, latest]),
+    )
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    market = {"bar_timestamp": latest.isoformat(), "currency": "USDT", "data_sha256": "d" * 64}
+    manual_position = {
+        "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
+        "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
+        "stop_loss_price": "95", "take_profit_price": "110",
+        "execution_owner": "manual_customer_api",
+    }
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([manual_position]))
+
+    async def forbidden_submit(**kwargs):
+        raise AssertionError(f"autonomous bot attempted to submit a SELL for a manual position: {kwargs}")
+
+    monkeypatch.setattr(flow, "submit_customer_paper_order", forbidden_submit)
+    result = asyncio.run(flow._protective_exit(7, req, frame, market))
+    assert result is None
+
+
+def test_paper_protective_exit_treats_missing_legacy_owner_as_manual(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    now = pd.Timestamp.now(tz="UTC").floor("h")
+    prior, breach, latest = now - pd.Timedelta(hours=3), now - pd.Timedelta(hours=2), now - pd.Timedelta(hours=1)
+    frame = pd.DataFrame(
+        {"open": [100.0, 96.0, 100.0], "high": [101.0, 101.0, 101.0],
+         "low": [99.0, 94.0, 99.0], "close": [100.0, 96.0, 100.0],
+         "volume": [1000.0, 1000.0, 1000.0]},
+        index=pd.DatetimeIndex([prior, breach, latest]),
+    )
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    market = {"bar_timestamp": latest.isoformat(), "currency": "USDT", "data_sha256": "d" * 64}
+    legacy_position = {
+        "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
+        "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
+        "stop_loss_price": "95", "take_profit_price": "110",
+    }
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([legacy_position]))
+
+    async def forbidden_submit(**kwargs):
+        raise AssertionError(f"autonomous bot attempted to submit a SELL for an unowned legacy position: {kwargs}")
+
+    monkeypatch.setattr(flow, "submit_customer_paper_order", forbidden_submit)
+    result = asyncio.run(flow._protective_exit(7, req, frame, market))
+    assert result is None
+
+
+def test_ownerless_version_one_pending_order_is_expired_without_autonomous_fill(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    market = {"currency": "USDT", "bar_timestamp": "2026-10-30T10:00:00+00:00"}
+    legacy_order = {
+        "client_order_id": "legacy-ownerless-buy",
+        "order_id": "legacy-order-7",
+        "venue": "binance",
+        "symbol": "BTC/USDT",
+        "side": "BUY",
+        "quantity": "0.25",
+        "metadata": {
+            "paper_flow_version": 1,
+            "timeframe": "1h",
+            "submission_bar_at": "2026-10-30T10:00:00+00:00",
+        },
+    }
+    monkeypatch.setattr(flow, "validate_customer_paper_market", lambda *_args: market)
+    monkeypatch.setattr(flow, "list_open_customer_paper_orders", _async_value([legacy_order]))
+
+    async def no_protective_exit(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(flow, "_protective_exit", no_protective_exit)
+
+    async def forbidden_fill(*_args, **_kwargs):
+        raise AssertionError("ownerless legacy order must never be filled by the autonomous bot")
+
+    expired = {}
+
+    async def expire_order(**kwargs):
+        expired.update(kwargs)
+        return {"status": "EXPIRED"}
+
+    monkeypatch.setattr(flow, "_fill_open_order", forbidden_fill)
+    monkeypatch.setattr(flow, "expire_customer_paper_order", expire_order)
+    result = asyncio.run(flow.process_customer_paper_orders(7, req, pd.DataFrame(), {}))
+
+    assert result["status"] == "EXPIRED_LEGACY_OWNERLESS"
+    assert result["client_order_id"] == "legacy-ownerless-buy"
+    assert result["fill"]["status"] == "EXPIRED"
+    assert result["order_intent"] == {
+        "client_order_id": "legacy-ownerless-buy",
+        "order_id": "legacy-order-7",
+        "side": "BUY",
+        "quantity": "0.25",
+        "bar_timestamp": "2026-10-30T10:00:00+00:00",
+        "submission_status": "SUBMITTED",
+        "execution_status": "EXPIRED",
+        "order_role": "LEGACY_MANUAL_RECONCILIATION",
+        "newly_submitted": False,
+    }
+    assert expired["customer_id"] == 7
+    assert expired["client_order_id"] == "legacy-ownerless-buy"
+    assert expired["idempotency_key"] == (
+        "paper-legacy-ownerless-expired-" + flow._sha("legacy-ownerless-buy")[:40]
+    )
+
+
+def test_terminal_same_bar_replay_preserves_submission_identity_for_audit_repair(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    market = {
+        "currency": "USDT",
+        "bar_timestamp": "2026-10-30T10:00:00+00:00",
+        "data_sha256": "d" * 64,
+        "ask": Decimal("100"),
+        "bid": Decimal("99"),
+    }
+    account = {"currency": "USDT", "paper_cash": "10000", "real_funds_used": False}
+    prior = {
+        "status": "FILLED",
+        "order_id": 88032,
+        "client_order_id": "cp-replayed-terminal",
+        "side": "BUY",
+        "quantity": "0.25",
+        "metadata": {
+            "submission_bar_at": market["bar_timestamp"],
+            "order_role": "ENTRY",
+        },
+    }
+    monkeypatch.setattr(flow, "validate_customer_paper_market", lambda *_args: market)
+    
+    async def account_value(*_args, **_kwargs):
+        return account
+
+    monkeypatch.setattr(flow, "ensure_customer_paper_account", account_value)
+
+    async def no_pending_recovery(*_args, **_kwargs):
+        return None
+
+    async def no_protective_exit(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(flow, "process_customer_paper_orders", no_pending_recovery)
+    monkeypatch.setattr(flow, "_protective_exit", no_protective_exit)
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([]))
+    monkeypatch.setattr(
+        flow, "_cost_inputs",
+        lambda: (Decimal("1"), Decimal("0"), "TEST_REPLAY_AUDIT"),
+    )
+    monkeypatch.setattr(flow, "submit_customer_paper_order", _async_value({"status": "REPLAYED"}))
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(prior))
+
+    result = asyncio.run(flow.execute_customer_paper_spot_signal(
+        customer_id=7,
+        req=req,
+        df=pd.DataFrame(),
+        market_context={},
+        side="BUY",
+        quantity="0.25",
+        stop_loss_price="95",
+        take_profit_price="110",
+        strategy="audit-replay-regression",
+    ))
+
+    assert result["status"] == "REPLAYED"
+    assert result["order_intent"] == {
+        "client_order_id": "cp-" + flow._sha(
+            f"7|binance|BTC/USDT|1h|{market['bar_timestamp']}|ENTRY|"
+        )[:48],
+        "order_id": 88032,
+        "side": "BUY",
+        "quantity": "0.25",
+        "bar_timestamp": market["bar_timestamp"],
+        "submission_status": "SUBMITTED",
+        "execution_status": "FILLED",
+        "order_role": "ENTRY",
+        "newly_submitted": False,
+    }
