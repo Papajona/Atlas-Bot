@@ -5,7 +5,7 @@ import json
 import re
 import sys
 from decimal import Decimal, InvalidOperation
-from typing import Any, Mapping
+from typing import Any
 
 
 _REVISION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,62}\Z")
