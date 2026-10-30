@@ -350,8 +350,17 @@ def evaluate_native_trade_packet(packet: dict[str, Any]) -> dict[str, Any]:
 
 async def native_trade_safety_review(packet: dict[str, Any]) -> dict[str, Any]:
     result = evaluate_native_trade_packet(packet)
+    providers = {"atlas_native": result}
+    groq = packet.get("groq_trade_review") if isinstance(packet, dict) else None
+    if isinstance(groq, dict):
+        # Preserve the bounded provider review in the decision audit; it cannot authorize execution.
+        providers["groq"] = {
+            key: groq[key]
+            for key in ("status", "provider", "model", "input_truncated", "execution_authority", "review")
+            if key in groq
+        }
     return {"mode": "ATLAS_NATIVE_AI_SAFETY_VETO", "safe": result["safe"], "configured": True,
-            "providers": {"atlas_native": result}, "errors": {}, "execution_authority": False,
+            "providers": providers, "errors": {}, "execution_authority": False,
             **({"reasons": result["reasons"]} if not result["safe"] else {})}
 
 
