@@ -1954,6 +1954,7 @@ def transform_ai_providers(commit: str) -> None:
             ) from exc
 
         all_values: list[ast.AST | None] = []
+        top_level_named_exports: dict[str, ast.Expr] = {}
         dynamic_all = False
         has_nested_star = False
         dynamic_exports = any(
@@ -2279,12 +2280,20 @@ def transform_ai_providers(commit: str) -> None:
                     elif mutates_all_target(nested.target):
                         dynamic_all = True
                     elif (
+                        isinstance(module_node, ast.Expr)
+                        and module_node.value is nested
+                        and isinstance(nested.target, ast.Name)
+                    ):
+                        # A standalone module-level walrus always executes during
+                        # import and has a statically known binding. Track it so the
+                        # export/order checks can account for star-import shadowing.
+                        top_level_named_exports[nested.target.id] = module_node
+                    elif (
                         id(nested) not in deferred_body_nodes
                         and id(nested) not in annotation_node_ids
                     ):
-                        # A module-scope walrus can create a public star export even
-                        # though _defined_names() does not see its target. Without
-                        # proving that binding and its order, refuse to migrate it.
+                        # Nested or conditional module-scope walruses may create
+                        # bindings whose execution/order is not statically proven.
                         dynamic_exports = True
 
         if dynamic_all or dynamic_exports or has_nested_star or len(all_values) > 1:
@@ -2313,6 +2322,9 @@ def transform_ai_providers(commit: str) -> None:
                 for name in _defined_names(module_node)
                 if not name.startswith("_")
             }
+            exports.update(
+                name for name in top_level_named_exports if not name.startswith("_")
+            )
 
         last_definitions: dict[str, ast.AST] = {}
         deleted_bindings: set[str] = set()
@@ -2328,6 +2340,17 @@ def transform_ai_providers(commit: str) -> None:
             for defined_name in _defined_names(module_node):
                 last_definitions[defined_name] = module_node
                 deleted_bindings.discard(defined_name)
+            named_expr = top_level_named_exports.get(
+                module_node.value.id
+                if isinstance(module_node, ast.Expr)
+                and isinstance(module_node.value, ast.NamedExpr)
+                and isinstance(module_node.value.target, ast.Name)
+                else ""
+            )
+            if named_expr is module_node:
+                named_target = module_node.value.target
+                last_definitions[named_target.id] = module_node
+                deleted_bindings.discard(named_target.id)
         if explicit_all and deleted_bindings.intersection(exports):
             deleted_exports = sorted(deleted_bindings.intersection(exports))
             raise MigrationError(
