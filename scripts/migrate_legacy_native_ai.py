@@ -5505,6 +5505,29 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 return False
         return quote is None and not escaped
 
+    def optional_groq_status_message(line: str) -> str | None:
+        """Replace retired two-provider warning text while preserving a valid Groq guard."""
+        stripped = line.strip()
+        if not inert_provider_message(stripped):
+            return None
+        if not re.search(r"(?i)\bgroq\b", stripped):
+            return None
+        if not re.search(
+            r"(?i)\b(?:warn(?:ing)?|no\s+groq|not configured|missing|unset|skipping|optional)\b",
+            stripped,
+        ):
+            return None
+        indent = line[: len(line) - len(line.lstrip())]
+        redirection = " >&2" if re.search(r"\s+>&2\s*(?:\r?\n)?$", line) else ""
+        ending = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+        return (
+            indent
+            + 'echo "Groq remains optional research-only support; '
+            + 'Atlas Native AI continues locally."'
+            + redirection
+            + ending
+        )
+
     block_start = 0
     while block_start < len(source_lines):
         source_line = source_lines[block_start]
@@ -5694,6 +5717,13 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if (re.match(r"^\s*if\b", line) and variable_pattern.search(line)
                 and not re.search(r";\s*fi\b", line)):
             skip_provider_block = True
+            continue
+
+        # Rewrite obsolete Gemini+Groq warning prose inside retained Groq guards.
+        # Dropping the warning line alone would leave an empty "if ... then fi" block.
+        sanitized_groq_message = optional_groq_status_message(line)
+        if sanitized_groq_message is not None:
+            output.append(sanitized_groq_message)
             continue
 
         # Provider-only shell declarations/guards/secret commands have no unrelated payload.
