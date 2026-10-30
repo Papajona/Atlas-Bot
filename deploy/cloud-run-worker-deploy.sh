@@ -57,7 +57,29 @@ SA="${WORKER_SERVICE_ACCOUNT}@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 API_SERVICE="${API_SERVICE:-${CLOUD_RUN_SERVICE:-}}"
 : "${API_SERVICE:?Set API_SERVICE to the currently deployed Cloud Run API service}"
 API_SERVICE_CONFIG="$(gcloud run services describe "$API_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format=json)"
-mapfile -t API_GROQ_CONFIG < <(printf "%s" "$API_SERVICE_CONFIG" | python "${REPO_ROOT}/scripts/resolve_worker_groq_config.py")
+mapfile -t API_TRAFFIC_REVISIONS < <(printf "%s" "$API_SERVICE_CONFIG" | python "${REPO_ROOT}/scripts/resolve_worker_groq_config.py" --traffic-revisions)
+if (( ${#API_TRAFFIC_REVISIONS[@]} > 0 )); then
+  API_GROQ_CONFIG=()
+  for API_REVISION in "${API_TRAFFIC_REVISIONS[@]}"; do
+    mapfile -t API_REVISION_GROQ_CONFIG < <(
+      gcloud run revisions describe "$API_REVISION" \
+        --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format=json \
+        | python "${REPO_ROOT}/scripts/resolve_worker_groq_config.py"
+    )
+    if (( ${#API_REVISION_GROQ_CONFIG[@]} != 4 )); then
+      echo "ERROR: could not resolve serving API revision $API_REVISION; refusing worker rollout." >&2
+      exit 2
+    fi
+    if (( ${#API_GROQ_CONFIG[@]} == 0 )); then
+      API_GROQ_CONFIG=("${API_REVISION_GROQ_CONFIG[@]}")
+    elif [[ "${API_GROQ_CONFIG[*]}" != "${API_REVISION_GROQ_CONFIG[*]}" ]]; then
+      echo "ERROR: serving API revisions have differing Groq settings; refusing worker rollout." >&2
+      exit 2
+    fi
+  done
+else
+  mapfile -t API_GROQ_CONFIG < <(printf "%s" "$API_SERVICE_CONFIG" | python "${REPO_ROOT}/scripts/resolve_worker_groq_config.py")
+fi
 if (( ${#API_GROQ_CONFIG[@]} != 4 )); then
   echo "ERROR: could not resolve the API deployment Groq configuration; refusing worker rollout." >&2
   exit 2
