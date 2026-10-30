@@ -388,3 +388,144 @@ def test_groq_minimal_fallback_reports_zero_omitted_list_items_when_no_lists_exi
     assert size_audit["applied"] is True
     assert size_audit["list_items_omitted"] == 0
     assert size_audit["mapping_entries_omitted"] > 0
+
+
+VALID_TRADE_REVIEW = {
+    "regime_assessment": "Volatility is elevated and the proposed setup has mixed support.",
+    "setup_alignment": "NEUTRAL",
+    "risk_level": "MODERATE",
+    "confidence": 0.86,
+    "key_observations": ["Spread and price context are within the supplied packet."],
+    "contradictions": [],
+    "data_quality_flags": [],
+}
+
+
+def test_groq_trade_context_review_is_bounded_advisory_and_records_no_execution_authority():
+    client = _FakeAsyncClient(_FakeResponse(json.dumps(VALID_TRADE_REVIEW)))
+    packet = {
+        "symbol": "BTC/USDT",
+        "asset": "crypto",
+        "exchange": "paper",
+        "timeframe": "1h",
+        "market_timestamp": "2026-10-30T10:00:00+00:00",
+        "customer_id": "must-not-be-sent",
+        "trade_plan": {
+            "side": "buy",
+            "entry_price": 100.0,
+            "stop_loss_price": 95.0,
+            "take_profit_price": 110.0,
+            "reward_risk": 2.0,
+        },
+        "deterministic_rules": {"entry": "confirmed"},
+        "price_context": {"latest_close": 100.0, "bars": 500, "spread_bps": 2.0},
+        "data_quality": {"safe": True, "reasons": []},
+        "adaptive_model": {"status": "PROMOTED", "model_version": "paper-fixture"},
+        "ml_signal": {"signal": 1.0, "confidence": 0.75},
+        "macro_context": {"macro_regime": "mixed", "status": "AVAILABLE"},
+        "derivatives_context": {"state": "NORMAL"},
+    }
+    with _settings(
+        groq_api_key="test-key-not-a-real-secret",
+        groq_model="openai/gpt-oss-20b",
+        groq_max_completion_tokens=2048,
+        groq_timeout_seconds=20.0,
+        groq_research_review_enabled=True,
+    ), patch.object(groq_ai.httpx, "AsyncClient", return_value=client):
+        result = asyncio.run(groq_ai.groq_trade_context_review(packet))
+
+    assert result["status"] == "OK"
+    assert result["provider"] == "groq"
+    assert result["execution_authority"] is False
+    assert result["input_truncated"] is False
+    assert result["review"] == VALID_TRADE_REVIEW
+    request = client.request
+    assert request is not None
+    assert "atlas_trade_decision_evidence" in request["json"]["messages"][1]["content"]
+    assert "customer_id" not in request["json"]["messages"][1]["content"]
+    assert "must-not-be-sent" not in request["json"]["messages"][1]["content"]
+    assert "does not approve a trade" in request["json"]["messages"][1]["content"]
+    assert "never claim execution authority" in request["json"]["messages"][0]["content"]
+
+
+def test_groq_trade_review_without_configured_key_fails_closed_without_network():
+    with _settings(
+        groq_api_key="",
+        groq_model="openai/gpt-oss-20b",
+        groq_max_completion_tokens=2048,
+        groq_timeout_seconds=20.0,
+        groq_research_review_enabled=True,
+    ), patch.object(groq_ai.httpx, "AsyncClient", side_effect=AssertionError("network must not be used")):
+        result = asyncio.run(groq_ai.groq_trade_context_review({"symbol": "BTC/USDT"}))
+
+    assert result["status"] == "ERROR"
+    assert result["provider"] == "groq"
+    assert result["cause"] == "GroqAIError"
+    assert result["execution_authority"] is False
+
+
+def test_groq_trade_review_rejects_actionable_or_invalid_assessments():
+    with pytest.raises(groq_ai.GroqAIError, match="actionable trading instructions"):
+        groq_ai._validate_trade_context_review({
+            **VALID_TRADE_REVIEW,
+            "contradictions": ["BUY BTC/USDT now"],
+        })
+    with pytest.raises(groq_ai.GroqAIError, match="setup_alignment is invalid"):
+        groq_ai._validate_trade_context_review({
+            **VALID_TRADE_REVIEW,
+            "setup_alignment": "BUY",
+        })
+
+
+def test_groq_trade_context_prompt_includes_produced_rule_macro_and_model_risk_fields():
+    packet = {
+        "symbol": "BTC/USDT",
+        "trade_plan": {"side": "buy", "entry_price": 100, "stop_loss_price": 95, "take_profit_price": 110},
+        "deterministic_rules": {"min_reward_risk": 2.0, "max_spread_bps": 25.0, "stop_atr": 1.5},
+        "strategy_router": {"strategy": "trend", "validation_gate": {"passed": True, "folds": 5}},
+        "macro_context": {"status": "OK", "risk_state": "ELEVATED", "risk_score": 0.82},
+        "adaptive_model": {"status": "CHAMPION_FRESH", "feature_drift": {"status": "WARN", "mean_psi": 0.12}},
+        "ml_signal": {"signal": 1, "long_probability": 0.78, "flat_probability": 0.12, "short_probability": 0.10, "score": 0.68},
+        "derivatives_context": {"state": "ELEVATED", "funding_rate": 0.001},
+    }
+    prompt, truncated = groq_ai._trade_context_prompt(packet)
+    assert truncated is False
+    for evidence in (
+        '"min_reward_risk":2.0',
+        '"max_spread_bps":25.0',
+        '"risk_state":"ELEVATED"',
+        '"risk_score":0.82',
+        '"feature_drift":{"status":"WARN","mean_psi":0.12}',
+        '"long_probability":0.78',
+        '"flat_probability":0.12',
+        '"short_probability":0.1',
+        '"validation_gate":{"passed":true,"folds":5}',
+        '"funding_rate":0.001',
+    ):
+        assert evidence in prompt
+
+
+def test_groq_trade_review_is_bounded_by_native_ai_deadline(monkeypatch):
+    from app import main as app_main
+
+    async def slow_review(_packet):
+        await asyncio.sleep(0.1)
+        return {"status": "OK", "provider": "groq", "execution_authority": False}
+
+    monkeypatch.setattr(app_main.settings, "groq_research_review_enabled", True)
+    monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 0.005)
+    monkeypatch.setattr(app_main, "groq_trade_context_review", slow_review)
+    result = asyncio.run(app_main._attach_groq_trade_review({"symbol": "BTC/USDT"}))
+    assert result["status"] == "ERROR"
+    assert result["error"] == "TimeoutError"
+
+
+def test_groq_trade_review_marks_compacted_evidence_as_truncated():
+    packet = {
+        "symbol": "BTC/USDT",
+        "trade_plan": {"side": "buy", "entry_price": 100, "stop_loss_price": 95, "take_profit_price": 110},
+        "data_quality": {"safe": True, "reasons": [f"reason-{index}" for index in range(13)]},
+    }
+    prompt, truncated = groq_ai._trade_context_prompt(packet)
+    assert truncated is True
+    assert "atlas_trade_decision_evidence" in prompt
