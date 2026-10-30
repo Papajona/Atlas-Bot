@@ -5914,6 +5914,7 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                     f"{step_indent}  run: python -m scripts.check_native_ai\n",
                 ]
             )
+            native_ai_provider_step_replaced_in_job = True
             index = end
             continue
 
@@ -5923,6 +5924,10 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
             re.I,
         )
         if legacy_provider_result_gate:
+            if not native_ai_provider_step_replaced_in_job:
+                raise MigrationError(
+                    f"{path} has an orphaned provider verification result gate without a replaced producer; preserving the gate"
+                )
             step_indent = legacy_provider_result_gate.group(1)
             end = index + 1
             while end < len(lines):
@@ -6001,8 +6006,8 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                 raise MigrationError(
                     f"{path} has an incomplete legacy provider result gate; refusing to remove it"
                 )
-            # The preceding Native AI check is now fail-fast; retaining this old
-            # always()-gate would reference deleted step outputs and weaken clarity.
+            # The paired producer was replaced by the fail-fast offline Native AI check.
+            native_ai_provider_step_replaced_in_job = False
             index = end
             continue
         if not stripped or stripped.startswith("#"):
@@ -6203,6 +6208,17 @@ def scrub_ancillary_text(path: str, text: str) -> str:
     )
 
     def scrub_markdown_line(line: str) -> str:
+        historical_gemini_defect = (
+            "| API deployment previously injected Gemini strategy-provider secrets |"
+        )
+        if line.lstrip().startswith(historical_gemini_defect):
+            newline = "\\n" if line.endswith("\\n") else ""
+            return (
+                "| API deployment previously injected legacy hosted strategy-provider secrets | "
+                "Legacy hosted-provider quotas and credentials could block strategy generation despite healthy core code | "
+                "Legacy hosted strategy calls were removed; Native AI now runs locally, while an optional Groq research-only secret can be injected separately |"
+                + newline
+            )
         # Remove obsolete credential/model table rows rather than leaving empty,
         # misleading entries after their provider-specific values are stripped.
         if line.lstrip().startswith("|") and re.search(
