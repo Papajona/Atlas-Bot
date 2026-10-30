@@ -1088,6 +1088,8 @@ async def execute_customer_paper_spot_signal(
         limit_price=None,
         metadata=meta,
     ), "submit strategy paper order")
+    # Idempotent retries must not emit a second submission audit event.
+    newly_submitted = str(submitted.get("status") or "").upper() != "REPLAYED"
     if submitted.get("status") == "REPLAYED":
         prior = await _paper_call(
             get_customer_paper_order(customer_id=customer_id, client_order_id=client_id),
@@ -1119,6 +1121,14 @@ async def execute_customer_paper_spot_signal(
         "status": execution.get("status", "UNKNOWN"),
         "decision": "TRADE" if execution.get("status") in {"APPENDED", "REPLAYED"} else "NO_TRADE",
         "execution": execution,
+        "order_intent": {
+            "client_order_id": client_id,
+            "order_id": execution.get("order_id"),
+            "side": normalized_side,
+            "quantity": format(raw_quantity, "f"),
+            "bar_timestamp": market["bar_timestamp"],
+            "newly_submitted": newly_submitted,
+        },
         "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
         "cost_model_status": cost_status,
         "real_money_ledger_written": False,
