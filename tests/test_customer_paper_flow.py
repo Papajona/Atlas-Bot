@@ -1236,7 +1236,7 @@ def test_ownerless_legacy_paper_positions_and_orders_default_to_manual():
     flow_source = (root / "app" / "customer_paper_flow.py").read_text(encoding="utf-8")
     assert "COALESCE(\n                        entry_order.metadata_json ->> 'execution_owner',\n                        'manual_customer_api'\n                    ) AS execution_owner" in lifecycle_source
     assert 'safe_metadata.get("execution_owner") or "manual_customer_api"' in lifecycle_source
-    assert "prior_execution_owner is None" in lifecycle_source
+    assert "not prior_execution_owner" in lifecycle_source
     assert 'prior_position_metadata.get("execution_owner") or "manual_customer_api"' in lifecycle_source
     assert 'meta.get("execution_owner") != "autonomous_customer_bot"' in flow_source
 
@@ -1262,7 +1262,7 @@ def test_ownerless_version_one_pending_sell_is_not_recovered(monkeypatch):
             "metadata": {"paper_flow_version": 1, "order_role": "STRATEGY"},
         }
     ]))
-    with pytest.raises(CustomerPaperFlowBlocked, match="Manual paper order is open"):
+    with pytest.raises(CustomerPaperFlowBlocked, match="manual paper order is open"):
         asyncio.run(
             flow.process_customer_paper_orders(
                 customer_id=99173, req=req, df=pd.DataFrame(), market_context={},
