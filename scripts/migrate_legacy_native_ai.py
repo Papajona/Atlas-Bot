@@ -6227,8 +6227,10 @@ def scrub_ancillary_text(path: str, text: str) -> str:
         line = re.sub(r"(?i)\bCerebras\b|\bAI Gateway\b", "", line)
         line = re.sub(r"(?i)\bGemini\b", "Atlas Native AI", line)
         # Keep Groq in documentation, but make its permitted role explicit.
-        # Uppercase GROQ_* configuration identifiers are intentionally unchanged.
+        # Protect phrases already annotated by the substitutions above from being duplicated.
+        line = re.sub(r"(?i)\boptional Groq\b", "__ATLAS_OPTIONAL_GROQ__", line)
         line = re.sub(r"\bGroq\b", "optional Groq research review", line)
+        line = line.replace("__ATLAS_OPTIONAL_GROQ__", "optional Groq")
         if not re.search(r"(?i)\bSecret Manager\b", line):
             line = re.sub(r"[ \t]{2,}", " ", line)
         return line
