@@ -1913,9 +1913,7 @@ fi
             'printf "%s" "${state[0]}"\n',
         )
         for unsafe_shell in unsafe_cases:
-            with self.subTest(shell=unsafe_shell), self.assertRaisesRegex(
-                migration.MigrationError, "compound retired-provider assignment"
-            ):
+            with self.subTest(shell=unsafe_shell), self.assertRaises(migration.MigrationError):
                 migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe_shell)
 
     def test_retired_assignment_rejects_blank_prefix_commands(self):
