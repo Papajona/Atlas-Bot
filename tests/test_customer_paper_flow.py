@@ -243,6 +243,7 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
             order_type="MARKET",
             metadata={
                 "paper_flow_version": 1,
+                "execution_owner": "autonomous_customer_bot",
                 "exchange": str(recovery_req.exchange).lower(),
                 "market_type": "spot",
                 "order_role": "ENTRY",
@@ -1175,3 +1176,45 @@ def test_pending_paper_buy_caps_quantity_after_rounded_notional_and_fee(monkeypa
     ).quantize(quantum, rounding="ROUND_DOWN")
     assert notional + fee == Decimal("0.1")
     assert quantity == previous_quantity - quantum
+
+
+def test_ownerless_legacy_paper_positions_and_orders_default_to_manual():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    lifecycle_source = (root / "app" / "customer_paper_lifecycle.py").read_text(encoding="utf-8")
+    flow_source = (root / "app" / "customer_paper_flow.py").read_text(encoding="utf-8")
+    assert "COALESCE(\n                        entry_order.metadata_json ->> 'execution_owner',\n                        'manual_customer_api'\n                    ) AS execution_owner" in lifecycle_source
+    assert 'safe_metadata.get("execution_owner") or "manual_customer_api"' in lifecycle_source
+    assert "prior_execution_owner is None" in lifecycle_source
+    assert 'prior_position_metadata.get("execution_owner") or "manual_customer_api"' in lifecycle_source
+    assert 'meta.get("execution_owner") != "autonomous_customer_bot"' in flow_source
+
+
+def test_ownerless_version_one_pending_sell_is_not_recovered(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1m")
+    monkeypatch.setattr(
+        flow, "validate_customer_paper_market",
+        lambda *_args, **_kwargs: {
+            "bar_timestamp": "2026-10-30T12:01:00+00:00",
+            "currency": "USDT",
+            "data_sha256": "d" * 64,
+        },
+    )
+    monkeypatch.setattr(flow, "list_open_customer_paper_orders", _async_value([
+        {
+            "venue": "binance",
+            "symbol": "BTC/USDT",
+            "side": "SELL",
+            "client_order_id": "legacy-ownerless-v1-sell",
+            "metadata": {"paper_flow_version": 1, "order_role": "STRATEGY"},
+        }
+    ]))
+    with pytest.raises(CustomerPaperFlowBlocked, match="Manual paper order is open"):
+        asyncio.run(
+            flow.process_customer_paper_orders(
+                customer_id=99173, req=req, df=pd.DataFrame(), market_context={},
+            )
+        )
