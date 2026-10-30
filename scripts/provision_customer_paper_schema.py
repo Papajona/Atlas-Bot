@@ -63,8 +63,7 @@ ROLE_EXISTS_SQL = "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='atlas_cu
 
 
 # CREATE ROLE authority does not automatically confer authority to grant CONNECT.
-# The setup operator must own the target database (including inherited owner role
-# membership) or be a superuser before any credential is generated or role DDL runs.
+# Accept database ownership/superuser authority or an explicit CONNECT grant option.
 ROLE_GRANT_AUTHORITY_SQL = """
 SELECT EXISTS (
   SELECT 1
@@ -74,6 +73,9 @@ SELECT EXISTS (
     AND (
       operator_role.rolsuper
       OR pg_has_role(current_user, target_db.datdba, 'USAGE')
+      OR has_database_privilege(
+           current_user, current_database(), 'CONNECT WITH GRANT OPTION'
+         )
     )
 )::text;
 """
@@ -117,7 +119,14 @@ SELECT
         OR has_table_privilege('atlas_customer_paper',c.oid,'DELETE')
         OR has_table_privilege('atlas_customer_paper',c.oid,'TRUNCATE')
         OR has_table_privilege('atlas_customer_paper',c.oid,'REFERENCES')
-        OR has_table_privilege('atlas_customer_paper',c.oid,'TRIGGER'))
+        OR has_table_privilege('atlas_customer_paper',c.oid,'TRIGGER')
+        -- MAINTAIN was added in PostgreSQL 17; include it in the public
+        -- financial-table denial check without breaking older supported versions.
+        OR CASE
+             WHEN current_setting('server_version_num')::integer >= 170000
+             THEN has_table_privilege('atlas_customer_paper',c.oid,'MAINTAIN')
+             ELSE false
+           END))
   ))::text || '|' ||
   (NOT EXISTS (
     SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
