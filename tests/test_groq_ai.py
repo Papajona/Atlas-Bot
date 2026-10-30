@@ -647,12 +647,44 @@ def test_groq_timeout_becomes_error_envelope_inside_shared_decision_deadline(mon
     monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 5.0)
     monkeypatch.setattr(app_main.settings, "groq_timeout_seconds", 20.0)
     monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 0.08)
+    monkeypatch.setattr(app_main.settings, "ai_trade_decision_total_timeout_seconds", 0.08)
     monkeypatch.setattr(app_main, "groq_trade_context_review", slow_groq)
     monkeypatch.setattr(app_main, "dual_ai_trade_safety_review", native_review)
 
     result = asyncio.run(app_main._run_trade_safety_review({"symbol": "BTC/USDT"}))
     assert result["safe"] is True
     assert native_observed == ["ERROR"]
+
+
+def test_groq_receives_five_seconds_and_native_keeps_full_veto_reserve(monkeypatch):
+    from app import main as app_main
+
+    captured = []
+
+    async def attach(_packet, *, timeout_seconds=None):
+        captured.append(timeout_seconds)
+        return {"status": "ERROR"}
+
+    async def native_review(_packet):
+        return {"safe": True, "configured": True}
+
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_enabled", True)
+    monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 1.5)
+    monkeypatch.setattr(app_main.settings, "ai_trade_decision_total_timeout_seconds", 6.5)
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 5.0)
+    monkeypatch.setattr(app_main, "_attach_groq_trade_review", attach)
+    monkeypatch.setattr(app_main, "dual_ai_trade_safety_review", native_review)
+
+    result = asyncio.run(app_main._run_trade_safety_review({"symbol": "BTC/USDT"}))
+
+    assert result["safe"] is True
+    assert captured == [5.0]
+    assert app_main._trade_safety_timeout_metadata() == {
+        "timeout_seconds": 6.5,
+        "total_timeout_seconds": 6.5,
+        "groq_provider_timeout_seconds": 5.0,
+        "native_veto_reserve_seconds": 1.5,
+    }
 
 
 def test_native_veto_uses_only_remaining_shared_deadline(monkeypatch):
@@ -678,6 +710,7 @@ def test_native_veto_uses_only_remaining_shared_deadline(monkeypatch):
     monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 5.0)
     monkeypatch.setattr(app_main.settings, "groq_timeout_seconds", 20.0)
     monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 0.08)
+    monkeypatch.setattr(app_main.settings, "ai_trade_decision_total_timeout_seconds", 0.08)
     monkeypatch.setattr(app_main, "groq_trade_context_review", quick_groq)
     monkeypatch.setattr(app_main, "dual_ai_trade_safety_review", slow_native)
 
