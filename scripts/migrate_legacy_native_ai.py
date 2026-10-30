@@ -2290,7 +2290,10 @@ def transform_ai_providers(commit: str) -> None:
                         top_level_named_exports[nested.target.id] = module_node
                     elif (
                         id(nested) not in deferred_body_nodes
-                        and id(nested) not in annotation_node_ids
+                        and (
+                            not postponed_annotations
+                            or id(nested) not in annotation_node_ids
+                        )
                     ):
                         # Nested or conditional module-scope walruses may create
                         # bindings whose execution/order is not statically proven.
