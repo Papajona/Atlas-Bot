@@ -5635,15 +5635,19 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if include_ai_secret_args:
             names = names[:-1] + r"|AI_SECRET_ARGS)"
         pattern = re.compile(
-            r"^\s*(?:export\s+)?" + names
-            + r"\s*=\s*(?:\"(?:\\.|[^\"\\])*\"|'[^']*'|[^\s;|&<>]+)?\s*(?:#.*)?$",
+            r"^\\s*(?:export\\s+)?" + names
+            + r"=(?:\\"(?:\\\\.|[^\\"\\\\])*\\"|'[^']*'|[^\\s;|&<>]+)?(?:\\s+#.*)?\\s*$",
             re.I,
         )
-        candidate = statement.rstrip("\r\n")
+        candidate = statement.rstrip("\\r\\n")
         # A final backslash joins the next physical line in Bash. Deleting
         # only this assignment would expose its continuation as a command.
-        trailing_backslashes = len(candidate) - len(candidate.rstrip("\\"))
+        trailing_backslashes = len(candidate) - len(candidate.rstrip("\\\\"))
         if trailing_backslashes % 2 == 1 or not pattern.fullmatch(candidate):
+            return False
+        # Parameter-expansion assignment operators mutate a different variable;
+        # deleting this retired secret assignment would silently remove that effect.
+        if re.search(r"\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::?=)", candidate):
             return False
         return "$(" not in candidate and chr(96) not in candidate
 
