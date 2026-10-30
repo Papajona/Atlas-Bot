@@ -127,8 +127,11 @@ async def _run_trade_safety_review(packet: dict) -> dict:
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
+    timeout_meta = {
+        "native_veto_reserve_seconds": min(0.25, timeout * 0.20)
+    }
+    native_reserve = timeout_meta["native_veto_reserve_seconds"]
     if settings.groq_trade_review_enabled:
-        native_reserve = min(0.25, timeout * 0.20)
         groq_budget = max(0.0, timeout - native_reserve)
         if groq_budget <= 0:
             raise asyncio.TimeoutError
@@ -136,11 +139,15 @@ async def _run_trade_safety_review(packet: dict) -> dict:
     else:
         # This path only attaches a local DISABLED marker and makes no provider call.
         await _attach_groq_trade_review(packet)
+        native_reserve = timeout
 
     remaining = deadline - loop.time()
-    if remaining <= 0:
+    native_timeout = min(native_reserve, remaining)
+    if native_timeout <= 0:
         raise asyncio.TimeoutError
-    return await asyncio.wait_for(dual_ai_trade_safety_review(packet), timeout=remaining)
+    return await asyncio.wait_for(
+        dual_ai_trade_safety_review(packet), timeout=native_timeout
+    )
 
 
 def _validated_customer_paper_mark(context: dict | None) -> tuple[float, str]:
