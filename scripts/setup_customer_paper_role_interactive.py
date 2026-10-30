@@ -107,6 +107,23 @@ BEGIN
     RAISE EXCEPTION 'Connected role lacks database CREATE privilege';
   END IF;
 
+  -- CREATE ROLE does not grant authority to grant database privileges. The
+  -- CONNECT grant below is issued by current_user, so require database-owner
+  -- authority (including inherited owner membership) or superuser up front.
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_database target_db
+    JOIN pg_roles operator_role ON operator_role.rolname = current_user
+    WHERE target_db.datname = current_database()
+      AND (
+        operator_role.rolsuper
+        OR pg_has_role(current_user, target_db.datdba, 'USAGE')
+      )
+  ) THEN
+    RAISE EXCEPTION
+      'Connected role must own the target database or be a superuser to grant CONNECT';
+  END IF;
+
   IF current_user IN (
     'atlas_customer_paper', 'anon', 'authenticated', 'service_role',
     'supabase_admin', 'supabase_auth_admin', 'authenticator'
