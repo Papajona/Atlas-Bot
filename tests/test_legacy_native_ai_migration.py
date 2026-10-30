@@ -3581,7 +3581,7 @@ gcloud run services update atlas-api --set-secrets="DATABASE_URL=atlas-db:latest
             command = (
                 "gcloud() {\n"
                 "  for arg in \"$@\"; do\n"
-                "    case \"$arg\" in --set-secrets=*) printf '%s\n' \"${arg#--set-secrets=}\" ;; esac\n"
+                "    case \"$arg\" in --set-secrets=*) printf '%s\\n' \"${arg#--set-secrets=}\" ;; esac\n"
                 "  done\n"
                 "}\n"
                 + cleaned
@@ -4866,7 +4866,7 @@ def retained_helper():
             helper_module = root / "app" / "branch_helpers.py"
             target.parent.mkdir()
             helper_module.write_text(
-                'run = exec\nrun("def branch_helper():\n    return True")\n',
+                'run = exec\nrun("def branch_helper():\\n    return True")\n',
                 encoding="utf-8",
             )
             target.write_text(legacy, encoding="utf-8")
