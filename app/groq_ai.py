@@ -97,7 +97,7 @@ _TRADE_PRICE_SETTING_COMMAND_PATTERN = re.compile(
     r"(?:(?:the|a|your|my|our|this|new|current)\s+)?"
     r"(?:(?:protective|trailing)\s+)?"
     r"(?:entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger)\b"
-    r"(?:\s+price)?(?:\s*(?:=|:)\s*[$€£]?[+-]?(?:\d|\.\d)\S*)?"
+    r"(?:\s+price)?(?:\s*(?:=|:)\s*[$€£]?[+-]?(?:\d|\.\d)\S*)?)"
 )
 _ACTIONABLE_TRADING_PATTERNS = (
     _ACTIONABLE_SYMBOL_COMMAND_PATTERN,
