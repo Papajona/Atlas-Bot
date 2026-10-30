@@ -67,7 +67,12 @@ def test_api_defaults_groq_and_worker_inherits_only_traffic_serving_revisions() 
     assert ': "${GROQ_MAX_COMPLETION_TOKENS:?' not in worker
     assert ': "${GROQ_RESEARCH_REVIEW_ENABLED:?' not in worker
     assert "validate_groq_deploy_env.py" in api
+    assert "GROQ_TRADE_REVIEW_ENABLED" in api
+    assert '[[ "$GROQ_TRADE_REVIEW_ENABLED" == "true" && -z "$SECRET_GROQ_API_KEY_VERSION" ]]' in api
+    assert "required Groq trade review cannot be enabled without a pinned SECRET_GROQ_API_KEY_VERSION" in api
     assert "validate_groq_deploy_env.py" in worker
+    assert '[[ "$GROQ_TRADE_REVIEW_ENABLED" == "true" && -z "$SECRET_GROQ_REF" ]]' in worker
+    assert "serving API requires Groq trade review but has no pinned Groq Secret Manager version" in worker
 
 
 def test_production_deploy_forwards_separate_groq_trade_review_opt_in():
