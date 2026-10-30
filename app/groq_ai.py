@@ -247,7 +247,7 @@ def _trade_context_prompt(packet: dict[str, Any]) -> tuple[str, bool]:
             "confidence", "status", "as_of", "age_hours", "source",
         )),
         "derivatives_context": fields(packet.get("derivatives_context"), (
-            "status", "state", "stress_score", "components", "observations", "confidence", "action",
+            "status", "state", "stress_score", "components", "observations", "confidence", "action", "reasons",
         )),
     }
     state = {"truncated": False}
@@ -831,11 +831,11 @@ async def groq_research_review(
 
 async def groq_trade_context_review(packet: dict[str, Any]) -> dict[str, Any]:
     """Review market evidence at trade time; the local Native AI remains the only veto authority."""
-    if not settings.groq_research_review_enabled:
+    if not settings.groq_trade_review_enabled:
         return {
             "status": "DISABLED",
             "provider": "groq",
-            "reason": "GROQ_RESEARCH_REVIEW_ENABLED is false",
+            "reason": "GROQ_TRADE_REVIEW_ENABLED is false",
             "execution_authority": False,
             "input_truncated": False,
         }
