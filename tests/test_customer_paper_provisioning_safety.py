@@ -475,3 +475,60 @@ def test_customer_paper_trigger_functions_pin_search_path_and_account_key_is_not
     ):
         assert f"CREATE INDEX IF NOT EXISTS {index_name}" in sql
 
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not os.getenv("ATLAS_POSTGRES_URL"),
+    reason="requires the disposable PostgreSQL database provisioned by the mandatory CI gate",
+)
+def test_role_grant_preflight_accepts_delegated_connect_grant_option_only():
+    """A non-owner CREATEROLE operator may proceed only with CONNECT grant authority."""
+    import uuid
+
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from scripts.provision_customer_paper_schema import ROLE_GRANT_AUTHORITY_SQL
+
+    async def run():
+        engine = create_async_engine(os.environ["ATLAS_POSTGRES_URL"])
+        suffix = uuid.uuid4().hex[:12]
+        delegated_role = f"atlas_qodo_connect_grant_{suffix}"
+        no_grant_role = f"atlas_qodo_connect_plain_{suffix}"
+        try:
+            async with engine.begin() as conn:
+                database = str((await conn.execute(text("SELECT current_database()"))).scalar_one())
+                database_ident = '"' + database.replace('"', '""') + '"'
+                delegated_ident = '"' + delegated_role + '"'
+                no_grant_ident = '"' + no_grant_role + '"'
+
+                # Both operators can create roles but are not database owners and
+                # do not inherit the database owner's role.
+                await conn.execute(text(f"CREATE ROLE {delegated_ident} CREATEROLE"))
+                await conn.execute(text(f"CREATE ROLE {no_grant_ident} CREATEROLE"))
+                await conn.execute(text(
+                    f"GRANT CONNECT ON DATABASE {database_ident} "
+                    f"TO {delegated_ident} WITH GRANT OPTION"
+                ))
+
+                await conn.execute(text(f"SET ROLE {delegated_ident}"))
+                delegated_authority = str(
+                    (await conn.execute(text(ROLE_GRANT_AUTHORITY_SQL))).scalar_one()
+                ).lower()
+                await conn.execute(text("RESET ROLE"))
+
+                await conn.execute(text(f"SET ROLE {no_grant_ident}"))
+                ordinary_authority = str(
+                    (await conn.execute(text(ROLE_GRANT_AUTHORITY_SQL))).scalar_one()
+                ).lower()
+                await conn.execute(text("RESET ROLE"))
+
+                assert delegated_authority in {"true", "t"}
+                assert ordinary_authority in {"false", "f"}
+
+                await conn.execute(text(f"DROP ROLE {delegated_ident}"))
+                await conn.execute(text(f"DROP ROLE {no_grant_ident}"))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
