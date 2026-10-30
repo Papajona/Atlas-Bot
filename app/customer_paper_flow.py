@@ -1026,6 +1026,7 @@ async def execute_customer_paper_spot_signal(
             "status": "RECOVERY_PROCESSED",
             "decision": "TRADE" if str(recovered.get("fill", {}).get("status") or "").upper() in {"APPENDED", "REPLAYED"} else "NO_TRADE",
             "execution": recovered,
+            "order_intent": recovered.get("order_intent"),
             "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
         }
 
