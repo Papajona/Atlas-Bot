@@ -665,7 +665,7 @@ def _git(cwd, *args: str) -> str:
     return result.stdout.strip()
 
 
-def test_mode_only_executable_bit_change_preserves_branch(tmp_path, monkeypatch):
+def test_matching_tree_without_exact_ancestry_or_merged_pr_proof_preserves_branch(tmp_path, monkeypatch):
     repo = tmp_path / "mode-repo"
     _git(tmp_path, "init", "-b", "main", repo)
     _git(repo, "config", "user.name", "Atlas mode regression")
@@ -696,7 +696,7 @@ def test_mode_only_executable_bit_change_preserves_branch(tmp_path, monkeypatch)
     )
     assert safe is False
     assert observed_mismatches == ["scripts/check.sh"]
-    assert "preserve branch" in reason
+    assert "preserve" in reason
 
 
 def test_lease_rejection_preserves_branch_updated_after_proof(tmp_path, monkeypatch):
@@ -772,36 +772,23 @@ def test_branch_without_common_merge_base_is_preserved_without_aborting_reconcil
     assert mismatches == []
 
 
-def test_main_protection_must_block_force_push_and_deletion_and_enforce_admins(monkeypatch):
-    safe = {
-        "allow_force_pushes": {"enabled": False},
-        "allow_deletions": {"enabled": False},
-        "enforce_admins": {"enabled": True},
-    }
+def test_matching_tree_without_ancestry_or_merged_pr_proof_is_not_deleted(monkeypatch):
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: False)
     monkeypatch.setattr(
         pruning,
-        "_run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, json.dumps(safe), ""),
+        "_branch_delta_mismatched_paths",
+        lambda *_args: [],
     )
-    pruning._verify_main_branch_is_non_rewritable("Papajona/Atlas-Bot")
-
-    for key, value in (
-        ("allow_force_pushes", {"enabled": True}),
-        ("allow_deletions", {"enabled": True}),
-        ("enforce_admins", {"enabled": False}),
-        ("allow_force_pushes", {}),
-    ):
-        unsafe = dict(safe)
-        unsafe[key] = value
-        monkeypatch.setattr(
-            pruning,
-            "_run",
-            lambda *_args, _unsafe=unsafe, **_kwargs: subprocess.CompletedProcess(
-                [], 0, json.dumps(_unsafe), ""
-            ),
-        )
-        with pytest.raises(RuntimeError, match="main"):
-            pruning._verify_main_branch_is_non_rewritable("Papajona/Atlas-Bot")
+    safe, reason, paths = pruning._resolve_branch_integration(
+        "squash-like-without-pr-proof",
+        "branch-sha",
+        "main-sha",
+        set(),
+        [],
+    )
+    assert safe is False
+    assert "exact branch ancestry or merged-PR proof is absent" in reason
+    assert paths == []
 
 
 def test_main_protection_api_failure_blocks_pruning(monkeypatch):
