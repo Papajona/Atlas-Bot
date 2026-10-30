@@ -563,6 +563,39 @@ def retained_helper():
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_class_local_walrus_does_not_block_star_import_migration(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                "__all__ = ['BranchContainer', 'branch_helper']\n"
+                "class BranchContainer:\n"
+                "    class_value = (class_local := 'class-only')\n"
+                "def branch_helper():\n    return True\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            canonical = "from __future__ import annotations\nfrom .native_ai import AIProviderError\n"
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            ast.parse(result, filename="app/ai_providers.py")
+            self.assertIn("BranchContainer", result)
+            self.assertIn("branch_helper", result)
+            self.assertIn("class_value = (class_local := 'class-only')", helper_module.read_text(encoding="utf-8"))
+
     def test_module_level_walrus_export_fails_closed_for_star_import(self):
         legacy = """from .branch_helpers import *
 
