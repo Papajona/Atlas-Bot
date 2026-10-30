@@ -466,6 +466,7 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
         "side": "SELL",
         "quantity": "1",
         "bar_timestamp": latest.isoformat(),
+        "order_role": "PROTECTIVE_EXIT",
         "newly_submitted": True,
     }
 
