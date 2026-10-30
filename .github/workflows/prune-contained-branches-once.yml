@@ -107,7 +107,7 @@ jobs:
               merge_base=""
               if merge_base=$(git merge-base "$sha" "$main_sha" 2>/dev/null); then
                 changed_paths_file=$(mktemp)
-                if ! git diff --name-only -z "$merge_base" "$sha" > "$changed_paths_file"; then
+                if ! git diff --no-renames --name-only -z "$merge_base" "$sha" > "$changed_paths_file"; then
                   rm -f "$changed_paths_file"
                   echo "KEEP/ERROR: changed-path enumeration failed: $branch" >&2
                   failed=$((failed + 1))
@@ -118,7 +118,7 @@ jobs:
                 rm -f "$changed_paths_file"
                 if [[ ${#changed_paths[@]} -eq 0 ]]; then
                   reason="branch has no net file changes relative to merge base"
-                elif git diff --quiet "$sha" "$main_sha" -- "${changed_paths[@]}"; then
+                elif git --literal-pathspecs diff --quiet "$sha" "$main_sha" -- "${changed_paths[@]}"; then
                   reason="all branch-changed paths exactly match main"
                 else
                   diff_status=$?
@@ -214,6 +214,7 @@ jobs:
                     && git show "$main_sha:tests/test_binance_deposit_address_boundary.py" | grep -F 'test_binance_deposit_role_cannot_be_used_as_atlas_sweep_destination' >/dev/null \
                     && git show "$main_sha:app/config.py" | grep -F 'def _validate_usdt_tron_treasury_address_role' >/dev/null \
                     && git show "$main_sha:app/custody_reconciliation.py" | grep -F 'role not in {"atlas_controlled", "binance_deposit"}' >/dev/null \
+                    && git show "$main_sha:app/custody_reconciliation.py" | grep -F 'if not address or (role == "binance_deposit" and address == treasury_address):' >/dev/null \
                     && git show "$main_sha:app/tron_sweep.py" | grep -F 'requires verified Atlas-controlled treasury address ownership' >/dev/null; then
                     reviewed_reason="reviewed Binance deposit-address boundary branch; current main contains the ownership, exclusion, and sweep guards with regression coverage"
                   fi
@@ -241,7 +242,8 @@ jobs:
                     && git show "$main_sha:.github/workflows/ledger-concurrency-check.yml" | grep -F "      - 'alembic/**'" >/dev/null \
                     && git show "$main_sha:.github/workflows/ledger-concurrency-check.yml" | grep -F "      - 'tests/test_unified_custody.py'" >/dev/null \
                     && git show "$main_sha:.github/workflows/ledger-concurrency-check.yml" | grep -F 'timeout-minutes: 45' >/dev/null \
-                    && git show "$main_sha:.github/workflows/ledger-concurrency-check.yml" | grep -F 'permissions:' >/dev/null; then
+                    && git show "$main_sha:.github/workflows/ledger-concurrency-check.yml" | grep -F 'permissions:' >/dev/null \
+                    && [[ "$(git rev-parse "$main_sha:.github/workflows/ledger-concurrency-check.yml")" == "$(git rev-parse "$sha:.github/workflows/ledger-concurrency-check.yml")" ]]; then
                     reviewed_reason="reviewed superseded CI-readiness branch; no-skip assertion script is byte-identical and current main has broader ledger workflow triggers and equivalent or stronger permissions/timeouts"
                   fi
                   ;;
