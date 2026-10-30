@@ -281,5 +281,39 @@ fi
 
 
 
+    def test_groq_initial_if_condition_rejects_command_substitution(self):
+        shell = """if [[ -n "$SECRET_GROQ_REF" && $(touch /tmp/atlas-migration-sentinel) ]]; then
+  GROQ_SECRET_ARG=",GROQ_API_KEY=\${SECRET_GROQ_REF}"
+else
+  echo "optional Groq research review is disabled"
+fi
+"""
+        with self.assertRaisesRegex(
+            migration.MigrationError, "unsafe Groq if-condition"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-worker-deploy.sh", shell)
+
+    def test_groq_elif_condition_rejects_command_substitution(self):
+        shell = """if [[ -n "$SECRET_GROQ_REF" ]]; then
+  GROQ_SECRET_ARG=",GROQ_API_KEY=\${SECRET_GROQ_REF}"
+elif [[ $(touch /tmp/atlas-migration-sentinel) ]]; then
+  GROQ_SECRET_ARG=""
+else
+  echo "optional Groq research review is disabled"
+fi
+"""
+        with self.assertRaisesRegex(
+            migration.MigrationError, "mixed provider-conditioned shell block"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-worker-deploy.sh", shell)
+
+    def test_groq_inline_assignment_and_else_header_remains_supported(self):
+        shell = """if [[ -n "$SECRET_GROQ_REF" ]]; then GROQ_SECRET_ARG=",GROQ_API_KEY=\${SECRET_GROQ_REF}"; else
+  echo "optional Groq research review is disabled"
+fi
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-worker-deploy.sh", shell)
+        self.assertEqual(cleaned, shell)
+
 if __name__ == "__main__":
     unittest.main()
