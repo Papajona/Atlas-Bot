@@ -466,6 +466,23 @@ def test_groq_trade_review_without_configured_key_fails_closed_without_network()
     assert result["execution_authority"] is False
 
 
+
+def test_groq_trade_review_enablement_is_independent_of_research_review():
+    client = _FakeAsyncClient(_FakeResponse(json.dumps(VALID_TRADE_REVIEW)))
+    with _settings(
+        groq_api_key="test-key-not-a-real-secret",
+        groq_model="openai/gpt-oss-20b",
+        groq_max_completion_tokens=2048,
+        groq_timeout_seconds=20.0,
+        groq_research_review_enabled=False,
+        groq_trade_review_enabled=True,
+    ), patch.object(groq_ai.httpx, "AsyncClient", return_value=client):
+        result = asyncio.run(groq_ai.groq_trade_context_review({"symbol": "BTC/USDT"}))
+
+    assert result["status"] == "OK"
+    assert result["execution_authority"] is False
+    assert client.request is not None
+
 def test_groq_trade_review_rejects_actionable_or_invalid_assessments():
     with pytest.raises(groq_ai.GroqAIError, match="actionable trading instructions"):
         groq_ai._validate_trade_context_review({
@@ -525,6 +542,36 @@ def test_groq_trade_review_is_bounded_by_native_ai_deadline(monkeypatch):
     assert result["status"] == "ERROR"
     assert result["error"] == "TimeoutError"
 
+
+
+def test_groq_and_native_share_one_end_to_end_trade_deadline(monkeypatch):
+    from app import main as app_main
+
+    native_started = []
+
+    async def slow_groq(_packet):
+        await asyncio.sleep(0.04)
+        return {
+            "status": "OK",
+            "provider": "groq",
+            "review": VALID_TRADE_REVIEW,
+            "input_truncated": False,
+            "execution_authority": False,
+        }
+
+    async def slow_native(_packet):
+        native_started.append(True)
+        await asyncio.sleep(0.06)
+        return {"safe": True, "configured": True}
+
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_enabled", True)
+    monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 0.08)
+    monkeypatch.setattr(app_main, "groq_trade_context_review", slow_groq)
+    monkeypatch.setattr(app_main, "dual_ai_trade_safety_review", slow_native)
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(app_main._run_trade_safety_review({"symbol": "BTC/USDT"}))
+    assert native_started == [True]
 
 def test_groq_trade_prompt_summarizes_router_and_model_drift_without_nested_truncation():
     packet = {
