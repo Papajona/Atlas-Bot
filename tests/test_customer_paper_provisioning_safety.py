@@ -526,6 +526,10 @@ def test_role_grant_preflight_accepts_delegated_connect_grant_option_only():
                 assert delegated_authority in {"true", "t"}
                 assert ordinary_authority in {"false", "f"}
 
+                # Remove the temporary database ACL dependency before dropping its grantee.
+                await conn.execute(text(
+                    f"REVOKE CONNECT ON DATABASE {database_ident} FROM {delegated_ident}"
+                ))
                 await conn.execute(text(f"DROP ROLE {delegated_ident}"))
                 await conn.execute(text(f"DROP ROLE {no_grant_ident}"))
         finally:
