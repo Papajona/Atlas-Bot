@@ -243,6 +243,7 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
             order_type="MARKET",
             metadata={
                 "paper_flow_version": 1,
+                "execution_owner": "autonomous_customer_bot",
                 "exchange": str(recovery_req.exchange).lower(),
                 "market_type": "spot",
                 "order_role": "ENTRY",
@@ -1220,6 +1221,35 @@ def test_customer_paper_buy_discipline_counts_any_filled_order_and_checks_cooldo
     assert cooldown_start_at <= prior_entry < now
 
 
+def test_ownerless_version_one_pending_order_is_not_recovered(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1m")
+    monkeypatch.setattr(
+        flow, "validate_customer_paper_market",
+        lambda *_args, **_kwargs: {
+            "bar_timestamp": "2026-10-30T12:01:00+00:00",
+            "currency": "USDT",
+            "data_sha256": "d" * 64,
+        },
+    )
+    monkeypatch.setattr(flow, "list_open_customer_paper_orders", _async_value([
+        {
+            "venue": "binance",
+            "symbol": "BTC/USDT",
+            "side": "SELL",
+            "client_order_id": "legacy-ownerless-v1-sell",
+            "metadata": {"paper_flow_version": 1, "order_role": "STRATEGY"},
+        }
+    ]))
+
+    with pytest.raises(CustomerPaperFlowBlocked, match="Manual paper order is open"):
+        asyncio.run(
+            flow.process_customer_paper_orders(
+                customer_id=99173, req=req, df=pd.DataFrame(), market_context={},
+            )
+        )
+
 def test_ownerless_legacy_paper_positions_default_to_manual():
     from pathlib import Path
 
@@ -1232,6 +1262,11 @@ def test_ownerless_legacy_paper_positions_default_to_manual():
     # submission, ownership-conflict checks, or protective-position checks.
     assert 'safe_metadata.get("execution_owner") or "manual_customer_api"' in source
     assert 'prior_metadata.get("execution_owner") or "manual_customer_api"' in source
+    assert "prior_execution_owner is None" in source
+    flow_source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_flow.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'meta.get("execution_owner") != "autonomous_customer_bot"' in flow_source
     assert 'prior_position_metadata.get("execution_owner") or "manual_customer_api"' in source
     assert '"autonomous_customer_bot" if safe_metadata.get("paper_flow_version") == 1' not in source
     assert '"autonomous_customer_bot" if prior_metadata.get("paper_flow_version") == 1' not in source
