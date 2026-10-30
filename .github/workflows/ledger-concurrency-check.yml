@@ -239,15 +239,6 @@ jobs:
             -c "REVOKE CONNECT ON DATABASE atlas_paper_test FROM PUBLIC; GRANT CONNECT ON DATABASE atlas_paper_test TO atlas_paper_app"
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_paper_test \
             -v paper_runtime_role=atlas_paper_app -f scripts/customer_paper_ledger_schema.sql
-          # The shared-schema preflight must see the migrated primary ledger relations,
-          # not a paper-only database. Apply the paper schema alongside Alembic's
-          # primary tables in atlas_test for the dedicated shared-schema test below.
-          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test \
-            -c "GRANT CONNECT ON DATABASE atlas_test TO atlas_paper_app"
-          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test \
-            -v paper_runtime_role=atlas_paper_app -f scripts/customer_paper_ledger_schema.sql
-          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test \
-            -c "REVOKE CREATE ON SCHEMA public FROM PUBLIC; REVOKE CREATE ON SCHEMA public FROM atlas_paper_app"
           echo "ATLAS_PAPER_TEST_DATABASE_URL=postgresql+asyncpg://atlas_paper_app:paper_test_password@127.0.0.1:5432/atlas_paper_test" >> "$GITHUB_ENV"
           echo "ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL=postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_test" >> "$GITHUB_ENV"
 
@@ -262,6 +253,19 @@ jobs:
             tests/test_paper_staging_runtime.py \
             -k "not test_customer_paper_shared_database_schema_preflight_isolated_from_primary_relations" \
             -v --tb=short
+
+      - name: Provision shared paper schema in primary test database
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Only this dedicated test uses the same database for primary and paper
+          # data. Other tests keep separate database credentials and schemas.
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test \
+            -c "GRANT CONNECT ON DATABASE atlas_test TO atlas_paper_app"
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test \
+            -v paper_runtime_role=atlas_paper_app -f scripts/customer_paper_ledger_schema.sql
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test \
+            -c "REVOKE CREATE ON SCHEMA public FROM PUBLIC; REVOKE CREATE ON SCHEMA public FROM atlas_paper_app"
 
       - name: Run shared-schema isolation test against migrated primary database (MANDATORY)
         env:
