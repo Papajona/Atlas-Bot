@@ -192,6 +192,19 @@ def _trade_context_prompt(packet: dict[str, Any]) -> tuple[str, bool]:
     plan = fields(packet.get("trade_plan"), (
         "side", "entry_price", "stop_loss_price", "take_profit_price", "reward_risk", "strategy", "atr",
     ))
+    quality_source = packet.get("data_quality")
+    data_quality = fields(
+        quality_source,
+        ("safe", "status", "reasons", "flags", "freshness", "gap_bars"),
+    )
+    nested_derivatives = quality_source.get("derivatives_context") if isinstance(quality_source, dict) else None
+    nested_derivatives_summary = fields(
+        nested_derivatives,
+        ("status", "state", "stress_score", "observations", "confidence", "action"),
+    )
+    if nested_derivatives_summary:
+        data_quality["derivatives_context"] = nested_derivatives_summary
+
     adaptive_source = packet.get("adaptive_model")
     adaptive_model = fields(adaptive_source, (
         "status", "model_version", "confidence", "prediction", "signal", "walk_forward_status",
@@ -223,9 +236,7 @@ def _trade_context_prompt(packet: dict[str, Any]) -> tuple[str, bool]:
         "price_context": fields(packet.get("price_context"), (
             "latest_close", "bars", "spread_bps", "bid", "ask", "mid", "timestamp",
         )),
-        "data_quality": fields(packet.get("data_quality"), (
-            "safe", "status", "reasons", "flags", "freshness", "gap_bars",
-        )),
+        "data_quality": data_quality,
         "adaptive_model": adaptive_model,
         "ml_signal": fields(packet.get("ml_signal"), (
             "status", "signal", "model_version", "signal_timestamp", "long_probability",
@@ -236,7 +247,7 @@ def _trade_context_prompt(packet: dict[str, Any]) -> tuple[str, bool]:
             "confidence", "status", "as_of", "age_hours", "source",
         )),
         "derivatives_context": fields(packet.get("derivatives_context"), (
-            "state", "stress_score", "components", "observations", "confidence", "action",
+            "status", "state", "stress_score", "components", "observations", "confidence", "action",
         )),
     }
     state = {"truncated": False}
@@ -755,11 +766,11 @@ async def groq_research_review(
     research: dict[str, Any], intelligence: dict[str, Any]
 ) -> dict[str, Any]:
     """Return an optional Groq research annotation without granting execution authority."""
-    if not settings.groq_research_review_enabled:
+    if not settings.groq_trade_review_enabled:
         return {
             "status": "DISABLED",
             "provider": "groq",
-            "reason": "GROQ_RESEARCH_REVIEW_ENABLED is false",
+            "reason": "GROQ_TRADE_REVIEW_ENABLED is false",
             "execution_authority": False,
         }
     if not str(settings.groq_api_key or "").strip():
