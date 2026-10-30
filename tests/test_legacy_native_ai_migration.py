@@ -1819,6 +1819,36 @@ async def _gemini_json(prompt):
             self.assertNotIn("groq_strategy_model", result)
             self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
+    def test_config_refuses_one_line_settings_class_with_retired_provider_field(self):
+        source = "class Settings: gemini_api_key: str = ''\\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "one-line Settings class"):
+                    migration.transform_config()
+            self.assertEqual(config.read_text(encoding="utf-8"), source)
+
+    def test_config_refuses_multiple_recognized_settings_classes_with_retired_provider_fields(self):
+        source = (
+            "class Settings:\\n"
+            "    gemini_api_key: str = ''\\n"
+            "class AppSettings:\\n"
+            "    database_url: str = ''\\n"
+            "settings = AppSettings()\\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "multiple recognized Settings classes"):
+                    migration.transform_config()
+            self.assertEqual(config.read_text(encoding="utf-8"), source)
+
     def test_config_refuses_a_provider_field_sharing_a_line_with_an_unrelated_setting(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -4875,8 +4905,11 @@ def retained_helper(value: exec) -> eval:
                 migration.transform_ai_providers("canonical-commit")
             rewritten = target.read_text(encoding="utf-8")
             ast.parse(rewritten, filename="app/ai_providers.py")
-            self.assertIn("value: exec", rewritten)
-            self.assertIn("-> eval", rewritten)
+            # The canonical facade does not retain postponed annotations, so the
+            # migration stringizes them to preserve the old deferred-evaluation contract.
+            self.assertIn("value: 'exec'", rewritten)
+            self.assertIn("-> 'eval'", rewritten)
+            self.assertNotIn("from __future__ import annotations", rewritten)
 
     def test_star_import_refuses_import_time_call_to_exec_helper(self):
         legacy = """from .branch_helpers import *
