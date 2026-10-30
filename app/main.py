@@ -112,10 +112,23 @@ async def _attach_groq_trade_review(packet: dict) -> dict:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            cause = exc
+            while getattr(cause, "__cause__", None) is not None:
+                cause = cause.__cause__
+            response = getattr(cause, "response", None)
+            raw_status = getattr(response, "status_code", None)
+            http_status = (
+                raw_status
+                if isinstance(raw_status, int) and not isinstance(raw_status, bool)
+                else None
+            )
             result = {
                 "status": "ERROR",
                 "provider": "groq",
                 "error": type(exc).__name__,
+                "cause": type(cause).__name__,
+                "http_status": http_status,
+                "reason": "groq_provider_call_failed",
                 "input_truncated": None,
                 "execution_authority": False,
             }
