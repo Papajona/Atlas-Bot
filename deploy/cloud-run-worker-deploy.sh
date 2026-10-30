@@ -52,7 +52,7 @@ if [[ "$IMAGE_TAG_SHA" != "$RELEASE_SHA" ]]; then
 fi
 SA="${WORKER_SERVICE_ACCOUNT}@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 
-# Atlas Native AI remains the strategy/safety authority; Groq is an optional research-only reviewer.
+# Atlas Native AI remains the strategy/safety authority; Groq provides optional research and trade-context evidence.
 # Read the effective API revision so the separately rolled-out worker cannot drift from it.
 API_SERVICE="${API_SERVICE:-${CLOUD_RUN_SERVICE:-}}"
 : "${API_SERVICE:?Set API_SERVICE to the currently deployed Cloud Run API service}"
@@ -70,14 +70,14 @@ for API_REVISION in "${API_TRAFFIC_REVISIONS[@]}"; do
   mapfile -t REVISION_GROQ_CONFIG < <(
     printf "%s" "$API_REVISION_CONFIG" | python "${REPO_ROOT}/scripts/resolve_worker_groq_config.py" --revision-config "$GCP_PROJECT_ID"
   )
-  if (( ${#REVISION_GROQ_CONFIG[@]} != 4 )); then
+  if (( ${#REVISION_GROQ_CONFIG[@]} != 5 )); then
     echo "ERROR: could not resolve Groq configuration from serving API revision $API_REVISION; refusing worker rollout." >&2
     exit 2
   fi
   if (( ${#API_GROQ_CONFIG[@]} == 0 )); then
     API_GROQ_CONFIG=("${REVISION_GROQ_CONFIG[@]}")
   else
-    for index in 0 1 2 3; do
+    for index in 0 1 2 3 4; do
       if [[ "${REVISION_GROQ_CONFIG[$index]}" != "${API_GROQ_CONFIG[$index]}" ]]; then
         echo "ERROR: API revisions receiving traffic have different Groq configuration; refusing worker rollout." >&2
         exit 2
@@ -85,7 +85,7 @@ for API_REVISION in "${API_TRAFFIC_REVISIONS[@]}"; do
     done
   fi
 done
-if (( ${#API_GROQ_CONFIG[@]} != 4 )); then
+if (( ${#API_GROQ_CONFIG[@]} != 5 )); then
   echo "ERROR: active API Groq configuration is incomplete; refusing worker rollout." >&2
   exit 2
 fi
@@ -101,14 +101,19 @@ if [[ -n "${GROQ_RESEARCH_REVIEW_ENABLED:-}" && "${GROQ_RESEARCH_REVIEW_ENABLED,
   echo "ERROR: supplied GROQ_RESEARCH_REVIEW_ENABLED differs from the deployed API; use the API value." >&2
   exit 2
 fi
-if [[ -n "${SECRET_GROQ_REF:-}" && "$SECRET_GROQ_REF" != "${API_GROQ_CONFIG[3]}" ]]; then
+if [[ -n "${GROQ_TRADE_REVIEW_ENABLED:-}" && "${GROQ_TRADE_REVIEW_ENABLED,,}" != "${API_GROQ_CONFIG[3]}" ]]; then
+  echo "ERROR: supplied GROQ_TRADE_REVIEW_ENABLED differs from the deployed API; use the API value." >&2
+  exit 2
+fi
+if [[ -n "${SECRET_GROQ_REF:-}" && "$SECRET_GROQ_REF" != "${API_GROQ_CONFIG[4]}" ]]; then
   echo "ERROR: supplied SECRET_GROQ_REF differs from the deployed API; use the API secret version." >&2
   exit 2
 fi
 GROQ_MODEL="${API_GROQ_CONFIG[0]}"
 GROQ_MAX_COMPLETION_TOKENS="${API_GROQ_CONFIG[1]}"
 GROQ_RESEARCH_REVIEW_ENABLED="${API_GROQ_CONFIG[2]}"
-SECRET_GROQ_REF="${API_GROQ_CONFIG[3]}"
+GROQ_TRADE_REVIEW_ENABLED="${API_GROQ_CONFIG[3]}"
+SECRET_GROQ_REF="${API_GROQ_CONFIG[4]}"
 [[ "$SECRET_GROQ_REF" == "__NONE__" ]] && SECRET_GROQ_REF=""
 if [[ -n "$SECRET_GROQ_REF" && ! "$SECRET_GROQ_REF" =~ ^atlas-groq-api-key:[1-9][0-9]*$ ]]; then
   echo "ERROR: API GROQ_API_KEY must reference atlas-groq-api-key:VERSION with a positive numeric version." >&2
@@ -128,7 +133,7 @@ gcloud run worker-pools deploy "$WORKER_POOL" \
   --memory 2Gi \
   --command python \
   --args=-m,app.worker \
-  --set-env-vars "ENVIRONMENT=production,PROCESS_ROLE=worker,RELEASE_SHA=${RELEASE_SHA},RELEASE_VERSION=${RELEASE_VERSION},IMAGE_DIGEST=${IMAGE_DIGEST},BACKUP_RECOVERY_URL=${BACKUP_RECOVERY_URL},OMP_NUM_THREADS=2,ML_THREADS=2,PAPER_TRADING=true,LIVE_TRADING_ENABLED=false,CUSTOMER_LIVE_TRADING_ENABLED=false,PAYOUT_LIVE_ENABLED=false,BROKER_SANDBOX=true,DOCS_ENABLED=false,MODEL_DIR=/app/models,MODEL_STAGING_DIR=/app/model-staging,RESEARCH_FEE_SOURCE=${RESEARCH_FEE_SOURCE},RESEARCH_FEE_EVIDENCE_ID=${RESEARCH_FEE_EVIDENCE_ID},RESEARCH_MIN_DEFLATED_SHARPE=${RESEARCH_MIN_DEFLATED_SHARPE},USDT_TRON_ENABLED=${USDT_TRON_ENABLED},USDT_TRON_TREASURY_ADDRESS_ROLE=${USDT_TRON_TREASURY_ADDRESS_ROLE:-unknown},USDT_TRON_NETWORK=${USDT_TRON_NETWORK},USDT_TRON_SWEEP_ENABLED=false,USDT_TRONGRID_BASE_URL=https://api.trongrid.io,USDT_TRON_USDT_CONTRACT=TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t,USDT_TRON_POLL_SECONDS=60,USDT_TRON_MIN_CONFIRMATIONS=19,DISTRIBUTED_RATE_LIMIT_REQUIRED=true,EXTERNAL_SECURITY_AUDIT_ENABLED=true,EXTERNAL_SECURITY_AUDIT_REQUIRED=true,GROQ_MODEL=${GROQ_MODEL},GROQ_MAX_COMPLETION_TOKENS=${GROQ_MAX_COMPLETION_TOKENS},GROQ_RESEARCH_REVIEW_ENABLED=${GROQ_RESEARCH_REVIEW_ENABLED}" \
+  --set-env-vars "ENVIRONMENT=production,PROCESS_ROLE=worker,RELEASE_SHA=${RELEASE_SHA},RELEASE_VERSION=${RELEASE_VERSION},IMAGE_DIGEST=${IMAGE_DIGEST},BACKUP_RECOVERY_URL=${BACKUP_RECOVERY_URL},OMP_NUM_THREADS=2,ML_THREADS=2,PAPER_TRADING=true,LIVE_TRADING_ENABLED=false,CUSTOMER_LIVE_TRADING_ENABLED=false,PAYOUT_LIVE_ENABLED=false,BROKER_SANDBOX=true,DOCS_ENABLED=false,MODEL_DIR=/app/models,MODEL_STAGING_DIR=/app/model-staging,RESEARCH_FEE_SOURCE=${RESEARCH_FEE_SOURCE},RESEARCH_FEE_EVIDENCE_ID=${RESEARCH_FEE_EVIDENCE_ID},RESEARCH_MIN_DEFLATED_SHARPE=${RESEARCH_MIN_DEFLATED_SHARPE},USDT_TRON_ENABLED=${USDT_TRON_ENABLED},USDT_TRON_TREASURY_ADDRESS_ROLE=${USDT_TRON_TREASURY_ADDRESS_ROLE:-unknown},USDT_TRON_NETWORK=${USDT_TRON_NETWORK},USDT_TRON_SWEEP_ENABLED=false,USDT_TRONGRID_BASE_URL=https://api.trongrid.io,USDT_TRON_USDT_CONTRACT=TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t,USDT_TRON_POLL_SECONDS=60,USDT_TRON_MIN_CONFIRMATIONS=19,DISTRIBUTED_RATE_LIMIT_REQUIRED=true,EXTERNAL_SECURITY_AUDIT_ENABLED=true,EXTERNAL_SECURITY_AUDIT_REQUIRED=true,GROQ_MODEL=${GROQ_MODEL},GROQ_MAX_COMPLETION_TOKENS=${GROQ_MAX_COMPLETION_TOKENS},GROQ_RESEARCH_REVIEW_ENABLED=${GROQ_RESEARCH_REVIEW_ENABLED},GROQ_TRADE_REVIEW_ENABLED=${GROQ_TRADE_REVIEW_ENABLED}" \
   --set-secrets "DATABASE_URL=$DATABASE_SECRET_REF,SECRET_KEY=$SECRET_KEY_REF,APP_ENCRYPTION_KEY=$SECRET_APP_ENCRYPTION_REF,REDIS_URL=$SECRET_REDIS_URL_REF,USDT_TRON_ACCOUNT_XPUB=$SECRET_TRON_XPUB_REF,USDT_TRONGRID_API_KEY=$SECRET_TRONGRID_REF,MODEL_SIGNING_PUBLIC_KEY=$SECRET_MODEL_SIGNING_PUBLIC_REF,MODEL_SIGNING_PRIVATE_KEY=$SECRET_MODEL_SIGNING_PRIVATE_REF${GROQ_SECRET_ARG}" \
   --add-volume "mount-path=/app/models,type=cloud-storage,bucket=$MODEL_BUCKET,readonly=false,mount-options=uid=10001;gid=10001" \
   --add-volume "mount-path=/app/model-staging,type=cloud-storage,bucket=$MODEL_STAGING_BUCKET,readonly=false,mount-options=uid=10001;gid=10001"

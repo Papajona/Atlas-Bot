@@ -56,13 +56,26 @@ def test_api_defaults_groq_and_worker_inherits_only_traffic_serving_revisions() 
     assert 'GROQ_MODEL="${API_GROQ_CONFIG[0]}"' in worker
     assert 'GROQ_MAX_COMPLETION_TOKENS="${API_GROQ_CONFIG[1]}"' in worker
     assert 'GROQ_RESEARCH_REVIEW_ENABLED="${API_GROQ_CONFIG[2]}"' in worker
-    assert 'SECRET_GROQ_REF="${API_GROQ_CONFIG[3]}"' in worker
+    assert 'GROQ_TRADE_REVIEW_ENABLED="${API_GROQ_CONFIG[3]}"' in worker
+    assert 'SECRET_GROQ_REF="${API_GROQ_CONFIG[4]}"' in worker
     assert "API revisions receiving traffic have different Groq configuration" in worker
     assert "supplied GROQ_MODEL differs from the deployed API" in worker
     assert "supplied GROQ_MAX_COMPLETION_TOKENS differs from the deployed API" in worker
     assert "supplied GROQ_RESEARCH_REVIEW_ENABLED differs from the deployed API" in worker
+    assert "supplied GROQ_TRADE_REVIEW_ENABLED differs from the deployed API" in worker
     assert ': "${GROQ_MODEL:?' not in worker
     assert ': "${GROQ_MAX_COMPLETION_TOKENS:?' not in worker
     assert ': "${GROQ_RESEARCH_REVIEW_ENABLED:?' not in worker
     assert "validate_groq_deploy_env.py" in api
     assert "validate_groq_deploy_env.py" in worker
+
+
+def test_production_deploy_forwards_separate_groq_trade_review_opt_in():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "production-deploy.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "GROQ_TRADE_REVIEW_ENABLED: ${{ vars.GROQ_TRADE_REVIEW_ENABLED }}" in workflow
