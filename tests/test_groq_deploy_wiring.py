@@ -106,7 +106,8 @@ def test_worker_runbook_does_not_require_a_groq_secret_placeholder():
     assert "API_SERVICE=atlas-api \\" in runbook
     assert "reads the active API service revision" in runbook
     assert "does not accept an independent worker Groq configuration" in runbook
-    assert "is optional and must be an exact" in runbook
+    assert "optional pinned `GROQ_API_KEY` Secret Manager reference" in runbook
+    assert "GROQ_STRATEGY_MODEL" in runbook
 
 
 def test_worker_groq_config_is_resolved_from_the_active_api_revision():
