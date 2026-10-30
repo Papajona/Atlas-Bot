@@ -34,6 +34,7 @@ def test_worker_keeps_groq_secret_optional_and_inherits_only_serving_api_revisio
     assert 'gcloud run revisions describe "$API_REVISION"' in script
     assert "scripts/resolve_worker_groq_config.py" in script
     assert "--traffic-revisions" in script
+    assert '--revision-config "$GCP_PROJECT_ID"' in script
     assert "--revision-config" in script
     assert 'GROQ_MODEL="${API_GROQ_CONFIG[0]}"' in script
     assert 'GROQ_MAX_COMPLETION_TOKENS="${API_GROQ_CONFIG[1]}"' in script
@@ -192,7 +193,7 @@ def test_worker_revision_config_resolver_reads_pinned_secret_and_validated_value
         }
     }
     result = subprocess.run(
-        [sys.executable, str(resolver), "--revision-config"],
+        [sys.executable, str(resolver), "--revision-config", "atlas"],
         input=json.dumps(payload), text=True, capture_output=True, check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -200,6 +201,32 @@ def test_worker_revision_config_resolver_reads_pinned_secret_and_validated_value
         "openai/gpt-oss-20b", "2048", "true", "atlas-groq-api-key:7"
     ]
 
+
+def test_worker_revision_config_resolver_rejects_qualified_cross_project_groq_secret():
+    import json
+    import subprocess
+    import sys
+
+    resolver = ROOT / "scripts" / "resolve_worker_groq_config.py"
+    payload = {
+        "spec": {"containers": [{
+            "env": [
+                {"name": "GROQ_MODEL", "value": "openai/gpt-oss-20b"},
+                {"name": "GROQ_MAX_COMPLETION_TOKENS", "value": "2048"},
+                {"name": "GROQ_RESEARCH_REVIEW_ENABLED", "value": "true"},
+                {"name": "GROQ_API_KEY", "valueFrom": {"secretKeyRef": {
+                    "name": "projects/another-project/secrets/atlas-groq-api-key",
+                    "key": "7",
+                }}},
+            ]
+        }]}
+    }
+    result = subprocess.run(
+        [sys.executable, str(resolver), "--revision-config", "atlas"],
+        input=json.dumps(payload), text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 2
+    assert "project does not match GCP_PROJECT_ID" in result.stderr
 
 def test_worker_revision_config_resolver_supports_cloud_run_v2_without_optional_secret():
     import json
@@ -213,7 +240,7 @@ def test_worker_revision_config_resolver_supports_cloud_run_v2_without_optional_
         {"name": "GROQ_RESEARCH_REVIEW_ENABLED", "value": "false"},
     ]}]}
     result = subprocess.run(
-        [sys.executable, str(resolver), "--revision-config"],
+        [sys.executable, str(resolver), "--revision-config", "atlas"],
         input=json.dumps(payload), text=True, capture_output=True, check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -234,7 +261,7 @@ def test_worker_revision_config_resolver_rejects_cap_above_worker_validator_limi
         {"name": "GROQ_RESEARCH_REVIEW_ENABLED", "value": "true"},
     ]}]}}
     result = subprocess.run(
-        [sys.executable, str(resolver), "--revision-config"],
+        [sys.executable, str(resolver), "--revision-config", "atlas"],
         input=json.dumps(payload), text=True, capture_output=True, check=False,
     )
     assert result.returncode == 2
