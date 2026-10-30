@@ -73,6 +73,24 @@ def _market_fixture(*, timestamp: datetime | None = None, low: float = 98.0, hig
     return request, frame, context
 
 
+def test_ownerless_legacy_paper_positions_default_to_manual():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_lifecycle.py").read_text(
+        encoding="utf-8"
+    )
+    assert "COALESCE(\n                        entry_order.metadata_json ->> 'execution_owner',\n                        'manual_customer_api'\n                    ) AS execution_owner" in source
+    assert "CASE WHEN entry_order.metadata_json ->> 'paper_flow_version' = '1'" not in source
+    # Legacy metadata must not silently grant autonomous ownership during order
+    # submission, ownership-conflict checks, or protective-position checks.
+    assert 'safe_metadata.get("execution_owner") or "manual_customer_api"' in source
+    assert 'prior_metadata.get("execution_owner") or "manual_customer_api"' in source
+    assert 'prior_position_metadata.get("execution_owner") or "manual_customer_api"' in source
+    assert '"autonomous_customer_bot" if safe_metadata.get("paper_flow_version") == 1' not in source
+    assert '"autonomous_customer_bot" if prior_metadata.get("paper_flow_version") == 1' not in source
+    assert '"autonomous_customer_bot" if prior_position_metadata.get("paper_flow_version") == 1' not in source
+
+
 def test_customer_paper_market_context_requires_verified_closed_spot_data(monkeypatch):
     monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
     monkeypatch.setattr(settings, "customer_paper_initial_currency", "USDT")
@@ -432,7 +450,11 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
 
     async def submit(**kwargs):
         captured.update(kwargs)
-        return {"status": "APPENDED", "client_order_id": kwargs["client_order_id"]}
+        return {
+            "status": "APPENDED",
+            "client_order_id": kwargs["client_order_id"],
+            "order_id": 88031,
+        }
 
     async def pending(**kwargs):
         return [{
@@ -456,6 +478,15 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
     assert captured["metadata"]["exit_reason"] == "STOP_LOSS"
     assert captured["metadata"]["signal_bar_timestamp"] == breach.isoformat()
     assert captured["metadata"]["submission_bar_at"] == latest.isoformat()
+    assert result["order_intent"] == {
+        "client_order_id": captured["client_order_id"],
+        "order_id": 88031,
+        "side": "SELL",
+        "quantity": "1",
+        "bar_timestamp": latest.isoformat(),
+        "order_role": "PROTECTIVE_EXIT",
+        "newly_submitted": True,
+    }
 
 
 def test_pending_paper_buy_is_resized_at_the_fill_quote_to_available_cash(monkeypatch):
@@ -1098,6 +1129,55 @@ def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monke
         assert conservative_group_notional <= Decimal("50")
 
     asyncio.run(run())
+
+
+def test_pending_paper_buy_caps_quantity_after_rounded_notional_and_fee(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    _, state, order, market = _paper_fill_test_context()
+    market["ask"] = Decimal("1.1")
+    market["bid"] = Decimal("1.0")
+    market["spread_bps"] = Decimal("1000")
+    monkeypatch.setattr(
+        flow, "_cost_inputs",
+        lambda: (Decimal("1"), Decimal("0"), "TEST_ROUNDED_FEE"),
+    )
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([]))
+    monkeypatch.setattr(flow, "register_customer_paper_market_bar", _async_value({
+        "bar_key": "bar-key-rounded-fee-cap", "bar_at": market["bar_timestamp"],
+        "capacity": "10", "available": "10",
+    }))
+    monkeypatch.setattr(flow, "get_customer_paper_fill_for_bar", _async_value(None))
+    monkeypatch.setattr(flow, "get_customer_paper_balances", _async_value([{
+        "account_code": "PAPER_CASH", "currency": "USDT", "balance": "0.1",
+    }]))
+    captured = {}
+
+    async def append_fill(**kwargs):
+        captured.update(kwargs)
+        return {"status": "APPENDED", "fill_id": "rounded-fee-fill"}
+
+    monkeypatch.setattr(flow, "record_customer_paper_fill", append_fill)
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=1004, order=order, market=market, df=pd.DataFrame()
+    ))
+
+    quantity = Decimal(captured["quantity"])
+    price = Decimal(captured["price"])
+    fee = Decimal(captured["fee_amount"])
+    quantum = Decimal("0.000000000000000001")
+    notional = (quantity * price).quantize(quantum, rounding="ROUND_HALF_EVEN")
+    assert result["fill"]["status"] == "APPENDED"
+    assert (notional + fee) <= Decimal("0.1")
+    # The previous unrounded-unit-cost division selected this quantity, whose
+    # rounded-up ledger fee exceeded the cash limit by exactly one quantum.
+    previous_quantity = (
+        Decimal("0.1") / (price * (Decimal("1") + Decimal("1") / Decimal("10000")))
+    ).quantize(quantum, rounding="ROUND_DOWN")
+    assert notional + fee == Decimal("0.1")
+    assert quantity == previous_quantity - quantum
+
 
 
 def test_customer_paper_buy_discipline_counts_any_filled_order_and_checks_cooldown_across_midnight():
