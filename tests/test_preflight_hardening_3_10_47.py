@@ -23,7 +23,10 @@ def test_withdrawal_step_up_is_capped_at_three_minutes():
 
 def test_ai_safety_has_hard_latency_ceiling_and_fails_closed():
     main = (ROOT / "app/main.py").read_text()
-    assert 'asyncio.wait_for(dual_ai_trade_safety_review(packet)' in main
+    assert "asyncio.wait_for(" in main
+    assert "dual_ai_trade_safety_review(packet)" in main
+    assert "timeout=native_timeout" in main
+    assert "native_timeout = min(native_reserve, remaining)" in main
     assert "settings.ai_strategy_provider_timeout_seconds" in main
     assert "ai_trade_decision_total_timeout_seconds" in main
     assert '"stage": "ai_safety_timeout"' in main
@@ -44,7 +47,10 @@ def test_customer_bot_ai_review_has_hard_latency_ceiling_and_fails_closed():
     assert "min(configured_groq, total - native_reserve)" in main
     assert "await _attach_groq_trade_review(packet, timeout_seconds=groq_budget)" in helper
     assert "remaining = deadline - loop.time()" in helper
-    assert "return await asyncio.wait_for(dual_ai_trade_safety_review(packet), timeout=remaining)" in helper
+    assert 'native_reserve = timeout_meta["native_veto_reserve_seconds"]' in helper
+    assert "native_timeout = min(native_reserve, remaining)" in helper
+    assert "return await asyncio.wait_for(" in helper
+    assert "dual_ai_trade_safety_review(packet), timeout=native_timeout" in helper
     assert "await asyncio.wait_for(_attach_groq_trade_review(" not in helper
     assert "if remaining <= 0:" in helper
     assert "await _run_trade_safety_review(packet)" in section
@@ -98,3 +104,11 @@ def test_live_signal_timestamp_policy_defaults_to_required_and_can_be_explicitly
         require_signal_timestamp_for_live=False,
     )
     assert explicitly_relaxed.require_signal_timestamp_for_live is False
+
+
+def test_risk_dashboard_does_not_show_zero_deadline_without_live_telemetry():
+    dashboard = (ROOT / "app/src/main/java/com/atlas/trading/ui/RiskDashboard.kt").read_text()
+    assert "AI Safety Decision Deadline: unavailable" in dashboard
+    assert "WebSocketConnectionState.Connected" in dashboard
+    assert "metrics.aiSafetyTimeoutSeconds.isFinite()" in dashboard
+    assert "metrics.lastUpdatedEpochMs > 0L" in dashboard
