@@ -281,7 +281,7 @@ def test_customer_paper_request_fill_protective_exit_and_restart_recovery(monkey
 
         # An empty owner string is still ownerless. It must not let another manual
         # order bypass the legacy-intent quarantine on the same market.
-        quarantine_customer = 99233
+        quarantine_customer = 99235
         quarantine_at = recovery_next_at + timedelta(minutes=5)
         quarantine_req, quarantine_frame, quarantine_context = _market_fixture(
             timestamp=quarantine_at, timeframe="1m"
