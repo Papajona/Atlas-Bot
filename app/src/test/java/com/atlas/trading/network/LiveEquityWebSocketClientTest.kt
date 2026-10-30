@@ -89,7 +89,25 @@ class LiveEquityWebSocketClientTest {
             assertEquals("TRENDING MOMENTUM", it.regime)
             assertEquals("WEBSOCKET_PUSH", it.streamType)
             assertFalse(it.isHalted)
+            assertTrue(it.telemetryAvailable)
+            assertEquals(1.5, it.aiSafetyTimeoutSeconds, 0.001)
+            assertEquals(1720000000000L, it.lastUpdatedEpochMs)
         }
+    }
+
+    @Test
+    fun testParseEquityMessageWithoutSafetyDeadlineDoesNotClaimLiveTelemetry() {
+        val jsonPayload = """
+            {
+                "equity": 10450.75,
+                "last_updated_epoch_ms": 1720000000000
+            }
+        """.trimIndent()
+
+        val parsed = WebSocketManager.parseEquityMessage(jsonPayload, PortfolioRiskMetrics())
+
+        assertNotNull(parsed)
+        assertFalse(parsed!!.telemetryAvailable)
     }
 
     @Test
