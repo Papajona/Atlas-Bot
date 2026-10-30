@@ -5795,5 +5795,17 @@ if __name__ == "__main__":
             with self.subTest(shell=shell), self.assertRaises(migration.MigrationError):
                 migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
 
+    def test_retired_provider_test_header_is_safely_scrubbed(self):
+        shell = 'if test -n "${GEMINI_API_KEY:-}"; then\n  echo "Gemini missing"\nfi\n'
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertEqual(cleaned, "")
+
+    def test_retired_provider_test_header_with_executable_suffix_is_rejected(self):
+        shell = 'if test -n "${GEMINI_API_KEY:-}"; then gcloud run deploy atlas\n'
+        with self.assertRaisesRegex(
+            migration.MigrationError, "unsafe retired-provider if-header|executable command"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
 if __name__ == "__main__":
     unittest.main()
