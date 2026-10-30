@@ -5412,6 +5412,37 @@ def retained_helper():
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_shell_scrub_rejects_compound_bracket_conditions_before_dropping_block(self):
+        unsafe = (
+            'if [[ -n "$GEMINI_API_KEY" ]] || touch /tmp/atlas-qodo-marker || '
+            '[[ -n "$GROQ_API_KEY" ]]; then\n'
+            '  GROQ_SECRET_ARG=""\n'
+            'else\n'
+            '  GROQ_SECRET_ARG=""\n'
+            'fi\n'
+        )
+        with self.assertRaisesRegex(migration.MigrationError, "unsafe Groq if-condition"):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe)
+
+    def test_shell_scrub_redacts_provider_secret_from_refusal_error(self):
+        secret = "sk-proj-atlas-regression-secret-123456"
+        source = f'echo "OPENAI_API_KEY={secret}"\n'
+        with self.assertRaises(migration.MigrationError) as raised:
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
+        self.assertNotIn(secret, str(raised.exception))
+        self.assertNotIn("OPENAI_API_KEY", str(raised.exception))
+
+    def test_shell_scrub_parses_then_inside_quoted_groq_test_value(self):
+        source = (
+            'if [[ "$GROQ_API_KEY" == "then abc" ]]; then\n'
+            '  GROQ_SECRET_ARG=""\n'
+            'fi\n'
+        )
+        self.assertEqual(
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source),
+            source,
+        )
+
     def test_groq_guard_refuses_printf_v_with_quoted_separator_but_allows_echo(self):
         unsafe = (
             'if [[ -n "$GROQ_API_KEY" ]]; then\n'
