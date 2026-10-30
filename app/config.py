@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     # Keep LightGBM/OpenMP within the two-CPU Cloud Run API/worker allocation by default.
     ml_threads: int = max(1, min(2, os.cpu_count() or 1))
 
+    groq_api_key: str = ""
+    groq_model: str = "openai/gpt-oss-20b"
+    groq_max_completion_tokens: int = 2048
+    groq_timeout_seconds: float = 20.0
+    groq_research_review_enabled: bool = True
     @field_validator("ml_threads")
     @classmethod
     def _validate_ml_threads(cls, value: int) -> int:
