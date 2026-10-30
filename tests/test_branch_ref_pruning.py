@@ -1338,3 +1338,38 @@ def test_duplicate_alias_retirement_preserves_if_alias_tip_moves(monkeypatch):
     assert safe is False
     assert "no exact duplicate-alias proof" in reason
     assert keeper is None
+
+def test_one_time_prune_workflow_uses_safe_literal_path_comparison_and_allowlist_proofs():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "prune-contained-branches-once.yml"
+    ).read_text(encoding="utf-8")
+
+    # Rename detection must report both the removed source and added destination;
+    # user-controlled filenames must never be reparsed as Git pathspec expressions.
+    assert 'git diff --no-renames --name-only -z "$merge_base" "$sha"' in workflow
+    assert 'git --literal-pathspecs diff --quiet "$sha" "$main_sha" -- "${changed_paths[@]}"' in workflow
+
+    binance_case = workflow.split(
+        '"hardening/binance-deposit-address-boundary:4e618b23de760d8d3965c05ab71d73123a381e6d")',
+        1,
+    )[1].split(";;", 1)[0]
+    assert (
+        'if not address or (role == "binance_deposit" and address == treasury_address):'
+        in binance_case
+    )
+
+    ledger_case = workflow.split(
+        '"hardening/ci-readiness-gates:1d4228e4722b3e91cd8503162bf89cbbd1e08c73")',
+        1,
+    )[1].split(";;", 1)[0]
+    assert (
+        'git rev-parse "$main_sha:.github/workflows/ledger-concurrency-check.yml"'
+        in ledger_case
+    )
+    assert (
+        'git rev-parse "$sha:.github/workflows/ledger-concurrency-check.yml"'
+        in ledger_case
+    )
