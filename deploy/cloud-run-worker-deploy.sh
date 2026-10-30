@@ -57,9 +57,36 @@ SA="${WORKER_SERVICE_ACCOUNT}@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 API_SERVICE="${API_SERVICE:-${CLOUD_RUN_SERVICE:-}}"
 : "${API_SERVICE:?Set API_SERVICE to the currently deployed Cloud Run API service}"
 API_SERVICE_CONFIG="$(gcloud run services describe "$API_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format=json)"
-mapfile -t API_GROQ_CONFIG < <(printf "%s" "$API_SERVICE_CONFIG" | python "${REPO_ROOT}/scripts/resolve_worker_groq_config.py")
+mapfile -t API_TRAFFIC_REVISIONS < <(
+  printf "%s" "$API_SERVICE_CONFIG" | python "${REPO_ROOT}/scripts/resolve_worker_groq_config.py" --traffic-revisions
+)
+if (( ${#API_TRAFFIC_REVISIONS[@]} == 0 )); then
+  echo "ERROR: could not determine the API revisions currently receiving traffic; refusing worker rollout." >&2
+  exit 2
+fi
+API_GROQ_CONFIG=()
+for API_REVISION in "${API_TRAFFIC_REVISIONS[@]}"; do
+  API_REVISION_CONFIG="$(gcloud run revisions describe "$API_REVISION" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format=json)"
+  mapfile -t REVISION_GROQ_CONFIG < <(
+    printf "%s" "$API_REVISION_CONFIG" | python "${REPO_ROOT}/scripts/resolve_worker_groq_config.py" --revision-config
+  )
+  if (( ${#REVISION_GROQ_CONFIG[@]} != 4 )); then
+    echo "ERROR: could not resolve Groq configuration from serving API revision $API_REVISION; refusing worker rollout." >&2
+    exit 2
+  fi
+  if (( ${#API_GROQ_CONFIG[@]} == 0 )); then
+    API_GROQ_CONFIG=("${REVISION_GROQ_CONFIG[@]}")
+  else
+    for index in 0 1 2 3; do
+      if [[ "${REVISION_GROQ_CONFIG[$index]}" != "${API_GROQ_CONFIG[$index]}" ]]; then
+        echo "ERROR: API revisions receiving traffic have different Groq configuration; refusing worker rollout." >&2
+        exit 2
+      fi
+    done
+  fi
+done
 if (( ${#API_GROQ_CONFIG[@]} != 4 )); then
-  echo "ERROR: could not resolve the API deployment Groq configuration; refusing worker rollout." >&2
+  echo "ERROR: active API Groq configuration is incomplete; refusing worker rollout." >&2
   exit 2
 fi
 if [[ -n "${GROQ_MODEL:-}" && "$GROQ_MODEL" != "${API_GROQ_CONFIG[0]}" ]]; then
