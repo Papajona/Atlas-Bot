@@ -5737,6 +5737,244 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
             )
             index = end
             continue
+        legacy_named_ai_step = re.match(
+            r"^([ \t]*)-[ \t]+name:[ \t]*AI model/provider verification when credentials are supplied[ \t]*(?:\r?\n)?$",
+            line,
+            re.I,
+        )
+        if legacy_named_ai_step:
+            step_indent = legacy_named_ai_step.group(1)
+            end = index + 1
+            while end < len(lines):
+                candidate = lines[end]
+                candidate_indent = len(candidate) - len(candidate.lstrip())
+                if (
+                    candidate.strip()
+                    and candidate_indent == len(step_indent)
+                    and re.match(r"^[ \t]*-[ \t]+name:", candidate, re.I)
+                ):
+                    break
+                end += 1
+            step_text = "".join(lines[index:end])
+            run_match = re.search(r"(?m)^([ \t]*)run:[ \t]*\|[ \t]*\r?$", step_text)
+            metadata_text = step_text[:run_match.start()] if run_match else ""
+            metadata_lines = [
+                item.strip()
+                for item in metadata_text.splitlines()
+                if item.strip() and not item.lstrip().startswith("#")
+            ]
+            metadata_keys = {}
+            for item in metadata_lines[1:]:
+                key_match = re.match(r"^([A-Z_]+):", item)
+                if key_match:
+                    metadata_keys[key_match.group(1)] = item
+            allowed_env_keys = {
+                "PYTHONPATH",
+                "GEMINI_API_KEY",
+                "GROQ_API_KEY",
+                "CEREBRAS_API_KEY",
+                "GEMINI_MODEL",
+                "GEMINI_STRATEGY_MODEL",
+            }
+            observed_env_keys = set(metadata_keys).intersection(allowed_env_keys)
+            if (
+                not run_match
+                or metadata_lines[0] != "- name: AI model/provider verification when credentials are supplied"
+                or "id: ai_provider_verification" not in metadata_lines
+                or "continue-on-error: true" not in metadata_lines
+                or "env:" not in metadata_lines
+                or not {"PYTHONPATH", "GEMINI_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY"}.issubset(observed_env_keys)
+                or set(metadata_keys) - allowed_env_keys
+            ):
+                raise MigrationError(
+                    f"{path} has an unrecognized legacy AI model/provider verification step; refusing to discard workflow behavior"
+                )
+
+            run_indent = len(run_match.group(1))
+            commands = []
+            grep_checks = []
+            for command_line in step_text[run_match.end():].splitlines():
+                if not command_line.strip():
+                    continue
+                if len(command_line) - len(command_line.lstrip()) <= run_indent:
+                    raise MigrationError(
+                        f"{path} has an unexpected YAML field after the legacy AI provider run block"
+                    )
+                command = command_line.strip()
+                is_grep_check = (
+                    ("grep -Eq" in command)
+                    and ("ai-provider-verification.log" in command)
+                    and (
+                        ("Gemini" in command and "HTTP 429" in command)
+                        or ("Groq" in command and ("succeeded" in command or "failed" in command))
+                        or ("Cerebras" in command and "failed" in command)
+                    )
+                    and command.startswith(("elif ", "&& ", "&& ! "))
+                    and (command.endswith("\\") or command.endswith("; then"))
+                )
+                is_echo = (
+                    command.startswith('echo "')
+                    and command.endswith('"')
+                    and (
+                        "BLOCKED:" in command
+                        or "::warning::" in command
+                        or "gemini_deferred=" in command
+                    )
+                )
+                allowed = (
+                    command in {
+                        "set +e",
+                        "set -e",
+                        "status=$?",
+                        "status=${PIPESTATUS[0]}",
+                        'if [ "$status" -eq 0 ]; then',
+                        'elif [ "$status" -eq 2 ]; then',
+                        "else",
+                        "exit 0",
+                        "exit 2",
+                        'exit "$status"',
+                        "fi",
+                    }
+                    or command in {
+                        "python -m scripts.check_ai_models 2>&1 | tee ai-provider-verification.log",
+                        "python -m scripts.check_ai_models",
+                        "python scripts/check_ai_models.py",
+                    }
+                    or is_echo
+                    or is_grep_check
+                )
+                if not allowed:
+                    raise MigrationError(
+                        f"{path} has an unexpected command in the legacy AI model/provider verification step: {command[:100]}"
+                    )
+                commands.append(command)
+                if is_grep_check:
+                    grep_checks.append(command)
+
+            required_commands = {
+                "set +e",
+                "set -e",
+                'if [ "$status" -eq 0 ]; then',
+                'elif [ "$status" -eq 2 ]; then',
+                "else",
+                "fi",
+            }
+            has_ai_checker = any(
+                "scripts.check_ai_models" in command or "scripts/check_ai_models.py" in command
+                for command in commands
+            )
+            has_status_capture = any(command in {"status=$?", "status=${PIPESTATUS[0]}"} for command in commands)
+            if (
+                not required_commands.issubset(set(commands))
+                or not has_ai_checker
+                or not has_status_capture
+                or not any(command.startswith("exit ") for command in commands)
+                or (grep_checks and not any("HTTP 429" in command for command in grep_checks))
+            ):
+                raise MigrationError(
+                    f"{path} has an incomplete legacy AI model/provider verification step; refusing to weaken the production gate"
+                )
+
+            kept.extend(
+                [
+                    f"{step_indent}- name: Atlas Native AI offline verification (no provider calls)\n",
+                    f"{step_indent}  id: native_ai_verification\n",
+                    f"{step_indent}  run: python -m scripts.check_native_ai\n",
+                ]
+            )
+            index = end
+            continue
+
+        legacy_provider_result_gate = re.match(
+            r"^([ \t]*)-[ \t]+name:[ \t]*Enforce provider verification result[ \t]*(?:\r?\n)?$",
+            line,
+            re.I,
+        )
+        if legacy_provider_result_gate:
+            step_indent = legacy_provider_result_gate.group(1)
+            end = index + 1
+            while end < len(lines):
+                candidate = lines[end]
+                candidate_indent = len(candidate) - len(candidate.lstrip())
+                if (
+                    candidate.strip()
+                    and candidate_indent == len(step_indent)
+                    and re.match(r"^[ \t]*-[ \t]+name:", candidate, re.I)
+                ):
+                    break
+                end += 1
+            step_text = "".join(lines[index:end])
+            run_match = re.search(r"(?m)^([ \t]*)run:[ \t]*\|[ \t]*\r?$", step_text)
+            metadata_text = step_text[:run_match.start()] if run_match else ""
+            metadata_lines = [
+                item.strip()
+                for item in metadata_text.splitlines()
+                if item.strip() and not item.lstrip().startswith("#")
+            ]
+            allowed_metadata = {
+                "- name: Enforce provider verification result",
+                "if: always()",
+                "env:",
+                "PROVIDER_VERIFICATION_OUTCOME: " + "$" + "{{ steps.ai_provider_verification.outcome }}",
+                "GEMINI_VERIFICATION_DEFERRED: " + "$" + "{{ steps.ai_provider_verification.outputs.gemini_deferred }}",
+            }
+            if (
+                not run_match
+                or metadata_lines[0] != "- name: Enforce provider verification result"
+                or "if: always()" not in metadata_lines
+                or "env:" not in metadata_lines
+                or not any(item.startswith("PROVIDER_VERIFICATION_OUTCOME: ") for item in metadata_lines)
+                or any(item not in allowed_metadata for item in metadata_lines)
+            ):
+                raise MigrationError(
+                    f"{path} has an unrecognized legacy provider result gate; refusing to remove it"
+                )
+            run_indent = len(run_match.group(1))
+            commands = []
+            for command_line in step_text[run_match.end():].splitlines():
+                if not command_line.strip():
+                    continue
+                if len(command_line) - len(command_line.lstrip()) <= run_indent:
+                    raise MigrationError(
+                        f"{path} has an unexpected YAML field after the legacy provider result gate"
+                    )
+                command = command_line.strip()
+                allowed = (
+                    command in {
+                        'if [ "$PROVIDER_VERIFICATION_OUTCOME" != "success" ]; then',
+                        'if [ "$GEMINI_VERIFICATION_DEFERRED" = "true" ]; then',
+                        "else",
+                        "fi",
+                        "exit 1",
+                    }
+                    or (
+                        command.startswith('echo "')
+                        and command.endswith('"')
+                        and (
+                            "BLOCKED:" in command
+                            or "::warning::" in command
+                            or "verification passed" in command
+                        )
+                    )
+                )
+                if not allowed:
+                    raise MigrationError(
+                        f"{path} has an unexpected command in the legacy provider result gate: {command[:100]}"
+                    )
+                commands.append(command)
+            if (
+                'if [ "$PROVIDER_VERIFICATION_OUTCOME" != "success" ]; then' not in commands
+                or "exit 1" not in commands
+                or not any("BLOCKED:" in command for command in commands)
+                or commands.count("fi") < 1
+            ):
+                raise MigrationError(
+                    f"{path} has an incomplete legacy provider result gate; refusing to remove it"
+                )
+            # The preceding Native AI check is now fail-fast; retaining this old
+            # always()-gate would reference deleted step outputs and weaken clarity.
+            index = end
+            continue
         if not stripped or stripped.startswith("#"):
             kept.append(line)
             index += 1
