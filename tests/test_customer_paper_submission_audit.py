@@ -211,6 +211,44 @@ def test_terminal_fill_repairs_submission_audit_without_being_mislabeled_pending
     assert events[0]["execution_status"] == "APPENDED"
 
 
+def test_terminal_fill_audit_failure_does_not_replace_filled_result_with_no_trade(monkeypatch):
+    fallback = []
+
+    async def audit_once(_detail):
+        raise RuntimeError("audit database unavailable")
+
+    async def safe_audit(event, detail):
+        fallback.append((event, detail))
+
+    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_safe_audit", safe_audit)
+    execution = {
+        "status": "APPENDED",
+        "decision": "TRADE",
+        "order_intent": {
+            "client_order_id": "cp-terminal-audit-failure",
+            "order_id": 44990,
+            "side": "BUY",
+            "quantity": "0.25",
+            "bar_timestamp": "2026-10-30T10:00:00+00:00",
+            "submission_status": "WAITING_FOR_FILL_LATENCY",
+            "execution_status": "APPENDED",
+            "order_role": "STRATEGY",
+            "newly_submitted": False,
+        },
+    }
+    req = SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h")
+
+    stage = asyncio.run(main._customer_paper_submission_stage(
+        execution, customer_id=501, trading_account_id=702, req=req,
+    ))
+
+    assert stage is None
+    assert execution["decision"] == "TRADE"
+    assert fallback[0][0] == "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE"
+    assert fallback[0][1]["execution_status"] == "APPENDED"
+
+
 def test_customer_submission_audit_uses_customer_actor_even_with_system_context(monkeypatch):
     captured = {}
     class DummySession:
