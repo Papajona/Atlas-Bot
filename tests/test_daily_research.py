@@ -334,6 +334,8 @@ def test_groq_non_success_result_is_sanitized_at_consumer_boundary():
         "status": "ERROR",
         "provider": "groq",
         "error": "TimeoutError",
+        "input_truncated": None,
+        "input_truncation_status": "UNKNOWN",
         "execution_authority": False,
     }
 
