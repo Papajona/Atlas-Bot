@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from app import main
 
 
-def _pending_execution(*, newly_submitted: bool = True) -> dict:
+def _pending_execution(*, newly_submitted: bool = True, order_role: str = "STRATEGY") -> dict:
     return {
         "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
         "decision": "NO_TRADE",
@@ -17,6 +17,7 @@ def _pending_execution(*, newly_submitted: bool = True) -> dict:
             "side": "BUY",
             "quantity": "0.250000000000000000",
             "bar_timestamp": "2026-10-30T10:00:00+00:00",
+            "order_role": order_role,
             "newly_submitted": newly_submitted,
         },
     }
@@ -112,6 +113,61 @@ def test_recovery_wrapper_order_intent_is_audited_as_pending(monkeypatch):
     assert calls[0]["order_role"] == "PROTECTIVE_EXIT"
     assert calls[0]["client_order_id"] == "cpx-recovered-exit"
 
+
+
+def test_audit_outage_does_not_turn_a_persisted_pending_order_into_http_error(monkeypatch):
+    fallback = []
+
+    async def audit_once(_detail):
+        raise RuntimeError("audit store unavailable")
+
+    async def safe_audit(event, detail):
+        fallback.append((event, detail))
+
+    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_safe_audit", safe_audit)
+    req = SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h")
+
+    stage = asyncio.run(main._customer_paper_submission_stage(
+        _pending_execution(),
+        customer_id=501,
+        trading_account_id=702,
+        req=req,
+    ))
+
+    assert stage == "customer_paper_order_pending"
+    assert fallback == [(
+        "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE",
+        {
+            "customer_id": 501,
+            "trading_account_id": 702,
+            "client_order_id": "cp-regression-order",
+            "symbol": "BTC/USDT",
+            "exchange": "binance",
+            "reason": "RuntimeError",
+        },
+    )]
+
+
+def test_protective_exit_role_survives_the_submission_audit_stage(monkeypatch):
+    audits = []
+
+    async def audit_once(detail):
+        audits.append(detail)
+        return True
+
+    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    req = SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h")
+
+    stage = asyncio.run(main._customer_paper_submission_stage(
+        _pending_execution(newly_submitted=True, order_role="PROTECTIVE_EXIT"),
+        customer_id=501,
+        trading_account_id=702,
+        req=req,
+    ))
+
+    assert stage == "customer_paper_order_submitted"
+    assert audits[0]["order_role"] == "PROTECTIVE_EXIT"
 
 def test_non_pending_execution_does_not_change_its_result_stage(monkeypatch):
     calls = []
