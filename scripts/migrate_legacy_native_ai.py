@@ -5633,9 +5633,19 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
     """
     lines = text.splitlines(keepends=True)
     kept: list[str] = []
+    jobs_match = re.search(r"(?m)^([ \t]*)jobs:[ \t]*(?:#.*)?$", text)
+    job_indent = len(jobs_match.group(1)) + 2 if jobs_match else None
+    job_header_re = (
+        re.compile(rf"^[ \t]{{{job_indent}}}[A-Za-z0-9_-]+:[ \t]*(?:#.*)?(?:\r?\n)?$")
+        if job_indent is not None
+        else None
+    )
+    native_ai_provider_step_replaced_in_job = False
     index = 0
     while index < len(lines):
         line = lines[index]
+        if job_header_re and job_header_re.match(line):
+            native_ai_provider_step_replaced_in_job = False
         stripped = line.lstrip()
 
         # Replace only the reviewed legacy live-inference step. Native AI must be
@@ -5655,7 +5665,7 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                 if (
                     candidate.strip()
                     and candidate_indent == len(step_indent)
-                    and re.match(r"^[ \t]*-[ \t]+name:", candidate, re.I)
+                    and re.match(r"^[ \t]*-[ \t]+", candidate)
                 ):
                     break
                 end += 1
