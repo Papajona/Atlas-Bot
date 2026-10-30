@@ -89,8 +89,6 @@ def test_native_safety_allows_only_explicitly_disabled_adaptive_mode_with_other_
 
 
 def _valid_groq_required_packet(review=None, *, input_truncated=False, status="OK"):
-    from app.native_ai import evaluate_native_trade_packet
-
     packet = {
         "symbol": "BTC/USDT",
         "asset": "crypto",
