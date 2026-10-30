@@ -5254,14 +5254,86 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 return True
         return quote is not None or escaped
 
+    def safe_groq_condition(condition: str) -> bool:
+        """Accept only bracket-test conditions with no executable substitutions."""
+        stripped = condition.strip()
+        if stripped.endswith(";"):
+            stripped = stripped[:-1].rstrip()
+        if not (
+            (stripped.startswith("[[") and stripped.endswith("]]"))
+            or (stripped.startswith("[") and stripped.endswith("]"))
+        ):
+            return False
+
+        double_bracket = stripped.startswith("[[")
+        quote: str | None = None
+        escaped = False
+        index = 0
+        while index < len(stripped):
+            character = stripped[index]
+            next_character = stripped[index + 1:index + 2]
+            if escaped:
+                escaped = False
+                index += 1
+                continue
+            if character == "\\" and quote != "'":
+                escaped = True
+                index += 1
+                continue
+            if quote == "'":
+                if character == "'":
+                    quote = None
+                index += 1
+                continue
+            if quote == '"':
+                if character == '"':
+                    quote = None
+                    index += 1
+                    continue
+                # Both command and arithmetic substitutions execute inside double quotes.
+                if ord(character) == 96 or (character == "$" and next_character == "("):
+                    return False
+                index += 1
+                continue
+            if character in {"'", '"'}:
+                quote = character
+                index += 1
+                continue
+            if ord(character) == 96 or (character == "$" and next_character == "("):
+                return False
+            if character in {"<", ">"} and next_character == "(":
+                return False
+            # An unquoted semicolon terminates the test command; a following
+            # command would execute before the conditional result is evaluated.
+            if character == ";":
+                return False
+            # && and || are test operators only inside [[ ... ]]. Reject
+            # command separators in the single-bracket test form.
+            if character == "&":
+                if double_bracket and next_character == "&":
+                    index += 2
+                    continue
+                return False
+            if character == "|":
+                if double_bracket and next_character == "|":
+                    index += 2
+                    continue
+                return False
+            index += 1
+        return quote is None and not escaped
+
     def safe_groq_statement(statement: str) -> bool:
         stripped = statement.strip()
         if not stripped or stripped.startswith("#"):
             return True
         if re.fullmatch(r"(?i)(?:then|else|fi)", stripped):
             return True
-        if re.fullmatch(r"(?i)elif\s+\[\[.*\]\]\s*;?\s*then", stripped):
-            return True
+        elif_match = re.fullmatch(
+            r"(?is)elif\s+(\[\[.*?\]\]|\[.*?\])\s*;?\s*then",
+            stripped,
+        )
+        if elif_match:
+            return safe_groq_condition(elif_match.group(1))
         groq_guard = re.compile(
             r"^:\s*['\"]?" + re.escape("$") + r"\{(?:GROQ_API_KEY|SECRET_GROQ[A-Z0-9_]*)(?::\?[^}]*)?\}['\"]?$",
             re.I,
@@ -5279,11 +5351,54 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if re.match(r"(?i)^(?:echo|printf)\b", stripped):
             normalized = re.sub(r"\s+>&2\s*$", "", stripped)
             return not has_unsafe_shell_operators(normalized)
-        return re.fullmatch(
-            r"(?i)(?:export\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
-            r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\s*=\s*[^;|<>]*",
-            stripped,
-        ) is not None
+        # A permitted Groq assignment must be a simple assignment, not a hidden
+        # command substitution or a compound shell command.
+        return (
+            re.fullmatch(
+                r"(?i)(?:export\s+)?(?:SECRET_GROQ[A-Z0-9_]*|GROQ_API_KEY|GROQ_SECRET_ARG|GROQ_SECRET_ARGS|"
+                r"GROQ_MODEL|GROQ_MAX_COMPLETION_TOKENS|GROQ_RESEARCH_REVIEW_ENABLED|AI_SECRET_ARGS)\s*=\s*[^;|<>]*",
+                stripped,
+            ) is not None
+            and not has_unsafe_shell_operators(stripped)
+        )
+
+    def safe_groq_header_tail(tail: str) -> bool:
+        """Validate simple Groq assignments around inline else/elif control tokens.
+
+        Legacy scripts commonly put the first assignment and the else keyword
+        on the same if/then header. Split only on an unquoted semicolon
+        immediately before a shell control keyword; compound commands remain
+        one statement and fail the allow-list above.
+        """
+        statements: list[str] = []
+        start = 0
+        quote: str | None = None
+        escaped = False
+        for index, character in enumerate(tail):
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\" and quote != "'":
+                escaped = True
+                continue
+            if quote == "'":
+                if character == "'":
+                    quote = None
+                continue
+            if quote == '"':
+                if character == '"':
+                    quote = None
+                continue
+            if character in {"'", '"'}:
+                quote = character
+                continue
+            if character == ";":
+                remainder = tail[index + 1:].lstrip()
+                if re.match(r"(?i)(?:else|elif\b|fi\b)", remainder):
+                    statements.append(tail[start:index].strip())
+                    start = index + 1
+        statements.append(tail[start:].strip())
+        return bool(statements) and all(safe_groq_statement(item) for item in statements)
 
     def inert_provider_message(statement: str) -> bool:
         stripped = statement.strip()
@@ -5326,9 +5441,18 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if re.match(r"^\s*if\b", source_line, re.I) and groq_condition.search(source_line):
             inline = re.match(r"^\s*if\b.*?\bthen\s*(.*?);\s*fi\s*$", source_line, re.I)
             header = re.search(r"\bthen\b(.*)$", source_line, re.I)
+            condition_match = re.match(r"^\s*if\s+(.+?)\s*;?\s*then\b", source_line, re.I)
+            if condition_match:
+                condition_text = condition_match.group(1)
+            else:
+                # Valid shell permits "then" on the next line after the test.
+                condition_without_then = re.match(r"^\s*if\s+(.+?)\s*$", source_line, re.I)
+                condition_text = condition_without_then.group(1) if condition_without_then else ""
+            if not condition_text or not safe_groq_condition(condition_text):
+                raise MigrationError(f"{path} has an unsafe Groq if-condition; refusing it")
             if header and not inline:
                 tail = header.group(1).strip().rstrip(";").strip()
-                if tail and not safe_groq_statement(tail):
+                if tail and not safe_groq_header_tail(tail):
                     raise MigrationError(f"{path} has an executable command on a Groq if-header; refusing it")
             if inline:
                 inline_commands = [chunk.strip() for chunk in inline.group(1).split(";") if chunk.strip()]
