@@ -5981,12 +5981,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                     is_safe_retired_assignment(command, include_ai_secret_args=True)
                     or command.strip() == ":"
                     or is_safe_provider_parameter_guard(command)
-                    or (
-                        re.match(r"^(?:echo|printf)\b", command, re.I)
-                        and not re.match(r"^printf\s+-v(?:\s|$)", command, re.I)
-                        and re.search(r"(?i)\b(?:gemini|cerebras|ai.?gateway|openai)\b", command)
-                        and re.search(r"(?i)\b(?:warn(?:ing)?|not configured|missing|unset|skipping|optional)\b", command)
-                    )
+                    or inert_provider_message(command)
                     for command in commands
                 )
                 if safe_inline:

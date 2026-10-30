@@ -5448,6 +5448,16 @@ if [[ -n "$SECRET_GROQ_API_KEY_VERSION" ]]; then AI_SECRET_ARGS="${AI_SECRET_ARG
         with self.assertRaisesRegex(migration.MigrationError, "unsafe Groq if-condition"):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe)
 
+    def test_shell_scrub_rejects_compound_command_in_inline_retired_provider_warning(self):
+        unsafe = (
+            'if [ -z "$SECRET_GEMINI_KEY" ]; then '
+            'echo "Gemini missing" && gcloud run services update atlas; fi\n'
+        )
+        with self.assertRaisesRegex(
+            migration.MigrationError, "mixed inline provider conditional"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe)
+
     def test_shell_scrub_redacts_provider_secret_from_refusal_error(self):
         secret = "sk-proj-atlas-regression-secret-123456"
         source = f'printf -v deployment_status "Gemini provider credential {secret}"\n'
