@@ -72,7 +72,7 @@ def test_reused_branch_name_cannot_borrow_out_of_range_merged_pr_proof():
             },
         },
         {
-            "number": 290,
+            "number": 331,
             "merged_at": "2026-10-09T00:00:00Z",
             "merge_commit_sha": "out-of-range-merge",
             "head": {
