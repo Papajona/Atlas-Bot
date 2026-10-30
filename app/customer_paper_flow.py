@@ -798,6 +798,9 @@ async def _protective_exit(
         )
         if str(p.get("venue") or "").lower() == str(req.exchange).lower()
         and str(p.get("symbol") or "").strip().upper() == str(req.symbol).strip().upper()
+        # Missing/legacy ownership is manual. Only positions explicitly persisted by
+        # the autonomous paper flow may receive bot-generated protective exits.
+        and str(p.get("execution_owner") or "manual_customer_api") == "autonomous_customer_bot"
         and Decimal(str(p.get("quantity") or "0")) > 0
     ]
     if not positions:
