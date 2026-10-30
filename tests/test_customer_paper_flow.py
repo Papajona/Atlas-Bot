@@ -410,6 +410,50 @@ def _paper_fill_test_context():
     return flow, state, order, market
 
 
+@pytest.mark.parametrize("execution_owner", ["manual_customer_api", None])
+def test_paper_protective_exit_ignores_manual_or_ownerless_positions(monkeypatch, execution_owner):
+    import app.customer_paper_flow as flow
+
+    current = pd.Timestamp.now(tz="UTC").floor("h")
+    prior = current - pd.Timedelta(hours=1)
+    frame = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [90.0],
+         "close": [95.0], "volume": [1000.0]},
+        index=pd.DatetimeIndex([current.to_pydatetime()]),
+    )
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    market = {
+        "bar_timestamp": current.isoformat(),
+        "currency": "USDT",
+        "data_sha256": "m" * 64,
+    }
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([{
+        "venue": "binance",
+        "symbol": "BTC/USDT",
+        "quantity": "1",
+        "timeframe": "1h",
+        "last_event_bar_key": prior.isoformat(),
+        "stop_loss_price": "95",
+        "take_profit_price": "110",
+        "execution_owner": execution_owner,
+    }]))
+
+    async def must_not_submit(*_args, **_kwargs):
+        raise AssertionError("autonomous protective logic must not exit a manual-owned position")
+
+    monkeypatch.setattr(flow, "submit_customer_paper_order", must_not_submit)
+    result = asyncio.run(
+        flow._protective_exit(
+            customer_id=99231,
+            req=req,
+            df=frame,
+            market=market,
+        )
+    )
+
+    assert result is None
+
+
 def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypatch):
     import app.customer_paper_flow as flow
 
@@ -427,6 +471,7 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
         "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
         "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
         "stop_loss_price": "95", "take_profit_price": "110",
+        "execution_owner": "autonomous_customer_bot",
     }]))
     captured = {}
 
@@ -456,6 +501,50 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
     assert captured["metadata"]["exit_reason"] == "STOP_LOSS"
     assert captured["metadata"]["signal_bar_timestamp"] == breach.isoformat()
     assert captured["metadata"]["submission_bar_at"] == latest.isoformat()
+
+
+def test_legacy_pending_protective_sell_cannot_close_manual_owned_position(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    _, state, order, market = _paper_fill_test_context()
+    state["side"] = "SELL"
+    state["remaining_quantity"] = "0.5"
+    order["metadata"]["order_role"] = "PROTECTIVE_EXIT"
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([{
+        "venue": "binance",
+        "symbol": "BTC/USDT",
+        "quantity": "1",
+        "execution_owner": "manual_customer_api",
+    }]))
+
+    expired = []
+
+    async def expire(**kwargs):
+        expired.append(kwargs)
+        return {"status": "EXPIRED"}
+
+    async def must_not_register(**_kwargs):
+        raise AssertionError("manual-owned position must not reach fill-bar registration")
+
+    async def must_not_fill(**_kwargs):
+        raise AssertionError("legacy protective SELL must not fill a manual-owned position")
+
+    monkeypatch.setattr(flow, "expire_customer_paper_order", expire)
+    monkeypatch.setattr(flow, "register_customer_paper_market_bar", must_not_register)
+    monkeypatch.setattr(flow, "record_customer_paper_fill", must_not_fill)
+
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=12006,
+        order=order,
+        market=market,
+        df=pd.DataFrame(),
+    ))
+
+    assert result["status"] == "EXPIRED_NO_OPEN_POSITION"
+    assert result["fill"]["status"] == "EXPIRED"
+    assert len(expired) == 1
+    assert expired[0]["client_order_id"] == order["client_order_id"]
 
 
 def test_pending_paper_buy_is_resized_at_the_fill_quote_to_available_cash(monkeypatch):
@@ -843,6 +932,7 @@ def test_paper_protective_exit_fails_closed_when_intervening_candle_is_missing(m
         "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
         "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
         "stop_loss_price": "95", "take_profit_price": "110",
+        "execution_owner": "autonomous_customer_bot",
     }]))
     with pytest.raises(CustomerPaperFlowBlocked, match="history is incomplete"):
         asyncio.run(flow._protective_exit(12003, req, frame, market))
@@ -1128,3 +1218,21 @@ def test_customer_paper_buy_discipline_counts_any_filled_order_and_checks_cooldo
     cooldown_start_at = now - timedelta(seconds=90)
     prior_entry = datetime(2026, 10, 23, 23, 59, 30, tzinfo=timezone.utc)
     assert cooldown_start_at <= prior_entry < now
+
+
+def test_ownerless_legacy_paper_positions_default_to_manual():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_lifecycle.py").read_text(
+        encoding="utf-8"
+    )
+    assert "COALESCE(\n                        entry_order.metadata_json ->> 'execution_owner',\n                        'manual_customer_api'\n                    ) AS execution_owner" in source
+    assert "CASE WHEN entry_order.metadata_json ->> 'paper_flow_version' = '1'" not in source
+    # Legacy metadata must not silently grant autonomous ownership during order
+    # submission, ownership-conflict checks, or protective-position checks.
+    assert 'safe_metadata.get("execution_owner") or "manual_customer_api"' in source
+    assert 'prior_metadata.get("execution_owner") or "manual_customer_api"' in source
+    assert 'prior_position_metadata.get("execution_owner") or "manual_customer_api"' in source
+    assert '"autonomous_customer_bot" if safe_metadata.get("paper_flow_version") == 1' not in source
+    assert '"autonomous_customer_bot" if prior_metadata.get("paper_flow_version") == 1' not in source
+    assert '"autonomous_customer_bot" if prior_position_metadata.get("paper_flow_version") == 1' not in source
