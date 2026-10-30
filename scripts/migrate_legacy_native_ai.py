@@ -5513,6 +5513,16 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if prefix is None:
             return None
         start = prefix.end()
+        # Accept a narrowly validated POSIX test form as well as bracket tests.
+        test_match = re.fullmatch(
+            r"""test\s+(-[nz])\s+(?:"(\$\{(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|SECRET_OPENAI[A-Z0-9_]*|SECRET_AI_GATEWAY[A-Z0-9_]*|GEMINI_API_KEY)(?::-[^}]*)?\})"|'(\$\{(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|SECRET_OPENAI[A-Z0-9_]*|SECRET_AI_GATEWAY[A-Z0-9_]*|GEMINI_API_KEY)(?::-[^}]*)?\})'|(\$\{(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|SECRET_OPENAI[A-Z0-9_]*|SECRET_AI_GATEWAY[A-Z0-9_]*|GEMINI_API_KEY)(?::-[^}]*)?\}))\s*;\s*then(?:\s*(.*))?""",
+            line[start:].rstrip("\r\n"),
+            re.I,
+        )
+        if test_match is not None:
+            value = next(group for group in test_match.groups()[1:4] if group is not None)
+            tail = test_match.group(5)
+            return f"[ {test_match.group(1)} {value} ]", (tail.strip() or None) if tail else None
         if line.startswith("[[", start):
             opening_length, closing_token = 2, "]]"
         elif line.startswith("[", start):
@@ -5636,7 +5646,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             names = names[:-1] + r"|AI_SECRET_ARGS)"
         pattern = re.compile(
             r"^\s*(?:export\s+)?" + names
-            + r"\s*=\s*(?:\"(?:\\.|[^\"\\])*\"|'[^']*'|[^\s;|&<>]+)?\s*(?:#.*)?$",
+            + r"=(?:\"(?:\\.|[^\"\\])*\"|'[^']*'|[^\s;|&<>]+)?(?:\s+#.*)?\s*$",
             re.I,
         )
         candidate = statement.rstrip("\r\n")
@@ -5644,6 +5654,10 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         # only this assignment would expose its continuation as a command.
         trailing_backslashes = len(candidate) - len(candidate.rstrip("\\"))
         if trailing_backslashes % 2 == 1 or not pattern.fullmatch(candidate):
+            return False
+        # Parameter-expansion assignment operators mutate a different variable;
+        # deleting this retired secret assignment would silently remove that effect.
+        if re.search(r"\$\{[A-Za-z_][A-Za-z0-9_]*(?::?=)", candidate):
             return False
         return "$(" not in candidate and chr(96) not in candidate
 
