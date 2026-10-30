@@ -151,3 +151,22 @@ def test_worker_groq_config_resolver_fails_closed_on_missing_api_override():
     )
     assert result.returncode == 2
     assert "GROQ_RESEARCH_REVIEW_ENABLED" in result.stderr
+
+
+def test_worker_groq_config_resolver_supports_cloud_run_v2_without_optional_secret():
+    import json
+    import subprocess
+    import sys
+
+    resolver = ROOT / "scripts" / "resolve_worker_groq_config.py"
+    payload = {"template": {"containers": [{"env": [
+        {"name": "GROQ_MODEL", "value": "openai/gpt-oss-20b"},
+        {"name": "GROQ_MAX_COMPLETION_TOKENS", "value": "1024"},
+        {"name": "GROQ_RESEARCH_REVIEW_ENABLED", "value": "false"},
+    ]}]}}
+    result = subprocess.run(
+        [sys.executable, str(resolver)], input=json.dumps(payload), text=True,
+        capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["openai/gpt-oss-20b", "1024", "false", "__NONE__"]
