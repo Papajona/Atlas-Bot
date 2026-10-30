@@ -153,7 +153,7 @@ def test_native_ai_vetoes_high_confidence_groq_contradiction_and_critical_risk()
         "regime_assessment": "The submitted technical context conflicts with the regime evidence.",
         "setup_alignment": "CONTRADICTS",
         "risk_level": "MODERATE",
-        "confidence": 0.90,
+        "confidence": 0.65,
         "key_observations": ["Independent inputs disagree."],
         "contradictions": ["The strategy's stated regime is not supported."],
         "data_quality_flags": [],
