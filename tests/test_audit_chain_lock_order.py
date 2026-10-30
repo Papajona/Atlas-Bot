@@ -4,7 +4,7 @@ import os
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from app.audit_chain import append_audit
+from app.audit_chain import append_audit, append_audit_once
 from app.config import settings
 from app.db import AuditChainState, AuditLog, Base
 
@@ -37,6 +37,51 @@ def test_append_audit_refreshes_state_loaded_before_the_lock(tmp_path):
             await b.close()
             await engine.dispose()
     asyncio.run(go())
+
+def test_append_audit_once_recovers_missing_submission_event_without_duplicates(tmp_path):
+    async def go():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path/'audit-once.db'}")
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        S = async_sessionmaker(engine, expire_on_commit=False)
+        detail = {
+            "customer_id": 99231,
+            "client_order_id": "cp-stable-order-identity",
+            "side": "BUY",
+            "quantity": "0.25",
+        }
+        try:
+            async with S() as first_db:
+                first, created = await append_audit_once(
+                    first_db,
+                    event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+                    detail=detail,
+                    actor_id="customer:99231",
+                    idempotency_fields=("customer_id", "client_order_id"),
+                )
+            async with S() as recovery_db:
+                replay, created_again = await append_audit_once(
+                    recovery_db,
+                    event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+                    detail=detail,
+                    actor_id="customer:99231",
+                    idempotency_fields=("customer_id", "client_order_id"),
+                )
+            async with S() as reader:
+                rows = (
+                    await reader.execute(
+                        select(AuditLog).where(AuditLog.event == "CUSTOMER_PAPER_ORDER_SUBMITTED")
+                    )
+                ).scalars().all()
+            assert created is True
+            assert created_again is False
+            assert replay.id == first.id
+            assert len(rows) == 1
+        finally:
+            await engine.dispose()
+
+    asyncio.run(go())
+
 
 @pytest.mark.postgres
 @pytest.mark.skipif(not os.getenv("ATLAS_POSTGRES_URL"), reason="needs migrated PostgreSQL (ATLAS_POSTGRES_URL)")
