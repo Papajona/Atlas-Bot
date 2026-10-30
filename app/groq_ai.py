@@ -78,7 +78,9 @@ _ACTIONABLE_IMMEDIATE_COMMAND_PATTERN = re.compile(
 )
 _PRICE_LEVEL_REFERENCE_PATTERN = re.compile(
     r"(?i:\b(?P<kind>entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger)\b)"
-    r"(?:\s+price)?(?:\s*(?:=|:)\s*|\s+(?:at|to)\s+|\s+)[$€£]?"
+    r"(?:\s+price)?"
+    r"(?:\s*(?:=|:)\s*|\s+(?:(?:is|was|equals?)\s+)?(?:at|to)\s+|"
+    r"\s+(?:(?:is|was|equals?)\s+)?)[$€£]?"
     # Capture the whole numeric-looking token (including invalid suffixes), but
     # never begin a reference match with ordinary prose such as "the market".
     r"(?P<price>[+-]?(?:\d|\.\d)\S*)"
@@ -160,11 +162,22 @@ def _validate_plan_price_references(text: str, trade_plan: dict[str, Any]) -> No
         expected = _decimal_plan_price(trade_plan.get(field_for_kind[kind]))
         raw_token = match.group("price").rstrip(".,;:!?)]}\\\"'")
         normalized_token = raw_token
-        if "," in normalized_token:
-            if "." in normalized_token:
-                if not re.fullmatch(r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d+(?:[eE][+-]?\d+)?", normalized_token):
-                    raise GroqAIError(f"Groq trade review cites an invalid {kind} price token")
+        if "," in normalized_token and "." in normalized_token:
+            # Resolve mixed separators only when they form valid US or European
+            # thousands/decimal grouping; reject ambiguous or malformed grouping.
+            if re.fullmatch(r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d+(?:[eE][+-]?\d+)?", normalized_token):
                 normalized_token = normalized_token.replace(",", "")
+            elif re.fullmatch(r"[+-]?\d{1,3}(?:\.\d{3})+,\d+(?:[eE][+-]?\d+)?", normalized_token):
+                normalized_token = normalized_token.replace(".", "").replace(",", ".")
+            else:
+                raise GroqAIError(f"Groq trade review cites an invalid {kind} price token")
+        elif "," in normalized_token:
+            if re.fullmatch(r"[+-]?\d{1,3}(?:,\d{3})+(?:[eE][+-]?\d+)?", normalized_token):
+                normalized_token = normalized_token.replace(",", "")
+            elif normalized_token.count(",") == 1 and re.fullmatch(r"[+-]?\d+,\d+(?:[eE][+-]?\d+)?", normalized_token):
+                normalized_token = normalized_token.replace(",", ".")
+            else:
+                raise GroqAIError(f"Groq trade review cites an invalid {kind} price token")
             elif re.fullmatch(r"[+-]?\d{1,3}(?:,\d{3})+(?:[eE][+-]?\d+)?", normalized_token):
                 normalized_token = normalized_token.replace(",", "")
             elif normalized_token.count(",") == 1 and re.fullmatch(r"[+-]?\d+,\d+(?:[eE][+-]?\d+)?", normalized_token):
