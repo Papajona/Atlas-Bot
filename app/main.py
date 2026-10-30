@@ -36,6 +36,7 @@ from .strategy_router import select_strategy, policy_walk_forward_backtest, stra
 from .trade_learning import process_trade_learning_episodes
 from .entry_exit_engine import EntryExitConfig, start_bot_decision, gated_entry_exit_backtest
 from .ai_providers import dual_ai_trade_safety_review, AIProviderError
+from .groq_ai import groq_trade_context_review
 from .strategy_ai import generate_strategy_draft
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates, live_strategy_signals
 from .research_trial_archive import archive_research_trials
@@ -78,6 +79,36 @@ from .admin_rbac import require_role, get_roles, upsert_role, ROLES
 from .transaction_policy import register_or_check_destination, verify_destination
 from .audit_chain import append_audit
 from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current, assert_database_role_compatible_with_rls_lockdown
+
+
+
+async def _attach_groq_trade_review(packet: dict) -> dict:
+    """Attach a bounded Groq review; Native AI remains the sole trade-safety authority."""
+    required = bool(settings.groq_research_review_enabled)
+    packet["groq_trade_review_required"] = required
+    if not required:
+        result = {
+            "status": "DISABLED",
+            "provider": "groq",
+            "reason": "GROQ_RESEARCH_REVIEW_ENABLED is false",
+            "input_truncated": False,
+            "execution_authority": False,
+        }
+    else:
+        try:
+            result = await groq_trade_context_review(packet)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            result = {
+                "status": "ERROR",
+                "provider": "groq",
+                "error": type(exc).__name__,
+                "input_truncated": None,
+                "execution_authority": False,
+            }
+    packet["groq_trade_review"] = result
+    return result
 
 
 def _validated_customer_paper_mark(context: dict | None) -> tuple[float, str]:
@@ -1313,7 +1344,8 @@ async def _run_persisted_adaptive_bot_cycle(
     # daily_research.latest_macro_context). This is advisory context for the veto review
     # only -- it does not gate on its own and never blocks a trade by itself.
     macro_context = await latest_macro_context()
-    packet = {"symbol": req.symbol, "asset": req.asset, "exchange": req.exchange, "timeframe": req.timeframe, "market_timestamp": deterministic["timestamp"], "trade_plan": plan, "deterministic_rules": deterministic["rules"], "price_context": {"latest_close": float(df.close.iloc[-1]), "bars": int(len(df)), "spread_bps": spread_bps}, "data_quality": deterministic["data_quality"], "adaptive_model": adaptive, "ml_signal": ml_signal, "macro_context": macro_context}
+    packet = {"symbol": req.symbol, "asset": req.asset, "exchange": req.exchange, "timeframe": req.timeframe, "market_timestamp": deterministic["timestamp"], "trade_plan": plan, "deterministic_rules": deterministic["rules"], "price_context": {"latest_close": float(df.close.iloc[-1]), "bars": int(len(df)), "spread_bps": spread_bps}, "data_quality": deterministic["data_quality"], "adaptive_model": adaptive, "ml_signal": ml_signal, "macro_context": macro_context, "derivatives_context": derivatives_context}
+    await _attach_groq_trade_review(packet)
     try:
         ai_review = await asyncio.wait_for(dual_ai_trade_safety_review(packet), timeout=settings.ai_strategy_provider_timeout_seconds)
     except asyncio.TimeoutError:
@@ -4882,7 +4914,9 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             "data_quality": deterministic["data_quality"],
             "adaptive_model": adaptive or {"status": "DISABLED"},
             "ml_signal": ml_signal if settings.adaptive_ai_enabled else {"status": "DISABLED"},
+            "macro_context": await latest_macro_context(),
         }
+        await _attach_groq_trade_review(packet)
         try:
             ai_review = await asyncio.wait_for(
                 dual_ai_trade_safety_review(packet),
