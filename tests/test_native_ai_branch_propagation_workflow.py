@@ -9,6 +9,16 @@ WORKFLOW = ROOT / ".github" / "workflows" / "propagate-native-ai-all-branches.ym
 MIGRATION = ROOT / "scripts" / "migrate_legacy_native_ai.py"
 
 
+def test_propagation_token_can_update_workflow_files() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    permissions = workflow.split("permissions:", 1)[1].split("concurrency:", 1)[0]
+
+    # The propagator intentionally updates the retired-provider wiring in workflow
+    # files on each branch; contents:write alone is rejected by GitHub for that path.
+    assert "contents: write" in permissions
+    assert "workflows: write" in permissions
+
+
 def test_propagation_reruns_when_migration_engine_changes() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     push_trigger = workflow.split("  push:", 1)[1].split("  workflow_dispatch:", 1)[0]
