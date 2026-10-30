@@ -430,7 +430,8 @@ def test_groq_trade_context_review_is_bounded_advisory_and_records_no_execution_
         groq_model="openai/gpt-oss-20b",
         groq_max_completion_tokens=2048,
         groq_timeout_seconds=20.0,
-        groq_research_review_enabled=True,
+        groq_research_review_enabled=False,
+        groq_trade_review_enabled=True,
     ), patch.object(groq_ai.httpx, "AsyncClient", return_value=client):
         result = asyncio.run(groq_ai.groq_trade_context_review(packet))
 
@@ -454,7 +455,8 @@ def test_groq_trade_review_without_configured_key_fails_closed_without_network()
         groq_model="openai/gpt-oss-20b",
         groq_max_completion_tokens=2048,
         groq_timeout_seconds=20.0,
-        groq_research_review_enabled=True,
+        groq_research_review_enabled=False,
+        groq_trade_review_enabled=True,
     ), patch.object(groq_ai.httpx, "AsyncClient", side_effect=AssertionError("network must not be used")):
         result = asyncio.run(groq_ai.groq_trade_context_review({"symbol": "BTC/USDT"}))
 
@@ -558,6 +560,20 @@ def test_groq_trade_prompt_summarizes_router_and_model_drift_without_nested_trun
     assert '"ranked"' not in prompt
     assert '"blend"' not in prompt
     assert '"per_feature_psi"' not in prompt
+
+
+def test_groq_trade_prompt_preserves_status_only_derivatives_failures():
+    packet = {
+        "symbol": "BTC/USDT",
+        "data_quality": {"safe": True, "derivatives_context": {"status": "UNAVAILABLE", "state": "UNKNOWN"}},
+        "derivatives_context": {"status": "UNSUPPORTED_EXCHANGE"},
+    }
+
+    prompt, truncated = groq_ai._trade_context_prompt(packet)
+
+    assert truncated is False
+    assert '"status":"UNAVAILABLE"' in prompt
+    assert '"status":"UNSUPPORTED_EXCHANGE"' in prompt
 
 
 def test_groq_trade_prompt_marks_wrapper_escaping_truncation_as_incomplete():
