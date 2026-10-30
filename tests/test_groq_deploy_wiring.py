@@ -113,64 +113,131 @@ def test_worker_runbook_does_not_require_a_groq_secret_placeholder():
     assert "GROQ_STRATEGY_MODEL" in runbook
 
 
-def test_worker_groq_config_is_resolved_from_the_active_api_revision():
+def test_worker_resolver_selects_only_revisions_receiving_api_traffic():
     import json
     import subprocess
     import sys
 
     resolver = ROOT / "scripts" / "resolve_worker_groq_config.py"
     payload = {
-        "spec": {"template": {"spec": {"containers": [{
-            "env": [
-                {"name": "GROQ_MODEL", "value": "openai/gpt-oss-20b"},
-                {"name": "GROQ_MAX_COMPLETION_TOKENS", "value": "2048"},
-                {"name": "GROQ_RESEARCH_REVIEW_ENABLED", "value": "true"},
-                {"name": "GROQ_API_KEY", "valueSource": {"secretKeyRef": {
-                    "secret": "atlas-groq-api-key", "version": "7"
-                }}},
-            ]
-        }]}}}
+        "status": {
+            "latestReadyRevisionName": "atlas-api-00008-new",
+            "traffic": [
+                {"revisionName": "atlas-api-00007-live", "percent": 80},
+                {"latestRevision": True, "percent": 20},
+                {"revisionName": "atlas-api-00009-canary", "tag": "canary"},
+                {"revisionName": "atlas-api-00006-unused", "percent": 0},
+            ],
+        },
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [{
+                        "env": [{"name": "GROQ_MODEL", "value": "wrong-desired-template"}]
+                    }]
+                }
+            }
+        },
     }
     result = subprocess.run(
-        [sys.executable, str(resolver)], input=json.dumps(payload), text=True,
-        capture_output=True, check=False,
+        [sys.executable, str(resolver), "--traffic-revisions"],
+        input=json.dumps(payload), text=True, capture_output=True, check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == ["openai/gpt-oss-20b", "2048", "true", "atlas-groq-api-key:7"]
+    assert result.stdout.splitlines() == [
+        "atlas-api-00007-live",
+        "atlas-api-00008-new",
+    ]
 
 
-def test_worker_groq_config_resolver_fails_closed_on_missing_api_override():
+def test_worker_resolver_fails_closed_when_api_traffic_revision_is_ambiguous():
     import json
     import subprocess
     import sys
 
     resolver = ROOT / "scripts" / "resolve_worker_groq_config.py"
-    payload = {"spec": {"template": {"spec": {"containers": [{"env": [
-        {"name": "GROQ_MODEL", "value": "openai/gpt-oss-20b"},
-        {"name": "GROQ_MAX_COMPLETION_TOKENS", "value": "2048"},
-    ]}]}}}}
+    cases = [
+        {"status": {"traffic": [{"tag": "canary"}]}},
+        {"status": {"traffic": [{"percent": 100}]}},
+        {"status": {"traffic": [{"revisionName": "api-rev-a", "percent": 80}]}},
+    ]
+    for payload in cases:
+        result = subprocess.run(
+            [sys.executable, str(resolver), "--traffic-revisions"],
+            input=json.dumps(payload), text=True, capture_output=True, check=False,
+        )
+        assert result.returncode == 2
+        assert "ERROR:" in result.stderr
+
+
+def test_worker_revision_config_resolver_reads_pinned_secret_and_validated_values():
+    import json
+    import subprocess
+    import sys
+
+    resolver = ROOT / "scripts" / "resolve_worker_groq_config.py"
+    payload = {
+        "spec": {
+            "containers": [{
+                "env": [
+                    {"name": "GROQ_MODEL", "value": "openai/gpt-oss-20b"},
+                    {"name": "GROQ_MAX_COMPLETION_TOKENS", "value": "2048"},
+                    {"name": "GROQ_RESEARCH_REVIEW_ENABLED", "value": "true"},
+                    {"name": "GROQ_API_KEY", "valueFrom": {"secretKeyRef": {
+                        "name": "projects/atlas/secrets/atlas-groq-api-key",
+                        "key": "7",
+                    }}},
+                ]
+            }]
+        }
+    }
     result = subprocess.run(
-        [sys.executable, str(resolver)], input=json.dumps(payload), text=True,
-        capture_output=True, check=False,
+        [sys.executable, str(resolver), "--revision-config"],
+        input=json.dumps(payload), text=True, capture_output=True, check=False,
     )
-    assert result.returncode == 2
-    assert "GROQ_RESEARCH_REVIEW_ENABLED" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "openai/gpt-oss-20b", "2048", "true", "atlas-groq-api-key:7"
+    ]
 
 
-def test_worker_groq_config_resolver_supports_cloud_run_v2_without_optional_secret():
+def test_worker_revision_config_resolver_supports_cloud_run_v2_without_optional_secret():
     import json
     import subprocess
     import sys
 
     resolver = ROOT / "scripts" / "resolve_worker_groq_config.py"
-    payload = {"template": {"containers": [{"env": [
+    payload = {"containers": [{"env": [
         {"name": "GROQ_MODEL", "value": "openai/gpt-oss-20b"},
-        {"name": "GROQ_MAX_COMPLETION_TOKENS", "value": "1024"},
+        {"name": "GROQ_MAX_COMPLETION_TOKENS", "value": "8192"},
         {"name": "GROQ_RESEARCH_REVIEW_ENABLED", "value": "false"},
+    ]}]}
+    result = subprocess.run(
+        [sys.executable, str(resolver), "--revision-config"],
+        input=json.dumps(payload), text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "openai/gpt-oss-20b", "8192", "false", "__NONE__"
+    ]
+
+
+def test_worker_revision_config_resolver_rejects_cap_above_worker_validator_limit():
+    import json
+    import subprocess
+    import sys
+
+    resolver = ROOT / "scripts" / "resolve_worker_groq_config.py"
+    payload = {"spec": {"containers": [{"env": [
+        {"name": "GROQ_MODEL", "value": "openai/gpt-oss-20b"},
+        {"name": "GROQ_MAX_COMPLETION_TOKENS", "value": "8193"},
+        {"name": "GROQ_RESEARCH_REVIEW_ENABLED", "value": "true"},
     ]}]}}
     result = subprocess.run(
-        [sys.executable, str(resolver)], input=json.dumps(payload), text=True,
-        capture_output=True, check=False,
+        [sys.executable, str(resolver), "--revision-config"],
+        input=json.dumps(payload), text=True, capture_output=True, check=False,
     )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == ["openai/gpt-oss-20b", "1024", "false", "__NONE__"]
+    assert result.returncode == 2
+    assert "between 1 and 8192" in result.stderr
+
+
