@@ -343,6 +343,38 @@ def retained_helper():
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_multiple_star_imports_preserve_source_order(self):
+        legacy = """from .first_helpers import *
+from .second_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return shared
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            first = root / "app" / "first_helpers.py"
+            second = root / "app" / "second_helpers.py"
+            target.parent.mkdir()
+            first.write_text("shared = 'first'\n", encoding="utf-8")
+            second.write_text("shared = 'second'\n", encoding="utf-8")
+            target.write_text(legacy, encoding="utf-8")
+            canonical = "from __future__ import annotations\nfrom .native_ai import AIProviderError\n"
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertLess(
+                result.index("from .first_helpers import *"),
+                result.index("from .second_helpers import *"),
+            )
+            self.assertIn("return shared", result)
+            ast.parse(result, filename="app/ai_providers.py")
+
     def test_star_import_dependency_is_preserved_after_docstring_and_future_imports(self):
         legacy = """from .branch_helpers import *
 
