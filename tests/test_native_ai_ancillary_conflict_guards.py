@@ -257,6 +257,29 @@ gcloud run services update atlas-api --set-secrets="DATABASE_URL=atlas-db:latest
         )
 
 
+    def test_inline_groq_assignment_and_else_header_is_preserved(self):
+        shell = """SECRET_GROQ_REF="${SECRET_GROQ_REF:-}"
+GROQ_SECRET_ARG=""
+if [[ -n "$SECRET_GROQ_REF" ]]; then GROQ_SECRET_ARG=",GROQ_API_KEY=${SECRET_GROQ_REF}"; else
+  echo "WARNING: optional Groq research review is not configured." >&2
+fi
+gcloud run worker-pools deploy atlas --set-secrets="DATABASE_URL=atlas-db:latest${GROQ_SECRET_ARG}"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-worker-deploy.sh", shell)
+        self.assertEqual(cleaned, shell)
+        self.assertIn('GROQ_SECRET_ARG=",GROQ_API_KEY=${SECRET_GROQ_REF}"', cleaned)
+
+    def test_inline_groq_assignment_header_rejects_command_substitution(self):
+        shell = """if [[ -n "$SECRET_GROQ_REF" ]]; then GROQ_SECRET_ARG="${$(touch /tmp/atlas-migration-sentinel)}"; else
+  echo "optional research review is disabled"
+fi
+"""
+        with self.assertRaisesRegex(
+            migration.MigrationError, "executable command on a Groq if-header"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-worker-deploy.sh", shell)
+
+
 
 if __name__ == "__main__":
     unittest.main()
