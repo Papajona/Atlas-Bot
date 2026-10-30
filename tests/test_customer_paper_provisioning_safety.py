@@ -385,6 +385,10 @@ def test_provision_verifier_rejects_mutating_privileges_on_every_paper_table():
     assert "server_version_num" in provisioner
     assert ">= 170000" in provisioner
     assert "THEN has_table_privilege(\'atlas_customer_paper\',c.oid,\'MAINTAIN\')" in provisioner
+    assert VERIFY_SQL.count("THEN has_table_privilege('atlas_customer_paper',c.oid,'MAINTAIN')") == 2
+    public_check_start = VERIFY_SQL.index("n.nspname='public'")
+    public_check_end = VERIFY_SQL.index("))::text ||", public_check_start)
+    assert "MAINTAIN" in VERIFY_SQL[public_check_start:public_check_end]
     forbidden = ("UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN")
     for privilege in forbidden:
         assert (
@@ -400,6 +404,8 @@ def test_role_setup_preflights_database_grant_authority_before_generating_creden
 
     assert "pg_has_role(current_user, target_db.datdba, 'USAGE')" in provisioner.ROLE_GRANT_AUTHORITY_SQL
     assert "operator_role.rolsuper" in provisioner.ROLE_GRANT_AUTHORITY_SQL
+    assert "has_database_privilege(" in provisioner.ROLE_GRANT_AUTHORITY_SQL
+    assert "'CONNECT WITH GRANT OPTION'" in provisioner.ROLE_GRANT_AUTHORITY_SQL
     source = Path("scripts/provision_customer_paper_schema.py").read_text(encoding="utf-8")
     setup_start = source.index("        if args.setup_role:")
     setup_end = source.index("        if not backup_ref:", setup_start)
