@@ -462,6 +462,12 @@ async def _fill_open_order(
         )
         if str(p.get("venue") or "").lower() == str(state.get("venue") or "").lower()
         and str(p.get("symbol") or "").strip().upper() == str(state.get("symbol") or "").strip().upper()
+        # Legacy protective SELL intents may outlive the ownership gate that created
+        # them. They must never consume a manual API position during autonomous recovery.
+        and (
+            not is_protective_exit
+            or str(p.get("execution_owner") or "manual_customer_api") == "autonomous_customer_bot"
+        )
     ]
     if side == "SELL":
         held = Decimal(str(position_matches[0]["quantity"])) if position_matches else Decimal("0")
