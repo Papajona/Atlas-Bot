@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 : "${GCP_PROJECT_ID:?Set GCP_PROJECT_ID}"
 : "${GCP_REGION:?Set GCP_REGION}"
 : "${WORKER_POOL:?Set WORKER_POOL, e.g. atlas-trading-worker}"
@@ -23,15 +22,12 @@ set -euo pipefail
 : "${RESEARCH_FEE_SOURCE:?Set RESEARCH_FEE_SOURCE to a traceable research-fee source}"
 : "${RESEARCH_FEE_EVIDENCE_ID:?Set RESEARCH_FEE_EVIDENCE_ID to an immutable evidence identifier}"
 : "${RESEARCH_MIN_DEFLATED_SHARPE:?Set RESEARCH_MIN_DEFLATED_SHARPE to a finite number >= 0.95}"
-
 # Validate the comma-delimited environment values and production DSR floor before deployment.
 python "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/validate_research_deploy_env.py" \
   "$RESEARCH_FEE_SOURCE" "$RESEARCH_FEE_EVIDENCE_ID" "$RESEARCH_MIN_DEFLATED_SHARPE" ","
-
 # Worker runs the TRON listener/sweeper; share the API gate to avoid config drift.
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/tron-funding-gate.sh"
 atlas_configure_tron_funding
-
 if [[ ! "$IMAGE" =~ @sha256:[0-9a-f]{64}$ || ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ || "$IMAGE" != *@$IMAGE_DIGEST ]]; then
   echo "ERROR: worker IMAGE must be an immutable @sha256 digest matching IMAGE_DIGEST." >&2
   exit 2
@@ -40,7 +36,6 @@ if [[ ! "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
   echo "ERROR: RELEASE_SHA must be a full 40-character git SHA." >&2
   exit 2
 fi
-
 IMAGE_TAG_SHA="${IMAGE%@*}"
 IMAGE_TAG_SHA="${IMAGE_TAG_SHA##*:}"
 if [[ "$IMAGE_TAG_SHA" != "$RELEASE_SHA" ]]; then
@@ -48,7 +43,6 @@ if [[ "$IMAGE_TAG_SHA" != "$RELEASE_SHA" ]]; then
   exit 2
 fi
 SA="${WORKER_SERVICE_ACCOUNT}@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
-
 # Atlas Native AI remains the strategy/safety authority; Groq is an optional research-only reviewer.
 SECRET_GROQ_REF="${SECRET_GROQ_REF:-}"
 if [[ -n "$SECRET_GROQ_REF" && ! "$SECRET_GROQ_REF" =~ ^atlas-groq-api-key:[1-9][0-9]*$ ]]; then
@@ -60,7 +54,6 @@ if [[ -n "$SECRET_GROQ_REF" ]]; then GROQ_SECRET_ARG=",GROQ_API_KEY=${SECRET_GRO
 GROQ_MODEL="openai/gpt-oss-20b"
 GROQ_MAX_COMPLETION_TOKENS="2048"
 GROQ_RESEARCH_REVIEW_ENABLED="true"
-
 gcloud run worker-pools deploy "$WORKER_POOL" \
   --project "$GCP_PROJECT_ID" \
   --region "$GCP_REGION" \
