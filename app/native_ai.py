@@ -335,7 +335,7 @@ def evaluate_native_trade_packet(packet: dict[str, Any]) -> dict[str, Any]:
                     data_quality_flags.append("GROQ_TRADE_REVIEW_INCLUDED")
                     if alignment == "INSUFFICIENT_EVIDENCE" or risk_level == "UNKNOWN" or groq_confidence < 0.50:
                         reasons.append("groq_trade_evidence_insufficient")
-                    if alignment == "CONTRADICTS" and groq_confidence >= 0.80:
+                    if alignment == "CONTRADICTS":
                         reasons.append("groq_setup_contradiction_veto")
                     # HIGH and CRITICAL are veto levels regardless of Groq's
                     # self-reported confidence, matching the reviewed prompt contract.
