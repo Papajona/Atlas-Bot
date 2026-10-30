@@ -73,6 +73,25 @@ def _market_fixture(*, timestamp: datetime | None = None, low: float = 98.0, hig
     return request, frame, context
 
 
+def test_ownerless_legacy_paper_positions_default_to_manual():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_lifecycle.py").read_text(
+        encoding="utf-8"
+    )
+    assert "COALESCE(\n                        entry_order.metadata_json ->> 'execution_owner',\n                        'manual_customer_api'\n                    ) AS execution_owner" in source
+    assert "CASE WHEN entry_order.metadata_json ->> 'paper_flow_version' = '1'" not in source
+    # Normalize whitespace so this regression asserts the owner fallback semantics,
+    # not whether the implementation happens to wrap the expression over lines.
+    normalized = " ".join(source.split())
+    assert 'safe_metadata.get("execution_owner") or "manual_customer_api"' in normalized
+    assert 'prior_metadata.get("execution_owner") or "manual_customer_api"' in normalized
+    assert 'prior_position_metadata.get("execution_owner") or "manual_customer_api"' in normalized
+    assert '"autonomous_customer_bot" if safe_metadata.get("paper_flow_version") == 1' not in normalized
+    assert '"autonomous_customer_bot" if prior_metadata.get("paper_flow_version") == 1' not in normalized
+    assert '"autonomous_customer_bot" if prior_position_metadata.get("paper_flow_version") == 1' not in normalized
+
+
 def test_customer_paper_market_context_requires_verified_closed_spot_data(monkeypatch):
     monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
     monkeypatch.setattr(settings, "customer_paper_initial_currency", "USDT")
@@ -432,7 +451,11 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
 
     async def submit(**kwargs):
         captured.update(kwargs)
-        return {"status": "APPENDED", "client_order_id": kwargs["client_order_id"]}
+        return {
+            "status": "APPENDED",
+            "client_order_id": kwargs["client_order_id"],
+            "order_id": 88031,
+        }
 
     async def pending(**kwargs):
         return [{
@@ -456,6 +479,15 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
     assert captured["metadata"]["exit_reason"] == "STOP_LOSS"
     assert captured["metadata"]["signal_bar_timestamp"] == breach.isoformat()
     assert captured["metadata"]["submission_bar_at"] == latest.isoformat()
+    assert result["order_intent"] == {
+        "client_order_id": captured["client_order_id"],
+        "order_id": 88031,
+        "side": "SELL",
+        "quantity": "1",
+        "bar_timestamp": latest.isoformat(),
+        "order_role": "PROTECTIVE_EXIT",
+        "newly_submitted": True,
+    }
 
 
 def test_pending_paper_buy_is_resized_at_the_fill_quote_to_available_cash(monkeypatch):
@@ -1100,35 +1132,6 @@ def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monke
     asyncio.run(run())
 
 
-def test_customer_paper_buy_discipline_counts_any_filled_order_and_checks_cooldown_across_midnight():
-    from pathlib import Path
-
-    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_lifecycle.py").read_text(
-        encoding="utf-8"
-    )
-    daily_start = source.index("todays_entries =")
-    daily_end = source.index("if int(todays_entries", daily_start)
-    daily_query = source[daily_start:daily_end]
-    cooldown_start = source.index("last_entry =")
-    cooldown_end = source.index("if last_entry is not None", cooldown_start)
-    cooldown_query = source[cooldown_start:cooldown_end]
-
-    for query in (daily_query, cooldown_query):
-        assert "EXISTS (" in query
-        assert "FROM customer_paper.fills f" in query
-        assert "f.customer_id=o.customer_id AND f.order_id=o.id" in query
-        assert "latest.event_type IN ('SUBMITTED','PARTIALLY_FILLED','FILLED')" in query
-    assert "o.created_at >= :day_start" not in cooldown_query
-    assert "cooldown_start = now - timedelta(" in source
-    assert "o.created_at >= :cooldown_start" in cooldown_query
-    # A 90-second cooldown starting at 00:00:30 includes a 23:59:30 entry.
-    from datetime import datetime, timedelta, timezone
-
-    now = datetime(2026, 10, 24, 0, 0, 30, tzinfo=timezone.utc)
-    cooldown_start_at = now - timedelta(seconds=90)
-    prior_entry = datetime(2026, 10, 23, 23, 59, 30, tzinfo=timezone.utc)
-    assert cooldown_start_at <= prior_entry < now
-
 def test_pending_paper_buy_caps_quantity_after_rounded_notional_and_fee(monkeypatch):
     import app.customer_paper_flow as flow
 
@@ -1175,3 +1178,34 @@ def test_pending_paper_buy_caps_quantity_after_rounded_notional_and_fee(monkeypa
     ).quantize(quantum, rounding="ROUND_DOWN")
     assert notional + fee == Decimal("0.1")
     assert quantity == previous_quantity - quantum
+
+
+
+def test_customer_paper_buy_discipline_counts_any_filled_order_and_checks_cooldown_across_midnight():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "customer_paper_lifecycle.py").read_text(
+        encoding="utf-8"
+    )
+    daily_start = source.index("todays_entries =")
+    daily_end = source.index("if int(todays_entries", daily_start)
+    daily_query = source[daily_start:daily_end]
+    cooldown_start = source.index("last_entry =")
+    cooldown_end = source.index("if last_entry is not None", cooldown_start)
+    cooldown_query = source[cooldown_start:cooldown_end]
+
+    for query in (daily_query, cooldown_query):
+        assert "EXISTS (" in query
+        assert "FROM customer_paper.fills f" in query
+        assert "f.customer_id=o.customer_id AND f.order_id=o.id" in query
+        assert "latest.event_type IN ('SUBMITTED','PARTIALLY_FILLED','FILLED')" in query
+    assert "o.created_at >= :day_start" not in cooldown_query
+    assert "cooldown_start = now - timedelta(" in source
+    assert "o.created_at >= :cooldown_start" in cooldown_query
+    # A 90-second cooldown starting at 00:00:30 includes a 23:59:30 entry.
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 10, 24, 0, 0, 30, tzinfo=timezone.utc)
+    cooldown_start_at = now - timedelta(seconds=90)
+    prior_entry = datetime(2026, 10, 23, 23, 59, 30, tzinfo=timezone.utc)
+    assert cooldown_start_at <= prior_entry < now
