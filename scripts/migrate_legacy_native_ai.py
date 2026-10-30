@@ -5896,8 +5896,13 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                     break
                 end += 1
             step_text = "".join(lines[index:end])
+            run_line_match = re.search(
+                r"(?m)^([ \t]*)run:[ \t]*(.*?)[ \t]*(?:\r?\n)?$",
+                step_text,
+            )
+            run_value = run_line_match.group(2).strip() if run_line_match else ""
             run_match = re.search(r"(?m)^([ \t]*)run:[ \t]*\|[ \t]*\r?$", step_text)
-            metadata_text = step_text[:run_match.start()] if run_match else ""
+            metadata_text = step_text[:run_line_match.start()] if run_line_match else ""
             metadata_lines = [
                 item.strip()
                 for item in metadata_text.splitlines()
@@ -5940,13 +5945,7 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                     {"GEMINI_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY"}
                 )
             )
-            inline_run_match = re.search(
-                r"(?m)^([ \t]*)run:[ \t]*(.+?)[ \t]*(?:\r?\n)?$",
-                step_text,
-            )
-            inline_run = inline_run_match.group(2).strip() if inline_run_match else ""
-            if inline_run in {"|", "|-", "|+", ">", ">-"}:
-                inline_run = ""
+            inline_run = "" if run_value in {"|", "|-", "|+", ">", ">-"} else run_value
             if (
                 metadata_lines[0] != "- name: " + step_name
                 or ("id: ai_provider_verification" in metadata_lines and metadata_lines.count("id: ai_provider_verification") != 1)
