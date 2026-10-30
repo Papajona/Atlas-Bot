@@ -446,6 +446,7 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
         "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
         "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
         "stop_loss_price": "95", "take_profit_price": "110",
+        "execution_owner": "autonomous_customer_bot",
     }]))
     captured = {}
 
@@ -875,6 +876,7 @@ def test_paper_protective_exit_fails_closed_when_intervening_candle_is_missing(m
         "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
         "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
         "stop_loss_price": "95", "take_profit_price": "110",
+        "execution_owner": "autonomous_customer_bot",
     }]))
     with pytest.raises(CustomerPaperFlowBlocked, match="history is incomplete"):
         asyncio.run(flow._protective_exit(12003, req, frame, market))
@@ -1209,3 +1211,60 @@ def test_customer_paper_buy_discipline_counts_any_filled_order_and_checks_cooldo
     cooldown_start_at = now - timedelta(seconds=90)
     prior_entry = datetime(2026, 10, 23, 23, 59, 30, tzinfo=timezone.utc)
     assert cooldown_start_at <= prior_entry < now
+
+
+def test_paper_protective_exit_never_closes_manual_or_legacy_owned_positions(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    now = pd.Timestamp.now(tz="UTC").floor("h")
+    prior, breach, latest = now - pd.Timedelta(hours=3), now - pd.Timedelta(hours=2), now - pd.Timedelta(hours=1)
+    frame = pd.DataFrame(
+        {"open": [100.0, 96.0, 100.0], "high": [101.0, 101.0, 101.0],
+         "low": [99.0, 94.0, 99.0], "close": [100.0, 96.0, 100.0],
+         "volume": [1000.0, 1000.0, 1000.0]},
+        index=pd.DatetimeIndex([prior, breach, latest]),
+    )
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    market = {"bar_timestamp": latest.isoformat(), "currency": "USDT", "data_sha256": "d" * 64}
+    manual_position = {
+        "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
+        "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
+        "stop_loss_price": "95", "take_profit_price": "110",
+        "execution_owner": "manual_customer_api",
+    }
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([manual_position]))
+
+    async def forbidden_submit(**kwargs):
+        raise AssertionError(f"autonomous bot attempted to submit a SELL for a manual position: {kwargs}")
+
+    monkeypatch.setattr(flow, "submit_customer_paper_order", forbidden_submit)
+    result = asyncio.run(flow._protective_exit(7, req, frame, market))
+    assert result is None
+
+
+def test_paper_protective_exit_treats_missing_legacy_owner_as_manual(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    now = pd.Timestamp.now(tz="UTC").floor("h")
+    prior, breach, latest = now - pd.Timedelta(hours=3), now - pd.Timedelta(hours=2), now - pd.Timedelta(hours=1)
+    frame = pd.DataFrame(
+        {"open": [100.0, 96.0, 100.0], "high": [101.0, 101.0, 101.0],
+         "low": [99.0, 94.0, 99.0], "close": [100.0, 96.0, 100.0],
+         "volume": [1000.0, 1000.0, 1000.0]},
+        index=pd.DatetimeIndex([prior, breach, latest]),
+    )
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    market = {"bar_timestamp": latest.isoformat(), "currency": "USDT", "data_sha256": "d" * 64}
+    legacy_position = {
+        "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
+        "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
+        "stop_loss_price": "95", "take_profit_price": "110",
+    }
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([legacy_position]))
+
+    async def forbidden_submit(**kwargs):
+        raise AssertionError(f"autonomous bot attempted to submit a SELL for an unowned legacy position: {kwargs}")
+
+    monkeypatch.setattr(flow, "submit_customer_paper_order", forbidden_submit)
+    result = asyncio.run(flow._protective_exit(7, req, frame, market))
+    assert result is None
