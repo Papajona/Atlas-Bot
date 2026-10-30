@@ -390,7 +390,7 @@ fun RiskDashboardScreen(
                         fontSize = 13.sp
                     )
                     Text(
-                        text = "• AI Safety Latency Ceiling: 1.5s Fail-Closed (NO_TRADE)",
+                        text = "• AI Safety Decision Deadline: ${metrics.aiSafetyTimeoutSeconds}s Fail-Closed (NO_TRADE)",
                         color = textMuted,
                         fontSize = 13.sp
                     )
