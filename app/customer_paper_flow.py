@@ -748,7 +748,7 @@ async def process_customer_paper_orders(
     # submission event after terminal execution, not only while still pending.
     recovered["order_intent"] = {
         "client_order_id": str(order.get("client_order_id") or ""),
-        "order_id": recovered.get("order_id") or order.get("id"),
+        "order_id": recovered.get("order_id") or order.get("order_id"),
         "side": str(order.get("side") or "").upper(),
         "quantity": str(order.get("quantity") or ""),
         "bar_timestamp": str(
