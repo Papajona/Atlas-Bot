@@ -26,6 +26,10 @@ from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 
+class NoCommonMergeBaseError(RuntimeError):
+    """A branch and main have no common ancestor; preserve this branch only."""
+
+
 def should_delete_ref(
     branch_name: str,
     branch_sha: str,
@@ -183,6 +187,10 @@ def _branch_delta_mismatched_paths(branch_sha: str, main_sha: str) -> list[str]:
         ["git", "merge-base", main_sha, branch_sha],
         check=False,
     )
+    if merge_base_result.returncode == 1 and not merge_base_result.stderr.strip():
+        raise NoCommonMergeBaseError(
+            "branch and main have no common merge base; preserve branch"
+        )
     if merge_base_result.returncode:
         raise RuntimeError(
             "git merge-base failed while comparing branch trees: "
@@ -430,7 +438,10 @@ def _resolve_branch_integration(
     if safe or reason != "no exact integration proof; preserve branch":
         return safe, reason, []
 
-    mismatch_paths = _branch_delta_mismatched_paths(branch_sha, main_sha)
+    try:
+        mismatch_paths = _branch_delta_mismatched_paths(branch_sha, main_sha)
+    except NoCommonMergeBaseError as exc:
+        return False, str(exc), []
     if not mismatch_paths:
         return True, "all branch-side changed paths match main", []
     if _is_explicitly_superseded_android_release_ref(
@@ -496,18 +507,23 @@ def _load_branch_protection_status(repository: str) -> dict[str, bool]:
     return statuses
 
 
-def _delete_remote_ref_with_lease(branch_name: str, expected_sha: str) -> tuple[str, str]:
-    """Delete a remote branch only if its current tip still equals the proven SHA.
+def _delete_remote_ref_with_lease(
+    branch_name: str, expected_sha: str, expected_main_sha: str
+) -> tuple[str, str]:
+    """Atomically require unchanged main and branch tips while deleting the branch.
 
-    Return (status, reason), where status is DELETED, PRESERVE, or ERROR.
-    A stale lease is a preservation outcome; other push errors remain failures.
+    The no-op main refspec participates in the same atomic push as the branch deletion.
+    If either ref advanced after proof, GitHub rejects the whole update and preserves both.
     """
     result = _run(
         [
             "git",
             "push",
+            "--atomic",
             "origin",
+            f"--force-with-lease=refs/heads/main:{expected_main_sha}",
             f"--force-with-lease=refs/heads/{branch_name}:{expected_sha}",
+            "refs/remotes/origin/main:refs/heads/main",
             f":refs/heads/{branch_name}",
         ],
         check=False,
@@ -717,7 +733,7 @@ def main() -> int:
             # force-with-lease on this push is the atomic guard against a ref
             # update between proof and deletion.
             deletion_status, deletion_reason = _delete_remote_ref_with_lease(
-                branch_name, branch_sha
+                branch_name, branch_sha, main_sha
             )
             if deletion_status == "PRESERVE":
                 record("PRESERVE", branch_name, deletion_reason)
