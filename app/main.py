@@ -77,7 +77,7 @@ from .trading_requirements import spot_requirement, oanda_requirement, deriv_req
 from .executor_engine import ExecutorConfig, ExecutorValidationError, build_executor_plan, next_slice
 from .admin_rbac import require_role, get_roles, upsert_role, ROLES
 from .transaction_policy import register_or_check_destination, verify_destination
-from .audit_chain import append_audit
+from .audit_chain import append_audit, append_audit_once
 from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current, assert_database_role_compatible_with_rls_lockdown
 
 
@@ -143,6 +143,31 @@ async def _run_trade_safety_review(packet: dict) -> dict:
     return await asyncio.wait_for(dual_ai_trade_safety_review(packet), timeout=remaining)
 
 
+async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
+    """Persist one submission event per customer/order identity, including recovery repairs."""
+    actor = str(_audit_actor.get() or f"customer:{detail['customer_id']}")
+    async with SessionLocal() as db:
+        row, created = await append_audit_once(
+            db,
+            event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+            detail=detail,
+            actor_id=actor,
+            idempotency_fields=("customer_id", "client_order_id"),
+        )
+    if created:
+        safe_detail = {
+            key: value for key, value in detail.items()
+            if key not in {"token", "secret", "api_token", "api_secret", "authorization", "destination"}
+        }
+        emit_security_audit(
+            event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+            actor_id=actor,
+            detail=safe_detail,
+            event_hash=row.event_hash,
+        )
+    return created
+
+
 async def _customer_paper_submission_stage(
     execution: dict,
     *,
@@ -150,40 +175,68 @@ async def _customer_paper_submission_stage(
     trading_account_id: int,
     req,
 ) -> str | None:
-    """Distinguish a newly persisted paper order intent from a rejected trade."""
-    if (
-        not isinstance(execution, dict)
-        or str(execution.get("status") or "").upper() != "WAITING_FOR_NEXT_COMPLETED_BAR"
-    ):
+    """Audit first submissions and repair missing audit events during pending-order recovery."""
+    if not isinstance(execution, dict):
         return None
 
     intent = execution.get("order_intent")
     if not isinstance(intent, dict):
+        nested = execution.get("execution")
+        intent = nested.get("order_intent") if isinstance(nested, dict) else None
+
+    pending_statuses = {
+        "WAITING_FOR_NEXT_COMPLETED_BAR",
+        "WAITING_FOR_FILL_LATENCY",
+        "WAITING_FOR_PRICE_PRECISION",
+        "NO_LIQUIDITY",
+        "NO_CORRELATION_GROUP_HEADROOM",
+    }
+    status = str(execution.get("status") or "").upper()
+    if not isinstance(intent, dict):
+        if status in pending_statuses:
+            await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE", {
+                "customer_id": customer_id,
+                "trading_account_id": trading_account_id,
+                "symbol": str(req.symbol),
+                "exchange": str(req.exchange),
+                "reason": "pending execution omitted order_intent evidence",
+            })
+            return "customer_paper_order_pending"
+        return None
+
+    client_order_id = str(intent.get("client_order_id") or "").strip()
+    if not client_order_id:
         await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE", {
             "customer_id": customer_id,
             "trading_account_id": trading_account_id,
             "symbol": str(req.symbol),
             "exchange": str(req.exchange),
-            "reason": "pending execution omitted order_intent evidence",
+            "reason": "pending execution omitted client_order_id evidence",
         })
         return "customer_paper_order_pending"
 
-    if intent.get("newly_submitted") is True:
-        await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMITTED", {
-            "customer_id": customer_id,
-            "trading_account_id": trading_account_id,
-            "symbol": str(req.symbol),
-            "exchange": str(req.exchange),
-            "timeframe": str(req.timeframe),
-            "client_order_id": str(intent.get("client_order_id") or ""),
-            "order_id": intent.get("order_id"),
-            "side": str(intent.get("side") or "").upper(),
-            "quantity": str(intent.get("quantity") or ""),
-            "bar_timestamp": str(intent.get("bar_timestamp") or ""),
-            "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
-        })
-        return "customer_paper_order_submitted"
-    return "customer_paper_order_pending"
+    detail = {
+        "customer_id": customer_id,
+        "trading_account_id": trading_account_id,
+        "symbol": str(req.symbol),
+        "exchange": str(req.exchange),
+        "timeframe": str(req.timeframe),
+        "client_order_id": client_order_id,
+        "order_id": intent.get("order_id"),
+        "side": str(intent.get("side") or "").upper(),
+        "quantity": str(intent.get("quantity") or ""),
+        "bar_timestamp": str(intent.get("bar_timestamp") or ""),
+        "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
+        "order_role": str(intent.get("order_role") or "STRATEGY"),
+    }
+    # The audit helper is idempotent and repairs a prior best-effort write failure.
+    # It also serializes concurrent retries on the audit-chain head.
+    await _audit_customer_paper_order_submitted_once(detail)
+    return (
+        "customer_paper_order_submitted"
+        if intent.get("newly_submitted") is True
+        else "customer_paper_order_pending"
+    )
 
 
 def _validated_customer_paper_mark(context: dict | None) -> tuple[float, str]:
