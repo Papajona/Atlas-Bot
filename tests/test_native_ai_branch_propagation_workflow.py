@@ -24,6 +24,13 @@ def test_propagation_requires_a_separate_credential_for_workflow_file_updates() 
     assert 'git diff --name-only "$expected_sha" "$new_sha" -- .github/workflows' in upload
     assert 'if [[ -z "$workflow_token" ]]' in upload
     assert "x-access-token:%s" in upload
+    # actions/checkout persists its own Authorization extraheader. Git sends every
+    # configured value unless the empty entry first resets the inherited header list.
+    reset_header = 'git -c "http.https://github.com/.extraheader=" \\'
+    workflow_header = '-c "http.https://github.com/.extraheader=AUTHORIZATION: basic $workflow_auth_header" \\'
+    assert reset_header in upload
+    assert workflow_header in upload
+    assert upload.index(reset_header) < upload.index(workflow_header)
 
 
 def test_propagation_reruns_when_migration_engine_changes() -> None:
