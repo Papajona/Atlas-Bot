@@ -145,7 +145,7 @@ async def _run_trade_safety_review(packet: dict) -> dict:
 
 async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
     """Persist one submission event per customer/order identity, including recovery repairs."""
-    actor = str(_audit_actor.get() or f"customer:{detail['customer_id']}")
+    actor = f"customer:{int(detail['customer_id'])}"
     async with SessionLocal() as db:
         row, created = await append_audit_once(
             db,
@@ -211,10 +211,15 @@ async def _customer_paper_submission_stage(
             "trading_account_id": trading_account_id,
             "symbol": str(req.symbol),
             "exchange": str(req.exchange),
-            "reason": "pending execution omitted client_order_id evidence",
+            "execution_status": status,
+            "reason": "order intent omitted client_order_id evidence",
         })
-        return "customer_paper_order_pending"
+        return "customer_paper_order_pending" if status in pending_statuses else None
 
+    submission_status = str(
+        intent.get("submission_status")
+        or (status if status in pending_statuses else "SUBMITTED")
+    ).upper()
     detail = {
         "customer_id": customer_id,
         "trading_account_id": trading_account_id,
@@ -226,13 +231,12 @@ async def _customer_paper_submission_stage(
         "side": str(intent.get("side") or "").upper(),
         "quantity": str(intent.get("quantity") or ""),
         "bar_timestamp": str(intent.get("bar_timestamp") or ""),
-        "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
+        "status": submission_status,
+        "execution_status": status or str(intent.get("execution_status") or ""),
         "order_role": str(intent.get("order_role") or "STRATEGY"),
     }
-    # The ledger order is already durably pending. An audit-store outage must
-    # not turn that accepted intent into an HTTP 500 or make the caller retry a
-    # submission that has already been persisted. Record a bounded failure marker
-    # when possible and keep the trade decision at NO_TRADE.
+    # The ledger submission is durable. Never convert an accepted order into an
+    # HTTP error or invite a duplicate retry when the audit store is unavailable.
     try:
         await _audit_customer_paper_order_submitted_once(detail)
     except Exception as exc:
@@ -242,14 +246,21 @@ async def _customer_paper_submission_stage(
             "client_order_id": client_order_id,
             "symbol": str(req.symbol),
             "exchange": str(req.exchange),
+            "submission_status": submission_status,
+            "execution_status": status,
             "reason": type(exc).__name__,
         })
-        return "customer_paper_order_pending"
-    return (
-        "customer_paper_order_submitted"
-        if intent.get("newly_submitted") is True
-        else "customer_paper_order_pending"
-    )
+        return "customer_paper_order_audit_incomplete"
+    # Only live pending states should be reported as pending or short-circuit the
+    # strategy route. Filled, replayed, expired or terminal orders keep their real
+    # execution result after the missing submission audit has been repaired.
+    if status in pending_statuses:
+        return (
+            "customer_paper_order_submitted"
+            if intent.get("newly_submitted") is True
+            else "customer_paper_order_pending"
+        )
+    return None
 
 
 def _validated_customer_paper_mark(context: dict | None) -> tuple[float, str]:
