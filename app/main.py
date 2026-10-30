@@ -115,6 +115,34 @@ async def _attach_groq_trade_review(packet: dict) -> dict:
     return result
 
 
+async def _run_trade_safety_review(packet: dict) -> dict:
+    """Run Groq and Native AI inside one end-to-end decision deadline.
+
+    Groq is advisory evidence only. Reserve a bounded slice for the local Native AI
+    veto so a slow external response cannot double the configured trade-decision time.
+    """
+    timeout = float(settings.ai_strategy_provider_timeout_seconds)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise asyncio.TimeoutError
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    if settings.groq_trade_review_enabled:
+        native_reserve = min(0.25, timeout * 0.20)
+        groq_budget = max(0.0, timeout - native_reserve)
+        if groq_budget <= 0:
+            raise asyncio.TimeoutError
+        await asyncio.wait_for(_attach_groq_trade_review(packet), timeout=groq_budget)
+    else:
+        # This path only attaches a local DISABLED marker and makes no provider call.
+        await _attach_groq_trade_review(packet)
+
+    remaining = deadline - loop.time()
+    if remaining <= 0:
+        raise asyncio.TimeoutError
+    return await asyncio.wait_for(dual_ai_trade_safety_review(packet), timeout=remaining)
+
+
 def _validated_customer_paper_mark(context: dict | None) -> tuple[float, str]:
     """Return a positive bid and timestamp only when the quote is demonstrably current."""
     if not isinstance(context, dict):
@@ -1349,9 +1377,8 @@ async def _run_persisted_adaptive_bot_cycle(
     # only -- it does not gate on its own and never blocks a trade by itself.
     macro_context = await latest_macro_context()
     packet = {"symbol": req.symbol, "asset": req.asset, "exchange": req.exchange, "timeframe": req.timeframe, "market_timestamp": deterministic["timestamp"], "trade_plan": plan, "deterministic_rules": deterministic["rules"], "strategy_router": deterministic.get("strategy_router", {}), "price_context": {"latest_close": float(df.close.iloc[-1]), "bars": int(len(df)), "spread_bps": spread_bps}, "data_quality": deterministic["data_quality"], "adaptive_model": adaptive, "ml_signal": ml_signal, "macro_context": macro_context, "derivatives_context": derivatives_context}
-    await _attach_groq_trade_review(packet)
     try:
-        ai_review = await asyncio.wait_for(dual_ai_trade_safety_review(packet), timeout=settings.ai_strategy_provider_timeout_seconds)
+        ai_review = await _run_trade_safety_review(packet)
     except asyncio.TimeoutError:
         await _audit("ADAPTIVE_BOT_AI_TIMEOUT", {"bot_id": bot_id, "customer_id": profile.id, "symbol": req.symbol, "timeout_seconds": settings.ai_strategy_provider_timeout_seconds})
         return {"decision": "NO_TRADE", "stage": "ai_safety_timeout", "analysis": deterministic, "adaptive_model": adaptive, "ml_signal": ml_signal}
@@ -4921,12 +4948,8 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             "ml_signal": ml_signal if settings.adaptive_ai_enabled else {"status": "DISABLED"},
             "macro_context": await latest_macro_context(),
         }
-        await _attach_groq_trade_review(packet)
         try:
-            ai_review = await asyncio.wait_for(
-                dual_ai_trade_safety_review(packet),
-                timeout=settings.ai_strategy_provider_timeout_seconds,
-            )
+            ai_review = await _run_trade_safety_review(packet)
         except asyncio.TimeoutError:
             await _audit("CUSTOMER_BOT_AI_TIMEOUT", {"customer_id": profile.id, "symbol": req.symbol, "timeout_seconds": settings.ai_strategy_provider_timeout_seconds})
             return await _record_customer_decision({"decision": "NO_TRADE", "stage": "ai_safety_timeout", "analysis": deterministic, "execution": None})
