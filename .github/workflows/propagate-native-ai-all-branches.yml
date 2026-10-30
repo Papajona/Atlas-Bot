@@ -34,6 +34,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          ATLAS_WORKFLOW_UPDATE_TOKEN: ${{ secrets.ATLAS_WORKFLOW_UPDATE_TOKEN }}
         run: |
           set -euo pipefail
           NATIVE_AI_CLEANUP_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
@@ -344,7 +345,7 @@ jobs:
           declare -a cleanup_warnings=()
           update_existing_branch_ref() {
             local branch="$1" expected_sha="$2" new_sha="$3"
-            local remote_sha branch_hash temp_ref update_rc ref_payload repository_id current_sha update_payload updated_sha updated_ref_payload read_back_sha
+            local remote_sha branch_hash temp_ref update_rc ref_payload repository_id current_sha update_payload updated_sha updated_ref_payload read_back_sha workflow_paths workflow_token workflow_auth_header
             remote_sha="$(git ls-remote --heads origin "refs/heads/$branch" | awk 'NR == 1 {print $1}')"
             if [[ "$remote_sha" != "$expected_sha" ]]; then
               echo "Ref refs/heads/$branch changed or disappeared after enumeration; refusing to update it." >&2
@@ -355,7 +356,23 @@ jobs:
             # non-force fast-forward update are one atomic server-side operation.
             branch_hash="$(printf '%s' "$branch" | sha256sum | cut -c1-12)"
             temp_ref="atlas-native-ai-propagation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${branch_hash}"
-            if ! git push origin "HEAD:refs/heads/$temp_ref" >/dev/null; then
+            workflow_paths="$(git diff --name-only "$expected_sha" "$new_sha" -- .github/workflows)"
+            if [[ -n "$workflow_paths" ]]; then
+              workflow_token="${ATLAS_WORKFLOW_UPDATE_TOKEN:-}"
+              if [[ -z "$workflow_token" ]]; then
+                echo "Cannot update refs/heads/$branch: migration changes workflow files but ATLAS_WORKFLOW_UPDATE_TOKEN is not configured; target branch unchanged." >&2
+                return 1
+              fi
+              # GITHUB_TOKEN has no workflow-file write permission. Use a separately
+              # scoped GitHub App/PAT token only for uploading this temporary commit.
+              workflow_auth_header="$(printf 'x-access-token:%s' "$workflow_token" | base64 -w0)"
+              if ! git -c "http.https://github.com/.extraheader=" \
+                  -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $workflow_auth_header" \
+                  push origin "HEAD:refs/heads/$temp_ref" >/dev/null; then
+                echo "Could not upload workflow-changing temporary commit ref for $branch; target branch unchanged." >&2
+                return 1
+              fi
+            elif ! git push origin "HEAD:refs/heads/$temp_ref" >/dev/null; then
               echo "Could not upload temporary commit ref for $branch; target branch unchanged." >&2
               return 1
             fi
