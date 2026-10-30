@@ -432,7 +432,11 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
 
     async def submit(**kwargs):
         captured.update(kwargs)
-        return {"status": "APPENDED", "client_order_id": kwargs["client_order_id"]}
+        return {
+            "status": "APPENDED",
+            "client_order_id": kwargs["client_order_id"],
+            "order_id": 88031,
+        }
 
     async def pending(**kwargs):
         return [{
@@ -456,6 +460,14 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
     assert captured["metadata"]["exit_reason"] == "STOP_LOSS"
     assert captured["metadata"]["signal_bar_timestamp"] == breach.isoformat()
     assert captured["metadata"]["submission_bar_at"] == latest.isoformat()
+    assert result["order_intent"] == {
+        "client_order_id": captured["client_order_id"],
+        "order_id": 88031,
+        "side": "SELL",
+        "quantity": "1",
+        "bar_timestamp": latest.isoformat(),
+        "newly_submitted": True,
+    }
 
 
 def test_pending_paper_buy_is_resized_at_the_fill_quote_to_available_cash(monkeypatch):
