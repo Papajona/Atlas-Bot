@@ -410,6 +410,49 @@ def _paper_fill_test_context():
     return flow, state, order, market
 
 
+def test_paper_protective_exit_ignores_manual_owned_positions(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    current = pd.Timestamp.now(tz="UTC").floor("h")
+    prior = current - pd.Timedelta(hours=1)
+    frame = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [90.0],
+         "close": [95.0], "volume": [1000.0]},
+        index=pd.DatetimeIndex([current.to_pydatetime()]),
+    )
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    market = {
+        "bar_timestamp": current.isoformat(),
+        "currency": "USDT",
+        "data_sha256": "m" * 64,
+    }
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([{
+        "venue": "binance",
+        "symbol": "BTC/USDT",
+        "quantity": "1",
+        "timeframe": "1h",
+        "last_event_bar_key": prior.isoformat(),
+        "stop_loss_price": "95",
+        "take_profit_price": "110",
+        "execution_owner": "manual_customer_api",
+    }]))
+
+    async def must_not_submit(*_args, **_kwargs):
+        raise AssertionError("autonomous protective logic must not exit a manual-owned position")
+
+    monkeypatch.setattr(flow, "submit_customer_paper_order", must_not_submit)
+    result = asyncio.run(
+        flow._protective_exit(
+            customer_id=99231,
+            req=req,
+            df=frame,
+            market=market,
+        )
+    )
+
+    assert result is None
+
+
 def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypatch):
     import app.customer_paper_flow as flow
 
@@ -427,6 +470,7 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
         "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
         "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
         "stop_loss_price": "95", "take_profit_price": "110",
+        "execution_owner": "autonomous_customer_bot",
     }]))
     captured = {}
 
@@ -456,6 +500,50 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
     assert captured["metadata"]["exit_reason"] == "STOP_LOSS"
     assert captured["metadata"]["signal_bar_timestamp"] == breach.isoformat()
     assert captured["metadata"]["submission_bar_at"] == latest.isoformat()
+
+
+def test_legacy_pending_protective_sell_cannot_close_manual_owned_position(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    _, state, order, market = _paper_fill_test_context()
+    state["side"] = "SELL"
+    state["remaining_quantity"] = "0.5"
+    order["metadata"]["order_role"] = "PROTECTIVE_EXIT"
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([{
+        "venue": "binance",
+        "symbol": "BTC/USDT",
+        "quantity": "1",
+        "execution_owner": "manual_customer_api",
+    }]))
+
+    expired = []
+
+    async def expire(**kwargs):
+        expired.append(kwargs)
+        return {"status": "EXPIRED"}
+
+    async def must_not_register(**_kwargs):
+        raise AssertionError("manual-owned position must not reach fill-bar registration")
+
+    async def must_not_fill(**_kwargs):
+        raise AssertionError("legacy protective SELL must not fill a manual-owned position")
+
+    monkeypatch.setattr(flow, "expire_customer_paper_order", expire)
+    monkeypatch.setattr(flow, "register_customer_paper_market_bar", must_not_register)
+    monkeypatch.setattr(flow, "record_customer_paper_fill", must_not_fill)
+
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=12006,
+        order=order,
+        market=market,
+        df=pd.DataFrame(),
+    ))
+
+    assert result["status"] == "EXPIRED_NO_OPEN_POSITION"
+    assert result["fill"]["status"] == "EXPIRED"
+    assert len(expired) == 1
+    assert expired[0]["client_order_id"] == order["client_order_id"]
 
 
 def test_pending_paper_buy_is_resized_at_the_fill_quote_to_available_cash(monkeypatch):
@@ -843,6 +931,7 @@ def test_paper_protective_exit_fails_closed_when_intervening_candle_is_missing(m
         "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
         "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
         "stop_loss_price": "95", "take_profit_price": "110",
+        "execution_owner": "autonomous_customer_bot",
     }]))
     with pytest.raises(CustomerPaperFlowBlocked, match="history is incomplete"):
         asyncio.run(flow._protective_exit(12003, req, frame, market))
