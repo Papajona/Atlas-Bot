@@ -1849,6 +1849,7 @@ async def _gemini_json(prompt):
             self.assertIn("groq_model", result)
             self.assertIn("groq_research_review_enabled", result)
             self.assertIn("groq_trade_review_enabled: bool = False", result)
+            self.assertIn("groq_trade_review_timeout_seconds: float = 5.0", result)
             self.assertNotIn("groq_strategy_model", result)
             self.assertNotRegex(result, migration.RETIRED_PROVIDER_RE)
 
