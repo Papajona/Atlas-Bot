@@ -592,9 +592,13 @@ def retained_helper():
                 migration.transform_ai_providers("canonical-commit")
             result = target.read_text(encoding="utf-8")
             ast.parse(result, filename="app/ai_providers.py")
-            self.assertIn("BranchContainer", result)
-            self.assertIn("branch_helper", result)
-            self.assertIn("class_value = (class_local := 'class-only')", helper_module.read_text(encoding="utf-8"))
+            self.assertIn("from .branch_helpers import *", result)
+            self.assertIn("def retained_helper():", result)
+            self.assertIn("return branch_helper()", result)
+            self.assertIn(
+                "class_value = (class_local := 'class-only')",
+                helper_module.read_text(encoding="utf-8"),
+            )
 
     def test_class_suite_global_walrus_fails_closed_for_star_import(self):
         legacy = """from .branch_helpers import *
