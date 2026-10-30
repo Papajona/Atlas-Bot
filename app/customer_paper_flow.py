@@ -987,20 +987,19 @@ async def _protective_exit(
     if len(match) != 1:
         raise CustomerPaperFlowBlocked("Protective exit intent was not visible to recovery")
     execution = await _fill_open_order(customer_id, match[0], market, df)
-    if str(execution.get("status") or "").upper() in {
-        "WAITING_FOR_NEXT_COMPLETED_BAR", "WAITING_FOR_FILL_LATENCY",
-        "WAITING_FOR_PRICE_PRECISION", "NO_LIQUIDITY",
-        "NO_CORRELATION_GROUP_HEADROOM",
-    }:
-        execution["order_intent"] = {
-            "client_order_id": position_client_id,
-            "order_id": execution.get("order_id") or submitted.get("order_id"),
-            "side": "SELL",
-            "quantity": format(quantity, "f"),
-            "bar_timestamp": submission_bar_at,
-            "order_role": "PROTECTIVE_EXIT",
-            "newly_submitted": str(submitted.get("status") or "").upper() != "REPLAYED",
-        }
+    # Preserve the immutable submission identity for terminal executions too, so
+    # the submission stage can repair an audit event after an immediate fill/expiry.
+    execution["order_intent"] = {
+        "client_order_id": position_client_id,
+        "order_id": execution.get("order_id") or submitted.get("order_id"),
+        "side": "SELL",
+        "quantity": format(quantity, "f"),
+        "bar_timestamp": submission_bar_at,
+        "submission_status": str(submitted.get("status") or "SUBMITTED").upper(),
+        "execution_status": str(execution.get("status") or "").upper(),
+        "order_role": "PROTECTIVE_EXIT",
+        "newly_submitted": str(submitted.get("status") or "").upper() != "REPLAYED",
+    }
     return execution
 
 
@@ -1089,6 +1088,7 @@ async def execute_customer_paper_spot_signal(
             "status": "PROTECTIVE_EXIT" if protective_executed else "PROTECTIVE_EXIT_PENDING",
             "decision": "TRADE" if protective_executed else "NO_TRADE",
             "execution": protective,
+            "order_intent": protective.get("order_intent"),
             "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
         }
 
