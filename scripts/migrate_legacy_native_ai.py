@@ -1954,6 +1954,7 @@ def transform_ai_providers(commit: str) -> None:
             ) from exc
 
         all_values: list[ast.AST | None] = []
+        top_level_named_exports: dict[str, ast.Expr] = {}
         dynamic_all = False
         has_nested_star = False
         dynamic_exports = any(
@@ -2157,6 +2158,67 @@ def transform_ai_providers(commit: str) -> None:
                     # Lambda bodies are deferred; default expressions remain checked.
                     deferred_body_nodes.update(id(item) for item in ast.walk(candidate.body))
 
+            class_scope_nodes: set[int] = set()
+            class_global_named_expr_ids: set[int] = set()
+            for candidate in ast.walk(module_node):
+                if not isinstance(candidate, ast.ClassDef):
+                    continue
+                class_global_names: set[str] = set()
+                class_named_expressions: list[ast.NamedExpr] = []
+                pending_class_nodes = list(candidate.body)
+                while pending_class_nodes:
+                    current = pending_class_nodes.pop()
+                    if isinstance(current, ast.ClassDef):
+                        # The nested class name belongs to this class, but its suite
+                        # has its own namespace and is handled by its own iteration.
+                        class_scope_nodes.add(id(current))
+                        pending_class_nodes.extend(current.decorator_list)
+                        pending_class_nodes.extend(current.bases)
+                        pending_class_nodes.extend(keyword.value for keyword in current.keywords)
+                        continue
+                    if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        # Function bodies execute later; only their decorators,
+                        # defaults and annotations are evaluated in the class suite.
+                        class_scope_nodes.add(id(current))
+                        pending_class_nodes.extend(current.decorator_list)
+                        pending_class_nodes.extend(current.args.defaults)
+                        pending_class_nodes.extend(
+                            item for item in current.args.kw_defaults if item is not None
+                        )
+                        for argument in [
+                            *current.args.posonlyargs,
+                            *current.args.args,
+                            *current.args.kwonlyargs,
+                        ]:
+                            if argument.annotation is not None:
+                                pending_class_nodes.append(argument.annotation)
+                        if current.args.vararg and current.args.vararg.annotation is not None:
+                            pending_class_nodes.append(current.args.vararg.annotation)
+                        if current.args.kwarg and current.args.kwarg.annotation is not None:
+                            pending_class_nodes.append(current.args.kwarg.annotation)
+                        if current.returns is not None:
+                            pending_class_nodes.append(current.returns)
+                        continue
+                    if isinstance(current, ast.Lambda):
+                        # Lambda bodies are deferred, but defaults are evaluated here.
+                        class_scope_nodes.add(id(current))
+                        pending_class_nodes.extend(current.args.defaults)
+                        pending_class_nodes.extend(
+                            item for item in current.args.kw_defaults if item is not None
+                        )
+                        continue
+                    class_scope_nodes.add(id(current))
+                    if isinstance(current, ast.Global):
+                        class_global_names.update(current.names)
+                    elif isinstance(current, ast.NamedExpr):
+                        class_named_expressions.append(current)
+                    pending_class_nodes.extend(ast.iter_child_nodes(current))
+                class_global_named_expr_ids.update(
+                    id(expression)
+                    for expression in class_named_expressions
+                    if root_name(expression.target) in class_global_names
+                )
+
             for nested in ast.walk(module_node):
                 # Reading __all__ can leak its mutable list through an alias
                 # (e.g. names = __all__; names.append(...)). Reject that escape
@@ -2198,6 +2260,11 @@ def transform_ai_providers(commit: str) -> None:
                     ):
                         dynamic_all = True
                 elif isinstance(nested, ast.NamedExpr):
+                    if (
+                        id(nested) in class_scope_nodes
+                        and id(nested) not in class_global_named_expr_ids
+                    ):
+                        continue
                     if directly_assigns_all(nested.target):
                         # Only a module-level expression (__all__ := [...]) is an
                         # export declaration. Function-local/nested walruses have a
@@ -2212,6 +2279,25 @@ def transform_ai_providers(commit: str) -> None:
                             dynamic_all = True
                     elif mutates_all_target(nested.target):
                         dynamic_all = True
+                    elif (
+                        isinstance(module_node, ast.Expr)
+                        and module_node.value is nested
+                        and isinstance(nested.target, ast.Name)
+                    ):
+                        # A standalone module-level walrus always executes during
+                        # import and has a statically known binding. Track it so the
+                        # export/order checks can account for star-import shadowing.
+                        top_level_named_exports[nested.target.id] = module_node
+                    elif (
+                        id(nested) not in deferred_body_nodes
+                        and (
+                            not postponed_annotations
+                            or id(nested) not in annotation_node_ids
+                        )
+                    ):
+                        # Nested or conditional module-scope walruses may create
+                        # bindings whose execution/order is not statically proven.
+                        dynamic_exports = True
 
         if dynamic_all or dynamic_exports or has_nested_star or len(all_values) > 1:
             raise MigrationError(
@@ -2239,6 +2325,9 @@ def transform_ai_providers(commit: str) -> None:
                 for name in _defined_names(module_node)
                 if not name.startswith("_")
             }
+            exports.update(
+                name for name in top_level_named_exports if not name.startswith("_")
+            )
 
         last_definitions: dict[str, ast.AST] = {}
         deleted_bindings: set[str] = set()
@@ -2254,6 +2343,17 @@ def transform_ai_providers(commit: str) -> None:
             for defined_name in _defined_names(module_node):
                 last_definitions[defined_name] = module_node
                 deleted_bindings.discard(defined_name)
+            named_expr = top_level_named_exports.get(
+                module_node.value.target.id
+                if isinstance(module_node, ast.Expr)
+                and isinstance(module_node.value, ast.NamedExpr)
+                and isinstance(module_node.value.target, ast.Name)
+                else ""
+            )
+            if named_expr is module_node:
+                named_target = module_node.value.target
+                last_definitions[named_target.id] = module_node
+                deleted_bindings.discard(named_target.id)
         if explicit_all and deleted_bindings.intersection(exports):
             deleted_exports = sorted(deleted_bindings.intersection(exports))
             raise MigrationError(
