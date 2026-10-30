@@ -1,4 +1,4 @@
-"""Regression tests for Native AI with optional, research-only Groq deployment wiring."""
+"""Regression tests for optional Groq research and trade-review deployment wiring."""
 from pathlib import Path
 
 
@@ -21,6 +21,7 @@ def test_api_keeps_groq_secret_optional_and_gemini_removed():
     assert 'GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"' in script
     assert 'GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"' in script
     assert 'GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"' in script
+    assert 'GROQ_TRADE_REVIEW_ENABLED="${GROQ_TRADE_REVIEW_ENABLED:-false}"' in script
     assert 'python "${REPO_ROOT}/scripts/validate_groq_deploy_env.py"' in script
     assert 'dirname -- "${BASH_SOURCE[0]}") && pwd)/validate_groq_deploy_env.py' not in script
     assert "GEMINI_API_KEY" not in script
@@ -71,12 +72,13 @@ def test_production_workflow_passes_optional_groq_secret_without_gemini():
     assert "GEMINI_STRATEGY_MODEL" not in workflow
 
 
-def test_example_documents_optional_groq_research_review_only():
+def test_example_documents_optional_groq_research_and_trade_review():
     env = ENV_EXAMPLE.read_text(encoding="utf-8")
     assert "GROQ_API_KEY=" in env
     assert "GROQ_MODEL=openai/gpt-oss-20b" in env
     assert "GROQ_MAX_COMPLETION_TOKENS=2048" in env
     assert "GROQ_RESEARCH_REVIEW_ENABLED=true" in env
+    assert "GROQ_TRADE_REVIEW_ENABLED=false" in env
     assert "GEMINI_API_KEY" not in env
 
 
