@@ -5633,10 +5633,383 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
     """
     lines = text.splitlines(keepends=True)
     kept: list[str] = []
+    jobs_match = re.search(r"(?m)^([ \t]*)jobs:[ \t]*(?:#.*)?$", text)
+    job_indent = len(jobs_match.group(1)) + 2 if jobs_match else None
+    job_header_re = (
+        re.compile(rf"^[ \t]{{{job_indent}}}[A-Za-z0-9_-]+:[ \t]*(?:#.*)?(?:\r?\n)?$")
+        if job_indent is not None
+        else None
+    )
+    native_ai_provider_step_replaced_in_job = False
     index = 0
     while index < len(lines):
         line = lines[index]
+        if job_header_re and job_header_re.match(line):
+            native_ai_provider_step_replaced_in_job = False
         stripped = line.lstrip()
+
+        # Replace only the reviewed legacy live-inference step. Native AI must be
+        # verified offline; this known step performed external Gemini/Groq calls and
+        # required provider credentials that must not remain on the production gate.
+        legacy_live_ai_step = re.match(
+            r"^([ \t]*)-[ \t]+name:[ \t]*AI provider live inference verification[ \t]*(?:\r?\n)?$",
+            line,
+            re.I,
+        )
+        if legacy_live_ai_step:
+            step_indent = legacy_live_ai_step.group(1)
+            end = index + 1
+            while end < len(lines):
+                candidate = lines[end]
+                candidate_indent = len(candidate) - len(candidate.lstrip())
+                if (
+                    candidate.strip()
+                    and candidate_indent == len(step_indent)
+                    and re.match(r"^[ \t]*-[ \t]+", candidate)
+                ):
+                    break
+                end += 1
+
+            step_text = "".join(lines[index:end])
+            run_match = re.search(r"(?m)^([ \t]*)run:[ \t]*\|[ \t]*\r?$", step_text)
+            expected_metadata = [
+                "- name: AI provider live inference verification",
+                "env:",
+                "GEMINI_API_KEY: " + "$" + "{{ secrets.GEMINI_API_KEY }}",
+                "GROQ_API_KEY: " + "$" + "{{ secrets.GROQ_API_KEY }}",
+            ]
+            metadata_text = step_text[:run_match.start()] if run_match else ""
+            metadata_lines = [item.strip() for item in metadata_text.splitlines() if item.strip()]
+            if not run_match or metadata_lines != expected_metadata or re.search(r"(?m)^[ \t]*uses:", step_text):
+                raise MigrationError(
+                    f"{path} has an unrecognized legacy live-AI verification step; refusing to discard workflow behavior"
+                )
+
+            run_indent = len(run_match.group(1))
+            command_lines = []
+            for command_line in step_text[run_match.end():].splitlines():
+                if not command_line.strip():
+                    continue
+                if len(command_line) - len(command_line.lstrip()) <= run_indent:
+                    raise MigrationError(
+                        f"{path} has an unexpected YAML field after the legacy live-AI run block"
+                    )
+                command = command_line.strip()
+                allowed = (
+                    re.fullmatch(r"set [+-]e", command)
+                    or command == "python scripts/check_ai_models.py"
+                    or command == "status=$?"
+                    or command in {
+                        'if [ "$status" -eq 0 ]; then',
+                        'elif [ "$status" -eq 2 ]; then',
+                        "else",
+                        "exit 1",
+                        'exit "$status"',
+                        "fi",
+                    }
+                    or command in {
+                        'echo "AI provider verification: PASS (Gemini and Groq inference requests succeeded)." | tee -a "$GITHUB_STEP_SUMMARY"',
+                        'echo "AI provider verification: NOT VERIFIED (one or more required AI credentials/models are missing; see checker output)." | tee -a "$GITHUB_STEP_SUMMARY"',
+                        'echo "AI provider verification: FAIL (one or more inference requests failed; checker exit code $status)." | tee -a "$GITHUB_STEP_SUMMARY"',
+                    }
+                )
+                if not allowed:
+                    raise MigrationError(
+                        f"{path} has an unexpected command in the legacy live-AI verification step: {command[:100]}"
+                    )
+                command_lines.append(command)
+
+            expected_commands = [
+                "set +e",
+                "python scripts/check_ai_models.py",
+                "status=$?",
+                "set -e",
+                'if [ "$status" -eq 0 ]; then',
+                'echo "AI provider verification: PASS (Gemini and Groq inference requests succeeded)." | tee -a "$GITHUB_STEP_SUMMARY"',
+                'elif [ "$status" -eq 2 ]; then',
+                'echo "AI provider verification: NOT VERIFIED (one or more required AI credentials/models are missing; see checker output)." | tee -a "$GITHUB_STEP_SUMMARY"',
+                "exit 1",
+                "else",
+                'echo "AI provider verification: FAIL (one or more inference requests failed; checker exit code $status)." | tee -a "$GITHUB_STEP_SUMMARY"',
+                'exit "$status"',
+                "fi",
+            ]
+            if command_lines != expected_commands:
+                raise MigrationError(
+                    f"{path} has an incomplete legacy live-AI verification step; refusing to weaken the production gate"
+                )
+
+            kept.extend(
+                [
+                    f"{step_indent}- name: Atlas Native AI offline verification (no provider calls)\n",
+                    f"{step_indent}  id: native_ai_verification\n",
+                    f"{step_indent}  run: python -m scripts.check_native_ai\n",
+                ]
+            )
+            index = end
+            continue
+        legacy_named_ai_step = re.match(
+            r"^([ \t]*)-[ \t]+name:[ \t]*(AI model/provider verification when credentials are supplied|AI model/provider verification \(manual dispatch only; uses provider quota\))[ \t]*(?:\r?\n)?$",
+            line,
+            re.I,
+        )
+        if legacy_named_ai_step:
+            step_indent = legacy_named_ai_step.group(1)
+            end = index + 1
+            while end < len(lines):
+                candidate = lines[end]
+                candidate_indent = len(candidate) - len(candidate.lstrip())
+                if (
+                    candidate.strip()
+                    and candidate_indent == len(step_indent)
+                    and re.match(r"^[ \t]*-[ \t]+", candidate)
+                ):
+                    break
+                end += 1
+            step_text = "".join(lines[index:end])
+            run_match = re.search(r"(?m)^([ \t]*)run:[ \t]*\|[ \t]*\r?$", step_text)
+            metadata_text = step_text[:run_match.start()] if run_match else ""
+            metadata_lines = [
+                item.strip()
+                for item in metadata_text.splitlines()
+                if item.strip() and not item.lstrip().startswith("#")
+            ]
+            metadata_keys = {}
+            for item in metadata_lines[1:]:
+                key_match = re.match(r"^([A-Z_]+):", item)
+                if key_match:
+                    metadata_keys[key_match.group(1)] = item
+            allowed_env_keys = {
+                "PYTHONPATH",
+                "GEMINI_API_KEY",
+                "GROQ_API_KEY",
+                "CEREBRAS_API_KEY",
+                "GEMINI_MODEL",
+                "GEMINI_STRATEGY_MODEL",
+            }
+            observed_env_keys = set(metadata_keys).intersection(allowed_env_keys)
+            step_name = legacy_named_ai_step.group(2)
+            manual_dispatch_condition = "if: github.event_name == 'workflow_dispatch'"
+            metadata_conditions = [item for item in metadata_lines if item.startswith("if:")]
+            allowed_metadata_fields = {
+                "id: ai_provider_verification",
+                "continue-on-error: true",
+                "env:",
+            }
+            unexpected_metadata = [
+                item
+                for item in metadata_lines[1:]
+                if (
+                    item not in allowed_metadata_fields
+                    and item not in metadata_conditions
+                    and not re.match(r"^[A-Z_]+:", item)
+                )
+            ]
+            if (
+                not run_match
+                or metadata_lines[0] != "- name: " + step_name
+                or "id: ai_provider_verification" not in metadata_lines
+                or "continue-on-error: true" not in metadata_lines
+                or "env:" not in metadata_lines
+                or not {"PYTHONPATH", "GEMINI_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY"}.issubset(observed_env_keys)
+                or set(metadata_keys) - allowed_env_keys
+                or unexpected_metadata
+                or any(item != manual_dispatch_condition for item in metadata_conditions)
+                or (
+                    "manual dispatch only" in step_name.lower()
+                    and metadata_conditions != [manual_dispatch_condition]
+                )
+            ):
+                raise MigrationError(
+                    f"{path} has an unrecognized legacy AI model/provider verification step; refusing to discard workflow behavior"
+                )
+
+            run_indent = len(run_match.group(1))
+            commands = []
+            grep_checks = []
+            for command_line in step_text[run_match.end():].splitlines():
+                if not command_line.strip():
+                    continue
+                if len(command_line) - len(command_line.lstrip()) <= run_indent:
+                    raise MigrationError(
+                        f"{path} has an unexpected YAML field after the legacy AI provider run block"
+                    )
+                command = command_line.strip()
+                is_grep_check = (
+                    ("grep -Eq" in command)
+                    and ("ai-provider-verification.log" in command)
+                    and (
+                        ("Gemini" in command and "HTTP 429" in command)
+                        or ("Groq" in command and ("succeeded" in command or "failed" in command))
+                        or ("Cerebras" in command and "failed" in command)
+                    )
+                    and command.startswith(("elif ", "&& ", "&& ! "))
+                    and (command.endswith("\\") or command.endswith("; then"))
+                )
+                is_echo = command in {
+                    'echo "gemini_deferred=false" >> "$GITHUB_OUTPUT"',
+                    'echo "gemini_deferred=true" >> "$GITHUB_OUTPUT"',
+                    'echo "BLOCKED: provider credentials are not configured; production verification cannot pass without provider checks"',
+                    'echo "::warning::Gemini check temporarily waived due to known exhausted test quota (HTTP 429); Groq inference passed. Recheck Gemini after quota reset."',
+                    'echo "BLOCKED: AI model/provider verification failed with exit code $status"',
+                }
+                allowed = (
+                    command in {
+                        "set +e",
+                        "set -e",
+                        "status=$?",
+                        "status=${PIPESTATUS[0]}",
+                        'if [ "$status" -eq 0 ]; then',
+                        'elif [ "$status" -eq 2 ]; then',
+                        "else",
+                        "exit 0",
+                        "exit 2",
+                        'exit "$status"',
+                        "fi",
+                    }
+                    or command in {
+                        "python -m scripts.check_ai_models 2>&1 | tee ai-provider-verification.log",
+                        "python -m scripts.check_ai_models",
+                        "python scripts/check_ai_models.py",
+                    }
+                    or is_echo
+                    or is_grep_check
+                )
+                if not allowed:
+                    raise MigrationError(
+                        f"{path} has an unexpected command in the legacy AI model/provider verification step: {command[:100]}"
+                    )
+                commands.append(command)
+                if is_grep_check:
+                    grep_checks.append(command)
+
+            required_commands = {
+                "set +e",
+                "set -e",
+                'if [ "$status" -eq 0 ]; then',
+                'elif [ "$status" -eq 2 ]; then',
+                "else",
+                "fi",
+            }
+            has_ai_checker = any(
+                "scripts.check_ai_models" in command or "scripts/check_ai_models.py" in command
+                for command in commands
+            )
+            has_status_capture = any(command in {"status=$?", "status=${PIPESTATUS[0]}"} for command in commands)
+            if (
+                not required_commands.issubset(set(commands))
+                or not has_ai_checker
+                or not has_status_capture
+                or not any(command.startswith("exit ") for command in commands)
+                or (grep_checks and not any("HTTP 429" in command for command in grep_checks))
+            ):
+                raise MigrationError(
+                    f"{path} has an incomplete legacy AI model/provider verification step; refusing to weaken the production gate"
+                )
+
+            kept.extend(
+                [
+                    f"{step_indent}- name: Atlas Native AI offline verification (no provider calls)\n",
+                    f"{step_indent}  id: native_ai_verification\n",
+                    f"{step_indent}  run: python -m scripts.check_native_ai\n",
+                ]
+            )
+            native_ai_provider_step_replaced_in_job = True
+            index = end
+            continue
+
+        legacy_provider_result_gate = re.match(
+            r"^([ \t]*)-[ \t]+name:[ \t]*Enforce provider verification result[ \t]*(?:\r?\n)?$",
+            line,
+            re.I,
+        )
+        if legacy_provider_result_gate:
+            if not native_ai_provider_step_replaced_in_job:
+                raise MigrationError(
+                    f"{path} has an orphaned provider verification result gate without a replaced producer; preserving the gate"
+                )
+            step_indent = legacy_provider_result_gate.group(1)
+            end = index + 1
+            while end < len(lines):
+                candidate = lines[end]
+                candidate_indent = len(candidate) - len(candidate.lstrip())
+                if (
+                    candidate.strip()
+                    and candidate_indent == len(step_indent)
+                    and re.match(r"^[ \t]*-[ \t]+", candidate)
+                ):
+                    break
+                end += 1
+            step_text = "".join(lines[index:end])
+            run_match = re.search(r"(?m)^([ \t]*)run:[ \t]*\|[ \t]*\r?$", step_text)
+            metadata_text = step_text[:run_match.start()] if run_match else ""
+            metadata_lines = [
+                item.strip()
+                for item in metadata_text.splitlines()
+                if item.strip() and not item.lstrip().startswith("#")
+            ]
+            allowed_metadata = {
+                "- name: Enforce provider verification result",
+                "if: always()",
+                "env:",
+                "PROVIDER_VERIFICATION_OUTCOME: " + "$" + "{{ steps.ai_provider_verification.outcome }}",
+                "GEMINI_VERIFICATION_DEFERRED: " + "$" + "{{ steps.ai_provider_verification.outputs.gemini_deferred }}",
+            }
+            if (
+                not run_match
+                or metadata_lines[0] != "- name: Enforce provider verification result"
+                or "if: always()" not in metadata_lines
+                or "env:" not in metadata_lines
+                or not any(item.startswith("PROVIDER_VERIFICATION_OUTCOME: ") for item in metadata_lines)
+                or any(item not in allowed_metadata for item in metadata_lines)
+            ):
+                raise MigrationError(
+                    f"{path} has an unrecognized legacy provider result gate; refusing to remove it"
+                )
+            run_indent = len(run_match.group(1))
+            commands = []
+            for command_line in step_text[run_match.end():].splitlines():
+                if not command_line.strip():
+                    continue
+                if len(command_line) - len(command_line.lstrip()) <= run_indent:
+                    raise MigrationError(
+                        f"{path} has an unexpected YAML field after the legacy provider result gate"
+                    )
+                command = command_line.strip()
+                allowed = (
+                    command in {
+                        'if [ "$PROVIDER_VERIFICATION_OUTCOME" != "success" ]; then',
+                        'if [ "$GEMINI_VERIFICATION_DEFERRED" = "true" ]; then',
+                        "else",
+                        "fi",
+                        "exit 1",
+                    }
+                    or command in {
+                        'echo "BLOCKED: production gate requires successful live AI provider verification."',
+                        'echo "BLOCKED: production gate requires successful live inference for every configured AI provider."',
+                        'echo "::warning::Provider gate passed with temporary Gemini quota waiver. Groq passed; retry Gemini after the quota resets."',
+                        'echo "AI provider verification passed for all configured providers."',
+                        'echo "Live AI provider verification passed for every configured model."',
+                    }
+                )
+                if not allowed:
+                    raise MigrationError(
+                        f"{path} has an unexpected command in the legacy provider result gate: {command[:100]}"
+                    )
+                commands.append(command)
+            if (
+                'if [ "$PROVIDER_VERIFICATION_OUTCOME" != "success" ]; then' not in commands
+                or "exit 1" not in commands
+                or not any("BLOCKED:" in command for command in commands)
+                or commands.count("fi") < 1
+            ):
+                raise MigrationError(
+                    f"{path} has an incomplete legacy provider result gate; refusing to remove it"
+                )
+            # The paired producer was replaced by the fail-fast offline Native AI check.
+            native_ai_provider_step_replaced_in_job = False
+            index = end
+            continue
         if not stripped or stripped.startswith("#"):
             kept.append(line)
             index += 1
@@ -5826,6 +6199,120 @@ def scrub_ancillary_text(path: str, text: str) -> str:
     is_markdown = path.lower().endswith(".md")
     markdown_fence_char: str | None = None
     markdown_fence_length = 0
+    markdown_fence_language = ""
+    markdown_retired_provider_re = re.compile(
+        r"(?i)(?:gemini|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
+        r"api\.cerebras\.ai|api\.openai\.com|AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|"
+        r"OPENAI_[A-Z0-9_]+|openai-compatible|GEMINI_[A-Z0-9_]+|SECRET_GEMINI[A-Z0-9_]*|"
+        r"atlas-gemini|_gemini_json|GROQ_STRATEGY_(?:MODEL|API_KEY)|groq_strategy_model|_groq_json)"
+    )
+
+    def scrub_markdown_line(line: str) -> str:
+        historical_gemini_defect = (
+            "| API deployment previously injected Gemini strategy-provider secrets |"
+        )
+        if line.lstrip().startswith(historical_gemini_defect):
+            newline = "\n" if line.endswith("\n") else ""
+            return (
+                "| API deployment previously injected legacy hosted strategy-provider secrets | "
+                "Legacy hosted-provider quotas and credentials could block strategy generation despite healthy core code | "
+                "Legacy hosted strategy calls were removed; Native AI now runs locally, while an optional Groq research-only secret can be injected separately |"
+                + newline
+            )
+        # Remove obsolete credential/model table rows rather than leaving empty,
+        # misleading entries after their provider-specific values are stripped.
+        if line.lstrip().startswith("|") and re.search(
+            r"(?i)GEMINI_|atlas-gemini|gemini-[A-Za-z0-9_.*-]+", line
+        ):
+            return ""
+
+        line = re.sub(
+            r"(?i)Both Gemini and Groq must approve every trade plan",
+            "Native AI provides the trade-safety path; optional Groq research review is advisory and cannot authorize trades",
+            line,
+        )
+        line = re.sub(
+            r"(?i)Gemini key and a Groq key",
+            "an optional Groq research-review key (Native AI requires no provider key)",
+            line,
+        )
+        line = re.sub(
+            r"(?i)set Groq\s*\(and Gemini\)\s*in both",
+            "configure optional Groq research review in both",
+            line,
+        )
+        line = re.sub(
+            r"(?i)Gemini strategy-provider secrets",
+            "legacy hosted strategy-provider secrets",
+            line,
+        )
+        line = re.sub(
+            r"(?i)deprecation notices for \x60?gemini-[^\x60 ]+\x60?",
+            "legacy hosted-model deprecation notices",
+            line,
+        )
+        line = SECRET_VERSION_RE.sub("", line)
+        line = KEY_ASSIGNMENT_RE.sub("", line)
+        line = HOST_RE.sub("", line)
+        line = re.sub(r"(?i)\batlas-gemini-[A-Za-z0-9_.:-]+\b", "", line)
+        line = re.sub(r"(?i)\bSECRET_GEMINI[A-Z0-9_]*\b|\bGEMINI_[A-Z0-9_]+\b", "", line)
+        line = re.sub(r"(?i)\bgemini-[A-Za-z0-9_.*-]+\b", "", line)
+        line = re.sub(r"(?i)\bGROQ_STRATEGY_(?:MODEL|API_KEY)\b", "", line)
+        line = re.sub(r"(?i)\bgroq_strategy_model\b|\b_groq_json\b|\b_gemini_json\b", "", line)
+        line = re.sub(r"(?i)\b(?:CEREBRAS_[A-Z0-9_]+|AI_GATEWAY_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+)\b", "", line)
+        line = re.sub(r"(?i)\batlas-(?:cerebras|ai-gateway|openai)-[A-Za-z0-9_.:-]+\b", "", line)
+        line = re.sub(r"(?i)\bopenai-compatible\b", "", line)
+        line = re.sub(r"(?i)\bCerebras\b|\bAI Gateway\b", "", line)
+        line = re.sub(r"(?i)\bGemini\b", "Atlas Native AI", line)
+        # Keep Groq in documentation, but make its permitted role explicit.
+        # Protect phrases already annotated by the substitutions above from being duplicated.
+        line = re.sub(r"(?i)\boptional Groq\b", "__ATLAS_OPTIONAL_GROQ__", line)
+        line = re.sub(r"\bGroq\b", "optional Groq research review", line)
+        line = line.replace("__ATLAS_OPTIONAL_GROQ__", "optional Groq")
+        if not re.search(r"(?i)\bSecret Manager\b", line):
+            line = re.sub(r"[ \t]{2,}", " ", line)
+        return line
+
+    def scrub_markdown_assignment_line(line: str) -> str | None:
+        """Remove only retired assignment tokens from a fenced env example."""
+        newline = "\n" if line.endswith("\n") else ""
+        without_newline = line[:-1] if newline else line
+        indent = without_newline[: len(without_newline) - len(without_newline.lstrip())]
+        body = without_newline.strip()
+        continuation = body.endswith("\\")
+        if continuation:
+            body = body[:-1].rstrip()
+        tokens = body.split()
+        assignment_re = re.compile(
+            r"""^([A-Za-z_][A-Za-z0-9_]*)=(?:"[^"]*"|'[^']*'|[^\s\\]+)$"""
+        )
+        if not tokens or any(not assignment_re.fullmatch(token) for token in tokens):
+            return None
+
+        removed_names = {
+            "SECRET_GEMINI_REF",
+            "SECRET_GROQ_REF",
+            "GEMINI_API_KEY",
+            "GEMINI_MODEL",
+            "GEMINI_STRATEGY_MODEL",
+            "GROQ_STRATEGY_MODEL",
+            "GROQ_STRATEGY_API_KEY",
+        }
+        # Do not mistake arbitrary fenced Python assignments (for example,
+        # client = GeminiClient()) for disposable environment declarations.
+        if not any(token.split("=", 1)[0].upper() in removed_names for token in tokens):
+            return None
+        retained = []
+        for token in tokens:
+            name = token.split("=", 1)[0]
+            if name.upper() in removed_names or markdown_retired_provider_re.search(token):
+                continue
+            retained.append(token)
+        if not retained:
+            return ""
+        suffix = " \\" if continuation else ""
+        return indent + " ".join(retained) + suffix + newline
+
     for line in text.splitlines(keepends=True):
         fence_match = re.match(r"^\s*(\x60{3,}|~{3,})(.*?)(?:\r?\n)?$", line)
         if is_markdown and fence_match:
@@ -5833,6 +6320,8 @@ def scrub_ancillary_text(path: str, text: str) -> str:
             if markdown_fence_char is None:
                 markdown_fence_char = marker[0]
                 markdown_fence_length = len(marker)
+                language = suffix.strip().split(None, 1)[0].lower() if suffix.strip() else ""
+                markdown_fence_language = language
                 kept.append(line)
                 continue
             if (
@@ -5842,34 +6331,76 @@ def scrub_ancillary_text(path: str, text: str) -> str:
             ):
                 markdown_fence_char = None
                 markdown_fence_length = 0
+                markdown_fence_language = ""
                 kept.append(line)
                 continue
             # A shorter marker (e.g. three backticks inside a four-backtick
             # fence) is content rather than a closing delimiter.
-        if not RETIRED_PROVIDER_RE.search(line):
-            kept.append(line)
-            continue
-        if is_markdown and markdown_fence_char is not None:
+
+        if is_markdown and markdown_fence_char is not None and markdown_retired_provider_re.search(line):
+            # Fenced shell deployment examples may contain a provider-only assignment
+            # alongside unrelated required variables. Remove only that assignment token.
+            if markdown_fence_language in {"", "bash", "sh", "shell", "text", "plaintext"}:
+                assignment_line = scrub_markdown_assignment_line(line)
+                if assignment_line is not None:
+                    if assignment_line:
+                        kept.append(assignment_line)
+                    continue
+                # This known diagram is descriptive ASCII architecture, not executable
+                # shell/Python. Rewrite provider labels but retain the architecture.
+                if (
+                    markdown_fence_language == ""
+                    and re.search(r"(?i)\bSecret Manager\b", line)
+                    and not re.search(r"[;&|<>\x60\$]", line)
+                ):
+                    candidate = scrub_markdown_line(line)
+                    if markdown_retired_provider_re.search(candidate):
+                        raise MigrationError(
+                            f"{path} retains retired-provider wording in a fenced architecture diagram"
+                        )
+                    kept.append(candidate)
+                    continue
             raise MigrationError(
                 f"{path} contains provider-bearing code inside a Markdown code fence; "
                 "refusing to rewrite an executable example"
             )
+
+        if not RETIRED_PROVIDER_RE.search(line) and not (
+            is_markdown and markdown_retired_provider_re.search(line)
+        ):
+            kept.append(line)
+            continue
+
+        if is_markdown:
+            candidate = scrub_markdown_line(line)
+            if markdown_retired_provider_re.search(candidate):
+                raise MigrationError(f"{path} still contains retired-provider text after documentation cleanup")
+            if candidate.strip():
+                kept.append(candidate)
+            continue
+
         candidate = SECRET_VERSION_RE.sub("", line)
         candidate = KEY_ASSIGNMENT_RE.sub("", candidate)
         candidate = HOST_RE.sub("", candidate)
         candidate = MODEL_RE.sub("atlas-native-strategy-v1", candidate)
         candidate = re.sub(r"(?i)\b(?:Gemini|Cerebras|AI Gateway)\b", "", candidate)
         if RETIRED_PROVIDER_RE.search(candidate):
-            if (
-                re.search(r"(?i)\b(?:gcloud|docker|curl|python|bash|run:)\b", candidate)
-                and not is_markdown
-            ):
-                raise MigrationError(f"{path} has provider wiring inside an executable line; refusing automatic deletion")
+            if re.search(r"(?i)\b(?:gcloud|docker|curl|python|bash|run:)\b", candidate):
+                raise MigrationError(
+                    f"{path} has provider wiring inside an executable line; refusing automatic deletion"
+                )
             candidate = RETIRED_PROVIDER_RE.sub("legacy provider", candidate)
         if candidate.strip():
             kept.append(candidate)
+
+    if is_markdown and markdown_fence_char is not None:
+        if markdown_retired_provider_re.search("".join(kept)):
+            raise MigrationError(f"{path} has an unterminated provider-bearing Markdown code fence")
     cleaned = "".join(_remove_empty_env(kept))
-    if RETIRED_PROVIDER_RE.search(cleaned):
+    if is_markdown:
+        if markdown_retired_provider_re.search(cleaned):
+            raise MigrationError(f"{path} still contains retired-provider documentation")
+    elif RETIRED_PROVIDER_RE.search(cleaned):
         raise MigrationError(f"{path} still contains retired-provider references")
     if path == "metadata.json":
         json.loads(cleaned)
