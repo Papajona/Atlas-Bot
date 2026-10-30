@@ -9,7 +9,8 @@ from typing import Any
 
 def _container_env(service: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Support both Cloud Run v1 and v2 service response shapes."""
-    template = service.get("spec", {}).get("template")
+    service_spec = service.get("spec")
+    template = service_spec.get("template") if isinstance(service_spec, dict) else None
     if not isinstance(template, dict):
         template = service.get("template")
     if not isinstance(template, dict):
@@ -74,7 +75,7 @@ def main() -> int:
         if not isinstance(payload, dict):
             raise ValueError("API service response must be an object")
         print("\n".join(resolve(payload)))
-    except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+    except (AttributeError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     return 0
