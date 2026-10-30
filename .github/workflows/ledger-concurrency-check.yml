@@ -101,10 +101,6 @@ jobs:
           alembic upgrade head
           alembic current
           alembic heads
-          # The disposable primary migration fixture must not give the paper
-          # runtime identity CREATE on the primary public schema.
-          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test \
-            -c "REVOKE CREATE ON SCHEMA public FROM PUBLIC; REVOKE CREATE ON SCHEMA public FROM atlas_paper_app"
 
       - name: Verify PostgreSQL custody decimal schema and exact round-trip
         env:
