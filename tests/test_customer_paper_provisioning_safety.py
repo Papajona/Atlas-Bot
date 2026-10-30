@@ -183,7 +183,7 @@ def test_provision_verifier_matches_all_nine_current_schema_tables_and_policy_ty
     assert "policyname='customer_paper_tenant'" in VERIFY_SQL
     assert "policyname='customer_paper_bar_budget_backend'" in VERIFY_SQL
     source = Path("scripts/provision_customer_paper_schema.py").read_text(encoding="utf-8")
-    assert "len(verification) != 12" in source
+    assert "len(verification) != 13" in source
     assert '"nine_paper_tables_only": table_count == "9" and expected_table_count == "9"' in source
 
 
