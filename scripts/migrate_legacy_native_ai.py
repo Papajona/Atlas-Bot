@@ -5512,7 +5512,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         block_start += 1
 
     variable_pattern = re.compile(
-        r"(?i)\b(?:SECRET_GEMINI[A-Z0-9_]*|"
+        r"(?i)\b(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|"
         r"GEMINI_API_KEY|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|AI_SECRET_ARGS|"
         r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\b"
     )
@@ -5634,7 +5634,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 output.append(scrub_ai_secret_args(line))
                 continue
             provider_assignment = re.match(
-                r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
+                r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|"
                 r"GEMINI_API_KEY|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|"
                 r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
                 line, re.I,
@@ -5658,10 +5658,10 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             continue
 
         # Provider-only shell declarations/guards/secret commands have no unrelated payload.
-        if re.match(r"^\s*(?::\s*)?['\"]?\$\{?(?:SECRET_GEMINI|GEMINI_API_KEY)", line, re.I):
+        if re.match(r"^\s*(?::\s*)?['\"]?\$\{?(?:SECRET_GEMINI|SECRET_CEREBRAS|GEMINI_API_KEY)", line, re.I):
             continue
         if re.match(
-            r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|"
+            r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|"
             r"GEMINI_API_KEY|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|"
             r"CEREBRAS_[A-Z0-9_]*|AI_GATEWAY_[A-Z0-9_]*|OPENAI_[A-Z0-9_]*|OPENAI_SECRET_ARG)\s*=",
             line, re.I,
