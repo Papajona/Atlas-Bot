@@ -1330,8 +1330,7 @@ async def get_customer_paper_positions(*, customer_id: int) -> list[dict[str, st
                     COALESCE(entry_order.metadata_json ->> 'take_profit_price', '') AS take_profit_price,
                     COALESCE(
                         entry_order.metadata_json ->> 'execution_owner',
-                        CASE WHEN entry_order.metadata_json ->> 'paper_flow_version' = '1'
-                             THEN 'autonomous_customer_bot' ELSE 'manual_customer_api' END
+                        'manual_customer_api'
                     ) AS execution_owner
                 FROM customer_paper.position_events AS pe
                 JOIN customer_paper.fills AS f
