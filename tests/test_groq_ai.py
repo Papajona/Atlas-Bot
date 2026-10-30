@@ -480,13 +480,13 @@ def test_groq_trade_review_rejects_actionable_or_invalid_assessments():
 def test_groq_trade_context_prompt_includes_produced_rule_macro_and_model_risk_fields():
     packet = {
         "symbol": "BTC/USDT",
-        "trade_plan": {"side": "buy", "entry_price": 100, "stop_loss_price": 95, "take_profit_price": 110},
+        "trade_plan": {"side": "buy", "entry_price": 100, "stop_loss_price": 95, "take_profit_price": 110, "atr": 2.5},
         "deterministic_rules": {"min_reward_risk": 2.0, "max_spread_bps": 25.0, "stop_atr": 1.5},
         "strategy_router": {"strategy": "trend", "validation_gate": {"passed": True, "folds": 5}},
         "macro_context": {"status": "OK", "risk_state": "ELEVATED", "risk_score": 0.82},
         "adaptive_model": {"status": "CHAMPION_FRESH", "feature_drift": {"status": "WARN", "mean_psi": 0.12}},
         "ml_signal": {"signal": 1, "long_probability": 0.78, "flat_probability": 0.12, "short_probability": 0.10, "score": 0.68},
-        "derivatives_context": {"state": "ELEVATED", "funding_rate": 0.001},
+        "derivatives_context": {"state": "ELEVATED", "stress_score": 0.68, "components": {"funding_crowding": 0.7}, "observations": 3, "confidence": 0.6},
     }
     prompt, truncated = groq_ai._trade_context_prompt(packet)
     assert truncated is False
@@ -500,7 +500,11 @@ def test_groq_trade_context_prompt_includes_produced_rule_macro_and_model_risk_f
         '"flat_probability":0.12',
         '"short_probability":0.1',
         '"validation_gate":{"passed":true,"folds":5}',
-        '"funding_rate":0.001',
+        '"atr":2.5',
+        '"stress_score":0.68',
+        '"components":{"funding_crowding":0.7}',
+        '"observations":3',
+        '"confidence":0.6',
     ):
         assert evidence in prompt
 
@@ -512,12 +516,67 @@ def test_groq_trade_review_is_bounded_by_native_ai_deadline(monkeypatch):
         await asyncio.sleep(0.1)
         return {"status": "OK", "provider": "groq", "execution_authority": False}
 
-    monkeypatch.setattr(app_main.settings, "groq_research_review_enabled", True)
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_enabled", True)
     monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 0.005)
     monkeypatch.setattr(app_main, "groq_trade_context_review", slow_review)
     result = asyncio.run(app_main._attach_groq_trade_review({"symbol": "BTC/USDT"}))
     assert result["status"] == "ERROR"
     assert result["error"] == "TimeoutError"
+
+
+def test_groq_trade_prompt_summarizes_router_and_model_drift_without_nested_truncation():
+    packet = {
+        "symbol": "BTC/USDT",
+        "trade_plan": {
+            "side": "buy", "entry_price": 100, "stop_loss_price": 95,
+            "take_profit_price": 110, "atr": 2.5,
+        },
+        "strategy_router": {
+            "status": "OK",
+            "strategy": "trend",
+            "validation_gate": {"passed": True, "folds": 5, "positive_fold_ratio": 0.8},
+            "ranked": [{"strategy": "trend", "score": 0.9, "metrics": {"trades": 30}}],
+            "blend": [{"strategy": "trend", "weight": 0.7}],
+        },
+        "adaptive_model": {
+            "status": "CHAMPION_FRESH",
+            "feature_drift": {
+                "status": "WARN", "mean_psi": 0.12, "max_psi": 0.31,
+                "max_psi_feature": "vol_12", "sample_bars": 300,
+                "per_feature_psi": {"ret_1": 0.1, "vol_1": 0.2},
+            },
+        },
+    }
+
+    prompt, truncated = groq_ai._trade_context_prompt(packet)
+
+    assert truncated is False
+    assert '"atr":2.5' in prompt
+    assert '"validation_gate":{"passed":true,"folds":5,"positive_fold_ratio":0.8}' in prompt
+    assert '"mean_psi":0.12' in prompt
+    assert '"max_psi_feature":"vol_12"' in prompt
+    assert '"ranked"' not in prompt
+    assert '"blend"' not in prompt
+    assert '"per_feature_psi"' not in prompt
+
+
+def test_groq_trade_prompt_marks_wrapper_escaping_truncation_as_incomplete():
+    packet = {
+        "symbol": "BTC/USDT",
+        "macro_context": {"status": "OK", "failures": ["<" * 300 for _ in range(12)]},
+    }
+    with pytest.raises(groq_ai.GroqAIError) as raised:
+        groq_ai._trade_context_prompt(packet)
+    assert raised.value.input_truncated is True
+
+
+def test_trade_time_groq_review_is_opt_in_by_default(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.delenv("GROQ_TRADE_REVIEW_ENABLED", raising=False)
+    configured = Settings(environment="test", _env_file=None)
+    assert configured.groq_trade_review_enabled is False
+    assert configured.groq_research_review_enabled is True
 
 
 def test_groq_trade_review_marks_compacted_evidence_as_truncated():
