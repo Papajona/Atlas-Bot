@@ -706,6 +706,23 @@ def test_groq_timeout_becomes_error_envelope_inside_shared_decision_deadline(mon
     assert native_observed == ["ERROR"]
 
 
+def test_groq_trade_review_fails_closed_when_native_veto_budget_is_zero_or_negative(monkeypatch):
+    from app import main as app_main
+
+    async def forbidden_attach(*_args, **_kwargs):
+        raise AssertionError("Groq must not run without a positive Native AI veto reserve")
+
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_enabled", True)
+    monkeypatch.setattr(app_main.settings, "ai_trade_decision_total_timeout_seconds", 6.5)
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 5.0)
+    monkeypatch.setattr(app_main, "_attach_groq_trade_review", forbidden_attach)
+
+    for native_timeout in (0.0, -0.1):
+        monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", native_timeout)
+        with pytest.raises(asyncio.TimeoutError):
+            asyncio.run(app_main._run_trade_safety_review({"symbol": "BTC/USDT"}))
+
+
 def test_groq_receives_five_seconds_and_native_keeps_full_veto_reserve(monkeypatch):
     from app import main as app_main
 
