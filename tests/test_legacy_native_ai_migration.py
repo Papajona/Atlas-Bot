@@ -663,6 +663,39 @@ def retained_helper():
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_evaluated_function_annotation_walrus_fails_closed_for_star_import(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return json
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                "__all__ = ['branch_helper', 'json']\\n"
+                "def branch_helper(value: (json := int)):\\n"
+                "    return value\\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            canonical = "import json\\nfrom .native_ai import AIProviderError\\n"
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "dynamic exports or mutates __all__",
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+
     def test_module_level_loop_binding_fails_closed_for_star_import(self):
         legacy = """from .branch_helpers import *
 
