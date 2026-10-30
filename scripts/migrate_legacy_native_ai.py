@@ -6212,7 +6212,7 @@ def scrub_ancillary_text(path: str, text: str) -> str:
             "| API deployment previously injected Gemini strategy-provider secrets |"
         )
         if line.lstrip().startswith(historical_gemini_defect):
-            newline = "\\n" if line.endswith("\\n") else ""
+            newline = "\n" if line.endswith("\n") else ""
             return (
                 "| API deployment previously injected legacy hosted strategy-provider secrets | "
                 "Legacy hosted-provider quotas and credentials could block strategy generation despite healthy core code | "
