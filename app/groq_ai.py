@@ -192,6 +192,19 @@ def _trade_context_prompt(packet: dict[str, Any]) -> tuple[str, bool]:
     plan = fields(packet.get("trade_plan"), (
         "side", "entry_price", "stop_loss_price", "take_profit_price", "reward_risk", "strategy",
     ))
+    strategy_router = fields(packet.get("strategy_router"), (
+        "regime", "strategy", "confidence", "status", "reason", "signal",
+        "validation", "validation_gate", "blend", "ranked", "regime_stable_bars", "action",
+    ))
+    ranked = strategy_router.get("ranked")
+    if isinstance(ranked, list):
+        # Metrics can contain another nested mapping; retain the bounded ranking
+        # evidence itself so ordinary router output is not marked incomplete.
+        strategy_router["ranked"] = [
+            fields(item, ("strategy", "score", "historical_score", "online_score"))
+            for item in ranked[:12]
+            if isinstance(item, dict)
+        ]
     market_data = {
         "market_identity": fields(packet, ("symbol", "asset", "exchange", "timeframe", "market_timestamp")),
         "trade_plan": plan,
@@ -201,10 +214,7 @@ def _trade_context_prompt(packet: dict[str, Any]) -> tuple[str, bool]:
             "trail_atr", "min_adx", "min_signal", "max_spread_bps",
             "entry", "exit", "signal", "trend", "momentum", "volatility", "reason", "reasons",
         )),
-        "strategy_router": fields(packet.get("strategy_router"), (
-            "regime", "strategy", "confidence", "status", "reason", "signal",
-            "validation", "validation_gate", "blend", "ranked", "regime_stable_bars", "action",
-        )),
+        "strategy_router": strategy_router,
         "price_context": fields(packet.get("price_context"), (
             "latest_close", "bars", "spread_bps", "bid", "ask", "mid", "timestamp",
         )),
@@ -246,6 +256,12 @@ def _trade_context_prompt(packet: dict[str, Any]) -> tuple[str, bool]:
     hits = suspicious_instruction_markers(serialized)
     if hits:
         _LOGGER.warning("possible prompt-injection markers in trade evidence: %s", hits[:5])
+    wrapped_evidence = wrap_untrusted("atlas_trade_decision_evidence", bounded, max_chars=18_000)
+    # wrap_untrusted applies its own escaping and size cap, so account for that
+    # representation rather than only the compact JSON measured above.
+    wrapped_body = json.dumps(bounded, default=str).replace("<", "\\u003c").replace(">", "\\u003e")
+    if len(wrapped_body) > 18_000:
+        state["truncated"] = True
     prompt = (
         "Assess the proposed trade context without issuing an action. Return exactly one JSON object with "
         "regime_assessment, setup_alignment (ALIGNED, CONTRADICTS, NEUTRAL, INSUFFICIENT_EVIDENCE), "
@@ -254,7 +270,7 @@ def _trade_context_prompt(packet: dict[str, Any]) -> tuple[str, bool]:
         "A CONTRADICTS or high-risk assessment is a veto signal for Atlas Native AI; an ALIGNED assessment "
         "does not approve a trade. Never provide side, entry, stop, target, quantity, leverage or instructions.\n\n"
         + UNTRUSTED_PREAMBLE + "\n\n"
-        + wrap_untrusted("atlas_trade_decision_evidence", bounded, max_chars=18_000)
+        + wrapped_evidence
     )
     if len(prompt) > 22_000:
         raise GroqAIError(
@@ -266,9 +282,6 @@ def _trade_context_prompt(packet: dict[str, Any]) -> tuple[str, bool]:
 
 def _bounded_prompt_value(value: Any, state: dict[str, bool], depth: int = 0) -> Any:
     """Compact nested source data so prompt delimiters are never cut mid-value."""
-    if depth >= 4:
-        state["truncated"] = True
-        return "[nested value omitted]"
     if value is None or isinstance(value, (bool, int)):
         return value
     if isinstance(value, float):
@@ -281,6 +294,9 @@ def _bounded_prompt_value(value: Any, state: dict[str, bool], depth: int = 0) ->
             return value
         state["truncated"] = True
         return value[:300] + f" [omitted {len(value) - 300} characters]"
+    if depth >= 4:
+        state["truncated"] = True
+        return "[nested value omitted]"
     if isinstance(value, dict):
         pairs = list(value.items())
         result = {str(key)[:80]: _bounded_prompt_value(item, state, depth + 1)
