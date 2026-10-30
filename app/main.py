@@ -96,10 +96,18 @@ async def _attach_groq_trade_review(packet: dict) -> dict:
         }
     else:
         try:
-            # Keep external Groq advisory work within the same deadline as Native AI.
+            # Keep external review bounded independently; Native AI receives its
+            # own full local veto deadline after this advisory call completes.
+            groq_timeout = float(settings.groq_trade_review_timeout_seconds)
+            transport_timeout = float(settings.groq_timeout_seconds)
+            if (
+                not math.isfinite(groq_timeout) or groq_timeout <= 0
+                or not math.isfinite(transport_timeout) or transport_timeout <= 0
+            ):
+                raise ValueError("Groq trade-review timeout configuration must be finite and positive")
             result = await asyncio.wait_for(
                 groq_trade_context_review(packet),
-                timeout=max(0.0, float(settings.ai_strategy_provider_timeout_seconds)),
+                timeout=min(groq_timeout, transport_timeout),
             )
         except asyncio.CancelledError:
             raise
@@ -116,31 +124,18 @@ async def _attach_groq_trade_review(packet: dict) -> dict:
 
 
 async def _run_trade_safety_review(packet: dict) -> dict:
-    """Run Groq and Native AI inside one end-to-end decision deadline.
+    """Run bounded advisory Groq review, then give Native AI its own veto deadline.
 
-    Groq is advisory evidence only. Reserve a bounded slice for the local Native AI
-    veto so a slow external response cannot double the configured trade-decision time.
+    The Groq call has a dedicated provider timeout and converts its own timeout into
+    an ERROR envelope. Native AI is then run locally within the configured safety
+    deadline; an external provider cannot cancel its veto window.
     """
     timeout = float(settings.ai_strategy_provider_timeout_seconds)
     if not math.isfinite(timeout) or timeout <= 0:
         raise asyncio.TimeoutError
 
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    if settings.groq_trade_review_enabled:
-        native_reserve = min(0.25, timeout * 0.20)
-        groq_budget = max(0.0, timeout - native_reserve)
-        if groq_budget <= 0:
-            raise asyncio.TimeoutError
-        await asyncio.wait_for(_attach_groq_trade_review(packet), timeout=groq_budget)
-    else:
-        # This path only attaches a local DISABLED marker and makes no provider call.
-        await _attach_groq_trade_review(packet)
-
-    remaining = deadline - loop.time()
-    if remaining <= 0:
-        raise asyncio.TimeoutError
-    return await asyncio.wait_for(dual_ai_trade_safety_review(packet), timeout=remaining)
+    await _attach_groq_trade_review(packet)
+    return await asyncio.wait_for(dual_ai_trade_safety_review(packet), timeout=timeout)
 
 
 def _validated_customer_paper_mark(context: dict | None) -> tuple[float, str]:
