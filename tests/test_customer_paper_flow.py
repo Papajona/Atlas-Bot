@@ -1128,3 +1128,50 @@ def test_customer_paper_buy_discipline_counts_any_filled_order_and_checks_cooldo
     cooldown_start_at = now - timedelta(seconds=90)
     prior_entry = datetime(2026, 10, 23, 23, 59, 30, tzinfo=timezone.utc)
     assert cooldown_start_at <= prior_entry < now
+
+def test_pending_paper_buy_caps_quantity_after_rounded_notional_and_fee(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    _, state, order, market = _paper_fill_test_context()
+    market["ask"] = Decimal("1.1")
+    market["bid"] = Decimal("1.0")
+    market["spread_bps"] = Decimal("1000")
+    monkeypatch.setattr(
+        flow, "_cost_inputs",
+        lambda: (Decimal("1"), Decimal("0"), "TEST_ROUNDED_FEE"),
+    )
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([]))
+    monkeypatch.setattr(flow, "register_customer_paper_market_bar", _async_value({
+        "bar_key": "bar-key-rounded-fee-cap", "bar_at": market["bar_timestamp"],
+        "capacity": "10", "available": "10",
+    }))
+    monkeypatch.setattr(flow, "get_customer_paper_fill_for_bar", _async_value(None))
+    monkeypatch.setattr(flow, "get_customer_paper_balances", _async_value([{
+        "account_code": "PAPER_CASH", "currency": "USDT", "balance": "0.1",
+    }]))
+    captured = {}
+
+    async def append_fill(**kwargs):
+        captured.update(kwargs)
+        return {"status": "APPENDED", "fill_id": "rounded-fee-fill"}
+
+    monkeypatch.setattr(flow, "record_customer_paper_fill", append_fill)
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=1004, order=order, market=market, df=pd.DataFrame()
+    ))
+
+    quantity = Decimal(captured["quantity"])
+    price = Decimal(captured["price"])
+    fee = Decimal(captured["fee_amount"])
+    quantum = Decimal("0.000000000000000001")
+    notional = (quantity * price).quantize(quantum, rounding="ROUND_HALF_EVEN")
+    assert result["fill"]["status"] == "APPENDED"
+    assert (notional + fee) <= Decimal("0.1")
+    # The previous unrounded-unit-cost division selected this quantity, whose
+    # rounded-up ledger fee exceeded the cash limit by exactly one quantum.
+    previous_quantity = (
+        Decimal("0.1") / (price * (Decimal("1") + Decimal("1") / Decimal("10000")))
+    ).quantize(quantum, rounding="ROUND_DOWN")
+    assert notional + fee == Decimal("0.1")
+    assert quantity == previous_quantity - quantum
