@@ -553,7 +553,7 @@ def test_android_gate_supersession_rejects_pull_request_continuation_line(monkey
     )
     unsafe_workflow = safe_workflow.replace(
         f"    if: {expected}",
-        f"    if: {expected}\\n      || (github.event_name == 'pull_request')",
+        f"    if: {expected}\n      || (github.event_name == 'pull_request')",
     )
     assert unsafe_workflow != safe_workflow
     monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: False)
