@@ -346,7 +346,7 @@ class AuditLog(Base):
     __tablename__ = "audit_log"
     __table_args__ = (
         Index("ix_audit_log_created_event", "created_at", "event"),
-        UniqueConstraint("event", "idempotency_key", name="uq_audit_log_event_idempotency"),
+        Index("uq_audit_log_event_idempotency", "event", "idempotency_key", unique=True),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     event: Mapped[str] = mapped_column(String(100))
