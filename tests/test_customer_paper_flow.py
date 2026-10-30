@@ -410,7 +410,8 @@ def _paper_fill_test_context():
     return flow, state, order, market
 
 
-def test_paper_protective_exit_ignores_manual_owned_positions(monkeypatch):
+@pytest.mark.parametrize("execution_owner", ["manual_customer_api", None])
+def test_paper_protective_exit_ignores_manual_or_ownerless_positions(monkeypatch, execution_owner):
     import app.customer_paper_flow as flow
 
     current = pd.Timestamp.now(tz="UTC").floor("h")
@@ -434,7 +435,7 @@ def test_paper_protective_exit_ignores_manual_owned_positions(monkeypatch):
         "last_event_bar_key": prior.isoformat(),
         "stop_loss_price": "95",
         "take_profit_price": "110",
-        "execution_owner": "manual_customer_api",
+        "execution_owner": execution_owner,
     }]))
 
     async def must_not_submit(*_args, **_kwargs):
