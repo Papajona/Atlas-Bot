@@ -288,7 +288,7 @@ def test_deletion_of_already_absent_remote_ref_is_a_successful_noop(monkeypatch)
 
     monkeypatch.setattr(pruning, "_run", fake_run)
 
-    status, reason = pruning._delete_remote_ref_with_lease("feature/already-gone", "abc123")
+    status, reason = pruning._delete_remote_ref_with_lease("feature/already-gone", "abc123", "main123")
 
     assert status == "PRESERVE"
     assert "already removed" in reason
@@ -300,11 +300,14 @@ def test_deletion_of_already_absent_remote_ref_is_a_successful_noop(monkeypatch)
 def test_deletion_lease_rejection_preserves_remote_branch_that_advanced(monkeypatch):
     def fake_run(args, *, check=True):
         if args[:2] == ["git", "push"]:
-            assert args[2] == "origin"
-            assert args[3] == (
+            assert args[2] == "--atomic"
+            assert args[3] == "origin"
+            assert args[4] == "--force-with-lease=refs/heads/main:main-sha"
+            assert args[5] == (
                 "--force-with-lease=refs/heads/feature/advancing:proven-sha"
             )
-            assert args[4] == ":refs/heads/feature/advancing"
+            assert args[6] == "refs/remotes/origin/main:refs/heads/main"
+            assert args[7] == ":refs/heads/feature/advancing"
             return subprocess.CompletedProcess(
                 args, 1, "", "! [rejected] feature/advancing (stale info)"
             )
@@ -319,7 +322,7 @@ def test_deletion_lease_rejection_preserves_remote_branch_that_advanced(monkeypa
     monkeypatch.setattr(pruning, "_run", fake_run)
 
     status, reason = pruning._delete_remote_ref_with_lease(
-        "feature/advancing", "proven-sha"
+        "feature/advancing", "proven-sha", "main-sha"
     )
 
     assert status == "PRESERVE"
@@ -736,12 +739,88 @@ def test_lease_rejection_preserves_branch_updated_after_proof(tmp_path, monkeypa
 
     # Run the actual lease-protected push from the stale cleanup checkout.
     monkeypatch.chdir(checkout)
-    status, reason = pruning._delete_remote_ref_with_lease(branch_name, proven_sha)
+    status, reason = pruning._delete_remote_ref_with_lease(branch_name, proven_sha, _git(checkout, "rev-parse", "refs/remotes/origin/main"))
 
     assert status == "PRESERVE"
     assert "lease was rejected" in reason
     remote_listing = _git(advancer, "ls-remote", "origin", f"refs/heads/{branch_name}")
     assert remote_listing.split()[0] == advanced_sha
+
+
+def test_branch_without_common_merge_base_is_preserved_without_aborting_reconciliation(tmp_path, monkeypatch):
+    repo = tmp_path / "unrelated-history-repo"
+    _git(tmp_path, "init", "-b", "main", repo)
+    _git(repo, "config", "user.name", "Atlas unrelated-history regression")
+    _git(repo, "config", "user.email", "atlas-unrelated@example.invalid")
+    (repo / "main.txt").write_text("main history\n", encoding="utf-8")
+    _git(repo, "add", "main.txt")
+    _git(repo, "commit", "-m", "main root")
+    main_sha = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "--orphan", "unrelated")
+    for path in repo.iterdir():
+        if path.name != ".git" and path.is_file():
+            path.unlink()
+    (repo / "branch.txt").write_text("unrelated branch history\n", encoding="utf-8")
+    _git(repo, "add", "branch.txt")
+    _git(repo, "commit", "-m", "unrelated root")
+    branch_sha = _git(repo, "rev-parse", "HEAD")
+    monkeypatch.chdir(repo)
+
+    safe, reason, mismatches = pruning._resolve_branch_integration(
+        "unrelated", branch_sha, main_sha, set(), []
+    )
+
+    assert safe is False
+    assert reason == "branch and main have no common merge base; preserve branch"
+    assert mismatches == []
+
+
+def test_main_advance_after_proof_prevents_atomic_branch_deletion(tmp_path, monkeypatch):
+    remote = tmp_path / "origin.git"
+    checkout = tmp_path / "checkout"
+    main_advancer = tmp_path / "main-advancer"
+    branch_name = "feature/main-rewrite-race"
+
+    _git(tmp_path, "init", "--bare", remote)
+    _git(tmp_path, "init", "-b", "main", checkout)
+    _git(checkout, "config", "user.name", "Atlas main lease regression")
+    _git(checkout, "config", "user.email", "atlas-main-lease@example.invalid")
+    (checkout / "README.md").write_text("base\n", encoding="utf-8")
+    _git(checkout, "add", "README.md")
+    _git(checkout, "commit", "-m", "main proof base")
+    _git(checkout, "remote", "add", "origin", remote)
+    _git(checkout, "push", "-u", "origin", "main")
+    _git(checkout, "fetch", "origin")
+    proven_main_sha = _git(checkout, "rev-parse", "refs/remotes/origin/main")
+
+    _git(checkout, "checkout", "-b", branch_name)
+    (checkout / "feature.txt").write_text("branch proof content\n", encoding="utf-8")
+    _git(checkout, "add", "feature.txt")
+    _git(checkout, "commit", "-m", "branch proof")
+    _git(checkout, "push", "-u", "origin", branch_name)
+    proven_branch_sha = _git(checkout, "rev-parse", "HEAD")
+
+    _git(tmp_path, "clone", "--branch", "main", remote, main_advancer)
+    _git(main_advancer, "config", "user.name", "Atlas main advancer")
+    _git(main_advancer, "config", "user.email", "atlas-main-advancer@example.invalid")
+    with (main_advancer / "README.md").open("a", encoding="utf-8") as readme:
+        readme.write("main advanced after branch proof\n")
+    _git(main_advancer, "commit", "-am", "advance main after proof")
+    _git(main_advancer, "push", "origin", "main")
+    advanced_main_sha = _git(main_advancer, "rev-parse", "HEAD")
+    assert advanced_main_sha != proven_main_sha
+
+    monkeypatch.chdir(checkout)
+    status, reason = pruning._delete_remote_ref_with_lease(
+        branch_name, proven_branch_sha, proven_main_sha
+    )
+
+    assert status == "PRESERVE"
+    assert "lease was rejected" in reason or "stale" in reason.lower()
+    branch_remote = _git(main_advancer, "ls-remote", "origin", f"refs/heads/{branch_name}")
+    main_remote = _git(main_advancer, "ls-remote", "origin", "refs/heads/main")
+    assert branch_remote.split()[0] == proven_branch_sha
+    assert main_remote.split()[0] == advanced_main_sha
 
 
 def test_native_ai_branch_retirement_requires_exact_sha_and_migration_only_paths(monkeypatch):
