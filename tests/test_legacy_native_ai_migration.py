@@ -5491,5 +5491,321 @@ if [[ -n "$SECRET_GROQ_API_KEY_VERSION" ]]; then AI_SECRET_ARGS="${AI_SECRET_ARG
 
 
 
+
+    def test_multiple_star_imports_preserve_source_order(self):
+        legacy = """from .first_helpers import *
+from .second_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return shared
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            first = root / "app" / "first_helpers.py"
+            second = root / "app" / "second_helpers.py"
+            target.parent.mkdir()
+            first.write_text("shared = 'first'\n", encoding="utf-8")
+            second.write_text("shared = 'second'\n", encoding="utf-8")
+            target.write_text(legacy, encoding="utf-8")
+            canonical = "from __future__ import annotations\nfrom .native_ai import AIProviderError\n"
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertLess(
+                result.index("from .first_helpers import *"),
+                result.index("from .second_helpers import *"),
+            )
+            self.assertIn("return shared", result)
+            ast.parse(result, filename="app/ai_providers.py")
+
+    def test_class_local_walrus_does_not_block_star_import_migration(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                "__all__ = ['BranchContainer', 'branch_helper']\n"
+                "class BranchContainer:\n"
+                "    class_value = (class_local := 'class-only')\n"
+                "def branch_helper():\n    return True\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            canonical = "from __future__ import annotations\nfrom .native_ai import AIProviderError\n"
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            ast.parse(result, filename="app/ai_providers.py")
+            self.assertIn("from .branch_helpers import *", result)
+            self.assertIn("def retained_helper():", result)
+            self.assertIn("return branch_helper()", result)
+            self.assertIn(
+                "class_value = (class_local := 'class-only')",
+                helper_module.read_text(encoding="utf-8"),
+            )
+
+    def test_class_suite_global_walrus_fails_closed_for_star_import(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                "__all__ = ['BranchContainer', 'branch_helper', 'json']\n"
+                "class BranchContainer:\n"
+                "    global json\n"
+                "    class_value = (json := 'module-export')\n"
+                "def branch_helper():\n    return True\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            canonical = "import json\nfrom .native_ai import AIProviderError\n"
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "dynamic exports or mutates __all__"
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_module_level_walrus_export_fails_closed_for_star_import(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return json
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                "(json := 'branch-specific')\n"
+                "def branch_helper():\n    return True\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            canonical = "import json\nfrom .native_ai import AIProviderError\n"
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError, "dynamic exports|different or unknown binding"
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_evaluated_function_annotation_walrus_fails_closed_for_star_import(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return json
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                "__all__ = ['branch_helper', 'json']\n"
+                "def branch_helper(value: (json := int)):\n"
+                "    return value\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            canonical = "import json\nfrom .native_ai import AIProviderError\n"
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "dynamic exports|different or unknown binding",
+                ):
+                    migration.transform_ai_providers("canonical-commit")
+            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+
+    def test_config_migration_preserves_explicit_trade_review_opt_in(self):
+        source = """class Settings:
+    groq_trade_review_enabled: bool = True
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_config()
+            result = config.read_text(encoding="utf-8")
+        self.assertIn("groq_trade_review_enabled: bool = True", result)
+
+    def test_config_migration_restores_trade_review_disabled_by_default(self):
+        source = """class Settings:
+    database_url: str = ''
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "app" / "config.py"
+            config.parent.mkdir()
+            config.write_text(source, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration.transform_config()
+            result = config.read_text(encoding="utf-8")
+        self.assertIn("groq_trade_review_enabled: bool = False", result)
+
+
+    def test_retired_provider_block_refuses_executable_control_line_suffixes(self):
+        unsafe_cases = (
+            """if [ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]; then
+  true
+then gcloud run deploy atlas
+fi
+""",
+            """if [ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]; then
+  true
+elif [[ $(touch /tmp/atlas-shell-marker) ]]; then
+  true
+fi
+""",
+            """if [ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]; then
+  true
+elsewhere "$DATABASE_URL"
+fi
+""",
+            """if [ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]; then
+  true
+fi; gcloud run deploy atlas
+""",
+        )
+        for shell in unsafe_cases:
+            with self.subTest(shell=shell), self.assertRaises(migration.MigrationError):
+                migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_groq_trade_review_flag_is_preserved_in_groq_guard(self):
+        shell = """if [[ -n "$GROQ_API_KEY" ]]; then
+  GROQ_TRADE_REVIEW_ENABLED=true
+fi
+"""
+        self.assertEqual(
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell),
+            shell,
+        )
+
+    def test_retired_assignment_line_continuation_refuses_to_expose_following_command(self):
+        shell = (
+            'if [ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]; then\n'
+            + "  SECRET_CEREBRAS_API_KEY_VERSION=" + "\\" + "\n"
+            + "  ./deploy/gcp-bootstrap.sh\n"
+            + "fi\n"
+        )
+        with self.assertRaisesRegex(
+            migration.MigrationError, "compound retired-provider assignment"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_retired_assignment_with_even_trailing_backslashes_does_not_consume_next_command(self):
+        shell = (
+            "SECRET_CEREBRAS_API_KEY_VERSION=value"
+            + "\\\\"
+            + "\n./deploy/gcp-bootstrap.sh\n"
+        )
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertEqual(cleaned, "./deploy/gcp-bootstrap.sh\n")
+
+    def test_retired_provider_stderr_warning_is_removed_without_blocking_migration(self):
+        shell = (
+            'if [[ -z "$SECRET_CEREBRAS_API_KEY_VERSION" ]]; then\n'
+            '  echo "WARNING: Cerebras not configured" >&2\n'
+            'fi\n'
+        )
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertEqual(cleaned, "")
+        result = subprocess.run(
+            ["bash", "-n"], input=cleaned, text=True, capture_output=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_retired_provider_header_refuses_executable_after_then(self):
+        shell = """if [ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]; then gcloud run deploy atlas
+"""
+        with self.assertRaisesRegex(
+            migration.MigrationError, "executable command on a retired-provider if-header"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_retired_provider_warning_refuses_trailing_deploy_command(self):
+        shell = """if [ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]; then
+  echo "Cerebras missing"; gcloud run deploy atlas
+fi
+"""
+        with self.assertRaisesRegex(
+            migration.MigrationError, "mixed provider-conditioned shell block"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+if __name__ == "__main__":
+    unittest.main()
+    def test_retired_assignment_rejects_parameter_expansion_side_effects(self):
+        unsafe_shell = (
+            "SECRET_OPENAI_API_KEY=${other:=value}\n"
+            'printf "%s" "$other"\n'
+        )
+        with self.assertRaisesRegex(
+            migration.MigrationError, "compound retired-provider assignment"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe_shell)
+
+    def test_retired_assignment_rejects_blank_prefix_commands(self):
+        unsafe_cases = (
+            "CEREBRAS_API_KEY= ./deploy-step.sh\n",
+            "OPENAI_API_KEY =value\n",
+        )
+        for shell in unsafe_cases:
+            with self.subTest(shell=shell), self.assertRaises(migration.MigrationError):
+                migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_retired_provider_test_header_is_safely_scrubbed(self):
+        shell = 'if test -n "${GEMINI_API_KEY:-}"; then\n  echo "Gemini missing"\nfi\n'
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertEqual(cleaned, "")
+
+    def test_retired_provider_test_header_with_executable_suffix_is_rejected(self):
+        shell = 'if test -n "${GEMINI_API_KEY:-}"; then gcloud run deploy atlas\n'
+        with self.assertRaisesRegex(
+            migration.MigrationError, "unsafe retired-provider if-header|executable command"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
 if __name__ == "__main__":
     unittest.main()
