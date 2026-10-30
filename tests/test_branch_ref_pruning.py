@@ -543,6 +543,68 @@ def test_android_gate_supersession_rejects_extra_release_job_alternative(monkeyp
     assert mismatches == ["tests/test_android_production_backend_wiring.py"]
 
 
+def test_android_gate_supersession_rejects_pull_request_continuation_line(monkeypatch):
+    branch_name = "fix/android-release-trigger-gating-followup-20261023"
+    branch_sha = "6b9feef6b55be4ef06eef630d4b558e0ffad35b7"
+    safe_workflow = _safe_android_release_workflow()
+    expected = (
+        "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || "
+        "(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v'))"
+    )
+    unsafe_workflow = safe_workflow.replace(
+        f"    if: {expected}",
+        f"    if: {expected}\\n      || (github.event_name == 'pull_request')",
+    )
+    assert unsafe_workflow != safe_workflow
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: False)
+    monkeypatch.setattr(
+        pruning, "_branch_delta_mismatched_paths",
+        lambda *_args: ["tests/test_android_production_backend_wiring.py"],
+    )
+    monkeypatch.setattr(
+        pruning, "_git_file_text_at_commit",
+        lambda _commit, path: (
+            unsafe_workflow
+            if path == ".github/workflows/android-release.yml"
+            else _safe_android_release_test_source()
+        ),
+    )
+
+    safe, reason, mismatches = pruning._resolve_branch_integration(
+        branch_name, branch_sha, "main-sha", set(), []
+    )
+
+    assert safe is False
+    assert reason == "no exact integration proof; preserve branch"
+    assert mismatches == ["tests/test_android_production_backend_wiring.py"]
+
+
+def test_android_gate_supersession_requires_executable_regression_test(monkeypatch):
+    branch_name = "fix/android-release-trigger-gating-followup-20261023"
+    branch_sha = "6b9feef6b55be4ef06eef630d4b558e0ffad35b7"
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: False)
+    monkeypatch.setattr(
+        pruning, "_branch_delta_mismatched_paths",
+        lambda *_args: ["tests/test_android_production_backend_wiring.py"],
+    )
+    monkeypatch.setattr(
+        pruning, "_git_file_text_at_commit",
+        lambda _commit, path: (
+            _safe_android_release_workflow()
+            if path == ".github/workflows/android-release.yml"
+            else "# test_signed_release_is_only_triggered_by_an_explicit_release_tag_or_manual_main_dispatch"
+        ),
+    )
+
+    safe, reason, mismatches = pruning._resolve_branch_integration(
+        branch_name, branch_sha, "main-sha", set(), []
+    )
+
+    assert safe is False
+    assert reason == "no exact integration proof; preserve branch"
+    assert mismatches == ["tests/test_android_production_backend_wiring.py"]
+
+
 def test_android_gate_supersession_preserves_unrelated_branch_path_changes(monkeypatch):
     branch_name = "fix/android-release-trigger-gating-20261023"
     branch_sha = "fc84eac73078c65a8c253101c40e963958b74e60"
