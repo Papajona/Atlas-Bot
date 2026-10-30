@@ -5254,14 +5254,35 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 return True
         return quote is not None or escaped
 
+    def safe_groq_condition(condition: str) -> bool:
+        """Allow only non-executable shell test expressions in Groq guards."""
+        stripped = condition.strip()
+        match = re.fullmatch(r"(?s)(?:\[\[(.*)\]\]|\[(.*)\])", stripped)
+        if not match:
+            return False
+        expression = match.group(1) if match.group(1) is not None else match.group(2)
+        # Do not preserve shell syntax capable of starting another command.  The
+        # remaining bracket expression is deliberately limited to test operands,
+        # parameter expansions, and the [[ logical operators.
+        if re.search(r"[`()]|[;<>]", expression):
+            return False
+        if re.search(r"(?<!&)&(?!&)|(?<!\|)\|(?!\|)", expression):
+            return False
+        if re.search(r"\$(?![A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*(?::[-+?=][^{}]*)?\})", expression):
+            return False
+        return True
+
     def safe_groq_statement(statement: str) -> bool:
         stripped = statement.strip()
         if not stripped or stripped.startswith("#"):
             return True
         if re.fullmatch(r"(?i)(?:then|else|fi)", stripped):
             return True
-        if re.fullmatch(r"(?i)elif\s+\[\[.*\]\]\s*;?\s*then", stripped):
-            return True
+        elif_match = re.fullmatch(r"(?is)elif\s+(.+?)\s*;?\s*then", stripped)
+        if elif_match:
+            return safe_groq_condition(elif_match.group(1))
+        if re.fullmatch(r"(?i)elif\b.*", stripped):
+            return False
         groq_guard = re.compile(
             r"^:\s*['\"]?" + re.escape("$") + r"\{(?:GROQ_API_KEY|SECRET_GROQ[A-Z0-9_]*)(?::\?[^}]*)?\}['\"]?$",
             re.I,
@@ -5369,6 +5390,9 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if re.match(r"^\s*if\b", source_line, re.I) and groq_condition.search(source_line):
             inline = re.match(r"^\s*if\b.*?\bthen\s*(.*?);\s*fi\s*$", source_line, re.I)
             header = re.search(r"\bthen\b(.*)$", source_line, re.I)
+            initial_condition = re.match(r"^\s*if\s+(.+?)\s*;?\s+then\b", source_line, re.I)
+            if not initial_condition or not safe_groq_condition(initial_condition.group(1)):
+                raise MigrationError(f"{path} has an unsafe condition on a Groq if-header; refusing it")
             if header and not inline:
                 tail = header.group(1).strip().rstrip(";").strip()
                 if tail and not safe_groq_header_tail(tail):

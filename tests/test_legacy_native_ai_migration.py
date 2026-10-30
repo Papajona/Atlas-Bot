@@ -5353,6 +5353,32 @@ def retained_helper():
             safe,
         )
 
+    def test_groq_guard_refuses_command_substitutions_in_conditions(self):
+        unsafe_conditions = (
+            'if [[ $(touch /tmp/sentinel) ]]; then\n'
+            '  GROQ_SECRET_ARG="x"\n'
+            'elif [[ -n "$GROQ_API_KEY" ]]; then\n'
+            '  GROQ_SECRET_ARG="y"\n'
+            'fi\n',
+            'if [[ -n "$GROQ_API_KEY" ]]; then\n'
+            '  GROQ_SECRET_ARG="x"\n'
+            'elif [[ $(touch /tmp/sentinel) ]]; then\n'
+            '  GROQ_SECRET_ARG="y"\n'
+            'fi\n',
+        )
+        for unsafe in unsafe_conditions:
+            with self.assertRaisesRegex(migration.MigrationError, "unsafe condition"):
+                migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe)
+
+    def test_groq_guard_allows_inline_assignment_and_else(self):
+        source = (
+            'if [[ -n "$GROQ_API_KEY" ]]; then GROQ_SECRET_ARG="x"; else GROQ_SECRET_ARG=""; fi\n'
+        )
+        self.assertEqual(
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source),
+            source,
+        )
+
 
 
 if __name__ == "__main__":
