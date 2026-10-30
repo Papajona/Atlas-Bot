@@ -410,6 +410,49 @@ def _paper_fill_test_context():
     return flow, state, order, market
 
 
+def test_paper_protective_exit_ignores_manual_owned_positions(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    current = pd.Timestamp.now(tz="UTC").floor("h")
+    prior = current - pd.Timedelta(hours=1)
+    frame = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [90.0],
+         "close": [95.0], "volume": [1000.0]},
+        index=pd.DatetimeIndex([current.to_pydatetime()]),
+    )
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    market = {
+        "bar_timestamp": current.isoformat(),
+        "currency": "USDT",
+        "data_sha256": "m" * 64,
+    }
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([{
+        "venue": "binance",
+        "symbol": "BTC/USDT",
+        "quantity": "1",
+        "timeframe": "1h",
+        "last_event_bar_key": prior.isoformat(),
+        "stop_loss_price": "95",
+        "take_profit_price": "110",
+        "execution_owner": "manual_customer_api",
+    }]))
+
+    async def must_not_submit(*_args, **_kwargs):
+        raise AssertionError("autonomous protective logic must not exit a manual-owned position")
+
+    monkeypatch.setattr(flow, "submit_customer_paper_order", must_not_submit)
+    result = asyncio.run(
+        flow._protective_exit(
+            customer_id=99231,
+            req=req,
+            df=frame,
+            market=market,
+        )
+    )
+
+    assert result is None
+
+
 def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypatch):
     import app.customer_paper_flow as flow
 
