@@ -426,6 +426,38 @@ def _safe_android_release_test_source() -> str:
 """
 
 
+def test_android_gate_allows_harmless_release_job_name_metadata(monkeypatch):
+    branch_name = "fix/android-release-trigger-gating-followup-20261023"
+    branch_sha = "6b9feef6b55be4ef06eef630d4b558e0ffad35b7"
+    named_workflow = _safe_android_release_workflow().replace(
+        "  android-release:\\n",
+        "  android-release:\\n    name: Signed Android release\\n",
+    )
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: False)
+    monkeypatch.setattr(
+        pruning,
+        "_branch_delta_mismatched_paths",
+        lambda *_args: ["tests/test_android_production_backend_wiring.py"],
+    )
+    monkeypatch.setattr(
+        pruning,
+        "_git_file_text_at_commit",
+        lambda _commit, path: (
+            named_workflow
+            if path == ".github/workflows/android-release.yml"
+            else _safe_android_release_test_source()
+        ),
+    )
+
+    safe, reason, mismatches = pruning._resolve_branch_integration(
+        branch_name, branch_sha, "main-sha", set(), []
+    )
+
+    assert safe is True
+    assert "exact historical Android release-trigger branch superseded" in reason
+    assert mismatches == []
+
+
 def test_known_android_gate_branch_is_pruned_only_after_main_has_stronger_gate(monkeypatch):
     branch_name = "fix/android-release-trigger-gating-followup-20261023"
     branch_sha = "6b9feef6b55be4ef06eef630d4b558e0ffad35b7"
