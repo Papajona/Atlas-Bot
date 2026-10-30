@@ -1344,7 +1344,11 @@ def test_ownerless_version_one_pending_order_is_expired_without_autonomous_fill(
         "symbol": "BTC/USDT",
         "side": "BUY",
         "quantity": "0.25",
-        "metadata": {"paper_flow_version": 1, "timeframe": "1h"},
+        "metadata": {
+            "paper_flow_version": 1,
+            "timeframe": "1h",
+            "submission_bar_at": "2026-10-30T10:00:00+00:00",
+        },
     }
     monkeypatch.setattr(flow, "validate_customer_paper_market", lambda *_args: market)
     monkeypatch.setattr(flow, "list_open_customer_paper_orders", _async_value([legacy_order]))
