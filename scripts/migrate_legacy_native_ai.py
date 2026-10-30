@@ -5707,10 +5707,11 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                         'exit "$status"',
                         "fi",
                     }
-                    or re.fullmatch(
-                        r'echo "AI provider verification: (?:PASS|NOT VERIFIED|FAIL) \([^"]*\)\.?" \| tee -a "\$GITHUB_STEP_SUMMARY"',
-                        command,
-                    )
+                    or command in {
+                        'echo "AI provider verification: PASS (Gemini and Groq inference requests succeeded)." | tee -a "$GITHUB_STEP_SUMMARY"',
+                        'echo "AI provider verification: NOT VERIFIED (one or more required AI credentials/models are missing; see checker output)." | tee -a "$GITHUB_STEP_SUMMARY"',
+                        'echo "AI provider verification: FAIL (one or more inference requests failed; checker exit code $status)." | tee -a "$GITHUB_STEP_SUMMARY"',
+                    }
                 )
                 if not allowed:
                     raise MigrationError(
@@ -5718,22 +5719,22 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                     )
                 command_lines.append(command)
 
-            required_commands = {
+            expected_commands = [
                 "set +e",
                 "python scripts/check_ai_models.py",
                 "status=$?",
                 "set -e",
                 'if [ "$status" -eq 0 ]; then',
+                'echo "AI provider verification: PASS (Gemini and Groq inference requests succeeded)." | tee -a "$GITHUB_STEP_SUMMARY"',
                 'elif [ "$status" -eq 2 ]; then',
-                "else",
+                'echo "AI provider verification: NOT VERIFIED (one or more required AI credentials/models are missing; see checker output)." | tee -a "$GITHUB_STEP_SUMMARY"',
                 "exit 1",
+                "else",
+                'echo "AI provider verification: FAIL (one or more inference requests failed; checker exit code $status)." | tee -a "$GITHUB_STEP_SUMMARY"',
                 'exit "$status"',
                 "fi",
-            }
-            if (
-                not required_commands.issubset(set(command_lines))
-                or sum(command.startswith('echo "AI provider verification:') for command in command_lines) != 3
-            ):
+            ]
+            if command_lines != expected_commands:
                 raise MigrationError(
                     f"{path} has an incomplete legacy live-AI verification step; refusing to weaken the production gate"
                 )
@@ -5761,7 +5762,7 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                 if (
                     candidate.strip()
                     and candidate_indent == len(step_indent)
-                    and re.match(r"^[ \t]*-[ \t]+name:", candidate, re.I)
+                    and re.match(r"^[ \t]*-[ \t]+", candidate)
                 ):
                     break
                 end += 1
@@ -5930,7 +5931,7 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                 if (
                     candidate.strip()
                     and candidate_indent == len(step_indent)
-                    and re.match(r"^[ \t]*-[ \t]+name:", candidate, re.I)
+                    and re.match(r"^[ \t]*-[ \t]+", candidate)
                 ):
                     break
                 end += 1
