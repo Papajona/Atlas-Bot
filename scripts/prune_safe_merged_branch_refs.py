@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """Delete only remote branch refs that are provably integrated into main.
 
-Three proofs are accepted:
+Two general proofs are accepted:
 1. The exact branch tip is an ancestor of origin/main.
 2. A merged PR records that exact branch tip as its head, and that PR's merge
    commit is an ancestor of origin/main (for squash/rebase merges).
-3. Every path changed on the branch side since the merge base has the same
-   object/content in main. This recognizes squash-merged or otherwise integrated
-   changes even when commit history differs.
 
-A historical patch-ID match alone is deliberately insufficient; if current branch
-content differs from main, the branch is preserved for manual review.
+Tree comparisons are diagnostic only; identical file trees are not enough to
+retire an unmerged branch. A small exact-SHA allowlist handles independently
+committed duplicate aliases only when the retained canonical ref is unchanged.
+A historical patch-ID match alone is insufficient.
 
 Any open-PR branch, unknown branch history, API failure, or head moved after a
 merge is preserved. This script never deletes main.
@@ -24,6 +23,14 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
+
+
+class BranchProtectionPolicyUnavailable(RuntimeError):
+    """Detailed branch-protection policy cannot be read with the configured credential."""
+
+
+class NoCommonMergeBaseError(RuntimeError):
+    """A branch and main have no common ancestor; preserve this branch only."""
 
 
 def should_delete_ref(
@@ -53,7 +60,13 @@ def should_delete_ref(
 
 
 def _run(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(args, capture_output=True, text=True, check=False)
+    command_env = None
+    if args[:2] == ["gh", "api"] and any("branches/main/protection" in str(item) for item in args):
+        protection_token = os.environ.get("ATLAS_BRANCH_PROTECTION_READ_TOKEN", "").strip()
+        if protection_token:
+            command_env = os.environ.copy()
+            command_env["GH_TOKEN"] = protection_token
+    result = subprocess.run(args, capture_output=True, text=True, check=False, env=command_env)
     if check and result.returncode:
         detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
         raise RuntimeError(f"Command failed ({' '.join(args[:4])}): {detail}")
@@ -183,6 +196,10 @@ def _branch_delta_mismatched_paths(branch_sha: str, main_sha: str) -> list[str]:
         ["git", "merge-base", main_sha, branch_sha],
         check=False,
     )
+    if merge_base_result.returncode == 1 and not merge_base_result.stderr.strip():
+        raise NoCommonMergeBaseError(
+            "branch and main have no common merge base; preserve branch"
+        )
     if merge_base_result.returncode:
         raise RuntimeError(
             "git merge-base failed while comparing branch trees: "
@@ -293,11 +310,24 @@ def _main_has_explicit_android_release_gate(main_sha: str) -> bool:
         "(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v'))"
     )
     release_job_lines = [line for line in release_job.splitlines() if line.strip()]
+    expected_if_line = f"    if: {expected_release_condition}"
     release_conditions = [
         " ".join(line.split("if:", 1)[1].split())
         for line in release_job_lines
         if line.startswith("    if:")
     ]
+    # A single descriptive job name is harmless metadata. Keep the condition exact.
+    release_name_lines = [
+        line for line in release_job_lines if line.startswith("    name:")
+    ]
+    # The production verifier locates this signing job by its exact displayed name.
+    release_job_shape_is_safe = (
+        len(release_name_lines) <= 1
+        and all(
+            line == expected_if_line or line == "    name: android-release"
+            for line in release_job_lines
+        )
+    )
     return (
         'tags:\n      - "android-v*"' in push_trigger
         and "branches:" not in push_trigger
@@ -305,9 +335,8 @@ def _main_has_explicit_android_release_gate(main_sha: str) -> bool:
         # Require the whole job condition, not merely the presence of two safe
         # alternatives. Extra alternatives (for example pull_request) can bypass
         # the release boundary even when the required substrings are present.
-        # This job has one deliberately single-line condition. Reject YAML plain-scalar
-        # continuations rather than accidentally attesting only the first line.
-        and release_job_lines == [f"    if: {expected_release_condition}"]
+        # Keep the condition single-line and exact; permit only a known-safe name.
+        and release_job_shape_is_safe
         and release_conditions == [expected_release_condition]
         # Require a real module-level regression test, not a name in a comment/string.
         and _source_defines_function(
@@ -411,6 +440,49 @@ def _is_explicitly_superseded_native_ai_migration_ref(
     return _main_has_verified_native_ai_migration(main_sha)
 
 
+_EXACT_DUPLICATE_BRANCH_ALIASES = {
+    # Loser and keeper were independently committed from the same parent with the same tree.
+    # Retire only this exact historical alias; any moved ref or changed object is preserved.
+    "fix/native-ai-propagation-error-alias-20261027": {
+        "branch_sha": "99e7d975d909fddc7098b06e31617fc3871e4cb4",
+        "tree_sha": "c238a3ba30b100ef9af5d92ce30d40169783d819",
+        "parent_sha": "a7f35abfe8d3a73af329c5ae34320afe5f0def12",
+        "keeper_branch": "fix/native-ai-propagation-verified-20261027",
+        "keeper_sha": "eed301d88b163ea36ad6b473d69400c5eb49b584",
+    },
+}
+
+
+def _explicit_duplicate_alias_retirement_proof(
+    branch_name: str, branch_sha: str
+) -> tuple[bool, str, str | None]:
+    """Prove one exact duplicate alias only while its canonical ref is unchanged."""
+    expected = _EXACT_DUPLICATE_BRANCH_ALIASES.get(branch_name)
+    if expected is None or branch_sha != expected["branch_sha"]:
+        return False, "no exact duplicate-alias proof; preserve branch", None
+
+    keeper_branch = str(expected["keeper_branch"])
+    keeper_ref = f"refs/remotes/origin/{keeper_branch}^{{commit}}"
+    keeper = _run(["git", "rev-parse", "--verify", keeper_ref], check=False)
+    if keeper.returncode or keeper.stdout.strip() != expected["keeper_sha"]:
+        return False, "canonical duplicate branch is absent or has moved; preserve alias", None
+
+    for commit_sha in (branch_sha, expected["keeper_sha"]):
+        metadata = _run(
+            ["git", "show", "-s", "--format=%T%n%P", commit_sha],
+            check=False,
+        )
+        if metadata.returncode:
+            return False, "duplicate commit metadata is unreadable; preserve alias", None
+        if metadata.stdout.splitlines() != [expected["tree_sha"], expected["parent_sha"]]:
+            return False, "duplicate tree or parent proof changed; preserve alias", None
+
+    return (
+        True,
+        f"exact duplicate alias of {keeper_branch}; identical audited tree and parent",
+        keeper_branch,
+    )
+
 def _resolve_branch_integration(
     branch_name: str,
     branch_sha: str,
@@ -430,9 +502,16 @@ def _resolve_branch_integration(
     if safe or reason != "no exact integration proof; preserve branch":
         return safe, reason, []
 
-    mismatch_paths = _branch_delta_mismatched_paths(branch_sha, main_sha)
+    try:
+        mismatch_paths = _branch_delta_mismatched_paths(branch_sha, main_sha)
+    except NoCommonMergeBaseError as exc:
+        return False, str(exc), []
     if not mismatch_paths:
-        return True, "all branch-side changed paths match main", []
+        return (
+            False,
+            "tree contents match main but exact branch ancestry or merged-PR proof is absent; preserve for review",
+            [],
+        )
     if _is_explicitly_superseded_android_release_ref(
         branch_name, branch_sha, main_sha, mismatch_paths
     ):
@@ -452,6 +531,31 @@ def _resolve_branch_integration(
             [],
         )
     return False, reason, mismatch_paths
+
+
+def _require_protected_main(
+    branch_status: Mapping[str, bool],
+    main_protection: Mapping[str, Any],
+) -> None:
+    """Require main to be non-rewritable and non-deletable before pruning refs."""
+    if branch_status.get("main") is not True:
+        raise RuntimeError("main is not reported protected; refusing all branch deletions")
+
+    enforce_admins = main_protection.get("enforce_admins")
+    if not isinstance(enforce_admins, Mapping) or enforce_admins.get("enabled") is not True:
+        raise RuntimeError(
+            "main branch protection does not enforce its rules for administrators; refusing all deletions"
+        )
+
+    for setting, description in (
+        ("allow_force_pushes", "force-push"),
+        ("allow_deletions", "branch deletion"),
+    ):
+        value = main_protection.get(setting)
+        if not isinstance(value, Mapping) or value.get("enabled") is not False:
+            raise RuntimeError(
+                f"main branch protection does not explicitly disable {description}; refusing all deletions"
+            )
 
 
 def _load_branch_protection_status(repository: str) -> dict[str, bool]:
@@ -493,6 +597,34 @@ def _load_branch_protection_status(repository: str) -> dict[str, bool]:
         raise RuntimeError(
             "GitHub branch-protection enumeration was empty or omitted main; refusing all deletions"
         )
+
+    # The branch-list "protected" flag does not say whether main can be force-pushed
+    # or deleted, nor whether administrators are covered by the rule. Read the full
+    # policy and refuse every deletion if the detailed policy cannot be verified.
+    main_protection_result = _run(
+        ["gh", "api", f"repos/{repository}/branches/main/protection"],
+        check=False,
+    )
+    if main_protection_result.returncode:
+        raise BranchProtectionPolicyUnavailable(
+            "Unable to read detailed main branch protection; refusing all deletions: "
+            + (
+                main_protection_result.stderr.strip()
+                or main_protection_result.stdout.strip()
+                or f"exit code {main_protection_result.returncode}"
+            )
+        )
+    try:
+        main_protection = json.loads(main_protection_result.stdout)
+    except json.JSONDecodeError as exc:
+        raise BranchProtectionPolicyUnavailable(
+            "GitHub returned malformed detailed main branch protection; refusing all deletions"
+        ) from exc
+    if not isinstance(main_protection, dict):
+        raise BranchProtectionPolicyUnavailable(
+            "GitHub returned an unexpected main branch protection payload; refusing all deletions"
+        )
+    _require_protected_main(statuses, main_protection)
     return statuses
 
 
@@ -570,7 +702,22 @@ def main() -> int:
             }
         )
 
-        branch_protection = _load_branch_protection_status(repository)
+        try:
+            branch_protection = _load_branch_protection_status(repository)
+        except BranchProtectionPolicyUnavailable as exc:
+            message = (
+                "SKIPPED: detailed main branch protection could not be verified; "
+                "no branch refs were modified. Add the optional "
+                "ATLAS_BRANCH_PROTECTION_READ_TOKEN secret with repository Administration read access "
+                "to enable guarded pruning. Details: " + str(exc)
+            )
+            print(message)
+            summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+            if summary_path:
+                with open(summary_path, "a", encoding="utf-8") as summary:
+                    summary.write("# Atlas-Bot branch reconciliation\n\n")
+                    summary.write(message + "\n")
+            return 0
         branches = _reconcile_unknown_protection_branches(branches, branch_protection)
 
         open_pr_payload = _run(
@@ -654,13 +801,19 @@ def main() -> int:
                 item for item in merged_prs
                 if item.get("headRefName") == branch_name
             ]
-            safe, reason, mismatch_paths = _resolve_branch_integration(
-                branch_name,
-                branch_sha,
-                main_sha,
-                open_pr_heads,
-                branch_merged_prs,
+            duplicate_safe, duplicate_reason, duplicate_keeper = _explicit_duplicate_alias_retirement_proof(
+                branch_name, branch_sha
             )
+            if duplicate_safe:
+                safe, reason, mismatch_paths = True, duplicate_reason, []
+            else:
+                safe, reason, mismatch_paths = _resolve_branch_integration(
+                    branch_name,
+                    branch_sha,
+                    main_sha,
+                    open_pr_heads,
+                    branch_merged_prs,
+                )
 
             if not safe:
                 if mismatch_paths:
@@ -673,6 +826,23 @@ def main() -> int:
                 record("PRESERVE", branch_name, reason)
                 preserved += 1
                 continue
+
+            # For the one explicit duplicate alias, recheck the retained canonical
+            # ref immediately before deleting its redundant sibling.
+            if duplicate_keeper:
+                expected_keeper_sha = _EXACT_DUPLICATE_BRANCH_ALIASES[branch_name]["keeper_sha"]
+                live_keeper = _run(
+                    ["git", "ls-remote", "--heads", "origin", f"refs/heads/{duplicate_keeper}"],
+                    check=False,
+                )
+                if (
+                    live_keeper.returncode
+                    or not live_keeper.stdout.strip()
+                    or live_keeper.stdout.split()[0] != expected_keeper_sha
+                ):
+                    record("PRESERVE", branch_name, "canonical duplicate branch moved during cleanup")
+                    preserved += 1
+                    continue
 
             # Re-read the live ref immediately before deletion. The subsequent
             # force-with-lease push atomically refuses to delete a moved ref.

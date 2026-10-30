@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -219,17 +220,85 @@ def test_missing_commit_marker_mixed_with_object_database_error_aborts(monkeypat
         pruning._is_ancestor("deadbeef", "main-sha")
 
 
-def test_branch_protection_status_is_parsed_and_protected_branches_are_identified(monkeypatch):
+def test_detailed_protection_request_uses_optional_admin_read_token(monkeypatch):
+    seen = {}
+
+    def fake_subprocess_run(args, *, capture_output, text, check, env=None):
+        seen["args"] = args
+        seen["env"] = env
+        return subprocess.CompletedProcess(args, 0, "{}", "")
+
+    monkeypatch.setenv("ATLAS_BRANCH_PROTECTION_READ_TOKEN", "narrow-admin-read-token")
+    monkeypatch.setattr(pruning.subprocess, "run", fake_subprocess_run)
+
+    pruning._run(["gh", "api", "repos/Papajona/Atlas-Bot/branches/main/protection"], check=False)
+
+    assert seen["env"]["GH_TOKEN"] == "narrow-admin-read-token"
+
+
+def test_branch_protection_status_is_parsed_and_main_rewrite_policy_is_verified(monkeypatch):
     def fake_run(args, *, check=True):
         assert args[:2] == ["gh", "api"]
-        return subprocess.CompletedProcess(args, 0, "main\tfalse\nfeature/keep\ttrue\n", "")
+        if any("branches?per_page=100" in arg for arg in args):
+            return subprocess.CompletedProcess(args, 0, "main\ttrue\nfeature/keep\ttrue\n", "")
+        if any("branches/main/protection" in arg for arg in args):
+            return subprocess.CompletedProcess(
+                args, 0,
+                json.dumps({
+                    "enforce_admins": {"enabled": True},
+                    "allow_force_pushes": {"enabled": False},
+                    "allow_deletions": {"enabled": False},
+                }),
+                "",
+            )
+        raise AssertionError(f"unexpected GitHub API request: {args}")
 
     monkeypatch.setattr(pruning, "_run", fake_run)
 
     assert pruning._load_branch_protection_status("Papajona/Atlas-Bot") == {
-        "main": False,
+        "main": True,
         "feature/keep": True,
     }
+
+
+def test_main_protection_rejects_force_push_allowance():
+    policy = {
+        "enforce_admins": {"enabled": True},
+        "allow_force_pushes": {"enabled": True},
+        "allow_deletions": {"enabled": False},
+    }
+    with pytest.raises(RuntimeError, match="force-push"):
+        pruning._require_protected_main({"main": True}, policy)
+
+
+def test_main_protection_rejects_branch_deletion_allowance():
+    policy = {
+        "enforce_admins": {"enabled": True},
+        "allow_force_pushes": {"enabled": False},
+        "allow_deletions": {"enabled": True},
+    }
+    with pytest.raises(RuntimeError, match="branch deletion"):
+        pruning._require_protected_main({"main": True}, policy)
+
+
+def test_main_protection_requires_admin_enforcement():
+    policy = {
+        "enforce_admins": {"enabled": False},
+        "allow_force_pushes": {"enabled": False},
+        "allow_deletions": {"enabled": False},
+    }
+    with pytest.raises(RuntimeError, match="administrators"):
+        pruning._require_protected_main({"main": True}, policy)
+
+
+def test_main_protection_requires_main_protected_flag():
+    policy = {
+        "enforce_admins": {"enabled": True},
+        "allow_force_pushes": {"enabled": False},
+        "allow_deletions": {"enabled": False},
+    }
+    with pytest.raises(RuntimeError, match="main is not reported protected"):
+        pruning._require_protected_main({"main": False}, policy)
 
 
 def test_branch_protection_status_fails_closed_on_api_error(monkeypatch):
@@ -241,6 +310,36 @@ def test_branch_protection_status_fails_closed_on_api_error(monkeypatch):
 
     with pytest.raises(RuntimeError, match="protection status"):
         pruning._load_branch_protection_status("Papajona/Atlas-Bot")
+
+
+def test_main_skips_without_deleting_when_detailed_protection_is_unavailable(monkeypatch):
+    calls = []
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Papajona/Atlas-Bot")
+    monkeypatch.setenv("GH_TOKEN", "default-workflow-token")
+    monkeypatch.delenv("ATLAS_BRANCH_PROTECTION_READ_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+    def fake_run(args, *, check=True):
+        calls.append(args)
+        if args[:2] == ["git", "fetch"]:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:3] == ["git", "rev-parse", "--verify"]:
+            return subprocess.CompletedProcess(args, 0, "main-sha\n", "")
+        if args[:3] == ["git", "for-each-ref", "--format=%(refname:strip=3)"]:
+            return subprocess.CompletedProcess(args, 0, "feature/keep\n", "")
+        raise AssertionError(f"unexpected command while protection is unavailable: {args}")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+    monkeypatch.setattr(
+        pruning,
+        "_load_branch_protection_status",
+        lambda _repository: (_ for _ in ()).throw(
+            pruning.BranchProtectionPolicyUnavailable("permission denied")
+        ),
+    )
+
+    assert pruning.main() == 0
+    assert not any(args[:2] == ["git", "push"] for args in calls)
 
 
 def test_branch_protection_status_rejects_malformed_data(monkeypatch):
@@ -1054,3 +1153,185 @@ def test_pruning_push_guard_handles_large_change_list_under_pipefail(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert output_path.read_text(encoding="utf-8").splitlines() == ["skip=true"]
+
+def test_matching_tree_without_ancestry_or_merged_pr_proof_is_not_deleted(monkeypatch):
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: False)
+    monkeypatch.setattr(
+        pruning,
+        "_branch_delta_mismatched_paths",
+        lambda *_args: [],
+    )
+    safe, reason, paths = pruning._resolve_branch_integration(
+        "same-tree-without-proof",
+        "branch-sha",
+        "main-sha",
+        set(),
+        [],
+    )
+    assert safe is False
+    assert "exact branch ancestry or merged-PR proof is absent" in reason
+    assert paths == []
+
+
+def test_branch_without_common_merge_base_is_preserved_without_aborting_reconciliation(tmp_path, monkeypatch):
+    repo = tmp_path / "unrelated-history-repo"
+    _git(tmp_path, "init", "-b", "main", repo)
+    _git(repo, "config", "user.name", "Atlas unrelated-history regression")
+    _git(repo, "config", "user.email", "atlas-unrelated@example.invalid")
+    (repo / "main.txt").write_text("main history\\n", encoding="utf-8")
+    _git(repo, "add", "main.txt")
+    _git(repo, "commit", "-m", "main root")
+    main_sha = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "--orphan", "unrelated")
+    for path in repo.iterdir():
+        if path.name != ".git" and path.is_file():
+            path.unlink()
+    (repo / "branch.txt").write_text("unrelated branch history\\n", encoding="utf-8")
+    _git(repo, "add", "branch.txt")
+    _git(repo, "commit", "-m", "unrelated root")
+    branch_sha = _git(repo, "rev-parse", "HEAD")
+    monkeypatch.chdir(repo)
+
+    safe, reason, mismatches = pruning._resolve_branch_integration(
+        "unrelated", branch_sha, main_sha, set(), []
+    )
+
+    assert safe is False
+    assert reason == "branch and main have no common merge base; preserve branch"
+    assert mismatches == []
+
+
+def test_android_gate_allows_harmless_release_job_name_metadata(monkeypatch):
+    branch_name = "fix/android-release-trigger-gating-followup-20261023"
+    branch_sha = "6b9feef6b55be4ef06eef630d4b558e0ffad35b7"
+    newline = chr(10)
+    named_workflow = _safe_android_release_workflow().replace(
+        "  android-release:" + newline,
+        "  android-release:" + newline + "    name: android-release" + newline,
+    )
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: False)
+    monkeypatch.setattr(
+        pruning,
+        "_branch_delta_mismatched_paths",
+        lambda *_args: ["tests/test_android_production_backend_wiring.py"],
+    )
+    monkeypatch.setattr(
+        pruning,
+        "_git_file_text_at_commit",
+        lambda _commit, path: (
+            named_workflow
+            if path == ".github/workflows/android-release.yml"
+            else _safe_android_release_test_source()
+        ),
+    )
+    safe, reason, mismatches = pruning._resolve_branch_integration(
+        branch_name, branch_sha, "main-sha", set(), []
+    )
+    assert safe is True
+    assert "exact historical Android release-trigger branch superseded" in reason
+    assert mismatches == []
+
+
+def test_android_gate_rejects_display_name_that_breaks_production_job_lookup(monkeypatch):
+    branch_name = "fix/android-release-trigger-gating-followup-20261023"
+    branch_sha = "6b9feef6b55be4ef06eef630d4b558e0ffad35b7"
+    newline = chr(10)
+    renamed_workflow = _safe_android_release_workflow().replace(
+        "  android-release:" + newline,
+        "  android-release:" + newline + "    name: Signed Android release" + newline,
+    )
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: False)
+    monkeypatch.setattr(
+        pruning,
+        "_branch_delta_mismatched_paths",
+        lambda *_args: ["tests/test_android_production_backend_wiring.py"],
+    )
+    monkeypatch.setattr(
+        pruning,
+        "_git_file_text_at_commit",
+        lambda _commit, path: (
+            renamed_workflow
+            if path == ".github/workflows/android-release.yml"
+            else _safe_android_release_test_source()
+        ),
+    )
+    safe, _reason, _mismatches = pruning._resolve_branch_integration(
+        branch_name, branch_sha, "main-sha", set(), []
+    )
+    assert safe is False
+
+
+def test_prune_workflow_passes_optional_branch_protection_read_token_to_pruning_step():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "safe-merged-branch-pruning.yml"
+    ).read_text(encoding="utf-8")
+    start = workflow.index("      - name: Delete only refs proven integrated into main")
+    step_end = workflow.find(chr(10) + "      - name:", start + 5)
+    step = workflow[start:] if step_end < 0 else workflow[start:step_end]
+    assert "ATLAS_BRANCH_PROTECTION_READ_TOKEN: ${{ secrets.ATLAS_BRANCH_PROTECTION_READ_TOKEN }}" in step
+    assert "GH_TOKEN: ${{ github.token }}" in step
+
+
+def test_exact_duplicate_alias_retirement_requires_exact_tree_parent_and_keeper(monkeypatch):
+    calls = []
+
+    def fake_run(args, *, check=True):
+        calls.append(args)
+        if args[:3] == ["git", "rev-parse", "--verify"]:
+            return subprocess.CompletedProcess(
+                args, 0, "eed301d88b163ea36ad6b473d69400c5eb49b584\n", ""
+            )
+        if args[:3] == ["git", "show", "-s"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                "c238a3ba30b100ef9af5d92ce30d40169783d819\na7f35abfe8d3a73af329c5ae34320afe5f0def12\n",
+                "",
+            )
+        raise AssertionError(f"unexpected command: {args}")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+    safe, reason, keeper = pruning._explicit_duplicate_alias_retirement_proof(
+        "fix/native-ai-propagation-error-alias-20261027",
+        "99e7d975d909fddc7098b06e31617fc3871e4cb4",
+    )
+    assert safe is True
+    assert keeper == "fix/native-ai-propagation-verified-20261027"
+    assert "identical audited tree and parent" in reason
+    assert len([call for call in calls if call[:3] == ["git", "show", "-s"]]) == 2
+
+
+def test_duplicate_alias_retirement_preserves_if_canonical_branch_moves(monkeypatch):
+    def fake_run(args, *, check=True):
+        return subprocess.CompletedProcess(
+            args, 0, "new-keeper-sha\n", ""
+        )
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+    safe, reason, keeper = pruning._explicit_duplicate_alias_retirement_proof(
+        "fix/native-ai-propagation-error-alias-20261027",
+        "99e7d975d909fddc7098b06e31617fc3871e4cb4",
+    )
+    assert safe is False
+    assert "canonical duplicate branch is absent or has moved" in reason
+    assert keeper is None
+
+
+def test_duplicate_alias_retirement_preserves_if_alias_tip_moves(monkeypatch):
+    monkeypatch.setattr(
+        pruning,
+        "_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("must not inspect a moved alias")
+        ),
+    )
+    safe, reason, keeper = pruning._explicit_duplicate_alias_retirement_proof(
+        "fix/native-ai-propagation-error-alias-20261027",
+        "different-sha",
+    )
+    assert safe is False
+    assert "no exact duplicate-alias proof" in reason
+    assert keeper is None

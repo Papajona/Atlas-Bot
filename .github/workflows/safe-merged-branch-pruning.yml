@@ -141,5 +141,6 @@ jobs:
         if: steps.pruning_guard.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          ATLAS_BRANCH_PROTECTION_READ_TOKEN: ${{ secrets.ATLAS_BRANCH_PROTECTION_READ_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: python scripts/prune_safe_merged_branch_refs.py
