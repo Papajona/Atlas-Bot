@@ -77,7 +77,7 @@ _ACTIONABLE_IMMEDIATE_COMMAND_PATTERN = re.compile(
     r"(?i:\b(?:buy|sell)\s+(?:now|immediately|at market)\b)"
 )
 _PRICE_LEVEL_REFERENCE_PATTERN = re.compile(
-    r"(?i:\b(?P<kind>entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger)"
+    r"(?i:\b(?P<kind>entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger))"
     r"(?:\s+price)?\s*(?:=|:|at|to)\s*[$€£]?"
     # Capture the complete adjacent token, including a sign, exponent, or
     # malformed suffix. The validator below must reject the full token rather
