@@ -5945,6 +5945,8 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
                 step_text,
             )
             inline_run = inline_run_match.group(2).strip() if inline_run_match else ""
+            if inline_run in {"|", "|-", "|+", ">", ">-"}:
+                inline_run = ""
             if (
                 metadata_lines[0] != "- name: " + step_name
                 or ("id: ai_provider_verification" in metadata_lines and metadata_lines.count("id: ai_provider_verification") != 1)
