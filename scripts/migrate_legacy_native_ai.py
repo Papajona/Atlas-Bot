@@ -1123,6 +1123,20 @@ def transform_config() -> None:
                 "refusing to remove its class header"
             )
 
+    if provider_nodes and len(settings_classes) > 1:
+        raise MigrationError(
+            "app/config.py has multiple recognized Settings classes; refusing to add an incomplete or ambiguous Groq configuration"
+        )
+    provider_node_ids = {id(node) for node in provider_nodes}
+    if any(
+        member.lineno == settings_class.lineno and id(member) in provider_node_ids
+        for settings_class in settings_classes
+        for member in settings_class.body
+    ):
+        raise MigrationError(
+            "app/config.py has a one-line Settings class with a retired provider field; refusing to drop the class header"
+        )
+
     statement_types = (
         ast.Assign, ast.AnnAssign, ast.Expr, ast.Import, ast.ImportFrom,
         ast.Raise, ast.Return, ast.Assert, ast.AugAssign, ast.Delete,
