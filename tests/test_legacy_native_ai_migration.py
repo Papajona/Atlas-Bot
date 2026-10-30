@@ -678,13 +678,13 @@ def retained_helper():
             helper_module = root / "app" / "branch_helpers.py"
             target.parent.mkdir()
             helper_module.write_text(
-                "__all__ = ['branch_helper', 'json']\\n"
-                "def branch_helper(value: (json := int)):\\n"
-                "    return value\\n",
+                "__all__ = ['branch_helper', 'json']\n"
+                "def branch_helper(value: (json := int)):\n"
+                "    return value\n",
                 encoding="utf-8",
             )
             target.write_text(legacy, encoding="utf-8")
-            canonical = "import json\\nfrom .native_ai import AIProviderError\\n"
+            canonical = "import json\nfrom .native_ai import AIProviderError\n"
             with patch.object(migration, "ROOT", root), patch.object(
                 migration, "canonical_text", return_value=canonical
             ):
