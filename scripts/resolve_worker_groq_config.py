@@ -91,7 +91,7 @@ def _container_env(revision: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return result
 
 
-def resolve(revision: dict[str, Any]) -> tuple[str, str, str, str]:
+def resolve(revision: dict[str, Any], expected_project_id: str) -> tuple[str, str, str, str]:
     """Return validated model, token cap, enablement and pinned optional secret from one revision."""
     env = _container_env(revision)
     values: list[str] = []
@@ -116,8 +116,21 @@ def resolve(revision: dict[str, Any]) -> tuple[str, str, str, str]:
         secret = value_source.get("secretKeyRef") if isinstance(value_source, dict) else None
         if not isinstance(secret, dict):
             raise ValueError("serving API GROQ_API_KEY is not backed by a Secret Manager reference")
-        secret_name = secret.get("secret") or secret.get("name")
-        secret_name = secret_name.rsplit("/", 1)[-1] if isinstance(secret_name, str) else None
+        raw_secret_name = secret.get("secret") or secret.get("name")
+        if not isinstance(raw_secret_name, str) or not raw_secret_name:
+            raise ValueError("serving API GROQ_API_KEY has no secret resource name")
+        qualified = re.fullmatch(r"projects/([^/]+)/secrets/([^/]+)", raw_secret_name)
+        if qualified:
+            secret_project, secret_name = qualified.groups()
+            if secret_project != expected_project_id:
+                raise ValueError(
+                    "serving API GROQ_API_KEY project does not match GCP_PROJECT_ID; refusing cross-project substitution"
+                )
+        elif "/" in raw_secret_name:
+            raise ValueError("serving API GROQ_API_KEY has an invalid qualified Secret Manager resource name")
+        else:
+            # A short Secret Manager name is scoped to the API service project.
+            secret_name = raw_secret_name
         version = secret.get("version") or secret.get("key")
         version = str(version) if version is not None else ""
         if secret_name != "atlas-groq-api-key" or not re.fullmatch(r"[1-9][0-9]*", version):
@@ -143,10 +156,13 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("Cloud Run response must be a JSON object")
         if args == ["--traffic-revisions"]:
             print("\n".join(serving_revisions(payload)))
-        elif args == ["--revision-config"]:
-            print("\n".join(resolve(payload)))
+        elif len(args) == 2 and args[0] == "--revision-config":
+            expected_project_id = args[1]
+            if not re.fullmatch(r"[a-z][a-z0-9-]{4,28}[a-z0-9]", expected_project_id):
+                raise ValueError("GCP_PROJECT_ID is not a valid Google Cloud project ID")
+            print("\n".join(resolve(payload, expected_project_id)))
         else:
-            raise ValueError("Use --traffic-revisions or --revision-config")
+            raise ValueError("Use --traffic-revisions or --revision-config GCP_PROJECT_ID")
     except (AttributeError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
