@@ -77,12 +77,12 @@ _ACTIONABLE_IMMEDIATE_COMMAND_PATTERN = re.compile(
     r"(?i:\b(?:buy|sell)\s+(?:now|immediately|at market)\b)"
 )
 _PRICE_LEVEL_REFERENCE_PATTERN = re.compile(
-    r"(?i:\b(?P<kind>entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger))"
-    r"(?:\s+price)?\s*(?:=|:|at|to)\s*[$€£]?"
-    # Capture the complete adjacent token, including a sign, exponent, or
-    # malformed suffix. The validator below must reject the full token rather
-    # than silently accepting a numeric prefix or skipping a signed value.
-    r"(?P<price>\S+)"
+    r"(?i:\b(?P<kind>entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger)\b)"
+    r"(?:\s+price)?(?:\s*[=:]\s*|\s+(?:at|to)\s+)"
+    # Only consider a following token a price reference when it starts with
+    # an optional currency/sign and a digit (or decimal point). Capture the
+    # complete token so validation still rejects malformed numeric suffixes.
+    r"(?P<price>[$€£]?[+-]?[\d.,]\S*)"
 )
 _PRICE_NUMBER_PATTERN = re.compile(
     r"[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][+-]?\d+)?"
@@ -160,11 +160,12 @@ def _validate_plan_price_references(text: str, trade_plan: dict[str, Any]) -> No
         kind = re.sub(r"\s+", "-", match.group("kind").lower())
         expected = _decimal_plan_price(trade_plan.get(field_for_kind[kind]))
         raw_token = match.group("price").rstrip(".,;:!?)]}\\\"'")
-        if not _PRICE_NUMBER_PATTERN.fullmatch(raw_token):
+        numeric_token = raw_token.lstrip("$€£")
+        if not _PRICE_NUMBER_PATTERN.fullmatch(numeric_token):
             raise GroqAIError(
                 f"Groq trade review cites an invalid {kind} price token"
             )
-        actual = _decimal_plan_price(raw_token.replace(",", "."))
+        actual = _decimal_plan_price(numeric_token.replace(",", "."))
         if expected is None or actual is None or actual != expected:
             raise GroqAIError(
                 f"Groq trade review cites {kind} price outside the submitted trade plan"

@@ -143,6 +143,30 @@ def test_groq_unseparated_tickers_and_mixed_case_pairs_are_rejected(text):
     with pytest.raises(groq_ai.GroqAIError, match="actionable trading instructions"):
         groq_ai._validate_review({**VALID_REVIEW, "research_only_summary": text})
 
+
+@pytest.mark.parametrize("text", [
+    "Data limitations remain in the sample.",
+    "Entry to the market is outside this research summary.",
+    "Stop at the swing low is descriptive market context.",
+])
+def test_groq_ordinary_price_level_words_are_not_actionable_research(text):
+    assert groq_ai._validate_review({**VALID_REVIEW, "research_only_summary": text})[
+        "research_only_summary"
+    ] == text
+
+
+@pytest.mark.parametrize("text", [
+    "Data limitations remain in the sample.",
+    "Entry to the market is outside this trade review.",
+    "Stop at the swing low is descriptive market context.",
+])
+def test_groq_ordinary_price_level_words_are_not_price_references(text):
+    groq_ai._validate_trade_context_review(
+        {**VALID_TRADE_REVIEW, "regime_assessment": text},
+        packet={"trade_plan": {}},
+    )
+
+
 @pytest.mark.parametrize("text", [
     "markets may enter risk-off conditions",
     "price could close mid-range after the release",
