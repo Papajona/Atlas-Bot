@@ -34,6 +34,10 @@ def test_worker_keeps_groq_secret_optional_and_gemini_removed():
     assert "GROQ_API_KEY=${SECRET_GROQ_REF}" in script
     assert "${GROQ_SECRET_ARG}" in script
     assert "GROQ_RESEARCH_REVIEW_ENABLED=${GROQ_RESEARCH_REVIEW_ENABLED}" in script
+    assert ': "${GROQ_MODEL:?Set GROQ_MODEL to the same approved value used by the API deployment}"' in script
+    assert ': "${GROQ_MAX_COMPLETION_TOKENS:?Set GROQ_MAX_COMPLETION_TOKENS to the same approved API value}"' in script
+    assert ': "${GROQ_RESEARCH_REVIEW_ENABLED:?Set GROQ_RESEARCH_REVIEW_ENABLED to the same approved API value}"' in script
+    assert 'GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"' not in script
     assert 'python "${REPO_ROOT}/scripts/validate_groq_deploy_env.py"' in script
     assert 'dirname -- "${BASH_SOURCE[0]}") && pwd)/validate_groq_deploy_env.py' not in script
     assert "GEMINI_API_KEY" not in script
