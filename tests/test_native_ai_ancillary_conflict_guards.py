@@ -315,5 +315,28 @@ fi
         cleaned = migration.scrub_shell_deployment("deploy/cloud-run-worker-deploy.sh", shell)
         self.assertEqual(cleaned, shell)
 
+    def test_groq_bracket_condition_rejects_unquoted_command_separator(self):
+        shell = """if [ -n "$GROQ_API_KEY" ; touch /tmp/atlas-migration-sentinel ]; then
+  GROQ_SECRET_ARG=""
+else
+  echo "optional Groq research review is disabled"
+fi
+"""
+        with self.assertRaisesRegex(
+            migration.MigrationError, "unsafe Groq if-condition"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-worker-deploy.sh", shell)
+
+    def test_groq_then_on_next_line_is_preserved(self):
+        shell = """if [[ -n "$SECRET_GROQ_REF" ]]
+then
+  GROQ_SECRET_ARG=",GROQ_API_KEY=atlas-groq-api-key:1"
+else
+  echo "optional Groq research review is disabled"
+fi
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-worker-deploy.sh", shell)
+        self.assertEqual(cleaned, shell)
+
 if __name__ == "__main__":
     unittest.main()
