@@ -743,22 +743,22 @@ async def process_customer_paper_orders(
         group_mark_price_loader=group_mark_price_loader,
         request=req,
     )
-    if str(recovered.get("status") or "").upper() in {
-        "WAITING_FOR_NEXT_COMPLETED_BAR", "WAITING_FOR_FILL_LATENCY",
-        "WAITING_FOR_PRICE_PRECISION", "NO_LIQUIDITY",
-        "NO_CORRELATION_GROUP_HEADROOM",
-    }:
-        recovered["order_intent"] = {
-            "client_order_id": str(order.get("client_order_id") or ""),
-            "order_id": recovered.get("order_id"),
-            "side": str(order.get("side") or "").upper(),
-            "quantity": str(order.get("quantity") or ""),
-            "bar_timestamp": str(
-                meta.get("submission_bar_at") or meta.get("signal_bar_timestamp") or ""
-            ),
-            "order_role": str(meta.get("order_role") or "STRATEGY").upper(),
-            "newly_submitted": False,
-        }
+    # Preserve the persisted submission identity even when this recovery poll
+    # fills or expires the order. The audit stage must be able to repair a lost
+    # submission event after terminal execution, not only while still pending.
+    recovered["order_intent"] = {
+        "client_order_id": str(order.get("client_order_id") or ""),
+        "order_id": recovered.get("order_id") or order.get("id"),
+        "side": str(order.get("side") or "").upper(),
+        "quantity": str(order.get("quantity") or ""),
+        "bar_timestamp": str(
+            meta.get("submission_bar_at") or meta.get("signal_bar_timestamp") or ""
+        ),
+        "submission_status": str(order.get("status") or "SUBMITTED").upper(),
+        "execution_status": str(recovered.get("status") or "").upper(),
+        "order_role": str(meta.get("order_role") or "STRATEGY").upper(),
+        "newly_submitted": False,
+    }
     return recovered
 
 
@@ -1162,6 +1162,8 @@ async def execute_customer_paper_spot_signal(
             "side": normalized_side,
             "quantity": format(raw_quantity, "f"),
             "bar_timestamp": market["bar_timestamp"],
+            "submission_status": str(match[0].get("status") or "SUBMITTED").upper(),
+            "execution_status": str(execution.get("status") or "").upper(),
             "order_role": role,
             "newly_submitted": newly_submitted,
         },
