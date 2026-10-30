@@ -756,6 +756,7 @@ async def process_customer_paper_orders(
             "bar_timestamp": str(
                 meta.get("submission_bar_at") or meta.get("signal_bar_timestamp") or ""
             ),
+            "order_role": str(meta.get("order_role") or "STRATEGY").upper(),
             "newly_submitted": False,
         }
     return recovered
@@ -951,6 +952,7 @@ async def _protective_exit(
             "side": "SELL",
             "quantity": format(quantity, "f"),
             "bar_timestamp": submission_bar_at,
+            "order_role": "PROTECTIVE_EXIT",
             "newly_submitted": str(submitted.get("status") or "").upper() != "REPLAYED",
         }
     return execution
@@ -1160,6 +1162,7 @@ async def execute_customer_paper_spot_signal(
             "side": normalized_side,
             "quantity": format(raw_quantity, "f"),
             "bar_timestamp": market["bar_timestamp"],
+            "order_role": role,
             "newly_submitted": newly_submitted,
         },
         "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
