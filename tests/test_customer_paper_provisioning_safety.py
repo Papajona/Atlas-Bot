@@ -382,7 +382,10 @@ def test_provision_verifier_rejects_mutating_privileges_on_every_paper_table():
     provisioner = Path("scripts/provision_customer_paper_schema.py").read_text(encoding="utf-8")
     assert "len(verification) != 13" in provisioner
     assert '"paper_tables_allow_only_select_insert"' in provisioner
-    forbidden = ("UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
+    assert "server_version_num" in provisioner
+    assert ">= 170000" in provisioner
+    assert "THEN has_table_privilege(\'atlas_customer_paper\',c.oid,\'MAINTAIN\')" in provisioner
+    forbidden = ("UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN")
     for privilege in forbidden:
         assert (
             f"has_table_privilege('atlas_customer_paper',c.oid,'{privilege}')"
