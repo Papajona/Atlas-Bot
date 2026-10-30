@@ -4873,58 +4873,59 @@ async def groq_research_review(research, intelligence):
             migration.scrub_workflow_ancillary(".github/workflows/production-verification.yml", source)
 
     def test_workflow_scrub_replaces_guarded_live_provider_variant_and_removes_output_gate(self):
-        dollar = chr(36)
-        source = (
-            "jobs:\n"
-            "  verify:\n"
-            "    steps:\n"
-            "      - name: AI model/provider verification when credentials are supplied\n"
-            "        id: ai_provider_verification\n"
-            "        continue-on-error: true\n"
-            "        env:\n"
-            "          PYTHONPATH: .\n"
-            "          GEMINI_API_KEY: " + dollar + "{{ secrets.GEMINI_API_KEY }}\n"
-            "          GROQ_API_KEY: " + dollar + "{{ secrets.GROQ_API_KEY }}\n"
-            "          CEREBRAS_API_KEY: " + dollar + "{{ secrets.CEREBRAS_API_KEY }}\n"
-            "        run: |\n"
-            "          set +e\n"
-            "          python -m scripts.check_ai_models 2>&1 | tee ai-provider-verification.log\n"
-            "          status=" + dollar + "{PIPESTATUS[0]}\n"
-            "          set -e\n"
-            "          if [ \\"$status\\" -eq 0 ]; then\n"
-            "            echo \\"gemini_deferred=false\\" >> \\"$GITHUB_OUTPUT\\"\n"
-            "            exit 0\n"
-            "          elif [ \\"$status\\" -eq 2 ]; then\n"
-            "            echo \\"BLOCKED: provider credentials are not configured; production verification cannot pass without provider checks\\"\n"
-            "            exit 2\n"
-            "          elif grep -Eq '\\\\[FAIL\\\\] Gemini .*generation failed \\\\(HTTP 429\\\\)' ai-provider-verification.log \\\\\n"
-            "            && grep -Eq '\\\\[PASS\\\\] Groq .*Chat Completions inference succeeded' ai-provider-verification.log \\\\\n"
-            "            && ! grep -Eq '\\\\[FAIL\\\\] Groq .*Chat Completions inference failed' ai-provider-verification.log \\\\\n"
-            "            && ! grep -Eq '\\\\[FAIL\\\\] Cerebras .*Chat Completions inference failed' ai-provider-verification.log; then\n"
-            "            echo \\"gemini_deferred=true\\" >> \\"$GITHUB_OUTPUT\\"\n"
-            "            echo \\"::warning::Gemini quota waiver is advisory only; retry after quota reset.\\"\n"
-            "            exit 0\n"
-            "          else\n"
-            "            echo \\"BLOCKED: AI model/provider verification failed with exit code $status\\"\n"
-            "            exit \\"$status\\"\n"
-            "          fi\n"
-            "      - name: Keep unrelated production validation\n"
-            "        run: python -m scripts.check_native_ai\n"
-            "      - name: Enforce provider verification result\n"
-            "        if: always()\n"
-            "        env:\n"
-            "          PROVIDER_VERIFICATION_OUTCOME: " + dollar + "{{ steps.ai_provider_verification.outcome }}\n"
-            "          GEMINI_VERIFICATION_DEFERRED: " + dollar + "{{ steps.ai_provider_verification.outputs.gemini_deferred }}\n"
-            "        run: |\n"
-            "          if [ \\"$PROVIDER_VERIFICATION_OUTCOME\\" != \\"success\\" ]; then\n"
-            "            echo \\"BLOCKED: production gate requires successful live AI provider verification.\\"\n"
-            "            exit 1\n"
-            "          fi\n"
-            "          if [ \\"$GEMINI_VERIFICATION_DEFERRED\\" = \\"true\\" ]; then\n"
-            "            echo \\"::warning::Provider gate passed with temporary Gemini quota waiver.\\"\n"
-            "          else\n"
-            "            echo \\"AI provider verification passed for all configured providers.\\"\n"
-            "          fi\n"
+        source = """jobs:
+  verify:
+    steps:
+      - name: AI model/provider verification when credentials are supplied
+        id: ai_provider_verification
+        continue-on-error: true
+        env:
+          PYTHONPATH: .
+          GEMINI_API_KEY: __DOLLAR__{{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: __DOLLAR__{{ secrets.GROQ_API_KEY }}
+          CEREBRAS_API_KEY: __DOLLAR__{{ secrets.CEREBRAS_API_KEY }}
+        run: |
+          set +e
+          python -m scripts.check_ai_models 2>&1 | tee ai-provider-verification.log
+          status=__PIPESTATUS_CAPTURE__
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "gemini_deferred=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [ "$status" -eq 2 ]; then
+            echo "BLOCKED: provider credentials are not configured; production verification cannot pass without provider checks"
+            exit 2
+          elif grep -Eq '\\[FAIL\\] Gemini .*generation failed \\(HTTP 429\\)' ai-provider-verification.log \\
+            && grep -Eq '\\[PASS\\] Groq .*Chat Completions inference succeeded' ai-provider-verification.log \\
+            && ! grep -Eq '\\[FAIL\\] Groq .*Chat Completions inference failed' ai-provider-verification.log \\
+            && ! grep -Eq '\\[FAIL\\] Cerebras .*Chat Completions inference failed' ai-provider-verification.log; then
+            echo "gemini_deferred=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Gemini quota waiver is advisory only; retry after quota reset."
+            exit 0
+          else
+            echo "BLOCKED: AI model/provider verification failed with exit code $status"
+            exit "$status"
+          fi
+      - name: Keep unrelated production validation
+        run: python -m scripts.check_native_ai
+      - name: Enforce provider verification result
+        if: always()
+        env:
+          PROVIDER_VERIFICATION_OUTCOME: __DOLLAR__{{ steps.ai_provider_verification.outcome }}
+          GEMINI_VERIFICATION_DEFERRED: __DOLLAR__{{ steps.ai_provider_verification.outputs.gemini_deferred }}
+        run: |
+          if [ "$PROVIDER_VERIFICATION_OUTCOME" != "success" ]; then
+            echo "BLOCKED: production gate requires successful live AI provider verification."
+            exit 1
+          fi
+          if [ "$GEMINI_VERIFICATION_DEFERRED" = "true" ]; then
+            echo "::warning::Provider gate passed with temporary Gemini quota waiver."
+          else
+            echo "AI provider verification passed for all configured providers."
+          fi
+"""
+        source = source.replace("__DOLLAR__", chr(36)).replace(
+            "__PIPESTATUS_CAPTURE__", chr(36) + "{PIPESTATUS[0]}"
         )
         cleaned = migration.scrub_workflow_ancillary(".github/workflows/production-verification.yml", source)
         self.assertNotIn("GEMINI_API_KEY", cleaned)
@@ -4935,36 +4936,75 @@ async def groq_research_review(research, intelligence):
         self.assertIn("python -m scripts.check_native_ai", cleaned)
         self.assertIn("Keep unrelated production validation", cleaned)
 
+    def test_workflow_scrub_replaces_manual_dispatch_live_provider_check(self):
+        source = """jobs:
+  verify:
+    steps:
+      - name: AI model/provider verification (manual dispatch only; uses provider quota)
+        if: github.event_name == 'workflow_dispatch'
+        id: ai_provider_verification
+        continue-on-error: true
+        env:
+          PYTHONPATH: .
+          GEMINI_API_KEY: __DOLLAR__{{ secrets.GEMINI_API_KEY || secrets.GEMINI }}
+          GROQ_API_KEY: __DOLLAR__{{ secrets.GROQ_API_KEY || secrets.GROQ }}
+          CEREBRAS_API_KEY: __DOLLAR__{{ secrets.CEREBRAS_API_KEY }}
+          GEMINI_MODEL: gemini-3.8-flash
+        run: |
+          set +e
+          python -m scripts.check_ai_models 2>&1 | tee ai-provider-verification.log
+          status=__PIPESTATUS_CAPTURE__
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "gemini_deferred=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [ "$status" -eq 2 ]; then
+            echo "BLOCKED: provider credentials are not configured; production verification cannot pass without provider checks"
+            exit 2
+          else
+            echo "BLOCKED: AI model/provider verification failed with exit code $status"
+            exit "$status"
+          fi
+"""
+        source = source.replace("__DOLLAR__", chr(36)).replace(
+            "__PIPESTATUS_CAPTURE__", chr(36) + "{PIPESTATUS[0]}"
+        )
+        cleaned = migration.scrub_workflow_ancillary(".github/workflows/production-verification.yml", source)
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+        self.assertNotIn("ai_provider_verification", cleaned)
+        self.assertIn("Atlas Native AI offline verification (no provider calls)", cleaned)
+
     def test_workflow_scrub_refuses_unexpected_command_in_guarded_live_provider_variant(self):
-        dollar = chr(36)
-        source = (
-            "jobs:\n"
-            "  verify:\n"
-            "    steps:\n"
-            "      - name: AI model/provider verification when credentials are supplied\n"
-            "        id: ai_provider_verification\n"
-            "        continue-on-error: true\n"
-            "        env:\n"
-            "          PYTHONPATH: .\n"
-            "          GEMINI_API_KEY: " + dollar + "{{ secrets.GEMINI_API_KEY }}\n"
-            "          GROQ_API_KEY: " + dollar + "{{ secrets.GROQ_API_KEY }}\n"
-            "          CEREBRAS_API_KEY: " + dollar + "{{ secrets.CEREBRAS_API_KEY }}\n"
-            "        run: |\n"
-            "          set +e\n"
-            "          python -m scripts.check_ai_models 2>&1 | tee ai-provider-verification.log\n"
-            "          python scripts/delete_unrelated_data.py\n"
-            "          status=" + dollar + "{PIPESTATUS[0]}\n"
-            "          set -e\n"
-            "          if [ \\"$status\\" -eq 0 ]; then\n"
-            "            echo \\"gemini_deferred=false\\" >> \\"$GITHUB_OUTPUT\\"\n"
-            "            exit 0\n"
-            "          elif [ \\"$status\\" -eq 2 ]; then\n"
-            "            echo \\"BLOCKED: provider credentials are not configured; production verification cannot pass without provider checks\\"\n"
-            "            exit 2\n"
-            "          else\n"
-            "            echo \\"BLOCKED: AI model/provider verification failed with exit code $status\\"\n"
-            "            exit \\"$status\\"\n"
-            "          fi\n"
+        source = """jobs:
+  verify:
+    steps:
+      - name: AI model/provider verification when credentials are supplied
+        id: ai_provider_verification
+        continue-on-error: true
+        env:
+          PYTHONPATH: .
+          GEMINI_API_KEY: __DOLLAR__{{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: __DOLLAR__{{ secrets.GROQ_API_KEY }}
+          CEREBRAS_API_KEY: __DOLLAR__{{ secrets.CEREBRAS_API_KEY }}
+        run: |
+          set +e
+          python -m scripts.check_ai_models 2>&1 | tee ai-provider-verification.log
+          python scripts/delete_unrelated_data.py
+          status=__PIPESTATUS_CAPTURE__
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "gemini_deferred=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [ "$status" -eq 2 ]; then
+            echo "BLOCKED: provider credentials are not configured; production verification cannot pass without provider checks"
+            exit 2
+          else
+            echo "BLOCKED: AI model/provider verification failed with exit code $status"
+            exit "$status"
+          fi
+"""
+        source = source.replace("__DOLLAR__", chr(36)).replace(
+            "__PIPESTATUS_CAPTURE__", chr(36) + "{PIPESTATUS[0]}"
         )
         with self.assertRaisesRegex(migration.MigrationError, "unexpected command in the legacy AI model/provider verification step"):
             migration.scrub_workflow_ancillary(".github/workflows/production-verification.yml", source)
