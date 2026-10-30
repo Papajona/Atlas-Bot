@@ -102,7 +102,7 @@ jobs:
 
           scan_active_provider_refs() {
             local rc=0 matches filtered
-            if matches="$(git grep -nIEi 'gemini|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/production-deploy.yml' ':!.github/workflows/production-verification.yml' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py')"; then
+            if matches="$(git grep -nIEi 'gemini|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/production-deploy.yml' ':!.github/workflows/production-verification.yml' ':!scripts/migrate_legacy_native_ai.py')"; then
               rc=0
             else
               rc=$?
@@ -131,7 +131,69 @@ jobs:
               if (( rc != 1 )); then return "$rc"; fi
             fi
             # Filter only those exact marker lines; scan every other line in this workflow.
-            filtered="$(printf '%s\n' "$matches" | awk '!($0 ~ /^\.github\/workflows\/prune-contained-branches-once\.yml:[0-9]+:/ && $0 ~ /grep -F .def _check_groq. >\/dev\/null/)')"
+            # Exempt only the two exact static Groq-function proof commands; scan every other matching line.
+            filtered="$(printf '%s\n' "$matches" | awk '
+              function escape_source_backslashes(value, result, i, character) {
+                result = ""
+                for (i = 1; i <= length(value); i++) {
+                  character = substr(value, i, 1)
+                  if (character == "\\") result = result "\\\\"
+                  else result = result character
+                }
+                return result
+              }
+              BEGIN { quote = sprintf("%c", 39) }
+              {
+                content = $0
+                sub(/^[^:]*:[0-9]+:/, "", content)
+                scanner_prefix = "            if matches=\"$(git grep -nIEi "
+                if (index(content, scanner_prefix) == 1) {
+                  open_quote = index(content, quote)
+                  close_quote = index(substr(content, open_quote + 1), quote) + open_quote
+                  if (open_quote > 0 && close_quote > open_quote) {
+                    scan_pattern = substr(content, open_quote + 1, close_quote - open_quote - 1)
+                    suffix = substr(content, close_quote + 1)
+                    current_pattern = "gemini|cerebras|ai[[:space:]_-]*gateway|generativelanguage\\.googleapis\\.com|_gemini_json|settings\\.gemini_|settings\\.cerebras_api_key|settings\\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\\.openai\\.com|SECRET_GEMINI|api\\.cerebras\\.ai"
+                    previous_pattern = "gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\\.googleapis\\.com|_gemini_json|settings\\.gemini_|settings\\.groq_api_key|settings\\.cerebras_api_key|settings\\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\\.openai\\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\\.groq\\.com|api\\.cerebras\\.ai"
+                    expected_suffix = " -- . " quote ":!tests" quote " " \
+                      quote ":!docs" quote " " quote ":!README.md" quote " " \
+                      quote ":!CHANGELOG.md" quote " " \
+                      quote ":!.github/workflows/production-deploy.yml" quote " " \
+                      quote ":!.github/workflows/production-verification.yml" quote " " \
+                      quote ":!scripts/migrate_legacy_native_ai.py" quote ")\"; then"
+                    current_self_excluded_suffix = " -- . " quote ":!tests" quote " " \
+                      quote ":!docs" quote " " quote ":!README.md" quote " " \
+                      quote ":!CHANGELOG.md" quote " " \
+                      quote ":!.github/workflows/production-deploy.yml" quote " " \
+                      quote ":!.github/workflows/production-verification.yml" quote " " \
+                      quote ":!.github/workflows/propagate-native-ai-all-branches.yml" quote " " \
+                      quote ":!scripts/migrate_legacy_native_ai.py" quote ")\"; then"
+                    previous_suffix = " -- . " quote ":!tests" quote " " \
+                      quote ":!docs" quote " " quote ":!README.md" quote " " \
+                      quote ":!CHANGELOG.md" quote " " \
+                      quote ":!.github/workflows/propagate-native-ai-all-branches.yml" quote " " \
+                      quote ":!scripts/migrate_legacy_native_ai.py" quote ")\"; then"
+                    if ((scan_pattern == current_pattern && suffix == expected_suffix) || \
+                        (scan_pattern == current_pattern && suffix == current_self_excluded_suffix) || \
+                        (scan_pattern == previous_pattern && suffix == previous_suffix)) next
+                  }
+                }
+                # Ignore only the exact two scanner regex declarations. A different value
+                # assigned to either variable can hide a provider endpoint and must remain visible.
+                normalized_content = content
+                sub(/^[[:space:]]+/, "", normalized_content)
+                expected_current_declaration = "current_pattern = \"" escape_source_backslashes(current_pattern) "\""
+                expected_previous_declaration = "previous_pattern = \"" escape_source_backslashes(previous_pattern) "\""
+                if (index($0, ".github/workflows/propagate-native-ai-all-branches.yml:") == 1 &&
+                    (normalized_content == expected_current_declaration ||
+                     normalized_content == expected_previous_declaration)) next
+                if ($0 ~ /^\.github\/workflows\/prune-contained-branches-once\.yml:[0-9]+:[[:space:]]*&&[[:space:]]*!?[[:space:]]*git show "\$(main_sha|sha):scripts\/check_ai_models\.py" \| grep -F .def _check_groq. >\/dev\/null[[:space:]]*\\$/) next
+                print
+              }
+            ')" || {
+              filter_status=$?
+              return "$filter_status"
+            }
             # Check metadata with the semantic helper so a generic secretRef
             # containing an Atlas provider secret cannot bypass this skip gate.
             local metadata_matches=""
@@ -478,8 +540,7 @@ jobs:
             git clean -fd >/dev/null 2>&1 || true; failed+=("$branch: post-migration provider scan errored; branch left unchanged"); continue; }
           if [[ -n "$after_refs" ]]; then
             echo "ACTIVE PROVIDER REFERENCES REMAIN after semantic migration on $branch:" >&2
-            git grep -nIEi 'gemini|cerebras|ai[[:space:]_-]*gateway|generativelanguage\.googleapis\.com|_gemini_json|settings\.gemini_|settings\.cerebras_api_key|settings\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\.openai\.com|SECRET_GEMINI|api\.cerebras\.ai' -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' ':!.github/workflows/production-deploy.yml' ':!.github/workflows/production-verification.yml' ':!.github/workflows/propagate-native-ai-all-branches.yml' ':!scripts/migrate_legacy_native_ai.py' >&2 || true
-            git grep -nIEi '_groq_json|settings\.groq_(strategy_model|model)|settings\.groq_api_key|GROQ_API_KEY|SECRET_GROQ|api\.groq\.com' -- app/strategy_ai.py app/daily_research.py app/ai_providers.py >&2 || true
+            printf '%s\n' "$after_refs" >&2
             git reset --hard "$start_sha" >/dev/null 2>&1 || true
             git clean -fd >/dev/null 2>&1 || true
             failed+=("$branch: provider references remain after semantic migration; branch left unchanged")
