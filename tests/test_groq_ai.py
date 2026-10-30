@@ -647,7 +647,7 @@ def test_groq_timeout_becomes_error_envelope_inside_shared_decision_deadline(mon
     monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 5.0)
     monkeypatch.setattr(app_main.settings, "groq_timeout_seconds", 20.0)
     monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 0.08)
-    monkeypatch.setattr(app_main.settings, "ai_trade_decision_total_timeout_seconds", 0.08)
+    monkeypatch.setattr(app_main.settings, "ai_trade_decision_total_timeout_seconds", 0.16)
     monkeypatch.setattr(app_main, "groq_trade_context_review", slow_groq)
     monkeypatch.setattr(app_main, "dual_ai_trade_safety_review", native_review)
 
@@ -710,7 +710,7 @@ def test_native_veto_uses_only_remaining_shared_deadline(monkeypatch):
     monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 5.0)
     monkeypatch.setattr(app_main.settings, "groq_timeout_seconds", 20.0)
     monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 0.08)
-    monkeypatch.setattr(app_main.settings, "ai_trade_decision_total_timeout_seconds", 0.08)
+    monkeypatch.setattr(app_main.settings, "ai_trade_decision_total_timeout_seconds", 0.16)
     monkeypatch.setattr(app_main, "groq_trade_context_review", quick_groq)
     monkeypatch.setattr(app_main, "dual_ai_trade_safety_review", slow_native)
 
