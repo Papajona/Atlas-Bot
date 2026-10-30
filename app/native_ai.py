@@ -304,6 +304,45 @@ def evaluate_native_trade_packet(packet: dict[str, Any]) -> dict[str, Any]:
     if entry is not None and stop is not None and target is not None and abs(entry - stop) > 0:
         if abs(target - entry) / abs(entry - stop) < 1.5: reasons.append("reward_risk_below_native_minimum")
     else: reasons.append("risk_distance_invalid")
+
+    groq_required = packet.get("groq_trade_review_required", False)
+    if type(groq_required) is not bool:
+        reasons.append("groq_trade_review_requirement_invalid")
+    elif groq_required:
+        envelope = packet.get("groq_trade_review")
+        if (
+            not isinstance(envelope, dict)
+            or envelope.get("status") != "OK"
+            or envelope.get("provider") != "groq"
+            or envelope.get("execution_authority") is not False
+        ):
+            reasons.append("groq_trade_review_unavailable")
+        elif envelope.get("input_truncated") is not False:
+            reasons.append("groq_trade_review_input_incomplete")
+        else:
+            review = envelope.get("review")
+            if not isinstance(review, dict):
+                reasons.append("groq_trade_review_malformed")
+            else:
+                alignment = str(review.get("setup_alignment") or "").upper()
+                risk_level = str(review.get("risk_level") or "").upper()
+                groq_confidence = _number(review.get("confidence"))
+                valid_alignment = alignment in {"ALIGNED", "CONTRADICTS", "NEUTRAL", "INSUFFICIENT_EVIDENCE"}
+                valid_risk = risk_level in {"LOW", "MODERATE", "HIGH", "CRITICAL", "UNKNOWN"}
+                if not valid_alignment or not valid_risk or groq_confidence is None or not 0.0 <= groq_confidence <= 1.0:
+                    reasons.append("groq_trade_review_malformed")
+                else:
+                    data_quality_flags.append("GROQ_TRADE_REVIEW_INCLUDED")
+                    if alignment == "INSUFFICIENT_EVIDENCE" or risk_level == "UNKNOWN" or groq_confidence < 0.50:
+                        reasons.append("groq_trade_evidence_insufficient")
+                    if alignment == "CONTRADICTS" and groq_confidence >= 0.80:
+                        reasons.append("groq_setup_contradiction_veto")
+                    # HIGH and CRITICAL are veto levels regardless of Groq's
+                    # self-reported confidence, matching the reviewed prompt contract.
+                    if risk_level == "CRITICAL":
+                        reasons.append("groq_critical_risk_veto")
+                    elif risk_level == "HIGH":
+                        reasons.append("groq_high_risk_veto")
     if reasons:
         return {"safe": False, "confidence": 0.0, "reasons": sorted(set(reasons)), "data_quality_flags": data_quality_flags,
                 "engine": "atlas-native-safety-v1", "execution_authority": False}
@@ -313,8 +352,17 @@ def evaluate_native_trade_packet(packet: dict[str, Any]) -> dict[str, Any]:
 
 async def native_trade_safety_review(packet: dict[str, Any]) -> dict[str, Any]:
     result = evaluate_native_trade_packet(packet)
+    providers = {"atlas_native": result}
+    groq = packet.get("groq_trade_review") if isinstance(packet, dict) else None
+    if isinstance(groq, dict):
+        # Preserve the bounded provider review in the decision audit; it cannot authorize execution.
+        providers["groq"] = {
+            key: groq[key]
+            for key in ("status", "provider", "model", "input_truncated", "execution_authority", "review")
+            if key in groq
+        }
     return {"mode": "ATLAS_NATIVE_AI_SAFETY_VETO", "safe": result["safe"], "configured": True,
-            "providers": {"atlas_native": result}, "errors": {}, "execution_authority": False,
+            "providers": providers, "errors": {}, "execution_authority": False,
             **({"reasons": result["reasons"]} if not result["safe"] else {})}
 
 
