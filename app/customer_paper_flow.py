@@ -344,7 +344,7 @@ def _fill_price_and_fee(side: str, quantity: Decimal, market: dict) -> tuple[str
         price = raw_price.quantize(_BAR_QUANTUM, rounding=price_rounding)
         if price <= 0:
             raise CustomerPaperFlowBlocked("Rounded simulated fill price is invalid")
-        rounded_quantity, notional, fee = _rounded_paper_fill_notional_and_fee(
+        _, notional, fee = _rounded_paper_fill_notional_and_fee(
             quantity, price, fee_bps
         )
     cost_details = {
