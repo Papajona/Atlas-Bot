@@ -377,6 +377,17 @@ def test_file_backed_bootstrap_accepts_distinct_passwords_without_disclosing_the
     assert paper_password not in result.stdout + result.stderr
     assert primary_password not in result.stdout + result.stderr
 
+
+def test_mandatory_postgres_workflow_covers_config_and_real_shared_primary_relations():
+    workflow = Path(".github/workflows/ledger-concurrency-check.yml").read_text(encoding="utf-8")
+    assert "      - 'app/config.py'" in workflow
+    assert "GRANT CONNECT ON DATABASE atlas_test TO atlas_paper_app" in workflow
+    assert "-d atlas_test" in workflow
+    assert "-v paper_runtime_role=atlas_paper_app -f scripts/customer_paper_ledger_schema.sql" in workflow
+    assert "ATLAS_PAPER_SHARED_PRIMARY_TEST_DATABASE_URL: postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_test" in workflow
+    assert "ATLAS_PAPER_TEST_DATABASE_URL: postgresql+asyncpg://atlas_paper_app:paper_test_password@127.0.0.1:5432/atlas_test" in workflow
+    assert "pg-paper-shared.xml" in workflow
+
 def test_customer_paper_trigger_functions_pin_search_path_and_account_key_is_not_duplicated():
     sql = Path("scripts/customer_paper_ledger_schema.sql").read_text(encoding="utf-8")
 
