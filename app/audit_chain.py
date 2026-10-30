@@ -107,10 +107,25 @@ async def append_audit_once(
     )
     idempotency_key = hashlib.sha256(identity_payload.encode("utf-8")).hexdigest()
 
-    # The unique (event, idempotency_key) index makes this a bounded indexed lookup.
-    # Select only non-encrypted columns: a damaged historical detail payload must not
-    # prevent a retry from recognizing its already-persisted submission event.
+    # Fast indexed read before the global chain-head lock: ordinary recovery polls
+    # should not serialize all platform audit writers just to detect an existing event.
+    # Select only non-encrypted columns so damaged historical detail cannot block retry.
+    existing = (
+        await db.execute(
+            select(AuditLog.id, AuditLog.event_hash)
+            .where(
+                AuditLog.event == event,
+                AuditLog.idempotency_key == idempotency_key,
+            )
+            .limit(1)
+        )
+    ).first()
+    if existing is not None:
+        return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
+
     state = await _lock_chain_state(db)
+    # A concurrent writer may have inserted after the first read and before the
+    # chain lock was acquired. Recheck under the lock before appending.
     existing = (
         await db.execute(
             select(AuditLog.id, AuditLog.event_hash)
