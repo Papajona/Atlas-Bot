@@ -93,6 +93,46 @@ def test_append_audit_once_recovers_missing_submission_event_without_duplicates(
     asyncio.run(go())
 
 
+def test_existing_idempotency_hit_does_not_take_global_chain_lock(tmp_path, monkeypatch):
+    import app.audit_chain as audit_chain
+
+    async def go():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path/'audit-fast-replay.db'}")
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        S = async_sessionmaker(engine, expire_on_commit=False)
+        payload = {"customer_id": 502, "client_order_id": "cp-fast-replay"}
+        try:
+            async with S() as db:
+                first, created = await append_audit_once(
+                    db,
+                    event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+                    detail=payload,
+                    actor_id="customer:502",
+                    idempotency_fields=("customer_id", "client_order_id"),
+                )
+            assert created is True
+
+            async def fail_if_locked(_db):
+                raise AssertionError("existing idempotent audit replay must not lock the global chain head")
+
+            monkeypatch.setattr(audit_chain, "_lock_chain_state", fail_if_locked)
+            async with S() as db:
+                replay, created_again = await append_audit_once(
+                    db,
+                    event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+                    detail=payload,
+                    actor_id="customer:502",
+                    idempotency_fields=("customer_id", "client_order_id"),
+                )
+            assert created_again is False
+            assert replay.id == first.id
+        finally:
+            await engine.dispose()
+
+    asyncio.run(go())
+
+
 @pytest.mark.postgres
 @pytest.mark.skipif(not os.getenv("ATLAS_POSTGRES_URL"), reason="needs migrated PostgreSQL (ATLAS_POSTGRES_URL)")
 def test_concurrent_audit_writers_never_fork_the_chain_on_postgres():
