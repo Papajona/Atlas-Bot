@@ -5254,14 +5254,69 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 return True
         return quote is not None or escaped
 
+    def safe_groq_condition(condition: str) -> bool:
+        """Accept only bracket-test conditions with no executable substitutions."""
+        stripped = condition.strip()
+        if stripped.endswith(";"):
+            stripped = stripped[:-1].rstrip()
+        if not (
+            (stripped.startswith("[[") and stripped.endswith("]]"))
+            or (stripped.startswith("[") and stripped.endswith("]"))
+        ):
+            return False
+
+        quote: str | None = None
+        escaped = False
+        index = 0
+        while index < len(stripped):
+            character = stripped[index]
+            next_character = stripped[index + 1:index + 2]
+            if escaped:
+                escaped = False
+                index += 1
+                continue
+            if character == "\\" and quote != "'":
+                escaped = True
+                index += 1
+                continue
+            if quote == "'":
+                if character == "'":
+                    quote = None
+                index += 1
+                continue
+            if quote == '"':
+                if character == '"':
+                    quote = None
+                    index += 1
+                    continue
+                # Both command and arithmetic substitutions execute inside double quotes.
+                if ord(character) == 96 or (character == "$" and next_character == "("):
+                    return False
+                index += 1
+                continue
+            if character in {"'", '"'}:
+                quote = character
+                index += 1
+                continue
+            if ord(character) == 96 or (character == "$" and next_character == "("):
+                return False
+            if character in {"<", ">"} and next_character == "(":
+                return False
+            index += 1
+        return quote is None and not escaped
+
     def safe_groq_statement(statement: str) -> bool:
         stripped = statement.strip()
         if not stripped or stripped.startswith("#"):
             return True
         if re.fullmatch(r"(?i)(?:then|else|fi)", stripped):
             return True
-        if re.fullmatch(r"(?i)elif\s+\[\[.*\]\]\s*;?\s*then", stripped):
-            return True
+        elif_match = re.fullmatch(
+            r"(?is)elif\s+(\[\[.*?\]\]|\[.*?\])\s*;?\s*then",
+            stripped,
+        )
+        if elif_match:
+            return safe_groq_condition(elif_match.group(1))
         groq_guard = re.compile(
             r"^:\s*['\"]?" + re.escape("$") + r"\{(?:GROQ_API_KEY|SECRET_GROQ[A-Z0-9_]*)(?::\?[^}]*)?\}['\"]?$",
             re.I,
@@ -5369,6 +5424,9 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if re.match(r"^\s*if\b", source_line, re.I) and groq_condition.search(source_line):
             inline = re.match(r"^\s*if\b.*?\bthen\s*(.*?);\s*fi\s*$", source_line, re.I)
             header = re.search(r"\bthen\b(.*)$", source_line, re.I)
+            condition_match = re.match(r"^\s*if\s+(.+?)\s*;?\s*then\b", source_line, re.I)
+            if not condition_match or not safe_groq_condition(condition_match.group(1)):
+                raise MigrationError(f"{path} has an unsafe Groq if-condition; refusing it")
             if header and not inline:
                 tail = header.group(1).strip().rstrip(";").strip()
                 if tail and not safe_groq_header_tail(tail):
