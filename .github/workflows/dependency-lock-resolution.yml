@@ -8,8 +8,8 @@ on:
       - ".github/workflows/dependency-lock-resolution.yml"
   workflow_dispatch:
 
-# Dependency resolution/testing runs without write credentials. Only the separate,
-# narrowly gated commit job receives contents:write and never installs packages.
+# This workflow is intentionally artifact-only. The PR author commits verified lock
+# candidates; the resulting branch update then runs ordinary PR CI and production gates.
 permissions:
   contents: read
 
@@ -67,64 +67,3 @@ jobs:
             ${{ runner.temp }}/requirements-locks.sha256
           if-no-files-found: error
           retention-days: 7
-
-  commit-verified-locks:
-    needs: resolve-hash-locks
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      (
-        (github.event.pull_request.number == 115 && github.head_ref == 'fix/remaining-audit-gates-2026-10-14') ||
-        (github.event.pull_request.number == 122 && github.head_ref == 'fix/audit-bias-runtime-money-2026-10-14') ||
-        (github.event.pull_request.number == 170 && github.head_ref == 'fix/certifi-security-update-2026-10-20')
-      )
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    steps:
-      # No package installation, scripts from dependencies, or build steps run in
-      # the job with write access. It only verifies hashes and copies artifact data.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.head_ref }}
-          persist-credentials: true
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: atlas-python-hash-lock-candidates
-          path: ${{ runner.temp }}/verified-lock-candidates
-      - name: Verify artifact lock hashes before committing
-        env:
-          LOCKS: ${{ runner.temp }}/verified-lock-candidates
-        run: |
-          set -euo pipefail
-          cd "$LOCKS"
-          test -s requirements.lock
-          test -s requirements-dev.lock
-          test -s requirements-locks.sha256
-          sha256sum --check requirements-locks.sha256
-      - name: Commit locks to the specific audit-repair PR only
-        env:
-          PR_BRANCH: ${{ github.head_ref }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          LOCKS: ${{ runner.temp }}/verified-lock-candidates
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "$PR_NUMBER" == "115" && "$PR_BRANCH" == "fix/remaining-audit-gates-2026-10-14" ]] || [[ "$PR_NUMBER" == "122" && "$PR_BRANCH" == "fix/audit-bias-runtime-money-2026-10-14" ]] || [[ "$PR_NUMBER" == "170" && "$PR_BRANCH" == "fix/certifi-security-update-2026-10-20" ]]; then
-            :
-          else
-            echo "Refusing to commit lock artifact to unexpected PR/branch: $PR_NUMBER:$PR_BRANCH" >&2
-            exit 1
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          install -m 0644 "$LOCKS/requirements.lock" requirements.lock
-          install -m 0644 "$LOCKS/requirements-dev.lock" requirements-dev.lock
-          git add -- requirements.lock requirements-dev.lock
-          if git diff --cached --quiet; then
-            echo "Committed lockfiles already match the verified candidates."
-            exit 0
-          fi
-          git commit -m "Lock Python dependencies with verified artifact hashes"
-          git push origin "HEAD:refs/heads/$PR_BRANCH"
