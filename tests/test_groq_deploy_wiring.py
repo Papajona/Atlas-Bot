@@ -1,4 +1,4 @@
-"""Regression tests for Native AI with optional, research-only Groq deployment wiring."""
+"""Regression tests for optional Groq research and trade-review deployment wiring."""
 from pathlib import Path
 
 
@@ -17,9 +17,11 @@ def test_api_keeps_groq_secret_optional_and_gemini_removed():
     assert "GROQ_MODEL=${GROQ_MODEL}" in script
     assert "GROQ_MAX_COMPLETION_TOKENS=${GROQ_MAX_COMPLETION_TOKENS}" in script
     assert "GROQ_RESEARCH_REVIEW_ENABLED=${GROQ_RESEARCH_REVIEW_ENABLED}" in script
+    assert "GROQ_TRADE_REVIEW_ENABLED=${GROQ_TRADE_REVIEW_ENABLED}" in script
     assert 'GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"' in script
     assert 'GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"' in script
     assert 'GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"' in script
+    assert 'GROQ_TRADE_REVIEW_ENABLED="${GROQ_TRADE_REVIEW_ENABLED:-false}"' in script
     assert 'python "${REPO_ROOT}/scripts/validate_groq_deploy_env.py"' in script
     assert 'dirname -- "${BASH_SOURCE[0]}") && pwd)/validate_groq_deploy_env.py' not in script
     assert "GEMINI_API_KEY" not in script
@@ -39,7 +41,8 @@ def test_worker_keeps_groq_secret_optional_and_inherits_only_serving_api_revisio
     assert 'GROQ_MODEL="${API_GROQ_CONFIG[0]}"' in script
     assert 'GROQ_MAX_COMPLETION_TOKENS="${API_GROQ_CONFIG[1]}"' in script
     assert 'GROQ_RESEARCH_REVIEW_ENABLED="${API_GROQ_CONFIG[2]}"' in script
-    assert 'SECRET_GROQ_REF="${API_GROQ_CONFIG[3]}"' in script
+    assert 'GROQ_TRADE_REVIEW_ENABLED="${API_GROQ_CONFIG[3]}"' in script
+    assert 'SECRET_GROQ_REF="${API_GROQ_CONFIG[4]}"' in script
     assert 'if [[ "${REVISION_GROQ_CONFIG[$index]}" != "${API_GROQ_CONFIG[$index]}" ]]' in script
     assert "API revisions receiving traffic have different Groq configuration" in script
     assert 'SECRET_GROQ_REF="${SECRET_GROQ_REF:-}"' not in script
@@ -63,17 +66,19 @@ def test_production_workflow_passes_optional_groq_secret_without_gemini():
     assert "GROQ_MODEL: ${{ vars.GROQ_MODEL }}" in workflow
     assert "GROQ_MAX_COMPLETION_TOKENS: ${{ vars.GROQ_MAX_COMPLETION_TOKENS }}" in workflow
     assert "GROQ_RESEARCH_REVIEW_ENABLED: ${{ vars.GROQ_RESEARCH_REVIEW_ENABLED }}" in workflow
+    assert "GROQ_TRADE_REVIEW_ENABLED: ${{ vars.GROQ_TRADE_REVIEW_ENABLED }}" in workflow
     assert "SECRET_GEMINI_API_KEY_VERSION" not in workflow
     assert "GEMINI_MODEL" not in workflow
     assert "GEMINI_STRATEGY_MODEL" not in workflow
 
 
-def test_example_documents_optional_groq_research_review_only():
+def test_example_documents_optional_groq_research_and_trade_review():
     env = ENV_EXAMPLE.read_text(encoding="utf-8")
     assert "GROQ_API_KEY=" in env
     assert "GROQ_MODEL=openai/gpt-oss-20b" in env
     assert "GROQ_MAX_COMPLETION_TOKENS=2048" in env
     assert "GROQ_RESEARCH_REVIEW_ENABLED=true" in env
+    assert "GROQ_TRADE_REVIEW_ENABLED=false" in env
     assert "GEMINI_API_KEY" not in env
 
 
@@ -223,6 +228,7 @@ def test_worker_revision_config_resolver_reads_pinned_secret_and_validated_value
                     {"name": "GROQ_MODEL", "value": "openai/gpt-oss-20b"},
                     {"name": "GROQ_MAX_COMPLETION_TOKENS", "value": "2048"},
                     {"name": "GROQ_RESEARCH_REVIEW_ENABLED", "value": "true"},
+                    {"name": "GROQ_TRADE_REVIEW_ENABLED", "value": "true"},
                     {"name": "GROQ_API_KEY", "valueFrom": {"secretKeyRef": {
                         "name": "projects/atlas-project/secrets/atlas-groq-api-key",
                         "key": "7",
@@ -237,7 +243,7 @@ def test_worker_revision_config_resolver_reads_pinned_secret_and_validated_value
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [
-        "openai/gpt-oss-20b", "2048", "true", "atlas-groq-api-key:7"
+        "openai/gpt-oss-20b", "2048", "true", "true", "atlas-groq-api-key:7"
     ]
 
 
@@ -284,7 +290,7 @@ def test_worker_revision_config_resolver_supports_cloud_run_v2_without_optional_
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [
-        "openai/gpt-oss-20b", "8192", "false", "__NONE__"
+        "openai/gpt-oss-20b", "8192", "false", "false", "__NONE__"
     ]
 
 

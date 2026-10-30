@@ -36,7 +36,7 @@ def test_customer_start_gates_customer_paper_before_ai_work():
     candidate_setup = start.index("candidate = None", config_gate)
     preflight = start.index("paper_preflight = await _customer_paper_isolation_preflight()", candidate_setup)
     analysis = start.index("asyncio.to_thread(start_bot_decision")
-    ai_review = start.index("dual_ai_trade_safety_review(")
+    ai_review = start.index("_run_trade_safety_review(packet)")
 
     assert paper_mode < unsupported_asset_gate < config_gate < candidate_setup < preflight < analysis < ai_review
     assert "_customer_paper_configuration_ready()" in start
