@@ -738,11 +738,28 @@ async def process_customer_paper_orders(
 
     if str(meta.get("timeframe") or "") != str(req.timeframe):
         raise CustomerPaperFlowBlocked("Open paper order timeframe differs from the current request; reconcile before execution")
-    return await _fill_open_order(
+    recovered = await _fill_open_order(
         customer_id, order, market, df,
         group_mark_price_loader=group_mark_price_loader,
         request=req,
     )
+    if str(recovered.get("status") or "").upper() in {
+        "WAITING_FOR_NEXT_COMPLETED_BAR", "WAITING_FOR_FILL_LATENCY",
+        "WAITING_FOR_PRICE_PRECISION", "NO_LIQUIDITY",
+        "NO_CORRELATION_GROUP_HEADROOM",
+    }:
+        recovered["order_intent"] = {
+            "client_order_id": str(order.get("client_order_id") or ""),
+            "order_id": recovered.get("order_id"),
+            "side": str(order.get("side") or "").upper(),
+            "quantity": str(order.get("quantity") or ""),
+            "bar_timestamp": str(
+                meta.get("submission_bar_at") or meta.get("signal_bar_timestamp") or ""
+            ),
+            "order_role": str(meta.get("order_role") or "STRATEGY").upper(),
+            "newly_submitted": False,
+        }
+    return recovered
 
 
 async def _protective_exit(
@@ -888,7 +905,7 @@ async def _protective_exit(
     position_client_id = "cpx-" + _sha(
         f"{customer_id}|{req.exchange}|{req.symbol}|{req.timeframe}|{breach_bar_at}|{reason}"
     )[:48]
-    await _paper_call(submit_customer_paper_order(
+    submitted = await _paper_call(submit_customer_paper_order(
         customer_id=customer_id,
         client_order_id=position_client_id,
         venue=str(req.exchange).lower(),
@@ -923,7 +940,22 @@ async def _protective_exit(
     ]
     if len(match) != 1:
         raise CustomerPaperFlowBlocked("Protective exit intent was not visible to recovery")
-    return await _fill_open_order(customer_id, match[0], market, df)
+    execution = await _fill_open_order(customer_id, match[0], market, df)
+    if str(execution.get("status") or "").upper() in {
+        "WAITING_FOR_NEXT_COMPLETED_BAR", "WAITING_FOR_FILL_LATENCY",
+        "WAITING_FOR_PRICE_PRECISION", "NO_LIQUIDITY",
+        "NO_CORRELATION_GROUP_HEADROOM",
+    }:
+        execution["order_intent"] = {
+            "client_order_id": position_client_id,
+            "order_id": execution.get("order_id") or submitted.get("order_id"),
+            "side": "SELL",
+            "quantity": format(quantity, "f"),
+            "bar_timestamp": submission_bar_at,
+            "order_role": "PROTECTIVE_EXIT",
+            "newly_submitted": str(submitted.get("status") or "").upper() != "REPLAYED",
+        }
+    return execution
 
 
 async def recover_customer_paper_spot_flow(
@@ -946,6 +978,7 @@ async def recover_customer_paper_spot_flow(
             "status": "RECOVERY_PROCESSED" if executed else str(recovered.get("status") or "WAITING_FOR_NEXT_COMPLETED_BAR"),
             "decision": "TRADE" if executed else "NO_TRADE",
             "execution": recovered,
+            "order_intent": recovered.get("order_intent"),
             "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
         }
     protective = await _protective_exit(customer_id, req, df, market, history_loader=history_loader)
@@ -956,6 +989,7 @@ async def recover_customer_paper_spot_flow(
             "status": "PROTECTIVE_EXIT" if executed else "PROTECTIVE_EXIT_PENDING",
             "decision": "TRADE" if executed else "NO_TRADE",
             "execution": protective,
+            "order_intent": protective.get("order_intent"),
             "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
         }
     return None
@@ -994,6 +1028,7 @@ async def execute_customer_paper_spot_signal(
             "status": "RECOVERY_PROCESSED",
             "decision": "TRADE" if str(recovered.get("fill", {}).get("status") or "").upper() in {"APPENDED", "REPLAYED"} else "NO_TRADE",
             "execution": recovered,
+            "order_intent": recovered.get("order_intent"),
             "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
         }
 
@@ -1088,6 +1123,8 @@ async def execute_customer_paper_spot_signal(
         limit_price=None,
         metadata=meta,
     ), "submit strategy paper order")
+    # Idempotent retries must not emit a second submission audit event.
+    newly_submitted = str(submitted.get("status") or "").upper() != "REPLAYED"
     if submitted.get("status") == "REPLAYED":
         prior = await _paper_call(
             get_customer_paper_order(customer_id=customer_id, client_order_id=client_id),
@@ -1119,6 +1156,15 @@ async def execute_customer_paper_spot_signal(
         "status": execution.get("status", "UNKNOWN"),
         "decision": "TRADE" if execution.get("status") in {"APPENDED", "REPLAYED"} else "NO_TRADE",
         "execution": execution,
+        "order_intent": {
+            "client_order_id": client_id,
+            "order_id": execution.get("order_id"),
+            "side": normalized_side,
+            "quantity": format(raw_quantity, "f"),
+            "bar_timestamp": market["bar_timestamp"],
+            "order_role": role,
+            "newly_submitted": newly_submitted,
+        },
         "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
         "cost_model_status": cost_status,
         "real_money_ledger_written": False,
