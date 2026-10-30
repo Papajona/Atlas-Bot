@@ -1110,6 +1110,19 @@ def transform_config() -> None:
         provider_nodes.append(node)
         removable_lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
 
+    # Removing a provider field that shares the class header's physical line
+    # would delete the only class declaration. Refuse this valid but ambiguous
+    # compact syntax before touching the file rather than emit invalid Python.
+    for settings_class in settings_classes:
+        if any(
+            member in provider_nodes and member.lineno == settings_class.lineno
+            for member in settings_class.body
+        ):
+            raise MigrationError(
+                "app/config.py has a one-line Settings class with a retired provider field; "
+                "refusing to remove its class header"
+            )
+
     statement_types = (
         ast.Assign, ast.AnnAssign, ast.Expr, ast.Import, ast.ImportFrom,
         ast.Raise, ast.Return, ast.Assert, ast.AugAssign, ast.Delete,
@@ -1168,21 +1181,14 @@ def transform_config() -> None:
     # Supply the separate Groq research-review settings on legacy branches that
     # predate them, without overwriting settings already present on a branch.
     post_cleanup_tree = ast.parse(result, filename=str(path))
-    settings_class = next(
-        (node for node in post_cleanup_tree.body
-         if isinstance(node, ast.ClassDef)
-         and node.name.lower() in {"settings", "appsettings", "atlassettings"}),
-        None,
-    )
-    if settings_class is None:
+    post_cleanup_settings_classes = [
+        node for node in post_cleanup_tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name.lower() in {"settings", "appsettings", "atlassettings"}
+    ]
+    if not post_cleanup_settings_classes:
         raise MigrationError("app/config.py has no recognized Settings class; cannot retain Groq")
-    existing_groq_fields = {
-        name
-        for node in settings_class.body
-        if isinstance(node, (ast.Assign, ast.AnnAssign))
-        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
-        for name in target_names(target)
-    }
+
     groq_field_definitions = [
         ("groq_api_key", 'groq_api_key: str = ""'),
         ("groq_model", 'groq_model: str = "openai/gpt-oss-20b"'),
@@ -1190,16 +1196,27 @@ def transform_config() -> None:
         ("groq_timeout_seconds", "groq_timeout_seconds: float = 20.0"),
         ("groq_research_review_enabled", "groq_research_review_enabled: bool = True"),
     ]
-    missing_groq_fields = [
-        source_line for field_name, source_line in groq_field_definitions
-        if field_name not in existing_groq_fields
-    ]
-    if missing_groq_fields:
-        class_methods = [
-            node for node in settings_class.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    result_lines = result.splitlines(keepends=True)
+    class_insertions: list[tuple[int, str, list[str]]] = []
+    for settings_class in post_cleanup_settings_classes:
+        existing_groq_fields = {
+            name
+            for node in settings_class.body
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+            for name in target_names(target)
+        }
+        missing_groq_fields = [
+            source_line for field_name, source_line in groq_field_definitions
+            if field_name not in existing_groq_fields
         ]
-        result_lines = result.splitlines(keepends=True)
+        if not missing_groq_fields:
+            continue
+        if any(member.lineno == settings_class.lineno for member in settings_class.body):
+            raise MigrationError(
+                f"app/config.py Settings class {settings_class.name} uses a one-line suite; "
+                "refusing to insert Groq defaults ambiguously"
+            )
         class_line = result_lines[settings_class.lineno - 1]
         class_indent = re.match(r"^[ \t]*", class_line).group(0)
         body_indent = next(
@@ -1211,6 +1228,10 @@ def transform_config() -> None:
             ),
             class_indent + ("\t" if "\t" in class_indent else "    "),
         )
+        class_methods = [
+            node for node in settings_class.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
         if class_methods:
             first_method_line = min(
                 min([node.lineno, *[decorator.lineno for decorator in node.decorator_list]])
@@ -1220,9 +1241,17 @@ def transform_config() -> None:
         else:
             # Insert after the full final statement, not inside a multiline field.
             insertion_index = settings_class.end_lineno or settings_class.lineno
+        class_insertions.append((insertion_index, body_indent, missing_groq_fields))
+
+    # Apply insertions bottom-up so original AST line numbers remain valid for
+    # every recognized Settings/AppSettings/AtlasSettings class.
+    for insertion_index, body_indent, missing_groq_fields in sorted(
+        class_insertions, key=lambda item: item[0], reverse=True
+    ):
         result_lines[insertion_index:insertion_index] = [
             body_indent + source_line + "\n" for source_line in missing_groq_fields
         ]
+    if class_insertions:
         result = "".join(result_lines)
     if RETIRED_PROVIDER_RE.search(result):
         raise MigrationError(
