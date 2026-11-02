@@ -93,6 +93,46 @@ def test_append_audit_once_recovers_missing_submission_event_without_duplicates(
     asyncio.run(go())
 
 
+def test_existing_idempotency_hit_does_not_consume_rate_limit(tmp_path, monkeypatch):
+    import app.audit_chain as audit_chain
+
+    async def go():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path/'audit-no-rate-limit-replay.db'}")
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        S = async_sessionmaker(engine, expire_on_commit=False)
+        payload = {"customer_id": 503, "client_order_id": "cp-no-rate-limit-replay"}
+        try:
+            async with S() as db:
+                first, created = await append_audit_once(
+                    db,
+                    event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+                    detail=payload,
+                    actor_id="customer:503",
+                    idempotency_fields=("customer_id", "client_order_id"),
+                )
+            assert created is True
+
+            async def fail_if_rate_limited(*_args, **_kwargs):
+                raise AssertionError("an existing idempotent replay must not consume the audit rate limit")
+
+            monkeypatch.setattr(audit_chain, "allow_rate_limit", fail_if_rate_limited)
+            async with S() as db:
+                replay, created_again = await append_audit_once(
+                    db,
+                    event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+                    detail=payload,
+                    actor_id="customer:503",
+                    idempotency_fields=("customer_id", "client_order_id"),
+                )
+            assert created_again is False
+            assert replay.id == first.id
+        finally:
+            await engine.dispose()
+
+    asyncio.run(go())
+
+
 def test_existing_idempotency_hit_does_not_take_global_chain_lock(tmp_path, monkeypatch):
     import app.audit_chain as audit_chain
 
