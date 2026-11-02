@@ -348,3 +348,139 @@ def test_new_audit_releases_read_transaction_before_rate_limit(tmp_path, monkeyp
             await engine.dispose()
 
     asyncio.run(go())
+
+
+def test_audit_idempotency_migration_retry_recovers_invalid_concurrent_index(monkeypatch):
+    import importlib.util
+    from contextlib import contextmanager
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    migration_path = root / "alembic" / "versions" / "0054_audit_log_idempotency_key.py"
+    spec = importlib.util.spec_from_file_location("migration_0054_audit_idempotency_key_test", migration_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    class Result:
+        def __init__(self, value):
+            self.value = value
+
+        def first(self):
+            return self.value
+
+    class Bind:
+        def __init__(self):
+            self.column_exists = False
+            self.index_state = None
+            self.executed = []
+
+        def execute(self, statement):
+            self.executed.append(str(statement))
+            return Result(self.index_state)
+
+    class Inspector:
+        def __init__(self, bind):
+            self.bind = bind
+
+        def has_column(self, table_name, column_name):
+            assert (table_name, column_name) == ("audit_log", "idempotency_key")
+            return self.bind.column_exists
+
+    class Context:
+        class Dialect:
+            name = "postgresql"
+
+        dialect = Dialect()
+
+        @contextmanager
+        def autocommit_block(self):
+            yield
+
+    bind = Bind()
+    calls = {"add_column": [], "create_index": [], "execute": []}
+    monkeypatch.setattr(migration.op, "get_context", lambda: Context())
+    monkeypatch.setattr(migration.op, "get_bind", lambda: bind)
+    monkeypatch.setattr(migration.sa, "inspect", lambda _bind: Inspector(bind))
+
+    def add_column(table, column):
+        calls["add_column"].append((table, column.name))
+        bind.column_exists = True
+
+    def create_index(name, table, columns, **kwargs):
+        calls["create_index"].append((name, table, tuple(columns), kwargs))
+        if len(calls["create_index"]) == 1:
+            # Simulate a failed concurrent build leaving an invalid catalog entry.
+            bind.index_state = (False, False)
+            raise RuntimeError("simulated interrupted concurrent index build")
+        bind.index_state = (True, True)
+
+    def execute(statement):
+        calls["execute"].append(str(statement))
+        bind.index_state = None
+
+    monkeypatch.setattr(migration.op, "add_column", add_column)
+    monkeypatch.setattr(migration.op, "create_index", create_index)
+    monkeypatch.setattr(migration.op, "execute", execute)
+
+    with pytest.raises(RuntimeError, match="simulated interrupted concurrent index build"):
+        migration.upgrade()
+
+    assert bind.column_exists is True
+    assert bind.index_state == (False, False)
+
+    migration.upgrade()
+
+    assert len(calls["add_column"]) == 1
+    assert len(calls["create_index"]) == 2
+    assert any(
+        "DROP INDEX CONCURRENTLY IF EXISTS uq_audit_log_event_idempotency" in statement
+        for statement in calls["execute"]
+    )
+    assert bind.index_state == (True, True)
+
+
+def test_audit_idempotency_migration_reuses_valid_concurrent_index(monkeypatch):
+    import importlib.util
+    from contextlib import contextmanager
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    migration_path = root / "alembic" / "versions" / "0054_audit_log_idempotency_key.py"
+    spec = importlib.util.spec_from_file_location("migration_0054_audit_log_idempotency_key_valid_test", migration_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    class Result:
+        def first(self):
+            return (True, True)
+
+    class Bind:
+        def execute(self, _statement):
+            return Result()
+
+    class Inspector:
+        def has_column(self, table_name, column_name):
+            return (table_name, column_name) == ("audit_log", "idempotency_key")
+
+    class Context:
+        class Dialect:
+            name = "postgresql"
+
+        dialect = Dialect()
+
+        @contextmanager
+        def autocommit_block(self):
+            yield
+
+    calls = {"create": [], "execute": []}
+    monkeypatch.setattr(migration.op, "get_context", lambda: Context())
+    monkeypatch.setattr(migration.op, "get_bind", lambda: Bind())
+    monkeypatch.setattr(migration.sa, "inspect", lambda _bind: Inspector())
+    monkeypatch.setattr(migration.op, "create_index", lambda *args, **kwargs: calls["create"].append((args, kwargs)))
+    monkeypatch.setattr(migration.op, "execute", lambda statement: calls["execute"].append(str(statement)))
+
+    migration.upgrade()
+
+    assert calls == {"create": [], "execute": []}
