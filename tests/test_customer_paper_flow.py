@@ -1175,3 +1175,64 @@ def test_pending_paper_buy_caps_quantity_after_rounded_notional_and_fee(monkeypa
     ).quantize(quantum, rounding="ROUND_DOWN")
     assert notional + fee == Decimal("0.1")
     assert quantity == previous_quantity - quantum
+
+
+
+def test_customer_paper_submission_audit_is_distinct_and_idempotent(monkeypatch):
+    import app.main as main
+
+    events = []
+
+    async def capture_audit(event, detail, actor_id=None):
+        events.append((event, detail, actor_id))
+
+    monkeypatch.setattr(main, "_safe_audit", capture_audit)
+    execution = {
+        "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
+        "order_submission": {
+            "newly_submitted": True,
+            "client_order_id": "cp-test-submission",
+            "order_id": "paper-order-123",
+            "side": "BUY",
+            "quantity": "0.25",
+            "submission_bar_timestamp": "2026-11-02T09:00:00+00:00",
+        },
+    }
+
+    pending = asyncio.run(main._audit_customer_paper_order_submission(
+        execution=execution, customer_id=123, trading_account_id=456,
+        bot_id=789, symbol="BTC/USDT",
+    ))
+    assert pending is True
+    assert len(events) == 1
+    event, detail, actor_id = events[0]
+    assert event == "CUSTOMER_PAPER_ORDER_SUBMITTED"
+    assert actor_id is None
+    assert detail == {
+        "customer_id": 123,
+        "trading_account_id": 456,
+        "bot_id": 789,
+        "symbol": "BTC/USDT",
+        "client_order_id": "cp-test-submission",
+        "order_id": "paper-order-123",
+        "side": "BUY",
+        "quantity": "0.25",
+        "submission_bar_timestamp": "2026-11-02T09:00:00+00:00",
+        "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
+        "mode": "CUSTOMER_PAPER",
+    }
+
+    # An idempotent replay of the same pending intent must not duplicate the
+    # accepted-submission audit event.
+    execution["order_submission"]["newly_submitted"] = False
+    assert asyncio.run(main._audit_customer_paper_order_submission(
+        execution=execution, customer_id=123, trading_account_id=456,
+        bot_id=789, symbol="BTC/USDT",
+    )) is True
+    assert len(events) == 1
+
+    assert asyncio.run(main._audit_customer_paper_order_submission(
+        execution={"status": "WAITING_FOR_FILL_LATENCY"},
+        customer_id=123, trading_account_id=456, bot_id=789,
+        symbol="BTC/USDT",
+    )) is False
