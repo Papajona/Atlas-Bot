@@ -118,7 +118,7 @@ def test_recovery_wrapper_order_intent_is_audited_as_pending(monkeypatch):
 
 
 
-def test_audit_outage_does_not_turn_a_persisted_pending_order_into_http_error(monkeypatch):
+def test_audit_outage_does_not_turn_a_persisted_pending_order_into_http_error(monkeypatch, caplog):
     fallback = []
 
     async def audit_once(_detail):
@@ -139,6 +139,13 @@ def test_audit_outage_does_not_turn_a_persisted_pending_order_into_http_error(mo
     ))
 
     assert stage == "customer_paper_order_audit_incomplete"
+    failure_logs = [
+        record for record in caplog.records
+        if record.getMessage() == "customer_paper_submission_audit_failed"
+    ]
+    assert len(failure_logs) == 1
+    assert failure_logs[0].exc_info is not None
+    assert failure_logs[0].exc_info[0] is RuntimeError
     assert fallback == [(
         "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE",
         {
