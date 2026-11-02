@@ -1511,3 +1511,46 @@ def test_open_pull_request_enumeration_rejects_malformed_page(monkeypatch):
 
     with pytest.raises(RuntimeError, match="malformed open-pull-request record"):
         pruning._load_open_pull_request_heads("Papajona/Atlas-Bot")
+
+
+def test_final_open_pull_request_recheck_is_paginated_and_fails_closed(monkeypatch):
+    # The last-moment check must also be complete: it is not enough for the
+    # initial inventory to paginate if a PR can be opened during reconciliation.
+    calls = []
+
+    def fake_run(args, *, check=True):
+        calls.append(args)
+        assert args[:3] == ["gh", "api", "--paginate"]
+        assert "--slurp" in args
+        assert "head=Papajona:feature/long-lived-branch&per_page=100" in args[-1]
+        return subprocess.CompletedProcess(
+            args, 0, json.dumps([[], [{"number": 1201}]]), ""
+        )
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+    assert pruning._has_open_pull_request_for_branch(
+        "Papajona/Atlas-Bot", "feature/long-lived-branch"
+    ) is True
+    assert len(calls) == 1
+
+
+def test_final_open_pull_request_recheck_failure_blocks_deletion(monkeypatch):
+    def fake_run(args, *, check=True):
+        return subprocess.CompletedProcess(args, 1, "", "API page unavailable")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+    with pytest.raises(RuntimeError, match="Unable to re-check open pull requests"):
+        pruning._has_open_pull_request_for_branch(
+            "Papajona/Atlas-Bot", "feature/long-lived-branch"
+        )
+
+
+def test_final_open_pull_request_recheck_rejects_malformed_page(monkeypatch):
+    def fake_run(args, *, check=True):
+        return subprocess.CompletedProcess(args, 0, json.dumps([[{"number": "not-an-int"}]]), "")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+    with pytest.raises(RuntimeError, match="malformed open-pull-request record"):
+        pruning._has_open_pull_request_for_branch(
+            "Papajona/Atlas-Bot", "feature/long-lived-branch"
+        )
