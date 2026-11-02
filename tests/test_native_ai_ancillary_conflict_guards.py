@@ -227,8 +227,12 @@ fi
     # Unknown branch-specific safety logic must not be discarded automatically.
     return {"safe": True, "execution_authority": False}
 """
-        approved_legacy = "def evaluate_native_trade_packet(packet): return {\"safe\": True}\\n"
-        canonical = "def evaluate_native_trade_packet(packet): return {\"safe\": False}\\n"
+        approved_legacy = """def evaluate_native_trade_packet(packet):
+    return {"safe": True}
+"""
+        canonical = """def evaluate_native_trade_packet(packet):
+    return {"safe": False}
+"""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "app").mkdir()
@@ -243,9 +247,17 @@ fi
         self.assertEqual(installed, branch_local)
 
     def test_native_ai_installer_refuses_existing_hosted_groq_wiring(self):
-        obsolete = "from groq import Groq\\nclient = Groq(api_key=GROQ_API_KEY)\\nasync def native_trade_safety_review(packet): return {\"safe\": True}\\n"
-        approved_legacy = "def evaluate_native_trade_packet(packet): return {\"safe\": True}\\n"
-        canonical = "def evaluate_native_trade_packet(packet): return {\"safe\": False}\\n"
+        obsolete = """from groq import Groq
+client = Groq(api_key=GROQ_API_KEY)
+async def native_trade_safety_review(packet):
+    return {"safe": True}
+"""
+        approved_legacy = """def evaluate_native_trade_packet(packet):
+    return {"safe": True}
+"""
+        canonical = """def evaluate_native_trade_packet(packet):
+    return {"safe": False}
+"""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "app").mkdir()
