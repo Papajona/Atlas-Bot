@@ -181,6 +181,7 @@ def test_provider_free_branch_skip_requires_static_native_error_alias_identity()
     assert "required_positional > 2" in workflow
     assert "required_keyword_only" in workflow
     assert "allowed_plain_imports" in workflow
+    assert '(0, "decimal"): {"Decimal", "InvalidOperation"}' in workflow
     assert '(node.level, node.module or "") == (0, "__future__") and alias.asname is not None' in workflow
     assert "if [[ -z \"$before_refs\" ]] && verify_native_ai_impl; then" in workflow
     assert 'importlib.import_module("app.groq_ai")' not in workflow
