@@ -596,8 +596,33 @@ async def _repair_customer_paper_submission_audit_retries(customer_id: int) -> N
         try:
             delivered = await _audit_customer_paper_order_submitted_once(record["submission_detail"])
             if delivered is not True:
-                # An active lease or superseded send is not proof of delivery;
-                # retain PENDING for a later lease/status check.
+                # A transient read failure, active lease or superseded send is
+                # not proof of delivery. Refresh updated_at so this bounded
+                # oldest-first queue cannot starve newer retries.
+                try:
+                    await _set_customer_paper_submission_audit_retry_state(
+                        retry_id,
+                        status="PENDING",
+                        error_type="DeliveryIncomplete",
+                        increment_attempts=True,
+                    )
+                except Exception as state_exc:
+                    _log_customer_paper_submission_audit_retry_failure(
+                        event="customer_paper_submission_audit_retry_incomplete_defer_failed",
+                        customer_id=customer_id,
+                        client_order_id=client_order_id,
+                        retry_id=retry_id,
+                        step="defer_incomplete_delivery",
+                        exc=state_exc,
+                    )
+                _log_customer_paper_submission_audit_retry_failure(
+                    event="customer_paper_submission_audit_retry_delivery_incomplete",
+                    customer_id=customer_id,
+                    client_order_id=client_order_id,
+                    retry_id=retry_id,
+                    step="external_delivery_not_confirmed",
+                    exc=RuntimeError("external audit delivery was not confirmed"),
+                )
                 continue
             await _set_customer_paper_submission_audit_retry_state(
                 retry_id,
@@ -743,7 +768,35 @@ async def _customer_paper_submission_stage(
     # The ledger submission is durable. Never convert an accepted order into an
     # HTTP error or invite a duplicate retry when the audit store is unavailable.
     try:
-        await _audit_customer_paper_order_submitted_once(detail)
+        delivered = await _audit_customer_paper_order_submitted_once(detail)
+        if delivered is not True:
+            # Do not treat an in-flight, superseded or temporarily unreadable
+            # outbox lease as delivery. The durable retry row lets the next
+            # customer cycle finish the idempotent external audit.
+            try:
+                await _persist_customer_paper_submission_audit_retry(
+                    customer_id=customer_id,
+                    submission_detail=detail,
+                    error_type="DeliveryIncomplete",
+                )
+            except Exception as persist_exc:
+                _log_customer_paper_submission_audit_retry_failure(
+                    event="customer_paper_submission_audit_retry_persist_failed",
+                    customer_id=customer_id,
+                    client_order_id=client_order_id,
+                    retry_id=None,
+                    step="persist_incomplete_delivery_retry",
+                    exc=persist_exc,
+                )
+            _log_customer_paper_submission_audit_retry_failure(
+                event="customer_paper_submission_audit_delivery_incomplete",
+                customer_id=customer_id,
+                client_order_id=client_order_id,
+                retry_id=None,
+                step="initial_submission_delivery_not_confirmed",
+                exc=RuntimeError("external audit delivery was not confirmed"),
+            )
+            return "customer_paper_order_audit_incomplete" if status in pending_statuses else None
     except CustomerPaperSubmissionAuditPayloadCorrupt as exc:
         # The immutable event already exists but its encrypted payload is damaged.
         # Do not create/reopen a PENDING retry from a different execution snapshot.
