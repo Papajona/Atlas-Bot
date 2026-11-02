@@ -1289,7 +1289,9 @@ async def list_open_customer_paper_orders(*, customer_id: int) -> list[dict[str,
                     raw_metadata = {}
             metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
             orders.append({
-                "order_id": int(row["order_id"]),
+                # customer_paper.orders.id is a UUID; preserve its stable text form
+                # for recovery callers instead of coercing it to an integer.
+                "order_id": str(row["order_id"]),
                 "client_order_id": str(row["client_order_id"]),
                 "venue": str(row["venue"]).lower(),
                 "market_type": str(row["market_type"]),
