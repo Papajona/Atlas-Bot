@@ -172,7 +172,7 @@ async def append_audit_once(
         )
         if existing is not None:
             await db.rollback()
-        return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
+            return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
         row = await _append_audit_locked(
             db,
             event=event,
@@ -195,7 +195,7 @@ async def append_audit_once(
                 )
                 if existing is not None:
                     await db.rollback()
-        return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
+                    return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
 
                 state = await _lock_chain_state(db)
                 existing = await _existing_idempotent_audit(
@@ -203,7 +203,7 @@ async def append_audit_once(
                 )
                 if existing is not None:
                     await db.rollback()
-        return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
+                    return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
 
                 row = await _append_audit_locked(
                     db,
@@ -228,7 +228,7 @@ async def append_audit_once(
                     existing = None
                 if existing is not None:
                     await db.rollback()
-        return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
+                    return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
                 if isinstance(exc, OperationalError):
                     error_text = str(exc).lower()
                     if not any(
