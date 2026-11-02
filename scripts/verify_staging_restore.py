@@ -282,7 +282,7 @@ def main() -> int:
     parser.add_argument("--restore-evidence-sha256", required=True, help="SHA-256 of the downloaded provider-native JSON restore record")
     parser.add_argument("--verified-target-project-ref", required=True, help="Target ref verified from that provider record")
     parser.add_argument("--expected-runtime-role", required=True)
-    parser.add_argument("--expected-revision", default="0053_supabase_public_default_acl_lockdown")
+    parser.add_argument("--expected-revision", default="0054_audit_log_idempotency_key")
     parser.add_argument("--output", default="staging-restore-audit.json")
     args = parser.parse_args()
     try:
