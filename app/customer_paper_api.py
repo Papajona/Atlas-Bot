@@ -50,6 +50,55 @@ _TIMEFRAME_SECONDS = {
 _PAPER_MARKET_IMPACT_RETURN_LOOKBACK = 20
 
 
+def _paper_market_bar_key(*, venue: str, symbol: str, timeframe: str, bar_at: datetime) -> str:
+    """Reproduce the durable market-bar key without registering its shared budget."""
+    stamp = bar_at.astimezone(timezone.utc)
+    material = (
+        f"paper-market-bar-v1|{str(venue or '').strip().lower()}|spot|"
+        f"{str(symbol or '').strip().upper()}|{str(timeframe or '').strip().lower()}|{stamp.isoformat()}"
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _paper_preflight_completed_bar(
+    order: dict[str, Any],
+    bar: dict[str, Any],
+    df: Any,
+    *,
+    timeframe: str,
+) -> tuple[Decimal | None, float | None]:
+    """Validate all fill-price history before the durable shared budget is registered."""
+    values = bar["values"]
+    limit = Decimal(order["limit_price"]) if order.get("limit_price") is not None else None
+    side = str(order.get("side") or "").upper()
+    reference_price: Decimal | None = None
+    if str(order.get("order_type") or "").upper() == "MARKET":
+        reference_price = values["open"]
+    elif side == "BUY" and limit is not None and values["low"] <= limit:
+        reference_price = min(values["open"], limit)
+    elif side == "SELL" and limit is not None and values["high"] >= limit:
+        reference_price = max(values["open"], limit)
+
+    if reference_price is None:
+        return None, None
+
+    bar_position = int(df.index.get_loc(bar["timestamp"]))
+    volatility = _paper_market_impact_volatility(
+        df, bar_position=bar_position, timeframe=timeframe
+    )
+    return reference_price, volatility
+
+
+async def _market_bar_contexts_off_loop(df: Any, *, symbol: str, timeframe: str) -> list[dict[str, Any]]:
+    """Build per-candle contexts away from the event loop for large anchored replays."""
+    return await asyncio.to_thread(
+        _market_bar_contexts,
+        df,
+        symbol=symbol,
+        timeframe=timeframe,
+    )
+
+
 def _paper_market_impact_volatility(df: Any, *, bar_position: int, timeframe: str) -> float:
     """Require the complete contiguous return window used to price a paper fill."""
     timeframe_seconds = _TIMEFRAME_SECONDS.get(str(timeframe))
@@ -703,7 +752,9 @@ def build_customer_paper_router(
                     "order": order,
                 }
 
-            bars = _market_bar_contexts(df, symbol=order["symbol"], timeframe=timeframe)
+            bars = await _market_bar_contexts_off_loop(
+                df, symbol=order["symbol"], timeframe=timeframe
+            )
             by_timestamp = {bar["timestamp"]: bar for bar in bars}
 
             # Never replay an order against revised or substituted submission history.
@@ -772,23 +823,16 @@ def build_customer_paper_router(
 
             async def _process_completed_bar(bar, elapsed_bars, current_order):
                 order = current_order
-                budget = await register_customer_paper_market_bar(
+                bar_key = _paper_market_bar_key(
                     venue=order_venue,
                     symbol=order["symbol"],
                     timeframe=timeframe,
                     bar_at=bar["timestamp"],
-                    bar_data_sha256=bar["bar_data_sha256"],
-                    base_volume=_decimal_text(bar["values"]["volume"]),
-                    participation_rate=_decimal_text(Decimal(str(settings.paper_max_bar_volume_participation))),
                 )
-                prior_fill = await get_customer_paper_fill_for_bar(
-                    customer_id=profile.id,
-                    client_order_id=client_order_id,
-                    bar_key=budget["bar_key"],
-                )
-                if prior_fill is not None:
-                    # Re-read after the immutable fill lookup: another request can have
-                    # completed the order since the initial status read above.
+
+                async def _replay_existing_fill(prior_fill):
+                    # Existing fills are immutable. Return them before revalidating
+                    # the source candle or creating any new shared-bar budget.
                     replay_order = await _order_detail(profile.id, client_order_id)
                     if (
                         elapsed_bars >= max(1, int(settings.paper_order_ttl_bars))
@@ -798,11 +842,11 @@ def build_customer_paper_router(
                             await expire_customer_paper_order(
                                 customer_id=profile.id,
                                 client_order_id=client_order_id,
-                                idempotency_key=_paper_ttl_idempotency_key(profile.id, client_order_id, budget["bar_key"]),
+                                idempotency_key=_paper_ttl_idempotency_key(
+                                    profile.id, client_order_id, bar_key
+                                ),
                             )
                         except CustomerPaperOrderConflict:
-                            # A concurrent fill/expiry can win between the re-read and
-                            # expiry. Return the replay if the latest order is now terminal.
                             replay_order = await _order_detail(profile.id, client_order_id)
                             if replay_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}:
                                 raise
@@ -812,20 +856,45 @@ def build_customer_paper_router(
                         "status": "REPLAYED",
                         "virtual_only": True,
                         "bar_at": bar["timestamp"].isoformat(),
-                        "bar_key": budget["bar_key"],
+                        "bar_key": bar_key,
                         "fill": prior_fill,
                         "order": replay_order,
                     }
+
+                prior_fill = await get_customer_paper_fill_for_bar(
+                    customer_id=profile.id,
+                    client_order_id=client_order_id,
+                    bar_key=bar_key,
+                )
+                if prior_fill is not None:
+                    return await _replay_existing_fill(prior_fill)
+
+                # A candidate fill must pass the entire pre-fill volatility window
+                # before its immutable, shared bar budget can be committed. A failed
+                # history check may then be retried with corrected source candles.
+                reference_price, volatility = _paper_preflight_completed_bar(
+                    order, bar, df, timeframe=timeframe
+                )
+                budget = await register_customer_paper_market_bar(
+                    venue=order_venue,
+                    symbol=order["symbol"],
+                    timeframe=timeframe,
+                    bar_at=bar["timestamp"],
+                    bar_data_sha256=bar["bar_data_sha256"],
+                    base_volume=_decimal_text(bar["values"]["volume"]),
+                    participation_rate=_decimal_text(Decimal(str(settings.paper_max_bar_volume_participation))),
+                )
+                # Close the race with another request that may have filled after
+                # the pre-registration lookup but before the budget transaction.
+                prior_fill = await get_customer_paper_fill_for_bar(
+                    customer_id=profile.id,
+                    client_order_id=client_order_id,
+                    bar_key=budget["bar_key"],
+                )
+                if prior_fill is not None:
+                    return await _replay_existing_fill(prior_fill)
                 values = bar["values"]
-                limit = Decimal(order["limit_price"]) if order["limit_price"] is not None else None
                 side = order["side"]
-                reference_price: Decimal | None = None
-                if order["order_type"] == "MARKET":
-                    reference_price = values["open"]
-                elif side == "BUY" and values["low"] <= limit:
-                    reference_price = min(values["open"], limit)
-                elif side == "SELL" and values["high"] >= limit:
-                    reference_price = max(values["open"], limit)
 
                 if reference_price is None:
                     attempt = "LIMIT_NOT_TRIGGERED"
@@ -894,12 +963,9 @@ def build_customer_paper_router(
                             }
                         fill_quantity = min(fill_quantity, held)
 
-                    # Use only the full, contiguous historical return window through
-                    # this replay candle. Never price a fill from truncated volatility.
-                    bar_position = int(df.index.get_loc(bar["timestamp"]))
-                    volatility = _paper_market_impact_volatility(
-                        df, bar_position=bar_position, timeframe=timeframe
-                    )
+                    # Volatility was validated before immutable budget registration.
+                    if volatility is None:
+                        raise HTTPException(409, "Paper fill volatility preflight is incomplete")
                     participation_for_impact = max(
                         0.0,
                         float(fill_quantity / max(values["volume"], Decimal("1e-18"))),
