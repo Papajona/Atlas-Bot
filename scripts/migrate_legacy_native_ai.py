@@ -5314,6 +5314,8 @@ def scrub_shell_deployment(path: str, text: str) -> str:
     """Remove provider-specific shell wiring without corrupting bundled env/secret lists."""
     output: list[str] = []
     skip_provider_block = False
+    provider_block_indent = ""
+    hoisted_ai_secret_args_in_block = False
     # Groq remains a supported research-only reviewer. Preserve pure Groq secret/config
     # conditionals verbatim, but fail closed if they wrap unrelated deployment commands.
     source_lines = text.splitlines(keepends=True)
@@ -5899,18 +5901,41 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             cleaned = shared + "${AI_SECRET_ARGS:+,}" + cleaned[len(shared) + 1:]
         return prefix + quote + cleaned + suffix
 
+    def safe_groq_only_ai_secret_args(statement: str) -> str | None:
+        """Return a standalone Groq-only list; reject all other surviving secret entries."""
+        if not re.match(r"^\s*(?:export\s+)?AI_SECRET_ARGS\s*=", statement, re.I):
+            return None
+        cleaned = scrub_ai_secret_args(statement)
+        value_match = re.match(
+            r"""^(\s*(?:export\s+)?AI_SECRET_ARGS\s*=\s*)(["'])(.*)(\2\s*(?:\r?\n)?)$""",
+            cleaned,
+            re.I,
+        )
+        if value_match is None:
+            raise MigrationError(f"{path} has an unparseable shared AI_SECRET_ARGS assignment")
+        value = value_match.group(3).strip()
+        if not value:
+            return None
+        entries = [item.strip() for item in split_shell_list(value.lstrip(","), ",") if item.strip()]
+        groq_only = bool(entries) and all(
+            re.fullmatch(r"\$\{GROQ_SECRET_(?:ARG|ARGS)\}", item, re.I)
+            or re.fullmatch(
+                r"(?i)GROQ_API_KEY=(?:atlas-groq-api-key:)?\$\{SECRET_GROQ[A-Z0-9_]*\}",
+                item,
+            )
+            for item in entries
+        )
+        if not groq_only:
+            raise MigrationError(
+                f"{path} has non-Groq shared-secret entries inside a retired-provider conditional; refusing to hoist them"
+            )
+        return cleaned
+
     def is_safe_empty_retired_ai_secret_args(statement: str) -> bool:
-        """Permit a guarded shared-secret list only when retired entries leave it empty."""
+        """Permit a retired-provider list to disappear only when no shared secrets remain."""
         if not re.match(r"^\s*(?:export\s+)?AI_SECRET_ARGS\s*=", statement, re.I):
             return False
         cleaned = scrub_ai_secret_args(statement)
-        if re.search(
-            r"(?i)\b(?:GROQ_API_KEY|SECRET_GROQ[A-Z0-9_]*|GROQ_SECRET_(?:ARG|ARGS))\b",
-            cleaned,
-        ):
-            raise MigrationError(
-                f"{path} has a Groq secret assignment inside a retired-provider conditional; refusing to remove its guard"
-            )
         value_match = re.match(
             r"""^\s*(?:export\s+)?AI_SECRET_ARGS\s*=\s*(["'])(.*)\1\s*(?:\r?\n)?$""",
             cleaned,
@@ -5918,6 +5943,13 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         )
         if value_match is None:
             raise MigrationError(f"{path} has an unparseable shared AI_SECRET_ARGS assignment")
+        if re.search(
+            r"(?i)\b(?:GROQ_API_KEY|SECRET_GROQ[A-Z0-9_]*|GROQ_SECRET_(?:ARG|ARGS))\b",
+            cleaned,
+        ):
+            raise MigrationError(
+                f"{path} has a Groq secret assignment inside a retired-provider conditional; use the safe Groq hoist path"
+            )
         if value_match.group(2).strip():
             raise MigrationError(
                 f"{path} has surviving shared-secret entries inside a retired-provider conditional; refusing to make them unconditional"
@@ -5957,7 +5989,18 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                     )
                 continue
             if re.match(r"^\s*(?:export\s+)?AI_SECRET_ARGS\s*=", line, re.I):
-                is_safe_empty_retired_ai_secret_args(line)
+                if hoisted_ai_secret_args_in_block:
+                    raise MigrationError(
+                        f"{path} has multiple AI_SECRET_ARGS assignments in a retired-provider conditional; refusing ambiguous hoisting"
+                    )
+                hoisted = safe_groq_only_ai_secret_args(line)
+                if hoisted is None:
+                    is_safe_empty_retired_ai_secret_args(line)
+                else:
+                    output.append(provider_block_indent + hoisted.lstrip())
+                    if not output[-1].endswith(("\n", "\r")):
+                        output[-1] += "\n"
+                    hoisted_ai_secret_args_in_block = True
                 continue
             provider_assignment = re.match(
                 r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|"
@@ -5996,6 +6039,8 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 raise MigrationError(
                     f"{path} has an executable command on a retired-provider if-header; refusing to discard it"
                 )
+            provider_block_indent = line[: len(line) - len(line.lstrip())]
+            hoisted_ai_secret_args_in_block = False
             skip_provider_block = True
             continue
 
