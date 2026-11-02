@@ -298,7 +298,7 @@ def test_customer_submission_audit_uses_customer_actor_even_with_system_context(
 
     async def append_once(_db, **kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(event_hash="hash-1"), True
+        return SimpleNamespace(event_hash="a".__mul__(64)), True
 
     monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
     monkeypatch.setattr(main, "append_audit_once", append_once)
