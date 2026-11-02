@@ -339,27 +339,27 @@ def test_provider_scan_filters_only_exact_current_and_previous_scanner_definitio
         "                    && ! git show \"$sha:scripts/check_ai_models.py\" | grep -F 'def _check_groq' >/dev/null \\"
     )
     current_pattern_definition = (
-        ".github/workflows/propagate-native-ai-all-branches.yml:146:"
+        ".github/workflows/propagate-native-ai-all-branches.yml:160:"
         '                    current_pattern = "' + current_pattern.replace("\\", "\\\\") + '"'
     )
     previous_pattern_definition = (
-        ".github/workflows/propagate-native-ai-all-branches.yml:147:"
+        ".github/workflows/propagate-native-ai-all-branches.yml:161:"
         '                    previous_pattern = "' + previous_pattern.replace("\\", "\\\\") + '"'
     )
-    current_pattern_override = (
     legacy_pattern_definition = (
-        ".github/workflows/propagate-native-ai-all-branches.yml:147:"
-        '                    legacy_expected_pattern = "' + previous_pattern.replace("\\", "\\\\") + '"'
+        ".github/workflows/propagate-native-ai-all-branches.yml:148:"
+        '                legacy_expected_pattern = "' + previous_pattern.replace("\\", "\\\\") + '"'
     )
     legacy_pattern_override = (
-        ".github/workflows/propagate-native-ai-all-branches.yml:147:"
-        '                    legacy_expected_pattern = "https://api.openai.com/v1/models"'
+        ".github/workflows/propagate-native-ai-all-branches.yml:148:"
+        '                legacy_expected_pattern = "https://api.openai.com/v1/models"'
     )
-        ".github/workflows/propagate-native-ai-all-branches.yml:146:"
+    current_pattern_override = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:160:"
         '                    current_pattern = "https://api.openai.com/v1/models"'
     )
     previous_pattern_override = (
-        ".github/workflows/propagate-native-ai-all-branches.yml:147:"
+        ".github/workflows/propagate-native-ai-all-branches.yml:161:"
         '                    previous_pattern = "https://api.groq.com/openai/v1/chat/completions"'
     )
     current_pattern_with_command = current_pattern_definition + "; curl https://api.openai.com/v1/models"
