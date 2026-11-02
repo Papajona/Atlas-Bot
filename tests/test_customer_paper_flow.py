@@ -427,6 +427,7 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
         "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
         "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
         "stop_loss_price": "95", "take_profit_price": "110",
+        "execution_owner": "autonomous_customer_bot",
     }]))
     captured = {}
 
@@ -843,6 +844,7 @@ def test_paper_protective_exit_fails_closed_when_intervening_candle_is_missing(m
         "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
         "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
         "stop_loss_price": "95", "take_profit_price": "110",
+        "execution_owner": "autonomous_customer_bot",
     }]))
     with pytest.raises(CustomerPaperFlowBlocked, match="history is incomplete"):
         asyncio.run(flow._protective_exit(12003, req, frame, market))
@@ -1175,3 +1177,49 @@ def test_pending_paper_buy_caps_quantity_after_rounded_notional_and_fee(monkeypa
     ).quantize(quantum, rounding="ROUND_DOWN")
     assert notional + fee == Decimal("0.1")
     assert quantity == previous_quantity - quantum
+
+
+
+def test_autonomous_protective_exit_ignores_manual_owned_positions(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    prior = pd.Timestamp("2026-11-02T08:00:00+00:00")
+    latest = prior + pd.Timedelta(hours=1)
+    frame = pd.DataFrame(
+        {"low": [90.0, 90.0], "high": [100.0, 100.0]},
+        index=[prior, latest],
+    )
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    market = {
+        "bar_timestamp": latest.isoformat(),
+        "currency": "USDT",
+        "data_sha256": "e" * 64,
+    }
+    manual_position = {
+        "venue": "binance",
+        "symbol": "BTC/USDT",
+        "quantity": "1",
+        "timeframe": "1h",
+        "last_event_bar_key": prior.isoformat(),
+        "stop_loss_price": "95",
+        "take_profit_price": "110",
+        "execution_owner": "manual_customer_api",
+    }
+    monkeypatch.setattr(
+        flow, "get_customer_paper_positions", _async_value([manual_position])
+    )
+
+    async def must_not_submit(**_kwargs):
+        raise AssertionError("autonomous recovery must not submit an exit for a manual position")
+
+    monkeypatch.setattr(flow, "submit_customer_paper_order", must_not_submit)
+    result = asyncio.run(flow._protective_exit(12006, req, frame, market))
+    assert result is None
+
+    # The lifecycle reader's conservative fallback is manual-owned too; a missing
+    # owner field must never be interpreted as permission for autonomous execution.
+    manual_position.pop("execution_owner")
+    result_without_owner = asyncio.run(
+        flow._protective_exit(12006, req, frame, market)
+    )
+    assert result_without_owner is None
