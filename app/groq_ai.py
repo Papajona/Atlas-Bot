@@ -196,7 +196,7 @@ def _validate_plan_price_references(text: str, trade_plan: dict[str, Any]) -> No
             )
 
 
-def _validate_reviewdef _validate_review(value: dict[str, Any]) -> dict[str, Any]:
+def _validate_review(value: dict[str, Any]) -> dict[str, Any]:
     required_text = ("regime_assessment", "research_only_summary")
     required_arrays = ("key_observations", "data_quality_flags", "strategy_watchlist")
     result: dict[str, Any] = {}
@@ -286,7 +286,7 @@ def _validate_trade_context_review(
     return result
 
 
-def _trade_context_prompt(def _trade_context_prompt(packet: dict[str, Any]) -> tuple[str, bool]:
+def _trade_context_prompt(packet: dict[str, Any]) -> tuple[str, bool]:
     """Build a bounded, market-only trade review input without customer/account identifiers."""
     if not isinstance(packet, dict):
         raise GroqAIError("Trade review packet must be an object", input_truncated=True)
