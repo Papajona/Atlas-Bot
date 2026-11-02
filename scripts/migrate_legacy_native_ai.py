@@ -820,7 +820,7 @@ def transform_config() -> None:
         # is retired with the hosted strategy generator.
         supported_groq_fields = {
             "groq_api_key", "groq_model", "groq_max_completion_tokens",
-            "groq_timeout_seconds", "groq_research_review_enabled", "groq_trade_review_enabled",
+            "groq_timeout_seconds", "groq_research_review_enabled", "groq_trade_review_enabled", "groq_trade_review_timeout_seconds",
         }
         return bool(PROVIDER_FIELD_RE.search(name)) and name.lower() not in supported_groq_fields
 
@@ -1086,7 +1086,7 @@ def transform_config() -> None:
         names = {name for target in targets for name in target_names(target)}
         supported_groq_fields = {
             "groq_api_key", "groq_model", "groq_max_completion_tokens",
-            "groq_timeout_seconds", "groq_research_review_enabled", "groq_trade_review_enabled",
+            "groq_timeout_seconds", "groq_research_review_enabled", "groq_trade_review_enabled", "groq_trade_review_timeout_seconds",
         }
         supported_groq_names = {
             name for name in names
