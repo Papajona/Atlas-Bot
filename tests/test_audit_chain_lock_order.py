@@ -384,9 +384,9 @@ def test_audit_idempotency_migration_retry_recovers_invalid_concurrent_index(mon
         def __init__(self, bind):
             self.bind = bind
 
-        def has_column(self, table_name, column_name):
-            assert (table_name, column_name) == ("audit_log", "idempotency_key")
-            return self.bind.column_exists
+        def get_columns(self, table_name):
+            assert table_name == "audit_log"
+            return [{"name": "idempotency_key"}] if self.bind.column_exists else []
 
     class Context:
         class Dialect:
@@ -462,8 +462,9 @@ def test_audit_idempotency_migration_reuses_valid_concurrent_index(monkeypatch):
             return Result()
 
     class Inspector:
-        def has_column(self, table_name, column_name):
-            return (table_name, column_name) == ("audit_log", "idempotency_key")
+        def get_columns(self, table_name):
+            assert table_name == "audit_log"
+            return [{"name": "idempotency_key"}]
 
     class Context:
         class Dialect:
