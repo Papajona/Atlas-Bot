@@ -679,10 +679,10 @@ def build_customer_paper_router(
                         fill_quantity = min(fill_quantity, held)
 
                     # Historical candle impact inputs must not include closes from bars
-                # that occurred after the candle currently being replayed.
-                bar_position = int(df.index.get_loc(bar["timestamp"]))
-                candle_history = df.iloc[:bar_position + 1]
-                returns = candle_history["close"].astype(float).pct_change().replace([float("inf"), float("-inf")], float("nan")).dropna().tail(20)
+                    # that occurred after the candle currently being replayed.
+                    bar_position = int(df.index.get_loc(bar["timestamp"]))
+                    candle_history = df.iloc[:bar_position + 1]
+                    returns = candle_history["close"].astype(float).pct_change().replace([float("inf"), float("-inf")], float("nan")).dropna().tail(20)
                     volatility = float(returns.std(ddof=0)) if len(returns) >= 2 else 0.0
                     if not math.isfinite(volatility) or volatility < 0:
                         raise HTTPException(409, "Market volatility estimate is invalid")
