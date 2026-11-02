@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -1026,4 +1027,79 @@ def test_unanchored_daily_snapshot_clamps_valid_long_ttl_to_supported_fetch_wind
 
     assert len(calls) == 1
     assert calls[0].days == 30
+
+def test_paper_fill_preflight_failure_does_not_register_bar_and_corrected_candle_can_retry():
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    order = {"order_type": "MARKET", "side": "BUY", "limit_price": None}
+    values = {
+        "open": Decimal("100"),
+        "high": Decimal("102"),
+        "low": Decimal("99"),
+        "close": Decimal("101"),
+        "volume": Decimal("10"),
+    }
+    bar = {"timestamp": now, "values": values}
+    registration_attempts = []
+
+    short_index = pd.date_range(end=now, periods=20, freq="1min")
+    short_frame = pd.DataFrame(
+        {"close": [100.0 + position for position in range(20)]},
+        index=short_index,
+    )
+    with pytest.raises(HTTPException) as failed:
+        reference, volatility = paper_api._paper_preflight_completed_bar(
+            order, bar, short_frame, timeframe="1m"
+        )
+        registration_attempts.append((reference, volatility))
+    assert failed.value.status_code == 409
+    assert registration_attempts == []
+
+    corrected_index = pd.date_range(end=now, periods=21, freq="1min")
+    corrected_frame = pd.DataFrame(
+        {"close": [100.0 + position for position in range(21)]},
+        index=corrected_index,
+    )
+    reference, volatility = paper_api._paper_preflight_completed_bar(
+        order, bar, corrected_frame, timeframe="1m"
+    )
+    assert reference == Decimal("100")
+    assert volatility is not None and volatility > 0
+    registration_attempts.append((reference, volatility))
+    assert len(registration_attempts) == 1
+
+
+def test_market_bar_key_matches_customer_paper_lifecycle_identity():
+    stamp = datetime(2026, 11, 2, 10, 0, tzinfo=timezone.utc)
+    expected = hashlib.sha256(
+        b"paper-market-bar-v1|binance|spot|BTC/USDT|1m|2026-11-02T10:00:00+00:00"
+    ).hexdigest()
+    assert paper_api._paper_market_bar_key(
+        venue="BINANCE",
+        symbol="btc/usdt",
+        timeframe="1M",
+        bar_at=stamp,
+    ) == expected
+
+
+def test_market_bar_context_conversion_runs_outside_event_loop(monkeypatch):
+    from threading import get_ident
+
+    loop_thread = get_ident()
+    worker_threads = []
+
+    def expensive_context(_df, *, symbol, timeframe):
+        worker_threads.append(get_ident())
+        return [{"symbol": symbol, "timeframe": timeframe}]
+
+    monkeypatch.setattr(paper_api, "_market_bar_contexts", expensive_context)
+
+    async def run():
+        return await paper_api._market_bar_contexts_off_loop(
+            object(), symbol="BTC/USDT", timeframe="1m"
+        )
+
+    result = asyncio.run(run())
+    assert result == [{"symbol": "BTC/USDT", "timeframe": "1m"}]
+    assert worker_threads
+    assert worker_threads[0] != loop_thread
 
