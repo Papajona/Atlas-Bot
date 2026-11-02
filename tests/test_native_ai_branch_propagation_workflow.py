@@ -347,6 +347,14 @@ def test_provider_scan_filters_only_exact_current_and_previous_scanner_definitio
         '                    previous_pattern = "' + previous_pattern.replace("\\", "\\\\") + '"'
     )
     current_pattern_override = (
+    legacy_pattern_definition = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:147:"
+        '                    legacy_expected_pattern = "' + previous_pattern.replace("\\", "\\\\") + '"'
+    )
+    legacy_pattern_override = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:147:"
+        '                    legacy_expected_pattern = "https://api.openai.com/v1/models"'
+    )
         ".github/workflows/propagate-native-ai-all-branches.yml:146:"
         '                    current_pattern = "https://api.openai.com/v1/models"'
     )
@@ -377,6 +385,8 @@ def test_provider_scan_filters_only_exact_current_and_previous_scanner_definitio
         historical_branch_prune_marker,
         current_pattern_definition,
         previous_pattern_definition,
+        legacy_pattern_definition,
+        legacy_pattern_override,
         current_pattern_override,
         previous_pattern_override,
         current_pattern_with_command,
@@ -408,6 +418,8 @@ def test_provider_scan_filters_only_exact_current_and_previous_scanner_definitio
     assert historical_branch_prune_marker not in output_lines
     assert current_pattern_definition not in output_lines
     assert previous_pattern_definition not in output_lines
+    assert legacy_pattern_definition not in output_lines
+    assert legacy_pattern_override in output_lines
     assert current_pattern_override in output_lines
     assert previous_pattern_override in output_lines
     assert current_pattern_with_command in output_lines
