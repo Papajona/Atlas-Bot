@@ -44,6 +44,13 @@ RETIRED_PROVIDER_FIELD_RE = re.compile(
     r"api\.cerebras\.ai|api\.openai\.com|"
     r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|_gemini_json|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|groq_strategy_model)"
 )
+# Native AI may consume a validated Groq evidence envelope, but must never host a Groq client.
+# Reject SDK imports, client construction, API credentials, helper calls and endpoints.
+NATIVE_AI_HOSTED_GROQ_RE = re.compile(
+    r"(?i)(?:\\b(?:from|import)\\s+groq(?:\\.[A-Za-z_][A-Za-z0-9_]*)?\\b|"
+    r"\\b(?:Async)?Groq\\s*\\(|\\bGROQ_API_KEY\\b|\\bSECRET_GROQ\\b|"
+    r"api\\.groq\\.com|\\b_groq_json\\b)"
+)
 ATLAS_PROVIDER_SECRET_RE = re.compile(
     r"(?i)\batlas[-_](?:openai|gemini|cerebras|ai[-_]gateway)[-_][a-z0-9_-]*\b"
 )
@@ -7131,8 +7138,14 @@ def _has_conflicting_provider_wiring(path: str, contents: str) -> bool:
     retired Gemini/Cerebras/AI Gateway and legacy Groq strategy-model fields remain
     migration blockers.
     """
-    pattern = RETIRED_PROVIDER_RE if path == "app/native_ai.py" else PROVIDER_RE
-    return bool(pattern.search(contents))
+    if path == "app/native_ai.py":
+        # Advisory evidence fields such as groq_trade_review are safe to inspect;
+        # hosted clients, keys, helper calls and service endpoints are not.
+        return bool(
+            RETIRED_PROVIDER_RE.search(contents)
+            or NATIVE_AI_HOSTED_GROQ_RE.search(contents)
+        )
+    return bool(PROVIDER_RE.search(contents))
 
 
 def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:
