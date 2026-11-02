@@ -157,25 +157,28 @@ fi
         self.assertTrue(
             migration._has_conflicting_provider_wiring(
                 "app/native_ai.py",
-                "from app.groq_ai import groq_trade_context_review\\n"
-                "async def native_trade_safety_review(packet):\\n"
-                "    review = await groq_trade_context_review(packet)\\n"
-                "    return review\\n",
+                """from app.groq_ai import groq_trade_context_review
+async def native_trade_safety_review(packet):
+    review = await groq_trade_context_review(packet)
+    return review
+""",
             )
         )
         self.assertTrue(
             migration._has_conflicting_provider_wiring(
                 "app/native_ai.py",
-                "import app.groq_ai\\n"
-                "async def native_trade_safety_review(packet):\\n"
-                "    return await app.groq_ai.groq_trade_context_review(packet)\\n",
+                """import app.groq_ai
+async def native_trade_safety_review(packet):
+    return await app.groq_ai.groq_trade_context_review(packet)
+""",
             )
         )
         self.assertTrue(
             migration._has_conflicting_provider_wiring(
                 "app/native_ai.py",
-                "async def native_trade_safety_review(packet):\\n"
-                "    return await _groq_json(packet)\\n",
+                """async def native_trade_safety_review(packet):
+    return await _groq_json(packet)
+""",
             )
         )
 
