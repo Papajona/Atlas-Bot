@@ -124,9 +124,18 @@ async def _attach_groq_trade_review(
                 extra={"error_type": type(exc).__name__},
                 exc_info=True,
             )
-            cause = exc
-            while getattr(cause, "__cause__", None) is not None:
-                cause = cause.__cause__
+            # Preserve the timeout itself as the diagnostic cause. asyncio.wait_for
+            # chains TimeoutError from CancelledError on supported Python versions;
+            # unwrapping that chain would misreport a budget timeout as cancellation.
+            if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+                cause = exc
+            else:
+                cause = exc
+                while (
+                    getattr(cause, "__cause__", None) is not None
+                    and not isinstance(cause.__cause__, asyncio.CancelledError)
+                ):
+                    cause = cause.__cause__
             response = getattr(cause, "response", None)
             raw_status = getattr(response, "status_code", None)
             http_status = (
@@ -1466,7 +1475,7 @@ async def _run_persisted_adaptive_bot_cycle(
     try:
         ai_review = await _run_trade_safety_review(packet)
     except asyncio.TimeoutError:
-        await _audit("ADAPTIVE_BOT_AI_TIMEOUT", {"bot_id": bot_id, "customer_id": profile.id, "symbol": req.symbol, "timeout_seconds": settings.ai_strategy_provider_timeout_seconds})
+        await _audit("ADAPTIVE_BOT_AI_TIMEOUT", {"bot_id": bot_id, "customer_id": profile.id, "symbol": req.symbol, **_trade_safety_timeout_metadata()})
         return {"decision": "NO_TRADE", "stage": "ai_safety_timeout", "analysis": deterministic, "adaptive_model": adaptive, "ml_signal": ml_signal}
     if not ai_review["safe"]:
         stage = "ai_safety_not_configured" if not ai_review.get("configured", True) else "ai_safety_gate"
@@ -5037,7 +5046,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
         try:
             ai_review = await _run_trade_safety_review(packet)
         except asyncio.TimeoutError:
-            await _audit("CUSTOMER_BOT_AI_TIMEOUT", {"customer_id": profile.id, "symbol": req.symbol, "timeout_seconds": settings.ai_strategy_provider_timeout_seconds})
+            await _audit("CUSTOMER_BOT_AI_TIMEOUT", {"customer_id": profile.id, "symbol": req.symbol, **_trade_safety_timeout_metadata()})
             return await _record_customer_decision({"decision": "NO_TRADE", "stage": "ai_safety_timeout", "analysis": deterministic, "execution": None})
         if not ai_review["safe"]:
             stage = "ai_safety_not_configured" if not ai_review.get("configured", True) else "ai_safety_gate"
