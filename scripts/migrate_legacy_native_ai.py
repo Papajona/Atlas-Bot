@@ -18,6 +18,9 @@ ROOT = Path.cwd()
 DEFAULT_CLEANUP_COMMIT = "f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
 # Reviewed source for canonical Native AI behavior, distinct from the cleanup patch base.
 DEFAULT_CANONICAL_COMMIT = "a2b745cff52a5b207d153bae5d1d7b98b916040b"
+# Exact reviewed pre-Groq Native AI module accepted for a narrowly scoped upgrade.
+# Other branch-local safety modules require explicit review; they are never overwritten.
+APPROVED_LEGACY_NATIVE_AI_COMMIT = "bafcc5bc3e5f025ce59c53555a622c9cb46a2f22"
 DEFAULT_EXTRA_BASE_COMMIT = "0d38f95079833804713fcba080caee38a6ddfb4c"
 PROVIDER_RE = re.compile(
     r"(?i)(?:gemini|groq|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
@@ -7149,36 +7152,50 @@ def _has_conflicting_provider_wiring(path: str, contents: str) -> bool:
     return bool(PROVIDER_RE.search(contents))
 
 
-def _install_canonical_native_ai(canonical_source: str) -> None:
-    """Replace branch-local veto logic with the exact reviewed Native AI source.
+def _install_canonical_native_ai(
+    canonical_source: str,
+    *,
+    approved_legacy_source: str,
+) -> None:
+    """Install the pinned Native AI veto only over an exact, reviewed baseline.
 
-    A Groq evidence envelope is advisory, but its presence is not proof that a
-    branch retained the canonical data-quality, protective-price and veto checks.
-    The pinned source must include the reviewed Groq evidence envelope and is the
-    sole accepted implementation of the Native AI authority module.
+    Branch-local safety logic is not discarded just because a new canonical file
+    exists. Existing hosted provider wiring and unknown/divergent modules fail
+    closed. The only upgrade allowed is from the exact reviewed legacy module
+    whose full content is read from APPROVED_LEGACY_NATIVE_AI_COMMIT.
     """
     path = "app/native_ai.py"
     target = ROOT / path
     existing = target.read_text(encoding="utf-8") if target.exists() else ""
-    if existing and _has_conflicting_provider_wiring(path, existing):
-        raise MigrationError(
-            f"{path} contains retired or hosted provider wiring; preserving the branch"
-        )
     if not isinstance(canonical_source, str) or not canonical_source.strip():
         raise MigrationError("pinned canonical app/native_ai.py is empty; preserving the branch")
-    if _has_conflicting_provider_wiring(path, canonical_source):
+    if not isinstance(approved_legacy_source, str) or not approved_legacy_source.strip():
+        raise MigrationError("approved legacy Native AI baseline is unavailable; preserving the branch")
+    for label, source in (
+        ("pinned canonical", canonical_source),
+        ("approved legacy", approved_legacy_source),
+    ):
+        if _has_conflicting_provider_wiring(path, source):
+            raise MigrationError(f"{label} app/native_ai.py contains retired or hosted provider wiring")
+        try:
+            ast.parse(source, filename=path)
+        except SyntaxError as exc:
+            raise MigrationError(f"{label} {path} is not valid Python; preserving the branch") from exc
+
+    # A previously upgraded branch already has the exact canonical source. The
+    # only other permitted replacement is the known prior Native AI baseline.
+    if existing and existing not in {canonical_source, approved_legacy_source}:
+        if _has_conflicting_provider_wiring(path, existing):
+            raise MigrationError(
+                f"{path} contains retired or hosted provider wiring; preserving the branch"
+            )
         raise MigrationError(
-            "pinned canonical app/native_ai.py contains retired or hosted provider wiring"
+            f"{path} differs from both reviewed Native AI baselines; preserving branch-specific safety logic"
         )
-    try:
-        ast.parse(canonical_source, filename=path)
-    except SyntaxError as exc:
-        raise MigrationError(
-            f"pinned canonical {path} is not valid Python; preserving the branch"
-        ) from exc
-    # This is deliberate replacement, not a whole-branch overwrite: the workflow
-    # installs only this safety-authority module from the pinned reviewed commit.
-    write_text(path, canonical_source)
+    if existing != canonical_source:
+        # This is a single-file replacement from a byte-for-byte reviewed baseline,
+        # not a broad branch overwrite. Any unrecognized local module is refused.
+        write_text(path, canonical_source)
 
 
 def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:
@@ -7189,7 +7206,10 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
     for path in ("app/native_ai.py", "scripts/check_native_ai.py", "app/groq_ai.py", "app/prompt_safety.py"):
         target = ROOT / path
         if path == "app/native_ai.py":
-            _install_canonical_native_ai(canonical_text(canonical_commit, path))
+            _install_canonical_native_ai(
+                canonical_text(canonical_commit, path),
+                approved_legacy_source=canonical_text(APPROVED_LEGACY_NATIVE_AI_COMMIT, path),
+            )
         elif not target.exists():
             write_text(path, canonical_text(canonical_commit, path))
         elif path == "app/groq_ai.py":
