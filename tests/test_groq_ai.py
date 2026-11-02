@@ -768,6 +768,17 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
     with pytest.raises(groq_ai.GroqAIError, match="outside the submitted trade plan"):
         groq_ai._validate_trade_context_review(invented_grammar, packet=rounded_packet)
 
+    # A factual-sounding stop reference is still rejected when it does not match
+    # the actual submitted stop; prose must not smuggle an invented level through.
+    mismatched_existing_price = {
+        **VALID_TRADE_REVIEW,
+        "key_observations": ["The strategy uses the stop-loss at 95."],
+    }
+    with pytest.raises(groq_ai.GroqAIError, match="outside the submitted trade plan"):
+        groq_ai._validate_trade_context_review(
+            mismatched_existing_price, packet=rounded_packet
+        )
+
     ordinary_text = {
         **VALID_TRADE_REVIEW,
         "key_observations": [
