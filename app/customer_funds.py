@@ -657,11 +657,19 @@ async def settle_trading_fee(db, *, customer_id: int, fee: float, reference_id: 
                                                shortfall=shortfall, source="TRADING_FEE")
 
 
-async def ledger_statement(db, customer_id: int, currency: str = USDT, limit: int = 100) -> list[dict]:
-    rows = (await db.execute(select(LedgerJournal, LedgerJournalLine).join(
+async def ledger_statement(
+    db, customer_id: int, currency: str = USDT, limit: int | None = 100
+) -> list[dict]:
+    """Return customer journal lines; a null limit is reserved for full-history exports."""
+    statement = select(LedgerJournal, LedgerJournalLine).join(
         LedgerJournalLine, LedgerJournalLine.journal_id == LedgerJournal.id
-    ).where(LedgerJournalLine.customer_id == customer_id, LedgerJournal.currency == currency)
-      .order_by(LedgerJournal.created_at.desc(), LedgerJournalLine.line_no).limit(limit))).all()
+    ).where(
+        LedgerJournalLine.customer_id == customer_id,
+        LedgerJournal.currency == currency,
+    ).order_by(LedgerJournal.created_at.desc(), LedgerJournalLine.line_no)
+    if limit is not None:
+        statement = statement.limit(limit)
+    rows = (await db.execute(statement)).all()
     return [{
         "journal_id": j.id, "entry_type": j.entry_type, "reference_type": j.reference_type,
         "reference_id": j.reference_id, "account_code": line.account_code,

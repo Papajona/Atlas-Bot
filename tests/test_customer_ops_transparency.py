@@ -61,7 +61,7 @@ def test_customer_csv_export_serializes_journal_lines_for_authenticated_customer
 
     async def statement(fake_db, customer_id, currency, limit):
         assert fake_db is db
-        assert (customer_id, currency, limit) == (23, "USDT", 5000)
+        assert (customer_id, currency, limit) == (23, "USDT", None)
         return db.entries
 
     monkeypatch.setattr(main, "ledger_statement", statement)
@@ -122,3 +122,38 @@ def test_customer_trade_decision_hides_another_customer_trade_as_not_found(monke
     assert exc.value.status_code == 404
     assert str(db.executed[0].whereclause).count("trades.customer_id") == 1
     assert not db.mutations
+
+
+def test_customer_csv_export_includes_more_than_5000_journal_lines(monkeypatch):
+    entries = [
+        {
+            "created_at": "2026-11-02T10:00:00+00:00",
+            "journal_id": index,
+            "entry_type": "DEPOSIT",
+            "reference_type": "TRON_DEPOSIT",
+            "reference_id": f"tx-{index}",
+            "account_code": "LIABILITY:CUSTOMER:AVAILABLE",
+            "debit": "0.000000",
+            "credit": "1.000000",
+        }
+        for index in range(5001)
+    ]
+    db = _DB(entries=entries)
+    profile = SimpleNamespace(id=23)
+    monkeypatch.setattr(main, "SessionLocal", lambda: db)
+    monkeypatch.setattr(main, "get_customer", _async_value((profile, {"sub": "customer-23"})))
+
+    async def statement(fake_db, customer_id, currency, limit):
+        assert fake_db is db
+        assert (customer_id, currency, limit) == (23, "USDT", None)
+        return db.entries
+
+    monkeypatch.setattr(main, "ledger_statement", statement)
+    response = asyncio.run(main.customer_ledger_export_csv(authorization="opaque-token"))
+
+    rows = response.body.decode("utf-8").splitlines()
+    assert response.status_code == 200
+    assert len(rows) == 5002  # header plus all 5,001 journal lines
+    assert rows[-1].split(",")[1] == "5000"
+    assert response.headers["X-Atlas-Export-Row-Count"] == "5001"
+    assert response.headers["X-Atlas-Export-Truncated"] == "false"

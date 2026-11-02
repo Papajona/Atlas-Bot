@@ -177,6 +177,20 @@ def _stable_draw(*parts: str) -> float:
     return int(digest[:13], 16) / float(16**13)
 
 
+def _paper_order_draw(customer_id: int, order_id: str, bar_key: str, outcome: str) -> float:
+    """Use server-persisted order identity, never client-chosen idempotency input."""
+    server_order_id = str(order_id or "").strip()
+    if not server_order_id:
+        raise ValueError("paper order is missing its server-generated order identity")
+    return _stable_draw(str(int(customer_id)), server_order_id, str(bar_key), str(outcome))
+
+
+def _paper_ttl_idempotency_key(customer_id: int, client_order_id: str, bar_identity: str) -> str:
+    """Make a TTL close event unique to one customer, order and completed bar."""
+    material = f"{int(customer_id)}|{str(client_order_id)}|{str(bar_identity)}"
+    return "paper-ttl:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _paper_feature_flags() -> None:
     """No paper API may run under any live-money, custody, or payout configuration."""
     if (
@@ -219,6 +233,8 @@ def build_customer_paper_router(
             raise HTTPException(401, "Customer authentication is required")
         async with SessionLocal() as db:
             profile, _claims = await get_customer(authorization, db, require_aal2=True)
+            # Persist a newly flushed profile before this short-lived session closes.
+            await db.commit()
         if not getattr(profile, "id", None):
             raise HTTPException(401, "Customer authentication is invalid")
         return profile
@@ -404,6 +420,9 @@ def build_customer_paper_router(
             order = await _order_detail(profile.id, client_order_id)
             if order["status"] not in {"SUBMITTED", "PARTIALLY_FILLED"}:
                 return {"status": "TERMINAL", "virtual_only": True, "order": order}
+            order_identity = str(order.get("order_id") or "").strip()
+            if not order_identity:
+                raise HTTPException(409, "Persisted paper order is missing its server-generated identity")
             order_venue = str(order.get("venue") or "").strip().lower()
             if order_venue != "binance" or str(order.get("market_type") or "").strip().lower() != "spot":
                 raise HTTPException(409, "Manual paper-order advancement supports Binance spot orders only")
@@ -421,20 +440,24 @@ def build_customer_paper_router(
                     "order": order,
                 }
             elapsed_bars = int((bar["timestamp"] - submitted_at).total_seconds() // _TIMEFRAME_SECONDS[timeframe])
-            if elapsed_bars < max(1, int(settings.paper_fill_latency_bars)):
-                if elapsed_bars >= max(1, int(settings.paper_order_ttl_bars)):
-                    await expire_customer_paper_order(
-                        customer_id=profile.id,
-                        client_order_id=client_order_id,
-                        idempotency_key=f"paper-ttl:{bar['timestamp'].isoformat()}",
-                    )
-                    expired_order = await _order_detail(profile.id, client_order_id)
-                    return {
-                        "status": "EXPIRED_TTL",
-                        "virtual_only": True,
-                        "elapsed_bars": elapsed_bars,
-                        "order": expired_order,
-                    }
+            ttl_bars = max(1, int(settings.paper_order_ttl_bars))
+            fill_latency_bars = max(1, int(settings.paper_fill_latency_bars))
+            # Never attempt a fill on a candle later than the configured order life.
+            # At the TTL boundary, allow the final eligible candle only when fill latency elapsed.
+            if elapsed_bars > ttl_bars or (elapsed_bars >= ttl_bars and elapsed_bars < fill_latency_bars):
+                await expire_customer_paper_order(
+                    customer_id=profile.id,
+                    client_order_id=client_order_id,
+                    idempotency_key=_paper_ttl_idempotency_key(profile.id, client_order_id, bar["timestamp"].isoformat()),
+                )
+                expired_order = await _order_detail(profile.id, client_order_id)
+                return {
+                    "status": "EXPIRED_TTL",
+                    "virtual_only": True,
+                    "elapsed_bars": elapsed_bars,
+                    "order": expired_order,
+                }
+            if elapsed_bars < fill_latency_bars:
                 return {
                     "status": "WAITING_FOR_FILL_LATENCY",
                     "virtual_only": True,
@@ -467,7 +490,7 @@ def build_customer_paper_router(
                         await expire_customer_paper_order(
                             customer_id=profile.id,
                             client_order_id=client_order_id,
-                            idempotency_key=f"paper-ttl:{budget['bar_key']}",
+                            idempotency_key=_paper_ttl_idempotency_key(profile.id, client_order_id, budget["bar_key"]),
                         )
                     except CustomerPaperOrderConflict:
                         # A concurrent fill/expiry can win between the re-read and
@@ -500,9 +523,9 @@ def build_customer_paper_router(
                 attempt = "LIMIT_NOT_TRIGGERED"
             elif Decimal(budget["available"]) <= 0:
                 attempt = "WAITING_FOR_BAR_CAPACITY"
-            elif _stable_draw(client_order_id, budget["bar_key"], "rejection") < min(1.0, max(0.0, float(settings.paper_rejection_probability))):
+            elif _paper_order_draw(profile.id, order_identity, budget["bar_key"], "rejection") < min(1.0, max(0.0, float(settings.paper_rejection_probability))):
                 attempt = "DETERMINISTIC_BAR_REJECTION"
-            elif _stable_draw(client_order_id, budget["bar_key"], "queue") > min(1.0, max(0.0, float(settings.paper_queue_fill_probability))):
+            elif _paper_order_draw(profile.id, order_identity, budget["bar_key"], "queue") > min(1.0, max(0.0, float(settings.paper_queue_fill_probability))):
                 attempt = "DETERMINISTIC_QUEUE_MISS"
             else:
                 execution_profile = PROFILES.get("crypto")
@@ -704,7 +727,7 @@ def build_customer_paper_router(
                                         await expire_customer_paper_order(
                                             customer_id=profile.id,
                                             client_order_id=client_order_id,
-                                            idempotency_key=f"paper-ttl:{budget['bar_key']}",
+                                            idempotency_key=_paper_ttl_idempotency_key(profile.id, client_order_id, budget["bar_key"]),
                                         )
                                         retry_order = await _order_detail(profile.id, client_order_id)
                                         return {
@@ -729,12 +752,12 @@ def build_customer_paper_router(
                     fresh_order = await _order_detail(profile.id, client_order_id)
                     if (
                         elapsed_bars >= max(1, int(settings.paper_order_ttl_bars))
-                        and fresh_order["status"] == "PARTIALLY_FILLED"
+                        and fresh_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}
                     ):
                         await expire_customer_paper_order(
                             customer_id=profile.id,
                             client_order_id=client_order_id,
-                            idempotency_key=f"paper-ttl:{budget['bar_key']}",
+                            idempotency_key=_paper_ttl_idempotency_key(profile.id, client_order_id, budget["bar_key"]),
                         )
                         fresh_order = await _order_detail(profile.id, client_order_id)
                     return {
@@ -751,7 +774,7 @@ def build_customer_paper_router(
                 await expire_customer_paper_order(
                     customer_id=profile.id,
                     client_order_id=client_order_id,
-                    idempotency_key=f"paper-ttl:{budget['bar_key']}",
+                    idempotency_key=_paper_ttl_idempotency_key(profile.id, client_order_id, budget["bar_key"]),
                 )
                 order = await _order_detail(profile.id, client_order_id)
                 return {"status": "EXPIRED", "attempt": attempt, "virtual_only": True, "order": order}

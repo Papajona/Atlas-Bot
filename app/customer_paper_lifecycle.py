@@ -95,6 +95,55 @@ def _fmt(value: Decimal) -> str:
         context.prec = 50
         return format(value.quantize(_AMOUNT_QUANTUM), "f")
 
+_BAR_SPECIFIC_RETRY_METADATA_KEYS = frozenset({
+    "submission_bar_at",
+    "submission_bar_sha256",
+    "dataset_sha256",
+    "data_source",
+    "fetched_at_utc",
+    "bar_data_sha256",
+})
+
+
+def _stable_retry_metadata(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        return None
+    return {str(key): item for key, item in value.items() if str(key) not in _BAR_SPECIFIC_RETRY_METADATA_KEYS}
+
+
+def _existing_order_intent_matches(existing: Mapping[str, Any], *, venue: str, market_type: str,
+                                   symbol: str, side: str, order_type: str, quantity: Decimal,
+                                   limit_price: Decimal | None, currency: str,
+                                   metadata: Mapping[str, Any]) -> bool:
+    """Compare customer intent while ignoring a retry request's newer market bar."""
+    stored_metadata = _stable_retry_metadata(existing.get("metadata_json"))
+    requested_metadata = _stable_retry_metadata(metadata)
+    if stored_metadata is None or requested_metadata is None:
+        return False
+    try:
+        stored_quantity = Decimal(str(existing.get("quantity")))
+        stored_limit = None if existing.get("limit_price") is None else Decimal(str(existing.get("limit_price")))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return (
+        str(existing.get("venue") or "").strip().lower() == venue
+        and str(existing.get("market_type") or "").strip().lower() == market_type
+        and str(existing.get("symbol") or "").strip().upper() == symbol
+        and str(existing.get("side") or "").strip().upper() == side
+        and str(existing.get("order_type") or "").strip().upper() == order_type
+        and str(existing.get("currency") or "").strip().upper() == currency
+        and stored_quantity == quantity
+        and stored_limit == limit_price
+        and stored_metadata == requested_metadata
+    )
+
 
 def _canonical_sha(payload: Mapping[str, Any]) -> str:
     encoded = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -334,16 +383,25 @@ async def submit_customer_paper_order(
             # Resolve idempotent retries before evaluating entry controls.
             existing_intent = (await conn.execute(text(
                 """
-                SELECT id, payload_sha256 FROM customer_paper.orders
+                SELECT id, venue, market_type, symbol, side, order_type, quantity, limit_price, currency, metadata_json FROM customer_paper.orders
                 WHERE customer_id=:customer_id AND client_order_id=:client_order_id
                 """
-            ), {"customer_id": customer_id, "client_order_id": client_id})).first()
+            ), {"customer_id": customer_id, "client_order_id": client_id})).mappings().first()
             if existing_intent is not None:
-                if str(existing_intent[1]) != digest:
+                if not _existing_order_intent_matches(
+                    existing_intent,
+                    venue=normalized_venue, market_type=normalized_market,
+                    symbol=normalized_symbol, side=normalized_side, order_type=normalized_order_type,
+                    quantity=amount, limit_price=limit, currency=normalized_currency,
+                    metadata=safe_metadata,
+                ):
                     raise CustomerPaperIdempotencyConflict(
                         "client_order_id already exists for a different immutable order intent"
                     )
-                return {"status": "REPLAYED", "order_id": str(existing_intent[0]), "client_order_id": client_id}
+                return {
+                    "status": "REPLAYED", "order_id": str(existing_intent["id"]),
+                    "client_order_id": client_id,
+                }
 
             new_owner = str(
                 safe_metadata.get("execution_owner")
@@ -538,15 +596,29 @@ async def submit_customer_paper_order(
             if row is None:
                 existing = (await conn.execute(text(
                     """
-                    SELECT id, payload_sha256 FROM customer_paper.orders
+                    SELECT id, venue, market_type, symbol, side, order_type, quantity, limit_price, currency, metadata_json FROM customer_paper.orders
                     WHERE customer_id=:customer_id AND client_order_id=:client_order_id
                     """
-                ), {"customer_id": customer_id, "client_order_id": client_id})).first()
-                if existing is None or str(existing[1]) != digest:
+                ), {"customer_id": customer_id, "client_order_id": client_id})).mappings().first()
+                if existing is None or not _existing_order_intent_matches(
+                    existing,
+                    venue=normalized_venue,
+                    market_type=normalized_market,
+                    symbol=normalized_symbol,
+                    side=normalized_side,
+                    order_type=normalized_order_type,
+                    quantity=amount,
+                    limit_price=limit,
+                    currency=normalized_currency,
+                    metadata=safe_metadata,
+                ):
                     raise CustomerPaperIdempotencyConflict(
                         "client_order_id already exists for a different immutable order intent"
                     )
-                return {"status": "REPLAYED", "order_id": str(existing[0]), "client_order_id": client_id}
+                return {
+                    "status": "REPLAYED", "order_id": str(existing["id"]),
+                    "client_order_id": client_id,
+                }
             order_id = str(row[0])
             await _insert_order_event(
                 conn, customer_id=customer_id, order_id=order_id,

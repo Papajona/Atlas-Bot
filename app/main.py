@@ -4247,7 +4247,8 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
 
     async with SessionLocal() as db:
         profile, _ = await get_customer(authorization, db)
-        entries = await ledger_statement(db, profile.id, "USDT", 5000)
+        # Export the complete journal; a hard cap silently omitted older history.
+        entries = await ledger_statement(db, profile.id, "USDT", limit=None)
         output = io.StringIO(newline="")
         writer = csv.writer(output)
         writer.writerow([
@@ -4273,6 +4274,8 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
                 "Content-Disposition": 'attachment; filename="atlas-customer-ledger-usdt.csv"',
                 "Cache-Control": "no-store",
                 "Pragma": "no-cache",
+                "X-Atlas-Export-Row-Count": str(len(entries)),
+                "X-Atlas-Export-Truncated": "false",
             },
         )
 
