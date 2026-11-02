@@ -11,7 +11,7 @@ import json
 import logging
 import math
 import re
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
@@ -77,26 +77,26 @@ _ACTIONABLE_IMMEDIATE_COMMAND_PATTERN = re.compile(
     r"(?i:\b(?:buy|sell)\s+(?:now|immediately|at market)\b)"
 )
 _PRICE_LEVEL_REFERENCE_PATTERN = re.compile(
-    r"(?i:\b(?P<kind>entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger)\b)"
+    r"(?i:\b(?P<kind>entry|stop[- ]loss|stop|take[- ]profit|target|"
+    r"limit(?=\s+price\b)|trigger(?=\s+price\b))\b)"
     r"(?:\s+price)?"
     r"(?:\s*(?:=|:)\s*|\s+(?:(?:is|was|equals?)\s+)?(?:at|to)\s+|"
     r"\s+(?:(?:is|was|equals?)\s+)?)[$€£]?"
-    # Capture the whole numeric-looking token (including invalid suffixes), but
-    # never begin a reference match with ordinary prose such as "the market".
+    # Keep the complete token so malformed price-like claims still fail closed.
+    # Risk units and R/ATR multiples are descriptive metrics, not plan prices;
+    # _validate_plan_price_references skips those explicitly.
     r"(?P<price>[+-]?(?:\d|\.\d)\S*)"
 )
 _PRICE_NUMBER_PATTERN = re.compile(
     r"[+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?"
 )
 _TRADE_PRICE_SETTING_COMMAND_PATTERN = re.compile(
-    r"(?i:\b(?:set|sets|setting|move|moves|moving|place|places|placing|"
-    r"adjust|adjusts|adjusting|raise|raises|raising|lower|lowers|lowering|"
-    r"change|changes|changing|update|updates|updating|put|puts|putting|"
-    r"tighten|tightens|tightening|widen|widens|widening|recommend|recommends|"
-    r"recommending)\s+"
+    r"(?i:\b(?:set|sets|move|moves|place|places|adjust|adjusts|raise|raises|"
+    r"lower|lowers|change|changes|update|updates|put|puts|tighten|tightens|"
+    r"widen|widens|recommend|recommends|use|keep)\s+"
     r"(?:(?:the|a|your|my|our|this|new|current)\s+)?"
     r"(?:(?:protective|trailing)\s+)?"
-    r"(?:entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger)\b"
+    r"(?:entry|stop[- ]loss|stop|take[- ]profit|target|limit\s+price|trigger\s+price)\b"
     r"(?:\s+price)?(?:\s*(?:=|:)\s*[$€£]?[+-]?(?:\d|\.\d)\S*)?)"
 )
 _ACTIONABLE_TRADING_PATTERNS = (
@@ -161,6 +161,14 @@ def _validate_plan_price_references(text: str, trade_plan: dict[str, Any]) -> No
         kind = re.sub(r"\s+", "-", match.group("kind").lower())
         expected = _decimal_plan_price(trade_plan.get(field_for_kind[kind]))
         raw_token = match.group("price").rstrip(".,;:!?)]}\\\"'")
+        numeric_prefix = _PRICE_NUMBER_PATTERN.match(raw_token)
+        if numeric_prefix is not None:
+            unit_context = raw_token[numeric_prefix.end():] + text[match.end():]
+            if re.match(
+                r"(?i)^\s*(?:%|[xX]\b|R\b|ATR\b|bps\b|pips?\b|points?\b|ticks?\b|times?\b)",
+                unit_context,
+            ):
+                continue
         normalized_token = raw_token
         if "," in normalized_token and "." in normalized_token:
             # Resolve mixed separators only when they form valid US or European
@@ -183,14 +191,7 @@ def _validate_plan_price_references(text: str, trade_plan: dict[str, Any]) -> No
                 f"Groq trade review cites an invalid {kind} price token"
             )
         actual = _decimal_plan_price(normalized_token)
-        try:
-            mantissa = re.split(r"[eE]", normalized_token, maxsplit=1)[0]
-            cited_decimals = len(mantissa.split(".", 1)[1]) if "." in mantissa else 0
-            quantum = Decimal(1).scaleb(-cited_decimals)
-            rounded_expected = expected.quantize(quantum, rounding=ROUND_HALF_UP) if expected is not None else None
-        except (InvalidOperation, ValueError):
-            rounded_expected = None
-        if expected is None or actual is None or (actual != expected and actual != rounded_expected):
+        if expected is None or actual is None or actual != expected:
             raise GroqAIError(
                 f"Groq trade review cites {kind} price outside the submitted trade plan"
             )
