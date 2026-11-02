@@ -1289,3 +1289,64 @@ def test_customer_paper_submission_audit_is_distinct_and_idempotent(monkeypatch)
         customer_id=123, trading_account_id=456, bot_id=789,
         symbol="BTC/USDT",
     )) is False
+
+
+
+def test_append_audit_once_uses_a_stable_key_to_dedupe(monkeypatch):
+    import json
+    from types import SimpleNamespace
+    import app.audit_chain as chain
+
+    rows = []
+    lock_calls = []
+    append_calls = []
+
+    class Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return list(rows)
+
+    class FakeSession:
+        async def execute(self, _statement):
+            return Result()
+
+    async def lock_chain(_db):
+        lock_calls.append(True)
+
+    async def append(db, *, event, detail, actor_id=""):
+        append_calls.append((event, dict(detail), actor_id))
+        row = SimpleNamespace(
+            event=event,
+            detail=json.dumps(detail),
+            actor_id=actor_id,
+            event_hash="f" * 64,
+        )
+        rows.append(row)
+        return row
+
+    monkeypatch.setattr(chain, "_lock_audit_chain_state", lock_chain)
+    monkeypatch.setattr(chain, "append_audit", append)
+    db = FakeSession()
+
+    first, created_first = asyncio.run(chain.append_audit_once(
+        db, event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+        detail={"client_order_id": "cp-once-1"},
+        actor_id="system", idempotency_key="customer-paper-order-submitted:1:cp-once-1",
+    ))
+    second, created_second = asyncio.run(chain.append_audit_once(
+        db, event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+        detail={"client_order_id": "cp-once-1"},
+        actor_id="system", idempotency_key="customer-paper-order-submitted:1:cp-once-1",
+    ))
+
+    assert first is second
+    assert created_first is True
+    assert created_second is False
+    assert len(rows) == 1
+    assert len(append_calls) == 1
+    assert rows[0].detail and json.loads(rows[0].detail)["_audit_idempotency_key"] == (
+        "customer-paper-order-submitted:1:cp-once-1"
+    )
+    assert len(lock_calls) == 2
