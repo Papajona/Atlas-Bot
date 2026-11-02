@@ -1405,7 +1405,18 @@ def test_open_pull_request_head_enumeration_fails_closed_on_api_error(monkeypatc
         pruning._list_open_pull_request_heads("Papajona/Atlas-Bot")
 
 
-def test_branch_open_pull_request_recheck_uses_paginated_exact_head_filter(monkeypatch):
+@pytest.mark.parametrize(
+    ("branch_name", "encoded_head"),
+    [
+        ("feature/with-slash", "Papajona%3Afeature%2Fwith-slash"),
+        ("feature&filter", "Papajona%3Afeature%26filter"),
+        ("feature#fragment", "Papajona%3Afeature%23fragment"),
+        ("feature+plus", "Papajona%3Afeature%2Bplus"),
+    ],
+)
+def test_branch_open_pull_request_recheck_uses_paginated_exact_head_filter(
+    monkeypatch, branch_name, encoded_head
+):
     calls = []
 
     def fake_run(args, *, check=True):
@@ -1413,10 +1424,10 @@ def test_branch_open_pull_request_recheck_uses_paginated_exact_head_filter(monke
         return subprocess.CompletedProcess(args, 0, "321\n", "")
 
     monkeypatch.setattr(pruning, "_run", fake_run)
-    assert pruning._branch_has_open_pull_request("Papajona/Atlas-Bot", "feature/with-slash")
+    assert pruning._branch_has_open_pull_request("Papajona/Atlas-Bot", branch_name)
     assert calls == [[
         "gh", "api", "--paginate",
-        "repos/Papajona/Atlas-Bot/pulls?state=open&head=Papajona:feature/with-slash&per_page=100",
+        f"repos/Papajona/Atlas-Bot/pulls?state=open&head={encoded_head}&per_page=100",
         "--jq", ".[].number",
     ]]
 

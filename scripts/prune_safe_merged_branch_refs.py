@@ -23,6 +23,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
+from urllib.parse import quote
 
 
 class BranchProtectionPolicyUnavailable(RuntimeError):
@@ -131,9 +132,10 @@ def _list_open_pull_request_heads(repository: str) -> set[str]:
 def _branch_has_open_pull_request(repository: str, branch_name: str) -> bool:
     """Recheck the exact same-repository head branch with pagination before deletion."""
     owner = repository.split("/", 1)[0]
+    encoded_head = quote(f"{owner}:{branch_name}", safe="")
     result = _run([
         "gh", "api", "--paginate",
-        f"repos/{repository}/pulls?state=open&head={owner}:{branch_name}&per_page=100",
+        f"repos/{repository}/pulls?state=open&head={encoded_head}&per_page=100",
         "--jq", ".[].number",
     ], check=False)
     if result.returncode:
