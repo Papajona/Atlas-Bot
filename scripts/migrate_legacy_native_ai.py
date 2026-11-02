@@ -7191,7 +7191,7 @@ def _has_conflicting_provider_wiring(path: str, contents: str) -> bool:
     if path == "app/native_ai.py":
         return bool(
             RETIRED_PROVIDER_RE.search(contents)
-            or re.search(r"(?i)api\\.groq\\.com", contents)
+            or re.search(r"(?i)api\.groq\.com", contents)
             or _native_ai_contains_hosted_provider_call(contents)
         )
     return bool(PROVIDER_RE.search(contents))
