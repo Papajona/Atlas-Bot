@@ -134,6 +134,44 @@ fi
         ):
             with self.subTest(unsafe=unsafe), self.assertRaises(migration.MigrationError):
                 migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe)
+
+
+    def test_native_ai_guard_allows_supported_groq_trade_review_but_rejects_retired_wiring(self):
+        supported_review = """def evaluate_native_trade_packet(packet):
+    envelope = packet.get("groq_trade_review")
+    if isinstance(envelope, dict) and envelope.get("provider") == "groq":
+        groq_audit = {
+            key: envelope[key]
+            for key in ("status", "provider", "model", "review")
+            if key in envelope
+        }
+        return {"providers": {"groq": groq_audit}, "execution_authority": False}
+    return {"providers": {}, "execution_authority": False}
+"""
+        self.assertFalse(
+            migration._has_conflicting_provider_wiring("app/native_ai.py", supported_review)
+        )
+
+        self.assertTrue(
+            migration._has_conflicting_provider_wiring(
+                "app/native_ai.py",
+                'def old_provider(): return call_gemini(GEMINI_API_KEY)',
+            )
+        )
+        self.assertTrue(
+            migration._has_conflicting_provider_wiring(
+                "app/native_ai.py",
+                'GROQ_STRATEGY_MODEL = "legacy-model"',
+            )
+        )
+        # Other migration paths retain the broader provider detector.
+        self.assertTrue(
+            migration._has_conflicting_provider_wiring(
+                "scripts/check_native_ai.py",
+                'GROQ_API_KEY = "legacy-hosted-provider"',
+            )
+        )
+
     def test_optional_groq_secret_creation_block_is_preserved(self):
         shell = """if [[ -n "$GROQ_API_KEY" ]]; then
   create_secret atlas-groq-api-key "$GROQ_API_KEY"
