@@ -212,9 +212,11 @@ jobs:
                 }
                 expected_current_declaration = "current_pattern = \"" escape_source_backslashes(current_pattern) "\""
                 expected_previous_declaration = "previous_pattern = \"" escape_source_backslashes(previous_pattern) "\""
+                expected_legacy_declaration = "legacy_expected_pattern = \"" escape_source_backslashes(legacy_expected_pattern) "\""
                 if (index($0, ".github/workflows/propagate-native-ai-all-branches.yml:") == 1 &&
                     (normalized_content == expected_current_declaration ||
-                     normalized_content == expected_previous_declaration)) next
+                     normalized_content == expected_previous_declaration ||
+                     normalized_content == expected_legacy_declaration)) next
                 if ($0 ~ /^\.github\/workflows\/prune-contained-branches-once\.yml:[0-9]+:[[:space:]]*&&[[:space:]]*!?[[:space:]]*git show "\$(main_sha|sha):scripts\/check_ai_models\.py" \| grep -F .def _check_groq. >\/dev\/null[[:space:]]*\\$/) next
                 print
               }
