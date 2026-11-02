@@ -300,9 +300,17 @@ def test_customer_submission_audit_uses_customer_actor_even_with_system_context(
         captured.update(kwargs)
         return SimpleNamespace(event_hash="a" * 64), True
 
+    async def claim_delivery(_event_hash):
+        return "test-claim-token"
+
+    async def finish_delivery(_event_hash, **_kwargs):
+        return True
+
     monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
     monkeypatch.setattr(main, "append_audit_once", append_once)
-    monkeypatch.setattr(main, "emit_security_audit", lambda **_kwargs: None)
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim_delivery)
+    monkeypatch.setattr(main, "finish_external_audit_delivery", finish_delivery)
+    monkeypatch.setattr(main, "emit_security_audit", lambda **_kwargs: True)
 
     created = asyncio.run(main._audit_customer_paper_order_submitted_once({
         "customer_id": 501,
