@@ -58,6 +58,8 @@ def test_api_defaults_groq_and_worker_inherits_only_traffic_serving_revisions() 
     assert 'GROQ_RESEARCH_REVIEW_ENABLED="${API_GROQ_CONFIG[2]}"' in worker
     assert 'GROQ_TRADE_REVIEW_ENABLED="${API_GROQ_CONFIG[3]}"' in worker
     assert 'SECRET_GROQ_REF="${API_GROQ_CONFIG[4]}"' in worker
+    assert '[[ "$GROQ_TRADE_REVIEW_ENABLED" == "true" && -z "$SECRET_GROQ_REF" ]]' in worker
+    assert "serving API requires Groq trade review but has no pinned Groq Secret Manager version" in worker
     assert "API revisions receiving traffic have different Groq configuration" in worker
     assert "supplied GROQ_MODEL differs from the deployed API" in worker
     assert "supplied GROQ_MAX_COMPLETION_TOKENS differs from the deployed API" in worker

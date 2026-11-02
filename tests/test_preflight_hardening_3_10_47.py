@@ -40,7 +40,13 @@ def test_customer_bot_ai_review_has_hard_latency_ceiling_and_fails_closed():
     helper_end = main.index("def _validated_customer_paper_mark(", helper_start)
     helper = main[helper_start:helper_end]
     assert "deadline = loop.time() + timeout" in helper
-    assert "await asyncio.wait_for(_attach_groq_trade_review(packet), timeout=groq_budget)" in helper
+    assert "await _attach_groq_trade_review(packet, timeout_seconds=groq_budget)" in helper
+    attach_start = main.index("async def _attach_groq_trade_review(")
+    attach_end = main.index("def _trade_safety_timeout_metadata(", attach_start)
+    attach = main[attach_start:attach_end]
+    assert "await asyncio.wait_for(" in attach
+    assert "timeout=min(budget, transport_timeout)" in attach
+    assert '"status": "ERROR"' in attach
     assert 'native_reserve = timeout_meta["native_veto_reserve_seconds"]' in helper
     assert "native_timeout = min(native_reserve, remaining)" in helper
     assert "return await asyncio.wait_for(" in helper

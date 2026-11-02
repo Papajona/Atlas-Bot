@@ -5659,6 +5659,8 @@ def retained_helper():
     def test_config_migration_preserves_explicit_trade_review_opt_in(self):
         source = """class Settings:
     groq_trade_review_enabled: bool = True
+    groq_trade_review_timeout_seconds: float = 7.0
+    ai_trade_decision_total_timeout_seconds: float = 8.25
 """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -5669,6 +5671,8 @@ def retained_helper():
                 migration.transform_config()
             result = config.read_text(encoding="utf-8")
         self.assertIn("groq_trade_review_enabled: bool = True", result)
+        self.assertIn("groq_trade_review_timeout_seconds: float = 7.0", result)
+        self.assertIn("ai_trade_decision_total_timeout_seconds: float = 8.25", result)
 
     def test_config_migration_restores_trade_review_disabled_by_default(self):
         source = """class Settings:
@@ -5683,6 +5687,8 @@ def retained_helper():
                 migration.transform_config()
             result = config.read_text(encoding="utf-8")
         self.assertIn("groq_trade_review_enabled: bool = False", result)
+        self.assertIn("groq_trade_review_timeout_seconds: float = 5.0", result)
+        self.assertIn("ai_trade_decision_total_timeout_seconds: float = 6.5", result)
 
 
     def test_retired_provider_block_refuses_executable_control_line_suffixes(self):

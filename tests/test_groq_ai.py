@@ -103,6 +103,16 @@ def test_groq_review_uses_research_only_json_and_cannot_authorize_execution():
     assert "buy/sell instructions" in request["json"]["messages"][0]["content"]
 
 
+def test_research_review_accepts_numeric_risk_metrics_without_treating_them_as_prices():
+    review = {
+        **VALID_REVIEW,
+        "regime_assessment": "Stop-loss is 1.5 ATR away and target 2R remains distant.",
+        "research_only_summary": "Daily loss limit is 3 percent; this is risk context, not an order.",
+    }
+    validated = groq_ai._validate_review(review)
+    assert validated["regime_assessment"] == review["regime_assessment"]
+
+
 def test_groq_invalid_review_fails_closed_to_advisory_error():
     client = _FakeAsyncClient(_FakeResponse('{"regime_assessment": "missing required fields"}'))
     with _settings(
@@ -542,7 +552,8 @@ def test_groq_trade_review_is_bounded_by_native_ai_deadline(monkeypatch):
         return {"status": "OK", "provider": "groq", "execution_authority": False}
 
     monkeypatch.setattr(app_main.settings, "groq_trade_review_enabled", True)
-    monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 0.005)
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 0.005)
+    monkeypatch.setattr(app_main.settings, "groq_timeout_seconds", 20.0)
     monkeypatch.setattr(app_main, "groq_trade_context_review", slow_review)
     result = asyncio.run(app_main._attach_groq_trade_review({"symbol": "BTC/USDT"}))
     assert result["status"] == "ERROR"
@@ -556,7 +567,7 @@ def test_groq_and_native_share_one_end_to_end_trade_deadline(monkeypatch):
     native_started = []
 
     async def slow_groq(_packet):
-        await asyncio.sleep(0.04)
+        await asyncio.sleep(0.02)
         return {
             "status": "OK",
             "provider": "groq",
@@ -567,11 +578,14 @@ def test_groq_and_native_share_one_end_to_end_trade_deadline(monkeypatch):
 
     async def slow_native(_packet):
         native_started.append(True)
-        await asyncio.sleep(0.06)
+        await asyncio.sleep(0.10)
         return {"safe": True, "configured": True}
 
     monkeypatch.setattr(app_main.settings, "groq_trade_review_enabled", True)
-    monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 0.08)
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 0.05)
+    monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 0.03)
+    monkeypatch.setattr(app_main.settings, "ai_trade_decision_total_timeout_seconds", 0.08)
+    monkeypatch.setattr(app_main.settings, "groq_timeout_seconds", 20.0)
     monkeypatch.setattr(app_main, "groq_trade_context_review", slow_groq)
     monkeypatch.setattr(app_main, "dual_ai_trade_safety_review", slow_native)
 
@@ -661,3 +675,494 @@ def test_groq_trade_review_marks_compacted_evidence_as_truncated():
     prompt, truncated = groq_ai._trade_context_prompt(packet)
     assert truncated is True
     assert "atlas_trade_decision_evidence" in prompt
+
+
+def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and_discards_blanks():
+    packet = {
+        "trade_plan": {
+            "entry_price": 100.0,
+            "stop_loss_price": 95.0,
+            "take_profit_price": 110.0,
+        }
+    }
+    factual = {
+        **VALID_TRADE_REVIEW,
+        "regime_assessment": "The submitted stop-loss at 95 protects the entry.",
+        "key_observations": ["Stop-loss at 95 gives 2R.", "", "  "],
+        "contradictions": ["Target at 110 is the value already in the submitted plan."],
+        "data_quality_flags": [],
+    }
+    validated = groq_ai._validate_trade_context_review(factual, packet=packet)
+    assert validated["key_observations"] == ["Stop-loss at 95 gives 2R."]
+
+    descriptive = {
+        **VALID_TRADE_REVIEW,
+        "regime_assessment": "The strategy uses the stop-loss at 95; data limitations remain.",
+        "key_observations": [
+            "Entry to the market is not a price instruction.",
+            "Stop at the swing low is only descriptive.",
+            "The strategy uses the stop-loss at 95.",
+            "The strategy keeps the stop-loss at 95.",
+        ],
+    }
+    groq_ai._validate_trade_context_review(descriptive, packet=packet)
+    for ordinary_text in (
+        "Data limitations remain around the exchange feed.",
+        "Entry to the market is not recommended.",
+        "Stop at the swing low is merely descriptive.",
+        "Stop-loss is 1.5 ATR away.",
+        "Stop 2% below the market.",
+        "Target 2R from entry.",
+        "Daily loss limit 3 remains unchanged.",
+        "The price tested the lower limit of the range.",
+        "The market is a moving target.",
+        "The upper limit is 123.",
+    ):
+        assert not groq_ai._contains_actionable_trading_instruction(ordinary_text)
+
+    rounded_packet = {
+        "trade_plan": {
+            "entry_price": 64150.0,
+            "stop_loss_price": 64123.456789,
+            "take_profit_price": 65000.0,
+        }
+    }
+    rounded_review = {
+        **VALID_TRADE_REVIEW,
+        "regime_assessment": "The strategy uses the stop-loss at 64,123.456789.",
+        "key_observations": ["The target at 65,000 is the submitted plan level."],
+    }
+    groq_ai._validate_trade_context_review(rounded_review, packet=rounded_packet)
+    european_review = {
+        **VALID_TRADE_REVIEW,
+        "regime_assessment": "The submitted stop-loss is at 64.123,456789.",
+        "key_observations": ["Target at 65,000 is already in the submitted plan."],
+    }
+    groq_ai._validate_trade_context_review(european_review, packet=rounded_packet)
+
+    rounded_mismatch = {
+        **VALID_TRADE_REVIEW,
+        "regime_assessment": "The submitted stop-loss is at 64,123.46.",
+    }
+    with pytest.raises(groq_ai.GroqAIError, match="outside the submitted trade plan"):
+        groq_ai._validate_trade_context_review(rounded_mismatch, packet=rounded_packet)
+
+    small_price_packet = {
+        "trade_plan": {
+            "entry_price": 0.55,
+            "stop_loss_price": 0.51,
+            "take_profit_price": 0.62,
+        }
+    }
+    coarse_small_price = {
+        **VALID_TRADE_REVIEW,
+        "regime_assessment": "The submitted stop-loss at 1 is the plan level.",
+    }
+    with pytest.raises(groq_ai.GroqAIError, match="outside the submitted trade plan"):
+        groq_ai._validate_trade_context_review(coarse_small_price, packet=small_price_packet)
+
+    invented_grammar = {
+        **VALID_TRADE_REVIEW,
+        "key_observations": ["The stop-loss is at 999999."],
+    }
+    with pytest.raises(groq_ai.GroqAIError, match="outside the submitted trade plan"):
+        groq_ai._validate_trade_context_review(invented_grammar, packet=rounded_packet)
+
+    # A factual-sounding stop reference is still rejected when it does not match
+    # the actual submitted stop; prose must not smuggle an invented level through.
+    mismatched_existing_price = {
+        **VALID_TRADE_REVIEW,
+        "key_observations": ["The strategy uses the stop-loss at 95."],
+    }
+    with pytest.raises(groq_ai.GroqAIError, match="outside the submitted trade plan"):
+        groq_ai._validate_trade_context_review(
+            mismatched_existing_price, packet=rounded_packet
+        )
+
+    ordinary_text = {
+        **VALID_TRADE_REVIEW,
+        "key_observations": [
+            "Data limitations remain.",
+            "Entry to the market is not recommended.",
+            "The stop-loss is at the swing low.",
+            "Stop-loss is 1.5 ATR away.",
+            "Stop 2% below the market.",
+            "Target 2R from entry.",
+            "Daily loss limit 3 remains unchanged.",
+            "The price tested the lower limit of the range.",
+            "The market is a moving target.",
+            "The daily loss limit is 3 percent.",
+            "The limit for daily loss is 3 percent.",
+            "The market hit the upper limit of its range.",
+            "The upper limit is 123.",
+            "The exchange position limit was 100 contracts.",
+        ],
+    }
+    observations = ordinary_text["key_observations"]
+    for offset in range(0, len(observations), 12):
+        groq_ai._validate_trade_context_review(
+            {**ordinary_text, "key_observations": observations[offset:offset + 12]},
+            packet=rounded_packet,
+        )
+    assert validated["contradictions"] == [
+        "Target at 110 is the value already in the submitted plan."
+    ]
+
+    for invented_claim in (
+        "Target at 999999 is in the submitted plan.",
+        "Limit order at 999999 is in the submitted plan.",
+        "Trigger level at 999999 is in the submitted plan.",
+        "Limit at 999999 is in the submitted plan.",
+        "Trigger at 999999 is in the submitted plan.",
+    ):
+        invented = {
+            **VALID_TRADE_REVIEW,
+            "key_observations": [invented_claim],
+        }
+        with pytest.raises(groq_ai.GroqAIError, match="outside the submitted trade plan"):
+            groq_ai._validate_trade_context_review(invented, packet=packet)
+
+    matching_limit_trigger = {
+        **VALID_TRADE_REVIEW,
+        "key_observations": [
+            "Limit order at 100 matches the submitted entry.",
+            "Trigger level at 100 matches the submitted entry.",
+            "Limit at 100 matches the submitted entry.",
+            "Trigger at 100 matches the submitted entry.",
+            "Limit is 100, matching the submitted entry.",
+            "Trigger is 100, matching the submitted entry.",
+        ],
+    }
+    groq_ai._validate_trade_context_review(matching_limit_trigger, packet=packet)
+    stop_limit_review = {
+        **VALID_TRADE_REVIEW,
+        "key_observations": ["Stop-loss limit order at 999 is the submitted stop."],
+    }
+    with pytest.raises(groq_ai.GroqAIError, match="outside the submitted trade plan"):
+        groq_ai._validate_trade_context_review(stop_limit_review, packet=packet)
+    matching_stop_limit = {
+        **VALID_TRADE_REVIEW,
+        "key_observations": ["Stop-loss limit order at 95 matches the submitted stop."],
+    }
+    groq_ai._validate_trade_context_review(matching_stop_limit, packet=packet)
+
+    for command in (
+        "Use the stop-loss at 95.",
+        "Keep the stop-loss at 95.",
+        "Use the limit at 100.",
+        "Keep trigger at 100.",
+        "Set limit at 999.",
+        "Lower the limit to 99.",
+    ):
+        assert groq_ai._contains_actionable_trading_instruction(
+            command, allow_factual_price_references=True
+        )
+        imperative_review = {**VALID_TRADE_REVIEW, "regime_assessment": command}
+        with pytest.raises(groq_ai.GroqAIError, match="actionable trading instructions"):
+            groq_ai._validate_trade_context_review(imperative_review, packet=packet)
+
+    # Complete numeric tokens must be checked: signs and scientific notation
+    # cannot disappear into an unmatched prefix.
+    scientific_packet = {
+        "trade_plan": {
+            "entry_price": 100.0,
+            "stop_loss_price": 0.00001,
+            "take_profit_price": 110.0,
+        }
+    }
+    scientific = {
+        **VALID_TRADE_REVIEW,
+        "regime_assessment": "Stop at 1e-5 is the submitted stop level.",
+        "key_observations": ["Target at +1.10e2 is the submitted target."],
+    }
+    groq_ai._validate_trade_context_review(scientific, packet=scientific_packet)
+
+    malformed = {
+        **VALID_TRADE_REVIEW,
+        "key_observations": ["Target at +999999 is in the submitted plan."],
+    }
+    with pytest.raises(groq_ai.GroqAIError, match="outside the submitted trade plan"):
+        groq_ai._validate_trade_context_review(malformed, packet=packet)
+
+    suffix = {
+        **VALID_TRADE_REVIEW,
+        "key_observations": ["Target at 110USD is in the submitted plan."],
+    }
+    with pytest.raises(groq_ai.GroqAIError, match="invalid target price token"):
+        groq_ai._validate_trade_context_review(suffix, packet=packet)
+
+    directives = [
+        "Set a stop-loss at 95.",
+        "Set your take-profit at 110.",
+        "Tighten the stop-loss at 101.",
+        "Move the stop-loss to 98.",
+        "Recommend entry at 64000.",
+        "Set a limit order at 95.",
+        "Move the trigger level to 95.",
+        "Use the stop-loss at 95.",
+        "Keep stop-loss at 95.",
+    ]
+    for directive_text in directives:
+        directive = {
+            **VALID_TRADE_REVIEW,
+            "key_observations": [directive_text],
+        }
+        with pytest.raises(groq_ai.GroqAIError, match="actionable trading instructions"):
+            groq_ai._validate_trade_context_review(directive, packet=packet)
+
+
+
+
+def test_groq_trade_review_uses_its_own_bounded_provider_timeout(monkeypatch):
+    from app import main as app_main
+
+    async def slow_review(_packet):
+        await asyncio.sleep(0.1)
+        return {"status": "OK", "provider": "groq", "execution_authority": False}
+
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_enabled", True)
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 0.005)
+    monkeypatch.setattr(app_main.settings, "groq_timeout_seconds", 20.0)
+    monkeypatch.setattr(app_main, "groq_trade_context_review", slow_review)
+    result = asyncio.run(app_main._attach_groq_trade_review({"symbol": "BTC/USDT"}))
+    assert result["status"] == "ERROR"
+    assert result["error"] == "TimeoutError"
+
+
+def test_groq_timeout_becomes_error_envelope_inside_shared_decision_deadline(monkeypatch):
+    from app import main as app_main
+
+    native_observed = []
+
+    async def slow_groq(_packet):
+        await asyncio.sleep(0.1)
+        return {
+            "status": "OK",
+            "provider": "groq",
+            "review": VALID_TRADE_REVIEW,
+            "input_truncated": False,
+            "execution_authority": False,
+        }
+
+    async def native_review(packet):
+        native_observed.append(packet["groq_trade_review"]["status"])
+        return {"safe": True, "configured": True}
+
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_enabled", True)
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 5.0)
+    monkeypatch.setattr(app_main.settings, "groq_timeout_seconds", 20.0)
+    monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 0.08)
+    monkeypatch.setattr(app_main.settings, "ai_trade_decision_total_timeout_seconds", 0.16)
+    monkeypatch.setattr(app_main, "groq_trade_context_review", slow_groq)
+    monkeypatch.setattr(app_main, "dual_ai_trade_safety_review", native_review)
+
+    result = asyncio.run(app_main._run_trade_safety_review({"symbol": "BTC/USDT"}))
+    assert result["safe"] is True
+    assert native_observed == ["ERROR"]
+
+
+def test_groq_trade_review_fails_closed_when_native_veto_budget_is_zero_or_negative(monkeypatch):
+    from app import main as app_main
+
+    async def forbidden_attach(*_args, **_kwargs):
+        raise AssertionError("Groq must not run without a positive Native AI veto reserve")
+
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_enabled", True)
+    monkeypatch.setattr(app_main.settings, "ai_trade_decision_total_timeout_seconds", 6.5)
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 5.0)
+    monkeypatch.setattr(app_main, "_attach_groq_trade_review", forbidden_attach)
+
+    for native_timeout in (0.0, -0.1):
+        monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", native_timeout)
+        with pytest.raises(asyncio.TimeoutError):
+            asyncio.run(app_main._run_trade_safety_review({"symbol": "BTC/USDT"}))
+
+
+def test_groq_receives_five_seconds_and_native_keeps_full_veto_reserve(monkeypatch):
+    from app import main as app_main
+
+    captured = []
+
+    async def attach(_packet, *, timeout_seconds=None):
+        captured.append(timeout_seconds)
+        return {"status": "ERROR"}
+
+    async def native_review(_packet):
+        return {"safe": True, "configured": True}
+
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_enabled", True)
+    monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 1.5)
+    monkeypatch.setattr(app_main.settings, "ai_trade_decision_total_timeout_seconds", 6.5)
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 5.0)
+    monkeypatch.setattr(app_main, "_attach_groq_trade_review", attach)
+    monkeypatch.setattr(app_main, "dual_ai_trade_safety_review", native_review)
+
+    result = asyncio.run(app_main._run_trade_safety_review({"symbol": "BTC/USDT"}))
+
+    assert result["safe"] is True
+    assert captured == [5.0]
+    assert app_main._trade_safety_timeout_metadata() == {
+        "timeout_seconds": 6.5,
+        "total_timeout_seconds": 6.5,
+        "groq_provider_timeout_seconds": 5.0,
+        "native_veto_reserve_seconds": 1.5,
+    }
+
+
+def test_invalid_native_or_total_timeout_never_starts_groq_or_native_review(monkeypatch):
+    from app import main as app_main
+
+    called = []
+
+    async def unexpected_groq(_packet, *, timeout_seconds=None):
+        called.append(("groq", timeout_seconds))
+        return {"status": "OK"}
+
+    async def unexpected_native(_packet):
+        called.append(("native", None))
+        return {"safe": True, "configured": True}
+
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_enabled", True)
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 5.0)
+    monkeypatch.setattr(app_main, "_attach_groq_trade_review", unexpected_groq)
+    monkeypatch.setattr(app_main, "dual_ai_trade_safety_review", unexpected_native)
+
+    for native_timeout, total_timeout in (
+        (0.0, 6.5),
+        (-0.1, 6.5),
+        (float("nan"), 6.5),
+        (float("inf"), 6.5),
+        (1.5, 1.5),
+        (2.0, 1.5),
+    ):
+        monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", native_timeout)
+        monkeypatch.setattr(app_main.settings, "ai_trade_decision_total_timeout_seconds", total_timeout)
+        with pytest.raises(asyncio.TimeoutError):
+            asyncio.run(app_main._run_trade_safety_review({"symbol": "BTC/USDT"}))
+
+    assert called == []
+
+
+def test_native_veto_never_exceeds_reserved_timeout_after_fast_groq(monkeypatch):
+    from app import main as app_main
+
+    native_started = []
+
+    async def quick_groq(_packet):
+        return {
+            "status": "OK",
+            "provider": "groq",
+            "review": VALID_TRADE_REVIEW,
+            "input_truncated": False,
+            "execution_authority": False,
+        }
+
+    async def slow_native(_packet):
+        native_started.append(True)
+        await asyncio.sleep(0.15)
+        return {"safe": True, "configured": True}
+
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_enabled", True)
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 0.01)
+    monkeypatch.setattr(app_main.settings, "groq_timeout_seconds", 1.0)
+    monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 0.04)
+    monkeypatch.setattr(app_main.settings, "ai_trade_decision_total_timeout_seconds", 0.5)
+    monkeypatch.setattr(app_main, "groq_trade_context_review", quick_groq)
+    monkeypatch.setattr(app_main, "dual_ai_trade_safety_review", slow_native)
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(app_main._run_trade_safety_review({"symbol": "BTC/USDT"}))
+    assert native_started == [True]
+
+def test_native_veto_uses_only_remaining_shared_deadline(monkeypatch):
+    from app import main as app_main
+
+    native_started = []
+
+    async def quick_groq(_packet):
+        # Consume most of Groq's 80ms slice so Native AI sees only the
+        # remaining shared deadline rather than the full overall budget.
+        await asyncio.sleep(0.075)
+        return {
+            "status": "OK",
+            "provider": "groq",
+            "review": VALID_TRADE_REVIEW,
+            "input_truncated": False,
+            "execution_authority": False,
+        }
+
+    async def slow_native(_packet):
+        native_started.append(True)
+        await asyncio.sleep(0.1)
+        return {"safe": True, "configured": True}
+
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_enabled", True)
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 5.0)
+    monkeypatch.setattr(app_main.settings, "groq_timeout_seconds", 20.0)
+    monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 0.08)
+    monkeypatch.setattr(app_main.settings, "ai_trade_decision_total_timeout_seconds", 0.16)
+    monkeypatch.setattr(app_main, "groq_trade_context_review", quick_groq)
+    monkeypatch.setattr(app_main, "dual_ai_trade_safety_review", slow_native)
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(app_main._run_trade_safety_review({"symbol": "BTC/USDT"}))
+    assert native_started == [True]
+
+
+
+def test_native_trade_audit_preserves_only_sanitized_groq_failure_diagnostics():
+    from app.native_ai import native_trade_safety_review
+
+    packet = {
+        "symbol": "BTC/USDT",
+        "groq_trade_review": {
+            "status": "ERROR",
+            "provider": "groq",
+            "error": "TimeoutError",
+            "cause": "HTTPStatusError",
+            "http_status": 429,
+            "reason": "groq_provider_call_failed",
+            "execution_authority": False,
+            "api_key": "must-not-be-persisted",
+        },
+    }
+    result = asyncio.run(native_trade_safety_review(packet))
+    groq = result["providers"]["groq"]
+    assert groq["error"] == "TimeoutError"
+    assert groq["cause"] == "HTTPStatusError"
+    assert groq["http_status"] == 429
+    assert groq["reason"] == "groq_provider_call_failed"
+    assert "api_key" not in groq
+    assert result["execution_authority"] is False
+
+def test_groq_timeout_error_is_not_misreported_as_cancellation(monkeypatch):
+    from app import main as app_main
+
+    async def timeout_chained_from_cancellation(_packet):
+        try:
+            raise asyncio.CancelledError()
+        except asyncio.CancelledError as cancellation:
+            raise asyncio.TimeoutError("Groq budget exhausted") from cancellation
+
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_enabled", True)
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 0.05)
+    monkeypatch.setattr(app_main.settings, "groq_timeout_seconds", 1.0)
+    monkeypatch.setattr(app_main, "groq_trade_context_review", timeout_chained_from_cancellation)
+
+    result = asyncio.run(app_main._attach_groq_trade_review({"symbol": "BTC/USDT"}))
+    assert result["status"] == "ERROR"
+    assert result["error"] == "TimeoutError"
+    assert result["cause"] == "TimeoutError"
+
+
+def test_trade_safety_timeout_audits_record_effective_groq_and_native_budgets():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    for event in ("ADAPTIVE_BOT_AI_TIMEOUT", "CUSTOMER_BOT_AI_TIMEOUT"):
+        line = next(line for line in source.splitlines() if event in line)
+        assert "**_trade_safety_timeout_metadata()" in line
+    assert source.count('"ai_safety_timeout_seconds": _trade_safety_timeout_metadata()["total_timeout_seconds"]') == 2
+    assert source.count('"ai_safety_native_veto_reserve_seconds": _trade_safety_timeout_metadata()["native_veto_reserve_seconds"]') == 2
+    assert source.count('"groq_trade_review_timeout_seconds": _trade_safety_timeout_metadata()["groq_provider_timeout_seconds"]') == 2
+
