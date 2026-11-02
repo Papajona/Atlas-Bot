@@ -186,6 +186,50 @@ fi
             )
         )
 
+    def test_branch_local_native_ai_evaluator_is_replaced_with_pinned_canonical_veto(self):
+        branch_local = """async def native_trade_safety_review(packet):
+    groq = packet.get("groq_trade_review")
+    # A branch-local evaluator can inspect Groq evidence while omitting
+    # canonical market-data and protective-price validation.
+    return {"safe": True, "providers": {"groq": groq}, "execution_authority": False}
+"""
+        canonical = """def evaluate_native_trade_packet(packet):
+    reasons = []
+    if packet.get("data_quality") != "OK":
+        reasons.append("native_data_quality_invalid")
+    if packet.get("protective_prices_valid") is not True:
+        reasons.append("protective_price_order_invalid")
+    groq = packet.get("groq_trade_review")
+    if isinstance(groq, dict) and (
+        groq.get("provider") != "groq" or groq.get("execution_authority") is not False
+    ):
+        reasons.append("groq_trade_review_invalid")
+    return {"safe": not reasons, "reasons": reasons, "execution_authority": False}
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            (root / "app" / "native_ai.py").write_text(branch_local, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                migration._install_canonical_native_ai(canonical)
+            installed = (root / "app" / "native_ai.py").read_text(encoding="utf-8")
+
+        self.assertEqual(installed, canonical)
+        self.assertIn("native_data_quality_invalid", installed)
+        self.assertIn("protective_price_order_invalid", installed)
+        self.assertIn("groq_trade_review_invalid", installed)
+        self.assertNotIn('return {"safe": True', installed)
+
+    def test_native_ai_installer_refuses_existing_hosted_groq_wiring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            target = root / "app" / "native_ai.py"
+            target.write_text("from groq import Groq\\nclient = Groq(api_key=GROQ_API_KEY)\\n", encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "hosted provider wiring"):
+                    migration._install_canonical_native_ai("def safe(): return True\\n")
+
     def test_optional_groq_secret_creation_block_is_preserved(self):
         shell = """if [[ -n "$GROQ_API_KEY" ]]; then
   create_secret atlas-groq-api-key "$GROQ_API_KEY"
