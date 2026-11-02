@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Any
 import logging
+import traceback
 import contextlib
 from pathlib import Path
 import hmac
@@ -13,7 +14,7 @@ import time
 import math
 import json
 import uuid
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from contextvars import ContextVar
 from dataclasses import asdict
 import pandas as pd
@@ -24,10 +25,12 @@ from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocke
 from fastapi.responses import HTMLResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, desc, or_, func, case, cast, Numeric
+from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from .config import settings
-from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
+from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, CustomerPaperSubmissionAuditRetry, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
 from .trading_core import train_model, predict_latest, ai_walk_forward_backtest
 from .adaptive_bot import AdaptiveModelPolicy, ensure_adaptive_model, adaptive_model_status
@@ -78,11 +81,14 @@ from .executor_engine import ExecutorConfig, ExecutorValidationError, build_exec
 from .admin_rbac import require_role, get_roles, upsert_role, ROLES
 from .transaction_policy import register_or_check_destination, verify_destination
 from .audit_chain import append_audit, append_audit_once
+from .crypto import decrypt_text
 from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current, assert_database_role_compatible_with_rls_lockdown
 
 
 
-async def _attach_groq_trade_review(packet: dict) -> dict:
+async def _attach_groq_trade_review(
+    packet: dict, *, timeout_seconds: float | None = None
+) -> dict:
     """Attach a bounded Groq review; Native AI remains the sole trade-safety authority."""
     required = bool(settings.groq_trade_review_enabled)
     packet["groq_trade_review_required"] = required
@@ -96,18 +102,58 @@ async def _attach_groq_trade_review(packet: dict) -> dict:
         }
     else:
         try:
-            # Keep external Groq advisory work within the same deadline as Native AI.
+            # Groq receives only the reserved slice of the overall decision budget.
+            configured_budget = float(settings.groq_trade_review_timeout_seconds)
+            transport_timeout = float(settings.groq_timeout_seconds)
+            if (
+                not math.isfinite(configured_budget) or configured_budget <= 0
+                or not math.isfinite(transport_timeout) or transport_timeout <= 0
+            ):
+                raise ValueError("Groq trade-review timeout configuration must be finite and positive")
+            budget = configured_budget
+            if timeout_seconds is not None:
+                reserved_budget = float(timeout_seconds)
+                if not math.isfinite(reserved_budget) or reserved_budget <= 0:
+                    raise asyncio.TimeoutError
+                budget = min(budget, reserved_budget)
             result = await asyncio.wait_for(
                 groq_trade_context_review(packet),
-                timeout=max(0.0, float(settings.ai_strategy_provider_timeout_seconds)),
+                timeout=min(budget, transport_timeout),
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "groq_trade_review_failed",
+                extra={"error_type": type(exc).__name__},
+                exc_info=True,
+            )
+            # Preserve the timeout itself as the diagnostic cause. asyncio.wait_for
+            # chains TimeoutError from CancelledError on supported Python versions;
+            # unwrapping that chain would misreport a budget timeout as cancellation.
+            if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+                cause = exc
+            else:
+                cause = exc
+                while (
+                    getattr(cause, "__cause__", None) is not None
+                    and not isinstance(cause.__cause__, asyncio.CancelledError)
+                ):
+                    cause = cause.__cause__
+            response = getattr(cause, "response", None)
+            raw_status = getattr(response, "status_code", None)
+            http_status = (
+                raw_status
+                if isinstance(raw_status, int) and not isinstance(raw_status, bool)
+                else None
+            )
             result = {
                 "status": "ERROR",
                 "provider": "groq",
                 "error": type(exc).__name__,
+                "cause": type(cause).__name__,
+                "http_status": http_status,
+                "reason": "groq_provider_call_failed",
                 "input_truncated": None,
                 "execution_authority": False,
             }
@@ -115,39 +161,87 @@ async def _attach_groq_trade_review(packet: dict) -> dict:
     return result
 
 
-async def _run_trade_safety_review(packet: dict) -> dict:
-    """Run Groq and Native AI inside one end-to-end decision deadline.
+def _trade_safety_timeout_metadata() -> dict[str, float]:
+    """Expose the effective total, optional Groq window and protected Native AI reserve."""
+    if settings.groq_trade_review_enabled:
+        try:
+            configured_total = float(settings.ai_trade_decision_total_timeout_seconds)
+            configured_native = float(settings.ai_strategy_provider_timeout_seconds)
+            configured_groq = float(settings.groq_trade_review_timeout_seconds)
+        except (TypeError, ValueError, OverflowError):
+            configured_total = configured_native = configured_groq = 0.0
+        total = configured_total if math.isfinite(configured_total) and configured_total > 0 else 0.0
+        native_reserve = configured_native if math.isfinite(configured_native) and configured_native > 0 else 0.0
+        if (
+            native_reserve > 0
+            and total > native_reserve
+            and math.isfinite(configured_groq)
+            and configured_groq > 0
+        ):
+            groq_budget = min(configured_groq, total - native_reserve)
+        else:
+            # A Groq-enabled decision is invalid without a positive reserved
+            # Native AI veto window; never let Groq run alone.
+            groq_budget = 0.0
+    else:
+        try:
+            configured_native = float(settings.ai_strategy_provider_timeout_seconds)
+        except (TypeError, ValueError, OverflowError):
+            configured_native = 0.0
+        total = configured_native if math.isfinite(configured_native) and configured_native > 0 else 0.0
+        native_reserve = total
+        groq_budget = 0.0
+    return {
+        "timeout_seconds": total,
+        "total_timeout_seconds": total,
+        "groq_provider_timeout_seconds": groq_budget,
+        "native_veto_reserve_seconds": native_reserve,
+    }
 
-    Groq is advisory evidence only. Reserve a bounded slice for the local Native AI
-    veto so a slow external response cannot double the configured trade-decision time.
+
+async def _run_trade_safety_review(packet: dict) -> dict:
+    """Run optional Groq evidence and Native AI within one explicit deadline.
+
+    When Groq is enabled, reserve the configured local Native AI timeout and give
+    Groq only the remaining portion of the end-to-end decision budget. When it is
+    disabled, retain the original local-only timeout unchanged.
     """
-    timeout = float(settings.ai_strategy_provider_timeout_seconds)
+    timeout_meta = _trade_safety_timeout_metadata()
+    timeout = timeout_meta["total_timeout_seconds"]
+    groq_budget = timeout_meta["groq_provider_timeout_seconds"]
+    native_reserve = timeout_meta["native_veto_reserve_seconds"]
     if not math.isfinite(timeout) or timeout <= 0:
+        raise asyncio.TimeoutError
+    if not math.isfinite(native_reserve) or native_reserve <= 0:
+        raise asyncio.TimeoutError
+    if settings.groq_trade_review_enabled and (
+        timeout <= native_reserve
+        or not math.isfinite(groq_budget)
+        or groq_budget <= 0
+    ):
         raise asyncio.TimeoutError
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    timeout_meta = {
-        "native_veto_reserve_seconds": min(0.25, timeout * 0.20)
-    }
-    native_reserve = timeout_meta["native_veto_reserve_seconds"]
     if settings.groq_trade_review_enabled:
-        groq_budget = max(0.0, timeout - native_reserve)
-        if groq_budget <= 0:
-            raise asyncio.TimeoutError
-        await asyncio.wait_for(_attach_groq_trade_review(packet), timeout=groq_budget)
+        # The helper converts its bounded provider timeout into an ERROR envelope;
+        # Native AI receives the remaining reserved veto time for its final decision.
+        await _attach_groq_trade_review(packet, timeout_seconds=groq_budget)
     else:
-        # This path only attaches a local DISABLED marker and makes no provider call.
         await _attach_groq_trade_review(packet)
-        native_reserve = timeout
 
     remaining = deadline - loop.time()
+    if remaining <= 0:
+        raise asyncio.TimeoutError
+    # A prompt Groq response must not expand Native AI beyond its separately
+    # configured veto reserve. The shared deadline remains an additional cap.
     native_timeout = min(native_reserve, remaining)
-    if native_timeout <= 0:
+    if not math.isfinite(native_timeout) or native_timeout <= 0:
         raise asyncio.TimeoutError
     return await asyncio.wait_for(
         dual_ai_trade_safety_review(packet), timeout=native_timeout
     )
+
 
 
 async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
@@ -175,115 +269,217 @@ async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
     return created
 
 
+def _log_customer_paper_submission_audit_retry_failure(
+    *,
+    event: str,
+    customer_id: int,
+    client_order_id: str,
+    retry_id: int | None,
+    step: str,
+    exc: Exception,
+) -> None:
+    """Log bounded retry diagnostics with stack frames but without SQL/error text."""
+    frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else []
+    safe_frames = " > ".join(
+        f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
+        for frame in frames[-8:]
+    )
+    logging.getLogger(__name__).warning(
+        "%s customer_id=%s client_order_id=%s retry_id=%s step=%s error_type=%s traceback_frames=%s",
+        event,
+        int(customer_id),
+        str(client_order_id or "")[:120],
+        retry_id if retry_id is not None else "unavailable",
+        step,
+        type(exc).__name__,
+        safe_frames or "unavailable",
+    )
+
+
+async def _persist_customer_paper_submission_audit_retry(
+    *,
+    customer_id: int,
+    submission_detail: dict,
+    error_type: str,
+) -> None:
+    """Upsert one customer/order retry row; never scan encrypted audit history."""
+    customer_id = int(customer_id)
+    client_order_id = str(submission_detail.get("client_order_id") or "").strip()
+    if not client_order_id:
+        raise ValueError("customer paper audit retry requires a client_order_id")
+    now = datetime.now(timezone.utc)
+    payload = json.dumps(submission_detail, sort_keys=True, separators=(",", ":"), default=str)
+    values = {
+        "customer_id": customer_id,
+        "client_order_id": client_order_id,
+        "submission_detail": payload,
+        "status": "PENDING",
+        "attempt_count": 0,
+        "last_error_type": str(error_type or "UnknownError")[:80],
+        "created_at": now,
+        "updated_at": now,
+    }
+    async with SessionLocal() as db:
+        dialect_name = db.get_bind().dialect.name
+        insert_fn = sqlite_insert if dialect_name == "sqlite" else pg_insert
+        statement = insert_fn(CustomerPaperSubmissionAuditRetry).values(**values)
+        statement = statement.on_conflict_do_update(
+            index_elements=[
+                CustomerPaperSubmissionAuditRetry.customer_id,
+                CustomerPaperSubmissionAuditRetry.client_order_id,
+            ],
+            set_={
+                "submission_detail": statement.excluded.submission_detail,
+                "status": "PENDING",
+                "attempt_count": CustomerPaperSubmissionAuditRetry.attempt_count + 1,
+                "last_error_type": str(error_type or "UnknownError")[:80],
+                "updated_at": now,
+            },
+        )
+        await db.execute(statement)
+        await db.commit()
+
+
+async def _set_customer_paper_submission_audit_retry_state(
+    retry_id: int,
+    *,
+    status: str,
+    error_type: str = "",
+    increment_attempts: bool = False,
+) -> None:
+    async with SessionLocal() as db:
+        row = await db.get(CustomerPaperSubmissionAuditRetry, int(retry_id))
+        if row is None:
+            return
+        row.status = str(status).upper()
+        row.last_error_type = str(error_type or "")[:80]
+        row.updated_at = datetime.now(timezone.utc)
+        if increment_attempts:
+            row.attempt_count = int(row.attempt_count or 0) + 1
+        await db.commit()
+
+
 async def _load_customer_paper_submission_audit_retries(customer_id: int) -> list[dict]:
-    """Load durable incomplete submission-audit records not yet marked repaired."""
+    """Read only indexed pending rows for this customer and decrypt each row independently."""
+    customer_id = int(customer_id)
     async with SessionLocal() as db:
         rows = (
             await db.execute(
-                select(AuditLog.id, AuditLog.event, AuditLog.detail)
-                .where(AuditLog.event.in_([
-                    "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE",
-                    "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_REPAIRED",
-                ]))
-                .order_by(AuditLog.id.asc())
+                select(
+                    CustomerPaperSubmissionAuditRetry.id,
+                    CustomerPaperSubmissionAuditRetry.client_order_id,
+                    cast(CustomerPaperSubmissionAuditRetry.submission_detail, Text).label("raw_detail"),
+                )
+                .where(
+                    CustomerPaperSubmissionAuditRetry.customer_id == customer_id,
+                    CustomerPaperSubmissionAuditRetry.status == "PENDING",
+                )
+                .order_by(
+                    CustomerPaperSubmissionAuditRetry.updated_at.asc(),
+                    CustomerPaperSubmissionAuditRetry.id.asc(),
+                )
+                .limit(100)
             )
         ).all()
 
-    incomplete: dict[str, dict] = {}
-    repaired: set[str] = set()
+    pending: list[dict] = []
     for row in rows:
-        raw_detail = row.detail
-        if isinstance(raw_detail, str):
+        client_order_id = str(row.client_order_id or "")
+        try:
+            parsed = json.loads(decrypt_text(row.raw_detail))
+            if (
+                not isinstance(parsed, dict)
+                or int(parsed.get("customer_id", -1)) != customer_id
+                or str(parsed.get("client_order_id") or "").strip() != client_order_id
+            ):
+                raise ValueError("retry detail identity does not match its indexed key")
+        except Exception as exc:
+            # One damaged ciphertext is quarantined; it must not prevent other order retries.
             try:
-                parsed = json.loads(raw_detail)
-            except (TypeError, ValueError, UnicodeDecodeError):
-                continue
-        elif isinstance(raw_detail, dict):
-            parsed = raw_detail
-        else:
+                await _set_customer_paper_submission_audit_retry_state(
+                    int(row.id),
+                    status="CORRUPT",
+                    error_type=type(exc).__name__,
+                    increment_attempts=True,
+                )
+            except Exception as state_exc:
+                _log_customer_paper_submission_audit_retry_failure(
+                    event="customer_paper_submission_audit_retry_quarantine_failed",
+                    customer_id=customer_id,
+                    client_order_id=client_order_id,
+                    retry_id=int(row.id),
+                    step="quarantine_corrupt_retry",
+                    exc=state_exc,
+                )
+            _log_customer_paper_submission_audit_retry_failure(
+                event="customer_paper_submission_audit_retry_corrupt",
+                customer_id=customer_id,
+                client_order_id=client_order_id,
+                retry_id=int(row.id),
+                step="decrypt_and_validate_retry_detail",
+                exc=exc,
+            )
             continue
-        if not isinstance(parsed, dict) or parsed.get("customer_id") != customer_id:
-            continue
-        client_order_id = str(parsed.get("client_order_id") or "").strip()
-        if not client_order_id:
-            continue
-        if row.event == "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_REPAIRED":
-            repaired.add(client_order_id)
-            continue
-        submission_detail = parsed.get("submission_detail")
-        if (
-            isinstance(submission_detail, dict)
-            and submission_detail.get("customer_id") == customer_id
-            and str(submission_detail.get("client_order_id") or "").strip() == client_order_id
-        ):
-            incomplete[client_order_id] = {
-                "incomplete_event_id": int(row.id),
-                "client_order_id": client_order_id,
-                "submission_detail": submission_detail,
-            }
-    return [
-        record for client_order_id, record in incomplete.items()
-        if client_order_id not in repaired
-    ]
-
-
-async def _audit_customer_paper_submission_audit_repaired_once(
-    *, customer_id: int, client_order_id: str, incomplete_event_id: int
-) -> bool:
-    """Record idempotent completion of a previously deferred submission audit."""
-    actor = f"customer:{customer_id}"
-    detail = {
-        "customer_id": customer_id,
-        "client_order_id": client_order_id,
-        "incomplete_event_id": incomplete_event_id,
-    }
-    async with SessionLocal() as db:
-        row, created = await append_audit_once(
-            db,
-            event="CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_REPAIRED",
-            detail=detail,
-            actor_id=actor,
-            idempotency_fields=("customer_id", "client_order_id"),
-        )
-    if created:
-        emit_security_audit(
-            event="CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_REPAIRED",
-            actor_id=actor,
-            detail=detail,
-            event_hash=row.event_hash,
-        )
-    return created
+        pending.append({
+            "retry_id": int(row.id),
+            "customer_id": customer_id,
+            "client_order_id": client_order_id,
+            "submission_detail": parsed,
+        })
+    return pending
 
 
 async def _repair_customer_paper_submission_audit_retries(customer_id: int) -> None:
-    """Retry terminal and pending submission audits from durable incomplete-event records."""
+    """Replay indexed pending audit deliveries; isolate every record's failure."""
+    customer_id = int(customer_id)
     try:
         pending = await _load_customer_paper_submission_audit_retries(customer_id)
     except Exception as exc:
-        logging.getLogger(__name__).warning(
-            "customer_paper_submission_audit_retry_load_failed error_type=%s",
-            type(exc).__name__,
+        _log_customer_paper_submission_audit_retry_failure(
+            event="customer_paper_submission_audit_retry_load_failed",
+            customer_id=customer_id,
+            client_order_id="",
+            retry_id=None,
+            step="load_customer_pending_retries",
+            exc=exc,
         )
         return
 
     for record in pending:
-        client_order_id = str(record.get("client_order_id") or "")
-        submission_detail = record.get("submission_detail")
-        if not client_order_id or not isinstance(submission_detail, dict):
-            continue
+        retry_id = int(record["retry_id"])
+        client_order_id = str(record["client_order_id"])
         try:
-            # append_audit_once is keyed by customer and client order. A replay is
-            # success too: it proves the submission event already exists.
-            await _audit_customer_paper_order_submitted_once(submission_detail)
-            await _audit_customer_paper_submission_audit_repaired_once(
-                customer_id=customer_id,
-                client_order_id=client_order_id,
-                incomplete_event_id=int(record["incomplete_event_id"]),
+            # append_audit_once treats an existing submission event as a successful replay.
+            await _audit_customer_paper_order_submitted_once(record["submission_detail"])
+            await _set_customer_paper_submission_audit_retry_state(
+                retry_id,
+                status="REPAIRED",
+                error_type="",
             )
         except Exception as exc:
-            logging.getLogger(__name__).warning(
-                "customer_paper_submission_audit_retry_failed error_type=%s",
-                type(exc).__name__,
+            try:
+                await _set_customer_paper_submission_audit_retry_state(
+                    retry_id,
+                    status="PENDING",
+                    error_type=type(exc).__name__,
+                    increment_attempts=True,
+                )
+            except Exception as state_exc:
+                _log_customer_paper_submission_audit_retry_failure(
+                    event="customer_paper_submission_audit_retry_state_write_failed",
+                    customer_id=customer_id,
+                    client_order_id=client_order_id,
+                    retry_id=retry_id,
+                    step="persist_retry_failure_state",
+                    exc=state_exc,
+                )
+            _log_customer_paper_submission_audit_retry_failure(
+                event="customer_paper_submission_audit_retry_failed",
+                customer_id=customer_id,
+                client_order_id=client_order_id,
+                retry_id=retry_id,
+                step="replay_submission_and_mark_repaired",
+                exc=exc,
             )
 
 
@@ -298,8 +494,7 @@ async def _customer_paper_submission_stage(
     if not isinstance(execution, dict):
         return None
 
-    # Retry previous terminal as well as pending submissions before evaluating
-    # this cycle. Repair is indexed/idempotent and never changes execution outcome.
+    # Retry prior terminal and pending deliveries without scanning audit history.
     await _repair_customer_paper_submission_audit_retries(customer_id)
 
     intent = execution.get("order_intent")
@@ -334,7 +529,7 @@ async def _customer_paper_submission_stage(
                 "symbol": str(req.symbol),
                 "exchange": str(req.exchange),
                 "reason": "pending execution omitted order_intent evidence",
-            })
+            }, actor_id=f"customer:{customer_id}")
             return "customer_paper_order_pending"
         return None
 
@@ -347,7 +542,7 @@ async def _customer_paper_submission_stage(
             "exchange": str(req.exchange),
             "execution_status": status,
             "reason": "order intent omitted client_order_id evidence",
-        })
+        }, actor_id=f"customer:{customer_id}")
         return "customer_paper_order_pending" if status in pending_statuses else None
 
     submission_status = str(
@@ -374,17 +569,30 @@ async def _customer_paper_submission_stage(
     try:
         await _audit_customer_paper_order_submitted_once(detail)
     except Exception as exc:
-        # Keep the accepted order pending, but preserve a traceback for operators
-        # to diagnose a transient audit-store failure. Do not put exception text
-        # into the persisted customer audit payload.
-        logging.getLogger(__name__).exception(
-            "customer_paper_submission_audit_failed",
-            extra={
-                "customer_id": customer_id,
-                "trading_account_id": trading_account_id,
-                "client_order_id": client_order_id,
-                "error_type": type(exc).__name__,
-            },
+        # Persist a customer/order-scoped retry state even for terminal fills. This
+        # gives the next bot cycle a bounded indexed lookup instead of a history scan.
+        try:
+            await _persist_customer_paper_submission_audit_retry(
+                customer_id=customer_id,
+                submission_detail=detail,
+                error_type=type(exc).__name__,
+            )
+        except Exception as persist_exc:
+            _log_customer_paper_submission_audit_retry_failure(
+                event="customer_paper_submission_audit_retry_persist_failed",
+                customer_id=customer_id,
+                client_order_id=client_order_id,
+                retry_id=None,
+                step="persist_initial_retry_state",
+                exc=persist_exc,
+            )
+        _log_customer_paper_submission_audit_retry_failure(
+            event="customer_paper_submission_audit_failed",
+            customer_id=customer_id,
+            client_order_id=client_order_id,
+            retry_id=None,
+            step="append_submission_audit",
+            exc=exc,
         )
         await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE", {
             "customer_id": customer_id,
@@ -395,10 +603,7 @@ async def _customer_paper_submission_stage(
             "submission_status": submission_status,
             "execution_status": status,
             "reason": type(exc).__name__,
-            # Preserve the complete allowlisted submission facts so a later bot
-            # cycle can repair the event even after the order has become terminal.
-            "submission_detail": detail,
-        })
+        }, actor_id=f"customer:{customer_id}")
         return "customer_paper_order_audit_incomplete" if status in pending_statuses else None
     # Only live pending states should be reported as pending or short-circuit the
     # strategy route. Filled, replayed, expired or terminal orders keep their real
@@ -1659,7 +1864,7 @@ async def _run_persisted_adaptive_bot_cycle(
     try:
         ai_review = await _run_trade_safety_review(packet)
     except asyncio.TimeoutError:
-        await _audit("ADAPTIVE_BOT_AI_TIMEOUT", {"bot_id": bot_id, "customer_id": profile.id, "symbol": req.symbol, "timeout_seconds": settings.ai_strategy_provider_timeout_seconds})
+        await _audit("ADAPTIVE_BOT_AI_TIMEOUT", {"bot_id": bot_id, "customer_id": profile.id, "symbol": req.symbol, **_trade_safety_timeout_metadata()})
         return {"decision": "NO_TRADE", "stage": "ai_safety_timeout", "analysis": deterministic, "adaptive_model": adaptive, "ml_signal": ml_signal}
     if not ai_review["safe"]:
         stage = "ai_safety_not_configured" if not ai_review.get("configured", True) else "ai_safety_gate"
@@ -3833,10 +4038,14 @@ async def admin_custody_reconciliation(authorization: str | None = Header(defaul
     import httpx
     async with SessionLocal() as db:
         rows = (await db.execute(select(CustomerLedgerAccount).where(CustomerLedgerAccount.currency == "USDT"))).scalars().all()
-        liability_available = sum((Decimal(str(r.available or 0)) for r in rows), Decimal("0"))
-        liability_trading_reserved = sum((Decimal(str(r.trading_reserved or 0)) for r in rows), Decimal("0"))
-        liability_withdrawal_reserved = sum((Decimal(str(r.withdrawal_reserved or 0)) for r in rows), Decimal("0"))
-        customer_liabilities = liability_available + liability_trading_reserved + liability_withdrawal_reserved
+        # Numeric(38, 6) account balances can exceed Decimal's default 28-digit context.
+        # Preserve the full stored precision through each liability aggregation.
+        with localcontext() as decimal_context:
+            decimal_context.prec = 60
+            liability_available = sum((Decimal(str(r.available or 0)) for r in rows), Decimal("0"))
+            liability_trading_reserved = sum((Decimal(str(r.trading_reserved or 0)) for r in rows), Decimal("0"))
+            liability_withdrawal_reserved = sum((Decimal(str(r.withdrawal_reserved or 0)) for r in rows), Decimal("0"))
+            customer_liabilities = liability_available + liability_trading_reserved + liability_withdrawal_reserved
         virtual_wallets = (await db.execute(select(Wallet).where(Wallet.currency == "USDT", Wallet.network == "TRON", Wallet.status == "ACTIVE"))).scalars().all()
     treasury_balance: Decimal | None = None
     virtual_wallet_balances: dict[str, Decimal] = {}
@@ -3862,15 +4071,21 @@ async def admin_custody_reconciliation(authorization: str | None = Header(defaul
         except Exception as exc:
             # Return REVIEW with no coverage value when provider evidence is unreliable.
             chain_error = f"{type(exc).__name__}: TRON USDT balance verification failed"
-    custody_onchain = (treasury_balance or Decimal("0")) + sum(virtual_wallet_balances.values(), Decimal("0")) if not chain_error else None
-    coverage_gap = None if custody_onchain is None else custody_onchain - customer_liabilities
+    with localcontext() as decimal_context:
+        decimal_context.prec = 60
+        virtual_wallet_total = sum(virtual_wallet_balances.values(), Decimal("0"))
+        custody_onchain = (
+            (treasury_balance or Decimal("0")) + virtual_wallet_total
+            if not chain_error else None
+        )
+        coverage_gap = None if custody_onchain is None else custody_onchain - customer_liabilities
     return {
         "asset": "USDT", "network": "TRON", "treasury_address": settings.usdt_tron_treasury_address,
         "customer_liabilities": {"available": liability_available, "trading_reserved": liability_trading_reserved,
                                   "withdrawal_reserved": liability_withdrawal_reserved, "total": customer_liabilities},
         "active_virtual_deposit_addresses": len(virtual_wallets),
         "treasury_onchain_balance": treasury_balance,
-        "virtual_wallet_onchain_balance": sum(virtual_wallet_balances.values(), Decimal("0")),
+        "virtual_wallet_onchain_balance": virtual_wallet_total,
         "custody_onchain_balance": custody_onchain,
         "coverage_gap": coverage_gap,
         "status": "OK" if coverage_gap is not None and coverage_gap >= Decimal("-0.000001") else "REVIEW",
@@ -4366,7 +4581,8 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
 
     async with SessionLocal() as db:
         profile, _ = await get_customer(authorization, db)
-        entries = await ledger_statement(db, profile.id, "USDT", 5000)
+        # Export the complete journal; a hard cap silently omitted older history.
+        entries = await ledger_statement(db, profile.id, "USDT", limit=None)
         output = io.StringIO(newline="")
         writer = csv.writer(output)
         writer.writerow([
@@ -4392,6 +4608,8 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
                 "Content-Disposition": 'attachment; filename="atlas-customer-ledger-usdt.csv"',
                 "Cache-Control": "no-store",
                 "Pragma": "no-cache",
+                "X-Atlas-Export-Row-Count": str(len(entries)),
+                "X-Atlas-Export-Truncated": "false",
             },
         )
 
@@ -5250,7 +5468,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
         try:
             ai_review = await _run_trade_safety_review(packet)
         except asyncio.TimeoutError:
-            await _audit("CUSTOMER_BOT_AI_TIMEOUT", {"customer_id": profile.id, "symbol": req.symbol, "timeout_seconds": settings.ai_strategy_provider_timeout_seconds})
+            await _audit("CUSTOMER_BOT_AI_TIMEOUT", {"customer_id": profile.id, "symbol": req.symbol, **_trade_safety_timeout_metadata()})
             return await _record_customer_decision({"decision": "NO_TRADE", "stage": "ai_safety_timeout", "analysis": deterministic, "execution": None})
         if not ai_review["safe"]:
             stage = "ai_safety_not_configured" if not ai_review.get("configured", True) else "ai_safety_gate"
@@ -6580,7 +6798,9 @@ async def risk_dashboard_metrics(
             "session_weight": 0,
             "carry_weight": 0,
             "cost_stress_headroom": 0.0,
-            "ai_safety_timeout_seconds": float(settings.ai_strategy_provider_timeout_seconds),
+            "ai_safety_timeout_seconds": _trade_safety_timeout_metadata()["total_timeout_seconds"],
+            "ai_safety_native_veto_reserve_seconds": _trade_safety_timeout_metadata()["native_veto_reserve_seconds"],
+            "groq_trade_review_timeout_seconds": _trade_safety_timeout_metadata()["groq_provider_timeout_seconds"],
             "is_halted": kill,
             "stream_type": "HTTP_POLL",
             "worker_health": worker_health,
@@ -6698,7 +6918,9 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 "session_weight": 0,
                 "carry_weight": 0,
                 "cost_stress_headroom": 0.0,
-                "ai_safety_timeout_seconds": float(settings.ai_strategy_provider_timeout_seconds),
+                "ai_safety_timeout_seconds": _trade_safety_timeout_metadata()["total_timeout_seconds"],
+                "ai_safety_native_veto_reserve_seconds": _trade_safety_timeout_metadata()["native_veto_reserve_seconds"],
+                "groq_trade_review_timeout_seconds": _trade_safety_timeout_metadata()["groq_provider_timeout_seconds"],
                 "is_halted": kill,
                 "stream_type": "WEBSOCKET_PUSH",
                 "worker_health": worker_health,
