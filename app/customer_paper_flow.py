@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_EVEN, ROUND_UP, localcontext
@@ -53,13 +54,20 @@ def _finite_decimal(value: object, name: str, *, non_negative: bool = False) -> 
 
 
 async def _paper_call(awaitable, action: str):
-    """Convert isolated paper-ledger failures into fail-closed flow errors."""
+    """Convert ledger failures to safe client errors while retaining server diagnostics."""
     try:
         return await awaitable
     except CustomerPaperFlowBlocked:
         raise
     except Exception as exc:
-        raise CustomerPaperFlowBlocked(f"{action}: {exc}") from exc
+        logging.getLogger(__name__).exception(
+            "customer_paper_ledger_operation_failed action=%s error_type=%s",
+            action,
+            type(exc).__name__,
+        )
+        raise CustomerPaperFlowBlocked(
+            f"{action} failed; customer paper ledger operation could not be completed"
+        ) from exc
 
 
 def _quote_currency(symbol: str) -> str:
@@ -250,7 +258,13 @@ async def ensure_customer_paper_account(customer_id: int, currency: str) -> dict
     except CustomerPaperFlowBlocked:
         raise
     except Exception as exc:
-        raise CustomerPaperFlowBlocked(str(exc)) from exc
+        logging.getLogger(__name__).exception(
+            "customer_paper_account_initialization_failed error_type=%s",
+            type(exc).__name__,
+        )
+        raise CustomerPaperFlowBlocked(
+            "Paper account initialization failed; ledger state could not be verified"
+        ) from exc
     currencies = {str(row.get("currency") or "").upper() for row in balances}
     by_code = {
         str(row.get("account_code") or ""): Decimal(str(row.get("balance") or "0"))
