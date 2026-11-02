@@ -49,12 +49,37 @@ def test_migration_fails_closed_when_legacy_account_rows_are_orphaned(monkeypatc
     assert not any("ADD CONSTRAINT" in statement for statement in executed)
 
 
-def test_migration_adds_validated_restrict_foreign_key_after_orphan_check():
-    source = MIGRATION_PATH.read_text(encoding="utf-8")
-    assert "LEFT JOIN public.customer_profiles AS profile" in source
-    assert "WHERE profile.id IS NULL" in source
-    assert "ADD CONSTRAINT fk_trading_accounts_customer_profile" in source
-    assert "NOT VALID" in source
-    assert "VALIDATE CONSTRAINT fk_trading_accounts_customer_profile" in source
-    assert "ON DELETE RESTRICT" in source
-    assert "SET LOCAL lock_timeout = '5s'" in source
+def test_migration_adds_validated_restrict_foreign_key_after_orphan_check(monkeypatch):
+    executed = []
+
+    class QueryResult:
+        def scalar_one(self):
+            return 0
+
+        def scalar_one_or_none(self):
+            return None
+
+    class Connection:
+        dialect = SimpleNamespace(name="postgresql")
+
+        def execute(self, statement, *_args, **_kwargs):
+            executed.append(str(statement))
+            return QueryResult()
+
+    monkeypatch.setattr(_migration.op, "get_bind", lambda: Connection())
+    monkeypatch.setattr(
+        _migration.op, "execute",
+        lambda statement: executed.append(str(statement)),
+    )
+
+    _migration.upgrade()
+
+    statements = "\n".join(executed)
+    assert "SET LOCAL lock_timeout = '5s'" in statements
+    assert "LEFT JOIN public.customer_profiles AS profile" in statements
+    assert "WHERE profile.id IS NULL" in statements
+    assert "ADD CONSTRAINT fk_trading_accounts_customer_profile" in statements
+    assert "NOT VALID" in statements
+    assert "VALIDATE CONSTRAINT fk_trading_accounts_customer_profile" in statements
+    assert "ON DELETE RESTRICT" in statements
+    assert statements.index("NOT VALID") < statements.index("VALIDATE CONSTRAINT")
