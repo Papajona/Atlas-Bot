@@ -198,6 +198,8 @@ def test_retry_loader_quarantines_corrupt_record_and_keeps_valid_retry(monkeypat
     quarantined = []
 
     class FakeResult:
+        rowcount = 1
+
         def all(self):
             return rows
 
@@ -209,8 +211,11 @@ def test_retry_loader_quarantines_corrupt_record_and_keeps_valid_retry(monkeypat
             return False
 
         async def execute(self, statement):
-            statements.append(str(statement))
-            return FakeResult()
+            sql = str(statement)
+            statements.append(sql)
+            if sql.lstrip().upper().startswith("SELECT"):
+                return FakeResult()
+            return SimpleNamespace(rowcount=1)
 
     def decrypt(value):
         if value == "bad-ciphertext":
@@ -249,6 +254,12 @@ def test_retry_loader_quarantines_corrupt_record_and_keeps_valid_retry(monkeypat
     assert "customer_paper_submission_audit_retries.customer_id" in sql
     assert "customer_paper_submission_audit_retries.status" in sql
     assert "limit" in sql
+    assert "processing" in sql
+    assert "updated_at" in sql
+    claim_sql = [statement.lower() for statement in statements[1:]]
+    assert len(claim_sql) == 2
+    assert all(statement.startswith("update customer_paper_submission_audit_retries") for statement in claim_sql)
+    assert all("status" in statement and "updated_at" in statement for statement in claim_sql)
     assert "corrupt-order-501" not in caplog.text
     assert "good-order-501" not in caplog.text
 
@@ -271,3 +282,98 @@ def test_retry_failure_logs_use_non_reversible_order_reference(caplog):
     assert "customer-visible-order-identity" not in caplog.text
     assert "customer_id=501" not in caplog.text
     assert "sensitive SQL details" not in caplog.text
+
+
+
+def test_retry_loader_skips_a_row_claimed_by_another_worker(monkeypatch):
+    rows = [
+        SimpleNamespace(id=21, client_order_id="raced-order-501", raw_detail="ciphertext"),
+    ]
+    calls = []
+
+    class FakeResult:
+        def all(self):
+            return rows
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def execute(self, statement):
+            sql = str(statement)
+            calls.append(sql)
+            if sql.lstrip().upper().startswith("SELECT"):
+                return FakeResult()
+            # A second worker won the compare-and-set claim first.
+            return SimpleNamespace(rowcount=0)
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(
+        main,
+        "decrypt_text",
+        lambda _value: json.dumps({
+            "customer_id": 501,
+            "client_order_id": "raced-order-501",
+        }),
+    )
+
+    pending = asyncio.run(main._load_customer_paper_submission_audit_retries(501))
+
+    assert pending == []
+    assert len(calls) == 2
+    assert calls[1].lstrip().upper().startswith("UPDATE ")
+    assert "status" in calls[1].lower()
+
+
+def test_retry_loader_uses_expiring_processing_lease(monkeypatch):
+    rows = [
+        SimpleNamespace(id=22, client_order_id="expired-lease-order-501", raw_detail="ciphertext"),
+    ]
+    statements = []
+
+    class FakeResult:
+        rowcount = 1
+
+        def all(self):
+            return rows
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def execute(self, statement):
+            sql = str(statement)
+            statements.append(sql)
+            if sql.lstrip().upper().startswith("SELECT"):
+                return FakeResult()
+            return SimpleNamespace(rowcount=1)
+
+        async def commit(self):
+            return None
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(
+        main,
+        "decrypt_text",
+        lambda _value: json.dumps({
+            "customer_id": 501,
+            "client_order_id": "expired-lease-order-501",
+            "side": "BUY",
+        }),
+    )
+
+    pending = asyncio.run(main._load_customer_paper_submission_audit_retries(501))
+
+    assert len(pending) == 1
+    assert pending[0]["retry_id"] == 22
+    selection = statements[0].lower()
+    assert "processing" in selection
+    assert "updated_at" in selection
+    assert "status" in selection
+    assert statements[1].lstrip().upper().startswith("UPDATE ")
