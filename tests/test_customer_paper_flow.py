@@ -1175,3 +1175,45 @@ def test_pending_paper_buy_caps_quantity_after_rounded_notional_and_fee(monkeypa
     ).quantize(quantum, rounding="ROUND_DOWN")
     assert notional + fee == Decimal("0.1")
     assert quantity == previous_quantity - quantum
+
+
+
+def test_customer_paper_ledger_errors_do_not_leak_database_details_to_callers():
+    import app.customer_paper_flow as flow
+
+    database_error = RuntimeError(
+        "asyncpg connection failed host=db.internal password=super-secret SQL=SELECT * FROM customer_paper"
+    )
+
+    async def fail_ledger_call():
+        raise database_error
+
+    with pytest.raises(CustomerPaperFlowBlocked) as captured:
+        asyncio.run(flow._paper_call(fail_ledger_call(), "read paper balances"))
+
+    assert str(captured.value) == (
+        "read paper balances failed; customer paper ledger operation could not be completed"
+    )
+    assert "super-secret" not in str(captured.value)
+    assert "db.internal" not in str(captured.value)
+    assert captured.value.__cause__ is database_error
+
+
+def test_customer_paper_seed_errors_do_not_leak_database_details_to_callers(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    monkeypatch.setattr(settings, "customer_paper_initial_currency", "USDT")
+    monkeypatch.setattr(settings, "customer_paper_initial_balance", 100.0)
+
+    async def fail_seed_call(*_args, **_kwargs):
+        raise RuntimeError("postgres://atlas:seed-secret@db.internal/customer_paper")
+
+    monkeypatch.setattr(flow, "_paper_call", fail_seed_call)
+    with pytest.raises(CustomerPaperFlowBlocked) as captured:
+        asyncio.run(flow.ensure_customer_paper_account(12345, "USDT"))
+
+    assert str(captured.value) == (
+        "Paper account initialization failed; ledger state could not be verified"
+    )
+    assert "seed-secret" not in str(captured.value)
+    assert "db.internal" not in str(captured.value)
