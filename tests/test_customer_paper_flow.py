@@ -671,6 +671,7 @@ def test_pending_order_reader_exposes_market_identity_and_immutable_metadata():
     block = source[start:end]
     assert "o.client_order_id, o.venue, o.market_type, o.symbol, o.side" in block
     assert "o.quantity, o.metadata_json" in block
+    assert '"order_id": str(row["order_id"])' in block
     assert '"venue": str(row["venue"]).lower()' in block
     assert '"market_type": str(row["market_type"])' in block
     assert '"metadata": metadata' in block
