@@ -97,6 +97,14 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
     frame.attrs["data_provenance"]["fetched_at_utc"] = (
         frozen_now - timedelta(seconds=1)
     ).isoformat()
+    submission_bar_at = bar_at - timedelta(minutes=1)
+    submission_bar_hash = next(
+        bar["bar_data_sha256"]
+        for bar in paper_api._market_bar_contexts(
+            frame, symbol="BTC/USDT", timeframe="1m"
+        )
+        if bar["timestamp"] == submission_bar_at
+    )
 
     open_order = {
         "client_order_id": "manual-replay-race",
@@ -109,7 +117,8 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
         "metadata": {
             "timeframe": "1m",
             "execution_model": "completed_bar_volume_capped_heuristic_v1",
-            "submission_bar_at": (bar_at - timedelta(minutes=1)).isoformat(),
+            "submission_bar_at": submission_bar_at.isoformat(),
+            "submission_bar_sha256": submission_bar_hash,
         },
     }
     prior_fill = {
