@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
+from pathlib import Path
 from types import SimpleNamespace
+
+import sqlalchemy as sa
 
 import pytest
 from sqlalchemy.dialects import postgresql, sqlite
@@ -209,3 +213,25 @@ def test_retry_upsert_is_unique_by_customer_and_order_and_reopens_pending_state(
     assert "client_order_id" in sql
     assert "PENDING" in captured["params"]
     assert captured["committed"] is True
+
+
+
+def test_retry_store_migration_enables_row_level_security(monkeypatch):
+    root = Path(__file__).resolve().parents[1]
+    migration_path = root / "alembic" / "versions" / "0056_customer_paper_submission_audit_retries.py"
+    spec = importlib.util.spec_from_file_location("migration_0056_customer_paper_submission_audit_retries", migration_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    executed = []
+    monkeypatch.setattr(migration.op, "create_table", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(migration.op, "create_index", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(migration.op, "execute", lambda statement: executed.append(str(statement)))
+
+    migration.upgrade()
+
+    assert any(
+        "ALTER TABLE public.customer_paper_submission_audit_retries ENABLE ROW LEVEL SECURITY" in statement
+        for statement in executed
+    )
