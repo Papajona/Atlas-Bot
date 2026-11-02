@@ -158,6 +158,21 @@ def test_audit_outage_does_not_turn_a_persisted_pending_order_into_http_error(mo
             "submission_status": "WAITING_FOR_NEXT_COMPLETED_BAR",
             "execution_status": "WAITING_FOR_NEXT_COMPLETED_BAR",
             "reason": "RuntimeError",
+            "submission_detail": {
+                "customer_id": 501,
+                "trading_account_id": 702,
+                "symbol": "BTC/USDT",
+                "exchange": "binance",
+                "timeframe": "1h",
+                "client_order_id": "cp-regression-order",
+                "order_id": 44021,
+                "side": "BUY",
+                "quantity": "0.250000000000000000",
+                "bar_timestamp": "2026-10-30T10:00:00+00:00",
+                "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
+                "execution_status": "WAITING_FOR_NEXT_COMPLETED_BAR",
+                "order_role": "STRATEGY",
+            },
         },
     )]
 
