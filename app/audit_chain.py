@@ -39,7 +39,6 @@ async def _existing_idempotent_audit(db, *, event: str, idempotency_key: str):
             select(
                 AuditLog.id,
                 AuditLog.event_hash,
-                AuditLog.detail,
                 AuditLog.actor_id,
             )
             .where(
@@ -173,7 +172,6 @@ async def append_audit_once(
             select(
                 AuditLog.id,
                 AuditLog.event_hash,
-                AuditLog.detail,
                 AuditLog.actor_id,
             )
             .where(
@@ -188,7 +186,6 @@ async def append_audit_once(
         return SimpleNamespace(
             id=existing.id,
             event_hash=existing.event_hash,
-            detail=existing.detail,
             actor_id=existing.actor_id,
         ), False
 
@@ -211,7 +208,6 @@ async def append_audit_once(
             return SimpleNamespace(
                 id=existing.id,
                 event_hash=existing.event_hash,
-                detail=existing.detail,
                 actor_id=existing.actor_id,
             ), False
         row = await _append_audit_locked(
@@ -239,7 +235,6 @@ async def append_audit_once(
                     return SimpleNamespace(
                         id=existing.id,
                         event_hash=existing.event_hash,
-                        detail=existing.detail,
                         actor_id=existing.actor_id,
                     ), False
 
@@ -252,7 +247,6 @@ async def append_audit_once(
                     return SimpleNamespace(
                         id=existing.id,
                         event_hash=existing.event_hash,
-                        detail=existing.detail,
                         actor_id=existing.actor_id,
                     ), False
 
@@ -282,7 +276,6 @@ async def append_audit_once(
                     return SimpleNamespace(
                         id=existing.id,
                         event_hash=existing.event_hash,
-                        detail=existing.detail,
                         actor_id=existing.actor_id,
                     ), False
                 if isinstance(exc, OperationalError):
