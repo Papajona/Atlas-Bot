@@ -56,6 +56,7 @@ def test_customer_csv_export_serializes_journal_lines_for_authenticated_customer
     db = _DB(entries=[{
         "created_at": "2026-10-20T10:00:00+00:00",
         "journal_id": 42,
+        "line_no": 1,
         "entry_type": "DEPOSIT",
         "reference_type": "TRON_DEPOSIT",
         "reference_id": "tx-abc",
@@ -161,6 +162,7 @@ def test_customer_csv_export_includes_more_than_5000_journal_lines(monkeypatch):
         {
             "created_at": "2026-11-02T10:00:00+00:00",
             "journal_id": index,
+            "line_no": 1,
             "entry_type": "DEPOSIT",
             "reference_type": "TRON_DEPOSIT",
             "reference_id": f"tx-{index}",
