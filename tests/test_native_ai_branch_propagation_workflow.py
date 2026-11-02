@@ -101,7 +101,7 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert "tests/" not in runtime_path_list
     assert 'git show "$GITHUB_SHA:scripts/migrate_legacy_native_ai.py"' in workflow
     assert 'python "$RUNNER_TEMP/migrate_legacy_native_ai.py" --canonical-commit "$NATIVE_AI_CANONICAL_COMMIT" --cleanup-commit "$NATIVE_AI_CLEANUP_COMMIT" --extra-base-commit "$NATIVE_AI_EXTRA_BASE_COMMIT" --extra-commit "$NATIVE_AI_EXTRA_COMMIT"' in workflow
-    assert 'NATIVE_AI_CANONICAL_COMMIT="bafcc5bc3e5f025ce59c53555a622c9cb46a2f22"' in workflow
+    assert 'NATIVE_AI_CANONICAL_COMMIT="a2b745cff52a5b207d153bae5d1d7b98b916040b"' in workflow
     assert 'NATIVE_AI_CANONICAL_COMMIT="$GITHUB_SHA"' not in workflow
     assert 'NATIVE_AI_CLEANUP_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"' in workflow
     assert 'NATIVE_AI_EXTRA_COMMIT="2317ccc4c3293e8bbd7043970876eceb509d2d1d"' in workflow
