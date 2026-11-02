@@ -8,6 +8,26 @@ from .db import AuditChainState, AuditLog, SessionLocal
 from .distributed import allow_rate_limit
 
 
+async def _lock_audit_chain_state(db) -> AuditChainState:
+    """Serialize audit writers and return the locked chain head."""
+    locked = (
+        select(AuditChainState)
+        .where(AuditChainState.id == 1)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    state = (await db.execute(locked)).scalar_one_or_none()
+    if state is None:
+        try:
+            async with db.begin_nested():
+                db.add(AuditChainState(id=1, last_hash=""))
+                await db.flush()
+        except IntegrityError:
+            pass
+        state = (await db.execute(locked)).scalar_one()
+    return state
+
+
 async def append_audit(db, *, event: str, detail: dict, actor_id: str = "") -> AuditLog:
     # Bound abusive event volume per actor using the shared Redis limiter when configured.
     # Never drop security/accounting events: annotate limited events and still append them.
@@ -18,25 +38,7 @@ async def append_audit(db, *, event: str, detail: dict, actor_id: str = "") -> A
     if not allowed:
         audit_detail["audit_chain_rate_limited"] = True
         audit_detail["audit_chain_rate_limit"] = {"limit": 100, "window_seconds": 60}
-    # Lock before reading so PostgreSQL writers always hash from the committed predecessor.
-    # populate_existing is required when this session already holds a stale identity-map object.
-    locked = (
-        select(AuditChainState)
-        .where(AuditChainState.id == 1)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    state = (await db.execute(locked)).scalar_one_or_none()
-    if state is None:
-        # The first two writers can race on creation. Keep the unique-key loser inside a
-        # savepoint so the outer transaction remains usable, then acquire the winner's row lock.
-        try:
-            async with db.begin_nested():
-                db.add(AuditChainState(id=1, last_hash=""))
-                await db.flush()
-        except IntegrityError:
-            pass
-        state = (await db.execute(locked)).scalar_one()
+    state = await _lock_audit_chain_state(db)
 
     created = datetime.now(timezone.utc)
     previous = state.last_hash or ""
@@ -66,6 +68,39 @@ async def append_audit(db, *, event: str, detail: dict, actor_id: str = "") -> A
     state.updated_at = created
     await db.commit()
     return row
+
+
+async def append_audit_once(
+    db,
+    *,
+    event: str,
+    detail: dict,
+    actor_id: str = "",
+    idempotency_key: str,
+) -> tuple[AuditLog, bool]:
+    """Append a durable audit event once per stable key, including after failed deliveries.
+
+    The chain-state row lock serializes lookups and appends. Existing encrypted detail is
+    decrypted by the AuditLog ORM type before its idempotency key is compared.
+    """
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 200:
+        raise ValueError("audit idempotency key must be non-empty and at most 200 characters")
+    await _lock_audit_chain_state(db)
+    prior_rows = (await db.execute(
+        select(AuditLog).where(AuditLog.event == event).order_by(AuditLog.id.desc())
+    )).scalars().all()
+    for prior in prior_rows:
+        try:
+            prior_detail = json.loads(prior.detail or "{}")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(prior_detail, dict) and prior_detail.get("_audit_idempotency_key") == key:
+            return prior, False
+    safe_detail = dict(detail or {})
+    safe_detail["_audit_idempotency_key"] = key
+    row = await append_audit(db, event=event, detail=safe_detail, actor_id=actor_id)
+    return row, True
 
 
 async def record_audit(event: str, detail: dict, actor_id: str = "system") -> AuditLog:
