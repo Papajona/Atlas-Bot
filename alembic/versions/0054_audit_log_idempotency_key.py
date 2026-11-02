@@ -65,7 +65,7 @@ def upgrade():
                 "audit_log",
                 sa.Column("idempotency_key", sa.String(length=64), nullable=True),
             )
-        if not sa.inspect(op.get_bind()).has_index("uq_audit_log_event_idempotency", "audit_log"):
+        if not sa.inspect(op.get_bind()).has_index("audit_log", "uq_audit_log_event_idempotency"):
             op.create_index(
                 "uq_audit_log_event_idempotency",
                 "audit_log",
@@ -76,13 +76,17 @@ def upgrade():
 
 def downgrade():
     context = op.get_context()
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
     if context.dialect.name == "postgresql":
-        with context.autocommit_block():
-            op.drop_index(
-                "uq_audit_log_event_idempotency",
-                table_name="audit_log",
-                postgresql_concurrently=True,
-            )
-    else:
+        if inspector.has_index("audit_log", "uq_audit_log_event_idempotency"):
+            with context.autocommit_block():
+                op.drop_index(
+                    "uq_audit_log_event_idempotency",
+                    table_name="audit_log",
+                    postgresql_concurrently=True,
+                )
+    elif inspector.has_index("audit_log", "uq_audit_log_event_idempotency"):
         op.drop_index("uq_audit_log_event_idempotency", table_name="audit_log")
-    op.drop_column("audit_log", "idempotency_key")
+    if inspector.has_column("audit_log", "idempotency_key"):
+        op.drop_column("audit_log", "idempotency_key")
