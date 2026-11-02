@@ -245,6 +245,21 @@ def test_cross_process_sqlite_lock_retries_distinct_audit_identities(tmp_path, m
             # A fresh lock per caller models independent worker processes: no
             # in-memory asyncio.Lock can coordinate these writers.
             monkeypatch.setattr(audit_chain, "_sqlite_audit_lock", lambda _db: asyncio.Lock())
+            original_lock_chain_state = audit_chain._lock_chain_state
+            attempted_writer_tasks = set()
+            all_writers_attempted_database_lock = asyncio.Event()
+
+            async def observe_database_lock_attempt(db):
+                task = asyncio.current_task()
+                if task is not None:
+                    attempted_writer_tasks.add(task)
+                    if len(attempted_writer_tasks) == 8:
+                        all_writers_attempted_database_lock.set()
+                return await original_lock_chain_state(db)
+
+            monkeypatch.setattr(
+                audit_chain, "_lock_chain_state", observe_database_lock_attempt
+            )
             blocker = await engine.connect()
             blocker_tx = await blocker.begin()
             await blocker.execute(text("UPDATE audit_chain_state SET id = id WHERE id = 1"))
@@ -264,7 +279,12 @@ def test_cross_process_sqlite_lock_retries_distinct_audit_identities(tmp_path, m
                     )
 
             tasks = [asyncio.create_task(append_distinct(index)) for index in range(8)]
-            await asyncio.sleep(0.08)
+            # Do not release the SQLite write reservation after a wall-clock sleep:
+            # wait until every independent writer has reached the actual chain-head
+            # acquisition attempt while the blocker is still held.
+            await asyncio.wait_for(
+                all_writers_attempted_database_lock.wait(), timeout=5.0
+            )
             await blocker_tx.commit()
             await blocker.close()
             results = await asyncio.gather(*tasks, return_exceptions=True)
