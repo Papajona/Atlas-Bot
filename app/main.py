@@ -1597,8 +1597,14 @@ async def _run_persisted_adaptive_bot_cycle(
             return {"decision": "NO_TRADE", "stage": "customer_paper_execution",
                     "reason": str(exc)}
         if execution.get("decision") != "TRADE":
+            order_submitted = await _audit_customer_paper_order_submission(
+                execution=execution, customer_id=profile.id,
+                trading_account_id=account.id, bot_id=bot_id, symbol=req.symbol,
+            )
             return {
-                "decision": "NO_TRADE", "stage": "customer_paper_order_gate", "mode": "CUSTOMER_PAPER",
+                "decision": "NO_TRADE",
+                "stage": "customer_paper_order_submitted" if order_submitted else "customer_paper_order_gate",
+                "mode": "CUSTOMER_PAPER",
                 "analysis": deterministic, "adaptive_model": adaptive, "ml_signal": ml_signal,
                 "ai_review": ai_review, "execution": execution,
             }
@@ -5101,9 +5107,13 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             except CustomerPaperFlowBlocked as exc:
                 raise HTTPException(409, f"Customer paper execution blocked: {exc}") from exc
             if execution.get("decision") != "TRADE":
+                order_submitted = await _audit_customer_paper_order_submission(
+                    execution=execution, customer_id=profile.id,
+                    trading_account_id=account_id, bot_id=bot_id, symbol=req.symbol,
+                )
                 return await _record_customer_decision({
                     "decision": "NO_TRADE",
-                    "stage": "customer_paper_order_gate",
+                    "stage": "customer_paper_order_submitted" if order_submitted else "customer_paper_order_gate",
                     "mode": "CUSTOMER_PAPER",
                     "analysis": deterministic,
                     "adaptive_model": adaptive or {"status": "DISABLED"},
@@ -7825,6 +7835,37 @@ async def _safe_audit(event: str, detail: dict, actor_id: str | None = None) -> 
         await _audit(event, detail, actor_id=actor_id)
     except Exception:
         logger.exception("worker_error_audit_failed event=%s", event)
+
+
+async def _audit_customer_paper_order_submission(
+    *,
+    execution: dict,
+    customer_id: int,
+    trading_account_id: int | None,
+    bot_id: int | None,
+    symbol: str,
+) -> bool:
+    """Audit a newly accepted paper order that is waiting for a later completed bar."""
+    if str(execution.get("status") or "").upper() != "WAITING_FOR_NEXT_COMPLETED_BAR":
+        return False
+    submission = execution.get("order_submission")
+    if not isinstance(submission, dict):
+        return False
+    if submission.get("newly_submitted") is True:
+        await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMITTED", {
+            "customer_id": customer_id,
+            "trading_account_id": trading_account_id,
+            "bot_id": bot_id,
+            "symbol": symbol,
+            "client_order_id": submission.get("client_order_id"),
+            "order_id": submission.get("order_id"),
+            "side": submission.get("side"),
+            "quantity": submission.get("quantity"),
+            "submission_bar_timestamp": submission.get("submission_bar_timestamp"),
+            "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
+            "mode": "CUSTOMER_PAPER",
+        })
+    return True
 
 
 def json_loads(v):
