@@ -7123,16 +7123,55 @@ def validate_groq_research_module(source: str, path: str = "app/groq_ai.py") -> 
 
 
 def _has_conflicting_provider_wiring(path: str, contents: str) -> bool:
-    """Reject retired provider wiring without treating supported Groq review as legacy.
+    """Reject provider implementations while preserving bounded Groq evidence.
 
-    app.native_ai records Groq's bounded trade-review evidence as advisory context;
-    it does not contain a hosted Groq strategy/safety provider implementation.
-    Groq remains allowed only through the current research-review contract, while
-    retired Gemini/Cerebras/AI Gateway and legacy Groq strategy-model fields remain
-    migration blockers.
+    app.native_ai may inspect Groq's bounded trade-review evidence as advisory
+    context, but it must not import or invoke the hosted Groq integration.  The
+    latter is checked separately because the path-specific retired-provider
+    pattern intentionally does not match supported Groq names.
     """
     pattern = RETIRED_PROVIDER_RE if path == "app/native_ai.py" else PROVIDER_RE
-    return bool(pattern.search(contents))
+    if pattern.search(contents):
+        return True
+    if path != "app/native_ai.py":
+        return False
+
+    try:
+        tree = ast.parse(contents, filename=path)
+    except SyntaxError:
+        # The normal provider scan remains the useful conservative guard for
+        # incomplete source; migration will reject invalid preserved modules later.
+        return False
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            module = node.module if isinstance(node, ast.ImportFrom) else None
+            imported_modules = [module] if module else [alias.name for alias in node.names]
+            if any(name and (name == "groq_ai" or name.endswith(".groq_ai")) for name in imported_modules):
+                return True
+            if isinstance(node, ast.ImportFrom) and any(alias.name == "groq_ai" for alias in node.names):
+                return True
+        elif isinstance(node, ast.Call):
+            function = node.func
+            if isinstance(function, ast.Name) and function.id in {
+                "groq_trade_context_review", "groq_research_review",
+            }:
+                return True
+            if isinstance(function, ast.Attribute):
+                if function.attr in {
+                    "groq_trade_context_review", "groq_research_review",
+                }:
+                    return True
+                qualified = []
+                cursor = function
+                while isinstance(cursor, ast.Attribute):
+                    qualified.append(cursor.attr)
+                    cursor = cursor.value
+                if isinstance(cursor, ast.Name):
+                    qualified.append(cursor.id)
+                if "groq_ai" in qualified:
+                    return True
+    return False
 
 
 def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:

@@ -152,6 +152,14 @@ fi
             migration._has_conflicting_provider_wiring("app/native_ai.py", supported_review)
         )
 
+        hosted_review_call = """async def native_trade_safety_review(packet):
+    from .groq_ai import groq_trade_context_review
+    return await groq_trade_context_review(packet)
+"""
+        self.assertTrue(
+            migration._has_conflicting_provider_wiring("app/native_ai.py", hosted_review_call)
+        )
+
         self.assertTrue(
             migration._has_conflicting_provider_wiring(
                 "app/native_ai.py",
