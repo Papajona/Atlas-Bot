@@ -78,12 +78,17 @@ def test_new_pending_paper_order_has_distinct_stage_and_submission_audit(monkeyp
 
 def test_replayed_pending_order_repairs_missing_audit_without_marking_new(monkeypatch):
     attempts = []
+    persisted = []
 
     async def audit_once(detail):
         attempts.append(detail)
-        return False  # The idempotent audit row already exists.
+        return False  # The outbox event exists, but external delivery is not confirmed.
+
+    async def persist_retry(**kwargs):
+        persisted.append(kwargs)
 
     monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_persist_customer_paper_submission_audit_retry", persist_retry)
     req = SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h")
 
     stage = asyncio.run(main._customer_paper_submission_stage(
@@ -93,19 +98,25 @@ def test_replayed_pending_order_repairs_missing_audit_without_marking_new(monkey
         req=req,
     ))
 
-    assert stage == "customer_paper_order_pending"
+    assert stage == "customer_paper_order_audit_incomplete"
     assert len(attempts) == 1
     assert attempts[0]["client_order_id"] == "cp-regression-order"
+    assert persisted[0]["error_type"] == "DeliveryIncomplete"
 
 
 def test_recovery_wrapper_order_intent_is_audited_as_pending(monkeypatch):
     calls = []
+    persisted = []
 
     async def audit_once(detail):
         calls.append(detail)
         return False
 
+    async def persist_retry(**kwargs):
+        persisted.append(kwargs)
+
     monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_persist_customer_paper_submission_audit_retry", persist_retry)
     req = SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h")
     recovered = {
         "status": "PROTECTIVE_EXIT_PENDING",
@@ -128,9 +139,11 @@ def test_recovery_wrapper_order_intent_is_audited_as_pending(monkeypatch):
         recovered, customer_id=501, trading_account_id=702, req=req,
     ))
 
-    assert stage == "customer_paper_order_pending"
+    assert stage == "customer_paper_order_audit_incomplete"
     assert calls[0]["order_role"] == "PROTECTIVE_EXIT"
     assert calls[0]["client_order_id"] == "cpx-recovered-exit"
+    assert persisted[0]["submission_detail"]["client_order_id"] == "cpx-recovered-exit"
+    assert persisted[0]["error_type"] == "DeliveryIncomplete"
 
 
 
