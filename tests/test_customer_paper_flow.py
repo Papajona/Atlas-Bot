@@ -693,7 +693,6 @@ def test_manual_paper_initialization_reuses_the_configured_seed_helper():
 
 def test_concurrent_paper_cash_spend_expires_unaffordable_pending_buy(monkeypatch):
     import app.customer_paper_flow as flow
-    from app.customer_paper_lifecycle import CustomerPaperOrderConflict
 
     _, state, order, market = _paper_fill_test_context()
     monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
