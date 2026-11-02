@@ -3,14 +3,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, OperationalError
 
-from .db import AuditChainState, AuditLog, SessionLocal
+from .db import AuditChainState, AuditLog, AuditLogExternalDelivery, SessionLocal
 from .distributed import allow_rate_limit
 
 
@@ -285,3 +285,97 @@ async def record_audit(event: str, detail: dict, actor_id: str = "system") -> Au
     """Append an audit row using a dedicated session (safe to call from any module)."""
     async with SessionLocal() as db:
         return await append_audit(db, event=event, detail=detail, actor_id=actor_id)
+
+
+async def claim_external_audit_delivery(
+    event_hash: str, *, lease_seconds: int = 120
+) -> bool:
+    """Atomically claim one external audit delivery; delivered events are never resent."""
+    digest = str(event_hash or "").strip()
+    if len(digest) != 64:
+        raise ValueError("external audit delivery requires a SHA-256 event hash")
+
+    for attempt in range(5):
+        async with SessionLocal() as db:
+            sqlite_lock = _sqlite_audit_lock(db)
+            if sqlite_lock is not None:
+                await sqlite_lock.acquire()
+            try:
+                async with db.begin():
+                    statement = (
+                        select(AuditLogExternalDelivery)
+                        .where(AuditLogExternalDelivery.event_hash == digest)
+                        .with_for_update()
+                    )
+                    delivery = (await db.execute(statement)).scalar_one_or_none()
+                    now = datetime.now(timezone.utc)
+                    if delivery is None:
+                        delivery = AuditLogExternalDelivery(
+                            event_hash=digest,
+                            status="PENDING",
+                            attempt_count=0,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                        db.add(delivery)
+                        await db.flush()
+                    if delivery.status == "DELIVERED":
+                        return False
+                    if (
+                        delivery.status == "IN_FLIGHT"
+                        and delivery.lease_until is not None
+                        and delivery.lease_until > now
+                    ):
+                        return False
+                    delivery.status = "IN_FLIGHT"
+                    delivery.attempt_count = int(delivery.attempt_count or 0) + 1
+                    delivery.lease_until = now + timedelta(seconds=max(30, int(lease_seconds)))
+                    delivery.updated_at = now
+                return True
+            except (IntegrityError, OperationalError) as exc:
+                await db.rollback()
+                if isinstance(exc, OperationalError):
+                    detail = str(exc).lower()
+                    if not any(marker in detail for marker in (
+                        "database is locked", "database table is locked", "database is busy"
+                    )):
+                        raise
+                if attempt == 4:
+                    raise
+            finally:
+                if sqlite_lock is not None and sqlite_lock.locked():
+                    sqlite_lock.release()
+    raise RuntimeError("external audit delivery claim could not be acquired")
+
+
+async def finish_external_audit_delivery(
+    event_hash: str, *, delivered: bool, error_type: str | None = None
+) -> None:
+    """Persist delivery success or release a failed attempt for a later replay retry."""
+    digest = str(event_hash or "").strip()
+    if len(digest) != 64:
+        raise ValueError("external audit delivery requires a SHA-256 event hash")
+
+    async with SessionLocal() as db:
+        sqlite_lock = _sqlite_audit_lock(db)
+        if sqlite_lock is not None:
+            await sqlite_lock.acquire()
+        try:
+            async with db.begin():
+                statement = (
+                    select(AuditLogExternalDelivery)
+                    .where(AuditLogExternalDelivery.event_hash == digest)
+                    .with_for_update()
+                )
+                row = (await db.execute(statement)).scalar_one_or_none()
+                if row is None:
+                    raise RuntimeError("external audit delivery claim disappeared before completion")
+                now = datetime.now(timezone.utc)
+                row.status = "DELIVERED" if delivered else "PENDING"
+                row.delivered_at = now if delivered else None
+                row.lease_until = None
+                row.last_error_type = None if delivered else (str(error_type or "DeliveryNotConfirmed")[:80])
+                row.updated_at = now
+        finally:
+            if sqlite_lock is not None and sqlite_lock.locked():
+                sqlite_lock.release()
