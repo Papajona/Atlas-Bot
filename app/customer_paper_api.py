@@ -226,6 +226,27 @@ def _market_bar_contexts(df: Any, *, symbol: str, timeframe: str) -> list[dict[s
     return contexts
 
 
+def _verify_submission_bar_integrity(
+    bars_by_timestamp: dict[datetime, dict[str, Any]],
+    submitted_at: datetime,
+    expected_sha256: Any,
+) -> None:
+    """Fail closed unless replay contains the exact candle persisted at order submission."""
+    expected = str(expected_sha256 or "").strip().lower()
+    if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
+        raise HTTPException(
+            409,
+            "Persisted paper order lacks a valid submission-bar digest; reconcile before advancing",
+        )
+    submitted_bar = bars_by_timestamp.get(submitted_at)
+    actual = str((submitted_bar or {}).get("bar_data_sha256") or "").strip().lower()
+    if actual != expected:
+        raise HTTPException(
+            409,
+            "The verified submission candle is missing or has changed; reconcile before advancing",
+        )
+
+
 def _stable_draw(*parts: str) -> float:
     digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
     return int(digest[:13], 16) / float(16**13)
@@ -510,6 +531,11 @@ def build_customer_paper_router(
 
             bars = _market_bar_contexts(df, symbol=order["symbol"], timeframe=timeframe)
             by_timestamp = {bar["timestamp"]: bar for bar in bars}
+            _verify_submission_bar_integrity(
+                by_timestamp,
+                submitted_at,
+                metadata.get("submission_bar_sha256"),
+            )
             evaluation_end = min(latest_at, ttl_at)
 
             # Never select only the latest candle. Every eligible candle from the
