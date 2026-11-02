@@ -219,3 +219,27 @@ def test_customer_csv_export_includes_more_than_5000_journal_lines(monkeypatch):
     assert response.headers["X-Atlas-Export-Truncated"] == "false"
     assert [page[2] for page in pages] == [1000, 1000, 1000, 1000, 1000, 1000]
     assert [page[0] for page in pages] == [None, 4001, 3001, 2001, 1001, 1]
+
+
+
+def test_customer_ledger_csv_export_rejects_row_counts_above_resource_limit(monkeypatch):
+    db = _DB()
+    profile = SimpleNamespace(id=23)
+    monkeypatch.setattr(main, "SessionLocal", lambda: db)
+    monkeypatch.setattr(main, "get_customer", _async_value((profile, {"sub": "customer-23"})))
+    monkeypatch.setattr(main, "_LEDGER_EXPORT_MAX_ROWS", 2)
+
+    async def export_bounds(_db, customer_id, currency, *, max_journal_id=None):
+        assert (customer_id, currency, max_journal_id) == (23, "USDT", None)
+        return 3, 3
+
+    async def unexpected_page(*_args, **_kwargs):
+        raise AssertionError("oversized export must be rejected before fetching page data")
+
+    monkeypatch.setattr(main, "ledger_statement_export_bounds", export_bounds)
+    monkeypatch.setattr(main, "ledger_statement", unexpected_page)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(main.customer_ledger_export_csv(authorization="opaque-token"))
+
+    assert exc.value.status_code == 413
