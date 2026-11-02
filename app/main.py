@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Any
 import logging
+import threading
 import contextlib
 from pathlib import Path
 import hmac
@@ -256,12 +257,30 @@ async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
             actor_id=actor,
             idempotency_fields=("customer_id", "client_order_id"),
         )
-    # A durable outbox remembers whether the second copy is still pending. This
-    # retries a failed sink on later idempotent replays without duplicating already
-    # acknowledged events on every bot recovery cycle.
-    if await claim_external_audit_delivery(row.event_hash):
+
+    # Retries must send the canonical payload that was originally hash-chained,
+    # not the mutable state observed by a later recovery poll.
+    try:
+        persisted_detail = row.detail
+        if isinstance(persisted_detail, str):
+            persisted_detail = json.loads(persisted_detail)
+        if not isinstance(persisted_detail, dict):
+            raise ValueError("stored customer paper audit payload is not an object")
+        if (
+            int(persisted_detail.get("customer_id", -1)) != int(detail["customer_id"])
+            or str(persisted_detail.get("client_order_id") or "") != str(detail["client_order_id"])
+        ):
+            raise ValueError("stored customer paper audit identity does not match the idempotency key")
+        actor = str(row.actor_id or actor)
+    except Exception as exc:
+        raise RuntimeError("stored customer paper audit payload cannot be safely replayed") from exc
+
+    # A durable, fenced outbox retries failed copies without replaying acknowledged
+    # events or allowing an expired sender to overwrite a newer sender's result.
+    claim_token = await claim_external_audit_delivery(row.event_hash)
+    if claim_token is not None:
         safe_detail = {
-            key: value for key, value in detail.items()
+            key: value for key, value in persisted_detail.items()
             if key not in {"token", "secret", "api_token", "api_secret", "authorization", "destination"}
         }
         try:
@@ -272,15 +291,29 @@ async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
                 event_hash=row.event_hash,
             ))
         except Exception as exc:
-            await finish_external_audit_delivery(
-                row.event_hash, delivered=False, error_type=type(exc).__name__
-            )
+            try:
+                await finish_external_audit_delivery(
+                    row.event_hash,
+                    claim_token=claim_token,
+                    delivered=False,
+                    error_type=type(exc).__name__,
+                )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "failed to release customer paper audit outbox lease after sink failure"
+                )
             raise
-        await finish_external_audit_delivery(
+
+        finished = await finish_external_audit_delivery(
             row.event_hash,
+            claim_token=claim_token,
             delivered=emitted,
             error_type=None if emitted else "DeliveryNotConfirmed",
         )
+        if not finished:
+            logging.getLogger(__name__).warning(
+                "customer paper audit delivery result arrived after its lease was superseded"
+            )
         if not emitted:
             raise RuntimeError("external customer paper submission audit sink did not confirm delivery")
     return created
@@ -4360,14 +4393,20 @@ async def customer_ledger(authorization: str | None = Header(default=None)):
         return {"currency": "USDT", "balance": balance, "entries": entries}
 
 
+_LEDGER_EXPORT_MAX_ROWS = 100_000
+_LEDGER_EXPORT_MAX_BYTES = 64 * 1024 * 1024
+_LEDGER_EXPORT_MAX_CONCURRENT = 2
+_LEDGER_EXPORT_SEMAPHORE = threading.BoundedSemaphore(_LEDGER_EXPORT_MAX_CONCURRENT)
+
+
 @app.get("/api/customer/ledger/export.csv")
 async def customer_ledger_export_csv(authorization: str | None = Header(default=None)):
-    """Build a complete disk-spooled CSV from short, keyset-paginated read sessions."""
+    """Build a complete bounded CSV from short, keyset-paginated read sessions."""
     import csv
     import tempfile
 
     # Authentication/profile creation uses the normal transaction isolation. The
-    # export snapshot ceiling is captured in a separate read session afterwards.
+    # export ceiling is captured separately; row and byte caps bound resource use.
     async with SessionLocal() as auth_db:
         profile, _ = await get_customer(authorization, auth_db)
         customer_id = int(profile.id)
@@ -4377,20 +4416,33 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
             bounds_db, customer_id, "USDT"
         )
 
-    # Keep only a small prefix in RAM; larger exports spill to the instance's
-    # temporary filesystem. The database is fully released before the client reads.
-    output = tempfile.SpooledTemporaryFile(
-        max_size=1_048_576,
-        mode="w+",
-        encoding="utf-8",
-        newline="",
-    )
+    if row_count > _LEDGER_EXPORT_MAX_ROWS:
+        raise HTTPException(
+            413,
+            f"Ledger export exceeds the {_LEDGER_EXPORT_MAX_ROWS}-row limit; request a narrower statement",
+        )
+
+    acquired = await asyncio.to_thread(_LEDGER_EXPORT_SEMAPHORE.acquire, True, 2.0)
+    if not acquired:
+        raise HTTPException(429, "Too many concurrent ledger exports; retry shortly")
+
+    output = None
     try:
+        # The spool keeps a small prefix in RAM and has a hard total-size ceiling.
+        output = tempfile.SpooledTemporaryFile(
+            max_size=1_048_576,
+            mode="w+",
+            encoding="utf-8",
+            newline="",
+        )
         writer = csv.writer(output)
         writer.writerow([
             "created_at", "journal_id", "entry_type", "currency",
             "reference_type", "reference_id", "account_code", "debit", "credit",
         ])
+        if output.tell() > _LEDGER_EXPORT_MAX_BYTES:
+            raise HTTPException(413, "Ledger export exceeds the 64 MiB response limit")
+
         written = 0
         cursor_journal_id = None
         cursor_line_no = None
@@ -4422,14 +4474,13 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
                 ]
                 for entry in entries
             ])
+            if output.tell() > _LEDGER_EXPORT_MAX_BYTES:
+                raise HTTPException(413, "Ledger export exceeds the 64 MiB response limit")
             last_entry = entries[-1]
             cursor_journal_id = int(last_entry["journal_id"])
             cursor_line_no = int(last_entry["line_no"])
             written += len(entries)
 
-        # Catch delayed commits using journal IDs allocated before the ceiling read.
-        # Such rows are excluded by the cursor walk if they appear after their position
-        # has passed; a changed count fails the export before any response is sent.
         async with SessionLocal() as verify_db:
             verified_count, _ = await ledger_statement_export_bounds(
                 verify_db,
@@ -4439,8 +4490,10 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
             )
         if verified_count != row_count or written != row_count:
             raise RuntimeError("customer ledger changed during export; refusing to return a partial CSV")
-    except Exception:
-        output.close()
+    except BaseException:
+        if output is not None:
+            output.close()
+        _LEDGER_EXPORT_SEMAPHORE.release()
         raise
 
     output.seek(0)
@@ -4454,6 +4507,7 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
                 yield chunk
         finally:
             output.close()
+            _LEDGER_EXPORT_SEMAPHORE.release()
 
     return StreamingResponse(
         stream_spooled_file(),
@@ -4466,7 +4520,6 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
             "X-Atlas-Export-Truncated": "false",
         },
     )
-
 
 @app.get("/api/customer/trades/{trade_id}/decision")
 async def customer_trade_decision(trade_id: int, authorization: str | None = Header(default=None)):
