@@ -59,20 +59,27 @@ def test_customer_csv_export_serializes_journal_lines_for_authenticated_customer
     monkeypatch.setattr(main, "SessionLocal", lambda: db)
     monkeypatch.setattr(main, "get_customer", _async_value((profile, {"sub": "customer-23"})))
 
-    async def statement(fake_db, customer_id, currency, limit):
+    async def export_bounds(fake_db, customer_id, currency):
         assert fake_db is db
-        assert (customer_id, currency, limit) == (23, "USDT", None)
-        return db.entries
+        assert (customer_id, currency) == (23, "USDT")
+        return 1, 42
 
+    async def statement(fake_db, customer_id, currency, limit, *, offset, max_journal_id):
+        assert fake_db is db
+        assert (customer_id, currency, limit, offset, max_journal_id) == (23, "USDT", 1000, 0, 42)
+        return db.entries[offset:offset + limit]
+
+    monkeypatch.setattr(main, "ledger_statement_export_bounds", export_bounds)
     monkeypatch.setattr(main, "ledger_statement", statement)
 
     response = asyncio.run(main.customer_ledger_export_csv(authorization="opaque-token"))
+    body = _stream_body(response)
 
     assert response.status_code == 200
     assert response.media_type.startswith("text/csv")
     assert 'filename="atlas-customer-ledger-usdt.csv"' in response.headers["content-disposition"]
     assert response.headers["cache-control"] == "no-store"
-    rows = response.body.decode("utf-8").splitlines()
+    rows = body.decode("utf-8").splitlines()
     assert rows[0] == "created_at,journal_id,entry_type,currency,reference_type,reference_id,account_code,debit,credit"
     assert rows[1] == "2026-10-20T10:00:00+00:00,42,DEPOSIT,USDT,TRON_DEPOSIT,tx-abc,LIABILITY:CUSTOMER:AVAILABLE,0.000000,12.500000"
     assert not db.mutations
@@ -82,6 +89,16 @@ def _async_value(value):
     async def inner(*_args, **_kwargs):
         return value
     return inner
+
+
+def _stream_body(response):
+    async def collect():
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk.encode("utf-8") if isinstance(chunk, str) else chunk)
+        return b"".join(chunks)
+
+    return asyncio.run(collect())
 
 
 def test_customer_trade_decision_is_owner_scoped_and_reports_only_persisted_reason(monkeypatch):
@@ -143,17 +160,27 @@ def test_customer_csv_export_includes_more_than_5000_journal_lines(monkeypatch):
     monkeypatch.setattr(main, "SessionLocal", lambda: db)
     monkeypatch.setattr(main, "get_customer", _async_value((profile, {"sub": "customer-23"})))
 
-    async def statement(fake_db, customer_id, currency, limit):
-        assert fake_db is db
-        assert (customer_id, currency, limit) == (23, "USDT", None)
-        return db.entries
+    pages = []
 
+    async def export_bounds(fake_db, customer_id, currency):
+        assert fake_db is db
+        assert (customer_id, currency) == (23, "USDT")
+        return len(entries), 5000
+
+    async def statement(fake_db, customer_id, currency, limit, *, offset, max_journal_id):
+        assert fake_db is db
+        assert (customer_id, currency, max_journal_id) == (23, "USDT", 5000)
+        pages.append((offset, limit))
+        return entries[offset:offset + limit]
+
+    monkeypatch.setattr(main, "ledger_statement_export_bounds", export_bounds)
     monkeypatch.setattr(main, "ledger_statement", statement)
     response = asyncio.run(main.customer_ledger_export_csv(authorization="opaque-token"))
 
-    rows = response.body.decode("utf-8").splitlines()
+    rows = _stream_body(response).decode("utf-8").splitlines()
     assert response.status_code == 200
     assert len(rows) == 5002  # header plus all 5,001 journal lines
     assert rows[-1].split(",")[1] == "5000"
     assert response.headers["X-Atlas-Export-Row-Count"] == "5001"
     assert response.headers["X-Atlas-Export-Truncated"] == "false"
+    assert pages == [(0, 1000), (1000, 1000), (2000, 1000), (3000, 1000), (4000, 1000), (5000, 1000)]
