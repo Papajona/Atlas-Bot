@@ -44,6 +44,13 @@ RETIRED_PROVIDER_FIELD_RE = re.compile(
     r"api\.cerebras\.ai|api\.openai\.com|"
     r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|_gemini_json|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|groq_strategy_model)"
 )
+# Native AI may consume a validated Groq evidence envelope, but must never host a Groq client.
+# Reject SDK imports, client construction, API credentials, helper calls and endpoints.
+NATIVE_AI_HOSTED_GROQ_RE = re.compile(
+    r"(?i)(?:\b(?:from|import)\s+groq(?:\.[A-Za-z_][A-Za-z0-9_]*)?\b|"
+    r"\b(?:Async)?Groq\s*\(|\bGROQ_API_KEY\b|\bSECRET_GROQ\b|"
+    r"api\.groq\.com|\b_groq_json\b)"
+)
 ATLAS_PROVIDER_SECRET_RE = re.compile(
     r"(?i)\batlas[-_](?:openai|gemini|cerebras|ai[-_]gateway)[-_][a-z0-9_-]*\b"
 )
@@ -7122,6 +7129,25 @@ def validate_groq_research_module(source: str, path: str = "app/groq_ai.py") -> 
 
 
 
+def _has_conflicting_provider_wiring(path: str, contents: str) -> bool:
+    """Reject retired provider wiring without treating supported Groq review as legacy.
+
+    app.native_ai records Groq's bounded trade-review evidence as advisory context;
+    it does not contain a hosted Groq strategy/safety provider implementation.
+    Groq remains allowed only through the current research-review contract, while
+    retired Gemini/Cerebras/AI Gateway and legacy Groq strategy-model fields remain
+    migration blockers.
+    """
+    if path == "app/native_ai.py":
+        # Advisory evidence fields such as groq_trade_review are safe to inspect;
+        # hosted clients, keys, helper calls and service endpoints are not.
+        return bool(
+            RETIRED_PROVIDER_RE.search(contents)
+            or NATIVE_AI_HOSTED_GROQ_RE.search(contents)
+        )
+    return bool(PROVIDER_RE.search(contents))
+
+
 def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:
     # Canonical Native AI source and the original provider-removal patch baseline are
     # independent pins: changing one must not widen the other per-path diff.
@@ -7138,8 +7164,8 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
         elif path == "app/prompt_safety.py":
             if target.read_text(encoding="utf-8") != canonical_text(canonical_commit, path):
                 raise MigrationError(f"{path} differs from its reviewed canonical implementation; preserving the branch")
-        elif PROVIDER_RE.search(target.read_text(encoding="utf-8")):
-            raise MigrationError(f"{path} has a divergent provider-bearing implementation; refusing overwrite")
+        elif _has_conflicting_provider_wiring(path, target.read_text(encoding="utf-8")):
+            raise MigrationError(f"{path} has a divergent retired-provider implementation; refusing overwrite")
 
     transform_config()
     transform_strategy_ai(canonical_commit)

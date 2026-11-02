@@ -134,6 +134,58 @@ fi
         ):
             with self.subTest(unsafe=unsafe), self.assertRaises(migration.MigrationError):
                 migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe)
+
+
+    def test_native_ai_guard_allows_supported_groq_trade_review_but_rejects_retired_wiring(self):
+        supported_review = """def evaluate_native_trade_packet(packet):
+    envelope = packet.get("groq_trade_review")
+    if isinstance(envelope, dict) and envelope.get("provider") == "groq":
+        groq_audit = {
+            key: envelope[key]
+            for key in ("status", "provider", "model", "review")
+            if key in envelope
+        }
+        return {"providers": {"groq": groq_audit}, "execution_authority": False}
+    return {"providers": {}, "execution_authority": False}
+"""
+        self.assertFalse(
+            migration._has_conflicting_provider_wiring("app/native_ai.py", supported_review)
+        )
+
+        self.assertTrue(
+            migration._has_conflicting_provider_wiring(
+                "app/native_ai.py",
+                'def old_provider(): return call_gemini(GEMINI_API_KEY)',
+            )
+        )
+        self.assertTrue(
+            migration._has_conflicting_provider_wiring(
+                "app/native_ai.py",
+                'GROQ_STRATEGY_MODEL = "legacy-model"',
+            )
+        )
+
+        # Existing Native AI authority code may inspect the bounded advisory envelope,
+        # but it must not instantiate a hosted Groq client or call its endpoint.
+        for hosted_wiring in (
+            "from groq import Groq\\nclient = Groq(api_key=GROQ_API_KEY)",
+            "import groq as hosted\\nclient = hosted.Groq(api_key=SECRET_GROQ_API_KEY)",
+            "from groq.asyncio import AsyncGroq\\nclient = AsyncGroq(api_key=GROQ_API_KEY)",
+            "import httpx\\nhttpx.post('https://api.groq.com/openai/v1/chat/completions')",
+            "def review(): return _groq_json('prompt')",
+        ):
+            with self.subTest(hosted_wiring=hosted_wiring):
+                self.assertTrue(
+                    migration._has_conflicting_provider_wiring("app/native_ai.py", hosted_wiring)
+                )
+        # Other migration paths retain the broader provider detector.
+        self.assertTrue(
+            migration._has_conflicting_provider_wiring(
+                "scripts/check_native_ai.py",
+                'GROQ_API_KEY = "legacy-hosted-provider"',
+            )
+        )
+
     def test_optional_groq_secret_creation_block_is_preserved(self):
         shell = """if [[ -n "$GROQ_API_KEY" ]]; then
   create_secret atlas-groq-api-key "$GROQ_API_KEY"
