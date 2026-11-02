@@ -348,6 +348,9 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
         async def __aexit__(self, _type, _value, _traceback):
             return False
 
+        async def commit(self):
+            return None
+
     async def state_guard():
         return None
 
