@@ -21,7 +21,7 @@ import numpy as np
 from datetime import datetime, timedelta, timezone
 from .withdrawal_ids import next_customer_withdrawal_request_id
 from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, Response, JSONResponse
+from fastapi.responses import HTMLResponse, Response, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, desc, or_, func, case, cast, Numeric
@@ -52,7 +52,7 @@ from .usdt_tron import derive_usdt_tron_address_from_xpub, validate_tron_account
 from .tron_reconciliation import parse_tron_usdt_balance
 from .tron_sweep import build_sweep_intent, serialize_sweep_intent, SweepError, classify_solidified_sweep, USDT_SCALE
 from .custody_locations import create_custody_transfer, transition_custody_transfer, flag_stale_custody_transfers
-from .customer_funds import record_ledger_incident, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, customer_balance_api, ledger_statement, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal
+from .customer_funds import record_ledger_incident, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, customer_balance_api, ledger_statement, ledger_statement_export_bounds, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal
 from .distributed import allow_rate_limit, check_redis, acquire_lock, release_lock, refresh_lock
 from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
@@ -251,17 +251,22 @@ async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
             actor_id=actor,
             idempotency_fields=("customer_id", "client_order_id"),
         )
-    if created:
-        safe_detail = {
-            key: value for key, value in detail.items()
-            if key not in {"token", "secret", "api_token", "api_secret", "authorization", "destination"}
-        }
-        emit_security_audit(
-            event="CUSTOMER_PAPER_ORDER_SUBMITTED",
-            actor_id=actor,
-            detail=safe_detail,
-            event_hash=row.event_hash,
-        )
+    # The external sink is a second copy of the durable database audit. Retry it
+    # on idempotent order replays too: a prior stdout/Cloud Logging failure must not
+    # become permanent merely because the database row already exists. Consumers
+    # can deduplicate repeated delivery using the stable event_hash.
+    safe_detail = {
+        key: value for key, value in detail.items()
+        if key not in {"token", "secret", "api_token", "api_secret", "authorization", "destination"}
+    }
+    emitted = emit_security_audit(
+        event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+        actor_id=actor,
+        detail=safe_detail,
+        event_hash=row.event_hash,
+    )
+    if not emitted:
+        raise RuntimeError("external customer paper submission audit sink did not confirm delivery")
     return created
 
 
@@ -4341,43 +4346,66 @@ async def customer_ledger(authorization: str | None = Header(default=None)):
 
 @app.get("/api/customer/ledger/export.csv")
 async def customer_ledger_export_csv(authorization: str | None = Header(default=None)):
-    """Export the authenticated customer's USDT ledger journal lines without mutating balances."""
+    """Stream the authenticated customer's complete USDT ledger without buffering its history."""
     import csv
     import io
 
     async with SessionLocal() as db:
         profile, _ = await get_customer(authorization, db)
-        # Export the complete journal; a hard cap silently omitted older history.
-        entries = await ledger_statement(db, profile.id, "USDT", limit=None)
+        customer_id = int(profile.id)
+        row_count, max_journal_id = await ledger_statement_export_bounds(
+            db, customer_id, "USDT"
+        )
+
+    def csv_row(values) -> str:
         output = io.StringIO(newline="")
-        writer = csv.writer(output)
-        writer.writerow([
+        csv.writer(output).writerow(values)
+        return output.getvalue()
+
+    async def stream_rows():
+        yield csv_row([
             "created_at", "journal_id", "entry_type", "currency",
             "reference_type", "reference_id", "account_code", "debit", "credit",
         ])
-        for entry in entries:
-            writer.writerow([
-                entry.get("created_at", ""),
-                entry.get("journal_id", ""),
-                entry.get("entry_type", ""),
-                "USDT",
-                entry.get("reference_type", ""),
-                entry.get("reference_id", ""),
-                entry.get("account_code", ""),
-                entry.get("debit", ""),
-                entry.get("credit", ""),
-            ])
-        return Response(
-            content=output.getvalue(),
-            media_type="text/csv; charset=utf-8",
-            headers={
-                "Content-Disposition": 'attachment; filename="atlas-customer-ledger-usdt.csv"',
-                "Cache-Control": "no-store",
-                "Pragma": "no-cache",
-                "X-Atlas-Export-Row-Count": str(len(entries)),
-                "X-Atlas-Export-Truncated": "false",
-            },
-        )
+        offset = 0
+        page_size = 1000
+        while offset < row_count:
+            async with SessionLocal() as page_db:
+                entries = await ledger_statement(
+                    page_db,
+                    customer_id,
+                    "USDT",
+                    limit=page_size,
+                    offset=offset,
+                    max_journal_id=max_journal_id,
+                )
+            if not entries:
+                raise RuntimeError("customer ledger export page ended before its captured row count")
+            for entry in entries:
+                yield csv_row([
+                    entry.get("created_at", ""),
+                    entry.get("journal_id", ""),
+                    entry.get("entry_type", ""),
+                    "USDT",
+                    entry.get("reference_type", ""),
+                    entry.get("reference_id", ""),
+                    entry.get("account_code", ""),
+                    entry.get("debit", ""),
+                    entry.get("credit", ""),
+                ])
+            offset += len(entries)
+
+    return StreamingResponse(
+        stream_rows(),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="atlas-customer-ledger-usdt.csv"',
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "X-Atlas-Export-Row-Count": str(row_count),
+            "X-Atlas-Export-Truncated": "false",
+        },
+    )
 
 
 @app.get("/api/customer/trades/{trade_id}/decision")
