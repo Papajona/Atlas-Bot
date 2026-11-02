@@ -173,6 +173,40 @@ def test_terminal_submission_audit_failure_persists_retry_without_changing_fill_
     assert fallback_events[0][0] == "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE"
     assert fallback_events[0][2] == "customer:712"
 
+@pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect()])
+def test_retry_state_transition_is_conditional_on_pending_row(monkeypatch, dialect):
+    captured = {}
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def execute(self, statement):
+            compiled = statement.compile(dialect=dialect)
+            captured["sql"] = str(compiled)
+            captured["params"] = compiled.params
+
+        async def commit(self):
+            captured["committed"] = True
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: FakeSession())
+    asyncio.run(main._set_customer_paper_submission_audit_retry_state(
+        714,
+        status="PENDING",
+        error_type="RuntimeError",
+        increment_attempts=True,
+    ))
+
+    sql = captured["sql"]
+    assert "WHERE customer_paper_submission_audit_retries.id =" in sql
+    assert "AND customer_paper_submission_audit_retries.status =" in sql
+    assert "attempt_count = customer_paper_submission_audit_retries.attempt_count +" in sql
+    assert "PENDING" in captured["params"].values()
+    assert captured["committed"] is True
+
 
 @pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect()])
 def test_retry_upsert_is_unique_by_customer_and_order_and_reopens_pending_state(monkeypatch, dialect):
