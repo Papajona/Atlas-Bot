@@ -583,12 +583,24 @@ _EXACT_DUPLICATE_BRANCH_ALIASES = {
 
 
 def _explicit_duplicate_alias_retirement_proof(
-    branch_name: str, branch_sha: str
+    branch_name: str, branch_sha: str, main_sha: str
 ) -> tuple[bool, str, str | None]:
-    """Prove one exact duplicate alias only while its canonical ref is unchanged."""
+    """Retire an exact alias only after its keeper commit is durable on main.
+
+    Checking a sibling branch immediately before deleting the alias is not atomic:
+    a concurrent cleanup could remove the keeper in the gap. Requiring the exact
+    keeper commit to be an ancestor of main makes alias deletion safe even if the
+    keeper ref is concurrently removed or moved after this proof.
+    """
     expected = _EXACT_DUPLICATE_BRANCH_ALIASES.get(branch_name)
     if expected is None or branch_sha != expected["branch_sha"]:
         return False, "no exact duplicate-alias proof; preserve branch", None
+    if not _is_ancestor(str(expected["keeper_sha"]), main_sha):
+        return (
+            False,
+            "canonical duplicate commit is not integrated into main; preserve alias",
+            None,
+        )
 
     keeper_branch = str(expected["keeper_branch"])
     keeper_ref = f"refs/remotes/origin/{keeper_branch}^{{commit}}"
@@ -930,7 +942,7 @@ def main() -> int:
                 and item.get("headRefOid") == branch_sha
             ]
             duplicate_safe, duplicate_reason, duplicate_keeper = _explicit_duplicate_alias_retirement_proof(
-                branch_name, branch_sha
+                branch_name, branch_sha, main_sha
             )
             if duplicate_safe:
                 safe, reason, mismatch_paths = True, duplicate_reason, []
