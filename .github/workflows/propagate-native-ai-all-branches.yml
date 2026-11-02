@@ -192,7 +192,7 @@ jobs:
                   quote ":!CHANGELOG.md" quote " " \
                   quote ":!.github/workflows/propagate-native-ai-all-branches.yml" quote " " \
                   quote ":!.github/workflows/prune-contained-branches-once.yml" quote " " \
-                  quote ":!scripts/migrate_legacy_native_ai.py"
+                  quote ":!scripts/migrate_legacy_native_ai.py" quote
                 legacy_scanner_prefix = "git" " grep -IlEi "
                 legacy_verify_prefix = "git grep -nIEi "
                 if (index(normalized_content, legacy_scanner_prefix) == 1 ||
