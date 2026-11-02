@@ -367,5 +367,7 @@ def test_retry_store_migration_enables_row_level_security(monkeypatch):
     statements = "\n".join(executed)
     assert "REVOKE ALL PRIVILEGES ON TABLE public.customer_paper_submission_audit_retries FROM PUBLIC" in statements
     assert "GRANT SELECT, INSERT, UPDATE ON TABLE public.customer_paper_submission_audit_retries TO %I" in statements
+    assert "REVOKE ALL PRIVILEGES ON SEQUENCE public.customer_paper_submission_audit_retries_id_seq FROM PUBLIC" in statements
+    assert "GRANT USAGE, SELECT ON SEQUENCE public.customer_paper_submission_audit_retries_id_seq TO %I" in statements
     assert "has_table_privilege(r.rolname, 'public.audit_log', 'INSERT')" in statements
     assert "'service_role'" in statements
