@@ -724,3 +724,61 @@ def test_external_audit_missing_historical_key_remains_retryable(monkeypatch):
     assert result is False
     assert finished == [("claim-missing-key", False, "EncryptionKeyConfigurationError")]
 
+def test_replayed_submission_persists_retry_when_external_delivery_returns_false(monkeypatch, caplog):
+    persisted = []
+
+    async def no_repair(_customer_id):
+        return None
+
+    async def audit_once(_detail):
+        return False
+
+    async def persist_retry(**kwargs):
+        persisted.append(kwargs)
+
+    monkeypatch.setattr(main, "_repair_customer_paper_submission_audit_retries", no_repair)
+    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_persist_customer_paper_submission_audit_retry", persist_retry)
+    req = SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h")
+
+    stage = asyncio.run(main._customer_paper_submission_stage(
+        _pending_execution(newly_submitted=False),
+        customer_id=501,
+        trading_account_id=702,
+        req=req,
+    ))
+
+    assert stage == "customer_paper_order_audit_incomplete"
+    assert len(persisted) == 1
+    assert persisted[0]["customer_id"] == 501
+    assert persisted[0]["submission_detail"]["client_order_id"] == "cp-regression-order"
+    assert persisted[0]["error_type"] == "DeliveryIncomplete"
+    assert "customer_paper_submission_audit_delivery_incomplete" in caplog.text
+
+
+def test_repair_defers_unconfirmed_delivery_to_avoid_oldest_first_starvation(monkeypatch):
+    records = [{
+        "retry_id": 72,
+        "customer_id": 501,
+        "client_order_id": "still-in-flight",
+        "submission_detail": {"customer_id": 501, "client_order_id": "still-in-flight"},
+    }]
+    state_updates = []
+
+    async def load(_customer_id):
+        return records
+
+    async def audit_once(_detail):
+        return False
+
+    async def set_state(retry_id, *, status, error_type="", increment_attempts=False):
+        state_updates.append((retry_id, status, error_type, increment_attempts))
+
+    monkeypatch.setattr(main, "_load_customer_paper_submission_audit_retries", load)
+    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_set_customer_paper_submission_audit_retry_state", set_state)
+
+    asyncio.run(main._repair_customer_paper_submission_audit_retries(501))
+
+    assert state_updates == [(72, "PENDING", "DeliveryIncomplete", True)]
+
