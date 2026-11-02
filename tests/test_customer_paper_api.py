@@ -735,3 +735,75 @@ def test_manual_paper_advance_replays_every_eligible_completed_bar_in_order(monk
     assert len(payload["bars_processed"]) == 3
     assert payload["bars_processed"][0]["bar_at"] == (submission_bar_at + timedelta(minutes=1)).isoformat()
     assert payload["bars_processed"][-1]["bar_at"] == latest_bar_at.isoformat()
+
+
+
+def test_customer_paper_market_snapshot_rate_limits_by_customer_before_exchange_fetch(monkeypatch):
+    calls = []
+
+    async def deny(key, *, limit, window_seconds):
+        calls.append((key, limit, window_seconds))
+        return False, 0
+
+    def market_data(_request):
+        raise AssertionError("exchange market data must not be requested after a rate-limit denial")
+
+    monkeypatch.setattr(paper_api, "allow_rate_limit", deny)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(paper_api._fetch_verified_market_snapshot(
+            customer_id=501,
+            symbol="BTC/USDT",
+            timeframe="1m",
+            market_data=market_data,
+            market_request_type=lambda **kwargs: kwargs,
+        ))
+
+    assert exc.value.status_code == 429
+    assert calls == [("customer-paper-market:501", 12, 60)]
+
+
+def test_customer_paper_market_snapshot_is_shared_across_customers_and_fetches_only_once(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    frame = _verified_bars(now - timedelta(minutes=1), volume="100")
+    frame.attrs["data_provenance"]["fetched_at_utc"] = (now - timedelta(seconds=1)).isoformat()
+    _freeze_paper_api_clock(monkeypatch, now)
+    paper_api._PAPER_MARKET_SNAPSHOTS.clear()
+    paper_api._PAPER_MARKET_SNAPSHOT_LOCKS.clear()
+    rate_calls = []
+    market_calls = []
+
+    async def allow(key, *, limit, window_seconds):
+        rate_calls.append((key, limit, window_seconds))
+        return True, limit - 1
+
+    class Request:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    def market_data(request):
+        market_calls.append(request)
+        return frame
+
+    monkeypatch.setattr(paper_api, "allow_rate_limit", allow)
+    first_frame, first_bar = asyncio.run(paper_api._fetch_verified_market_snapshot(
+        customer_id=501, symbol="BTC/USDT", timeframe="1m",
+        market_data=market_data, market_request_type=Request,
+    ))
+    second_frame, second_bar = asyncio.run(paper_api._fetch_verified_market_snapshot(
+        customer_id=502, symbol="BTC/USDT", timeframe="1m",
+        market_data=market_data, market_request_type=Request,
+    ))
+
+    assert first_frame is frame and second_frame is frame
+    assert first_bar["bar_data_sha256"] == second_bar["bar_data_sha256"]
+    assert len(market_calls) == 1
+    assert market_calls[0].asset == "crypto"
+    assert market_calls[0].exchange == "binance"
+    assert market_calls[0].timeframe == "1m"
+    assert market_calls[0].days <= 1
+    assert rate_calls == [
+        ("customer-paper-market:501", 12, 60),
+        ("customer-paper-market:502", 12, 60),
+    ]
