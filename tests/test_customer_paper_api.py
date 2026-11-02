@@ -97,6 +97,14 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
     frame.attrs["data_provenance"]["fetched_at_utc"] = (
         frozen_now - timedelta(seconds=1)
     ).isoformat()
+    submission_bar_at = bar_at - timedelta(minutes=1)
+    submission_bar_hash = next(
+        bar["bar_data_sha256"]
+        for bar in paper_api._market_bar_contexts(
+            frame, symbol="BTC/USDT", timeframe="1m"
+        )
+        if bar["timestamp"] == submission_bar_at
+    )
 
     open_order = {
         "client_order_id": "manual-replay-race",
@@ -109,7 +117,8 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
         "metadata": {
             "timeframe": "1m",
             "execution_model": "completed_bar_volume_capped_heuristic_v1",
-            "submission_bar_at": (bar_at - timedelta(minutes=1)).isoformat(),
+            "submission_bar_at": submission_bar_at.isoformat(),
+            "submission_bar_sha256": submission_bar_hash,
         },
     }
     prior_fill = {
@@ -415,6 +424,7 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
     # Both tenants advance against the exact same completed bar. Shared capacity is 1.0:
     # customer A receives 0.6 and customer B can receive only the 0.4 remainder.
     market["bar_at"] = now + timedelta(minutes=1)
+    paper_api._PAPER_MARKET_SNAPSHOTS.clear()
     first = post("/api/customer/paper/orders/shared-bar-order-a/advance", "customer-a")
     second = post("/api/customer/paper/orders/shared-bar-order-b/advance", "customer-b")
     assert first.status_code == 200, first.text
@@ -432,6 +442,7 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
 
     # A later bar completes the remainder after restart/recovery by reading persisted state.
     market["bar_at"] = now + timedelta(minutes=2)
+    paper_api._PAPER_MARKET_SNAPSHOTS.clear()
     finish = post("/api/customer/paper/orders/shared-bar-order-b/advance", "customer-b")
     assert finish.status_code == 200, finish.text
     assert finish.json()["order"]["status"] == "FILLED"
@@ -602,13 +613,24 @@ def test_same_customer_order_retry_ignores_only_submission_bar_metadata():
     )
 
 
-def test_manual_paper_advance_replays_every_eligible_completed_bar_in_order(monkeypatch):
+@pytest.mark.parametrize("submission_hash_matches", [True, False])
+def test_manual_paper_advance_requires_original_submission_bar_and_replays_every_eligible_bar(
+    monkeypatch, submission_hash_matches
+):
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     latest_bar_at = now - timedelta(minutes=1)
     submission_bar_at = latest_bar_at - timedelta(minutes=3)
     _freeze_paper_api_clock(monkeypatch, now)
     frame = _verified_bars(latest_bar_at, volume="100")
     frame.attrs["data_provenance"]["fetched_at_utc"] = (now - timedelta(seconds=1)).isoformat()
+    submission_contexts = paper_api._market_bar_contexts(
+        frame, symbol="BTC/USDT", timeframe="1m"
+    )
+    submission_bar_hash = next(
+        bar["bar_data_sha256"]
+        for bar in submission_contexts
+        if bar["timestamp"] == submission_bar_at
+    )
 
     order = {
         "client_order_id": "multi-bar-manual-order",
@@ -628,6 +650,9 @@ def test_manual_paper_advance_replays_every_eligible_completed_bar_in_order(monk
             "timeframe": "1m",
             "execution_model": "completed_bar_volume_capped_heuristic_v1",
             "submission_bar_at": submission_bar_at.isoformat(),
+            "submission_bar_sha256": (
+                submission_bar_hash if submission_hash_matches else "0" * 64
+            ),
         },
     }
     prior_fills = {}
@@ -725,6 +750,13 @@ def test_manual_paper_advance_replays_every_eligible_completed_bar_in_order(monk
         headers={"Authorization": "Bearer multi-bar-customer"},
     )
 
+    if not submission_hash_matches:
+        assert response.status_code == 409, response.text
+        assert "submission candle" in response.json()["detail"].lower()
+        assert registered_bars == []
+        assert fill_rows == []
+        return
+
     assert response.status_code == 200, response.text
     payload = response.json()
     assert order["status"] == "FILLED"
@@ -735,3 +767,74 @@ def test_manual_paper_advance_replays_every_eligible_completed_bar_in_order(monk
     assert len(payload["bars_processed"]) == 3
     assert payload["bars_processed"][0]["bar_at"] == (submission_bar_at + timedelta(minutes=1)).isoformat()
     assert payload["bars_processed"][-1]["bar_at"] == latest_bar_at.isoformat()
+
+
+def test_customer_paper_market_snapshot_rate_limits_by_customer_before_exchange_fetch(monkeypatch):
+    calls = []
+
+    async def deny(key, *, limit, window_seconds):
+        calls.append((key, limit, window_seconds))
+        return False, 0
+
+    def market_data(_request):
+        raise AssertionError("exchange market data must not be requested after a rate-limit denial")
+
+    monkeypatch.setattr(paper_api, "allow_rate_limit", deny)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(paper_api._fetch_verified_market_snapshot(
+            customer_id=501,
+            symbol="BTC/USDT",
+            timeframe="1m",
+            market_data=market_data,
+            market_request_type=lambda **kwargs: kwargs,
+        ))
+
+    assert exc.value.status_code == 429
+    assert calls == [("customer-paper-market:501", 12, 60)]
+
+
+def test_customer_paper_market_snapshot_is_shared_across_customers_and_fetches_only_once(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    frame = _verified_bars(now - timedelta(minutes=1), volume="100")
+    frame.attrs["data_provenance"]["fetched_at_utc"] = (now - timedelta(seconds=1)).isoformat()
+    _freeze_paper_api_clock(monkeypatch, now)
+    paper_api._PAPER_MARKET_SNAPSHOTS.clear()
+    paper_api._PAPER_MARKET_SNAPSHOT_LOCKS.clear()
+    rate_calls = []
+    market_calls = []
+
+    async def allow(key, *, limit, window_seconds):
+        rate_calls.append((key, limit, window_seconds))
+        return True, limit - 1
+
+    class Request:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    def market_data(request):
+        market_calls.append(request)
+        return frame
+
+    monkeypatch.setattr(paper_api, "allow_rate_limit", allow)
+    first_frame, first_bar = asyncio.run(paper_api._fetch_verified_market_snapshot(
+        customer_id=501, symbol="BTC/USDT", timeframe="1m",
+        market_data=market_data, market_request_type=Request,
+    ))
+    second_frame, second_bar = asyncio.run(paper_api._fetch_verified_market_snapshot(
+        customer_id=502, symbol="BTC/USDT", timeframe="1m",
+        market_data=market_data, market_request_type=Request,
+    ))
+
+    assert first_frame is frame and second_frame is frame
+    assert first_bar["bar_data_sha256"] == second_bar["bar_data_sha256"]
+    assert len(market_calls) == 1
+    assert market_calls[0].asset == "crypto"
+    assert market_calls[0].exchange == "binance"
+    assert market_calls[0].timeframe == "1m"
+    assert market_calls[0].days <= 1
+    assert rate_calls == [
+        ("customer-paper-market:501", 12, 60),
+        ("customer-paper-market:502", 12, 60),
+    ]

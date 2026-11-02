@@ -1,5 +1,6 @@
 """Behavioral tests for authenticated customer ledger exports and trade explanations."""
 import asyncio
+import threading
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -34,19 +35,28 @@ class _DB:
         self.executed.append(stmt)
         return _Result(self.trade)
 
+    def get_bind(self):
+        return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+    async def rollback(self):
+        return None
+
+    async def close(self):
+        return None
+
     def add(self, *_args, **_kwargs):
         self.mutations.append("add")
         raise AssertionError("read-only customer export may not mutate database rows")
 
     async def commit(self):
         self.mutations.append("commit")
-        raise AssertionError("read-only customer export may not commit")
 
 
 def test_customer_csv_export_serializes_journal_lines_for_authenticated_customer(monkeypatch):
     db = _DB(entries=[{
         "created_at": "2026-10-20T10:00:00+00:00",
         "journal_id": 42,
+        "line_no": 1,
         "entry_type": "DEPOSIT",
         "reference_type": "TRON_DEPOSIT",
         "reference_id": "tx-abc",
@@ -59,29 +69,52 @@ def test_customer_csv_export_serializes_journal_lines_for_authenticated_customer
     monkeypatch.setattr(main, "SessionLocal", lambda: db)
     monkeypatch.setattr(main, "get_customer", _async_value((profile, {"sub": "customer-23"})))
 
-    async def statement(fake_db, customer_id, currency, limit):
+    async def export_bounds(fake_db, customer_id, currency, *, max_journal_id=None):
         assert fake_db is db
-        assert (customer_id, currency, limit) == (23, "USDT", None)
+        assert (customer_id, currency) == (23, "USDT")
+        assert max_journal_id in (None, 42)
+        return 1, 42
+
+    async def statement(
+        fake_db, customer_id, currency, limit, *,
+        cursor_journal_id, cursor_line_no, max_journal_id,
+    ):
+        assert fake_db is db
+        assert (customer_id, currency, limit, cursor_journal_id, cursor_line_no, max_journal_id) == (
+            23, "USDT", 1000, None, None, 42
+        )
         return db.entries
 
+    monkeypatch.setattr(main, "ledger_statement_export_bounds", export_bounds)
     monkeypatch.setattr(main, "ledger_statement", statement)
 
     response = asyncio.run(main.customer_ledger_export_csv(authorization="opaque-token"))
+    body = _stream_body(response)
 
     assert response.status_code == 200
     assert response.media_type.startswith("text/csv")
     assert 'filename="atlas-customer-ledger-usdt.csv"' in response.headers["content-disposition"]
     assert response.headers["cache-control"] == "no-store"
-    rows = response.body.decode("utf-8").splitlines()
+    rows = body.decode("utf-8").splitlines()
     assert rows[0] == "created_at,journal_id,entry_type,currency,reference_type,reference_id,account_code,debit,credit"
     assert rows[1] == "2026-10-20T10:00:00+00:00,42,DEPOSIT,USDT,TRON_DEPOSIT,tx-abc,LIABILITY:CUSTOMER:AVAILABLE,0.000000,12.500000"
-    assert not db.mutations
+    assert db.mutations == ["commit"]
 
 
 def _async_value(value):
     async def inner(*_args, **_kwargs):
         return value
     return inner
+
+
+def _stream_body(response):
+    async def collect():
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk.encode("utf-8") if isinstance(chunk, str) else chunk)
+        return b"".join(chunks)
+
+    return asyncio.run(collect())
 
 
 def test_customer_trade_decision_is_owner_scoped_and_reports_only_persisted_reason(monkeypatch):
@@ -129,6 +162,7 @@ def test_customer_csv_export_includes_more_than_5000_journal_lines(monkeypatch):
         {
             "created_at": "2026-11-02T10:00:00+00:00",
             "journal_id": index,
+            "line_no": 1,
             "entry_type": "DEPOSIT",
             "reference_type": "TRON_DEPOSIT",
             "reference_id": f"tx-{index}",
@@ -143,17 +177,162 @@ def test_customer_csv_export_includes_more_than_5000_journal_lines(monkeypatch):
     monkeypatch.setattr(main, "SessionLocal", lambda: db)
     monkeypatch.setattr(main, "get_customer", _async_value((profile, {"sub": "customer-23"})))
 
-    async def statement(fake_db, customer_id, currency, limit):
-        assert fake_db is db
-        assert (customer_id, currency, limit) == (23, "USDT", None)
-        return db.entries
+    pages = []
 
+    async def export_bounds(fake_db, customer_id, currency, *, max_journal_id=None):
+        assert fake_db is db
+        assert (customer_id, currency) == (23, "USDT")
+        assert max_journal_id in (None, 5000)
+        return len(entries), 5000
+
+    async def statement(
+        fake_db, customer_id, currency, limit, *,
+        cursor_journal_id, cursor_line_no, max_journal_id,
+    ):
+        assert fake_db is db
+        assert (customer_id, currency, max_journal_id) == (23, "USDT", 5000)
+        pages.append((cursor_journal_id, cursor_line_no, limit))
+        eligible = [
+            entry for entry in entries
+            if entry["journal_id"] <= max_journal_id
+            and (
+                cursor_journal_id is None
+                or entry["journal_id"] < cursor_journal_id
+                or (
+                    entry["journal_id"] == cursor_journal_id
+                    and entry.get("line_no", 1) > cursor_line_no
+                )
+            )
+        ]
+        return sorted(eligible, key=lambda entry: (-entry["journal_id"], entry.get("line_no", 1)))[:limit]
+
+    monkeypatch.setattr(main, "ledger_statement_export_bounds", export_bounds)
     monkeypatch.setattr(main, "ledger_statement", statement)
     response = asyncio.run(main.customer_ledger_export_csv(authorization="opaque-token"))
 
-    rows = response.body.decode("utf-8").splitlines()
+    rows = _stream_body(response).decode("utf-8").splitlines()
     assert response.status_code == 200
     assert len(rows) == 5002  # header plus all 5,001 journal lines
-    assert rows[-1].split(",")[1] == "5000"
+    assert rows[1].split(",")[1] == "5000"
+    assert rows[-1].split(",")[1] == "0"
     assert response.headers["X-Atlas-Export-Row-Count"] == "5001"
     assert response.headers["X-Atlas-Export-Truncated"] == "false"
+    assert [page[2] for page in pages] == [1000, 1000, 1000, 1000, 1000, 1000]
+    assert [page[0] for page in pages] == [None, 4001, 3001, 2001, 1001, 1]
+
+
+
+def test_customer_ledger_csv_export_rejects_row_counts_above_resource_limit(monkeypatch):
+    db = _DB()
+    profile = SimpleNamespace(id=23)
+    monkeypatch.setattr(main, "SessionLocal", lambda: db)
+    monkeypatch.setattr(main, "get_customer", _async_value((profile, {"sub": "customer-23"})))
+    monkeypatch.setattr(main, "_LEDGER_EXPORT_MAX_ROWS", 2)
+
+    async def export_bounds(_db, customer_id, currency, *, max_journal_id=None):
+        assert (customer_id, currency, max_journal_id) == (23, "USDT", None)
+        return 3, 3
+
+    async def unexpected_page(*_args, **_kwargs):
+        raise AssertionError("oversized export must be rejected before fetching page data")
+
+    monkeypatch.setattr(main, "ledger_statement_export_bounds", export_bounds)
+    monkeypatch.setattr(main, "ledger_statement", unexpected_page)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(main.customer_ledger_export_csv(authorization="opaque-token"))
+
+    assert exc.value.status_code == 413
+
+
+
+def test_customer_ledger_export_response_releases_spool_when_disconnect_precedes_body(monkeypatch):
+    db = _DB()
+    profile = SimpleNamespace(id=23)
+    monkeypatch.setattr(main, "SessionLocal", lambda: db)
+    monkeypatch.setattr(main, "get_customer", _async_value((profile, {"sub": "customer-23"})))
+
+    async def export_bounds(_db, _customer_id, _currency, *, max_journal_id=None):
+        return 0, None
+
+    async def statement(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(main, "ledger_statement_export_bounds", export_bounds)
+    monkeypatch.setattr(main, "ledger_statement", statement)
+    original = main._LEDGER_EXPORT_SEMAPHORE
+
+    response = asyncio.run(main.customer_ledger_export_csv(authorization="opaque-token"))
+    assert original._value == 1  # the response owns one export slot
+
+    async def disconnected_send(_message):
+        raise OSError("client disconnected before the body started")
+
+    async def unused_receive():
+        return {"type": "http.disconnect"}
+
+    async def call_response():
+        with pytest.raises(Exception):
+            await response(
+                {"type": "http", "asgi": {"spec_version": "2.4"}},
+                unused_receive,
+                disconnected_send,
+            )
+
+    asyncio.run(call_response())
+    assert original._value == 2  # response-scope cleanup released the slot
+
+
+def test_customer_ledger_stream_releases_semaphore_on_event_loop_thread(monkeypatch):
+    async def exercise():
+        owner_thread = threading.get_ident()
+
+        class ThreadBoundSemaphore:
+            def __init__(self):
+                self.release_threads = []
+
+            async def acquire(self):
+                return True
+
+            def release(self):
+                self.release_threads.append(threading.get_ident())
+                assert threading.get_ident() == owner_thread, (
+                    "asyncio semaphore must only be released on its owning event-loop thread"
+                )
+
+        semaphore = ThreadBoundSemaphore()
+        monkeypatch.setattr(main, "_LEDGER_EXPORT_SEMAPHORE", semaphore)
+
+        db = _DB(entries=[{
+            "created_at": "2026-11-02T10:00:00+00:00",
+            "journal_id": 42,
+            "line_no": 1,
+            "entry_type": "DEPOSIT",
+            "reference_type": "TRON_DEPOSIT",
+            "reference_id": "tx-async-stream",
+            "account_code": "LIABILITY:CUSTOMER:AVAILABLE",
+            "debit": "0.000000",
+            "credit": "1.000000",
+        }])
+        profile = SimpleNamespace(id=23)
+        monkeypatch.setattr(main, "SessionLocal", lambda: db)
+        monkeypatch.setattr(main, "get_customer", _async_value((profile, {"sub": "customer-23"})))
+
+        async def export_bounds(_db, _customer_id, _currency, *, max_journal_id=None):
+            return 1, 42
+
+        async def statement(*_args, **_kwargs):
+            return db.entries
+
+        monkeypatch.setattr(main, "ledger_statement_export_bounds", export_bounds)
+        monkeypatch.setattr(main, "ledger_statement", statement)
+
+        response = await main.customer_ledger_export_csv(authorization="opaque-token")
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk.encode("utf-8") if isinstance(chunk, str) else chunk)
+
+        assert b"tx-async-stream" in b"".join(chunks)
+        assert semaphore.release_threads == [owner_thread]
+
+    asyncio.run(exercise())
