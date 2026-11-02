@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Any
 import logging
+import traceback
 import contextlib
 from pathlib import Path
 import hmac
@@ -24,10 +25,12 @@ from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocke
 from fastapi.responses import HTMLResponse, Response, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, desc, or_, func, case, cast, Numeric
+from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from .config import settings
-from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
+from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, CustomerPaperSubmissionAuditRetry, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
 from .trading_core import train_model, predict_latest, ai_walk_forward_backtest
 from .adaptive_bot import AdaptiveModelPolicy, ensure_adaptive_model, adaptive_model_status
@@ -83,6 +86,7 @@ from .audit_chain import (
     claim_external_audit_delivery,
     finish_external_audit_delivery,
 )
+from .crypto import decrypt_text
 from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current, assert_database_role_compatible_with_rls_lockdown
 
 
@@ -345,6 +349,228 @@ async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
         raise RuntimeError("external customer paper submission audit sink did not confirm delivery")
     return created
 
+def _log_customer_paper_submission_audit_retry_failure(
+    *,
+    event: str,
+    customer_id: int,
+    client_order_id: str,
+    retry_id: int | None,
+    step: str,
+    exc: Exception,
+) -> None:
+    """Log bounded retry diagnostics with stack frames but without SQL/error text."""
+    frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else []
+    safe_frames = " > ".join(
+        f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
+        for frame in frames[-8:]
+    )
+    logging.getLogger(__name__).warning(
+        "%s customer_id=%s client_order_id=%s retry_id=%s step=%s error_type=%s traceback_frames=%s",
+        event,
+        int(customer_id),
+        str(client_order_id or "")[:120],
+        retry_id if retry_id is not None else "unavailable",
+        step,
+        type(exc).__name__,
+        safe_frames or "unavailable",
+    )
+
+
+async def _persist_customer_paper_submission_audit_retry(
+    *,
+    customer_id: int,
+    submission_detail: dict,
+    error_type: str,
+) -> None:
+    """Upsert one customer/order retry row; never scan encrypted audit history."""
+    customer_id = int(customer_id)
+    client_order_id = str(submission_detail.get("client_order_id") or "").strip()
+    if not client_order_id:
+        raise ValueError("customer paper audit retry requires a client_order_id")
+    now = datetime.now(timezone.utc)
+    payload = json.dumps(submission_detail, sort_keys=True, separators=(",", ":"), default=str)
+    values = {
+        "customer_id": customer_id,
+        "client_order_id": client_order_id,
+        "submission_detail": payload,
+        "status": "PENDING",
+        "attempt_count": 0,
+        "last_error_type": str(error_type or "UnknownError")[:80],
+        "created_at": now,
+        "updated_at": now,
+    }
+    async with SessionLocal() as db:
+        dialect_name = db.get_bind().dialect.name
+        insert_fn = sqlite_insert if dialect_name == "sqlite" else pg_insert
+        statement = insert_fn(CustomerPaperSubmissionAuditRetry).values(**values)
+        statement = statement.on_conflict_do_update(
+            index_elements=[
+                CustomerPaperSubmissionAuditRetry.customer_id,
+                CustomerPaperSubmissionAuditRetry.client_order_id,
+            ],
+            set_={
+                "submission_detail": statement.excluded.submission_detail,
+                "status": "PENDING",
+                "attempt_count": CustomerPaperSubmissionAuditRetry.attempt_count + 1,
+                "last_error_type": str(error_type or "UnknownError")[:80],
+                "updated_at": now,
+            },
+        )
+        await db.execute(statement)
+        await db.commit()
+
+
+async def _set_customer_paper_submission_audit_retry_state(
+    retry_id: int,
+    *,
+    status: str,
+    error_type: str = "",
+    increment_attempts: bool = False,
+) -> None:
+    """Compare-and-set a pending retry so a stale worker cannot undo a repair."""
+    values = {
+        "status": str(status).upper(),
+        "last_error_type": str(error_type or "")[:80],
+        "updated_at": datetime.now(timezone.utc),
+    }
+    if increment_attempts:
+        values["attempt_count"] = CustomerPaperSubmissionAuditRetry.attempt_count + 1
+    async with SessionLocal() as db:
+        await db.execute(
+            update(CustomerPaperSubmissionAuditRetry)
+            .where(
+                CustomerPaperSubmissionAuditRetry.id == int(retry_id),
+                CustomerPaperSubmissionAuditRetry.status == "PENDING",
+            )
+            .values(**values)
+        )
+        await db.commit()
+
+
+async def _load_customer_paper_submission_audit_retries(customer_id: int) -> list[dict]:
+    """Read only indexed pending rows for this customer and decrypt each row independently."""
+    customer_id = int(customer_id)
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(
+                    CustomerPaperSubmissionAuditRetry.id,
+                    CustomerPaperSubmissionAuditRetry.client_order_id,
+                    cast(CustomerPaperSubmissionAuditRetry.submission_detail, Text).label("raw_detail"),
+                )
+                .where(
+                    CustomerPaperSubmissionAuditRetry.customer_id == customer_id,
+                    CustomerPaperSubmissionAuditRetry.status == "PENDING",
+                )
+                .order_by(
+                    CustomerPaperSubmissionAuditRetry.updated_at.asc(),
+                    CustomerPaperSubmissionAuditRetry.id.asc(),
+                )
+                .limit(100)
+            )
+        ).all()
+
+    pending: list[dict] = []
+    for row in rows:
+        client_order_id = str(row.client_order_id or "")
+        try:
+            parsed = json.loads(decrypt_text(row.raw_detail))
+            if (
+                not isinstance(parsed, dict)
+                or int(parsed.get("customer_id", -1)) != customer_id
+                or str(parsed.get("client_order_id") or "").strip() != client_order_id
+            ):
+                raise ValueError("retry detail identity does not match its indexed key")
+        except Exception as exc:
+            # One damaged ciphertext is quarantined; it must not prevent other order retries.
+            try:
+                await _set_customer_paper_submission_audit_retry_state(
+                    int(row.id),
+                    status="CORRUPT",
+                    error_type=type(exc).__name__,
+                    increment_attempts=True,
+                )
+            except Exception as state_exc:
+                _log_customer_paper_submission_audit_retry_failure(
+                    event="customer_paper_submission_audit_retry_quarantine_failed",
+                    customer_id=customer_id,
+                    client_order_id=client_order_id,
+                    retry_id=int(row.id),
+                    step="quarantine_corrupt_retry",
+                    exc=state_exc,
+                )
+            _log_customer_paper_submission_audit_retry_failure(
+                event="customer_paper_submission_audit_retry_corrupt",
+                customer_id=customer_id,
+                client_order_id=client_order_id,
+                retry_id=int(row.id),
+                step="decrypt_and_validate_retry_detail",
+                exc=exc,
+            )
+            continue
+        pending.append({
+            "retry_id": int(row.id),
+            "customer_id": customer_id,
+            "client_order_id": client_order_id,
+            "submission_detail": parsed,
+        })
+    return pending
+
+
+async def _repair_customer_paper_submission_audit_retries(customer_id: int) -> None:
+    """Replay indexed pending audit deliveries; isolate every record's failure."""
+    customer_id = int(customer_id)
+    try:
+        pending = await _load_customer_paper_submission_audit_retries(customer_id)
+    except Exception as exc:
+        _log_customer_paper_submission_audit_retry_failure(
+            event="customer_paper_submission_audit_retry_load_failed",
+            customer_id=customer_id,
+            client_order_id="",
+            retry_id=None,
+            step="load_customer_pending_retries",
+            exc=exc,
+        )
+        return
+
+    for record in pending:
+        retry_id = int(record["retry_id"])
+        client_order_id = str(record["client_order_id"])
+        try:
+            # append_audit_once treats an existing submission event as a successful replay.
+            await _audit_customer_paper_order_submitted_once(record["submission_detail"])
+            await _set_customer_paper_submission_audit_retry_state(
+                retry_id,
+                status="REPAIRED",
+                error_type="",
+            )
+        except Exception as exc:
+            try:
+                await _set_customer_paper_submission_audit_retry_state(
+                    retry_id,
+                    status="PENDING",
+                    error_type=type(exc).__name__,
+                    increment_attempts=True,
+                )
+            except Exception as state_exc:
+                _log_customer_paper_submission_audit_retry_failure(
+                    event="customer_paper_submission_audit_retry_state_write_failed",
+                    customer_id=customer_id,
+                    client_order_id=client_order_id,
+                    retry_id=retry_id,
+                    step="persist_retry_failure_state",
+                    exc=state_exc,
+                )
+            _log_customer_paper_submission_audit_retry_failure(
+                event="customer_paper_submission_audit_retry_failed",
+                customer_id=customer_id,
+                client_order_id=client_order_id,
+                retry_id=retry_id,
+                step="replay_submission_and_mark_repaired",
+                exc=exc,
+            )
+
+
 async def _customer_paper_submission_stage(
     execution: dict,
     *,
@@ -355,6 +581,9 @@ async def _customer_paper_submission_stage(
     """Audit first submissions and repair missing audit events during pending-order recovery."""
     if not isinstance(execution, dict):
         return None
+
+    # Retry prior terminal and pending deliveries without scanning audit history.
+    await _repair_customer_paper_submission_audit_retries(customer_id)
 
     intent = execution.get("order_intent")
     if not isinstance(intent, dict):
@@ -388,7 +617,7 @@ async def _customer_paper_submission_stage(
                 "symbol": str(req.symbol),
                 "exchange": str(req.exchange),
                 "reason": "pending execution omitted order_intent evidence",
-            })
+            }, actor_id=f"customer:{customer_id}")
             return "customer_paper_order_pending"
         return None
 
@@ -401,7 +630,7 @@ async def _customer_paper_submission_stage(
             "exchange": str(req.exchange),
             "execution_status": status,
             "reason": "order intent omitted client_order_id evidence",
-        })
+        }, actor_id=f"customer:{customer_id}")
         return "customer_paper_order_pending" if status in pending_statuses else None
 
     submission_status = str(
@@ -428,17 +657,30 @@ async def _customer_paper_submission_stage(
     try:
         await _audit_customer_paper_order_submitted_once(detail)
     except Exception as exc:
-        # Keep the accepted order pending, but preserve a traceback for operators
-        # to diagnose a transient audit-store failure. Do not put exception text
-        # into the persisted customer audit payload.
-        logging.getLogger(__name__).exception(
-            "customer_paper_submission_audit_failed",
-            extra={
-                "customer_id": customer_id,
-                "trading_account_id": trading_account_id,
-                "client_order_id": client_order_id,
-                "error_type": type(exc).__name__,
-            },
+        # Persist a customer/order-scoped retry state even for terminal fills. This
+        # gives the next bot cycle a bounded indexed lookup instead of a history scan.
+        try:
+            await _persist_customer_paper_submission_audit_retry(
+                customer_id=customer_id,
+                submission_detail=detail,
+                error_type=type(exc).__name__,
+            )
+        except Exception as persist_exc:
+            _log_customer_paper_submission_audit_retry_failure(
+                event="customer_paper_submission_audit_retry_persist_failed",
+                customer_id=customer_id,
+                client_order_id=client_order_id,
+                retry_id=None,
+                step="persist_initial_retry_state",
+                exc=persist_exc,
+            )
+        _log_customer_paper_submission_audit_retry_failure(
+            event="customer_paper_submission_audit_failed",
+            customer_id=customer_id,
+            client_order_id=client_order_id,
+            retry_id=None,
+            step="append_submission_audit",
+            exc=exc,
         )
         await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE", {
             "customer_id": customer_id,
@@ -449,7 +691,7 @@ async def _customer_paper_submission_stage(
             "submission_status": submission_status,
             "execution_status": status,
             "reason": type(exc).__name__,
-        })
+        }, actor_id=f"customer:{customer_id}")
         return "customer_paper_order_audit_incomplete" if status in pending_statuses else None
     # Only live pending states should be reported as pending or short-circuit the
     # strategy route. Filled, replayed, expired or terminal orders keep their real
