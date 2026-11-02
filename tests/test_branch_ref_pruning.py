@@ -1372,7 +1372,7 @@ def test_prune_workflow_passes_optional_branch_protection_read_token_to_pruning_
     assert "GH_TOKEN: ${{ github.token }}" in step
 
 
-def test_exact_duplicate_alias_retirement_requires_exact_tree_parent_and_keeper(monkeypatch):
+def test_exact_duplicate_alias_retirement_requires_exact_tree_parent_keeper_and_main_integration(monkeypatch):
     calls = []
 
     def fake_run(args, *, check=True):
@@ -1383,17 +1383,21 @@ def test_exact_duplicate_alias_retirement_requires_exact_tree_parent_and_keeper(
             )
         if args[:3] == ["git", "show", "-s"]:
             return subprocess.CompletedProcess(
-                args,
-                0,
+                args, 0,
                 "c238a3ba30b100ef9af5d92ce30d40169783d819\na7f35abfe8d3a73af329c5ae34320afe5f0def12\n",
                 "",
             )
         raise AssertionError(f"unexpected command: {args}")
 
     monkeypatch.setattr(pruning, "_run", fake_run)
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda ancestor, descendant: (
+        ancestor == "eed301d88b163ea36ad6b473d69400c5eb49b584"
+        and descendant == "main-with-keeper-integrated"
+    ))
     safe, reason, keeper = pruning._explicit_duplicate_alias_retirement_proof(
         "fix/native-ai-propagation-error-alias-20261027",
         "99e7d975d909fddc7098b06e31617fc3871e4cb4",
+        "main-with-keeper-integrated",
     )
     assert safe is True
     assert keeper == "fix/native-ai-propagation-verified-20261027"
@@ -1401,7 +1405,33 @@ def test_exact_duplicate_alias_retirement_requires_exact_tree_parent_and_keeper(
     assert len([call for call in calls if call[:3] == ["git", "show", "-s"]]) == 2
 
 
+def test_duplicate_alias_is_preserved_until_exact_keeper_commit_is_on_main(monkeypatch):
+    calls = []
+
+    def fake_run(args, *, check=True):
+        calls.append(args)
+        if args[:3] == ["git", "rev-parse", "--verify"]:
+            return subprocess.CompletedProcess(
+                args, 0, "eed301d88b163ea36ad6b473d69400c5eb49b584\n", ""
+            )
+        raise AssertionError(f"unexpected command: {args}")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: False)
+    safe, reason, keeper = pruning._explicit_duplicate_alias_retirement_proof(
+        "fix/native-ai-propagation-error-alias-20261027",
+        "99e7d975d909fddc7098b06e31617fc3871e4cb4",
+        "main-without-keeper",
+    )
+    assert safe is False
+    assert keeper is None
+    assert "not integrated into main" in reason
+    assert not [call for call in calls if call[:3] == ["git", "show", "-s"]]
+
+
 def test_duplicate_alias_retirement_preserves_if_canonical_branch_moves(monkeypatch):
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: True)
+
     def fake_run(args, *, check=True):
         return subprocess.CompletedProcess(
             args, 0, "new-keeper-sha\n", ""
@@ -1411,6 +1441,7 @@ def test_duplicate_alias_retirement_preserves_if_canonical_branch_moves(monkeypa
     safe, reason, keeper = pruning._explicit_duplicate_alias_retirement_proof(
         "fix/native-ai-propagation-error-alias-20261027",
         "99e7d975d909fddc7098b06e31617fc3871e4cb4",
+        "main-with-keeper-integrated",
     )
     assert safe is False
     assert "canonical duplicate branch is absent or has moved" in reason
@@ -1418,6 +1449,7 @@ def test_duplicate_alias_retirement_preserves_if_canonical_branch_moves(monkeypa
 
 
 def test_duplicate_alias_retirement_preserves_if_alias_tip_moves(monkeypatch):
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: True)
     monkeypatch.setattr(
         pruning,
         "_run",
@@ -1428,6 +1460,7 @@ def test_duplicate_alias_retirement_preserves_if_alias_tip_moves(monkeypatch):
     safe, reason, keeper = pruning._explicit_duplicate_alias_retirement_proof(
         "fix/native-ai-propagation-error-alias-20261027",
         "different-sha",
+        "main-with-keeper-integrated",
     )
     assert safe is False
     assert "no exact duplicate-alias proof" in reason
