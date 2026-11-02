@@ -855,11 +855,19 @@ async def ledger_invariant_report(
     tol = D(tolerance)
     if _dialect_name(db) == "postgresql":
         async with SessionLocal() as snap:
-            await snap.connection(execution_options={"isolation_level": "REPEATABLE READ"})
-            unbalanced, drifts, customer_account_mismatches, checked = await _invariant_snapshot(
-                snap, tol, customer_id=customer_id
-            )
-            await snap.rollback()
+            if _dialect_name(snap) == "postgresql":
+                await snap.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+                unbalanced, drifts, customer_account_mismatches, checked = await _invariant_snapshot(
+                    snap, tol, customer_id=customer_id
+                )
+                await snap.rollback()
+            else:
+                # Unit tests may pass an isolated database session while the
+                # application-wide SessionLocal points at a different dialect.
+                # Never apply PostgreSQL isolation options to a non-PostgreSQL engine.
+                unbalanced, drifts, customer_account_mismatches, checked = await _invariant_snapshot(
+                    db, tol, customer_id=customer_id
+                )
     else:
         unbalanced, drifts, customer_account_mismatches, checked = await _invariant_snapshot(
             db, tol, customer_id=customer_id
