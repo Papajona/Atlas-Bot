@@ -214,10 +214,31 @@ class WebSocketManager(
             }
         }
 
-        fun parseEquityMessage(jsonString: String, current: PortfolioRiskMetrics): PortfolioRiskMetrics? {
+        private const val MAX_RISK_TELEMETRY_AGE_MS = 30_000L
+        private const val MAX_RISK_TELEMETRY_FUTURE_SKEW_MS = 5_000L
+
+        fun parseEquityMessage(
+            jsonString: String,
+            current: PortfolioRiskMetrics,
+            nowEpochMs: Long = System.currentTimeMillis(),
+        ): PortfolioRiskMetrics? {
             return try {
                 val json = JSONObject(jsonString)
-                if (!json.has("equity")) return null
+                if (!json.has("equity") || !json.has("last_updated_epoch_ms")) return null
+                val safetyTimeoutSeconds = json.optDouble("ai_safety_timeout_seconds", Double.NaN)
+                val lastUpdatedEpochMs = json.optLong("last_updated_epoch_ms", 0L)
+                // Never turn an explicit invalid, replayed, or future-dated server
+                // timestamp into a fresh client timestamp. Such a frame must not
+                // overwrite risk state or unlock biometric resume.
+                if (
+                    lastUpdatedEpochMs <= 0L ||
+                    lastUpdatedEpochMs > nowEpochMs + MAX_RISK_TELEMETRY_FUTURE_SKEW_MS ||
+                    nowEpochMs - lastUpdatedEpochMs > MAX_RISK_TELEMETRY_AGE_MS
+                ) return null
+                val hasLiveSafetyTelemetry =
+                    json.has("ai_safety_timeout_seconds") &&
+                        safetyTimeoutSeconds.isFinite() &&
+                        safetyTimeoutSeconds > 0.0
                 PortfolioRiskMetrics(
                     equity = json.optDouble("equity", current.equity),
                     peakEquity = json.optDouble("peak_equity", current.peakEquity),
@@ -239,10 +260,12 @@ class WebSocketManager(
                     sessionWeight = json.optInt("session_weight", current.sessionWeight),
                     carryWeight = json.optInt("carry_weight", current.carryWeight),
                     costStressHeadroom = json.optDouble("cost_stress_headroom", current.costStressHeadroom),
-                    aiSafetyTimeoutSeconds = json.optDouble("ai_safety_timeout_seconds", current.aiSafetyTimeoutSeconds),
+                    aiSafetyTimeoutSeconds = safetyTimeoutSeconds.takeIf { it.isFinite() }
+                        ?: current.aiSafetyTimeoutSeconds,
+                    telemetryAvailable = hasLiveSafetyTelemetry,
                     isHalted = json.optBoolean("is_halted", current.isHalted),
                     streamType = json.optString("stream_type", "WEBSOCKET_PUSH"),
-                    lastUpdatedEpochMs = json.optLong("last_updated_epoch_ms", System.currentTimeMillis())
+                    lastUpdatedEpochMs = lastUpdatedEpochMs
                 )
             } catch (_: Exception) {
                 null

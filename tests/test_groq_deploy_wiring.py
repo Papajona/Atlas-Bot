@@ -22,6 +22,8 @@ def test_api_keeps_groq_secret_optional_and_gemini_removed():
     assert 'GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"' in script
     assert 'GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"' in script
     assert 'GROQ_TRADE_REVIEW_ENABLED="${GROQ_TRADE_REVIEW_ENABLED:-false}"' in script
+    assert 'if [[ "$GROQ_TRADE_REVIEW_ENABLED" == "true" && -z "$SECRET_GROQ_API_KEY_VERSION" ]]' in script
+    assert "enabling Groq trade review requires SECRET_GROQ_API_KEY_VERSION" in script
     assert 'python "${REPO_ROOT}/scripts/validate_groq_deploy_env.py"' in script
     assert 'dirname -- "${BASH_SOURCE[0]}") && pwd)/validate_groq_deploy_env.py' not in script
     assert "GEMINI_API_KEY" not in script

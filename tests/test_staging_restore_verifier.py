@@ -50,7 +50,7 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     provider_verifier = Path("scripts/verify_provider_ledger_reconciliation.py").read_text(encoding="utf-8")
     verifier = Path("scripts/verify_staging_restore.py").read_text(encoding="utf-8")
     runbook = Path("RUNBOOK.md").read_text(encoding="utf-8")
-    expected = "0053_supabase_public_default_acl_lockdown"
+    expected = "0054_audit_log_idempotency_key"
 
     # Restore verification still checks the expected migration revision. The
     # isolated paper-only runtime intentionally avoids the production Alembic
@@ -63,7 +63,7 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     assert "database revision is 0049" not in runbook
     assert "same actual ref" in runbook
     assert "EXPECTED_ALEMBIC_HEAD" not in identity_workflow
-    assert "0053_supabase_public_default_acl_lockdown" not in identity_workflow
+    assert "0054_audit_log_idempotency_key" not in identity_workflow
     assert "app.paper_staging:app" in identity_workflow
     assert "can access only customer_profiles/app_state" in identity_workflow
     assert "no second project or paid branch is required" in runbook

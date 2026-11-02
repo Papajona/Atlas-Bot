@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import subprocess
@@ -183,7 +184,7 @@ def test_provision_verifier_matches_all_nine_current_schema_tables_and_policy_ty
     assert "policyname='customer_paper_tenant'" in VERIFY_SQL
     assert "policyname='customer_paper_bar_budget_backend'" in VERIFY_SQL
     source = Path("scripts/provision_customer_paper_schema.py").read_text(encoding="utf-8")
-    assert "len(verification) != 12" in source
+    assert "len(verification) != 13" in source
     assert '"nine_paper_tables_only": table_count == "9" and expected_table_count == "9"' in source
 
 
@@ -377,6 +378,61 @@ def test_file_backed_bootstrap_accepts_distinct_passwords_without_disclosing_the
     assert paper_password not in result.stdout + result.stderr
     assert primary_password not in result.stdout + result.stderr
 
+
+def test_provision_verifier_rejects_mutating_privileges_on_every_paper_table():
+    provisioner = Path("scripts/provision_customer_paper_schema.py").read_text(encoding="utf-8")
+    assert "len(verification) != 13" in provisioner
+    assert '"paper_tables_allow_only_select_insert"' in provisioner
+    assert "server_version_num" in provisioner
+    assert ">= 170000" in provisioner
+    assert "THEN has_table_privilege(\'atlas_customer_paper\',c.oid,\'MAINTAIN\')" in provisioner
+    assert VERIFY_SQL.count("THEN has_table_privilege('atlas_customer_paper',c.oid,'MAINTAIN')") == 2
+    public_check_start = VERIFY_SQL.index("n.nspname='public'")
+    public_check_end = VERIFY_SQL.index("))::text ||", public_check_start)
+    assert "MAINTAIN" in VERIFY_SQL[public_check_start:public_check_end]
+    forbidden = ("UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN")
+    for privilege in forbidden:
+        assert (
+            f"has_table_privilege('atlas_customer_paper',c.oid,'{privilege}')"
+            in VERIFY_SQL
+        )
+    assert "NOT has_table_privilege('atlas_customer_paper',c.oid,'SELECT')" in VERIFY_SQL
+    assert "NOT has_table_privilege('atlas_customer_paper',c.oid,'INSERT')" in VERIFY_SQL
+    assert "n.nspname='customer_paper' AND c.relkind IN ('r','p')" in VERIFY_SQL
+
+def test_role_setup_preflights_database_grant_authority_before_generating_credentials():
+    from scripts import provision_customer_paper_schema as provisioner
+
+    assert "pg_has_role(current_user, target_db.datdba, 'USAGE')" in provisioner.ROLE_GRANT_AUTHORITY_SQL
+    assert "operator_role.rolsuper" in provisioner.ROLE_GRANT_AUTHORITY_SQL
+    assert "has_database_privilege(" in provisioner.ROLE_GRANT_AUTHORITY_SQL
+    assert "'CONNECT WITH GRANT OPTION'" in provisioner.ROLE_GRANT_AUTHORITY_SQL
+    source = Path("scripts/provision_customer_paper_schema.py").read_text(encoding="utf-8")
+    setup_start = source.index("        if args.setup_role:")
+    setup_end = source.index("        if not backup_ref:", setup_start)
+    setup = source[setup_start:setup_end]
+    assert setup.index("ROLE_GRANT_AUTHORITY_SQL") < setup.index(
+        'output_path.write_text(connection_uri + "\\n", encoding="utf-8")'
+    )
+    assert setup.index("ROLE_GRANT_AUTHORITY_SQL") < setup.index(
+        "role_sql = _role_setup_sql(password)"
+    )
+
+def test_customer_paper_preflight_excludes_dedicated_schema_only_when_database_is_shared():
+    source = Path("app/customer_paper_ledger.py").read_text(encoding="utf-8")
+    assert source.count("(NOT :same_database OR n.nspname <> 'customer_paper')") == 4
+
+
+def test_mandatory_postgres_workflow_covers_config_and_real_shared_primary_relations():
+    workflow = Path(".github/workflows/ledger-concurrency-check.yml").read_text(encoding="utf-8")
+    assert "      - 'app/config.py'" in workflow
+    assert "GRANT CONNECT ON DATABASE atlas_test TO atlas_paper_app" in workflow
+    assert "-d atlas_test" in workflow
+    assert "-v paper_runtime_role=atlas_paper_app -f scripts/customer_paper_ledger_schema.sql" in workflow
+    assert "ATLAS_PAPER_SHARED_PRIMARY_TEST_DATABASE_URL: postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_test" in workflow
+    assert "ATLAS_PAPER_TEST_DATABASE_URL: postgresql+asyncpg://atlas_paper_app:paper_test_password@127.0.0.1:5432/atlas_test" in workflow
+    assert "pg-paper-shared.xml" in workflow
+
 def test_customer_paper_trigger_functions_pin_search_path_and_account_key_is_not_duplicated():
     sql = Path("scripts/customer_paper_ledger_schema.sql").read_text(encoding="utf-8")
 
@@ -420,3 +476,64 @@ def test_customer_paper_trigger_functions_pin_search_path_and_account_key_is_not
     ):
         assert f"CREATE INDEX IF NOT EXISTS {index_name}" in sql
 
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not os.getenv("ATLAS_POSTGRES_URL"),
+    reason="requires the disposable PostgreSQL database provisioned by the mandatory CI gate",
+)
+def test_role_grant_preflight_accepts_delegated_connect_grant_option_only():
+    """A non-owner CREATEROLE operator may proceed only with CONNECT grant authority."""
+    import uuid
+
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from scripts.provision_customer_paper_schema import ROLE_GRANT_AUTHORITY_SQL
+
+    async def run():
+        engine = create_async_engine(os.environ["ATLAS_POSTGRES_URL"])
+        suffix = uuid.uuid4().hex[:12]
+        delegated_role = f"atlas_qodo_connect_grant_{suffix}"
+        no_grant_role = f"atlas_qodo_connect_plain_{suffix}"
+        try:
+            async with engine.begin() as conn:
+                database = str((await conn.execute(text("SELECT current_database()"))).scalar_one())
+                database_ident = '"' + database.replace('"', '""') + '"'
+                delegated_ident = '"' + delegated_role + '"'
+                no_grant_ident = '"' + no_grant_role + '"'
+
+                # Both operators can create roles but are not database owners and
+                # do not inherit the database owner's role.
+                await conn.execute(text(f"CREATE ROLE {delegated_ident} CREATEROLE"))
+                await conn.execute(text(f"CREATE ROLE {no_grant_ident} CREATEROLE"))
+                await conn.execute(text(
+                    f"GRANT CONNECT ON DATABASE {database_ident} "
+                    f"TO {delegated_ident} WITH GRANT OPTION"
+                ))
+
+                await conn.execute(text(f"SET ROLE {delegated_ident}"))
+                delegated_authority = str(
+                    (await conn.execute(text(ROLE_GRANT_AUTHORITY_SQL))).scalar_one()
+                ).lower()
+                await conn.execute(text("RESET ROLE"))
+
+                await conn.execute(text(f"SET ROLE {no_grant_ident}"))
+                ordinary_authority = str(
+                    (await conn.execute(text(ROLE_GRANT_AUTHORITY_SQL))).scalar_one()
+                ).lower()
+                await conn.execute(text("RESET ROLE"))
+
+                assert delegated_authority in {"true", "t"}
+                assert ordinary_authority in {"false", "f"}
+
+                # Remove the temporary database ACL dependency before dropping its grantee.
+                await conn.execute(text(
+                    f"REVOKE CONNECT ON DATABASE {database_ident} FROM {delegated_ident}"
+                ))
+                await conn.execute(text(f"DROP ROLE {delegated_ident}"))
+                await conn.execute(text(f"DROP ROLE {no_grant_ident}"))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())

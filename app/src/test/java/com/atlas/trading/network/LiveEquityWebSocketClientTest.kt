@@ -77,7 +77,10 @@ class LiveEquityWebSocketClientTest {
             }
         """.trimIndent()
 
-        val parsed = WebSocketManager.parseEquityMessage(jsonPayload, PortfolioRiskMetrics())
+        val nowEpochMs = 1720000000000L
+        val parsed = WebSocketManager.parseEquityMessage(
+            jsonPayload, PortfolioRiskMetrics(), nowEpochMs = nowEpochMs
+        )
         assertNotNull(parsed)
         parsed?.let {
             assertEquals(10450.75, it.equity, 0.001)
@@ -89,7 +92,70 @@ class LiveEquityWebSocketClientTest {
             assertEquals("TRENDING MOMENTUM", it.regime)
             assertEquals("WEBSOCKET_PUSH", it.streamType)
             assertFalse(it.isHalted)
+            assertTrue(it.telemetryAvailable)
+            assertEquals(1.5, it.aiSafetyTimeoutSeconds, 0.001)
+            assertEquals(1720000000000L, it.lastUpdatedEpochMs)
         }
+    }
+
+    @Test
+    fun testParseEquityMessageWithoutSafetyDeadlineDoesNotClaimLiveTelemetry() {
+        val jsonPayload = """
+            {
+                "equity": 10450.75,
+                "last_updated_epoch_ms": 1720000000000
+            }
+        """.trimIndent()
+
+        val parsed = WebSocketManager.parseEquityMessage(
+            jsonPayload, PortfolioRiskMetrics(), nowEpochMs = 1720000000000L
+        )
+
+        assertNotNull(parsed)
+        assertFalse(parsed!!.telemetryAvailable)
+    }
+
+    @Test
+    fun testParseEquityMessageRejectsStaleFutureAndInvalidServerTimestamps() {
+        val nowEpochMs = 1720000000000L
+        fun payload(timestamp: Long) = """
+            {
+                "equity": 10450.75,
+                "ai_safety_timeout_seconds": 1.5,
+                "last_updated_epoch_ms": $timestamp
+            }
+        """.trimIndent()
+
+        assertNull(
+            WebSocketManager.parseEquityMessage(
+                payload(nowEpochMs - 30_001L), PortfolioRiskMetrics(), nowEpochMs
+            )
+        )
+        assertNull(
+            WebSocketManager.parseEquityMessage(
+                payload(nowEpochMs + 5_001L), PortfolioRiskMetrics(), nowEpochMs
+            )
+        )
+        assertNull(
+            WebSocketManager.parseEquityMessage(
+                payload(0L), PortfolioRiskMetrics(), nowEpochMs
+            )
+        )
+        assertNull(
+            WebSocketManager.parseEquityMessage(
+                payload(-1L), PortfolioRiskMetrics(), nowEpochMs
+            )
+        )
+    }
+
+    @Test
+    fun testParseEquityMessageRejectsMissingTimestamp() {
+        val payload = """{"equity":10450.75,"ai_safety_timeout_seconds":1.5}"""
+        assertNull(
+            WebSocketManager.parseEquityMessage(
+                payload, PortfolioRiskMetrics(), nowEpochMs = 1720000000000L
+            )
+        )
     }
 
     @Test

@@ -254,6 +254,7 @@ fun RiskDashboardScreen(
                 item {
                     SystemStateRibbon(
                         metrics = metrics,
+                        webSocketConnected = wsConnectionState is WebSocketConnectionState.Connected,
                         cardSurface = cardSurface,
                         cardBorder = cardBorder,
                         emeraldColor = emeraldPass,
@@ -409,6 +410,7 @@ fun RiskDashboardScreen(
 @Composable
 private fun SystemStateRibbon(
     metrics: PortfolioRiskMetrics,
+    webSocketConnected: Boolean,
     cardSurface: Color,
     cardBorder: Color,
     emeraldColor: Color,
@@ -465,6 +467,24 @@ private fun SystemStateRibbon(
                         fontWeight = FontWeight.Bold,
                         color = healthColor,
                         modifier = Modifier.testTag("worker_health_status")
+                    )
+
+                    val safetyDeadlineAvailable =
+                        webSocketConnected &&
+                            metrics.telemetryAvailable &&
+                            metrics.aiSafetyTimeoutSeconds.isFinite() &&
+                            metrics.aiSafetyTimeoutSeconds > 0.0 &&
+                            metrics.lastUpdatedEpochMs > 0L
+                    Text(
+                        text = if (safetyDeadlineAvailable) {
+                            "AI Safety Decision Deadline: ${metrics.aiSafetyTimeoutSeconds}s"
+                        } else {
+                            "AI Safety Decision Deadline: unavailable"
+                        },
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = if (safetyDeadlineAvailable) healthColor else textMuted,
+                        modifier = Modifier.testTag("ai_safety_deadline_status")
                     )
                 }
             }
