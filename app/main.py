@@ -4362,68 +4362,101 @@ async def customer_ledger(authorization: str | None = Header(default=None)):
 
 @app.get("/api/customer/ledger/export.csv")
 async def customer_ledger_export_csv(authorization: str | None = Header(default=None)):
-    """Stream the authenticated customer's complete USDT ledger without buffering its history."""
+    """Build a complete disk-spooled CSV from short, keyset-paginated read sessions."""
     import csv
-    import io
+    import tempfile
 
-    db = SessionLocal()
-    try:
-        # Keep a single MVCC snapshot for the complete export. Reopening a session
-        # for each page could admit late commits between pages and shift offsets.
-        if db.get_bind().dialect.name == "postgresql":
-            await db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
-        profile, _ = await get_customer(authorization, db)
+    # Authentication/profile creation uses the normal transaction isolation. The
+    # export snapshot ceiling is captured in a separate read session afterwards.
+    async with SessionLocal() as auth_db:
+        profile, _ = await get_customer(authorization, auth_db)
         customer_id = int(profile.id)
+
+    async with SessionLocal() as bounds_db:
         row_count, max_journal_id = await ledger_statement_export_bounds(
-            db, customer_id, "USDT"
+            bounds_db, customer_id, "USDT"
         )
-    except Exception:
-        await db.close()
-        raise
 
-    def csv_row(values) -> str:
-        output = io.StringIO(newline="")
-        csv.writer(output).writerow(values)
-        return output.getvalue()
-
-    async def stream_rows():
-        try:
-            yield csv_row([
-                "created_at", "journal_id", "entry_type", "currency",
-                "reference_type", "reference_id", "account_code", "debit", "credit",
-            ])
-            offset = 0
-            page_size = 1000
-            while offset < row_count:
+    # Keep only a small prefix in RAM; larger exports spill to the instance's
+    # temporary filesystem. The database is fully released before the client reads.
+    output = tempfile.SpooledTemporaryFile(
+        max_size=1_048_576,
+        mode="w+",
+        encoding="utf-8",
+        newline="",
+    )
+    try:
+        writer = csv.writer(output)
+        writer.writerow([
+            "created_at", "journal_id", "entry_type", "currency",
+            "reference_type", "reference_id", "account_code", "debit", "credit",
+        ])
+        written = 0
+        cursor_journal_id = None
+        cursor_line_no = None
+        page_size = 1000
+        while written < row_count:
+            async with SessionLocal() as page_db:
                 entries = await ledger_statement(
-                    db,
+                    page_db,
                     customer_id,
                     "USDT",
                     limit=page_size,
-                    offset=offset,
+                    cursor_journal_id=cursor_journal_id,
+                    cursor_line_no=cursor_line_no,
                     max_journal_id=max_journal_id,
                 )
-                if not entries:
-                    raise RuntimeError("customer ledger export page ended before its captured row count")
-                for entry in entries:
-                    yield csv_row([
-                        entry.get("created_at", ""),
-                        entry.get("journal_id", ""),
-                        entry.get("entry_type", ""),
-                        "USDT",
-                        entry.get("reference_type", ""),
-                        entry.get("reference_id", ""),
-                        entry.get("account_code", ""),
-                        entry.get("debit", ""),
-                        entry.get("credit", ""),
-                    ])
-                offset += len(entries)
+            if not entries or written + len(entries) > row_count:
+                raise RuntimeError("customer ledger changed during export; refusing to return a partial CSV")
+            writer.writerows([
+                [
+                    entry.get("created_at", ""),
+                    entry.get("journal_id", ""),
+                    entry.get("entry_type", ""),
+                    "USDT",
+                    entry.get("reference_type", ""),
+                    entry.get("reference_id", ""),
+                    entry.get("account_code", ""),
+                    entry.get("debit", ""),
+                    entry.get("credit", ""),
+                ]
+                for entry in entries
+            ])
+            last_entry = entries[-1]
+            cursor_journal_id = int(last_entry["journal_id"])
+            cursor_line_no = int(last_entry["line_no"])
+            written += len(entries)
+
+        # Catch delayed commits using journal IDs allocated before the ceiling read.
+        # Such rows are excluded by the cursor walk if they appear after their position
+        # has passed; a changed count fails the export before any response is sent.
+        async with SessionLocal() as verify_db:
+            verified_count, _ = await ledger_statement_export_bounds(
+                verify_db,
+                customer_id,
+                "USDT",
+                max_journal_id=max_journal_id,
+            )
+        if verified_count != row_count or written != row_count:
+            raise RuntimeError("customer ledger changed during export; refusing to return a partial CSV")
+    except Exception:
+        output.close()
+        raise
+
+    output.seek(0)
+
+    def stream_spooled_file():
+        try:
+            while True:
+                chunk = output.read(64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
         finally:
-            await db.rollback()
-            await db.close()
+            output.close()
 
     return StreamingResponse(
-        stream_rows(),
+        stream_spooled_file(),
         media_type="text/csv; charset=utf-8",
         headers={
             "Content-Disposition": 'attachment; filename="atlas-customer-ledger-usdt.csv"',
