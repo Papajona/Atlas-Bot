@@ -40,6 +40,10 @@ class CustomerPaperOrderConflict(CustomerPaperLedgerBlocked):
     """An immutable customer paper order conflicts with an existing intent or state."""
 
 
+class CustomerPaperCashShortfall(CustomerPaperOrderConflict):
+    """A fill cannot be applied because concurrent paper cash consumption won the race."""
+
+
 def _customer_id(value: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError("customer_id must be a positive integer")
@@ -1104,7 +1108,7 @@ async def record_customer_paper_fill(
                 """
             ), {"customer_id": customer_id, "currency": currency})).scalar_one())
             if cash_before + cash_delta < 0:
-                raise CustomerPaperOrderConflict("paper fill would overdraw the customer's paper cash")
+                raise CustomerPaperCashShortfall("paper fill would overdraw the customer's paper cash")
 
             fill_id = str(uuid.uuid4())
             filled_row = (await conn.execute(text(
