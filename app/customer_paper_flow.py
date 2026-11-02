@@ -1163,10 +1163,24 @@ async def execute_customer_paper_spot_signal(
         if prior is None:
             raise CustomerPaperFlowBlocked("Idempotent order replay has no durable order row")
         if prior.get("status") in {"FILLED", "CANCELLED", "EXPIRED", "REJECTED"}:
+            prior_meta = _json_mapping(prior.get("metadata"))
             return {
                 "mode": "CUSTOMER_PAPER", "status": "REPLAYED",
                 "decision": "NO_TRADE" if prior.get("status") != "FILLED" else "TRADE",
                 "execution": {"status": "REPLAYED", "order": prior},
+                "order_submission": {
+                    "newly_submitted": False,
+                    "client_order_id": client_id,
+                    "order_id": str(prior.get("order_id") or ""),
+                    "side": normalized_side,
+                    "quantity": str(prior.get("quantity") or format(raw_quantity, "f")),
+                    "submission_bar_timestamp": str(
+                        prior_meta.get("submission_bar_at")
+                        or prior_meta.get("signal_bar_timestamp")
+                        or market["bar_timestamp"]
+                    ),
+                    "order_role": role,
+                },
                 "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
                 "cost_model_status": cost_status,
                 "real_money_ledger_written": False,
