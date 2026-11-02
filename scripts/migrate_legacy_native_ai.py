@@ -7122,6 +7122,19 @@ def validate_groq_research_module(source: str, path: str = "app/groq_ai.py") -> 
 
 
 
+def _has_conflicting_provider_wiring(path: str, contents: str) -> bool:
+    """Reject retired provider wiring without treating supported Groq review as legacy.
+
+    app.native_ai records Groq's bounded trade-review evidence as advisory context;
+    it does not contain a hosted Groq strategy/safety provider implementation.
+    Groq remains allowed only through the current research-review contract, while
+    retired Gemini/Cerebras/AI Gateway and legacy Groq strategy-model fields remain
+    migration blockers.
+    """
+    pattern = RETIRED_PROVIDER_RE if path == "app/native_ai.py" else PROVIDER_RE
+    return bool(pattern.search(contents))
+
+
 def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:
     # Canonical Native AI source and the original provider-removal patch baseline are
     # independent pins: changing one must not widen the other per-path diff.
@@ -7138,8 +7151,8 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
         elif path == "app/prompt_safety.py":
             if target.read_text(encoding="utf-8") != canonical_text(canonical_commit, path):
                 raise MigrationError(f"{path} differs from its reviewed canonical implementation; preserving the branch")
-        elif PROVIDER_RE.search(target.read_text(encoding="utf-8")):
-            raise MigrationError(f"{path} has a divergent provider-bearing implementation; refusing overwrite")
+        elif _has_conflicting_provider_wiring(path, target.read_text(encoding="utf-8")):
+            raise MigrationError(f"{path} has a divergent retired-provider implementation; refusing overwrite")
 
     transform_config()
     transform_strategy_ai(canonical_commit)
