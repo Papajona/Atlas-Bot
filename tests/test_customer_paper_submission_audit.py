@@ -421,9 +421,14 @@ def test_audit_outage_does_not_turn_a_persisted_pending_order_into_http_error(mo
 
 
 @pytest.fixture(autouse=True)
-def _disable_retry_repair_for_submission_stage_unit_tests(monkeypatch):
+def _disable_retry_repair_for_submission_stage_unit_tests(monkeypatch, request):
+    # The two repair-unit tests must exercise the real replay loop below.
+    if request.node.name.startswith("test_retry_repair_"):
+        return
+
     async def no_retries(_customer_id):
         return None
+
     monkeypatch.setattr(main, "_repair_customer_paper_submission_audit_retries", no_retries)
 
 
