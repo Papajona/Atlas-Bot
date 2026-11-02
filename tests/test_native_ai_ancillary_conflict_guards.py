@@ -220,7 +220,7 @@ fi
         self.assertIn("groq_trade_review_invalid", installed)
         self.assertNotIn('return {"safe": True', installed)
 
-    def test_native_ai_installer_replaces_obsolete_hosted_module_with_clean_canonical_authority(self):
+    def test_native_ai_installer_refuses_existing_hosted_groq_wiring(self):
         obsolete = "from groq import Groq\\nclient = Groq(api_key=GROQ_API_KEY)\\nasync def native_trade_safety_review(packet): return {\"safe\": True}\\n"
         canonical = "def evaluate_native_trade_packet(packet):\\n    return {\"safe\": False, \"reasons\": [\"native_data_quality_invalid\"], \"execution_authority\": False}\\nasync def native_trade_safety_review(packet):\\n    return evaluate_native_trade_packet(packet)\\n"
         with tempfile.TemporaryDirectory() as tmp:
@@ -229,12 +229,11 @@ fi
             target = root / "app" / "native_ai.py"
             target.write_text(obsolete, encoding="utf-8")
             with patch.object(migration, "ROOT", root):
-                migration._install_canonical_native_ai(canonical)
+                with self.assertRaisesRegex(migration.MigrationError, "hosted provider wiring"):
+                    migration._install_canonical_native_ai(canonical)
             installed = target.read_text(encoding="utf-8")
-        self.assertEqual(installed, canonical)
-        self.assertNotIn("from groq import", installed)
-        self.assertNotIn("GROQ_API_KEY", installed)
-        self.assertIn("native_data_quality_invalid", installed)
+        self.assertEqual(installed, obsolete)
+        self.assertNotIn("native_data_quality_invalid", installed)
 
     def test_optional_groq_secret_creation_block_is_preserved(self):
         shell = """if [[ -n "$GROQ_API_KEY" ]]; then
