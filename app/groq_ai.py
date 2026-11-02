@@ -77,8 +77,7 @@ _ACTIONABLE_IMMEDIATE_COMMAND_PATTERN = re.compile(
     r"(?i:\b(?:buy|sell)\s+(?:now|immediately|at market)\b)"
 )
 _PRICE_LEVEL_REFERENCE_PATTERN = re.compile(
-    r"(?i:\b(?P<kind>entry|stop[- ]loss|stop|take[- ]profit|target|"
-    r"limit(?=\s+(?:order|price)\b)|trigger(?=\s+(?:level|price)\b))\b)"
+    r"(?i:\b(?P<kind>entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger)\b)"
     r"(?:\s+(?:order|level))?"
     r"(?:\s+price)?"
     r"(?:\s*(?:=|:)\s*|\s+(?:(?:is|was|equals?)\s+)?(?:at|to)\s+|"
@@ -98,10 +97,26 @@ _TRADE_PRICE_SETTING_COMMAND_PATTERN = re.compile(
     r"trigger\s+(?:level|price))\b"
     r"(?:\s+price)?(?:\s*(?:=|:)\s*[$€£]?[+-]?(?:\d|\.\d)\S*)?)"
 )
+_TRADE_LIMIT_TRIGGER_COMMAND_PATTERN = re.compile(
+    r"(?i:\b(?:set|sets|setting|move|moves|moving|place|places|placing|"
+    r"adjust|adjusts|adjusting|raise|raises|raising|change|changes|changing|"
+    r"update|updates|updating|put|puts|putting|tighten|tightens|tightening|"
+    r"widen|widens|widening|recommend|recommends|recommending|use|uses|keep|keeps)"
+    r"\s+(?:(?:the|a|your|my|our|this|new|current)\s+)?"
+    r"(?:limit|trigger)(?:\s+(?:order|price|level))?\s+"
+    r"(?:at|to|is|was|equals?)\s+[$€£]?[+-]?(?:\d|\.\d)\S*)"
+)
+_LOWER_LIMIT_COMMAND_PATTERN = re.compile(
+    r"(?i:\blower\s+(?:the|a|your|my|our|this|new|current)\s+"
+    r"limit(?:\s+(?:order|price))?\s+"
+    r"(?:at|to|is|was|equals?)\s+[$€£]?[+-]?(?:\d|\.\d)\S*)"
+)
 _ACTIONABLE_TRADING_PATTERNS = (
     _ACTIONABLE_SYMBOL_COMMAND_PATTERN,
     _ACTIONABLE_ORDER_COMMAND_PATTERN,
     _ACTIONABLE_IMMEDIATE_COMMAND_PATTERN,
+    _TRADE_LIMIT_TRIGGER_COMMAND_PATTERN,
+    _LOWER_LIMIT_COMMAND_PATTERN,
 )
 
 _NEGATED_ACTION_PREFIX = re.compile(
@@ -113,6 +128,26 @@ _NEGATED_ACTION_PREFIX = re.compile(
 
 def _is_negated_match(text: str, start: int) -> bool:
     return bool(_NEGATED_ACTION_PREFIX.search(text[max(0, start - 80):start]))
+
+
+def _is_non_trade_limit_reference(text: str, match: re.Match[str]) -> bool:
+    """Ignore market/risk-cap uses of 'limit'; validate only order-price references."""
+    if match.group("kind").lower() != "limit":
+        return False
+    prefix = text[max(0, match.start() - 80):match.start()]
+    suffix = text[match.end():match.end() + 80]
+    if re.search(
+        r"(?i)\b(?:(?:upper|lower)(?:\s+price)?|"
+        r"(?:daily|weekly|monthly)\s+loss|(?:daily|weekly|monthly)\s+risk|"
+        r"loss|risk|exposure|leverage|range|(?:price|trading)\s+range)\s*$",
+        prefix,
+    ):
+        return True
+    return bool(re.match(
+        r"(?i)^\s+(?:for\s+(?:(?:daily|weekly|monthly)\s+)?"
+        r"(?:loss|risk|exposure)|of\s+(?:the\s+)?(?:range|market))\b",
+        suffix,
+    ))
 
 
 def _contains_actionable_trading_instruction(
@@ -129,7 +164,7 @@ def _contains_actionable_trading_instruction(
         return True
     if not allow_factual_price_references:
         for match in _PRICE_LEVEL_REFERENCE_PATTERN.finditer(text):
-            if _is_negated_match(text, match.start()):
+            if _is_negated_match(text, match.start()) or _is_non_trade_limit_reference(text, match):
                 continue
             # Do not misclassify risk distances and ratios as proposed price levels.
             # Keep this shared detector consistent with the plan-reference validator.
@@ -168,6 +203,8 @@ def _validate_plan_price_references(text: str, trade_plan: dict[str, Any]) -> No
         "trigger": "entry_price",
     }
     for match in _PRICE_LEVEL_REFERENCE_PATTERN.finditer(text):
+        if _is_non_trade_limit_reference(text, match):
+            continue
         kind = re.sub(r"\s+", "-", match.group("kind").lower())
         expected = _decimal_plan_price(trade_plan.get(field_for_kind[kind]))
         raw_token = match.group("price").rstrip(".,;:!?)]}\\\"'")
