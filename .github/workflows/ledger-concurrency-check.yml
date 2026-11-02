@@ -215,7 +215,7 @@ jobs:
           ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_test
           DATABASE_URL: postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_test
         run: |
-          pytest -q -rs --junitxml=pg-custody.xml \\
+          pytest -q -rs --junitxml=pg-custody.xml \
             tests/test_custody_withdrawal_acceptance.py -v --tb=short
 
       - name: Run duplicate idempotency verification
