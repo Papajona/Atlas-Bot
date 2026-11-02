@@ -502,30 +502,6 @@ async def _repair_customer_paper_submission_audit_retries(customer_id: int) -> N
             )
 
 
-    """Persist one submission event per customer/order identity, including recovery repairs."""
-    actor = f"customer:{int(detail['customer_id'])}"
-    async with SessionLocal() as db:
-        row, created = await append_audit_once(
-            db,
-            event="CUSTOMER_PAPER_ORDER_SUBMITTED",
-            detail=detail,
-            actor_id=actor,
-            idempotency_fields=("customer_id", "client_order_id"),
-        )
-    if created:
-        safe_detail = {
-            key: value for key, value in detail.items()
-            if key not in {"token", "secret", "api_token", "api_secret", "authorization", "destination"}
-        }
-        emit_security_audit(
-            event="CUSTOMER_PAPER_ORDER_SUBMITTED",
-            actor_id=actor,
-            detail=safe_detail,
-            event_hash=row.event_hash,
-        )
-    return created
-
-
 async def _customer_paper_submission_stage(
     execution: dict,
     *,
