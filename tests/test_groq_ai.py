@@ -103,6 +103,16 @@ def test_groq_review_uses_research_only_json_and_cannot_authorize_execution():
     assert "buy/sell instructions" in request["json"]["messages"][0]["content"]
 
 
+def test_research_review_accepts_numeric_risk_metrics_without_treating_them_as_prices():
+    review = {
+        **VALID_REVIEW,
+        "regime_assessment": "Stop-loss is 1.5 ATR away and target 2R remains distant.",
+        "research_only_summary": "Daily loss limit is 3 percent; this is risk context, not an order.",
+    }
+    validated = groq_ai._validate_review(review)
+    assert validated["regime_assessment"] == review["regime_assessment"]
+
+
 def test_groq_invalid_review_fails_closed_to_advisory_error():
     client = _FakeAsyncClient(_FakeResponse('{"regime_assessment": "missing required fields"}'))
     with _settings(
@@ -701,6 +711,7 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
         "Daily loss limit 3 remains unchanged.",
         "The price tested the lower limit of the range.",
         "The market is a moving target.",
+        "The upper limit is 123.",
     ):
         assert not groq_ai._contains_actionable_trading_instruction(ordinary_text)
 
@@ -767,6 +778,7 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
             "The daily loss limit is 3 percent.",
             "The limit for daily loss is 3 percent.",
             "The market hit the upper limit of its range.",
+            "The upper limit is 123.",
         ],
     }
     groq_ai._validate_trade_context_review(ordinary_text, packet=rounded_packet)
@@ -776,8 +788,8 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
 
     for invented_claim in (
         "Target at 999999 is in the submitted plan.",
-        "Limit at 999999 is in the submitted plan.",
-        "Trigger: 999999 is in the submitted plan.",
+        "Limit order at 999999 is in the submitted plan.",
+        "Trigger level at 999999 is in the submitted plan.",
     ):
         invented = {
             **VALID_TRADE_REVIEW,
@@ -789,8 +801,8 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
     matching_limit_trigger = {
         **VALID_TRADE_REVIEW,
         "key_observations": [
-            "Limit at 64000 matches the submitted entry.",
-            "Trigger: 64000 matches the submitted entry.",
+            "Limit order at 64000 matches the submitted entry.",
+            "Trigger level at 64000 matches the submitted entry.",
         ],
     }
     groq_ai._validate_trade_context_review(matching_limit_trigger, packet=packet)
@@ -831,6 +843,8 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
         "Tighten the stop-loss at 101.",
         "Move the stop-loss to 98.",
         "Recommend entry at 64000.",
+        "Set a limit order at 95.",
+        "Move the trigger level to 95.",
         "Use the stop-loss at 95.",
         "Keep stop-loss at 95.",
     ]
