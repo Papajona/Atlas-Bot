@@ -19,6 +19,7 @@ from app.customer_paper_flow import (
 )
 from app.customer_paper_ledger import get_customer_paper_balances
 from app.customer_paper_lifecycle import (
+    CustomerPaperCashShortfall,
     CustomerPaperOrderConflict,
     get_customer_paper_positions,
     submit_customer_paper_order,
@@ -714,7 +715,7 @@ def test_concurrent_paper_cash_spend_expires_unaffordable_pending_buy(monkeypatc
     )
 
     async def cash_was_spent_by_another_fill(**kwargs):
-        raise CustomerPaperOrderConflict("paper fill would overdraw the customer's paper cash")
+        raise CustomerPaperCashShortfall("paper fill would overdraw the customer's paper cash")
 
     expired = {}
 
