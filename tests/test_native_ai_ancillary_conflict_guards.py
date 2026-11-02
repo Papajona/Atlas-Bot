@@ -185,6 +185,25 @@ async def native_trade_safety_review(packet):
         self.assertTrue(
             migration._has_conflicting_provider_wiring(
                 "app/native_ai.py",
+                """from google import generativeai
+def native_trade_safety_review(packet):
+    return generativeai.GenerativeModel("retired-model")
+""",
+            )
+        )
+        self.assertTrue(
+            migration._has_conflicting_provider_wiring(
+                "app/native_ai.py",
+                """from urllib.request import urlopen
+def native_trade_safety_review(packet):
+    return urlopen("https://api.groq.com/openai/v1")
+""",
+            )
+        )
+
+        self.assertTrue(
+            migration._has_conflicting_provider_wiring(
+                "app/native_ai.py",
                 'def old_provider(): return call_gemini(GEMINI_API_KEY)',
             )
         )
