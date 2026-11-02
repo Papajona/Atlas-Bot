@@ -352,7 +352,7 @@ def test_ledger_invariant_report_detects_embedded_customer_account_mismatch():
                 ])
                 await db.commit()
 
-                report = await ledger_invariant_report(db)
+                report = await ledger_invariant_report(db, customer_id=customer_id)
                 assert report["ok"] is False
                 assert report["unbalanced_journals"] == []
                 assert report["bucket_drifts"] == []
