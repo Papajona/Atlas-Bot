@@ -1,4 +1,4 @@
-"""Add indexed durable retry state for customer paper submission audit delivery.
+"""Add indexed durable state for customer paper submission audit retries.
 
 Revision ID: 0056_customer_paper_submission_audit_retries
 Revises: 0055_trading_account_customer_fk
