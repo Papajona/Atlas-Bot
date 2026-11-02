@@ -435,6 +435,8 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
         qpos = select(Position).where(Position.symbol == symbol, Position.quantity != 0)
         if customer_id is not None:
             qpos = qpos.where(Position.customer_id == customer_id)
+        else:
+            qpos = qpos.where(Position.customer_id.is_(None))
         existing_positions = (await db.execute(qpos)).scalars().all()
         signed = quantity if side == "buy" else -quantity
         # Magnitude-capped: only an order no larger than the opposing position is a pure reduce. A larger order
@@ -460,6 +462,8 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
             qtrades = select(Trade).where(Trade.created_at >= day_start_utc, Trade.status.in_(active_statuses))
             if customer_id is not None:
                 qtrades = qtrades.where(Trade.customer_id == customer_id)
+            else:
+                qtrades = qtrades.where(Trade.customer_id.is_(None))
             todays_entries = (await db.execute(select(func.count()).select_from(qtrades.subquery()))).scalar_one()
             if int(todays_entries) >= settings.discipline_max_entries_per_day:
                 raise RiskBlocked("Trading-discipline daily entry limit reached")
@@ -467,6 +471,8 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
             qlast = select(Trade.created_at).where(Trade.created_at >= day_start_utc, Trade.status.in_(active_statuses)).order_by(Trade.created_at.desc()).limit(1)
             if customer_id is not None:
                 qlast = qlast.where(Trade.customer_id == customer_id)
+            else:
+                qlast = qlast.where(Trade.customer_id.is_(None))
             last_entry = (await db.execute(qlast)).scalar_one_or_none()
             if last_entry is not None:
                 if last_entry.tzinfo is None:
