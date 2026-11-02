@@ -136,6 +136,26 @@ fi
                 migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe)
 
 
+    def test_groq_secret_fragment_is_hoisted_out_of_retired_gemini_conditional(self):
+        shell = """if [[ -n "$SECRET_GEMINI_API_KEY_VERSION" ]]; then
+  AI_SECRET_ARGS=",GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}${GROQ_SECRET_ARG}"
+fi
+gcloud run deploy atlas --set-secrets "DATABASE_URL=atlas-database-url:3${AI_SECRET_ARGS}"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertNotIn("GEMINI", cleaned)
+        self.assertIn('AI_SECRET_ARGS="${GROQ_SECRET_ARG}"', cleaned)
+        self.assertIn("${AI_SECRET_ARGS}", cleaned)
+        self.assertIn("DATABASE_URL=atlas-database-url:3", cleaned)
+
+    def test_groq_secret_hoist_refuses_non_groq_shared_secret_entries(self):
+        shell = """if [[ -n "$SECRET_GEMINI_API_KEY_VERSION" ]]; then
+  AI_SECRET_ARGS="DATABASE_URL=atlas-database-url:3,GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}${GROQ_SECRET_ARG}"
+fi
+"""
+        with self.assertRaisesRegex(migration.MigrationError, "non-Groq shared-secret entries"):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
     def test_native_ai_guard_allows_supported_groq_trade_review_but_rejects_retired_wiring(self):
         supported_review = """def evaluate_native_trade_packet(packet):
     envelope = packet.get("groq_trade_review")
