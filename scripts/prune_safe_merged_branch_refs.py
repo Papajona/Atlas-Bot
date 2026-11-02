@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Delete only remote branch refs that are provably integrated into main.
 
-Two general proofs are accepted:
+Two general integration proofs are accepted:
 1. The exact branch tip is an ancestor of origin/main.
 2. A merged PR records that exact branch tip as its head, and that PR's merge
    commit is an ancestor of origin/main (for squash/rebase merges).
 
-Tree comparisons are diagnostic only; identical file trees are not enough to
-retire an unmerged branch. A small exact-SHA allowlist handles independently
-committed duplicate aliases only when the retained canonical ref is unchanged.
-A historical patch-ID match alone is insufficient.
+Additional retirement proofs are individually pinned to exact historical SHAs
+and revalidated against current main: reviewed duplicate aliases, superseded
+Android release-gate refs, and superseded Native AI migration-only refs. Tree
+comparisons are diagnostic only; identical file trees and patch-ID matches
+never authorize deletion by themselves.
 
 Any open-PR branch, unknown branch history, API failure, or head moved after a
 merge is preserved. This script never deletes main.
@@ -113,31 +114,75 @@ def _refresh_remote_main_sha(current_sha: str) -> str:
     return fetched_sha
 
 
+def _parse_slurped_pull_request_pages(output: str, *, description: str) -> list[dict[str, Any]]:
+    """Validate gh --paginate --slurp output before using it as deletion evidence.
+
+    A successful API process is not enough: malformed, flat, or partially-shaped
+    JSON must never be interpreted as an empty pull-request inventory.
+    """
+    try:
+        pages = json.loads(output)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"GitHub returned malformed paginated {description} JSON; preserving every branch"
+        ) from exc
+    if (
+        not isinstance(pages, list)
+        or not pages
+        or any(not isinstance(page, list) for page in pages)
+    ):
+        raise RuntimeError(
+            f"GitHub returned an unexpected paginated {description} envelope; preserving every branch"
+        )
+
+    records: list[dict[str, Any]] = []
+    for page_number, page in enumerate(pages, start=1):
+        for row_number, item in enumerate(page, start=1):
+            if not isinstance(item, dict):
+                raise RuntimeError(
+                    f"GitHub returned a malformed {description} record "
+                    f"on page {page_number}, row {row_number}; preserving every branch"
+                )
+            records.append(item)
+    return records
+
+
 def _list_open_pull_request_heads(repository: str) -> set[str]:
-    """Enumerate every open PR head through REST pagination; failures must not look empty."""
+    """Enumerate and validate every open PR head through REST pagination."""
     result = _run([
-        "gh", "api", "--paginate",
+        "gh", "api", "--paginate", "--slurp",
         f"repos/{repository}/pulls?state=open&per_page=100",
-        "--jq", ".[].head.ref",
     ], check=False)
     if result.returncode:
         raise RuntimeError(
             "Unable to enumerate all open pull requests; preserving every branch: "
             + (result.stderr.strip() or f"exit code {result.returncode}")
         )
-    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    pull_requests = _parse_slurped_pull_request_pages(
+        result.stdout, description="open pull requests"
+    )
+    heads: set[str] = set()
+    for number, item in enumerate(pull_requests, start=1):
+        head = item.get("head")
+        ref = head.get("ref") if isinstance(head, Mapping) else None
+        if not isinstance(ref, str) or not ref.strip():
+            raise RuntimeError(
+                f"GitHub returned an open pull request without a valid head ref "
+                f"(record {number}); preserving every branch"
+            )
+        heads.add(ref.strip())
+    return heads
 
 
 def _branch_has_open_pull_request(repository: str, branch_name: str) -> bool:
-    """Recheck the exact same-repository head branch with pagination before deletion."""
+    """Recheck the exact head branch with validated, paginated GET results."""
     owner = repository.split("/", 1)[0]
     result = _run([
-        "gh", "api", "--paginate", "--method", "GET",
+        "gh", "api", "--paginate", "--slurp", "--method", "GET",
         f"repos/{repository}/pulls",
         "-f", "state=open",
         "-f", f"head={owner}:{branch_name}",
         "-f", "per_page=100",
-        "--jq", ".[].number",
     ], check=False)
     if result.returncode:
         raise RuntimeError(
@@ -146,7 +191,25 @@ def _branch_has_open_pull_request(repository: str, branch_name: str) -> bool:
             + ": "
             + (result.stderr.strip() or f"exit code {result.returncode}")
         )
-    return bool(result.stdout.strip())
+    pull_requests = _parse_slurped_pull_request_pages(
+        result.stdout, description=f"open pull requests for {branch_name!r}"
+    )
+    for number, item in enumerate(pull_requests, start=1):
+        pr_number = item.get("number")
+        head = item.get("head")
+        ref = head.get("ref") if isinstance(head, Mapping) else None
+        if (
+            isinstance(pr_number, bool)
+            or not isinstance(pr_number, int)
+            or pr_number <= 0
+            or not isinstance(ref, str)
+            or not ref.strip()
+        ):
+            raise RuntimeError(
+                f"GitHub returned a malformed open pull request for branch {branch_name!r} "
+                f"(record {number}); preserving the branch"
+            )
+    return bool(pull_requests)
 
 def _is_ancestor(ancestor_sha: str, descendant_sha: str) -> bool:
     result = _run(
@@ -565,7 +628,11 @@ def _resolve_branch_integration(
     open_pr_heads: set[str],
     merged_prs: Iterable[Mapping[str, Any]],
 ) -> tuple[bool, str, list[str]]:
-    """Resolve deletion proof and compute tree mismatches at most once."""
+    """Resolve exact ancestry, merged-PR, pinned-alias and supersession proofs.
+
+    Tree mismatches remain diagnostic only; no tree-equality result authorizes
+    deletion. The pinned supersession checks are separate, exact-SHA proofs.
+    """
     safe, reason = should_delete_ref(
         branch_name,
         branch_sha,
@@ -813,24 +880,39 @@ def main() -> int:
                 "Unable to list all closed pull requests for reconciliation: "
                 + (closed_pr_result.stderr.strip() or f"exit code {closed_pr_result.returncode}")
             )
-        raw_pages = json.loads(closed_pr_result.stdout)
-        if not isinstance(raw_pages, list):
-            raise RuntimeError("GitHub returned an unexpected closed-pull-request response")
-        if raw_pages and isinstance(raw_pages[0], list):
-            closed_prs = [item for page in raw_pages for item in page]
-        else:
-            closed_prs = raw_pages
-        merged_prs = [
-            {
-                "headRefName": item.get("head", {}).get("ref"),
-                "headRefOid": item.get("head", {}).get("sha"),
-                "mergeCommit": {"oid": item.get("merge_commit_sha")},
-            }
-            for item in closed_prs
-            if isinstance(item, dict)
-            and item.get("merged_at")
-            and isinstance(item.get("head"), dict)
-        ]
+        closed_prs = _parse_slurped_pull_request_pages(
+            closed_pr_result.stdout, description="closed pull requests"
+        )
+        merged_prs: list[dict[str, Any]] = []
+        for number, item in enumerate(closed_prs, start=1):
+            head = item.get("head")
+            if (
+                isinstance(item.get("number"), bool)
+                or not isinstance(item.get("number"), int)
+                or item["number"] <= 0
+                or not isinstance(head, Mapping)
+                or not isinstance(head.get("ref"), str)
+                or not head["ref"].strip()
+                or not isinstance(head.get("sha"), str)
+                or not head["sha"].strip()
+                or "merged_at" not in item
+            ):
+                raise RuntimeError(
+                    f"GitHub returned a malformed closed pull request (record {number}); "
+                    "preserving every branch"
+                )
+            if item.get("merged_at"):
+                merge_sha = item.get("merge_commit_sha")
+                if not isinstance(merge_sha, str) or not merge_sha.strip():
+                    raise RuntimeError(
+                        f"GitHub omitted the merge commit for merged pull request "
+                        f"#{item['number']}; preserving every branch"
+                    )
+                merged_prs.append({
+                    "headRefName": head["ref"],
+                    "headRefOid": head["sha"],
+                    "mergeCommit": {"oid": merge_sha},
+                })
 
         deleted = 0
         preserved = 0
