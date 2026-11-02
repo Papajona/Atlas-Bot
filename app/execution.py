@@ -790,6 +790,13 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
     else:
         old_qty = position.quantity
         if old_qty == 0 or (old_qty > 0 and signed > 0) or (old_qty < 0 and signed < 0):
+            if old_qty == 0:
+                # A flat Position row can remain after the previous lifecycle closes.
+                # A fresh fill must establish a new entry identity, not reuse the old one.
+                entry_trade_id = trade.id
+                position.entry_trade_id = trade.id
+                position.strategy = str(trade_context.get("strategy") or "unknown")
+                position.entry_regime = str(trade_context.get("regime") or "UNKNOWN")
             old_qty_d = Decimal(str(old_qty))
             signed_d = Decimal(str(signed))
             fill_price_d = Decimal(str(fill_price))

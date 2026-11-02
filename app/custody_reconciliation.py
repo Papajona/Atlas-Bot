@@ -162,6 +162,12 @@ async def reconcile_usdt_custody(db) -> dict:
         )
         return report
 
+    # The address-role alert is independent of later provider/configuration errors.
+    # Once the role is an explicitly supported value, resolve only that specific alert.
+    await _resolve_incident(
+        db, key="CUSTODY_RECONCILIATION:USDT:TRON:ADDRESS_ROLE"
+    )
+
     wallets = (
         await db.execute(
             select(Wallet).where(

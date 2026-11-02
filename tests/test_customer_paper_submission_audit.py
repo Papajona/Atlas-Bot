@@ -263,6 +263,8 @@ def test_customer_submission_audit_uses_customer_actor_even_with_system_context(
             return self
         async def __aexit__(self, *_args):
             return False
+        async def commit(self):
+            return None
 
     async def append_once(_db, **kwargs):
         captured.update(kwargs)

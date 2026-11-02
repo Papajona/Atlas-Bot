@@ -420,7 +420,12 @@ def test_role_setup_preflights_database_grant_authority_before_generating_creden
 
 def test_customer_paper_preflight_excludes_dedicated_schema_only_when_database_is_shared():
     source = Path("app/customer_paper_ledger.py").read_text(encoding="utf-8")
-    assert source.count("(NOT :same_database OR n.nspname <> 'customer_paper')") == 4
+    assert source.count("(NOT :same_database OR n.nspname <> 'customer_paper')") == 3
+    query = source.split("primary_security_definer_rows", 1)[1].split(
+        "for row in primary_security_definer_rows", 1
+    )[0]
+    assert "p.oid IS DISTINCT FROM to_regprocedure('customer_paper.verify_market_bar_capacity_guards()')" in query
+    assert "n.nspname <> 'customer_paper'" not in query
 
 
 def test_mandatory_postgres_workflow_covers_config_and_real_shared_primary_relations():
