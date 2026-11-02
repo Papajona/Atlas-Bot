@@ -774,16 +774,17 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
         "Target at 110 is the value already in the submitted plan."
     ]
 
-    invented = {
-        **VALID_TRADE_REVIEW,
-        "key_observations": [
-            "Target at 999999 is in the submitted plan.",
-            "Limit at 999999 is in the submitted plan.",
-            "Trigger: 999999 is in the submitted plan.",
-        ],
-    }
-    with pytest.raises(groq_ai.GroqAIError, match="outside the submitted trade plan"):
-        groq_ai._validate_trade_context_review(invented, packet=packet)
+    for invented_claim in (
+        "Target at 999999 is in the submitted plan.",
+        "Limit at 999999 is in the submitted plan.",
+        "Trigger: 999999 is in the submitted plan.",
+    ):
+        invented = {
+            **VALID_TRADE_REVIEW,
+            "key_observations": [invented_claim],
+        }
+        with pytest.raises(groq_ai.GroqAIError, match="outside the submitted trade plan"):
+            groq_ai._validate_trade_context_review(invented, packet=packet)
 
     matching_limit_trigger = {
         **VALID_TRADE_REVIEW,
