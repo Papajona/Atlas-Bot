@@ -799,6 +799,8 @@ async def _protective_exit(
         if str(p.get("venue") or "").lower() == str(req.exchange).lower()
         and str(p.get("symbol") or "").strip().upper() == str(req.symbol).strip().upper()
         and Decimal(str(p.get("quantity") or "0")) > 0
+        and str(p.get("execution_owner") or "manual_customer_api").strip().lower()
+            == "autonomous_customer_bot"
     ]
     if not positions:
         return None
