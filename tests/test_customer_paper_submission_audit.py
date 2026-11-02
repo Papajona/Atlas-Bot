@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -10,10 +11,11 @@ from app import main
 
 def _successful_external_delivery(monkeypatch):
     async def claim(_event_hash):
-        return True
+        return "test-claim-token"
 
-    async def finish(_event_hash, **_kwargs):
-        return None
+    async def finish(_event_hash, *, claim_token, **_kwargs):
+        assert claim_token == "test-claim-token"
+        return True
 
     monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
     monkeypatch.setattr(main, "finish_external_audit_delivery", finish)
@@ -281,7 +283,11 @@ def test_customer_submission_audit_uses_customer_actor_even_with_system_context(
 
     async def append_once(_db, **kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(event_hash="hash-1"), True
+        return SimpleNamespace(
+            event_hash="hash-1",
+            detail=json.dumps(kwargs["detail"]),
+            actor_id=kwargs["actor_id"],
+        ), True
 
     monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
     monkeypatch.setattr(main, "append_audit_once", append_once)
@@ -434,15 +440,13 @@ def test_external_submission_audit_is_retried_when_database_event_already_exists
         async def __aexit__(self, *_args):
             return False
 
-    async def append_once(_db, **kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(event_hash="stable-event-hash"), False
-
-    def emit(**kwargs):
-        emitted.append(kwargs)
-        return True
-
-    claim_results = iter([True, True, False])
+    original_payload = {
+        "customer_id": 501,
+        "client_order_id": "cp-replayed-external-audit",
+        "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
+        "execution_status": "WAITING_FOR_NEXT_COMPLETED_BAR",
+    }
+    claim_results = iter(["claim-1", "claim-2", None])
     create_results = iter([True, False, False])
     emit_results = iter([False, True])
     delivery_results = []
@@ -450,12 +454,17 @@ def test_external_submission_audit_is_retried_when_database_event_already_exists
     async def claim(_event_hash):
         return next(claim_results)
 
-    async def finish(_event_hash, *, delivered, error_type=None):
-        delivery_results.append((delivered, error_type))
+    async def finish(_event_hash, *, claim_token, delivered, error_type=None):
+        delivery_results.append((delivered, error_type, claim_token))
+        return True
 
     async def append_with_replay(_db, **kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(event_hash="stable-event-hash"), next(create_results)
+        return SimpleNamespace(
+            event_hash="stable-event-hash",
+            detail=json.dumps(original_payload),
+            actor_id="customer:501",
+        ), next(create_results)
 
     def emit(**kwargs):
         emitted.append(kwargs)
@@ -486,7 +495,11 @@ def test_external_submission_audit_is_retried_when_database_event_already_exists
     assert len(emitted) == 2  # One failed attempt and one successful retry, not every replay.
     assert emitted[0]["event_hash"] == emitted[1]["event_hash"] == "stable-event-hash"
     assert emitted[0]["actor_id"] == emitted[1]["actor_id"] == "customer:501"
-    assert delivery_results == [(False, "DeliveryNotConfirmed"), (True, None)]
+    assert emitted[0]["detail"] == emitted[1]["detail"] == original_payload
+    assert delivery_results == [
+        (False, "DeliveryNotConfirmed", "claim-1"),
+        (True, None, "claim-2"),
+    ]
 
 
 def test_external_submission_audit_rejects_unconfirmed_second_copy(monkeypatch):
@@ -496,8 +509,12 @@ def test_external_submission_audit_rejects_unconfirmed_second_copy(monkeypatch):
         async def __aexit__(self, *_args):
             return False
 
-    async def append_once(_db, **_kwargs):
-        return SimpleNamespace(event_hash="stable-event-hash"), False
+    async def append_once(_db, **kwargs):
+        return SimpleNamespace(
+            event_hash="stable-event-hash",
+            detail=json.dumps(kwargs["detail"]),
+            actor_id=kwargs["actor_id"],
+        ), False
 
     monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
     monkeypatch.setattr(main, "append_audit_once", append_once)
