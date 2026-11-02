@@ -6,9 +6,10 @@ Two general proofs are accepted:
 2. A merged PR records that exact branch tip as its head, and that PR's merge
    commit is an ancestor of origin/main (for squash/rebase merges).
 
-Tree comparisons are diagnostic only; identical file trees are not enough to
-retire an unmerged branch. A small exact-SHA allowlist handles independently
-committed duplicate aliases only when the retained canonical ref is unchanged.
+Exact-SHA allowlist proofs are limited to individually reviewed duplicate aliases
+and explicitly superseded one-off release/migration refs, with current-main content
+checks. Tree comparisons alone never authorize deletion; identical file trees are
+not enough to retire an unmerged branch.
 A historical patch-ID match alone is insufficient.
 
 Any open-PR branch, unknown branch history, API failure, or head moved after a
@@ -258,6 +259,33 @@ def _load_open_pull_request_heads(repository: str) -> set[str]:
             raise RuntimeError("GitHub returned an open pull request without a head branch")
         heads.add(head)
     return heads
+
+
+def _load_closed_pull_request_records(repository: str) -> list[dict[str, Any]]:
+    """Enumerate closed PRs from complete slurped pages; malformed results block pruning."""
+    result = _run(
+        [
+            "gh", "api", "--paginate", "--slurp",
+            f"repos/{repository}/pulls?state=closed&per_page=100",
+        ],
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(
+            "Unable to list all closed pull requests for reconciliation: "
+            + (result.stderr.strip() or f"exit code {result.returncode}")
+        )
+    raw_pages = json.loads(result.stdout)
+    if not isinstance(raw_pages, list) or not raw_pages or any(
+        not isinstance(page, list) for page in raw_pages
+    ):
+        raise RuntimeError(
+            "GitHub returned an unexpected paginated closed-pull-request response"
+        )
+    pull_requests = [item for page in raw_pages for item in page]
+    if any(not isinstance(item, dict) for item in pull_requests):
+        raise RuntimeError("GitHub returned a malformed closed-pull-request record")
+    return pull_requests
 
 
 def _has_open_pull_request_for_branch(repository: str, branch_name: str) -> bool:
@@ -864,28 +892,8 @@ def main() -> int:
 
         open_pr_heads = _load_open_pull_request_heads(repository)
 
-        # Read closed PRs through the GitHub REST API. `gh pr list --state merged`
-        # is not consistently supported across CLI versions; an empty result must
-        # never be mistaken for evidence that no merged PR exists.
-        closed_pr_result = _run(
-            [
-                "gh", "api", "--paginate", "--slurp",
-                f"repos/{repository}/pulls?state=closed&per_page=100",
-            ],
-            check=False,
-        )
-        if closed_pr_result.returncode:
-            raise RuntimeError(
-                "Unable to list all closed pull requests for reconciliation: "
-                + (closed_pr_result.stderr.strip() or f"exit code {closed_pr_result.returncode}")
-            )
-        raw_pages = json.loads(closed_pr_result.stdout)
-        if not isinstance(raw_pages, list):
-            raise RuntimeError("GitHub returned an unexpected closed-pull-request response")
-        if raw_pages and isinstance(raw_pages[0], list):
-            closed_prs = [item for page in raw_pages for item in page]
-        else:
-            closed_prs = raw_pages
+        # An incomplete or malformed closed-PR page cannot authorize branch deletion.
+        closed_prs = _load_closed_pull_request_records(repository)
         merged_prs = _merged_pr_records_in_range(closed_prs, repository)
         in_scope_branch_heads = {str(item["headRefName"]) for item in merged_prs}
         deleted = 0
