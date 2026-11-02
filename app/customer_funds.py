@@ -770,23 +770,16 @@ async def _invariant_snapshot(db, tol: Decimal, customer_id: int | None = None):
         net_statement = net_statement.where(customer_line_filter)
     net_rows = (await db.execute(net_statement)).all()
     journal_net: dict[tuple[int, str], Decimal] = {}
-    for customer_id, account_code, net in net_rows:
-        if customer_id is not None:
-            journal_net[(int(customer_id), str(account_code).rsplit(":", 1)[-1])] = D(str(net))
-
-    # The customer_id column and the customer embedded in LIABILITY account codes
-    # are independent persisted values. Aggregating by only the column and bucket
-    # suffix would hide a cross-customer posting that happens to net to the ledger.
-    distinct_accounts_statement = (
-        select(LedgerJournalLine.customer_id, LedgerJournalLine.account_code)
-        .where(LedgerJournalLine.account_code.like("LIABILITY:CUSTOMER:%"))
-        .distinct()
-    )
-    if customer_line_filter is not None:
-        distinct_accounts_statement = distinct_accounts_statement.where(customer_line_filter)
-    distinct_liability_accounts = (await db.execute(distinct_accounts_statement)).all()
     customer_account_mismatches = []
-    for line_customer_id, account_code in distinct_liability_accounts:
+    # net_rows already groups the required identity pair. Validate the embedded
+    # customer ID while consuming these rows; do not rescan the full journal table
+    # with a second DISTINCT query on each invariant request.
+    for line_customer_id, account_code, net in net_rows:
+        if line_customer_id is not None:
+            journal_net[(int(line_customer_id), str(account_code).rsplit(":", 1)[-1])] = D(str(net))
+
+        # The customer_id column and customer encoded in LIABILITY account codes
+        # are independent persisted values. A null/mismatched column must fail closed.
         parts = str(account_code or "").split(":")
         embedded_customer_id = None
         if len(parts) == 5 and parts[:2] == ["LIABILITY", "CUSTOMER"]:
