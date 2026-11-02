@@ -129,11 +129,22 @@ def _contains_actionable_trading_instruction(
         for match in _TRADE_PRICE_SETTING_COMMAND_PATTERN.finditer(text)
     ):
         return True
-    if not allow_factual_price_references and any(
-        not _is_negated_match(text, match.start())
-        for match in _PRICE_LEVEL_REFERENCE_PATTERN.finditer(text)
-    ):
-        return True
+    if not allow_factual_price_references:
+        for match in _PRICE_LEVEL_REFERENCE_PATTERN.finditer(text):
+            if _is_negated_match(text, match.start()):
+                continue
+            # Do not misclassify risk distances and ratios as proposed price levels.
+            # Keep this shared detector consistent with the plan-reference validator.
+            raw_token = match.group("price")
+            numeric_prefix = _PRICE_NUMBER_PATTERN.match(raw_token)
+            if numeric_prefix is not None:
+                unit_context = raw_token[numeric_prefix.end():] + text[match.end():]
+                if re.match(
+                    r"(?i)^\\s*(?:%|percent(?:age)?\\b|[xX]\\b|R\\b|ATR\\b|bps\\b|basis\\s+points?\\b|pips?\\b|points?\\b|ticks?\\b|times?\\b)",
+                    unit_context,
+                ):
+                    continue
+            return True
     return False
 
 
