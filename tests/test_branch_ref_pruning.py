@@ -1373,3 +1373,116 @@ def test_one_time_prune_workflow_uses_safe_literal_path_comparison_and_allowlist
         'git rev-parse "$sha:.github/workflows/ledger-concurrency-check.yml"'
         in ledger_case
     )
+
+
+
+def test_open_pull_request_head_enumeration_uses_all_rest_pages(monkeypatch):
+    calls = []
+
+    def fake_run(args, *, check=True):
+        calls.append(args)
+        return subprocess.CompletedProcess(
+            args, 0, "feature/page-one\nfeature/page-two\n", ""
+        )
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+    heads = pruning._list_open_pull_request_heads("Papajona/Atlas-Bot")
+
+    assert heads == {"feature/page-one", "feature/page-two"}
+    assert calls == [[
+        "gh", "api", "--paginate",
+        "repos/Papajona/Atlas-Bot/pulls?state=open&per_page=100",
+        "--jq", ".[].head.ref",
+    ]]
+
+
+def test_open_pull_request_head_enumeration_fails_closed_on_api_error(monkeypatch):
+    def failed_run(args, *, check=True):
+        return subprocess.CompletedProcess(args, 1, "", "rate limit exceeded")
+
+    monkeypatch.setattr(pruning, "_run", failed_run)
+    with pytest.raises(RuntimeError, match="enumerate all open pull requests"):
+        pruning._list_open_pull_request_heads("Papajona/Atlas-Bot")
+
+
+def test_branch_open_pull_request_recheck_uses_paginated_exact_head_filter(monkeypatch):
+    calls = []
+
+    def fake_run(args, *, check=True):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "321\n", "")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+    assert pruning._branch_has_open_pull_request("Papajona/Atlas-Bot", "feature/with-slash")
+    assert calls == [[
+        "gh", "api", "--paginate",
+        "repos/Papajona/Atlas-Bot/pulls?state=open&head=Papajona:feature/with-slash&per_page=100",
+        "--jq", ".[].number",
+    ]]
+
+
+def test_branch_open_pull_request_recheck_fails_closed_on_api_error(monkeypatch):
+    def failed_run(args, *, check=True):
+        return subprocess.CompletedProcess(args, 1, "", "network unavailable")
+
+    monkeypatch.setattr(pruning, "_run", failed_run)
+    with pytest.raises(RuntimeError, match="re-check open pull requests"):
+        pruning._branch_has_open_pull_request("Papajona/Atlas-Bot", "feature/one")
+
+
+def test_remote_main_refresh_uses_new_tip_and_confirms_stability(monkeypatch):
+    calls = []
+    live_values = iter([
+        "new-main-sha\trefs/heads/main\n",
+        "new-main-sha\trefs/heads/main\n",
+    ])
+
+    def fake_run(args, *, check=True):
+        calls.append(args)
+        if args[:3] == ["git", "ls-remote", "--heads"]:
+            return subprocess.CompletedProcess(args, 0, next(live_values), "")
+        if args[:2] == ["git", "fetch"]:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:3] == ["git", "rev-parse", "--verify"]:
+            return subprocess.CompletedProcess(args, 0, "new-main-sha\n", "")
+        raise AssertionError(f"unexpected command: {args}")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+    assert pruning._refresh_remote_main_sha("old-main-sha") == "new-main-sha"
+    assert calls[1] == [
+        "git", "fetch", "origin",
+        "+refs/heads/main:refs/remotes/origin/main",
+    ]
+
+
+def test_remote_main_refresh_aborts_when_main_moves_during_fetch(monkeypatch):
+    live_values = iter([
+        "new-main-sha\trefs/heads/main\n",
+        "second-main-sha\trefs/heads/main\n",
+    ])
+
+    def fake_run(args, *, check=True):
+        if args[:3] == ["git", "ls-remote", "--heads"]:
+            return subprocess.CompletedProcess(args, 0, next(live_values), "")
+        if args[:2] == ["git", "fetch"]:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:3] == ["git", "rev-parse", "--verify"]:
+            return subprocess.CompletedProcess(args, 0, "new-main-sha\n", "")
+        raise AssertionError(f"unexpected command: {args}")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+    with pytest.raises(RuntimeError, match="changed during pruning proof refresh"):
+        pruning._refresh_remote_main_sha("old-main-sha")
+
+
+def test_branch_pruning_main_refreshes_live_main_and_uses_paginated_pr_guards():
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts" / "prune_safe_merged_branch_refs.py"
+    ).read_text(encoding="utf-8")
+    assert "open_pr_heads = _list_open_pull_request_heads(repository)" in source
+    assert "main_sha = _refresh_remote_main_sha(main_sha)" in source
+    assert "main_before_delete = _refresh_remote_main_sha(main_sha)" in source
+    assert "_branch_has_open_pull_request(repository, branch_name)" in source
+    assert '"--limit", "1000"' not in source
