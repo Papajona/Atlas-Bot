@@ -764,6 +764,9 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
             "Daily loss limit 3 remains unchanged.",
             "The price tested the lower limit of the range.",
             "The market is a moving target.",
+            "The daily loss limit is 3 percent.",
+            "The limit for daily loss is 3 percent.",
+            "The market hit the upper limit of its range.",
         ],
     }
     groq_ai._validate_trade_context_review(ordinary_text, packet=rounded_packet)
@@ -773,10 +776,23 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
 
     invented = {
         **VALID_TRADE_REVIEW,
-        "key_observations": ["Target at 999999 is in the submitted plan."],
+        "key_observations": [
+            "Target at 999999 is in the submitted plan.",
+            "Limit at 999999 is in the submitted plan.",
+            "Trigger: 999999 is in the submitted plan.",
+        ],
     }
     with pytest.raises(groq_ai.GroqAIError, match="outside the submitted trade plan"):
         groq_ai._validate_trade_context_review(invented, packet=packet)
+
+    matching_limit_trigger = {
+        **VALID_TRADE_REVIEW,
+        "key_observations": [
+            "Limit at 64000 matches the submitted entry.",
+            "Trigger: 64000 matches the submitted entry.",
+        ],
+    }
+    groq_ai._validate_trade_context_review(matching_limit_trigger, packet=packet)
 
     # Complete numeric tokens must be checked: signs and scientific notation
     # cannot disappear into an unmatched prefix.
