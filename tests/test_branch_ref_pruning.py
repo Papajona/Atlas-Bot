@@ -27,34 +27,30 @@ def test_branch_pruning_never_deletes_main_or_a_branch_with_an_open_pr():
     ) == (False, "branch has an open pull request")
 
 
-def test_branch_cleanup_scope_is_limited_to_same_repository_merged_prs_164_through_330():
+def test_branch_cleanup_scope_is_limited_to_same_repository_merged_prs_271_through_331():
     repository = "Papajona/Atlas-Bot"
     closed_prs = [
-        {"number": 163, "merged_at": "2026-09-29T00:00:00Z", "merge_commit_sha": "outside-before-merge", "head": {"ref": "outside-before", "sha": "outside-before-sha", "repo": {"full_name": repository}}},
-        {"number": 164, "merged_at": "2026-09-30T00:00:00Z", "merge_commit_sha": "range-lower-merge", "head": {"ref": "range-lower", "sha": "range-lower-sha", "repo": {"full_name": repository}}},
-        {"number": 170, "merged_at": "2026-10-01T00:00:00Z", "merge_commit_sha": "range-start-merge", "head": {"ref": "range-start", "sha": "range-start-sha", "repo": {"full_name": repository}}},
-        {"number": 270, "merged_at": "2026-10-02T00:00:00Z", "merge_commit_sha": "range-end-merge", "head": {"ref": "range-end", "sha": "range-end-sha", "repo": {"full_name": repository}}},
-        {"number": 271, "merged_at": "2026-10-03T00:00:00Z", "merge_commit_sha": "outside-271-merge", "head": {"ref": "range-271", "sha": "range-271-sha", "repo": {"full_name": repository}}},
-        {"number": 328, "merged_at": "2026-10-04T00:00:00Z", "merge_commit_sha": "outside-328-merge", "head": {"ref": "range-late", "sha": "range-late-sha", "repo": {"full_name": repository}}},
-        {"number": 330, "merged_at": "2026-10-05T00:00:00Z", "merge_commit_sha": "outside-330-merge", "head": {"ref": "range-330", "sha": "range-330-sha", "repo": {"full_name": repository}}},
-        {"number": 331, "merged_at": "2026-10-06T00:00:00Z", "merge_commit_sha": "outside-after-merge", "head": {"ref": "outside-after", "sha": "outside-after-sha", "repo": {"full_name": repository}}},
-        {"number": None, "merged_at": "2026-10-07T00:00:00Z", "merge_commit_sha": "malformed-merge", "head": {"ref": "malformed-number", "sha": "malformed-sha", "repo": {"full_name": repository}}},
-        {"number": 200, "merged_at": "2026-10-08T00:00:00Z", "merge_commit_sha": "missing-head-merge", "head": None},
+        {"number": 270, "merged_at": "2026-09-29T00:00:00Z", "merge_commit_sha": "outside-before-merge", "head": {"ref": "outside-before", "sha": "outside-before-sha", "repo": {"full_name": repository}}},
+        {"number": 271, "merged_at": "2026-09-30T00:00:00Z", "merge_commit_sha": "range-lower-merge", "head": {"ref": "range-lower", "sha": "range-lower-sha", "repo": {"full_name": repository}}},
+        {"number": 300, "merged_at": "2026-10-01T00:00:00Z", "merge_commit_sha": "range-mid-merge", "head": {"ref": "range-mid", "sha": "range-mid-sha", "repo": {"full_name": repository}}},
+        {"number": 330, "merged_at": "2026-10-02T00:00:00Z", "merge_commit_sha": "range-330-merge", "head": {"ref": "range-330", "sha": "range-330-sha", "repo": {"full_name": repository}}},
+        {"number": 331, "merged_at": "2026-10-03T00:00:00Z", "merge_commit_sha": "range-upper-merge", "head": {"ref": "range-upper", "sha": "range-upper-sha", "repo": {"full_name": repository}}},
+        {"number": 332, "merged_at": "2026-10-04T00:00:00Z", "merge_commit_sha": "outside-after-merge", "head": {"ref": "outside-after", "sha": "outside-after-sha", "repo": {"full_name": repository}}},
+        {"number": None, "merged_at": "2026-10-05T00:00:00Z", "merge_commit_sha": "malformed-merge", "head": {"ref": "malformed-number", "sha": "malformed-sha", "repo": {"full_name": repository}}},
+        {"number": 300, "merged_at": "2026-10-06T00:00:00Z", "merge_commit_sha": "missing-head-merge", "head": None},
         # A fork PR with the same ref name must never authorize deletion of the
         # same-named local branch in this repository.
-        {"number": 200, "merged_at": "2026-10-09T00:00:00Z", "merge_commit_sha": "fork-merge", "head": {"ref": "fork-collision", "sha": "fork-sha", "repo": {"full_name": "contributor/Atlas-Bot"}}},
-        {"number": 201, "merged_at": "2026-10-10T00:00:00Z", "merge_commit_sha": "deleted-fork-merge", "head": {"ref": "deleted-fork-ref", "sha": "deleted-fork-sha", "repo": None}},
+        {"number": 300, "merged_at": "2026-10-07T00:00:00Z", "merge_commit_sha": "fork-merge", "head": {"ref": "fork-collision", "sha": "fork-sha", "repo": {"full_name": "contributor/Atlas-Bot"}}},
+        {"number": 301, "merged_at": "2026-10-08T00:00:00Z", "merge_commit_sha": "deleted-fork-merge", "head": {"ref": "deleted-fork-ref", "sha": "deleted-fork-sha", "repo": None}},
     ]
 
     records = pruning._merged_pr_records_in_range(closed_prs, repository)
 
     assert {(x["number"], x["headRefName"], x["headRefOid"]) for x in records} == {
-        (164, "range-lower", "range-lower-sha"),
-        (170, "range-start", "range-start-sha"),
-        (270, "range-end", "range-end-sha"),
-        (271, "range-271", "range-271-sha"),
-        (328, "range-late", "range-late-sha"),
+        (271, "range-lower", "range-lower-sha"),
+        (300, "range-mid", "range-mid-sha"),
         (330, "range-330", "range-330-sha"),
+        (331, "range-upper", "range-upper-sha"),
     }
 
 
@@ -62,7 +58,7 @@ def test_reused_branch_name_cannot_borrow_out_of_range_merged_pr_proof():
     repository = "Papajona/Atlas-Bot"
     closed_prs = [
         {
-            "number": 200,
+            "number": 271,
             "merged_at": "2026-10-08T00:00:00Z",
             "merge_commit_sha": "in-range-merge",
             "head": {
@@ -72,7 +68,7 @@ def test_reused_branch_name_cannot_borrow_out_of_range_merged_pr_proof():
             },
         },
         {
-            "number": 331,
+            "number": 332,
             "merged_at": "2026-10-09T00:00:00Z",
             "merge_commit_sha": "out-of-range-merge",
             "head": {
