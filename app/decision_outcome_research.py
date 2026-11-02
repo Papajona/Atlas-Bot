@@ -92,10 +92,12 @@ def _max_outcome_close(label: dict, horizon: int) -> pd.Timestamp | None:
 
 
 def _normalise_labels(records: list[dict]) -> tuple[list[dict], dict]:
-    valid = []
+    # The loader returns records chronologically. Keep the latest persisted audit
+    # row for each decision/version pair so retries cannot overweight one decision.
+    latest_by_decision: dict[tuple[str, str], dict] = {}
     rejected = 0
     invalid = 0
-    missing_side = 0
+    duplicate_labels = 0
     for record in records:
         if not isinstance(record, dict) or record.get("record_type") != "adaptive_decision_outcome_label":
             invalid += 1
@@ -104,10 +106,12 @@ def _normalise_labels(records: list[dict]) -> tuple[list[dict], dict]:
             rejected += 1
             continue
         decision = str(record.get("original_decision") or "").upper()
+        decision_id = str(record.get("decision_id") or "").strip()
+        label_version = str(record.get("label_version") or "").strip()
         if decision not in {"TRADE", "NO_TRADE"}:
             rejected += 1
             continue
-        if not isinstance(record.get("outcomes"), dict):
+        if not decision_id or not label_version or not isinstance(record.get("outcomes"), dict):
             invalid += 1
             continue
         item = dict(record)
@@ -115,16 +119,40 @@ def _normalise_labels(records: list[dict]) -> tuple[list[dict], dict]:
         item["candidate_side"] = str(record.get("candidate_side") or "").lower() or None
         if item["candidate_side"] not in {"buy", "sell"}:
             item["candidate_side"] = None
-            missing_side += 1
-        valid.append(item)
+        for cost_key in ("cost_bps_per_side", "carry_bps_per_bar"):
+            raw_cost = item.get(cost_key)
+            if raw_cost in (None, ""):
+                item[cost_key] = None
+                continue
+            try:
+                parsed_cost = float(raw_cost)
+            except (TypeError, ValueError):
+                invalid += 1
+                break
+            if not math.isfinite(parsed_cost) or parsed_cost < 0:
+                invalid += 1
+                break
+            item[cost_key] = parsed_cost
+        else:
+            identity = (label_version, decision_id)
+            if identity in latest_by_decision:
+                duplicate_labels += 1
+            latest_by_decision[identity] = item
+
+    valid = list(latest_by_decision.values())
+    missing_side = sum(1 for item in valid if item["candidate_side"] is None)
+    label_versions: dict[str, int] = defaultdict(int)
+    for item in valid:
+        label_versions[item["label_version"]] += 1
     return valid, {
         "input_records": len(records),
         "valid_labels": len(valid),
         "ignored_non_valid_or_non_decision_labels": rejected,
         "invalid_records": invalid,
         "valid_labels_without_candidate_side": missing_side,
+        "duplicate_decision_labels": duplicate_labels,
+        "label_version_counts": dict(sorted(label_versions.items())),
     }
-
 
 def evaluate_decision_outcome_labels(
     records: list[dict],
@@ -168,8 +196,19 @@ def evaluate_decision_outcome_labels(
             if value is None:
                 continue
             key = (
-                _text(label, "asset"), _text(label, "timeframe"), _text(label, "mode"),
-                horizon, label["candidate_side"], strategy, regime,
+                _text(label, "asset"),
+                _text(label, "symbol"),
+                _text(label, "exchange"),
+                _text(label, "timeframe"),
+                _text(label, "mode"),
+                _text(label, "label_version"),
+                _text(label, "cost_source", "UNKNOWN"),
+                label.get("cost_bps_per_side"),
+                label.get("carry_bps_per_bar"),
+                horizon,
+                label["candidate_side"],
+                strategy,
+                regime,
             )
             grouped[key][label["original_decision"]].append(value)
             if label["original_decision"] == "NO_TRADE":
@@ -181,11 +220,20 @@ def evaluate_decision_outcome_labels(
 
     by_market = []
     for key, decision_metrics in sorted(grouped.items(), key=lambda item: tuple(str(x) for x in item[0])):
-        asset, timeframe, mode, horizon, side, strategy, regime = key
+        (
+            asset, symbol, exchange, timeframe, mode, label_version, cost_source,
+            cost_bps_per_side, carry_bps_per_bar, horizon, side, strategy, regime,
+        ) = key
         by_market.append({
             "asset": asset,
+            "symbol": symbol,
+            "exchange": exchange,
             "timeframe": timeframe,
             "mode": mode,
+            "label_version": label_version,
+            "cost_source": cost_source,
+            "cost_bps_per_side": cost_bps_per_side,
+            "carry_bps_per_bar": carry_bps_per_bar,
             "horizon_bars": horizon,
             "candidate_side": side,
             "strategy": strategy,
@@ -198,11 +246,21 @@ def evaluate_decision_outcome_labels(
 
     rejected_by_reason = []
     for key, values in sorted(rejected_grouped.items(), key=lambda item: tuple(str(x) for x in item[0])):
-        asset, timeframe, mode, horizon, side, strategy, regime, stage, reason = key
+        (
+            asset, symbol, exchange, timeframe, mode, label_version, cost_source,
+            cost_bps_per_side, carry_bps_per_bar, horizon, side, strategy, regime,
+            stage, reason,
+        ) = key
         rejected_by_reason.append({
             "asset": asset,
+            "symbol": symbol,
+            "exchange": exchange,
             "timeframe": timeframe,
             "mode": mode,
+            "label_version": label_version,
+            "cost_source": cost_source,
+            "cost_bps_per_side": cost_bps_per_side,
+            "carry_bps_per_bar": carry_bps_per_bar,
             "horizon_bars": horizon,
             "candidate_side": side,
             "strategy": strategy,
@@ -230,20 +288,40 @@ def evaluate_decision_outcome_labels(
             if value is None:
                 continue
             key = (
-                _text(label, "asset"), _text(label, "timeframe"), _text(label, "mode"),
-                horizon, label["candidate_side"], _text(label, "strategy"), _text(label, "regime"),
+                _text(label, "asset"),
+                _text(label, "symbol"),
+                _text(label, "exchange"),
+                _text(label, "timeframe"),
+                _text(label, "mode"),
+                _text(label, "label_version"),
+                _text(label, "cost_source", "UNKNOWN"),
+                label.get("cost_bps_per_side"),
+                label.get("carry_bps_per_bar"),
+                horizon,
+                label["candidate_side"],
+                _text(label, "strategy"),
+                _text(label, "regime"),
             )
             oos_groups[key].append((timestamp, label, value))
 
     out_of_sample = []
     for key, entries in sorted(oos_groups.items(), key=lambda item: tuple(str(x) for x in item[0])):
-        asset, timeframe, mode, horizon, side, strategy, regime = key
+        (
+            asset, symbol, exchange, timeframe, mode, label_version, cost_source,
+            cost_bps_per_side, carry_bps_per_bar, horizon, side, strategy, regime,
+        ) = key
         entries.sort(key=lambda item: item[0])
         unique_times = sorted({item[0] for item in entries})
         base = {
             "asset": asset,
+            "symbol": symbol,
+            "exchange": exchange,
             "timeframe": timeframe,
             "mode": mode,
+            "label_version": label_version,
+            "cost_source": cost_source,
+            "cost_bps_per_side": cost_bps_per_side,
+            "carry_bps_per_bar": carry_bps_per_bar,
             "horizon_bars": horizon,
             "candidate_side": side,
             "strategy": strategy,
@@ -301,7 +379,7 @@ def evaluate_decision_outcome_labels(
         })
 
     return {
-        "report_version": "rejected-signal-evaluation-v1",
+        "report_version": "rejected-signal-evaluation-v2",
         "research_only": True,
         "automatic_promotion": False,
         "methodology": {
