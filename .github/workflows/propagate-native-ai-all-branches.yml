@@ -144,7 +144,7 @@ jobs:
               }
               BEGIN {
                 quote = sprintf("%c", 39)
-                legacy_pattern = "gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\\\\.googleapis\\\\.com|_gemini_json|settings\\\\.gemini_|settings\\\\.groq_api_key|settings\\\\.cerebras_api_key|settings\\\\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\\\\.openai\\\\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\\\\.groq\\\\.com|api\\\\.cerebras\\\\.ai"
+                legacy_expected_pattern = "gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\\\\.googleapis\\\\.com|_gemini_json|settings\\\\.gemini_|settings\\\\.groq_api_key|settings\\\\.cerebras_api_key|settings\\\\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\\\\.openai\\\\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\\\\.groq\\\\.com|api\\\\.cerebras\\\\.ai"
               }
               {
                 content = $0
@@ -185,6 +185,31 @@ jobs:
                 # assigned to either variable can hide a provider endpoint and must remain visible.
                 normalized_content = content
                 sub(/^[[:space:]]+/, "", normalized_content)
+                # Filter only the two exact inert provider-search commands found in
+                # older self-scanning workflows; altered commands remain visible.
+                legacy_scan_suffix = " -- . " quote ":!tests" quote " " \
+                  quote ":!docs" quote " " quote ":!README.md" quote " " \
+                  quote ":!CHANGELOG.md" quote " " \
+                  quote ":!.github/workflows/propagate-native-ai-all-branches.yml" quote " " \
+                  quote ":!.github/workflows/prune-contained-branches-once.yml" quote " " \
+                  quote ":!scripts/migrate_legacy_native_ai.py"
+                legacy_scanner_prefix = "git grep -IlEi "
+                legacy_verify_prefix = "git grep -nIEi "
+                if (index(normalized_content, legacy_scanner_prefix) == 1 ||
+                    index(normalized_content, legacy_verify_prefix) == 1) {
+                  legacy_open_quote = index(normalized_content, quote)
+                  legacy_close_quote = index(substr(normalized_content, legacy_open_quote + 1), quote) + legacy_open_quote
+                  if (legacy_open_quote > 0 && legacy_close_quote > legacy_open_quote) {
+                    legacy_scan_pattern = substr(normalized_content, legacy_open_quote + 1,
+                                                  legacy_close_quote - legacy_open_quote - 1)
+                    legacy_suffix = substr(normalized_content, legacy_close_quote + 1)
+                    if (legacy_scan_pattern == legacy_expected_pattern &&
+                        ((index(normalized_content, legacy_scanner_prefix) == 1 &&
+                          legacy_suffix == legacy_scan_suffix " || rc=$?") ||
+                         (index(normalized_content, legacy_verify_prefix) == 1 &&
+                          legacy_suffix == legacy_scan_suffix " >&2 || true"))) next
+                  }
+                }
                 expected_current_declaration = "current_pattern = \"" escape_source_backslashes(current_pattern) "\""
                 expected_previous_declaration = "previous_pattern = \"" escape_source_backslashes(previous_pattern) "\""
                 if (index($0, ".github/workflows/propagate-native-ai-all-branches.yml:") == 1 &&
