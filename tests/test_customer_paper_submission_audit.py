@@ -120,14 +120,19 @@ def test_recovery_wrapper_order_intent_is_audited_as_pending(monkeypatch):
 
 def test_audit_outage_does_not_turn_a_persisted_pending_order_into_http_error(monkeypatch, caplog):
     fallback = []
+    persisted_retries = []
 
     async def audit_once(_detail):
         raise RuntimeError("audit store unavailable")
+
+    async def persist_retry(**kwargs):
+        persisted_retries.append(kwargs)
 
     async def safe_audit(event, detail, **_kwargs):
         fallback.append((event, detail))
 
     monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_persist_customer_paper_submission_audit_retry", persist_retry)
     monkeypatch.setattr(main, "_safe_audit", safe_audit)
     req = SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h")
 
@@ -141,11 +146,20 @@ def test_audit_outage_does_not_turn_a_persisted_pending_order_into_http_error(mo
     assert stage == "customer_paper_order_audit_incomplete"
     failure_logs = [
         record for record in caplog.records
-        if record.getMessage() == "customer_paper_submission_audit_failed"
+        if record.getMessage().startswith("customer_paper_submission_audit_failed ")
     ]
     assert len(failure_logs) == 1
-    assert failure_logs[0].exc_info is not None
-    assert failure_logs[0].exc_info[0] is RuntimeError
+    failure_message = failure_logs[0].getMessage()
+    assert "customer_id=501" in failure_message
+    assert "client_order_id=cp-regression-order" in failure_message
+    assert "error_type=RuntimeError" in failure_message
+    assert "traceback_frames=" in failure_message
+    assert "audit store unavailable" not in failure_message
+    assert failure_logs[0].exc_info is None
+    assert len(persisted_retries) == 1
+    assert persisted_retries[0]["customer_id"] == 501
+    assert persisted_retries[0]["submission_detail"]["client_order_id"] == "cp-regression-order"
+    assert persisted_retries[0]["error_type"] == "RuntimeError"
     assert fallback == [(
         "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE",
         {
